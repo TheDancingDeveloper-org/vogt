@@ -2,54 +2,98 @@ import { expect, test, type Page } from "@playwright/test";
 import { STRESS_PROFILE } from "../../src/demo/scale";
 
 /** Release-only browser measurements; normal CI skips this file. */
-test.skip(!process.env.VOGT_RUN_PERF, "run with VOGT_RUN_PERF=1 for the release profile");
+test.skip(
+  !process.env.VOGT_RUN_PERF,
+  "run with VOGT_RUN_PERF=1 for the release profile",
+);
 test.setTimeout(120_000);
 test.describe.configure({ mode: "serial" });
 
 const sha = "23ac0a9b8f7c6d5e4a32100123456789abcdef01";
 
 async function installDemo(page: Page): Promise<void> {
-  await page.route("**/demo-manifest.json", (route) => route.fulfill({
-    status: 200,
-    contentType: "application/json",
-    body: JSON.stringify({ schema: 1, enabled: true, product_version: "local/dev", source_ref: "dev", source_sha: sha, scenario: "full-demo-v1" }),
-  }));
-  await page.route("**/demo-build.json", (route) => route.fulfill({
-    status: 200,
-    contentType: "application/json",
-    body: JSON.stringify({ schema: 1, product_version: "local/dev", source_ref: "dev", source_sha: sha, assets: { "index.html": "a".repeat(64) } }),
-  }));
+  await page.route("**/demo-manifest.json", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        schema: 1,
+        enabled: true,
+        product_version: "local/dev",
+        source_ref: "dev",
+        source_sha: sha,
+        scenario: "full-demo-v1",
+      }),
+    }),
+  );
+  await page.route("**/demo-build.json", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        schema: 1,
+        product_version: "local/dev",
+        source_ref: "dev",
+        source_sha: sha,
+        assets: { "index.html": "a".repeat(64) },
+      }),
+    }),
+  );
   await page.route("**/api/**", (route) => route.abort("blockedbyclient"));
   await page.addInitScript(() => {
-    const measurements: { name: string; start: number; duration: number }[] = [];
-    (window as unknown as { __vogtPerf: typeof measurements }).__vogtPerf = measurements;
+    const measurements: { name: string; start: number; duration: number }[] =
+      [];
+    (window as unknown as { __vogtPerf: typeof measurements }).__vogtPerf =
+      measurements;
     if ("PerformanceObserver" in window) {
       const observer = new PerformanceObserver((list) => {
         for (const entry of list.getEntries()) {
-          measurements.push({ name: "longtask", start: entry.startTime, duration: entry.duration });
+          measurements.push({
+            name: "longtask",
+            start: entry.startTime,
+            duration: entry.duration,
+          });
         }
       });
-      try { observer.observe({ type: "longtask", buffered: true }); } catch { /* support varies */ }
+      try {
+        observer.observe({ type: "longtask", buffered: true });
+      } catch {
+        /* support varies */
+      }
     }
   });
 }
 
-async function snapshot(page: Page, name: string): Promise<Record<string, unknown>> {
+async function snapshot(
+  page: Page,
+  name: string,
+): Promise<Record<string, unknown>> {
   return page.evaluate((label) => {
-    const memory = (performance as Performance & { memory?: { usedJSHeapSize: number } }).memory;
-    const tasks = ((window as unknown as { __vogtPerf: { name: string; duration: number }[] }).__vogtPerf ?? [])
-      .filter((entry) => entry.name === "longtask");
+    const memory = (
+      performance as Performance & { memory?: { usedJSHeapSize: number } }
+    ).memory;
+    const tasks = (
+      (
+        window as unknown as {
+          __vogtPerf: { name: string; duration: number }[];
+        }
+      ).__vogtPerf ?? []
+    ).filter((entry) => entry.name === "longtask");
     return {
       name: label,
       long_tasks: tasks.length,
       longest_task_ms: Math.max(0, ...tasks.map((entry) => entry.duration)),
       retained_nodes: document.querySelectorAll("*").length,
-      heap_used_mb: memory ? Math.round(memory.usedJSHeapSize / 1024 / 1024 * 10) / 10 : null,
+      heap_used_mb: memory
+        ? Math.round((memory.usedJSHeapSize / 1024 / 1024) * 10) / 10
+        : null,
     };
   }, name);
 }
 
-test("large board stays windowed and records cold first interaction", async ({ page }) => {
+test("large board stays windowed and records cold first interaction", async ({
+  page,
+}) => {
   await installDemo(page);
   const started = Date.now();
   await page.goto(`/?demoScale=${STRESS_PROFILE.workItems}#/board`);
@@ -62,28 +106,44 @@ test("large board stays windowed and records cold first interaction", async ({ p
   expect(result.board_cards).toBeLessThan(200);
 });
 
-test("deep FileTree and 32-session rail record wake retained nodes", async ({ page }) => {
+test("deep FileTree and 32-session rail record wake retained nodes", async ({
+  page,
+}) => {
   await installDemo(page);
   await page.goto(`/?demoScale=${STRESS_PROFILE.workItems}#/sessions`);
   await expect(page.getByRole("heading", { name: "Sessions" })).toBeVisible();
-  await expect(page.locator(".places-rail-session-area .session-row")).toHaveCount(STRESS_PROFILE.sessions);
+  await expect(
+    page.locator(".places-rail-session-area .session-row"),
+  ).toHaveCount(STRESS_PROFILE.sessions);
   await page.getByRole("button", { name: "Files" }).click();
   await page.getByLabel("Expand stress").click();
   for (let depth = 1; depth <= STRESS_PROFILE.fileDepth; depth += 1) {
-    await page.getByLabel(`Expand stress/depth-${String(depth).padStart(2, "0")}`).click();
+    await page
+      .getByLabel(`Expand stress/depth-${String(depth).padStart(2, "0")}`)
+      .click();
   }
   const beforeWake = await snapshot(page, "tree-and-rail");
   await page.evaluate(() => {
-    Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      value: "hidden",
+    });
     document.dispatchEvent(new Event("visibilitychange"));
-    Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      value: "visible",
+    });
     document.dispatchEvent(new Event("visibilitychange"));
     window.dispatchEvent(new Event("focus"));
   });
   await page.waitForTimeout(250);
   const afterWake = await snapshot(page, "wake");
-  console.log(JSON.stringify({ beforeWake, afterWake, profile: STRESS_PROFILE }));
-  expect(await page.locator(".places-rail-session-area .session-row").count()).toBe(STRESS_PROFILE.sessions);
+  console.log(
+    JSON.stringify({ beforeWake, afterWake, profile: STRESS_PROFILE }),
+  );
+  expect(
+    await page.locator(".places-rail-session-area .session-row").count(),
+  ).toBe(STRESS_PROFILE.sessions);
 });
 
 // Phone pager swipe (WI-2706): attaches and the longest task per settled
@@ -93,10 +153,14 @@ test("deep FileTree and 32-session rail record wake retained nodes", async ({ pa
 // Measured 2026-10-30, phone project, 3 swipes from scale-session-20:
 //   before (main 8ac1e72a3): 2 attaches per swipe; 1-2 long tasks, longest 63-76 ms
 //   after  (WI-2706):        1 attach per swipe;  0 long tasks
-test("phone pager swipe attaches once per settled swipe", async ({ page }, testInfo) => {
+test("phone pager swipe attaches once per settled swipe", async ({
+  page,
+}, testInfo) => {
   test.skip(testInfo.project.name !== "phone", "phone profile only");
   await installDemo(page);
-  await page.goto(`/?demoScale=${STRESS_PROFILE.workItems}#/t/scale-session-20`);
+  await page.goto(
+    `/?demoScale=${STRESS_PROFILE.workItems}#/t/scale-session-20`,
+  );
   const stage = page.locator(".terminal-mobile-stage");
   await expect(stage).toBeVisible();
   await page.waitForTimeout(500);
@@ -111,7 +175,8 @@ test("phone pager swipe attaches once per settled swipe", async ({ page }, testI
     await stage.evaluate((element) => {
       const touch = (type: string, x: number) => {
         const event = new Event(type, { bubbles: true, cancelable: true });
-        const touches = type === "touchend" ? [] : [{ clientX: x, clientY: 200 }];
+        const touches =
+          type === "touchend" ? [] : [{ clientX: x, clientY: 200 }];
         Object.defineProperty(event, "touches", { value: touches });
         element.dispatchEvent(event);
       };
@@ -121,7 +186,9 @@ test("phone pager swipe attaches once per settled swipe", async ({ page }, testI
       touch("touchmove", 60);
       touch("touchend", 60);
     });
-    await expect.poll(() => page.evaluate(() => location.hash)).not.toBe(before);
+    await expect
+      .poll(() => page.evaluate(() => location.hash))
+      .not.toBe(before);
     await page.waitForTimeout(600);
     const result = await snapshot(page, `swipe-${index}`);
     // Count the destination's attaches only: a destination with a saved

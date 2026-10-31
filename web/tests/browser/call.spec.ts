@@ -17,15 +17,22 @@ test.use({
 });
 
 test.beforeEach(({}, testInfo) => {
-  test.skip(testInfo.project.name !== "desktop", "audio plumbing is device-independent");
+  test.skip(
+    testInfo.project.name !== "desktop",
+    "audio plumbing is device-independent",
+  );
 });
 
-test("the capture worklet streams 20 ms frames of 16 kHz PCM16", async ({ page }) => {
+test("the capture worklet streams 20 ms frames of 16 kHz PCM16", async ({
+  page,
+}) => {
   await page.goto("/");
   const result = await page.evaluate(async () => {
     const { startCapture } = await import("/src/callCapture.ts");
     const frames: ArrayBuffer[] = [];
-    const capture = await startCapture({ onFrame: (frame) => frames.push(frame) });
+    const capture = await startCapture({
+      onFrame: (frame) => frames.push(frame),
+    });
     await new Promise((resolve) => setTimeout(resolve, 1500));
     capture.stop();
     const samples = frames.flatMap((f) => Array.from(new Int16Array(f)));
@@ -43,11 +50,14 @@ test("the capture worklet streams 20 ms frames of 16 kHz PCM16", async ({ page }
   expect(result.peak).toBeGreaterThan(500);
 });
 
-test("the playback queue plays clips in order and reports them", async ({ page }) => {
+test("the playback queue plays clips in order and reports them", async ({
+  page,
+}) => {
   await page.goto("/");
   const events = await page.evaluate(async () => {
     const { CallPlayer } = await import("/src/callPlayer.ts");
-    const { sharedAudioContext, primeAudio } = await import("/src/audioPlayback.ts");
+    const { sharedAudioContext, primeAudio } =
+      await import("/src/audioPlayback.ts");
     primeAudio();
     // A 200 ms 440 Hz WAV at 24 kHz, as a TTS backend would send.
     const wav = (ms: number): ArrayBuffer => {
@@ -55,7 +65,8 @@ test("the playback queue plays clips in order and reports them", async ({ page }
       const n = Math.round((rate * ms) / 1000);
       const buf = new ArrayBuffer(44 + n * 2);
       const v = new DataView(buf);
-      const w = (o: number, s: string) => [...s].forEach((c, i) => v.setUint8(o + i, c.charCodeAt(0)));
+      const w = (o: number, s: string) =>
+        [...s].forEach((c, i) => v.setUint8(o + i, c.charCodeAt(0)));
       w(0, "RIFF");
       v.setUint32(4, 36 + n * 2, true);
       w(8, "WAVEfmt ");
@@ -69,7 +80,11 @@ test("the playback queue plays clips in order and reports them", async ({ page }
       w(36, "data");
       v.setUint32(40, n * 2, true);
       for (let i = 0; i < n; i += 1) {
-        v.setInt16(44 + i * 2, Math.round(Math.sin((2 * Math.PI * 440 * i) / rate) * 8000), true);
+        v.setInt16(
+          44 + i * 2,
+          Math.round(Math.sin((2 * Math.PI * 440 * i) / rate) * 8000),
+          true,
+        );
       }
       return buf;
     };
@@ -88,5 +103,10 @@ test("the playback queue plays clips in order and reports them", async ({ page }
     });
     return log;
   });
-  expect(events).toEqual(["first:r1", "started:r1:0", "started:r1:1", "idle:r1"]);
+  expect(events).toEqual([
+    "first:r1",
+    "started:r1:0",
+    "started:r1:1",
+    "idle:r1",
+  ]);
 });

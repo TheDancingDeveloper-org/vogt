@@ -1,5 +1,6 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { TERMINAL_RENDERER_STORAGE_KEY } from "../../src/terminalRenderer";
+import { LIVE_SKIP, mockOnly } from "./mockOnly";
 
 // The `live` Playwright project drives these specs against a *running*
 // stack (real API) rather than the mocked Vite server. In that mode
@@ -27,7 +28,10 @@ const inboxEntry = {
   freshness: "current",
   triage_state: "active",
   action: { kind: "drift", drift_id: "proposal-1" },
-  evidence_snapshot: { observed_state: "done", observed_at: "2026-08-17T10:00:00Z" },
+  evidence_snapshot: {
+    observed_state: "done",
+    observed_at: "2026-08-17T10:00:00Z",
+  },
   proposed_change: { state: "done" },
 };
 
@@ -89,7 +93,12 @@ const sessionEntry = {
 const inboxResult = () => ({
   entries: [inboxEntry, sourceUrlEntry, orphanEntry, sessionEntry],
   snapshot_at: "2026-08-17T10:01:00Z",
-  high_water: { github: null, drift: "2026-08-17T10:00:00Z", ci: null, agent: null },
+  high_water: {
+    github: null,
+    drift: "2026-08-17T10:00:00Z",
+    ci: null,
+    agent: null,
+  },
   coverage: {
     github: { status: "unswept", count: 0, detail: "not collected" },
     drift: { status: "current", count: 1 },
@@ -104,9 +113,17 @@ const inboxResult = () => ({
 
 const boardItems = [
   {
-    ref: "WI-7", title: "Measured board card", kind: "feature", state: "open",
-    priority: "normal", project_slug: "vogt", trust_state: "verified", labels: [],
-    score: 1, updated_at: "2026-08-17T10:00:00Z", origin: "declared",
+    ref: "WI-7",
+    title: "Measured board card",
+    kind: "feature",
+    state: "open",
+    priority: "normal",
+    project_slug: "vogt",
+    trust_state: "verified",
+    labels: [],
+    score: 1,
+    updated_at: "2026-08-17T10:00:00Z",
+    origin: "declared",
   },
 ];
 
@@ -172,7 +189,11 @@ async function installFixtures(
   initialSessions: Record<string, unknown>[] = [],
   tree: Record<string, unknown>[] = [
     { name: "src", path: "src", is_dir: true },
-    { name: "an-identifiable-long-filename.tsx", path: "src/an-identifiable-long-filename.tsx", is_dir: false },
+    {
+      name: "an-identifiable-long-filename.tsx",
+      path: "src/an-identifiable-long-filename.tsx",
+      is_dir: false,
+    },
   ],
   metricOverrides: PlaceMetricFixtures = {},
   agentTasks: Record<string, unknown>[] | null = null,
@@ -206,7 +227,8 @@ async function installFixtures(
     ({ signedIn, token }) => {
       // Live mode needs a real front-door token to pass the sign-in gate; the
       // mocked run uses a fixed fake one the mocked API accepts.
-      if (signedIn) localStorage.setItem("vogt.token", token || "browser-test-token");
+      if (signedIn)
+        localStorage.setItem("vogt.token", token || "browser-test-token");
       // Pin the shell to Vogt Dark so the default rendering under test stays
       // deterministic — the existing baselines were taken in the dark palette,
       // and the theme system must not shift them. Per-theme tests below
@@ -234,18 +256,26 @@ async function installFixtures(
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, "-")
       .replace(/^-|-$/g, "");
-    return route.fulfill({ json: {
-      actor: {
-        id: "act-wizard",
-        identity_ref: `human:${slug}`,
-        display_name: body.display_name,
-        kind: "human",
+    return route.fulfill({
+      json: {
+        actor: {
+          id: "act-wizard",
+          identity_ref: `human:${slug}`,
+          display_name: body.display_name,
+          kind: "human",
+        },
+        token: {
+          id: "tok-wizard",
+          name: "first-run browser token",
+          scopes: ["admin"],
+          kind: "session",
+        },
+        secret: "vogt_browser-test-first-run-secret",
+        warning:
+          "This is a browser session; sign in again with your password when it expires.",
+        username: body.username ?? slug,
       },
-      token: { id: "tok-wizard", name: "first-run browser token", scopes: ["admin"], kind: "session" },
-      secret: "vogt_browser-test-first-run-secret",
-      warning: "This is a browser session; sign in again with your password when it expires.",
-      username: body.username ?? slug,
-    } });
+    });
   });
   // The password login. The mocked door accepts one pair and refuses the
   // rest with the core's own shape, so the gate's copy is exercised for
@@ -254,47 +284,85 @@ async function installFixtures(
     const body = route.request().postDataJSON() as Record<string, unknown>;
     loginRequests.push(body);
     if (body.username === "ada" && body.password === "correct horse battery") {
-      return route.fulfill({ json: {
-        actor: { id: "act-ada", identity_ref: "human:ada", display_name: "Ada", kind: "human" },
-        token: { id: "tok-session", name: "browser session", scopes: ["admin"], kind: "session" },
-        secret: "browser-test-token",
-      } });
+      return route.fulfill({
+        json: {
+          actor: {
+            id: "act-ada",
+            identity_ref: "human:ada",
+            display_name: "Ada",
+            kind: "human",
+          },
+          token: {
+            id: "tok-session",
+            name: "browser session",
+            scopes: ["admin"],
+            kind: "session",
+          },
+          secret: "browser-test-token",
+        },
+      });
     }
     return route.fulfill({
       status: 401,
-      json: { error: { code: "unauthenticated", message: "the username or password is not right" } },
+      json: {
+        error: {
+          code: "unauthenticated",
+          message: "the username or password is not right",
+        },
+      },
     });
   });
-  await registerRoute("**/api/status**", async (route) => route.fulfill({ json: {
-    version: "test",
-    session_count: 0,
-    push_subscription_count: 0,
-    gui_process_count: 0,
-    gui_stream_configured: false,
-    fcm_enabled: false,
-    history: {
-      enabled: true, archived_session_count: 0, log_file_count: 0,
-      log_bytes: 0, db_bytes: 0,
-    },
-    agent_tasks: {
-      task_count: 0, prompt_task_dir_count: 0, prompt_file_count: 0,
-      context_file_count: 0, prompt_bytes: 0, orphan_task_dir_count: 0,
-    },
-    auth_broker: { auto_agent_auth: false, helper: "disabled" },
-    storage: { state_dir: "/tmp/vogt", workspace_root: "/workspace" },
-  } }));
-  await registerRoute("**/api/auth/check", async (route) => route.fulfill({ json: {
-    ok: true,
-    version: "test",
-    product_version: "test",
-    storage: { state_dir: "/tmp/vogt", workspace_root: "/workspace" },
-  } }));
-  await registerRoute("**/api/config**", async (route) => route.fulfill({ json: {
-    assistant_enabled: false, gui_stream_url: null, session_templates: [],
-    gui_stream_available: false,
-    vogt: { configured: true },
-    ...config,
-  } }));
+  await registerRoute("**/api/status**", async (route) =>
+    route.fulfill({
+      json: {
+        version: "test",
+        session_count: 0,
+        push_subscription_count: 0,
+        gui_process_count: 0,
+        gui_stream_configured: false,
+        fcm_enabled: false,
+        history: {
+          enabled: true,
+          archived_session_count: 0,
+          log_file_count: 0,
+          log_bytes: 0,
+          db_bytes: 0,
+        },
+        agent_tasks: {
+          task_count: 0,
+          prompt_task_dir_count: 0,
+          prompt_file_count: 0,
+          context_file_count: 0,
+          prompt_bytes: 0,
+          orphan_task_dir_count: 0,
+        },
+        auth_broker: { auto_agent_auth: false, helper: "disabled" },
+        storage: { state_dir: "/tmp/vogt", workspace_root: "/workspace" },
+      },
+    }),
+  );
+  await registerRoute("**/api/auth/check", async (route) =>
+    route.fulfill({
+      json: {
+        ok: true,
+        version: "test",
+        product_version: "test",
+        storage: { state_dir: "/tmp/vogt", workspace_root: "/workspace" },
+      },
+    }),
+  );
+  await registerRoute("**/api/config**", async (route) =>
+    route.fulfill({
+      json: {
+        assistant_enabled: false,
+        gui_stream_url: null,
+        session_templates: [],
+        gui_stream_available: false,
+        vogt: { configured: true },
+        ...config,
+      },
+    }),
+  );
   // The list is `GET /api/sessions?view=rail` (WI-2692); a glob would miss
   // the query and let the request through to the dev server unmocked.
   await registerRoute(/\/api\/sessions(\?.*)?$/, async (route) => {
@@ -323,14 +391,17 @@ async function installFixtures(
   );
   await registerRoute("**/api/sessions/*/input", async (route) => {
     const id = new URL(route.request().url()).pathname.split("/").at(-2) ?? "";
-    const body = route.request().postDataJSON() as { text: string; submit: boolean };
+    const body = route.request().postDataJSON() as {
+      text: string;
+      submit: boolean;
+    };
     sessionInputs.push({ id, ...body });
     return route.fulfill({ json: { ok: true } });
   });
   await registerRoute("**/api/sessions/*", async (route) => {
     if (
-      route.request().method() === "POST"
-      && new URL(route.request().url()).pathname.endsWith("/kill")
+      route.request().method() === "POST" &&
+      new URL(route.request().url()).pathname.endsWith("/kill")
     ) {
       return route.fulfill({ json: { ok: true } });
     }
@@ -344,27 +415,40 @@ async function installFixtures(
     if (route.request().method() === "GET") {
       const id = new URL(route.request().url()).pathname.split("/").at(-1);
       const session = sessions.find((one) => one.id === id);
-      if (!session) return route.fulfill({ status: 404, json: { error: "not found" } });
-      return route.fulfill({ json: {
-        ...session,
-        scrollback_base64: btoa(metrics.scrollback ?? "Apply this migration? (y/n) "),
-      } });
+      if (!session)
+        return route.fulfill({ status: 404, json: { error: "not found" } });
+      return route.fulfill({
+        json: {
+          ...session,
+          scrollback_base64: btoa(
+            metrics.scrollback ?? "Apply this migration? (y/n) ",
+          ),
+        },
+      });
     }
     return route.fulfill({ status: 404, json: { error: "not found" } });
   });
-  await registerRoute("**/api/events", async (route) => route.fulfill({
-    status: 200,
-    contentType: "text/event-stream",
-    // Keep the mocked stream open and mark it answered. An immediately closed
-    // body is correctly treated as a disconnect by the production client.
-    body: `data: ${JSON.stringify({ type: "activity", id: "fixture-stream", state: "idle" })}\n\n`,
-  }));
+  await registerRoute("**/api/events", async (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "text/event-stream",
+      // Keep the mocked stream open and mark it answered. An immediately closed
+      // body is correctly treated as a disconnect by the production client.
+      body: `data: ${JSON.stringify({ type: "activity", id: "fixture-stream", state: "idle" })}\n\n`,
+    }),
+  );
   await registerRoute("**/api/tree**", async (route) => {
     const path = new URL(route.request().url()).searchParams.get("path") ?? "";
     if (path === "src") {
-      return route.fulfill({ json: [
-        { name: "nested-component.tsx", path: "src/nested-component.tsx", is_dir: false },
-      ] });
+      return route.fulfill({
+        json: [
+          {
+            name: "nested-component.tsx",
+            path: "src/nested-component.tsx",
+            is_dir: false,
+          },
+        ],
+      });
     }
     return route.fulfill({ json: tree });
   });
@@ -374,10 +458,13 @@ async function installFixtures(
   // A regex keeps this off `/api/files/op` and `/api/files/download`.
   const fileHash = (s: string) => {
     let h = 5381;
-    for (let i = 0; i < s.length; i += 1) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0;
+    for (let i = 0; i < s.length; i += 1)
+      h = ((h << 5) + h + s.charCodeAt(i)) >>> 0;
     return h.toString(16);
   };
-  const fileStore = new Map<string, string>(Object.entries(metrics.files ?? {}));
+  const fileStore = new Map<string, string>(
+    Object.entries(metrics.files ?? {}),
+  );
   let fileMtime = 1000;
   await registerRoute(/\/api\/files(\?|$)/, async (route) => {
     const request = route.request();
@@ -392,14 +479,21 @@ async function installFixtures(
         return route.fulfill({
           status: 409,
           contentType: "application/json",
-          body: JSON.stringify({ error: "file changed on disk since it was read" }),
+          body: JSON.stringify({
+            error: "file changed on disk since it was read",
+          }),
         });
       }
       const content = body.content ?? "";
       fileStore.set(body.path, content);
       fileMtime += 1;
       return route.fulfill({
-        json: { ok: true, bytes: content.length, hash: fileHash(content), mtime: fileMtime },
+        json: {
+          ok: true,
+          bytes: content.length,
+          hash: fileHash(content),
+          mtime: fileMtime,
+        },
       });
     }
     const path = new URL(request.url()).searchParams.get("path") ?? "";
@@ -416,7 +510,9 @@ async function installFixtures(
       },
     });
   });
-  await registerRoute("**/api/tasks**", async (route) => route.fulfill({ json: [] }));
+  await registerRoute("**/api/tasks**", async (route) =>
+    route.fulfill({ json: [] }),
+  );
   // Push endpoints: Settings polls these on open. Answer them deterministically
   // so opening Settings never reaches a live backend. `pushSubscriptions` lets
   // a test model the server having dropped this device's subscription.
@@ -445,33 +541,39 @@ async function installFixtures(
       route.fulfill({ json: tasks }),
     );
     await registerRoute("**/api/agent-tasks/*/run", async (route) => {
-      const id = new URL(route.request().url()).pathname.split("/").at(-2) ?? "";
+      const id =
+        new URL(route.request().url()).pathname.split("/").at(-2) ?? "";
       agentTaskRuns.push(id);
-      return route.fulfill({ json: {
-        id: `run-${agentTaskRuns.length}`,
-        task_id: id,
-        started_at: "2026-08-18T00:10:00Z",
-        trigger: "manual",
-        session_id: `run-session-${agentTaskRuns.length}`,
-        session_name: `on-demand-${agentTaskRuns.length}`,
-        prompt_file: "prompt.txt",
-        context_file: "context.txt",
-        status: "running",
-        completed_at: null,
-        exit_code: null,
-        summary: null,
-        findings: [],
-      } });
+      return route.fulfill({
+        json: {
+          id: `run-${agentTaskRuns.length}`,
+          task_id: id,
+          started_at: "2026-08-18T00:10:00Z",
+          trigger: "manual",
+          session_id: `run-session-${agentTaskRuns.length}`,
+          session_name: `on-demand-${agentTaskRuns.length}`,
+          prompt_file: "prompt.txt",
+          context_file: "context.txt",
+          status: "running",
+          completed_at: null,
+          exit_code: null,
+          summary: null,
+          findings: [],
+        },
+      });
     });
     await registerRoute("**/api/agent-tasks/*", async (route) => {
       const method = route.request().method();
-      const id = new URL(route.request().url()).pathname.split("/").at(-1) ?? "";
+      const id =
+        new URL(route.request().url()).pathname.split("/").at(-1) ?? "";
       const index = tasks.findIndex((task) => task.id === id);
       if (method === "PATCH") {
         const body = route.request().postDataJSON() as Record<string, unknown>;
         agentTaskUpdates.push(body);
         if (index >= 0) tasks[index] = { ...tasks[index], ...body };
-        return route.fulfill({ json: tasks[index] ?? { ...tasks[0], ...body } });
+        return route.fulfill({
+          json: tasks[index] ?? { ...tasks[0], ...body },
+        });
       }
       return route.fulfill({ json: tasks[index] ?? tasks[0] });
     });
@@ -480,63 +582,117 @@ async function installFixtures(
   // unstubbed they reach whatever backend sits behind the dev proxy, and a
   // 401 from it flips the whole app to the login gate mid-test — so answer
   // them with benign, empty engine state.
-  await registerRoute("**/api/git/status**", async (route) => route.fulfill({ json: {
-    repo: "", is_repo: false, branch: "", ahead: 0, behind: 0, entries: [],
-  } }));
-  await registerRoute("**/api/assistant/history**", async (route) => route.fulfill({ json: {
-    transcript: [],
-  } }));
+  await registerRoute("**/api/git/status**", async (route) =>
+    route.fulfill({
+      json: {
+        repo: "",
+        is_repo: false,
+        branch: "",
+        ahead: 0,
+        behind: 0,
+        entries: [],
+      },
+    }),
+  );
+  await registerRoute("**/api/assistant/history**", async (route) =>
+    route.fulfill({
+      json: {
+        transcript: [],
+      },
+    }),
+  );
   // A default assistant turn: a plain acknowledgement. Individual tests
   // register their own `**/api/assistant/message` handler afterwards to fail
   // it, hold it open, or answer with Markdown — a later route wins in
   // Playwright, so those overrides take precedence over this default.
-  await registerRoute("**/api/assistant/message", async (route) => route.fulfill({ json: {
-    reply: "Acknowledged.", pending_action: null, tool_trace: [],
-  } }));
+  await registerRoute("**/api/assistant/message", async (route) =>
+    route.fulfill({
+      json: {
+        reply: "Acknowledged.",
+        pending_action: null,
+        tool_trace: [],
+      },
+    }),
+  );
   await registerRoute("**/api/vogt/**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
     if (url.pathname.endsWith("/inbox")) {
       inboxCalls += 1;
-      return route.fulfill({ json: {
-        ...inboxResult(),
-        counts: { active: metrics.inboxActive, archived: 0, snoozed: 0 },
-      } });
+      return route.fulfill({
+        json: {
+          ...inboxResult(),
+          counts: { active: metrics.inboxActive, archived: 0, snoozed: 0 },
+        },
+      });
     }
     if (url.pathname.endsWith("/inbox/archive")) {
-      return route.fulfill({ json: { entry: { ...inboxEntry, triage_state: "archived" } } });
+      return route.fulfill({
+        json: { entry: { ...inboxEntry, triage_state: "archived" } },
+      });
     }
     if (url.pathname.endsWith("/workflows")) {
-      return route.fulfill({ json: { workflows: metrics.workflows ?? [{ kind: "feature", initial_state: "open", states: ["open", "done"], transitions: { open: ["done"], done: [] } }] } });
+      return route.fulfill({
+        json: {
+          workflows: metrics.workflows ?? [
+            {
+              kind: "feature",
+              initial_state: "open",
+              states: ["open", "done"],
+              transitions: { open: ["done"], done: [] },
+            },
+          ],
+        },
+      });
     }
     if (url.pathname.endsWith("/work/transition")) {
-      const body = request.postDataJSON() as { ref: string; to_state: string; reason: string };
+      const body = request.postDataJSON() as {
+        ref: string;
+        to_state: string;
+        reason: string;
+      };
       transitionRequests.push(body as Record<string, unknown>);
-      const source = (metrics.boardItems ?? boardItems).find((item) => item.ref === body.ref) ?? boardItems[0];
-      return route.fulfill({ json: {
-        item: { ...source, ref: body.ref, state: body.to_state, updated_at: "2026-08-17T11:00:00Z" },
-      } });
+      const source =
+        (metrics.boardItems ?? boardItems).find(
+          (item) => item.ref === body.ref,
+        ) ?? boardItems[0];
+      return route.fulfill({
+        json: {
+          item: {
+            ...source,
+            ref: body.ref,
+            state: body.to_state,
+            updated_at: "2026-08-17T11:00:00Z",
+          },
+        },
+      });
     }
     if (url.pathname.endsWith("/work/update")) {
       const body = request.postDataJSON() as Record<string, unknown>;
       updateRequests.push(body);
-      const source = (metrics.boardItems ?? boardItems).find((item) => item.ref === body.ref) ?? boardItems[0];
+      const source =
+        (metrics.boardItems ?? boardItems).find(
+          (item) => item.ref === body.ref,
+        ) ?? boardItems[0];
       // Echo back the item with the edited fields applied, the way work.update
       // answers: the detail page keeps the server's version, not what was typed.
-      return route.fulfill({ json: {
-        item: {
-          ...source,
-          ref: body.ref,
-          title: body.title ?? source.title,
-          priority: body.priority ?? source.priority,
-          updated_at: "2026-08-17T11:00:00Z",
+      return route.fulfill({
+        json: {
+          item: {
+            ...source,
+            ref: body.ref,
+            title: body.title ?? source.title,
+            priority: body.priority ?? source.priority,
+            updated_at: "2026-08-17T11:00:00Z",
+          },
+          comments: [],
+          sessions: [],
         },
-        comments: [],
-        sessions: [],
-      } });
+      });
     }
     if (url.pathname.endsWith("/board/list")) {
-      if (metrics.boardTotal === null) return route.fulfill({ status: 503, body: "work unavailable" });
+      if (metrics.boardTotal === null)
+        return route.fulfill({ status: 503, body: "work unavailable" });
       const body = request.postDataJSON() as {
         cells?: { lane_key?: string; state?: string; cursor?: string }[];
         lane_mode?: string;
@@ -560,15 +716,15 @@ async function installFixtures(
         );
         // A bounded cell: the first page carries a cursor, and the request
         // that returns with it gets the rest.
-        const items = page > 0
-          ? (cell.cursor ? all.slice(page) : all.slice(0, page))
-          : all;
+        const items =
+          page > 0 ? (cell.cursor ? all.slice(page) : all.slice(0, page)) : all;
         return {
           lane_key: cell.lane_key ?? "",
           state: cell.state ?? "",
           items,
           total: all.length,
-          next_cursor: page > 0 && !cell.cursor && all.length > page ? "cursor-1" : null,
+          next_cursor:
+            page > 0 && !cell.cursor && all.length > page ? "cursor-1" : null,
         };
       });
       const columnTotals: Record<string, number> = {};
@@ -579,45 +735,67 @@ async function installFixtures(
         const lane = laneOf(item);
         laneTotals[lane] = (laneTotals[lane] ?? 0) + 1;
       }
-      return route.fulfill({ json: {
-        cells,
-        column_totals: columnTotals,
-        lane_totals: laneTotals,
-        total: metrics.boardTotal,
-        snapshot: "browser-board-snapshot",
-        snapshot_at: "2026-08-17T10:01:00Z",
-        revision: 1,
-      } });
+      return route.fulfill({
+        json: {
+          cells,
+          column_totals: columnTotals,
+          lane_totals: laneTotals,
+          total: metrics.boardTotal,
+          snapshot: "browser-board-snapshot",
+          snapshot_at: "2026-08-17T10:01:00Z",
+          revision: 1,
+        },
+      });
     }
     if (url.pathname.endsWith("/work")) {
-      if (metrics.boardTotal === null) return route.fulfill({ status: 503, body: "work unavailable" });
-      return route.fulfill({ json: { items: boardItems, total: metrics.boardTotal, freshness: { status: "fresh" } } });
+      if (metrics.boardTotal === null)
+        return route.fulfill({ status: 503, body: "work unavailable" });
+      return route.fulfill({
+        json: {
+          items: boardItems,
+          total: metrics.boardTotal,
+          freshness: { status: "fresh" },
+        },
+      });
     }
     if (url.pathname.endsWith("/backlog")) {
-      if (metrics.backlogTotal === null) return route.fulfill({ status: 503, body: "backlog unavailable" });
-      return route.fulfill({ json: {
-        items: metrics.backlogItems ?? boardItems,
-        total_considered: metrics.backlogTotal,
-        freshness: { status: "fresh", collectors: {} },
-      } });
+      if (metrics.backlogTotal === null)
+        return route.fulfill({ status: 503, body: "backlog unavailable" });
+      return route.fulfill({
+        json: {
+          items: metrics.backlogItems ?? boardItems,
+          total_considered: metrics.backlogTotal,
+          freshness: { status: "fresh", collectors: {} },
+        },
+      });
     }
     if (url.pathname.endsWith("/projects")) {
       if (request.method() === "POST") {
         // project.register: echo the registration back as a project.
-        const body = request.postDataJSON() as { name?: string; root_path?: string };
+        const body = request.postDataJSON() as {
+          name?: string;
+          root_path?: string;
+        };
         registerRequests.push(body as Record<string, unknown>);
         const slug = String(body.name ?? "project")
           .toLowerCase()
           .replace(/[^a-z0-9]+/g, "-")
           .replace(/^-|-$/g, "");
-        return route.fulfill({ json: { project: { slug, name: body.name ?? slug } } });
+        return route.fulfill({
+          json: { project: { slug, name: body.name ?? slug } },
+        });
       }
-      if (metrics.projectsTotal === null) return route.fulfill({ status: 503, body: "projects unavailable" });
-      const projects = metrics.projects ?? [{ slug: "vogt", name: "Vogt", root_path: "/workspace/vogt" }];
-      return route.fulfill({ json: {
-      projects,
-      total: metrics.projectsTotal,
-      } });
+      if (metrics.projectsTotal === null)
+        return route.fulfill({ status: 503, body: "projects unavailable" });
+      const projects = metrics.projects ?? [
+        { slug: "vogt", name: "Vogt", root_path: "/workspace/vogt" },
+      ];
+      return route.fulfill({
+        json: {
+          projects,
+          total: metrics.projectsTotal,
+        },
+      });
     }
     // The setup steps: forge account linking, the repo picker, the
     // first import, and the sweep + coverage that follow it.
@@ -625,51 +803,83 @@ async function installFixtures(
       if (request.method() === "POST") {
         const body = request.postDataJSON() as Record<string, unknown>;
         linkRequests.push(body);
-        return route.fulfill({ json: {
-          host: "github.com", login: "ada", scopes: "repo", linked: true,
-        } });
+        return route.fulfill({
+          json: {
+            host: "github.com",
+            login: "ada",
+            scopes: "repo",
+            linked: true,
+          },
+        });
       }
       return route.fulfill({ json: { accounts: metrics.forgeAccounts ?? [] } });
     }
     if (url.pathname.endsWith("/forge/repos")) {
-      return route.fulfill({ json: {
-        repos: metrics.forgeRepos ?? [
-          {
-            owner: "ada", name: "engine", default_branch: "main",
-            visibility: "private", url: "https://github.com/ada/engine",
-            already_registered: false,
-          },
-        ],
-        login: "ada",
-        detail: null,
-      } });
+      return route.fulfill({
+        json: {
+          repos: metrics.forgeRepos ?? [
+            {
+              owner: "ada",
+              name: "engine",
+              default_branch: "main",
+              visibility: "private",
+              url: "https://github.com/ada/engine",
+              already_registered: false,
+            },
+          ],
+          login: "ada",
+          detail: null,
+        },
+      });
     }
     if (url.pathname.endsWith("/projects/import")) {
       const body = request.postDataJSON() as Record<string, unknown>;
       importRequests.push(body);
-      return route.fulfill({ json: {
-        project: { slug: "engine", name: "engine" },
-        remote: String(body.repo ?? ""),
-        root_path: "/imports/engine",
-        cloned: true,
-      } });
+      return route.fulfill({
+        json: {
+          project: { slug: "engine", name: "engine" },
+          remote: String(body.repo ?? ""),
+          root_path: "/imports/engine",
+          cloned: true,
+        },
+      });
     }
     if (url.pathname.endsWith("/sweep")) {
       const body = request.postDataJSON() as Record<string, unknown>;
       sweepRequests.push(body);
-      return route.fulfill({ json: {
-        scope: "project:engine", projects: 1, subjects: 12, dep_refs: 3, reports: [],
-      } });
+      return route.fulfill({
+        json: {
+          scope: "project:engine",
+          projects: 1,
+          subjects: 12,
+          dep_refs: 3,
+          reports: [],
+        },
+      });
     }
     if (url.pathname.endsWith("/coverage")) {
-      return route.fulfill({ json: {
-        collectors: [
-          { collector: "git_local", status: "current", last_swept_at: null, age_seconds: 0, projects: 1 },
-          { collector: "markers", status: "current", last_swept_at: null, age_seconds: 0, projects: 1 },
-        ],
-        swept_project_ids: ["prj-1"],
-        unswept_project_ids: [],
-      } });
+      return route.fulfill({
+        json: {
+          collectors: [
+            {
+              collector: "git_local",
+              status: "current",
+              last_swept_at: null,
+              age_seconds: 0,
+              projects: 1,
+            },
+            {
+              collector: "markers",
+              status: "current",
+              last_swept_at: null,
+              age_seconds: 0,
+              projects: 1,
+            },
+          ],
+          swept_project_ids: ["prj-1"],
+          unswept_project_ids: [],
+        },
+      });
     }
     if (url.pathname.endsWith("/vogt/events")) {
       return route.fulfill({ json: { events: [], last_id: 0 } });
@@ -678,33 +888,57 @@ async function installFixtures(
       return route.fulfill({ json: { records: [], total: 0 } });
     }
     if (url.pathname.endsWith("/work/get")) {
-      return route.fulfill({ json: {
-        item: {
-          id: "01JWORKITEM", ref: "WI-7", kind: "feature", title: "Measured board card",
-          body: metrics.workBody ?? "", state: "open", priority: "normal", project_slug: "vogt",
-          initiative_id: null, origin: "declared", trust_state: "verified",
-          assignee_identity_ref: null, labels: [], relations: [],
-          created_at: "2026-08-01T00:00:00Z", updated_at: "2026-08-17T10:00:00Z",
+      return route.fulfill({
+        json: {
+          item: {
+            id: "01JWORKITEM",
+            ref: "WI-7",
+            kind: "feature",
+            title: "Measured board card",
+            body: metrics.workBody ?? "",
+            state: "open",
+            priority: "normal",
+            project_slug: "vogt",
+            initiative_id: null,
+            origin: "declared",
+            trust_state: "verified",
+            assignee_identity_ref: null,
+            labels: [],
+            relations: [],
+            created_at: "2026-08-01T00:00:00Z",
+            updated_at: "2026-08-17T10:00:00Z",
+          },
+          comments: [],
+          sessions: [],
+          audit: [],
         },
-        comments: [],
-        sessions: [],
-        audit: [],
-      } });
+      });
     }
     if (url.pathname.endsWith("/why")) {
-      return route.fulfill({ json: {
-        ref: "WI-7",
-        title: "Ranked",
-        total: 1,
-        contributions: [
-          { input: "age", detail: "raised 9 days ago and still open", value: 9, weight: 0.1, contribution: 0.9 },
-        ],
-        inputs_not_yet_available: {},
-      } });
+      return route.fulfill({
+        json: {
+          ref: "WI-7",
+          title: "Ranked",
+          total: 1,
+          contributions: [
+            {
+              input: "age",
+              detail: "raised 9 days ago and still open",
+              value: 9,
+              weight: 0.1,
+              contribution: 0.9,
+            },
+          ],
+          inputs_not_yet_available: {},
+        },
+      });
     }
-    if (url.pathname.endsWith("/labels")) return route.fulfill({ json: { labels: [] } });
-    if (url.pathname.endsWith("/initiatives")) return route.fulfill({ json: { initiatives: [] } });
-    if (url.pathname.endsWith("/actors")) return route.fulfill({ json: { actors: metrics.actors ?? [] } });
+    if (url.pathname.endsWith("/labels"))
+      return route.fulfill({ json: { labels: [] } });
+    if (url.pathname.endsWith("/initiatives"))
+      return route.fulfill({ json: { initiatives: [] } });
+    if (url.pathname.endsWith("/actors"))
+      return route.fulfill({ json: { actors: metrics.actors ?? [] } });
     if (url.pathname.endsWith("/vogt/observations")) {
       return route.fulfill({ json: { observations: [], total: 0 } });
     }
@@ -739,42 +973,64 @@ async function installFixtures(
   };
 }
 
-test("History palette results restore the selected session, query and match", async ({ page }) => {
+test("History palette results restore the selected session, query and match", async ({
+  page,
+}) => {
   await installFixtures(page);
   const archivedSessions = [
     {
-      id: "archive-alpha", name: "alpha archive", cwd: "/workspace/alpha",
-      command: "pnpm test", created_at: "2026-08-18T09:00:00Z",
-      ended_at: "2026-08-18T09:05:00Z", exit_code: 0, scrollback_bytes: 18,
+      id: "archive-alpha",
+      name: "alpha archive",
+      cwd: "/workspace/alpha",
+      command: "pnpm test",
+      created_at: "2026-08-18T09:00:00Z",
+      ended_at: "2026-08-18T09:05:00Z",
+      exit_code: 0,
+      scrollback_bytes: 18,
     },
     {
-      id: "archive-beta", name: "beta archive", cwd: "/workspace/beta",
-      command: "cargo test", created_at: "2026-08-18T10:00:00Z",
-      ended_at: "2026-08-18T10:05:00Z", exit_code: 0, scrollback_bytes: 17,
+      id: "archive-beta",
+      name: "beta archive",
+      cwd: "/workspace/beta",
+      command: "cargo test",
+      created_at: "2026-08-18T10:00:00Z",
+      ended_at: "2026-08-18T10:05:00Z",
+      exit_code: 0,
+      scrollback_bytes: 17,
     },
   ];
   const matches = [
     {
-      session_id: "archive-alpha", session_name: "alpha archive",
+      session_id: "archive-alpha",
+      session_name: "alpha archive",
       created_at: "2026-08-18T09:00:00Z",
-      match_snippet: "alpha says <mark>needle</mark>", rank: -2,
+      match_snippet: "alpha says <mark>needle</mark>",
+      rank: -2,
     },
     {
-      session_id: "archive-beta", session_name: "beta archive",
+      session_id: "archive-beta",
+      session_name: "beta archive",
       created_at: "2026-08-18T10:00:00Z",
-      match_snippet: "beta says <mark>needle</mark>", rank: -1,
+      match_snippet: "beta says <mark>needle</mark>",
+      rank: -1,
     },
   ];
   await page.route("**/api/history/**", async (route) => {
     const path = new URL(route.request().url()).pathname;
-    if (path === "/api/history/sessions") return route.fulfill({ json: archivedSessions });
+    if (path === "/api/history/sessions")
+      return route.fulfill({ json: archivedSessions });
     if (path === "/api/history/search") return route.fulfill({ json: matches });
     if (path.endsWith("/log")) {
       const id = path.split("/").at(-2)!;
-      return route.fulfill({ json: {
-        session_id: id, text: `${id} says needle`, bytes: 20,
-        total_bytes: 20, truncated: false,
-      } });
+      return route.fulfill({
+        json: {
+          session_id: id,
+          text: `${id} says needle`,
+          bytes: 20,
+          total_bytes: 20,
+          truncated: false,
+        },
+      });
     }
     const id = path.split("/").at(-1);
     const session = archivedSessions.find((candidate) => candidate.id === id);
@@ -788,21 +1044,35 @@ test("History palette results restore the selected session, query and match", as
   await page.getByRole("button", { name: "Go to…" }).click();
   const palette = page.getByRole("dialog", { name: "Command palette" });
   await palette.locator("input").fill("> needle");
-  await expect(palette.getByText("alpha archive", { exact: true })).toBeVisible();
-  await expect(palette.getByText("beta archive", { exact: true })).toBeVisible();
+  await expect(
+    palette.getByText("alpha archive", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    palette.getByText("beta archive", { exact: true }),
+  ).toBeVisible();
   await palette.getByText("beta archive", { exact: true }).click();
 
-  await expect(page).toHaveURL(/#\/history\?q=needle&session=archive-beta&match=m[0-9a-f]{8}$/);
-  await expect(page.getByLabel("Search all archived output")).toHaveValue("needle");
-  await expect(page.getByRole("heading", { name: "beta archive" })).toBeVisible();
-  const selectedMatch = page.locator('.history-result-snippet.qualified-match[aria-current="true"]');
+  await expect(page).toHaveURL(
+    /#\/history\?q=needle&session=archive-beta&match=m[0-9a-f]{8}$/,
+  );
+  await expect(page.getByLabel("Search all archived output")).toHaveValue(
+    "needle",
+  );
+  await expect(
+    page.getByRole("heading", { name: "beta archive" }),
+  ).toBeVisible();
+  const selectedMatch = page.locator(
+    '.history-result-snippet.qualified-match[aria-current="true"]',
+  );
   await expect(selectedMatch).toContainText("beta says needle");
   await expect(selectedMatch.locator("mark")).toHaveText("needle");
 
   const qualifiedUrl = page.url();
   await page.reload();
   await expect(page).toHaveURL(qualifiedUrl);
-  await expect(page.getByRole("heading", { name: "beta archive" })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "beta archive" }),
+  ).toBeVisible();
   await expect(selectedMatch).toContainText("beta says needle");
 
   await page.goBack();
@@ -817,275 +1087,397 @@ test("History palette results restore the selected session, query and match", as
   await expect(page.getByLabel("Search all archived output")).toBeFocused();
 });
 
-test("Login and authentication errors present Vogt as the only product", async ({ page }) => {
-  await page.route("**/api/public-config", async (route) => route.fulfill({ json: {} }));
-  await page.route("**/api/status", async (route) => route.fulfill({
-    status: 401,
-    json: { error: "unauthorized" },
-  }));
-  await page.goto("/#/sessions");
+test(
+  "Login and authentication errors present Vogt as the only product",
+  mockOnly(LIVE_SKIP.auth),
+  async ({ page }) => {
+    await page.route("**/api/public-config", async (route) =>
+      route.fulfill({ json: {} }),
+    );
+    await page.route("**/api/status", async (route) =>
+      route.fulfill({
+        status: 401,
+        json: { error: "unauthorized" },
+      }),
+    );
+    await page.goto("/#/sessions");
 
-  await expect(page).toHaveTitle("Sign in · Vogt");
-  await expect(page.getByRole("heading", { name: "Sign in to Vogt" })).toBeVisible();
-  await expect(page.locator("body")).not.toContainText("MyDevEnv2");
-  // The gate leads with a username and password; a wrong pair is refused
-  // in the core's words, and the reader stays at the gate.
-  await page.route("**/api/auth/login", async (route) => route.fulfill({
-    status: 401,
-    json: { error: { code: "unauthenticated", message: "the username or password is not right" } },
-  }));
-  await page.getByLabel("Username").fill("ada");
-  await page.getByLabel("Password", { exact: true }).fill("not the password");
-  await page.getByRole("button", { name: "Sign in", exact: true }).click();
-  await expect(page.getByRole("alert")).toContainText("username or password");
-  // The token path is one disclosure away, for agents and the break-glass token.
-  await page.getByRole("button", { name: "Sign in with a token" }).click();
-  await page.getByLabel("Bearer token").fill("rejected-browser-token");
-  await page.getByRole("button", { name: "Sign in", exact: true }).click();
-  await expect(page.getByRole("alert")).toContainText("current Vogt token");
-});
+    await expect(page).toHaveTitle("Sign in · Vogt");
+    await expect(
+      page.getByRole("heading", { name: "Sign in to Vogt" }),
+    ).toBeVisible();
+    await expect(page.locator("body")).not.toContainText("MyDevEnv2");
+    // The gate leads with a username and password; a wrong pair is refused
+    // in the core's words, and the reader stays at the gate.
+    await page.route("**/api/auth/login", async (route) =>
+      route.fulfill({
+        status: 401,
+        json: {
+          error: {
+            code: "unauthenticated",
+            message: "the username or password is not right",
+          },
+        },
+      }),
+    );
+    await page.getByLabel("Username").fill("ada");
+    await page.getByLabel("Password", { exact: true }).fill("not the password");
+    await page.getByRole("button", { name: "Sign in", exact: true }).click();
+    await expect(page.getByRole("alert")).toContainText("username or password");
+    // The token path is one disclosure away, for agents and the break-glass token.
+    await page.getByRole("button", { name: "Sign in with a token" }).click();
+    await page.getByLabel("Bearer token").fill("rejected-browser-token");
+    await page.getByRole("button", { name: "Sign in", exact: true }).click();
+    await expect(page.getByRole("alert")).toContainText("current Vogt token");
+  },
+);
 
 // A password login: the gate posts the pair, stores the session the core
 // minted where a pasted token lives, and enters the shell.
-test("Sign in with a username and password enters the shell with the session", async ({ page }) => {
-  const fixtures = await installFixtures(page, {}, [], undefined, { noToken: true });
-  await page.goto("/#/sessions");
-  await expect(page.getByRole("heading", { name: "Sign in to Vogt" })).toBeVisible();
-  await page.getByLabel("Username").fill("ada");
-  await page.getByLabel("Password", { exact: true }).fill("correct horse battery");
-  await page.getByRole("button", { name: "Sign in", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Sign in to Vogt" })).toBeHidden();
-  expect(fixtures.loginRequests).toEqual([
-    { username: "ada", password: "correct horse battery", session_name: "browser session" },
-  ]);
-  expect(await page.evaluate(() => localStorage.getItem("vogt.token"))).toBe("browser-test-token");
-});
+test(
+  "Sign in with a username and password enters the shell with the session",
+  mockOnly(LIVE_SKIP.auth),
+  async ({ page }) => {
+    const fixtures = await installFixtures(page, {}, [], undefined, {
+      noToken: true,
+    });
+    await page.goto("/#/sessions");
+    await expect(
+      page.getByRole("heading", { name: "Sign in to Vogt" }),
+    ).toBeVisible();
+    await page.getByLabel("Username").fill("ada");
+    await page
+      .getByLabel("Password", { exact: true })
+      .fill("correct horse battery");
+    await page.getByRole("button", { name: "Sign in", exact: true }).click();
+    await expect(
+      page.getByRole("heading", { name: "Sign in to Vogt" }),
+    ).toBeHidden();
+    expect(fixtures.loginRequests).toEqual([
+      {
+        username: "ada",
+        password: "correct horse battery",
+        session_name: "browser session",
+      },
+    ]);
+    expect(await page.evaluate(() => localStorage.getItem("vogt.token"))).toBe(
+      "browser-test-token",
+    );
+  },
+);
 
 // The first-run wizard. A fresh instance has no tokens, so the core
 // reports install mode and the shell leads with the wizard rather than a
 // demand for a token nobody has minted yet. Verified at the two shapes the
 // product ships: a 1440×900 desktop and a 390×844 phone.
-test("First run: the wizard claims the instance with a password and signs in", async ({ page }) => {
-  if (test.info().project.name === "desktop") {
-    await page.setViewportSize({ width: 1440, height: 900 });
-  } else {
-    await page.setViewportSize({ width: 390, height: 844 });
-  }
-  const fixtures = await installFixtures(page, {}, [], undefined, {
-    installMode: true,
-    noToken: true,
-  });
-  await page.goto("/");
+test(
+  "First run: the wizard claims the instance with a password and signs in",
+  mockOnly(LIVE_SKIP.auth),
+  async ({ page }) => {
+    if (test.info().project.name === "desktop") {
+      await page.setViewportSize({ width: 1440, height: 900 });
+    } else {
+      await page.setViewportSize({ width: 390, height: 844 });
+    }
+    const fixtures = await installFixtures(page, {}, [], undefined, {
+      installMode: true,
+      noToken: true,
+    });
+    await page.goto("/");
 
-  await expect(page.getByRole("heading", { name: "Claim this instance" })).toBeVisible();
-  // The whole journey is named up front, identity first.
-  const steps = page.getByRole("list", { name: "Setup steps" });
-  await expect(steps).toContainText("Identity");
-  await expect(steps).toContainText("Forge");
-  await expect(steps).toContainText("First project");
-  // The wizard stays inside the viewport at both shapes.
-  const overflow = await page.evaluate(
-    () => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1,
-  );
-  expect(overflow, "the wizard must not overflow horizontally").toBe(false);
+    await expect(
+      page.getByRole("heading", { name: "Claim this instance" }),
+    ).toBeVisible();
+    // The whole journey is named up front, identity first.
+    const steps = page.getByRole("list", { name: "Setup steps" });
+    await expect(steps).toContainText("Identity");
+    await expect(steps).toContainText("Forge");
+    await expect(steps).toContainText("First project");
+    // The wizard stays inside the viewport at both shapes.
+    const overflow = await page.evaluate(
+      () =>
+        document.documentElement.scrollWidth >
+        document.documentElement.clientWidth + 1,
+    );
+    expect(overflow, "the wizard must not overflow horizontally").toBe(false);
 
-  await page.getByLabel("Your name").fill("Ada Lovelace");
-  // The username is suggested from the name and stays editable.
-  await expect(page.getByLabel("Username")).toHaveValue("ada-lovelace");
-  await page.getByLabel("Password", { exact: true }).fill("correct horse battery");
-  await page.getByLabel("Confirm password").fill("correct horse battery");
-  await page.getByRole("button", { name: "Claim instance & create my login" }).click();
+    await page.getByLabel("Your name").fill("Ada Lovelace");
+    // The username is suggested from the name and stays editable.
+    await expect(page.getByLabel("Username")).toHaveValue("ada-lovelace");
+    await page
+      .getByLabel("Password", { exact: true })
+      .fill("correct horse battery");
+    await page.getByLabel("Confirm password").fill("correct horse battery");
+    await page
+      .getByRole("button", { name: "Claim instance & create my login" })
+      .click();
 
-  await expect(page.getByRole("heading", { name: "Welcome, Ada Lovelace" })).toBeVisible();
-  await expect(page.getByTestId("setup-username")).toContainText("ada-lovelace");
-  expect(fixtures.bootstrapRequests).toEqual([
-    { display_name: "Ada Lovelace", username: "ada-lovelace", password: "correct horse battery" },
-  ]);
-  // The CLI/MCP equivalents are one disclosure away.
-  await page.getByText("Use it from a terminal or an agent").click();
-  await expect(page.getByText("vogt-mcp-remote")).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: "Welcome, Ada Lovelace" }),
+    ).toBeVisible();
+    await expect(page.getByTestId("setup-username")).toContainText(
+      "ada-lovelace",
+    );
+    expect(fixtures.bootstrapRequests).toEqual([
+      {
+        display_name: "Ada Lovelace",
+        username: "ada-lovelace",
+        password: "correct horse battery",
+      },
+    ]);
+    // The CLI/MCP equivalents are one disclosure away.
+    await page.getByText("Use it from a terminal or an agent").click();
+    await expect(page.getByText("vogt-mcp-remote")).toBeVisible();
 
-  // Continue hands the minted session to the ordinary sign-in path: the shell
-  // comes up authenticated with it stored where a pasted token lives, and the
-  // pending flag lands the fresh operator on the remaining setup steps.
-  await page.getByRole("button", { name: "Continue to Vogt" }).click();
-  await expect(page).toHaveURL(/#\/setup$/);
-  await expect(
-    page.getByRole("heading", { name: "Setup", exact: true }),
-  ).toBeVisible();
-  expect(await page.evaluate(() => localStorage.getItem("vogt.token"))).toBe(
-    "vogt_browser-test-first-run-secret",
-  );
-});
+    // Continue hands the minted session to the ordinary sign-in path: the shell
+    // comes up authenticated with it stored where a pasted token lives, and the
+    // pending flag lands the fresh operator on the remaining setup steps.
+    await page.getByRole("button", { name: "Continue to Vogt" }).click();
+    await expect(page).toHaveURL(/#\/setup$/);
+    await expect(
+      page.getByRole("heading", { name: "Setup", exact: true }),
+    ).toBeVisible();
+    expect(await page.evaluate(() => localStorage.getItem("vogt.token"))).toBe(
+      "vogt_browser-test-first-run-secret",
+    );
+  },
+);
 
 // The setup steps at #/setup: forge link and first
 // project, each with a visible pass/fail carrying the server's own words,
 // then the first sweep and the coverage it earns. Verified at 1440×900 and,
 // via the phone project, 390×844.
-test("Setup steps: link the forge, import the first project, sweep, and see coverage", async ({ page }) => {
-  if (test.info().project.name === "desktop") {
-    await page.setViewportSize({ width: 1440, height: 900 });
-  } else {
-    await page.setViewportSize({ width: 390, height: 844 });
-  }
-  const fixtures = await installFixtures(page);
-  await page.goto("/#/setup");
+test(
+  "Setup steps: link the forge, import the first project, sweep, and see coverage",
+  mockOnly(LIVE_SKIP.data),
+  async ({ page }) => {
+    if (test.info().project.name === "desktop") {
+      await page.setViewportSize({ width: 1440, height: 900 });
+    } else {
+      await page.setViewportSize({ width: 390, height: 844 });
+    }
+    const fixtures = await installFixtures(page);
+    await page.goto("/#/setup");
 
-  await expect(page.getByRole("heading", { name: "Setup" })).toBeVisible();
-  await expect(page.getByRole("list", { name: "Setup steps" })).toContainText("Identity");
+    await expect(page.getByRole("heading", { name: "Setup" })).toBeVisible();
+    await expect(page.getByRole("list", { name: "Setup steps" })).toContainText(
+      "Identity",
+    );
 
-  // Forge: paste a PAT with a typed reason, and the step reports as whom.
-  await page.getByLabel("Personal Access Token").fill("ghp_wizard");
-  await page
-    .getByLabel("Forge step")
-    .getByLabel("Reason (audited)")
-    .fill("first-run: my own attribution");
-  await page.getByRole("button", { name: "Link account" }).click();
-  await expect(page.getByText("Linked as ada — token scopes: repo.")).toBeVisible();
-  expect(fixtures.linkRequests).toEqual([
-    { token: "ghp_wizard", reason: "first-run: my own attribution" },
-  ]);
+    // Forge: paste a PAT with a typed reason, and the step reports as whom.
+    await page.getByLabel("Personal Access Token").fill("ghp_wizard");
+    await page
+      .getByLabel("Forge step")
+      .getByLabel("Reason (audited)")
+      .fill("first-run: my own attribution");
+    await page.getByRole("button", { name: "Link account" }).click();
+    await expect(
+      page.getByText("Linked as ada — token scopes: repo."),
+    ).toBeVisible();
+    expect(fixtures.linkRequests).toEqual([
+      { token: "ghp_wizard", reason: "first-run: my own attribution" },
+    ]);
 
-  // First project: pick a repository and import it, reason attached.
-  await page.getByRole("button", { name: "Browse my repositories" }).click();
-  await page.getByRole("radio").first().check();
-  await page
-    .getByLabel("First project step")
-    .getByLabel("Reason (audited)")
-    .first()
-    .fill("first project for this instance");
-  await page.getByRole("button", { name: "Import it" }).click();
-  await expect(page.getByText(/Imported engine/)).toBeVisible();
-  expect(fixtures.importRequests[0]).toMatchObject({
-    repo: "https://github.com/ada/engine",
-    reason: "first project for this instance",
-  });
+    // First project: pick a repository and import it, reason attached.
+    await page.getByRole("button", { name: "Browse my repositories" }).click();
+    await page.getByRole("radio").first().check();
+    await page
+      .getByLabel("First project step")
+      .getByLabel("Reason (audited)")
+      .first()
+      .fill("first project for this instance");
+    await page.getByRole("button", { name: "Import it" }).click();
+    await expect(page.getByText(/Imported engine/)).toBeVisible();
+    expect(fixtures.importRequests[0]).toMatchObject({
+      repo: "https://github.com/ada/engine",
+      reason: "first project for this instance",
+    });
 
-  // The first sweep, its numbers, and the coverage table behind them.
-  await page
-    .getByLabel("First project step")
-    .getByLabel("Reason (audited)")
-    .last()
-    .fill("baseline evidence");
-  await page.getByRole("button", { name: "Run the first sweep" }).click();
-  await expect(page.getByText(/Swept 1 project/)).toBeVisible();
-  await expect(page.getByRole("table", { name: "Collector coverage" })).toContainText("git_local");
-  expect(fixtures.sweepRequests[0]).toMatchObject({
-    project: "engine",
-    reason: "baseline evidence",
-  });
+    // The first sweep, its numbers, and the coverage table behind them.
+    await page
+      .getByLabel("First project step")
+      .getByLabel("Reason (audited)")
+      .last()
+      .fill("baseline evidence");
+    await page.getByRole("button", { name: "Run the first sweep" }).click();
+    await expect(page.getByText(/Swept 1 project/)).toBeVisible();
+    await expect(
+      page.getByRole("table", { name: "Collector coverage" }),
+    ).toContainText("git_local");
+    expect(fixtures.sweepRequests[0]).toMatchObject({
+      project: "engine",
+      reason: "baseline evidence",
+    });
 
-  // The surface never overflows horizontally, at either shape.
-  const overflow = await page.evaluate(
-    () => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1,
-  );
-  expect(overflow, "the setup surface must not overflow horizontally").toBe(false);
+    // The surface never overflows horizontally, at either shape.
+    const overflow = await page.evaluate(
+      () =>
+        document.documentElement.scrollWidth >
+        document.documentElement.clientWidth + 1,
+    );
+    expect(overflow, "the setup surface must not overflow horizontally").toBe(
+      false,
+    );
 
-  // Finishing lands on Projects with the pending flag cleared.
-  await page.getByRole("button", { name: "Finish setup" }).click();
-  await expect(page).toHaveURL(/#\/projects$/);
-  expect(await page.evaluate(() => localStorage.getItem("vogt.setup.pending"))).toBeNull();
-});
+    // Finishing lands on Projects with the pending flag cleared.
+    await page.getByRole("button", { name: "Finish setup" }).click();
+    await expect(page).toHaveURL(/#\/projects$/);
+    expect(
+      await page.evaluate(() => localStorage.getItem("vogt.setup.pending")),
+    ).toBeNull();
+  },
+);
 
-test("First run: a closed install mode means the ordinary sign-in gate", async ({ page }) => {
+test("First run: a closed install mode means the ordinary sign-in gate", async ({
+  page,
+}) => {
   await installFixtures(page, {}, [], undefined, {
     installMode: false,
     noToken: true,
   });
   await page.goto("/");
-  await expect(page.getByRole("heading", { name: "Sign in to Vogt" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Claim this instance" })).not.toBeVisible();
-});
-
-test("First run: a reader who already holds a token can reach the gate from the wizard", async ({ page }) => {
-  await installFixtures(page, {}, [], undefined, {
-    installMode: true,
-    noToken: true,
-  });
-  await page.goto("/");
-  await expect(page.getByRole("heading", { name: "Claim this instance" })).toBeVisible();
-  await page.getByRole("button", { name: "Sign in instead" }).click();
-  await expect(page.getByRole("heading", { name: "Sign in to Vogt" })).toBeVisible();
-});
-
-test("Board dragover/drop uses the real browser gesture and keeps its filter on reload", async ({ page }) => {
-  test.skip(test.info().project.name === "phone", "Drag/drop is validated in the desktop browser project");
-  await installFixtures(page);
-  await page.goto("/#/board?project=vogt");
-  await expect(page.getByRole("heading", { name: "Board" })).toBeVisible();
-  await expect(page.getByText("Measured board card")).toBeVisible();
-  const card = page.locator(".board-card").filter({ hasText: "Measured board card" });
-  const target = page.locator('.board-cell[data-state="done"]');
-  await card.dragTo(target);
-  await expect(target.locator("textarea")).toBeVisible();
-  await page.reload();
-  await expect(page).toHaveURL(/#\/board\?project=vogt/);
   await expect(
-    page.getByRole("group", { name: "Board filters", exact: true }),
+    page.getByRole("heading", { name: "Sign in to Vogt" }),
   ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Claim this instance" }),
+  ).not.toBeVisible();
 });
+
+test(
+  "First run: a reader who already holds a token can reach the gate from the wizard",
+  mockOnly(LIVE_SKIP.auth),
+  async ({ page }) => {
+    await installFixtures(page, {}, [], undefined, {
+      installMode: true,
+      noToken: true,
+    });
+    await page.goto("/");
+    await expect(
+      page.getByRole("heading", { name: "Claim this instance" }),
+    ).toBeVisible();
+    await page.getByRole("button", { name: "Sign in instead" }).click();
+    await expect(
+      page.getByRole("heading", { name: "Sign in to Vogt" }),
+    ).toBeVisible();
+  },
+);
+
+test(
+  "Board dragover/drop uses the real browser gesture and keeps its filter on reload",
+  mockOnly(LIVE_SKIP.data),
+  async ({ page }) => {
+    test.skip(
+      test.info().project.name === "phone",
+      "Drag/drop is validated in the desktop browser project",
+    );
+    await installFixtures(page);
+    await page.goto("/#/board?project=vogt");
+    await expect(page.getByRole("heading", { name: "Board" })).toBeVisible();
+    await expect(page.getByText("Measured board card")).toBeVisible();
+    const card = page
+      .locator(".board-card")
+      .filter({ hasText: "Measured board card" });
+    const target = page.locator('.board-cell[data-state="done"]');
+    await card.dragTo(target);
+    await expect(target.locator("textarea")).toBeVisible();
+    await page.reload();
+    await expect(page).toHaveURL(/#\/board\?project=vogt/);
+    await expect(
+      page.getByRole("group", { name: "Board filters", exact: true }),
+    ).toBeVisible();
+  },
+);
 
 // The chrome over the board was pushing the first card past the fold —
 // a legend, a saved-lenses row and a success banner that all belonged
 // elsewhere. With those moved into the `?` help and the `+ Filter` panel, the
 // first card sits inside the first screen; and the card, being a button, opens
 // on a single click of its body and on Space, not only by double-click.
-test("Board leads with the first card, which opens on a click and on Space", async ({ page }) => {
-  await installFixtures(page);
-  await page.goto("/#/board");
-  await expect(page.getByRole("heading", { name: "Board" })).toBeVisible();
-  const card = page.locator(".board-card").filter({ hasText: "Measured board card" });
-  await expect(card).toBeVisible();
+test(
+  "Board leads with the first card, which opens on a click and on Space",
+  mockOnly(LIVE_SKIP.data),
+  async ({ page }) => {
+    await installFixtures(page);
+    await page.goto("/#/board");
+    await expect(page.getByRole("heading", { name: "Board" })).toBeVisible();
+    const card = page
+      .locator(".board-card")
+      .filter({ hasText: "Measured board card" });
+    await expect(card).toBeVisible();
 
-  // The first card is above the fold: measured tops were 318px on the desk and
-  // 470px on the phone before the trim.
-  // This is about the chrome the *board* puts before the first card — the
-  // legend, the saved-lenses row, the boxed filter bar, the success banner. The
-  // app shell above the surface (the phone's Go-to bar, and a "Realtime
-  // connection lost" banner that shows only because this harness serves no live
-  // event stream) is not the board's to trim, so the budget is measured from
-  // the top of the board surface rather than from the viewport.
-  const chrome = await page.evaluate(() => {
-    const surface = document.querySelector(".vogt-surface.board")!;
-    const cardEl = document.querySelector(".board-card")!;
-    return (
-      cardEl.getBoundingClientRect().top - surface.getBoundingClientRect().top
-    );
-  });
-  const ceiling = test.info().project.name === "phone" ? 300 : 200;
-  expect(chrome, `board chrome before first card ${chrome} under ${ceiling}`)
-    .toBeLessThan(ceiling);
+    // The first card is above the fold: measured tops were 318px on the desk and
+    // 470px on the phone before the trim.
+    // This is about the chrome the *board* puts before the first card — the
+    // legend, the saved-lenses row, the boxed filter bar, the success banner. The
+    // app shell above the surface (the phone's Go-to bar, and a "Realtime
+    // connection lost" banner that shows only because this harness serves no live
+    // event stream) is not the board's to trim, so the budget is measured from
+    // the top of the board surface rather than from the viewport.
+    const chrome = await page.evaluate(() => {
+      const surface = document.querySelector(".vogt-surface.board")!;
+      const cardEl = document.querySelector(".board-card")!;
+      return (
+        cardEl.getBoundingClientRect().top - surface.getBoundingClientRect().top
+      );
+    });
+    const ceiling = test.info().project.name === "phone" ? 300 : 200;
+    expect(
+      chrome,
+      `board chrome before first card ${chrome} under ${ceiling}`,
+    ).toBeLessThan(ceiling);
 
-  // A single click of the card body opens the item.
-  await card.locator(".board-card-title").click();
-  await expect(page).toHaveURL(/#\/w\/WI-7/);
+    // A single click of the card body opens the item.
+    await card.locator(".board-card-title").click();
+    await expect(page).toHaveURL(/#\/w\/WI-7/);
 
-  // And Space on the focused card opens it, the way a button is operated.
-  await page.goBack();
-  await expect(card).toBeVisible();
-  await card.focus();
-  await page.keyboard.press("Space");
-  await expect(page).toHaveURL(/#\/w\/WI-7/);
-});
+    // And Space on the focused card opens it, the way a button is operated.
+    await page.goBack();
+    await expect(card).toBeVisible();
+    await card.focus();
+    await page.keyboard.press("Space");
+    await expect(page).toHaveURL(/#\/w\/WI-7/);
+  },
+);
 
 // A coarse pointer cannot drag and cannot see the Shift+Arrow hint, so
 // the "Move…" control is its only way to move a card. It opens the same
 // composer a drag does, with a state select in place of the drop cell a tap
 // never lands on — and the move it commits is an ordinary `work.transition`.
-test("Phone Board moves a card by tapping Move… and choosing a state", async ({ page }) => {
-  test.skip(test.info().project.name !== "phone", "The touch move control is the coarse-pointer path");
+test("Phone Board moves a card by tapping Move… and choosing a state", async ({
+  page,
+}) => {
+  test.skip(
+    test.info().project.name !== "phone",
+    "The touch move control is the coarse-pointer path",
+  );
   const fixture = await installFixtures(page, {}, [], undefined, {
-    boardItems: [{ ...boardItems[0], ref: "WI-7", title: "Phone move card", state: "open" }],
-    workflows: [{
-      kind: "feature",
-      initial_state: "open",
-      states: ["open", "in_progress", "done"],
-      transitions: { open: ["in_progress", "done"], in_progress: ["done"], done: [] },
-    }],
+    boardItems: [
+      {
+        ...boardItems[0],
+        ref: "WI-7",
+        title: "Phone move card",
+        state: "open",
+      },
+    ],
+    workflows: [
+      {
+        kind: "feature",
+        initial_state: "open",
+        states: ["open", "in_progress", "done"],
+        transitions: {
+          open: ["in_progress", "done"],
+          in_progress: ["done"],
+          done: [],
+        },
+      },
+    ],
   });
   await page.goto("/#/board?project=vogt");
   await expect(page.getByRole("heading", { name: "Board" })).toBeVisible();
-  const card = page.locator(".board-card").filter({ hasText: "Phone move card" });
+  const card = page
+    .locator(".board-card")
+    .filter({ hasText: "Phone move card" });
   await expect(card).toBeVisible();
 
   // The control is revealed only by `pointer: coarse`, which is the mobile
@@ -1109,7 +1501,9 @@ test("Phone Board moves a card by tapping Move… and choosing a state", async (
   const selectBox = await select.boundingBox();
   const viewport = page.viewportSize()!;
   expect(selectBox!.x).toBeGreaterThanOrEqual(0);
-  expect(selectBox!.x + selectBox!.width).toBeLessThanOrEqual(viewport.width + 1);
+  expect(selectBox!.x + selectBox!.width).toBeLessThanOrEqual(
+    viewport.width + 1,
+  );
 
   // The open composer is a new visual on the phone; keep a reviewed baseline.
   await expect(composer).toHaveScreenshot("board-move-composer.png");
@@ -1122,75 +1516,111 @@ test("Phone Board moves a card by tapping Move… and choosing a state", async (
 
   // Exactly the chosen transition was sent — no drag, no drop cell — and the
   // board says the move landed.
-  await expect.poll(() => fixture.transitionRequests).toEqual([
-    { ref: "WI-7", to_state: "done", reason: "closing it from my phone" },
-  ]);
+  await expect
+    .poll(() => fixture.transitionRequests)
+    .toEqual([
+      { ref: "WI-7", to_state: "done", reason: "closing it from my phone" },
+    ]);
   await expect(page.getByText("WI-7 moved to done.")).toBeVisible();
 });
 
 // Dropping a card into another lane of its own column changes only the
 // swimlane, which a drag cannot do. The cell is never offered as a target and,
 // when a drop lands there anyway, it says why rather than doing nothing.
-test("Board explains a same-column, other-lane drop instead of swallowing it", async ({ page }) => {
-  test.skip(test.info().project.name === "phone", "The lane-drop hint is a desktop drag gesture");
-  const fixture = await installFixtures(page, {}, [], undefined, {
-    boardTotal: 2,
-    projects: [
-      { slug: "vogt", name: "Vogt", root_path: "/workspace/vogt" },
-      { slug: "beta", name: "Beta", root_path: "/workspace/beta" },
-    ],
-    boardItems: [
-      { ...boardItems[0], ref: "WI-7", title: "Vogt lane card", state: "open", project_slug: "vogt" },
-      { ...boardItems[0], ref: "WI-8", title: "Beta lane card", state: "open", project_slug: "beta" },
-    ],
-  });
-  await page.goto("/#/board?lanes=project");
-  await expect(page.getByRole("heading", { name: "Board" })).toBeVisible();
-  const vogtCard = page.locator(".board-card").filter({ hasText: "Vogt lane card" });
-  const betaCard = page.locator(".board-card").filter({ hasText: "Beta lane card" });
-  await expect(vogtCard).toBeVisible();
-  await expect(betaCard).toBeVisible();
+test(
+  "Board explains a same-column, other-lane drop instead of swallowing it",
+  mockOnly(LIVE_SKIP.data),
+  async ({ page }) => {
+    test.skip(
+      test.info().project.name === "phone",
+      "The lane-drop hint is a desktop drag gesture",
+    );
+    const fixture = await installFixtures(page, {}, [], undefined, {
+      boardTotal: 2,
+      projects: [
+        { slug: "vogt", name: "Vogt", root_path: "/workspace/vogt" },
+        { slug: "beta", name: "Beta", root_path: "/workspace/beta" },
+      ],
+      boardItems: [
+        {
+          ...boardItems[0],
+          ref: "WI-7",
+          title: "Vogt lane card",
+          state: "open",
+          project_slug: "vogt",
+        },
+        {
+          ...boardItems[0],
+          ref: "WI-8",
+          title: "Beta lane card",
+          state: "open",
+          project_slug: "beta",
+        },
+      ],
+    });
+    await page.goto("/#/board?lanes=project");
+    await expect(page.getByRole("heading", { name: "Board" })).toBeVisible();
+    const vogtCard = page
+      .locator(".board-card")
+      .filter({ hasText: "Vogt lane card" });
+    const betaCard = page
+      .locator(".board-card")
+      .filter({ hasText: "Beta lane card" });
+    await expect(vogtCard).toBeVisible();
+    await expect(betaCard).toBeVisible();
 
-  // Two swimlanes are two rows: the cards share the `open` column but sit at
-  // different heights, which is the arrangement the drop is about to conflate.
-  const vogtBox = await vogtCard.boundingBox();
-  const betaBox = await betaCard.boundingBox();
-  expect(Math.abs(vogtBox!.y - betaBox!.y)).toBeGreaterThan(20);
+    // Two swimlanes are two rows: the cards share the `open` column but sit at
+    // different heights, which is the arrangement the drop is about to conflate.
+    const vogtBox = await vogtCard.boundingBox();
+    const betaBox = await betaCard.boundingBox();
+    expect(Math.abs(vogtBox!.y - betaBox!.y)).toBeGreaterThan(20);
 
-  // The Beta lane's own `open` cell — where WI-8 lives — differs from the
-  // dragged card's source only by lane.
-  const betaOpen = page.locator('.board-cell[data-state="open"]', {
-    has: page.getByText("Beta lane card"),
-  });
-  // A native HTML5 drag with one shared DataTransfer, dispatched on the real
-  // nodes: the board's move is a drag/drop, and this is the gesture a reader
-  // makes — carried through to the `drop` the cell handles.
-  await page.evaluate(() => {
-    const cardOf = (text: string) =>
-      [...document.querySelectorAll<HTMLElement>(".board-card")].find((node) =>
-        node.textContent?.includes(text),
-      )!;
-    const source = cardOf("Vogt lane card");
-    const target = cardOf("Beta lane card").closest<HTMLElement>(".board-cell")!;
-    const dataTransfer = new DataTransfer();
-    source.dispatchEvent(new DragEvent("dragstart", { bubbles: true, dataTransfer }));
-    target.dispatchEvent(new DragEvent("dragover", { bubbles: true, dataTransfer }));
-    target.dispatchEvent(new DragEvent("drop", { bubbles: true, dataTransfer }));
-    source.dispatchEvent(new DragEvent("dragend", { bubbles: true, dataTransfer }));
-  });
+    // The Beta lane's own `open` cell — where WI-8 lives — differs from the
+    // dragged card's source only by lane.
+    const betaOpen = page.locator('.board-cell[data-state="open"]', {
+      has: page.getByText("Beta lane card"),
+    });
+    // A native HTML5 drag with one shared DataTransfer, dispatched on the real
+    // nodes: the board's move is a drag/drop, and this is the gesture a reader
+    // makes — carried through to the `drop` the cell handles.
+    await page.evaluate(() => {
+      const cardOf = (text: string) =>
+        [...document.querySelectorAll<HTMLElement>(".board-card")].find(
+          (node) => node.textContent?.includes(text),
+        )!;
+      const source = cardOf("Vogt lane card");
+      const target =
+        cardOf("Beta lane card").closest<HTMLElement>(".board-cell")!;
+      const dataTransfer = new DataTransfer();
+      source.dispatchEvent(
+        new DragEvent("dragstart", { bubbles: true, dataTransfer }),
+      );
+      target.dispatchEvent(
+        new DragEvent("dragover", { bubbles: true, dataTransfer }),
+      );
+      target.dispatchEvent(
+        new DragEvent("drop", { bubbles: true, dataTransfer }),
+      );
+      source.dispatchEvent(
+        new DragEvent("dragend", { bubbles: true, dataTransfer }),
+      );
+    });
 
-  // The drop is a no-op with the reason left on screen: no composer opened and
-  // no transition was requested.
-  await expect(
-    betaOpen.getByText(
-      "Lanes group cards; to change the project/initiative open the item",
-    ),
-  ).toBeVisible();
-  await expect(betaOpen.locator(".board-composer")).toHaveCount(0);
-  expect(fixture.transitionRequests).toEqual([]);
-  // The card never left its lane.
-  await expect(betaOpen.filter({ has: page.getByText("Vogt lane card") })).toHaveCount(0);
-});
+    // The drop is a no-op with the reason left on screen: no composer opened and
+    // no transition was requested.
+    await expect(
+      betaOpen.getByText(
+        "Lanes group cards; to change the project/initiative open the item",
+      ),
+    ).toBeVisible();
+    await expect(betaOpen.locator(".board-composer")).toHaveCount(0);
+    expect(fixture.transitionRequests).toEqual([]);
+    // The card never left its lane.
+    await expect(
+      betaOpen.filter({ has: page.getByText("Vogt lane card") }),
+    ).toHaveCount(0);
+  },
+);
 
 /**
  * Saved lenses live inside the `+ Filter` disclosure at every width now,
@@ -1202,155 +1632,230 @@ async function openFilterPanel(group: Locator): Promise<void> {
   if ((await add.getAttribute("aria-expanded")) === "false") await add.click();
 }
 
-test("Board progressive filters survive reload, history, and saved-lens recall", async ({ page }) => {
-  await installFixtures(page);
-  await page.goto("/#/board?project=vogt&lanes=project");
-  await expect(page.getByRole("heading", { name: "Board" })).toBeVisible();
+test(
+  "Board progressive filters survive reload, history, and saved-lens recall",
+  mockOnly(LIVE_SKIP.data),
+  async ({ page }) => {
+    await installFixtures(page);
+    await page.goto("/#/board?project=vogt&lanes=project");
+    await expect(page.getByRole("heading", { name: "Board" })).toBeVisible();
 
-  const filters = page.getByRole("group", { name: "Board filters" });
-  await expect(filters.getByText("Project: Vogt")).toBeVisible();
-  await expect(filters.getByText("Swimlanes: project")).toBeVisible();
-  await expect(page.getByRole("group", { name: "Add Board filters" })).toBeHidden();
+    const filters = page.getByRole("group", { name: "Board filters" });
+    await expect(filters.getByText("Project: Vogt")).toBeVisible();
+    await expect(filters.getByText("Swimlanes: project")).toBeVisible();
+    await expect(
+      page.getByRole("group", { name: "Add Board filters" }),
+    ).toBeHidden();
 
-  await filters.getByRole("button", { name: "+ Filter", exact: true }).click();
-  const addPanel = page.getByRole("group", { name: "Add Board filters" });
-  await expect(addPanel).toBeVisible();
-  await addPanel.getByText("Type", { exact: true }).click();
-  await addPanel.getByRole("button", { name: "feature", exact: true }).click();
-  await expect(page).toHaveURL(/kind=feature/);
+    await filters
+      .getByRole("button", { name: "+ Filter", exact: true })
+      .click();
+    const addPanel = page.getByRole("group", { name: "Add Board filters" });
+    await expect(addPanel).toBeVisible();
+    // "Type" is a plain label and also an Exclude-facet <option>; the chip
+    // button is the unique control (WI-1842).
+    await addPanel
+      .getByRole("button", { name: "feature", exact: true })
+      .click();
+    await expect(page).toHaveURL(/kind=feature/);
 
-  await page.getByLabel("Lens name").fill("Vogt features");
-  await page.getByRole("button", { name: "Save lens" }).click();
-  await expect(page.locator(".board-saved-recall")).toHaveText("Vogt features");
+    await page.getByLabel("Lens name").fill("Vogt features");
+    await page.getByRole("button", { name: "Save lens" }).click();
+    await expect(page.locator(".board-saved-recall")).toHaveText(
+      "Vogt features",
+    );
 
-  await filters.getByRole("button", { name: "Remove filter Project: Vogt" }).click();
-  await expect(page).not.toHaveURL(/project=vogt/);
-  await page.reload();
-  await expect(filters.getByText("Type: feature")).toBeVisible();
-  await expect(filters.getByText("Swimlanes: project")).toBeVisible();
+    await filters
+      .getByRole("button", { name: "Remove filter Project: Vogt" })
+      .click();
+    await expect(page).not.toHaveURL(/project=vogt/);
+    await page.reload();
+    await expect(filters.getByText("Type: feature")).toBeVisible();
+    await expect(filters.getByText("Swimlanes: project")).toBeVisible();
 
-  await openFilterPanel(filters);
-  await page.locator(".board-saved-recall").click();
-  await expect(page).toHaveURL(/project=vogt/);
-  await expect(page).toHaveURL(/kind=feature/);
-  await expect(page).toHaveURL(/lanes=project/);
+    await openFilterPanel(filters);
+    await page.locator(".board-saved-recall").click();
+    await expect(page).toHaveURL(/project=vogt/);
+    await expect(page).toHaveURL(/kind=feature/);
+    await expect(page).toHaveURL(/lanes=project/);
 
-  await page.goto("/#/board?label=infra");
-  await expect(filters.getByText("Label: infra")).toBeVisible();
-  await page.goBack();
-  await expect(filters.getByText("Project: Vogt")).toBeVisible();
-  await expect(filters.getByText("Type: feature")).toBeVisible();
-  await page.goForward();
-  await expect(filters.getByText("Label: infra")).toBeVisible();
-});
+    await page.goto("/#/board?label=infra");
+    await expect(filters.getByText("Label: infra")).toBeVisible();
+    await page.goBack();
+    await expect(filters.getByText("Project: Vogt")).toBeVisible();
+    await expect(filters.getByText("Type: feature")).toBeVisible();
+    await page.goForward();
+    await expect(filters.getByText("Label: infra")).toBeVisible();
+  },
+);
 
 // Opening a work item unmounts the Board/Backlog surface. Browser Back
 // keeps the query, but the rail/palette/bottom-bar links were bare `#/board`,
 // so returning through them remounted the surface against an empty query and
 // dropped the filter set. The links now carry the last query the surface
 // wrote, so the filter survives a rail/bottom-bar return too.
-test("Board filters survive a return through the rail, not just browser Back", async ({ page }) => {
-  const nav = test.info().project.name === "phone" ? ".phone-bottom-nav" : ".places-nav";
-  await installFixtures(page);
-  await page.goto("/#/board?project=vogt");
-  await expect(page.getByRole("heading", { name: "Board" })).toBeVisible();
-  const filters = page.getByRole("group", { name: "Board filters" });
-  await expect(filters.getByText("Project: Vogt")).toBeVisible();
+test(
+  "Board filters survive a return through the rail, not just browser Back",
+  mockOnly(LIVE_SKIP.data),
+  async ({ page }) => {
+    const nav =
+      test.info().project.name === "phone"
+        ? ".phone-bottom-nav"
+        : ".places-nav";
+    await installFixtures(page);
+    await page.goto("/#/board?project=vogt");
+    await expect(page.getByRole("heading", { name: "Board" })).toBeVisible();
+    const filters = page.getByRole("group", { name: "Board filters" });
+    await expect(filters.getByText("Project: Vogt")).toBeVisible();
 
-  // Open the item, which unmounts the Board (the surface mounts only while the
-  // path is exactly `/board`).
-  await page.locator(".board-card").filter({ hasText: "Measured board card" })
-    .locator(".board-card-title").click();
-  await expect(page).toHaveURL(/#\/w\/WI-7/);
-  await expect(page.locator(".vogt-surface.board")).toHaveCount(0);
+    // Open the item, which unmounts the Board (the surface mounts only while the
+    // path is exactly `/board`).
+    await page
+      .locator(".board-card")
+      .filter({ hasText: "Measured board card" })
+      .locator(".board-card-title")
+      .click();
+    await expect(page).toHaveURL(/#\/w\/WI-7/);
+    await expect(page.locator(".vogt-surface.board")).toHaveCount(0);
 
-  // Return through the rail/bottom-bar link — not browser Back.
-  await page.locator(nav).getByRole("link", { name: /^Board/ }).click();
+    // Return through the rail/bottom-bar link — not browser Back.
+    await page
+      .locator(nav)
+      .getByRole("link", { name: /^Board/ })
+      .click();
 
-  await expect(page).toHaveURL(/project=vogt/);
-  await expect(page.getByRole("heading", { name: "Board" })).toBeVisible();
-  await expect(filters.getByText("Project: Vogt")).toBeVisible();
-});
+    await expect(page).toHaveURL(/project=vogt/);
+    await expect(page.getByRole("heading", { name: "Board" })).toBeVisible();
+    await expect(filters.getByText("Project: Vogt")).toBeVisible();
+  },
+);
 
-test("Backlog filters survive a return through the rail, not just browser Back", async ({ page }) => {
-  const nav = test.info().project.name === "phone" ? ".phone-bottom-nav" : ".places-nav";
-  await installFixtures(page);
-  await page.goto("/#/backlog?project=vogt");
-  await expect(page.getByRole("heading", { name: "Backlog" })).toBeVisible();
-  const filters = page.getByRole("group", { name: "Backlog filters" });
-  await expect(filters.getByText("Project: Vogt")).toBeVisible();
+test(
+  "Backlog filters survive a return through the rail, not just browser Back",
+  mockOnly(LIVE_SKIP.data),
+  async ({ page }) => {
+    const nav =
+      test.info().project.name === "phone"
+        ? ".phone-bottom-nav"
+        : ".places-nav";
+    await installFixtures(page);
+    await page.goto("/#/backlog?project=vogt");
+    await expect(page.getByRole("heading", { name: "Backlog" })).toBeVisible();
+    const filters = page.getByRole("group", { name: "Backlog filters" });
+    await expect(filters.getByText("Project: Vogt")).toBeVisible();
 
-  // Open the item from its ref link, which unmounts the Backlog.
-  await page.locator(".vogt-backlog-link").first().click();
-  await expect(page).toHaveURL(/#\/w\/WI-7/);
-  await expect(page.locator(".vogt-surface.vogt-backlog")).toHaveCount(0);
+    // Open the item from its ref link, which unmounts the Backlog.
+    await page.locator(".vogt-backlog-link").first().click();
+    await expect(page).toHaveURL(/#\/w\/WI-7/);
+    await expect(page.locator(".vogt-surface.vogt-backlog")).toHaveCount(0);
 
-  await page.locator(nav).getByRole("link", { name: /^Backlog/ }).click();
+    await page
+      .locator(nav)
+      .getByRole("link", { name: /^Backlog/ })
+      .click();
 
-  await expect(page).toHaveURL(/project=vogt/);
-  await expect(page.getByRole("heading", { name: "Backlog" })).toBeVisible();
-  await expect(filters.getByText("Project: Vogt")).toBeVisible();
-});
+    await expect(page).toHaveURL(/project=vogt/);
+    await expect(page.getByRole("heading", { name: "Backlog" })).toBeVisible();
+    await expect(filters.getByText("Project: Vogt")).toBeVisible();
+  },
+);
 
 // A ref is a machine handle, not a name. Every surface that renders a
 // project slug or an actor identity ref resolves it through the loaded lists to
 // the human name, keeps the raw ref on the element's `title`, and — for a
 // project — links to that project.
-test("Board card shows resolved project and assignee names, with the raw refs kept in the title", async ({ page }) => {
-  await installFixtures(page, {}, [], undefined, {
-    projects: [{ slug: "vogt", name: "Vogt", root_path: "/workspace/vogt" }],
-    actors: [{ identity_ref: "local:ana", display_name: "Ana" }],
-    boardItems: [{
-      ...boardItems[0], ref: "WI-7", title: "Named refs card", state: "open",
-      project_slug: "vogt", assignee_identity_ref: "local:ana",
-    }],
-  });
-  await page.goto("/#/board");
-  const card = page.locator(".board-card").filter({ hasText: "Named refs card" });
-  await expect(card).toBeVisible();
-  const meta = card.locator(".board-card-meta");
+test(
+  "Board card shows resolved project and assignee names, with the raw refs kept in the title",
+  mockOnly(LIVE_SKIP.data),
+  async ({ page }) => {
+    await installFixtures(page, {}, [], undefined, {
+      projects: [{ slug: "vogt", name: "Vogt", root_path: "/workspace/vogt" }],
+      actors: [{ identity_ref: "local:ana", display_name: "Ana" }],
+      boardItems: [
+        {
+          ...boardItems[0],
+          ref: "WI-7",
+          title: "Named refs card",
+          state: "open",
+          project_slug: "vogt",
+          assignee_identity_ref: "local:ana",
+        },
+      ],
+    });
+    await page.goto("/#/board");
+    const card = page
+      .locator(".board-card")
+      .filter({ hasText: "Named refs card" });
+    await expect(card).toBeVisible();
+    const meta = card.locator(".board-card-meta");
 
-  // The project reads as its name, links to the project, and carries the slug.
-  const projectLink = meta.locator("a.board-card-project");
-  await expect(projectLink).toHaveText("Vogt");
-  await expect(projectLink).toHaveAttribute("title", "vogt");
-  await expect(projectLink).toHaveAttribute("href", "#/projects?p=vogt");
+    // The project reads as its name, links to the project, and carries the slug.
+    const projectLink = meta.locator("a.board-card-project");
+    await expect(projectLink).toHaveText("Vogt");
+    await expect(projectLink).toHaveAttribute("title", "vogt");
+    await expect(projectLink).toHaveAttribute("href", "#/projects?p=vogt");
 
-  // The assignee reads as its display name, with the identity ref in the title.
-  const assignee = meta.locator("span[title='local:ana']");
-  await expect(assignee).toHaveText("Ana");
-});
+    // The assignee reads as its display name, with the identity ref in the title.
+    const assignee = meta.locator("span[title='local:ana']");
+    await expect(assignee).toHaveText("Ana");
+  },
+);
 
 // The counts on a project's Work panel are the way into that project's
 // board, backlog and audit, filtered to it.
-test("Projects Work panel cross-links the counts to the board, backlog and audit for the project", async ({ page }) => {
-  test.skip(test.info().project.name === "phone", "The desktop panel layout is enough to prove the links");
+test("Projects Work panel cross-links the counts to the board, backlog and audit for the project", async ({
+  page,
+}) => {
+  test.skip(
+    test.info().project.name === "phone",
+    "The desktop panel layout is enough to prove the links",
+  );
   await installFixtures(page, {}, [], undefined, {
     projects: [{ slug: "vogt", name: "Vogt", root_path: "/workspace/vogt" }],
   });
-  await page.route("**/api/vogt/projects/brief**", async (route) => route.fulfill({ json: {
-    project: { slug: "vogt", name: "Vogt", lifecycle_state: "active", trust_state: "verified" },
-    open_work: 3,
-    open_bugs: 1,
-    by_state: { open: 2, in_progress: 1 },
-    by_kind: { feature: 2, bug: 1 },
-    compliance_status: "not_applicable",
-    freshness: { status: "fresh" },
-  } }));
+  await page.route("**/api/vogt/projects/brief**", async (route) =>
+    route.fulfill({
+      json: {
+        project: {
+          slug: "vogt",
+          name: "Vogt",
+          lifecycle_state: "active",
+          trust_state: "verified",
+        },
+        open_work: 3,
+        open_bugs: 1,
+        by_state: { open: 2, in_progress: 1 },
+        by_kind: { feature: 2, bug: 1 },
+        compliance_status: "not_applicable",
+        freshness: { status: "fresh" },
+      },
+    }),
+  );
   // The overview also draws a compliance panel; give it a well-formed answer so
   // the panel renders rather than the whole detail erroring on empty data.
-  await page.route("**/api/vogt/compliance**", async (route) => route.fulfill({ json: {
-    contract_version: "1.0", checked_at: "2026-08-17T10:00:00Z", age_seconds: 0,
-    failing: [], detail: null,
-  } }));
+  await page.route("**/api/vogt/compliance**", async (route) =>
+    route.fulfill({
+      json: {
+        contract_version: "1.0",
+        checked_at: "2026-08-17T10:00:00Z",
+        age_seconds: 0,
+        failing: [],
+        detail: null,
+      },
+    }),
+  );
   await page.goto("/#/projects?p=vogt");
 
   const work = page.locator(".vogt-projects-panel").filter({ hasText: "Work" });
   await expect(work).toBeVisible();
   // The four cross-links carry the project as `?project=vogt`.
   await expect(work.locator('a[href="#/board?project=vogt"]')).toHaveText("3");
-  await expect(work.locator('a[href="#/backlog?view=bugs&project=vogt"]')).toHaveText("1");
-  await expect(work.locator('a[href="#/board?project=vogt&state=open"]')).toContainText("open: 2");
+  await expect(
+    work.locator('a[href="#/backlog?view=bugs&project=vogt"]'),
+  ).toHaveText("1");
+  await expect(
+    work.locator('a[href="#/board?project=vogt&state=open"]'),
+  ).toContainText("open: 2");
   await expect(work.locator('a[href="#/audit?project=vogt"]')).toBeVisible();
 
   // Following the open-work link lands on the Board, scoped to the project, and
@@ -1359,31 +1864,46 @@ test("Projects Work panel cross-links the counts to the board, backlog and audit
   await expect(page).toHaveURL(/project=vogt/);
   await expect(page.getByRole("heading", { name: "Board" })).toBeVisible();
   await expect(
-    page.getByRole("group", { name: "Board filters" }).getByText("Project: Vogt"),
+    page
+      .getByRole("group", { name: "Board filters" })
+      .getByText("Project: Vogt"),
   ).toBeVisible();
 });
 
 // The registry is where you go to find a project, so it filters.
-test("Projects registry narrows the list to a name/slug search", async ({ page }) => {
-  await installFixtures(page, {}, [], undefined, {
-    projectsTotal: 3,
-    projects: [
-      { slug: "vogt", name: "Vogt", root_path: "/workspace/vogt" },
-      { slug: "cadastre", name: "Cadastre", root_path: "/workspace/cadastre" },
-      { slug: "beta", name: "Beta", root_path: "/workspace/beta" },
-    ],
-  });
-  await page.goto("/#/projects");
-  const cards = page.locator(".vogt-projects-card");
-  await expect(cards).toHaveCount(3);
+test(
+  "Projects registry narrows the list to a name/slug search",
+  mockOnly(LIVE_SKIP.data),
+  async ({ page }) => {
+    await installFixtures(page, {}, [], undefined, {
+      projectsTotal: 3,
+      projects: [
+        { slug: "vogt", name: "Vogt", root_path: "/workspace/vogt" },
+        {
+          slug: "cadastre",
+          name: "Cadastre",
+          root_path: "/workspace/cadastre",
+        },
+        { slug: "beta", name: "Beta", root_path: "/workspace/beta" },
+      ],
+    });
+    await page.goto("/#/projects");
+    const cards = page.locator(".vogt-projects-card");
+    await expect(cards).toHaveCount(3);
 
-  await page.getByRole("searchbox", { name: "Filter projects" }).fill("cad");
-  await expect(cards).toHaveCount(1);
-  await expect(cards.first()).toContainText("Cadastre");
-});
+    await page.getByRole("searchbox", { name: "Filter projects" }).fill("cad");
+    await expect(cards).toHaveCount(1);
+    await expect(cards.first()).toContainText("Cadastre");
+  },
+);
 
-test("Phone Board renders one URL-selected workflow state without widening the server filter", async ({ page }) => {
-  test.skip(test.info().project.name !== "phone", "Phone state composition is a narrow-shell contract");
+test("Phone Board renders one URL-selected workflow state without widening the server filter", async ({
+  page,
+}) => {
+  test.skip(
+    test.info().project.name !== "phone",
+    "Phone state composition is a narrow-shell contract",
+  );
   const openItem = {
     ...boardItems[0],
     ref: "WI-OPEN",
@@ -1446,91 +1966,136 @@ test("Phone Board renders one URL-selected workflow state without widening the s
   await expect(page.getByText("Done phone card")).toBeVisible();
 });
 
-test("Board cards expand measured title and body content in place", async ({ page }) => {
-  const longTitle = "A long Board title that must remain readable after expansion ".repeat(8);
-  const longBody = "The expanded body stays in the measured card and never moves to a modal.";
-  await installFixtures(page, {}, [], undefined, {
-    boardItems: [{ ...boardItems[0], title: longTitle, body: longBody }],
-  });
-  await page.goto("/#/board");
+test(
+  "Board cards expand measured title and body content in place",
+  mockOnly(LIVE_SKIP.data),
+  async ({ page }) => {
+    const longTitle =
+      "A long Board title that must remain readable after expansion ".repeat(8);
+    const longBody =
+      "The expanded body stays in the measured card and never moves to a modal.";
+    await installFixtures(page, {}, [], undefined, {
+      boardItems: [{ ...boardItems[0], title: longTitle, body: longBody }],
+    });
+    await page.goto("/#/board");
 
-  const card = page.locator(".board-card").filter({ hasText: "A long Board title" });
-  const title = card.locator(".board-card-title");
-  const before = await card.evaluate((element) => element.getBoundingClientRect().height);
-  await expect(card.getByRole("button", { name: "Show more" })).toBeVisible();
-  await card.getByRole("button", { name: "Show more" }).focus();
-  await page.keyboard.press("Enter");
-  await expect(card.getByText(longBody)).toBeVisible();
-  await expect(title).toHaveClass(/expanded/);
-  const expanded = await card.evaluate((element) => element.getBoundingClientRect().height);
-  expect(expanded).toBeGreaterThan(before);
-  await expect(page.getByRole("dialog")).toHaveCount(0);
-
-  // Collapse the same way the reader reached the control: by pointer where the
-  // board has room for one, and by keyboard everywhere. Phone containment of
-  // the surrounding controls is tracked separately as first-viewport work.
-  const collapse = card.getByRole("button", { name: "Show less" });
-  if (test.info().project.name === "desktop") {
-    await collapse.click();
-  } else {
-    await collapse.focus();
+    const card = page
+      .locator(".board-card")
+      .filter({ hasText: "A long Board title" });
+    const title = card.locator(".board-card-title");
+    const before = await card.evaluate(
+      (element) => element.getBoundingClientRect().height,
+    );
+    await expect(card.getByRole("button", { name: "Show more" })).toBeVisible();
+    await card.getByRole("button", { name: "Show more" }).focus();
     await page.keyboard.press("Enter");
-  }
-  await expect(card.getByText(longBody)).toHaveCount(0);
-  await expect(title).not.toHaveClass(/expanded/);
-  await expect(card.getByRole("button", { name: "Show more" })).toBeFocused();
-});
+    await expect(card.getByText(longBody)).toBeVisible();
+    await expect(title).toHaveClass(/expanded/);
+    const expanded = await card.evaluate(
+      (element) => element.getBoundingClientRect().height,
+    );
+    expect(expanded).toBeGreaterThan(before);
+    await expect(page.getByRole("dialog")).toHaveCount(0);
 
-test("Vogt identity and route-aware titles survive navigation and reload", async ({ page }) => {
-  await installFixtures(page, { assistant_enabled: true });
-  await page.goto("/#/board?project=vogt");
-  await expect(page).toHaveTitle("Board · Vogt");
-  await expect(page.locator(".places-brand")).toContainText("Vogt");
+    // Collapse the same way the reader reached the control: by pointer where the
+    // board has room for one, and by keyboard everywhere. Phone containment of
+    // the surrounding controls is tracked separately as first-viewport work.
+    const collapse = card.getByRole("button", { name: "Show less" });
+    if (test.info().project.name === "desktop") {
+      await collapse.click();
+    } else {
+      await collapse.focus();
+      await page.keyboard.press("Enter");
+    }
+    await expect(card.getByText(longBody)).toHaveCount(0);
+    await expect(title).not.toHaveClass(/expanded/);
+    await expect(card.getByRole("button", { name: "Show more" })).toBeFocused();
+  },
+);
 
-  await page.goto("/#/history");
-  await expect(page).toHaveTitle("History · Vogt");
-  await page.reload();
-  await expect(page).toHaveTitle("History · Vogt");
+test(
+  "Vogt identity and route-aware titles survive navigation and reload",
+  mockOnly(LIVE_SKIP.harness),
+  async ({ page }) => {
+    await installFixtures(page, { assistant_enabled: true });
+    await page.goto("/#/board?project=vogt");
+    await expect(page).toHaveTitle("Board · Vogt");
+    await expect(page.locator(".places-brand")).toContainText("Vogt");
 
-  const manifest = await page.evaluate(async () => {
-    const response = await fetch("/manifest.webmanifest");
-    return response.json() as Promise<Record<string, unknown>>;
-  });
-  expect(manifest).toMatchObject({ id: "/", name: "Vogt", short_name: "Vogt" });
+    await page.goto("/#/history");
+    await expect(page).toHaveTitle("History · Vogt");
+    await page.reload();
+    await expect(page).toHaveTitle("History · Vogt");
 
-  const serviceWorker = await page.evaluate(async () => {
-    const registration = await navigator.serviceWorker.ready;
-    await registration.update();
-    const source = await fetch("/sw.js").then((response) => response.text());
-    return {
-      script: registration.active?.scriptURL,
-      source,
-    };
-  });
-  expect(serviceWorker.script).toMatch(/\/sw\.js$/);
-  expect(serviceWorker.source).toContain('const title = payload.title || "Vogt"');
-  expect(serviceWorker.source).not.toContain("MyDevEnv2");
-});
+    const manifest = await page.evaluate(async () => {
+      const response = await fetch("/manifest.webmanifest");
+      return response.json() as Promise<Record<string, unknown>>;
+    });
+    expect(manifest).toMatchObject({
+      id: "/",
+      name: "Vogt",
+      short_name: "Vogt",
+    });
 
-test("Inbox evidence, source filter and batch reason survive a desktop browser", async ({ page }) => {
-  test.skip(test.info().project.name === "phone", "Phone Inbox uses the bottom action sheet");
-  const fixture = await installFixtures(page);
-  await page.goto("/#/inbox?source=drift");
-  await expect(page.getByRole("heading", { name: inboxEntry.title })).toBeVisible();
-  await expect(page.getByRole("region", { name: "Drift evidence" })).toContainText("observed_state");
-  await expect(page.getByRole("button", { name: "Reject proposed change…" })).toBeVisible();
-  await expect(page.getByPlaceholder("Why this triage decision?")).toHaveCount(0);
-  await expect(page.locator(".inbox-filter select")).toHaveValue("drift");
-  await page.getByLabel(`Select ${inboxEntry.title}`).check();
-  await page.getByRole("button", { name: "Archive selected…" }).click();
-  await page.getByLabel("Batch reason").fill("reviewed in browser");
-  await page.locator(".inbox-batch-composer").getByRole("button", { name: "Confirm archive" }).click();
-  await expect.poll(() => fixture.inboxCalls()).toBeGreaterThan(1);
-  await expect(page).toHaveURL(/#\/inbox\?source=drift/);
-});
+    const serviceWorker = await page.evaluate(async () => {
+      const registration = await navigator.serviceWorker.ready;
+      await registration.update();
+      const source = await fetch("/sw.js").then((response) => response.text());
+      return {
+        script: registration.active?.scriptURL,
+        source,
+      };
+    });
+    expect(serviceWorker.script).toMatch(/\/sw\.js$/);
+    expect(serviceWorker.source).toContain(
+      'const title = payload.title || "Vogt"',
+    );
+    expect(serviceWorker.source).not.toContain("MyDevEnv2");
+  },
+);
 
-test("Phone Inbox uses source pills and a focus-safe bottom action sheet", async ({ page }) => {
-  test.skip(test.info().project.name !== "phone", "Bottom-sheet mechanics are validated in the phone project");
+test(
+  "Inbox evidence, source filter and batch reason survive a desktop browser",
+  mockOnly(LIVE_SKIP.data),
+  async ({ page }) => {
+    test.skip(
+      test.info().project.name === "phone",
+      "Phone Inbox uses the bottom action sheet",
+    );
+    const fixture = await installFixtures(page);
+    await page.goto("/#/inbox?source=drift");
+    await expect(
+      page.getByRole("heading", { name: inboxEntry.title }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("region", { name: "Drift evidence" }),
+    ).toContainText("observed_state");
+    await expect(
+      page.getByRole("button", { name: "Reject proposed change…" }),
+    ).toBeVisible();
+    await expect(
+      page.getByPlaceholder("Why this triage decision?"),
+    ).toHaveCount(0);
+    await expect(page.locator(".inbox-filter select")).toHaveValue("drift");
+    await page.getByLabel(`Select ${inboxEntry.title}`).check();
+    await page.getByRole("button", { name: "Archive selected…" }).click();
+    await page.getByLabel("Batch reason").fill("reviewed in browser");
+    await page
+      .locator(".inbox-batch-composer")
+      .getByRole("button", { name: "Confirm archive" })
+      .click();
+    await expect.poll(() => fixture.inboxCalls()).toBeGreaterThan(1);
+    await expect(page).toHaveURL(/#\/inbox\?source=drift/);
+  },
+);
+
+test("Phone Inbox uses source pills and a focus-safe bottom action sheet", async ({
+  page,
+}) => {
+  test.skip(
+    test.info().project.name !== "phone",
+    "Bottom-sheet mechanics are validated in the phone project",
+  );
   await installFixtures(page);
   await page.goto("/#/inbox");
 
@@ -1539,7 +2104,9 @@ test("Phone Inbox uses source pills and a focus-safe bottom action sheet", async
   await expect(page.locator(".inbox-filter select")).toHaveCount(0);
   await pills.getByRole("button", { name: "drift" }).click();
   await expect(page).toHaveURL(/#\/inbox\?source=drift$/);
-  await expect(page.getByRole("region", { name: "Drift evidence" })).toContainText("observed_state");
+  await expect(
+    page.getByRole("region", { name: "Drift evidence" }),
+  ).toContainText("observed_state");
 
   const entryTitle = page.locator(".inbox-entry h2").first();
   const entrySummary = page.locator(".inbox-entry-summary").first();
@@ -1548,14 +2115,24 @@ test("Phone Inbox uses source pills and a focus-safe bottom action sheet", async
 
   const trigger = page.getByRole("button", { name: "Inbox actions" }).first();
   await trigger.click();
-  const sheet = page.getByRole("dialog", { name: `Actions for ${inboxEntry.title}` });
+  const sheet = page.getByRole("dialog", {
+    name: `Actions for ${inboxEntry.title}`,
+  });
   await expect(sheet).toBeVisible();
-  const targetHeights = await sheet.locator("button").evaluateAll((buttons) =>
-    buttons.map((button) => Math.round(button.getBoundingClientRect().height)),
-  );
+  const targetHeights = await sheet
+    .locator("button")
+    .evaluateAll((buttons) =>
+      buttons.map((button) =>
+        Math.round(button.getBoundingClientRect().height),
+      ),
+    );
   expect(targetHeights.every((height) => height >= 52)).toBe(true);
-  await expect(sheet.getByRole("button", { name: "Reject proposed change…" })).toBeVisible();
-  await expect(sheet.getByPlaceholder("Why this triage decision?")).toHaveCount(0);
+  await expect(
+    sheet.getByRole("button", { name: "Reject proposed change…" }),
+  ).toBeVisible();
+  await expect(sheet.getByPlaceholder("Why this triage decision?")).toHaveCount(
+    0,
+  );
 
   // BackdropClass replaces (rather than augments) the Dialog's default
   // "modal-backdrop" class, so the action sheet's own backdrop rule has to be
@@ -1563,7 +2140,11 @@ test("Phone Inbox uses source pills and a focus-safe bottom action sheet", async
   const backdrop = page.locator(".inbox-action-sheet-backdrop");
   const backdropStyle = await backdrop.evaluate((element) => {
     const style = getComputedStyle(element);
-    return { position: style.position, alignItems: style.alignItems, display: style.display };
+    return {
+      position: style.position,
+      alignItems: style.alignItems,
+      display: style.display,
+    };
   });
   expect(backdropStyle.position).toBe("fixed");
   expect(backdropStyle.alignItems).toBe("flex-end");
@@ -1577,7 +2158,10 @@ test("Phone Inbox uses source pills and a focus-safe bottom action sheet", async
   expect(Math.round(backdropBox.height)).toBe(viewport.height);
 
   const sheetBox = (await sheet.boundingBox())!;
-  expect(Math.round(sheetBox.y + sheetBox.height)).toBeCloseTo(viewport.height, -1);
+  expect(Math.round(sheetBox.y + sheetBox.height)).toBeCloseTo(
+    viewport.height,
+    -1,
+  );
 
   // The entry behind the sheet must keep its full-width layout: a backdrop
   // that isn't taken out of document flow squeezes the entry instead of
@@ -1590,92 +2174,127 @@ test("Phone Inbox uses source pills and a focus-safe bottom action sheet", async
   await expect(sheet).toHaveScreenshot("inbox-action-sheet-phone.png");
 
   await sheet.getByRole("button", { name: "Reject proposed change…" }).click();
-  await sheet.getByPlaceholder("Why this triage decision?").fill("the observed evidence was reviewed");
+  await sheet
+    .getByPlaceholder("Why this triage decision?")
+    .fill("the observed evidence was reviewed");
   await page.keyboard.press("Escape");
   await expect(sheet).toHaveCount(0);
   await expect(trigger).toBeFocused();
   expect(page.url()).toContain("#/inbox?source=drift");
 });
 
-test("Inbox puts its first answer before progressive support at every shell width", async ({ page }) => {
-  await installFixtures(page);
-  const widths = test.info().project.name === "phone" ? [390] : [768, 1280];
-  for (const width of widths) {
-    await page.setViewportSize({ width, height: 900 });
+test(
+  "Inbox puts its first answer before progressive support at every shell width",
+  mockOnly(LIVE_SKIP.data),
+  async ({ page }) => {
+    await installFixtures(page);
+    const widths = test.info().project.name === "phone" ? [390] : [768, 1280];
+    for (const width of widths) {
+      await page.setViewportSize({ width, height: 900 });
+      await page.goto("/#/inbox");
+      const entry = page.locator(".inbox-entry").first();
+      const coverage = page.locator(".inbox-support").first();
+      await expect(entry).toBeVisible();
+      await expect(coverage).not.toHaveAttribute("open", "");
+      const geometry = await page
+        .locator(".inbox-surface")
+        .evaluate((surface) => {
+          const entry = surface.querySelector<HTMLElement>(".inbox-entry")!;
+          const coverage =
+            surface.querySelector<HTMLElement>(".inbox-support")!;
+          return {
+            entryTop: entry.getBoundingClientRect().top,
+            entryBottom: entry.getBoundingClientRect().bottom,
+            viewportHeight: document.documentElement.clientHeight,
+            // The attention answer leads; coverage and provenance stay below it.
+            ordered: Boolean(
+              entry.compareDocumentPosition(coverage) &
+              Node.DOCUMENT_POSITION_FOLLOWING,
+            ),
+            overflow: surface.scrollWidth - surface.clientWidth,
+          };
+        });
+      expect(geometry.ordered).toBe(true);
+      expect(geometry.entryTop).toBeGreaterThanOrEqual(0);
+      expect(geometry.entryBottom).toBeLessThanOrEqual(geometry.viewportHeight);
+      expect(geometry.overflow).toBeLessThanOrEqual(1);
+    }
+  },
+);
+
+test(
+  "Inbox is dense, keeps the Source select on screen, links out and sticks its batch bar",
+  mockOnly(LIVE_SKIP.data),
+  async ({ page }) => {
+    test.skip(
+      test.info().project.name === "phone",
+      "Desktop density and the Source select live on the desktop shell",
+    );
+    await installFixtures(page);
+    await page.setViewportSize({ width: 1280, height: 900 });
     await page.goto("/#/inbox");
-    const entry = page.locator(".inbox-entry").first();
-    const coverage = page.locator(".inbox-support").first();
-    await expect(entry).toBeVisible();
-    await expect(coverage).not.toHaveAttribute("open", "");
-    const geometry = await page.locator(".inbox-surface").evaluate((surface) => {
-      const entry = surface.querySelector<HTMLElement>(".inbox-entry")!;
-      const coverage = surface.querySelector<HTMLElement>(".inbox-support")!;
-      return {
-        entryTop: entry.getBoundingClientRect().top,
-        entryBottom: entry.getBoundingClientRect().bottom,
-        viewportHeight: document.documentElement.clientHeight,
-        // The attention answer leads; coverage and provenance stay below it.
-        ordered: Boolean(
-          entry.compareDocumentPosition(coverage) & Node.DOCUMENT_POSITION_FOLLOWING,
-        ),
-        overflow: surface.scrollWidth - surface.clientWidth,
-      };
+
+    const entries = page.locator(".inbox-entry");
+    await expect(entries).toHaveCount(4);
+
+    // Density: with every evidence disclosure collapsed, four entries
+    // fit within one screen. Force the drift entry's auto-opened evidence shut
+    // to measure the collapsed layout the requirement is about.
+    await page.locator(".inbox-list").evaluate((list) => {
+      list
+        .querySelectorAll("details.inbox-evidence[open]")
+        .forEach((node) => node.removeAttribute("open"));
     });
-    expect(geometry.ordered).toBe(true);
-    expect(geometry.entryTop).toBeGreaterThanOrEqual(0);
-    expect(geometry.entryBottom).toBeLessThanOrEqual(geometry.viewportHeight);
-    expect(geometry.overflow).toBeLessThanOrEqual(1);
-  }
-});
+    const bottoms = await entries.evaluateAll((nodes) =>
+      nodes.map((node) => node.getBoundingClientRect().bottom),
+    );
+    expect(Math.max(...bottoms)).toBeLessThanOrEqual(
+      page.viewportSize()!.height,
+    );
 
-test("Inbox is dense, keeps the Source select on screen, links out and sticks its batch bar", async ({ page }) => {
-  test.skip(test.info().project.name === "phone", "Desktop density and the Source select live on the desktop shell");
-  await installFixtures(page);
-  await page.setViewportSize({ width: 1280, height: 900 });
-  await page.goto("/#/inbox");
+    // The Source select keeps a right gutter rather than clipping at the edge.
+    const selectBox = (await page
+      .locator(".inbox-filter select")
+      .boundingBox())!;
+    expect(selectBox.x + selectBox.width).toBeLessThan(
+      page.viewportSize()!.width,
+    );
 
-  const entries = page.locator(".inbox-entry");
-  await expect(entries).toHaveCount(4);
+    // The source-linked entry offers an out-to-source deep link…
+    const link = page.getByRole("link", { name: /Open on github/ });
+    await expect(link).toBeVisible();
+    await expect(link).toHaveAttribute("target", "_blank");
+    await expect(link).toHaveAttribute(
+      "href",
+      "https://github.example/org/repo/pull/42",
+    );
 
-  // Density: with every evidence disclosure collapsed, four entries
-  // fit within one screen. Force the drift entry's auto-opened evidence shut
-  // to measure the collapsed layout the requirement is about.
-  await page.locator(".inbox-list").evaluate((list) => {
-    list
-      .querySelectorAll("details.inbox-evidence[open]")
-      .forEach((node) => node.removeAttribute("open"));
-  });
-  const bottoms = await entries.evaluateAll((nodes) =>
-    nodes.map((node) => node.getBoundingClientRect().bottom),
+    // …and the entry with nothing in-app behind it disables Open entry.
+    const orphan = page.locator('[data-entry-key="ci:build-99"]');
+    await expect(
+      orphan.getByRole("button", { name: "Open entry" }),
+    ).toBeDisabled();
+
+    // Selecting an entry raises a batch bar stuck to the top of the list.
+    await page.getByLabel(`Select ${inboxEntry.title}`).check();
+    const bar = page.locator(".inbox-batch-bar");
+    await expect(bar).toBeVisible();
+    expect(
+      await bar.evaluate((element) => getComputedStyle(element).position),
+    ).toBe("sticky");
+    const barBox = (await bar.boundingBox())!;
+    const listBox = (await page.locator(".inbox-list").boundingBox())!;
+    expect(barBox.y).toBeLessThan(listBox.y);
+  },
+);
+
+test("Phone Inbox shows a denser, collapsed-evidence list", async ({
+  page,
+}) => {
+  test.skip(
+    test.info().project.name !== "phone",
+    "The phone screenshot belongs to the phone project",
   );
-  expect(Math.max(...bottoms)).toBeLessThanOrEqual(page.viewportSize()!.height);
-
-  // The Source select keeps a right gutter rather than clipping at the edge.
-  const selectBox = (await page.locator(".inbox-filter select").boundingBox())!;
-  expect(selectBox.x + selectBox.width).toBeLessThan(page.viewportSize()!.width);
-
-  // The source-linked entry offers an out-to-source deep link…
-  const link = page.getByRole("link", { name: /Open on github/ });
-  await expect(link).toBeVisible();
-  await expect(link).toHaveAttribute("target", "_blank");
-  await expect(link).toHaveAttribute("href", "https://github.example/org/repo/pull/42");
-
-  // …and the entry with nothing in-app behind it disables Open entry.
-  const orphan = page.locator('[data-entry-key="ci:build-99"]');
-  await expect(orphan.getByRole("button", { name: "Open entry" })).toBeDisabled();
-
-  // Selecting an entry raises a batch bar stuck to the top of the list.
-  await page.getByLabel(`Select ${inboxEntry.title}`).check();
-  const bar = page.locator(".inbox-batch-bar");
-  await expect(bar).toBeVisible();
-  expect(await bar.evaluate((element) => getComputedStyle(element).position)).toBe("sticky");
-  const barBox = (await bar.boundingBox())!;
-  const listBox = (await page.locator(".inbox-list").boundingBox())!;
-  expect(barBox.y).toBeLessThan(listBox.y);
-});
-
-test("Phone Inbox shows a denser, collapsed-evidence list", async ({ page }) => {
-  test.skip(test.info().project.name !== "phone", "The phone screenshot belongs to the phone project");
   await installFixtures(page);
   await page.goto("/#/inbox");
   await expect(page.locator(".inbox-entry")).toHaveCount(4);
@@ -1685,81 +2304,113 @@ test("Phone Inbox shows a denser, collapsed-evidence list", async ({ page }) => 
       .querySelectorAll("details.inbox-evidence[open]")
       .forEach((node) => node.removeAttribute("open"));
   });
-  await expect(page.locator(".inbox-list")).toHaveScreenshot("inbox-dense-list-phone.png");
+  await expect(page.locator(".inbox-list")).toHaveScreenshot(
+    "inbox-dense-list-phone.png",
+  );
 });
 
-test("primary surface headers keep their shared order and geometry across zoom", async ({ page }) => {
-  await installFixtures(page, {}, [liveSession]);
-  const routes = ["board", "backlog", "inbox", "sessions"] as const;
-  const zooms = ["80%", "100%", "125%", "150%", "200%"] as const;
-  const widths = test.info().project.name === "phone" ? [390] : [1280, 768];
-  const usefulContent = {
-    board: ".board-scroll, .board-empty",
-    backlog: ".vogt-backlog-listwrap",
-    inbox: ".inbox-list",
-    sessions: ".sessions-place-body",
-  } as const;
+test(
+  "primary surface headers keep their shared order and geometry across zoom",
+  mockOnly(LIVE_SKIP.baseline),
+  async ({ page }) => {
+    await installFixtures(page, {}, [liveSession]);
+    const routes = ["board", "backlog", "inbox", "sessions"] as const;
+    const zooms = ["80%", "100%", "125%", "150%", "200%"] as const;
+    const widths = test.info().project.name === "phone" ? [390] : [1280, 768];
+    const usefulContent = {
+      board: ".board-scroll, .board-empty",
+      backlog: ".vogt-backlog-listwrap",
+      inbox: ".inbox-list",
+      sessions: ".sessions-place-body",
+    } as const;
 
-  for (const width of widths) {
-    await page.setViewportSize({ width, height: 900 });
-    for (const routeName of routes) {
-      await page.goto(`/#/${routeName}`);
-      const header = page.locator("[data-surface-header]:visible");
-      await expect(header).toBeVisible();
-
-      // A narrow shell folds the controls and the detail behind one
-      // disclosure so the surface's own work owns the first screen. The
-      // contract below is what has to hold once they are shown, so they are
-      // shown; that the fold exists at all is asserted where it belongs, with
-      // the rest of the phone's first-viewport composition.
-      const more = header.locator(".surface-header-more");
-      if (await more.count()) {
-        if ((await more.getAttribute("aria-expanded")) === "false") await more.click();
-      }
-
-      const slots = await header.locator(":scope > [data-surface-header-slot]")
-        .evaluateAll((elements) => elements.map((element) =>
-          element.getAttribute("data-surface-header-slot"),
-        ));
-      // "goto" is the phone's inline Go to… (WI-75); it exists only on a
-      // narrow client, and the filter drops it wherever it is absent.
-      const expected = ["title", "goto", "honesty", "spacer", "controls", "action", "detail"]
-        .filter((slot) => slots.includes(slot));
-      expect(slots).toEqual(expected);
-
-      for (const zoom of zooms) {
-        await page.locator("html").evaluate((element, nextZoom) => {
-          element.style.zoom = nextZoom;
-        }, zoom);
+    for (const width of widths) {
+      await page.setViewportSize({ width, height: 900 });
+      for (const routeName of routes) {
+        await page.goto(`/#/${routeName}`);
+        const header = page.locator("[data-surface-header]:visible");
         await expect(header).toBeVisible();
-        const geometry = await header.evaluate((element) => {
-          const viewportWidth = document.documentElement.clientWidth;
-          const viewportHeight = document.documentElement.clientHeight;
-          const essential = [...element.querySelectorAll<HTMLElement>(
-            '[data-surface-header-slot="honesty"], [data-surface-header-slot="controls"], [data-surface-header-slot="action"]',
-          )];
-          return {
-            route: window.location.hash,
-            zoom: document.documentElement.style.zoom,
-            documentOverflow: document.documentElement.scrollWidth > viewportWidth + 1,
-            headerOverflow: element.scrollWidth > element.clientWidth + 1,
-            essentialOffscreen: essential.filter((child) => {
-              const box = child.getBoundingClientRect();
-              return box.left < -1 || box.right > viewportWidth + 1
-                || box.top < -1 || box.top >= viewportHeight - 1
-                || box.width === 0;
-            }).map((child) => child.dataset.surfaceHeaderSlot),
-          };
+
+        // A narrow shell folds the controls and the detail behind one
+        // disclosure so the surface's own work owns the first screen. The
+        // contract below is what has to hold once they are shown, so they are
+        // shown; that the fold exists at all is asserted where it belongs, with
+        // the rest of the phone's first-viewport composition.
+        const more = header.locator(".surface-header-more");
+        if (await more.count()) {
+          if ((await more.getAttribute("aria-expanded")) === "false")
+            await more.click();
+        }
+
+        const slots = await header
+          .locator(":scope > [data-surface-header-slot]")
+          .evaluateAll((elements) =>
+            elements.map((element) =>
+              element.getAttribute("data-surface-header-slot"),
+            ),
+          );
+        // "goto" is the phone's inline Go to… (WI-75); it exists only on a
+        // narrow client, and the filter drops it wherever it is absent.
+        const expected = [
+          "title",
+          "goto",
+          "honesty",
+          "spacer",
+          "controls",
+          "action",
+          "detail",
+        ].filter((slot) => slots.includes(slot));
+        expect(slots).toEqual(expected);
+
+        for (const zoom of zooms) {
+          await page.locator("html").evaluate((element, nextZoom) => {
+            element.style.zoom = nextZoom;
+          }, zoom);
+          await expect(header).toBeVisible();
+          const geometry = await header.evaluate((element) => {
+            const viewportWidth = document.documentElement.clientWidth;
+            const viewportHeight = document.documentElement.clientHeight;
+            const essential = [
+              ...element.querySelectorAll<HTMLElement>(
+                '[data-surface-header-slot="honesty"], [data-surface-header-slot="controls"], [data-surface-header-slot="action"]',
+              ),
+            ];
+            return {
+              route: window.location.hash,
+              zoom: document.documentElement.style.zoom,
+              documentOverflow:
+                document.documentElement.scrollWidth > viewportWidth + 1,
+              headerOverflow: element.scrollWidth > element.clientWidth + 1,
+              essentialOffscreen: essential
+                .filter((child) => {
+                  const box = child.getBoundingClientRect();
+                  return (
+                    box.left < -1 ||
+                    box.right > viewportWidth + 1 ||
+                    box.top < -1 ||
+                    box.top >= viewportHeight - 1 ||
+                    box.width === 0
+                  );
+                })
+                .map((child) => child.dataset.surfaceHeaderSlot),
+            };
+          });
+          expect(geometry.documentOverflow, JSON.stringify(geometry)).toBe(
+            false,
+          );
+          expect(geometry.headerOverflow, JSON.stringify(geometry)).toBe(false);
+          expect(geometry.essentialOffscreen, JSON.stringify(geometry)).toEqual(
+            [],
+          );
+          await expect(page.locator(usefulContent[routeName])).toBeVisible();
+        }
+        await page.locator("html").evaluate((element) => {
+          element.style.zoom = "100%";
         });
-        expect(geometry.documentOverflow, JSON.stringify(geometry)).toBe(false);
-        expect(geometry.headerOverflow, JSON.stringify(geometry)).toBe(false);
-        expect(geometry.essentialOffscreen, JSON.stringify(geometry)).toEqual([]);
-        await expect(page.locator(usefulContent[routeName])).toBeVisible();
       }
-      await page.locator("html").evaluate((element) => { element.style.zoom = "100%"; });
     }
-  }
-});
+  },
+);
 
 /**
  * The same slot-order and geometry contract, now that Projects and the Work
@@ -1768,75 +2419,109 @@ test("primary surface headers keep their shared order and geometry across zoom",
  * mount, and stretching one test to six routes across two widths and five
  * zooms made it flaky under a loaded box, not more truthful.
  */
-test("Projects and Work item headers answer the shared geometry contract", async ({ page }) => {
-  await installFixtures(page, {}, [liveSession]);
-  const routes = [
-    { goto: "/#/projects", content: ".vogt-projects-list" },
-    { goto: "/#/w/WI-7", content: ".wid-facts" },
-  ] as const;
-  const zooms = ["80%", "100%", "150%", "200%"] as const;
-  const widths = test.info().project.name === "phone" ? [390] : [1280, 768];
+test(
+  "Projects and Work item headers answer the shared geometry contract",
+  mockOnly(LIVE_SKIP.baseline),
+  async ({ page }) => {
+    await installFixtures(page, {}, [liveSession]);
+    const routes = [
+      { goto: "/#/projects", content: ".vogt-projects-list" },
+      { goto: "/#/w/WI-7", content: ".wid-facts" },
+    ] as const;
+    const zooms = ["80%", "100%", "150%", "200%"] as const;
+    const widths = test.info().project.name === "phone" ? [390] : [1280, 768];
 
-  for (const width of widths) {
-    await page.setViewportSize({ width, height: 900 });
-    for (const route of routes) {
-      await page.goto(route.goto);
-      const header = page.locator("[data-surface-header]:visible");
-      await expect(header).toBeVisible();
-      await expect(page.locator(route.content).first()).toBeVisible();
-
-      const more = header.locator(".surface-header-more");
-      if (await more.count()) {
-        if ((await more.getAttribute("aria-expanded")) === "false") await more.click();
-      }
-
-      const slots = await header.locator(":scope > [data-surface-header-slot]")
-        .evaluateAll((elements) => elements.map((element) =>
-          element.getAttribute("data-surface-header-slot"),
-        ));
-      expect(slots).toEqual(
-        ["title", "goto", "honesty", "spacer", "controls", "action", "detail"]
-          .filter((slot) => slots.includes(slot)),
-      );
-
-      for (const zoom of zooms) {
-        await page.locator("html").evaluate((element, nextZoom) => {
-          element.style.zoom = nextZoom;
-        }, zoom);
+    for (const width of widths) {
+      await page.setViewportSize({ width, height: 900 });
+      for (const route of routes) {
+        await page.goto(route.goto);
+        const header = page.locator("[data-surface-header]:visible");
         await expect(header).toBeVisible();
-        const geometry = await header.evaluate((element) => {
-          const viewportWidth = document.documentElement.clientWidth;
-          const viewportHeight = document.documentElement.clientHeight;
-          const essential = [...element.querySelectorAll<HTMLElement>(
-            '[data-surface-header-slot="honesty"], [data-surface-header-slot="controls"], [data-surface-header-slot="action"]',
-          )];
-          return {
-            route: window.location.hash,
-            zoom: document.documentElement.style.zoom,
-            documentOverflow: document.documentElement.scrollWidth > viewportWidth + 1,
-            headerOverflow: element.scrollWidth > element.clientWidth + 1,
-            essentialOffscreen: essential.filter((child) => {
-              const box = child.getBoundingClientRect();
-              return box.left < -1 || box.right > viewportWidth + 1
-                || box.top < -1 || box.top >= viewportHeight - 1
-                || box.width === 0;
-            }).map((child) => child.dataset.surfaceHeaderSlot),
-          };
-        });
-        expect(geometry.documentOverflow, JSON.stringify(geometry)).toBe(false);
-        expect(geometry.headerOverflow, JSON.stringify(geometry)).toBe(false);
-        expect(geometry.essentialOffscreen, JSON.stringify(geometry)).toEqual([]);
-      }
-      await page.locator("html").evaluate((element) => { element.style.zoom = "100%"; });
-    }
-  }
-});
+        await expect(page.locator(route.content).first()).toBeVisible();
 
-test("Phone shell keeps labelled primary navigation and Go to reachability", async ({ page }) => {
+        const more = header.locator(".surface-header-more");
+        if (await more.count()) {
+          if ((await more.getAttribute("aria-expanded")) === "false")
+            await more.click();
+        }
+
+        const slots = await header
+          .locator(":scope > [data-surface-header-slot]")
+          .evaluateAll((elements) =>
+            elements.map((element) =>
+              element.getAttribute("data-surface-header-slot"),
+            ),
+          );
+        expect(slots).toEqual(
+          [
+            "title",
+            "goto",
+            "honesty",
+            "spacer",
+            "controls",
+            "action",
+            "detail",
+          ].filter((slot) => slots.includes(slot)),
+        );
+
+        for (const zoom of zooms) {
+          await page.locator("html").evaluate((element, nextZoom) => {
+            element.style.zoom = nextZoom;
+          }, zoom);
+          await expect(header).toBeVisible();
+          const geometry = await header.evaluate((element) => {
+            const viewportWidth = document.documentElement.clientWidth;
+            const viewportHeight = document.documentElement.clientHeight;
+            const essential = [
+              ...element.querySelectorAll<HTMLElement>(
+                '[data-surface-header-slot="honesty"], [data-surface-header-slot="controls"], [data-surface-header-slot="action"]',
+              ),
+            ];
+            return {
+              route: window.location.hash,
+              zoom: document.documentElement.style.zoom,
+              documentOverflow:
+                document.documentElement.scrollWidth > viewportWidth + 1,
+              headerOverflow: element.scrollWidth > element.clientWidth + 1,
+              essentialOffscreen: essential
+                .filter((child) => {
+                  const box = child.getBoundingClientRect();
+                  return (
+                    box.left < -1 ||
+                    box.right > viewportWidth + 1 ||
+                    box.top < -1 ||
+                    box.top >= viewportHeight - 1 ||
+                    box.width === 0
+                  );
+                })
+                .map((child) => child.dataset.surfaceHeaderSlot),
+            };
+          });
+          expect(geometry.documentOverflow, JSON.stringify(geometry)).toBe(
+            false,
+          );
+          expect(geometry.headerOverflow, JSON.stringify(geometry)).toBe(false);
+          expect(geometry.essentialOffscreen, JSON.stringify(geometry)).toEqual(
+            [],
+          );
+        }
+        await page.locator("html").evaluate((element) => {
+          element.style.zoom = "100%";
+        });
+      }
+    }
+  },
+);
+
+test("Phone shell keeps labelled primary navigation and Go to reachability", async ({
+  page,
+}) => {
   await installFixtures(page);
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/#/sessions");
-  await expect(page.getByRole("navigation", { name: "Primary navigation" })).toBeVisible();
+  await expect(
+    page.getByRole("navigation", { name: "Primary navigation" }),
+  ).toBeVisible();
   await expect(page.getByRole("link", { name: /Inbox/ })).toBeVisible();
   await expect(page.getByRole("button", { name: "Go to…" })).toBeVisible();
   await page.getByRole("button", { name: "Go to…" }).click();
@@ -1846,17 +2531,18 @@ test("Phone shell keeps labelled primary navigation and Go to reachability", asy
   await expect(query).toBeFocused();
   await expect(page.getByText("Open Audit")).toBeVisible();
   await page.keyboard.press("ArrowDown");
-  await expect(palette.getByRole("option", { name: /Open Backlog/ })).toHaveAttribute(
-    "aria-selected",
-    "true",
-  );
+  await expect(
+    palette.getByRole("option", { name: /Open Backlog/ }),
+  ).toHaveAttribute("aria-selected", "true");
   await page.keyboard.press("Tab");
   await expect(query).toBeFocused();
   await page.keyboard.press("Escape");
   await expect(page.getByRole("button", { name: "Go to…" })).toBeFocused();
 
   await page.getByRole("button", { name: "Go to…" }).click();
-  await page.getByRole("combobox", { name: "Search commands" }).fill("Open Audit");
+  await page
+    .getByRole("combobox", { name: "Search commands" })
+    .fill("Open Audit");
   await page.keyboard.press("Enter");
   await expect(page).toHaveURL(/#\/audit$/);
 });
@@ -1865,33 +2551,58 @@ test("Phone shell keeps labelled primary navigation and Go to reachability", asy
 // must stay visible or the bar cuts every badge in half at its top edge.
 // The first fix for this lost on selector specificity, so this pins the
 // computed value rather than the rule.
-test("Phone bottom bar badges are not clipped by their icon slot", async ({ page }) => {
-  test.skip(test.info().project.name !== "phone", "The bottom bar is the phone's");
+test("Phone bottom bar badges are not clipped by their icon slot", async ({
+  page,
+}) => {
+  test.skip(
+    test.info().project.name !== "phone",
+    "The bottom bar is the phone's",
+  );
   await installFixtures(page);
   await page.goto("/#/sessions");
   const nav = page.getByRole("navigation", { name: "Primary navigation" });
   await expect(nav).toBeVisible();
-  const overflows = await nav.locator(".phone-nav-icon-slot").evaluateAll((slots) =>
-    slots.map((slot) => getComputedStyle(slot).overflow),
-  );
+  const overflows = await nav
+    .locator(".phone-nav-icon-slot")
+    .evaluateAll((slots) =>
+      slots.map((slot) => getComputedStyle(slot).overflow),
+    );
   expect(overflows.length).toBeGreaterThanOrEqual(5);
   expect(new Set(overflows)).toEqual(new Set(["visible"]));
   // And a badge that is drawn is drawn whole: its box lies inside its link's.
-  const boxes = await nav.locator("a").first().evaluate((link) => {
-    const badge = link.querySelector(".place-count");
-    const l = link.getBoundingClientRect();
-    const b = badge?.getBoundingClientRect();
-    return b ? { linkTop: l.top, badgeTop: b.top, badgeBottom: b.bottom, linkBottom: l.bottom } : null;
-  });
+  const boxes = await nav
+    .locator("a")
+    .first()
+    .evaluate((link) => {
+      const badge = link.querySelector(".place-count");
+      const l = link.getBoundingClientRect();
+      const b = badge?.getBoundingClientRect();
+      return b
+        ? {
+            linkTop: l.top,
+            badgeTop: b.top,
+            badgeBottom: b.bottom,
+            linkBottom: l.bottom,
+          }
+        : null;
+    });
   if (boxes) {
     expect(boxes.badgeTop).toBeGreaterThanOrEqual(boxes.linkTop - 0.5);
     expect(boxes.badgeBottom).toBeLessThanOrEqual(boxes.linkBottom + 0.5);
   }
 });
 
-test("Phone More sheet reaches every remaining place plus Settings and Sign out", async ({ page }) => {
-  test.skip(test.info().project.name !== "phone", "The More sheet is the phone bottom bar's fifth slot");
-  await installFixtures(page, { assistant_enabled: true, gui_stream_available: true });
+test("Phone More sheet reaches every remaining place plus Settings and Sign out", async ({
+  page,
+}) => {
+  test.skip(
+    test.info().project.name !== "phone",
+    "The More sheet is the phone bottom bar's fifth slot",
+  );
+  await installFixtures(page, {
+    assistant_enabled: true,
+    gui_stream_available: true,
+  });
   await page.goto("/#/sessions");
 
   const nav = page.getByRole("navigation", { name: "Primary navigation" });
@@ -1903,12 +2614,26 @@ test("Phone More sheet reaches every remaining place plus Settings and Sign out"
   await expect(sheet).toBeVisible();
 
   // Every place the four-slot bar cannot reach is present, gated rows included.
-  for (const place of ["Projects", "Audit", "Git", "History", "Tasks", "GUI stream", "Assistant"]) {
-    await expect(sheet.getByRole("link", { name: place, exact: true })).toBeVisible();
+  for (const place of [
+    "Projects",
+    "Audit",
+    "Git",
+    "History",
+    "Tasks",
+    "GUI stream",
+    "Assistant",
+  ]) {
+    await expect(
+      sheet.getByRole("link", { name: place, exact: true }),
+    ).toBeVisible();
   }
   // Settings and Sign out are reachable without a command-palette round trip.
-  await expect(sheet.getByRole("button", { name: "Settings", exact: true })).toBeVisible();
-  await expect(sheet.getByRole("button", { name: "Sign out", exact: true })).toBeVisible();
+  await expect(
+    sheet.getByRole("button", { name: "Settings", exact: true }),
+  ).toBeVisible();
+  await expect(
+    sheet.getByRole("button", { name: "Sign out", exact: true }),
+  ).toBeVisible();
 
   await expect(sheet).toHaveScreenshot("phone-more-sheet.png");
 
@@ -1918,8 +2643,13 @@ test("Phone More sheet reaches every remaining place plus Settings and Sign out"
   await expect(sheet).toHaveCount(0);
 });
 
-test("Desktop Ctrl+B toggles the Places rail while palette and help stay bound", async ({ page }) => {
-  test.skip(test.info().project.name === "phone", "The rail is a desktop surface; the phone uses the More sheet");
+test("Desktop Ctrl+B toggles the Places rail while palette and help stay bound", async ({
+  page,
+}) => {
+  test.skip(
+    test.info().project.name === "phone",
+    "The rail is a desktop surface; the phone uses the More sheet",
+  );
   await installFixtures(page);
   await page.goto("/#/board");
 
@@ -1930,124 +2660,189 @@ test("Desktop Ctrl+B toggles the Places rail while palette and help stay bound",
   // the rail's own collapse/reopen controls.
   await page.keyboard.press("ControlOrMeta+B");
   await expect(rail).toBeHidden();
-  await expect(page.getByRole("button", { name: "Show the Places rail" })).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Show the Places rail" }),
+  ).toBeVisible();
   await page.keyboard.press("ControlOrMeta+B");
   await expect(rail).toBeVisible();
 
   // The new binding does not shadow the existing global shortcuts.
   await page.keyboard.press("ControlOrMeta+K");
-  await expect(page.getByRole("dialog", { name: "Command palette" })).toBeVisible();
+  await expect(
+    page.getByRole("dialog", { name: "Command palette" }),
+  ).toBeVisible();
   await page.keyboard.press("Escape");
   await page.keyboard.press("?");
-  await expect(page.getByRole("dialog", { name: "Keyboard Shortcuts" })).toBeVisible();
+  await expect(
+    page.getByRole("dialog", { name: "Keyboard Shortcuts" }),
+  ).toBeVisible();
 });
 
-test("Places counts expose live workload meaning without overflowing the phone bar", async ({ page }) => {
-  const waitingSession = {
-    ...liveSession,
-    id: "waiting-session",
-    name: "needs-attention",
-    activity: "waiting-for-input",
-  };
-  await installFixtures(page, {}, [liveSession, waitingSession], undefined, {
-    inboxActive: 12_345,
-    projectsTotal: 23_456,
-    boardTotal: 34_567,
-    backlogTotal: 45_678,
-  });
-  if (test.info().project.name === "phone") {
-    await page.setViewportSize({ width: 320, height: 700 });
-  }
-  await page.goto("/#/sessions");
+test(
+  "Places counts expose live workload meaning without overflowing the phone bar",
+  mockOnly(LIVE_SKIP.data),
+  async ({ page }) => {
+    const waitingSession = {
+      ...liveSession,
+      id: "waiting-session",
+      name: "needs-attention",
+      activity: "waiting-for-input",
+    };
+    await installFixtures(page, {}, [liveSession, waitingSession], undefined, {
+      inboxActive: 12_345,
+      projectsTotal: 23_456,
+      boardTotal: 34_567,
+      backlogTotal: 45_678,
+    });
+    if (test.info().project.name === "phone") {
+      await page.setViewportSize({ width: 320, height: 700 });
+    }
+    await page.goto("/#/sessions");
 
-  if (test.info().project.name === "phone") {
-    const nav = page.getByRole("navigation", { name: "Primary navigation" });
-    await expect(nav.getByLabel(/2 sessions/)).toHaveText("2");
-    await expect(nav.getByLabel(/12345 active Inbox entries/)).toHaveText("999+");
-    await expect(nav.getByLabel(/34567 Board work items/)).toHaveText("999+");
-    await expect(nav.getByLabel(/45678 Backlog candidates/)).toHaveText("999+");
-    const geometry = await nav.evaluate((element) => ({
-      left: element.getBoundingClientRect().left,
-      right: element.getBoundingClientRect().right,
-      viewport: document.documentElement.clientWidth,
-      overflow: element.scrollWidth - element.clientWidth,
-    }));
-    expect(geometry.left).toBeGreaterThanOrEqual(0);
-    expect(geometry.right).toBeLessThanOrEqual(geometry.viewport);
-    expect(geometry.overflow).toBeLessThanOrEqual(0);
-  } else {
-    await expect(page.locator('.places-nav [aria-label="12345 active Inbox entries"]')).toBeVisible();
-    await expect(page.locator('.places-nav [aria-label="23456 Projects"]')).toBeVisible();
-    await expect(page.locator('.places-nav [aria-label^="1 sessions waiting for input"]')).toBeVisible();
-    await expect(page.locator('.places-section-label [aria-label^="2 running sessions"]')).toBeVisible();
-    // The desktop Sessions overview also lists this session as a row, so
-    // scope to the rail's own highlight of the one waiting for input.
-    await expect(page.locator(".places-rail-session-area .session-row.waiting")).toContainText("needs-attention");
-  }
-});
+    if (test.info().project.name === "phone") {
+      const nav = page.getByRole("navigation", { name: "Primary navigation" });
+      await expect(nav.getByLabel(/2 sessions/)).toHaveText("2");
+      await expect(nav.getByLabel(/12345 active Inbox entries/)).toHaveText(
+        "999+",
+      );
+      await expect(nav.getByLabel(/34567 Board work items/)).toHaveText("999+");
+      await expect(nav.getByLabel(/45678 Backlog candidates/)).toHaveText(
+        "999+",
+      );
+      const geometry = await nav.evaluate((element) => ({
+        left: element.getBoundingClientRect().left,
+        right: element.getBoundingClientRect().right,
+        viewport: document.documentElement.clientWidth,
+        overflow: element.scrollWidth - element.clientWidth,
+      }));
+      expect(geometry.left).toBeGreaterThanOrEqual(0);
+      expect(geometry.right).toBeLessThanOrEqual(geometry.viewport);
+      expect(geometry.overflow).toBeLessThanOrEqual(0);
+    } else {
+      await expect(
+        page.locator('.places-nav [aria-label="12345 active Inbox entries"]'),
+      ).toBeVisible();
+      await expect(
+        page.locator('.places-nav [aria-label="23456 Projects"]'),
+      ).toBeVisible();
+      await expect(
+        page.locator(
+          '.places-nav [aria-label^="1 sessions waiting for input"]',
+        ),
+      ).toBeVisible();
+      await expect(
+        page.locator(
+          '.places-section-label [aria-label^="2 running sessions"]',
+        ),
+      ).toBeVisible();
+      // The desktop Sessions overview also lists this session as a row, so
+      // scope to the rail's own highlight of the one waiting for input.
+      await expect(
+        page.locator(".places-rail-session-area .session-row.waiting"),
+      ).toContainText("needs-attention");
+    }
+  },
+);
 
-test("Places counts distinguish real zero from an unavailable provider", async ({ page }) => {
-  await installFixtures(page, {}, [], undefined, {
-    sessionsUnavailable: true,
-    inboxActive: 0,
-    projectsTotal: null,
-    boardTotal: 0,
-    backlogTotal: null,
-  });
-  await page.goto("/#/sessions");
+test(
+  "Places counts distinguish real zero from an unavailable provider",
+  mockOnly(LIVE_SKIP.data),
+  async ({ page }) => {
+    await installFixtures(page, {}, [], undefined, {
+      sessionsUnavailable: true,
+      inboxActive: 0,
+      projectsTotal: null,
+      boardTotal: 0,
+      backlogTotal: null,
+    });
+    await page.goto("/#/sessions");
 
-  if (test.info().project.name === "phone") {
-    const nav = page.getByRole("navigation", { name: "Primary navigation" });
-    await expect(nav.getByLabel("sessions unavailable")).toHaveText("—");
-    await expect(nav.getByLabel("0 active Inbox entries")).toHaveText("0");
-    await expect(nav.getByLabel("0 Board work items")).toHaveText("0");
-    await expect(nav.getByLabel("Backlog candidates unavailable")).toHaveText("—");
-  } else {
-    await expect(page.locator('.places-nav [aria-label="0 active Inbox entries"]')).toHaveText("0");
-    await expect(page.locator('.places-nav [aria-label="Projects unavailable"]')).toHaveText("—");
-    await expect(page.locator('.places-nav [aria-label="sessions waiting for input unavailable"]')).toHaveText("—");
-    await expect(page.locator('.places-section-label [aria-label="running sessions unavailable"]')).toHaveText("—");
-  }
-});
+    if (test.info().project.name === "phone") {
+      const nav = page.getByRole("navigation", { name: "Primary navigation" });
+      await expect(nav.getByLabel("sessions unavailable")).toHaveText("—");
+      await expect(nav.getByLabel("0 active Inbox entries")).toHaveText("0");
+      await expect(nav.getByLabel("0 Board work items")).toHaveText("0");
+      await expect(nav.getByLabel("Backlog candidates unavailable")).toHaveText(
+        "—",
+      );
+    } else {
+      await expect(
+        page.locator('.places-nav [aria-label="0 active Inbox entries"]'),
+      ).toHaveText("0");
+      await expect(
+        page.locator('.places-nav [aria-label="Projects unavailable"]'),
+      ).toHaveText("—");
+      await expect(
+        page.locator(
+          '.places-nav [aria-label="sessions waiting for input unavailable"]',
+        ),
+      ).toHaveText("—");
+      await expect(
+        page.locator(
+          '.places-section-label [aria-label="running sessions unavailable"]',
+        ),
+      ).toHaveText("—");
+    }
+  },
+);
 
-test("Desktop session rows open, bookmark, and close entirely from the keyboard", async ({ page }) => {
-  test.skip(test.info().project.name === "phone", "The desktop Places rail owns session rows");
-  await installFixtures(page, {}, [liveSession]);
-  await page.routeWebSocket(/\/api\/sessions\/[^/]+\/attach$/, (socket) => {
-    socket.onMessage(() => undefined);
-    socket.send(JSON.stringify({
-      type: "snapshot-start",
-      scrollback_bytes: 0,
-      scrollback_pos: 0,
-    }));
-    socket.send(JSON.stringify({ type: "snapshot-done" }));
-  });
-  await page.goto("/#/sessions");
+test(
+  "Desktop session rows open, bookmark, and close entirely from the keyboard",
+  mockOnly(LIVE_SKIP.data),
+  async ({ page }) => {
+    test.skip(
+      test.info().project.name === "phone",
+      "The desktop Places rail owns session rows",
+    );
+    await installFixtures(page, {}, [liveSession]);
+    await page.routeWebSocket(/\/api\/sessions\/[^/]+\/attach$/, (socket) => {
+      socket.onMessage(() => undefined);
+      socket.send(
+        JSON.stringify({
+          type: "snapshot-start",
+          scrollback_bytes: 0,
+          scrollback_pos: 0,
+        }),
+      );
+      socket.send(JSON.stringify({ type: "snapshot-done" }));
+    });
+    await page.goto("/#/sessions");
 
-  const row = page.locator('.session-row[role="link"]', { hasText: "browser-session" });
-  await row.focus();
-  await expect(row).toBeFocused();
-  await page.keyboard.press("Space");
-  await expect(page).toHaveURL(/#\/t\/browser-session$/);
+    const row = page.locator('.session-row[role="link"]', {
+      hasText: "browser-session",
+    });
+    await row.focus();
+    await expect(row).toBeFocused();
+    await page.keyboard.press("Space");
+    await expect(page).toHaveURL(/#\/t\/browser-session$/);
 
-  const bookmark = page.getByRole("button", { name: "Bookmark browser-session" });
-  await bookmark.focus();
-  await page.keyboard.press("Enter");
-  await expect(page.getByRole("button", {
-    name: "Remove bookmark from browser-session",
-  })).toBeFocused();
-  await expect(page).toHaveURL(/#\/t\/browser-session$/);
+    const bookmark = page.getByRole("button", {
+      name: "Bookmark browser-session",
+    });
+    await bookmark.focus();
+    await page.keyboard.press("Enter");
+    await expect(
+      page.getByRole("button", {
+        name: "Remove bookmark from browser-session",
+      }),
+    ).toBeFocused();
+    await expect(page).toHaveURL(/#\/t\/browser-session$/);
 
-  const close = page.getByRole("button", { name: "Close browser-session" });
-  await close.focus();
-  await page.keyboard.press("Enter");
-  const confirm = page.getByRole("dialog").getByRole("button", { name: "Confirm" });
-  await confirm.focus();
-  await page.keyboard.press("Enter");
-  await expect(row).toHaveCount(0);
-});
+    const close = page.getByRole("button", { name: "Close browser-session" });
+    await close.focus();
+    await page.keyboard.press("Enter");
+    const confirm = page
+      .getByRole("dialog")
+      .getByRole("button", { name: "Confirm" });
+    await confirm.focus();
+    await page.keyboard.press("Enter");
+    await expect(row).toHaveCount(0);
+  },
+);
 
-test("Global shortcut help works outside editable surfaces and returns focus", async ({ page }) => {
+test("Global shortcut help works outside editable surfaces and returns focus", async ({
+  page,
+}) => {
   await installFixtures(page);
   await page.goto("/#/sessions");
 
@@ -2055,7 +2850,8 @@ test("Global shortcut help works outside editable surfaces and returns focus", a
   await goTo.focus();
   await page.keyboard.press("ControlOrMeta+K");
   await expect(
-    page.getByRole("dialog", { name: "Command palette" })
+    page
+      .getByRole("dialog", { name: "Command palette" })
       .getByRole("combobox", { name: "Search commands" }),
   ).toBeFocused();
   await page.keyboard.press("Escape");
@@ -2064,7 +2860,9 @@ test("Global shortcut help works outside editable surfaces and returns focus", a
   await page.keyboard.press("?");
   const help = page.getByRole("dialog", { name: "Keyboard Shortcuts" });
   await expect(help).toBeVisible();
-  await expect(help.getByText("Outside text fields, editors, and terminals")).toBeVisible();
+  await expect(
+    help.getByText("Outside text fields, editors, and terminals"),
+  ).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(goTo).toBeFocused();
 
@@ -2072,11 +2870,15 @@ test("Global shortcut help works outside editable surfaces and returns focus", a
   const query = page.getByRole("combobox", { name: "Search commands" });
   await query.fill("audit");
   await page.keyboard.press("?");
-  await expect(page.getByRole("dialog", { name: "Keyboard Shortcuts" })).toHaveCount(0);
+  await expect(
+    page.getByRole("dialog", { name: "Keyboard Shortcuts" }),
+  ).toHaveCount(0);
   await expect(query).toHaveValue("audit?");
 });
 
-test("Repeated palette opening defers and reuses workspace discovery", async ({ page }) => {
+test("Repeated palette opening defers and reuses workspace discovery", async ({
+  page,
+}) => {
   let manifestRequests = 0;
   await page.route("**/api/search/files**", async (route) => {
     manifestRequests += 1;
@@ -2103,11 +2905,11 @@ test("Repeated palette opening defers and reuses workspace discovery", async ({ 
   expect(manifestRequests).toBe(9);
 });
 
-test("Command palette lists the machine places, shows shortcuts, and ranks a session above a work item", async ({ page }) => {
-  await installFixtures(
-    page,
-    {},
-    [
+test(
+  "Command palette lists the machine places, shows shortcuts, and ranks a session above a work item",
+  mockOnly(LIVE_SKIP.data),
+  async ({ page }) => {
+    await installFixtures(page, {}, [
       {
         id: "ses-deploy",
         name: "deploy-preview",
@@ -2117,51 +2919,70 @@ test("Command palette lists the machine places, shows shortcuts, and ranks a ses
         scrollback_bytes: 0,
         created_at: "2026-08-18T08:00:00Z",
       },
-    ],
+    ]);
+    // The palette lists work items from the /work endpoint; give it one whose
+    // title contains the query word so it competes with the session.
+    await page.route(/\/api\/vogt\/work(\?|$)/, async (route) =>
+      route.fulfill({
+        json: {
+          items: [
+            {
+              ref: "WI-42",
+              title: "deploy the shell",
+              kind: "feature",
+              state: "open",
+              priority: "normal",
+              project_slug: "vogt",
+              trust_state: "verified",
+              labels: [],
+            },
+          ],
+          total: 1,
+          freshness: { status: "fresh" },
+        },
+      }),
+    );
+    await page.goto("/#/sessions");
+
+    await page.getByRole("button", { name: "Go to…" }).click();
+    const palette = page.getByRole("dialog", { name: "Command palette" });
+    await expect(palette).toBeVisible();
+
+    // The machine places the rail and phone bar expose are reachable by name in
+    // the palette too: Inbox, Sessions and History were all missing.
+    for (const label of ["Open Inbox", "Open Sessions", "Open History"]) {
+      await expect(palette.getByText(label, { exact: true })).toBeVisible();
+    }
+
+    // A command with a keyboard binding shows it on the row. New Terminal Session
+    // is bound to Ctrl/Cmd+Shift+T.
+    const newSession = palette.getByRole("option", {
+      name: /New Terminal Session/,
+    });
+    await expect(
+      newSession.locator("kbd", { hasText: "Ctrl/Cmd" }),
+    ).toBeVisible();
+
+    // Typing a session-name prefix surfaces that session above the work item that
+    // merely contains the word: a name match beats a description/word match, and
+    // sessions are listed before work items on a tie.
+    await palette
+      .getByRole("combobox", { name: "Search commands" })
+      .fill("deploy");
+    await expect(palette.getByRole("option").first()).toContainText(
+      "deploy-preview",
+    );
+    await expect(palette.getByText("deploy the shell")).toBeVisible();
+  },
+);
+
+test("Dialog focus is contained and restored, and feedback matches its live region", async ({
+  page,
+}) => {
+  test.skip(
+    test.info().project.name === "phone",
+    "Settings is a desktop route",
   );
-  // The palette lists work items from the /work endpoint; give it one whose
-  // title contains the query word so it competes with the session.
-  await page.route(/\/api\/vogt\/work(\?|$)/, async (route) =>
-    route.fulfill({
-      json: {
-        items: [
-          {
-            ref: "WI-42", title: "deploy the shell", kind: "feature", state: "open",
-            priority: "normal", project_slug: "vogt", trust_state: "verified", labels: [],
-          },
-        ],
-        total: 1,
-        freshness: { status: "fresh" },
-      },
-    }),
-  );
-  await page.goto("/#/sessions");
-
-  await page.getByRole("button", { name: "Go to…" }).click();
-  const palette = page.getByRole("dialog", { name: "Command palette" });
-  await expect(palette).toBeVisible();
-
-  // The machine places the rail and phone bar expose are reachable by name in
-  // the palette too: Inbox, Sessions and History were all missing.
-  for (const label of ["Open Inbox", "Open Sessions", "Open History"]) {
-    await expect(palette.getByText(label, { exact: true })).toBeVisible();
-  }
-
-  // A command with a keyboard binding shows it on the row. New Terminal Session
-  // is bound to Ctrl/Cmd+Shift+T.
-  const newSession = palette.getByRole("option", { name: /New Terminal Session/ });
-  await expect(newSession.locator("kbd", { hasText: "Ctrl/Cmd" })).toBeVisible();
-
-  // Typing a session-name prefix surfaces that session above the work item that
-  // merely contains the word: a name match beats a description/word match, and
-  // sessions are listed before work items on a tie.
-  await palette.getByRole("combobox", { name: "Search commands" }).fill("deploy");
-  await expect(palette.getByRole("option").first()).toContainText("deploy-preview");
-  await expect(palette.getByText("deploy the shell")).toBeVisible();
-});
-
-test("Dialog focus is contained and restored, and feedback matches its live region", async ({ page }) => {
-  test.skip(test.info().project.name === "phone", "Settings is a desktop route");
   await installFixtures(page);
   await page.goto("/#/sessions");
 
@@ -2175,11 +2996,18 @@ test("Dialog focus is contained and restored, and feedback matches its live regi
   await expect(goTo).toBeFocused();
 
   await page.getByRole("button", { name: "Settings" }).click();
-  const settings = page.getByRole("dialog", { name: "Settings", includeHidden: true });
+  const settings = page.getByRole("dialog", {
+    name: "Settings",
+    includeHidden: true,
+  });
   await expect(settings).toBeVisible();
-  const saveLayout = settings.getByRole("button", { name: "Save Current Layout" });
+  const saveLayout = settings.getByRole("button", {
+    name: "Save Current Layout",
+  });
   await saveLayout.click();
-  const layoutPrompt = page.getByRole("dialog", { name: "Save workspace layout" });
+  const layoutPrompt = page.getByRole("dialog", {
+    name: "Save workspace layout",
+  });
   await expect(layoutPrompt).toBeVisible();
   await expect(settings).toHaveAttribute("aria-hidden", "true");
   await layoutPrompt.locator("input").fill("Browser layout");
@@ -2192,13 +3020,18 @@ test("Dialog focus is contained and restored, and feedback matches its live regi
 
   await page.route(/\/api\/sessions(\?.*)?$/, async (route) => {
     if (route.request().method() === "POST") {
-      return route.fulfill({ status: 503, json: { error: "session service offline" } });
+      return route.fulfill({
+        status: 503,
+        json: { error: "session service offline" },
+      });
     }
     return route.fulfill({ json: [] });
   });
   await page.getByRole("button", { name: "Go to…" }).click();
   const createPalette = page.getByRole("dialog", { name: "Command palette" });
-  await createPalette.getByText("New Terminal Session", { exact: true }).click();
+  await createPalette
+    .getByText("New Terminal Session", { exact: true })
+    .click();
   const prompt = page.getByRole("dialog", { name: "New session" });
   await expect(prompt).toBeVisible();
   await prompt.locator("input").fill("browser-failure");
@@ -2228,7 +3061,9 @@ async function openSettings(page: Page): Promise<void> {
   }
 }
 
-test("Settings keeps its Save/Cancel footer on screen at desktop and phone sizes", async ({ page }) => {
+test("Settings keeps its Save/Cancel footer on screen at desktop and phone sizes", async ({
+  page,
+}) => {
   // The footer must stay reachable, not scroll off the bottom of a long
   // dialog. Asserted at 1440×900 on desktop and at the phone's own viewport.
   if (test.info().project.name === "desktop") {
@@ -2254,14 +3089,25 @@ test("Settings keeps its Save/Cancel footer on screen at desktop and phone sizes
   await expect(save).toBeInViewport();
 });
 
-test("Settings confirms every destructive action before it runs", async ({ page }) => {
-  test.skip(test.info().project.name === "phone", "Destructive-confirm plumbing is asserted on desktop");
+test("Settings confirms every destructive action before it runs", async ({
+  page,
+}) => {
+  test.skip(
+    test.info().project.name === "phone",
+    "Destructive-confirm plumbing is asserted on desktop",
+  );
   // Seed a saved auth profile so the Delete-profile path exists.
   await page.addInitScript(() => {
     localStorage.setItem(
       "vogt.authProfiles.v1",
       JSON.stringify([
-        { id: "p1", name: "Read only", token: "ro-token", base: "", updated_at: "2026-08-22T00:00:00Z" },
+        {
+          id: "p1",
+          name: "Read only",
+          token: "ro-token",
+          base: "",
+          updated_at: "2026-08-22T00:00:00Z",
+        },
       ]),
     );
   });
@@ -2273,16 +3119,25 @@ test("Settings confirms every destructive action before it runs", async ({ page 
 
   const cases = [
     { button: "Sign out & clear saved auth", title: "Sign out of Vogt?" },
-    { button: "Clear managed browser data", title: "Clear managed browser data?" },
+    {
+      button: "Clear managed browser data",
+      title: "Clear managed browser data?",
+    },
     { button: "Clean archived history", title: "Purge archived history?" },
     { button: "Delete", title: "Delete this profile?" },
   ];
   for (const one of cases) {
-    await settings.getByRole("button", { name: one.button, exact: true }).scrollIntoViewIfNeeded();
-    await settings.getByRole("button", { name: one.button, exact: true }).click();
+    await settings
+      .getByRole("button", { name: one.button, exact: true })
+      .scrollIntoViewIfNeeded();
+    await settings
+      .getByRole("button", { name: one.button, exact: true })
+      .click();
     const confirm = page.getByRole("dialog", { name: one.title });
     await expect(confirm).toBeVisible();
-    await expect(confirm.getByRole("button", { name: "Confirm" })).toBeVisible();
+    await expect(
+      confirm.getByRole("button", { name: "Confirm" }),
+    ).toBeVisible();
     // Cancelling leaves the destructive action undone and Settings still open.
     await confirm.getByRole("button", { name: "Cancel" }).click();
     await expect(confirm).toHaveCount(0);
@@ -2290,77 +3145,143 @@ test("Settings confirms every destructive action before it runs", async ({ page 
   }
 });
 
-test("Settings shows the blocked push state and disables Enable when permission is denied", async ({ page }) => {
-  test.skip(test.info().project.name === "phone", "Push controls are asserted on the desktop route");
-  // Force a denied Notification permission while keeping ServiceWorker and
-  // PushManager present, so the push section renders its blocked state rather
-  // than the unsupported fallback.
-  await page.addInitScript(() => {
-    const stub = function Notification() {} as unknown as { permission: string; requestPermission: () => Promise<string> };
-    Object.defineProperty(stub, "permission", { get: () => "denied", configurable: true });
-    stub.requestPermission = () => Promise.resolve("denied");
-    Object.defineProperty(window, "Notification", { value: stub, configurable: true, writable: true });
-  });
-  await installFixtures(page);
-  await page.goto("/#/sessions");
-  await page.getByRole("button", { name: "Settings" }).click();
-  const settings = page.getByRole("dialog", { name: "Settings" });
-  await expect(settings).toBeVisible();
+test(
+  "Settings shows the blocked push state and disables Enable when permission is denied",
+  mockOnly(LIVE_SKIP.harness),
+  async ({ page }) => {
+    test.skip(
+      test.info().project.name === "phone",
+      "Push controls are asserted on the desktop route",
+    );
+    // Force a denied Notification permission while keeping ServiceWorker and
+    // PushManager present, so the push section renders its blocked state rather
+    // than the unsupported fallback.
+    await page.addInitScript(() => {
+      const stub = function Notification() {} as unknown as {
+        permission: string;
+        requestPermission: () => Promise<string>;
+      };
+      Object.defineProperty(stub, "permission", {
+        get: () => "denied",
+        configurable: true,
+      });
+      stub.requestPermission = () => Promise.resolve("denied");
+      Object.defineProperty(window, "Notification", {
+        value: stub,
+        configurable: true,
+        writable: true,
+      });
+    });
+    await installFixtures(page);
+    await page.goto("/#/sessions");
+    await page.getByRole("button", { name: "Settings" }).click();
+    const settings = page.getByRole("dialog", { name: "Settings" });
+    await expect(settings).toBeVisible();
 
-  const enable = settings.getByRole("button", { name: "Enable push" });
-  await enable.scrollIntoViewIfNeeded();
-  await expect(enable).toBeDisabled();
-  await expect(
-    settings.getByText("blocked — allow in site settings, then reload"),
-  ).toBeVisible();
-});
+    const enable = settings.getByRole("button", { name: "Enable push" });
+    await enable.scrollIntoViewIfNeeded();
+    await expect(enable).toBeDisabled();
+    await expect(
+      settings.getByText("blocked — allow in site settings, then reload"),
+    ).toBeVisible();
+  },
+);
 
-test("Files rail keeps its hierarchy compact and exposes real modified-file status", async ({ page }) => {
-  test.skip(test.info().project.name === "phone", "The places rail is a desktop surface");
-  await installFixtures(page);
-  await page.route("**/api/git/status**", async (route) => route.fulfill({ json: {
-    repo: "", is_repo: true, branch: "dev", ahead: 0, behind: 0,
-    entries: [{
-      path: "src/an-identifiable-long-filename.tsx",
-      index: " ", worktree: "M", kind: "modified",
-    }],
-  } }));
-  await page.goto("/#/sessions");
-  await page.getByRole("button", { name: /Files/ }).click();
-  const files = page.getByRole("heading", { name: "Files" });
-  const search = page.getByRole("searchbox", { name: "Search files" });
-  await expect(files).toBeVisible();
-  expect(await files.evaluate((element) => Boolean(
-    element.compareDocumentPosition(document.querySelector('.file-tree-search'))
-      & Node.DOCUMENT_POSITION_FOLLOWING,
-  ))).toBe(true);
-  await expect(page.getByText("an-identifiable-long-filename.tsx")).toBeVisible();
-  await expect(search).toBeVisible();
-  await expect(page.getByLabel("Modified file")).toHaveText("M");
-  await expect(page.getByText("TSX", { exact: true })).toHaveCount(0);
-  await expect(page.locator(".file-tree").getByRole("button", { name: "New", exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Refresh files" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "New folder" })).toHaveCount(0);
+test(
+  "Files rail keeps its hierarchy compact and exposes real modified-file status",
+  mockOnly(LIVE_SKIP.data),
+  async ({ page }) => {
+    test.skip(
+      test.info().project.name === "phone",
+      "The places rail is a desktop surface",
+    );
+    await installFixtures(page);
+    await page.route("**/api/git/status**", async (route) =>
+      route.fulfill({
+        json: {
+          repo: "",
+          is_repo: true,
+          branch: "dev",
+          ahead: 0,
+          behind: 0,
+          entries: [
+            {
+              path: "src/an-identifiable-long-filename.tsx",
+              index: " ",
+              worktree: "M",
+              kind: "modified",
+            },
+          ],
+        },
+      }),
+    );
+    await page.goto("/#/sessions");
+    await page.getByRole("button", { name: /Files/ }).click();
+    const files = page.getByRole("heading", { name: "Files" });
+    const search = page.getByRole("searchbox", { name: "Search files" });
+    await expect(files).toBeVisible();
+    expect(
+      await files.evaluate((element) =>
+        Boolean(
+          element.compareDocumentPosition(
+            document.querySelector(".file-tree-search"),
+          ) & Node.DOCUMENT_POSITION_FOLLOWING,
+        ),
+      ),
+    ).toBe(true);
+    await expect(
+      page.getByText("an-identifiable-long-filename.tsx"),
+    ).toBeVisible();
+    await expect(search).toBeVisible();
+    await expect(page.getByLabel("Modified file")).toHaveText("M");
+    await expect(page.getByText("TSX", { exact: true })).toHaveCount(0);
+    await expect(
+      page
+        .locator(".file-tree")
+        .getByRole("button", { name: "New", exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Refresh files" }),
+    ).toBeVisible();
+    await expect(page.getByRole("button", { name: "New folder" })).toHaveCount(
+      0,
+    );
 
-  const newFile = page.locator(".file-tree").getByRole("button", { name: "New", exact: true });
-  await newFile.click();
-  await expect(page.getByRole("button", { name: "Upload files" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "New file" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "New folder" })).toBeVisible();
-  await newFile.click();
+    const newFile = page
+      .locator(".file-tree")
+      .getByRole("button", { name: "New", exact: true });
+    await newFile.click();
+    await expect(
+      page.getByRole("button", { name: "Upload files" }),
+    ).toBeVisible();
+    await expect(page.getByRole("button", { name: "New file" })).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "New folder" }),
+    ).toBeVisible();
+    await newFile.click();
 
-  await page.getByRole("button", { name: "Expand src" }).click();
-  await expect(page.getByText("nested-component.tsx")).toBeVisible();
-  await expect(page.getByRole("button", { name: "Actions for src", exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Delete" })).toHaveCount(0);
-  await page.getByRole("button", { name: "Actions for src", exact: true }).click();
-  await expect(page.getByRole("button", { name: "Open terminal" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Delete" })).toBeVisible();
-  await expect(page.locator(".places-rail > .file-tree"))
-    .toHaveScreenshot("files-rail-nested-modified.png");
-});
+    await page.getByRole("button", { name: "Expand src" }).click();
+    await expect(page.getByText("nested-component.tsx")).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Actions for src", exact: true }),
+    ).toBeVisible();
+    await expect(page.getByRole("button", { name: "Delete" })).toHaveCount(0);
+    await page
+      .getByRole("button", { name: "Actions for src", exact: true })
+      .click();
+    await expect(
+      page.getByRole("button", { name: "Open terminal" }),
+    ).toBeVisible();
+    await expect(page.getByRole("button", { name: "Delete" })).toBeVisible();
+    await expect(page.locator(".places-rail > .file-tree")).toHaveScreenshot(
+      "files-rail-nested-modified.png",
+    );
+  },
+);
 
-test("palette file commands open distinct real workflows and cancellation is inert", async ({ page }) => {
+test("palette file commands open distinct real workflows and cancellation is inert", async ({
+  page,
+}) => {
   await installFixtures(page);
   let createdPath: string | null = null;
   let manifestRequests = 0;
@@ -2378,9 +3299,17 @@ test("palette file commands open distinct real workflows and cancellation is ine
   await page.route("**/api/search/files**", async (route) => {
     const query = new URL(route.request().url()).searchParams.get("q") ?? "";
     if (manifests.has(query)) manifestRequests += 1;
-    return route.fulfill({ json: query === "identifiable" ? [
-      { name: "an-identifiable-long-filename.tsx", path: "src/an-identifiable-long-filename.tsx" },
-    ] : [] });
+    return route.fulfill({
+      json:
+        query === "identifiable"
+          ? [
+              {
+                name: "an-identifiable-long-filename.tsx",
+                path: "src/an-identifiable-long-filename.tsx",
+              },
+            ]
+          : [],
+    });
   });
   // The engine reads only files that exist (missing paths 404). New File relies
   // on that: creating over an occupied path is refused, so a create only lands
@@ -2393,29 +3322,34 @@ test("palette file commands open distinct real workflows and cancellation is ine
     }
     const path = new URL(route.request().url()).searchParams.get("path") ?? "";
     if (!existingFiles.has(path)) {
-      return route.fulfill({ status: 404, json: { error: { message: "not found" } } });
+      return route.fulfill({
+        status: 404,
+        json: { error: { message: "not found" } },
+      });
     }
-    return route.fulfill({ json: {
-      path,
-      size: 0,
-      content: "",
-      content_base64: null,
-      is_binary: false,
-    } });
+    return route.fulfill({
+      json: {
+        path,
+        size: 0,
+        content: "",
+        content_base64: null,
+        is_binary: false,
+      },
+    });
   });
   await page.goto("/#/sessions");
 
   const goTo = page.getByRole("button", { name: "Go to…" });
   await goTo.click();
   const palette = page.getByRole("dialog", { name: "Command palette" });
-  await palette.getByRole("combobox", { name: "Search commands" }).fill("#workspace");
+  await palette
+    .getByRole("combobox", { name: "Search commands" })
+    .fill("#workspace");
   await expect.poll(() => manifestRequests).toBe(9);
   await page.keyboard.press("Escape");
 
   await goTo.click();
-  await palette
-    .getByText("New File", { exact: true })
-    .click();
+  await palette.getByText("New File", { exact: true }).click();
   const create = page.getByRole("dialog", { name: "New file" });
   await expect(create.getByLabel("Destination folder")).toBeVisible();
   await expect(create.getByLabel("Filename")).toBeVisible();
@@ -2425,9 +3359,7 @@ test("palette file commands open distinct real workflows and cancellation is ine
   expect(manifestRequests).toBe(9);
 
   await goTo.click();
-  await palette
-    .getByText("Open File...", { exact: true })
-    .click();
+  await palette.getByText("Open File...", { exact: true }).click();
   const chooser = page.getByRole("dialog", { name: "Open file" });
   await expect(chooser.getByLabel("Search workspace files")).toBeFocused();
   await chooser.getByLabel("Search workspace files").fill("identifiable");
@@ -2436,13 +3368,13 @@ test("palette file commands open distinct real workflows and cancellation is ine
   });
   await expect(existing).toBeVisible();
   await existing.click();
-  await expect(page).toHaveURL(/#\/e\/src%2Fan-identifiable-long-filename\.tsx$/);
+  await expect(page).toHaveURL(
+    /#\/e\/src%2Fan-identifiable-long-filename\.tsx$/,
+  );
   expect(manifestRequests).toBe(9);
 
   await goTo.click();
-  await palette
-    .getByText("New File", { exact: true })
-    .click();
+  await palette.getByText("New File", { exact: true }).click();
   const createAgain = page.getByRole("dialog", { name: "New file" });
   await createAgain.getByLabel("Destination folder").fill("notes");
   await createAgain.getByLabel("Filename").fill("palette.md");
@@ -2452,23 +3384,34 @@ test("palette file commands open distinct real workflows and cancellation is ine
   await expect(page).toHaveURL(/#\/e\/notes%2Fpalette\.md$/);
 
   await goTo.click();
-  await palette.getByRole("combobox", { name: "Search commands" }).fill("#workspace");
+  await palette
+    .getByRole("combobox", { name: "Search commands" })
+    .fill("#workspace");
   await expect.poll(() => manifestRequests).toBe(18);
 });
 
-test("Phone editor keeps the compact Files hierarchy and progressive controls usable", async ({ page }) => {
-  test.skip(test.info().project.name !== "phone", "Phone geometry is validated in the phone browser project");
+test("Phone editor keeps the compact Files hierarchy and progressive controls usable", async ({
+  page,
+}) => {
+  test.skip(
+    test.info().project.name !== "phone",
+    "Phone geometry is validated in the phone browser project",
+  );
   await installFixtures(page);
   await page.addInitScript(() => {
     localStorage.setItem("vogt.layoutMode.v1", "ide");
   });
-  await page.route("**/api/files**", async (route) => route.fulfill({ json: {
-    path: "src/an-identifiable-long-filename.tsx",
-    size: 26,
-    content: "export const answer = 42;\n",
-    content_base64: null,
-    is_binary: false,
-  } }));
+  await page.route("**/api/files**", async (route) =>
+    route.fulfill({
+      json: {
+        path: "src/an-identifiable-long-filename.tsx",
+        size: 26,
+        content: "export const answer = 42;\n",
+        content_base64: null,
+        is_binary: false,
+      },
+    }),
+  );
   await page.goto("/#/e/src%2Fan-identifiable-long-filename.tsx");
 
   // On a phone the Files sidebar is an overlay drawer that defaults collapsed
@@ -2480,19 +3423,38 @@ test("Phone editor keeps the compact Files hierarchy and progressive controls us
   await expect(fileTree.getByRole("heading", { name: "Files" })).toBeVisible();
   // The Files section defaults collapsed; expand it to reach its search box and
   // the rest of the compact control hierarchy.
-  if ((await fileTree.getByRole("searchbox", { name: "Search files" }).count()) === 0) {
+  if (
+    (await fileTree
+      .getByRole("searchbox", { name: "Search files" })
+      .count()) === 0
+  ) {
     await fileTree.getByRole("button", { name: "Files", exact: true }).tap();
   }
-  await expect(fileTree.getByRole("searchbox", { name: "Search files" })).toBeVisible();
-  await expect(fileTree.getByRole("button", { name: "New", exact: true })).toBeVisible();
+  await expect(
+    fileTree.getByRole("searchbox", { name: "Search files" }),
+  ).toBeVisible();
+  await expect(
+    fileTree.getByRole("button", { name: "New", exact: true }),
+  ).toBeVisible();
   await fileTree.getByRole("button", { name: "New", exact: true }).tap();
-  await expect(fileTree.getByRole("button", { name: "Upload files" })).toBeVisible();
-  await expect(fileTree.getByRole("button", { name: "New file" })).toBeVisible();
-  await expect(fileTree.getByRole("button", { name: "New folder" })).toBeVisible();
+  await expect(
+    fileTree.getByRole("button", { name: "Upload files" }),
+  ).toBeVisible();
+  await expect(
+    fileTree.getByRole("button", { name: "New file" }),
+  ).toBeVisible();
+  await expect(
+    fileTree.getByRole("button", { name: "New folder" }),
+  ).toBeVisible();
 });
 
-test("Phone editor gives the editor the width and floats Files as an overlay drawer", async ({ page }) => {
-  test.skip(test.info().project.name !== "phone", "The overlay drawer is the phone editor layout");
+test("Phone editor gives the editor the width and floats Files as an overlay drawer", async ({
+  page,
+}) => {
+  test.skip(
+    test.info().project.name !== "phone",
+    "The overlay drawer is the phone editor layout",
+  );
   await installFixtures(page);
   await page.addInitScript(() => {
     localStorage.setItem("vogt.layoutMode.v1", "ide");
@@ -2505,9 +3467,9 @@ test("Phone editor gives the editor the width and floats Files as an overlay dra
   await expect(page.locator(".editor-sidebar-expand")).toBeVisible();
 
   const viewport = page.viewportSize()!;
-  const contentWidth = await page.locator(".editor-content").evaluate(
-    (element) => element.getBoundingClientRect().width,
-  );
+  const contentWidth = await page
+    .locator(".editor-content")
+    .evaluate((element) => element.getBoundingClientRect().width);
   expect(contentWidth).toBeGreaterThanOrEqual(viewport.width * 0.7);
 
   // Opening the drawer floats it over the editor (position: absolute) rather
@@ -2516,7 +3478,9 @@ test("Phone editor gives the editor the width and floats Files as an overlay dra
   const sidebar = page.locator(".editor-sidebar");
   await expect(sidebar).toBeVisible();
   await expect(page.locator(".editor-sidebar-backdrop")).toBeVisible();
-  const position = await sidebar.evaluate((element) => getComputedStyle(element).position);
+  const position = await sidebar.evaluate(
+    (element) => getComputedStyle(element).position,
+  );
   expect(position).toBe("absolute");
 
   // Tapping the scrim (its uncovered strip, right of the drawer and clear of the
@@ -2531,88 +3495,123 @@ test("Phone editor gives the editor the width and floats Files as an overlay dra
 // menu), so the editor answers it with its own edit bar. A real touch hold —
 // not a mouse right-click — must select the word under the finger, copy it to
 // the clipboard, and paste the clipboard back over a later selection.
-test("Phone editor long-press copies and pastes through the edit bar", TOUCH, async ({ page, context }) => {
-  test.skip(!isPhoneProject(), "Touch long-press is the coarse-pointer path");
-  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
-  await installFixtures(page);
-  await page.route("**/api/files**", async (route) => route.fulfill({ json: {
-    path: "src/an-identifiable-long-filename.tsx",
-    size: 21,
-    content: "const alpha = omega;\n",
-    content_base64: null,
-    is_binary: false,
-  } }));
-  await page.goto("/#/e/src%2Fan-identifiable-long-filename.tsx");
-  const lines = page.locator(".monaco-editor .view-lines");
-  // Monaco is a cold, lazily loaded chunk on the dev server.
-  await expect(lines).toContainText("const alpha = omega;", { timeout: 15_000 });
+test(
+  "Phone editor long-press copies and pastes through the edit bar",
+  TOUCH,
+  async ({ page, context }) => {
+    test.skip(!isPhoneProject(), "Touch long-press is the coarse-pointer path");
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    await installFixtures(page);
+    await page.route("**/api/files**", async (route) =>
+      route.fulfill({
+        json: {
+          path: "src/an-identifiable-long-filename.tsx",
+          size: 21,
+          content: "const alpha = omega;\n",
+          content_base64: null,
+          is_binary: false,
+        },
+      }),
+    );
+    await page.goto("/#/e/src%2Fan-identifiable-long-filename.tsx");
+    const lines = page.locator(".monaco-editor .view-lines");
+    // Monaco is a cold, lazily loaded chunk on the dev server.
+    await expect(lines).toContainText("const alpha = omega;", {
+      timeout: 15_000,
+    });
 
-  const cdp = await context.newCDPSession(page);
-  // Monaco hit-tests a hold where the touch *started*, against where the editor
-  // is when it *ends*; the shell header is still settling just after load, so
-  // wait for the editor to stop moving before holding a finger on it.
-  const editorRect = () => page.locator(".monaco-editor").evaluate((el) => {
-    const r = el.getBoundingClientRect();
-    return `${r.x},${r.y},${r.width},${r.height}`;
-  });
-  const settle = async () => {
-    let last = "";
-    await expect.poll(async () => {
-      const now = await editorRect();
-      const still = now === last;
-      last = now;
-      return still;
-    }, { intervals: [400] }).toBe(true);
-  };
-  // Hold a touch on a word for longer than Monaco's 700 ms hold delay. The
-  // point is measured on the word's own characters: whether the line is one
-  // span or several depends on whether the tokenizer has loaded yet.
-  const longPress = async (word: string) => {
-    await settle();
-    const point = await page.evaluate((target) => {
-      const walker = document.createTreeWalker(
-        document.querySelector(".monaco-editor .view-lines")!,
-        NodeFilter.SHOW_TEXT,
-      );
-      for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-        const at = node.textContent!.indexOf(target);
-        if (at < 0) continue;
-        const range = document.createRange();
-        range.setStart(node, at);
-        range.setEnd(node, at + target.length);
-        const r = range.getBoundingClientRect();
-        return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
-      }
-      return null;
-    }, word);
-    expect(point).not.toBeNull();
-    await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [point!] });
-    await page.waitForTimeout(900);
-    await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
-  };
+    const cdp = await context.newCDPSession(page);
+    // Monaco hit-tests a hold where the touch *started*, against where the editor
+    // is when it *ends*; the shell header is still settling just after load, so
+    // wait for the editor to stop moving before holding a finger on it.
+    const editorRect = () =>
+      page.locator(".monaco-editor").evaluate((el) => {
+        const r = el.getBoundingClientRect();
+        return `${r.x},${r.y},${r.width},${r.height}`;
+      });
+    const settle = async () => {
+      let last = "";
+      await expect
+        .poll(
+          async () => {
+            const now = await editorRect();
+            const still = now === last;
+            last = now;
+            return still;
+          },
+          { intervals: [400] },
+        )
+        .toBe(true);
+    };
+    // Hold a touch on a word for longer than Monaco's 700 ms hold delay. The
+    // point is measured on the word's own characters: whether the line is one
+    // span or several depends on whether the tokenizer has loaded yet.
+    const longPress = async (word: string) => {
+      await settle();
+      const point = await page.evaluate((target) => {
+        const walker = document.createTreeWalker(
+          document.querySelector(".monaco-editor .view-lines")!,
+          NodeFilter.SHOW_TEXT,
+        );
+        for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+          const at = node.textContent!.indexOf(target);
+          if (at < 0) continue;
+          const range = document.createRange();
+          range.setStart(node, at);
+          range.setEnd(node, at + target.length);
+          const r = range.getBoundingClientRect();
+          return {
+            x: Math.round(r.x + r.width / 2),
+            y: Math.round(r.y + r.height / 2),
+          };
+        }
+        return null;
+      }, word);
+      expect(point).not.toBeNull();
+      await cdp.send("Input.dispatchTouchEvent", {
+        type: "touchStart",
+        touchPoints: [point!],
+      });
+      await page.waitForTimeout(900);
+      await cdp.send("Input.dispatchTouchEvent", {
+        type: "touchEnd",
+        touchPoints: [],
+      });
+    };
 
-  await longPress("alpha");
-  const bar = page.getByRole("toolbar", { name: "Edit" });
-  await expect(bar).toBeVisible();
-  await bar.getByRole("button", { name: "Copy" }).tap();
-  await expect(page.getByText("Copied to clipboard")).toBeVisible();
-  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe("alpha");
-  await expect(bar).toBeHidden();
+    await longPress("alpha");
+    const bar = page.getByRole("toolbar", { name: "Edit" });
+    await expect(bar).toBeVisible();
+    await bar.getByRole("button", { name: "Copy" }).tap();
+    await expect(page.getByText("Copied to clipboard")).toBeVisible();
+    await expect
+      .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+      .toBe("alpha");
+    await expect(bar).toBeHidden();
 
-  await longPress("omega");
-  await expect(bar).toBeVisible();
-  await bar.getByRole("button", { name: "Paste" }).tap();
-  await expect(lines).toContainText("const alpha = alpha;");
-  await expect(bar).toBeHidden();
-});
+    await longPress("omega");
+    await expect(bar).toBeVisible();
+    await bar.getByRole("button", { name: "Paste" }).tap();
+    await expect(lines).toContainText("const alpha = alpha;");
+    await expect(bar).toBeHidden();
+  },
+);
 
 test("Phone editor splitter resizes on a touch drag", async ({ page }) => {
-  test.skip(test.info().project.name !== "phone", "The touch splitter is exercised on the phone project");
-  await installFixtures(page, {}, [], [
-    { name: "src", path: "src", is_dir: true },
-    { name: "alpha.tsx", path: "src/alpha.tsx", is_dir: false },
-    { name: "beta.tsx", path: "src/beta.tsx", is_dir: false },
-  ]);
+  test.skip(
+    test.info().project.name !== "phone",
+    "The touch splitter is exercised on the phone project",
+  );
+  await installFixtures(
+    page,
+    {},
+    [],
+    [
+      { name: "src", path: "src", is_dir: true },
+      { name: "alpha.tsx", path: "src/alpha.tsx", is_dir: false },
+      { name: "beta.tsx", path: "src/beta.tsx", is_dir: false },
+    ],
+  );
   await page.addInitScript(() => {
     localStorage.setItem("vogt.layoutMode.v1", "ide");
   });
@@ -2655,89 +3654,115 @@ test("Phone editor splitter resizes on a touch drag", async ({ page }) => {
 });
 
 for (const height of [700, 900]) {
-  test(`Crowded desktop rail keeps Files and its footer reachable at ${height}px`, async ({ page }) => {
-    test.skip(test.info().project.name === "phone", "The places rail is a desktop surface");
-    const crowdedSessions = Array.from({ length: 44 }, (_, index) => ({
-      ...liveSession,
-      id: `crowded-${index + 1}`,
-      name: `Crowded session ${String(index + 1).padStart(2, "0")}`,
-    }));
-    await installFixtures(page, {}, crowdedSessions);
-    await page.setViewportSize({ width: 1280, height });
-    await page.goto("/#/sessions");
+  test(
+    `Crowded desktop rail keeps Files and its footer reachable at ${height}px`,
+    mockOnly(LIVE_SKIP.data),
+    async ({ page }) => {
+      test.skip(
+        test.info().project.name === "phone",
+        "The places rail is a desktop surface",
+      );
+      const crowdedSessions = Array.from({ length: 44 }, (_, index) => ({
+        ...liveSession,
+        id: `crowded-${index + 1}`,
+        name: `Crowded session ${String(index + 1).padStart(2, "0")}`,
+      }));
+      await installFixtures(page, {}, crowdedSessions);
+      await page.setViewportSize({ width: 1280, height });
+      await page.goto("/#/sessions");
 
-    const rail = page.getByRole("complementary", { name: "Places" });
-    const files = page.getByRole("heading", { name: "Files" });
-    const search = page.getByRole("searchbox", { name: "Search files" });
-    const row = page.getByText("an-identifiable-long-filename.tsx");
-    const settings = page.getByRole("button", { name: "Settings" });
-    const metrics = await rail.evaluate((element) => {
-      const sessions = element.querySelector(".places-rail-session-area");
-      const sessionList = sessions?.querySelector(":scope > div") ?? null;
-      return {
-        overflowY: getComputedStyle(element).overflowY,
-        scrollHeight: element.scrollHeight,
-        clientHeight: element.clientHeight,
-        sessionScrolls: sessionList
-          ? sessionList.scrollHeight > sessionList.clientHeight + 1
-          : false,
-        nestedOverflow: [".places-nav"].map(
-          (selector) => getComputedStyle(element.querySelector(selector)!).overflowY,
-        ),
-      };
-    });
-    expect(metrics.overflowY).not.toBe("auto");
-    expect(metrics.overflowY).not.toBe("scroll");
-    expect(metrics.scrollHeight).toBeLessThanOrEqual(metrics.clientHeight + 1);
-    expect(metrics.sessionScrolls).toBe(true);
-    expect(metrics.nestedOverflow).not.toContain("scroll");
+      const rail = page.getByRole("complementary", { name: "Places" });
+      const files = page.getByRole("heading", { name: "Files" });
+      const search = page.getByRole("searchbox", { name: "Search files" });
+      const row = page.getByText("an-identifiable-long-filename.tsx");
+      const settings = page.getByRole("button", { name: "Settings" });
+      const metrics = await rail.evaluate((element) => {
+        const sessions = element.querySelector(".places-rail-session-area");
+        const sessionList = sessions?.querySelector(":scope > div") ?? null;
+        return {
+          overflowY: getComputedStyle(element).overflowY,
+          scrollHeight: element.scrollHeight,
+          clientHeight: element.clientHeight,
+          sessionScrolls: sessionList
+            ? sessionList.scrollHeight > sessionList.clientHeight + 1
+            : false,
+          nestedOverflow: [".places-nav"].map(
+            (selector) =>
+              getComputedStyle(element.querySelector(selector)!).overflowY,
+          ),
+        };
+      });
+      expect(metrics.overflowY).not.toBe("auto");
+      expect(metrics.overflowY).not.toBe("scroll");
+      expect(metrics.scrollHeight).toBeLessThanOrEqual(
+        metrics.clientHeight + 1,
+      );
+      expect(metrics.sessionScrolls).toBe(true);
+      expect(metrics.nestedOverflow).not.toContain("scroll");
 
-    await settings.focus();
-    await expect(settings).toBeFocused();
-    await expect(settings).toBeInViewport();
-    await expect(files).toBeInViewport();
-    await page.getByRole("link", { name: "Board" }).focus();
-    await expect(page.getByRole("link", { name: "Board" })).toBeInViewport();
+      await settings.focus();
+      await expect(settings).toBeFocused();
+      await expect(settings).toBeInViewport();
+      await expect(files).toBeInViewport();
+      await page.getByRole("link", { name: "Board" }).focus();
+      await expect(page.getByRole("link", { name: "Board" })).toBeInViewport();
 
-    // Opening Files puts its search and a row on screen without moving nav or
-    // the footer, and without making the rail itself scroll.
-    await files.click();
-    await expect(search).toBeVisible();
-    await expect(search).toBeInViewport();
-    await expect(row).toBeInViewport();
-    await expect(page.locator(".file-tree").getByRole("button", { name: "New", exact: true })).toBeInViewport();
-    const still = await rail.evaluate((element) => ({
-      scrolls: element.scrollHeight > element.clientHeight + 1,
-      fileHeight: element.querySelector(".file-tree")!.getBoundingClientRect().height,
-    }));
-    expect(still.scrolls).toBe(false);
-    expect(still.fileHeight).toBeGreaterThanOrEqual(80);
-  });
+      // Opening Files puts its search and a row on screen without moving nav or
+      // the footer, and without making the rail itself scroll.
+      await files.click();
+      await expect(search).toBeVisible();
+      await expect(search).toBeInViewport();
+      await expect(row).toBeInViewport();
+      await expect(
+        page
+          .locator(".file-tree")
+          .getByRole("button", { name: "New", exact: true }),
+      ).toBeInViewport();
+      const still = await rail.evaluate((element) => ({
+        scrolls: element.scrollHeight > element.clientHeight + 1,
+        fileHeight: element.querySelector(".file-tree")!.getBoundingClientRect()
+          .height,
+      }));
+      expect(still.scrolls).toBe(false);
+      expect(still.fileHeight).toBeGreaterThanOrEqual(80);
+    },
+  );
 }
 
-test("Route truth owns unavailable links, current navigation and Settings return", async ({ page }) => {
+test("Route truth owns unavailable links, current navigation and Settings return", async ({
+  page,
+}) => {
   await installFixtures(page);
   await page.goto("/#/board?project=vogt");
 
   const phone = test.info().project.name === "phone";
-  const currentNavigation = phone ? page.locator('.phone-bottom-nav a[aria-current="page"]') : page.locator('.places-nav a[aria-current="page"]');
+  const currentNavigation = phone
+    ? page.locator('.phone-bottom-nav a[aria-current="page"]')
+    : page.locator('.places-nav a[aria-current="page"]');
   await expect(currentNavigation).toContainText("Board");
   await expect(page.getByRole("link", { name: "GUI stream" })).toHaveCount(0);
 
   await page.getByRole("button", { name: "Go to…" }).click();
-  await expect(page.getByRole("dialog", { name: "Command palette" }).getByText("Open GUI Stream", { exact: true }))
-    .toHaveCount(0);
+  await expect(
+    page
+      .getByRole("dialog", { name: "Command palette" })
+      .getByText("Open GUI Stream", { exact: true }),
+  ).toHaveCount(0);
   await page.keyboard.press("Escape");
 
   if (phone) await page.getByRole("button", { name: "Go to…" }).click();
   if (phone) {
-    await page.getByRole("dialog", { name: "Command palette" })
+    await page
+      .getByRole("dialog", { name: "Command palette" })
       .getByText("Open Settings", { exact: true })
       .click();
   } else await page.getByRole("button", { name: "Settings" }).click();
   await expect(page).toHaveURL(/#\/settings$/);
   await expect(currentNavigation).toContainText("Board");
-  await page.getByRole("dialog", { name: "Settings" }).getByRole("button", { name: "Cancel" }).click();
+  await page
+    .getByRole("dialog", { name: "Settings" })
+    .getByRole("button", { name: "Cancel" })
+    .click();
   await expect(page).toHaveURL(/#\/board\?project=vogt$/);
 
   if (!phone) {
@@ -2750,24 +3775,35 @@ test("Route truth owns unavailable links, current navigation and Settings return
 
   await page.goto("/#/history");
   if (phone) {
-    await expect(page.locator('.phone-bottom-nav a[aria-current="page"]')).toContainText("Sessions");
+    await expect(
+      page.locator('.phone-bottom-nav a[aria-current="page"]'),
+    ).toContainText("Sessions");
   } else {
-    await expect(page.locator('.places-nav a[aria-current="page"]')).toContainText("History");
+    await expect(
+      page.locator('.places-nav a[aria-current="page"]'),
+    ).toContainText("History");
   }
-  await expect(page.getByRole("navigation", { name: "Session tools" }).getByRole("link", { name: "History" }))
-    .toHaveAttribute("aria-current", "page");
+  await expect(
+    page
+      .getByRole("navigation", { name: "Session tools" })
+      .getByRole("link", { name: "History" }),
+  ).toHaveAttribute("aria-current", "page");
 
   if (phone) await page.getByRole("button", { name: "Go to…" }).click();
   if (phone) {
-    await page.getByRole("dialog", { name: "Command palette" })
+    await page
+      .getByRole("dialog", { name: "Command palette" })
       .getByText("Open Settings", { exact: true })
       .click();
   } else await page.getByRole("button", { name: "Settings" }).click();
   await expect(page).toHaveURL(/#\/settings$/);
-  await expect(page.getByRole("navigation", { name: "Session tools" })
-    .getByRole("link", { name: "History" }))
-    .toHaveAttribute("aria-current", "page");
-  await page.getByRole("dialog", { name: "Settings" })
+  await expect(
+    page
+      .getByRole("navigation", { name: "Session tools" })
+      .getByRole("link", { name: "History" }),
+  ).toHaveAttribute("aria-current", "page");
+  await page
+    .getByRole("dialog", { name: "Settings" })
     .getByRole("button", { name: "Cancel" })
     .click();
   await expect(page).toHaveURL(/#\/history$/);
@@ -2777,115 +3813,170 @@ test("Route truth owns unavailable links, current navigation and Settings return
     window.location.hash = "#/t/missing-session";
   });
   await expect(page).toHaveURL(/#\/t\/missing-session$/);
-  await expect(page.getByRole("heading", { name: "Session not found" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Return to Sessions" })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Session not found" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Return to Sessions" }),
+  ).toBeVisible();
   await page.reload();
-  await expect(page.getByRole("heading", { name: "Session not found" })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Session not found" }),
+  ).toBeVisible();
   await page.goBack();
   await expect(page).toHaveURL(/#\/history$/);
   await expect(page.locator(".history-view")).toBeVisible();
   await page.goForward();
-  await expect(page.getByRole("heading", { name: "Session not found" })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Session not found" }),
+  ).toBeVisible();
 
   await page.goto("/#/history");
   await page.evaluate(() => {
     window.location.hash = "#/assistant";
   });
   await expect(page).toHaveURL(/#\/assistant$/);
-  await expect(page.getByRole("heading", { name: "Assistant is unavailable" })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Assistant is unavailable" }),
+  ).toBeVisible();
   await page.reload();
-  await expect(page.getByRole("heading", { name: "Assistant is unavailable" })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Assistant is unavailable" }),
+  ).toBeVisible();
   await page.goBack();
   await expect(page).toHaveURL(/#\/history$/);
   await expect(page.locator(".history-view")).toBeVisible();
   await page.goForward();
-  await expect(page.getByRole("heading", { name: "Assistant is unavailable" })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Assistant is unavailable" }),
+  ).toBeVisible();
 
   await page.goto("/#/gui");
-  await expect(page.getByRole("heading", { name: "GUI stream is unavailable" })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "GUI stream is unavailable" }),
+  ).toBeVisible();
 
   await page.goto("/#/settings");
   await page.reload();
-  await page.getByRole("dialog", { name: "Settings" })
+  await page
+    .getByRole("dialog", { name: "Settings" })
     .getByRole("button", { name: "Cancel" })
     .click();
   await expect(page).toHaveURL(/#\/sessions$/);
 });
 
-test("Enabled GUI capability is reachable and renders its configured stream", async ({ page }) => {
-  await page.route("https://stream.example.test/**", async (route) =>
-    route.fulfill({ contentType: "text/html", body: "<main>fixture stream</main>" }),
-  );
-  await installFixtures(page, {
-    gui_stream_url: "https://stream.example.test/view",
-    gui_stream_available: true,
-    features: { selkies: "1.6.2" },
-  });
-  await page.route("**/api/gui/processes", async (route) => route.fulfill({ json: [] }));
-  await page.goto("/#/sessions");
+test(
+  "Enabled GUI capability is reachable and renders its configured stream",
+  mockOnly(LIVE_SKIP.data),
+  async ({ page }) => {
+    await page.route("https://stream.example.test/**", async (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: "<main>fixture stream</main>",
+      }),
+    );
+    await installFixtures(page, {
+      gui_stream_url: "https://stream.example.test/view",
+      gui_stream_available: true,
+      features: { selkies: "1.6.2" },
+    });
+    await page.route("**/api/gui/processes", async (route) =>
+      route.fulfill({ json: [] }),
+    );
+    await page.goto("/#/sessions");
 
-  await expect(page.getByRole("link", { name: "GUI stream" }).first()).toBeVisible();
-  await page.getByRole("button", { name: "Go to…" }).click();
-  await page.getByRole("dialog", { name: "Command palette" })
-    .getByText("Open GUI Stream", { exact: true })
-    .click();
+    await expect(
+      page.getByRole("link", { name: "GUI stream" }).first(),
+    ).toBeVisible();
+    await page.getByRole("button", { name: "Go to…" }).click();
+    await page
+      .getByRole("dialog", { name: "Command palette" })
+      .getByText("Open GUI Stream", { exact: true })
+      .click();
 
-  await expect(page).toHaveURL(/#\/gui$/);
-  const frame = page.getByTitle("GUI stream");
-  await expect(frame).toBeVisible();
-  await expect(frame).toHaveAttribute("src", "https://stream.example.test/view");
-  await expect(frame.contentFrame().getByText("fixture stream")).toBeVisible();
-});
+    await expect(page).toHaveURL(/#\/gui$/);
+    const frame = page.getByTitle("GUI stream");
+    await expect(frame).toBeVisible();
+    await expect(frame).toHaveAttribute(
+      "src",
+      "https://stream.example.test/view",
+    );
+    await expect(
+      frame.contentFrame().getByText("fixture stream"),
+    ).toBeVisible();
+  },
+);
 
-test("Sessions owns the tool workspace and retains only terminal continuity", async ({ page }) => {
-  await installFixtures(page, {}, [liveSession], undefined, {}, []);
-  await page.routeWebSocket(/\/api\/sessions\/[^/]+\/attach$/, (socket) => {
-    socket.onMessage(() => undefined);
-    socket.send(JSON.stringify({
-      type: "snapshot-start",
-      scrollback_bytes: 0,
-      scrollback_pos: 0,
-    }));
-    socket.send(JSON.stringify({ type: "snapshot-done" }));
-  });
-  await page.route("**/api/history/sessions**", async (route) =>
-    route.fulfill({ json: [] }),
-  );
+test(
+  "Sessions owns the tool workspace and retains only terminal continuity",
+  mockOnly(LIVE_SKIP.data),
+  async ({ page }) => {
+    await installFixtures(page, {}, [liveSession], undefined, {}, []);
+    await page.routeWebSocket(/\/api\/sessions\/[^/]+\/attach$/, (socket) => {
+      socket.onMessage(() => undefined);
+      socket.send(
+        JSON.stringify({
+          type: "snapshot-start",
+          scrollback_bytes: 0,
+          scrollback_pos: 0,
+        }),
+      );
+      socket.send(JSON.stringify({ type: "snapshot-done" }));
+    });
+    await page.route("**/api/history/sessions**", async (route) =>
+      route.fulfill({ json: [] }),
+    );
 
-  await page.goto("/#/t/browser-session");
-  await expect(page.locator(".terminal-host")).toBeVisible();
-  await expect(page.getByRole("region", { name: "Sessions" })).toBeVisible();
-  // The Live Sessions sub-panel was removed; the running session is
-  // listed in the places rail instead.
+    await page.goto("/#/t/browser-session");
+    await expect(page.locator(".terminal-host")).toBeVisible();
+    await expect(page.getByRole("region", { name: "Sessions" })).toBeVisible();
+    // The Live Sessions sub-panel was removed; the running session is
+    // listed in the places rail instead.
 
-  await page.goto("/#/history");
-  await expect(page.locator(".history-view")).toBeVisible();
-  await expect(page.locator('[data-tab-kind="terminal"]')).toHaveCount(1);
+    await page.goto("/#/history");
+    await expect(page.locator(".history-view")).toBeVisible();
+    await expect(page.locator('[data-tab-kind="terminal"]')).toHaveCount(1);
 
-  await page.goto("/#/tasks");
-  await expect(page.locator(".agent-tasks-view")).toBeVisible();
-  await expect(page.locator('[data-tab-kind="terminal"]')).toHaveCount(1);
-  await expect(page.locator('[data-tab-kind="history"]')).toHaveCount(0);
-  await expect(page.locator('[data-tab-kind="tasks"]')).toHaveCount(1);
-});
+    await page.goto("/#/tasks");
+    await expect(page.locator(".agent-tasks-view")).toBeVisible();
+    await expect(page.locator('[data-tab-kind="terminal"]')).toHaveCount(1);
+    await expect(page.locator('[data-tab-kind="history"]')).toHaveCount(0);
+    await expect(page.locator('[data-tab-kind="tasks"]')).toHaveCount(1);
+  },
+);
 
 // Three sessions in the three states the Sessions shell has to keep reachable
 // and legible at once: an idle one, one waiting for input, one running.
 const THREE_SESSIONS = [
   {
-    id: "sess-idle", name: "idle-shell", cwd: "/workspace/vogt",
-    activity: "idle", exit_code: null, scrollback_bytes: 1024,
-    created_at: "2026-08-18T08:00:00Z", activity_changed_at: "2026-08-18T08:00:00Z",
+    id: "sess-idle",
+    name: "idle-shell",
+    cwd: "/workspace/vogt",
+    activity: "idle",
+    exit_code: null,
+    scrollback_bytes: 1024,
+    created_at: "2026-08-18T08:00:00Z",
+    activity_changed_at: "2026-08-18T08:00:00Z",
   },
   {
-    id: "sess-wait", name: "needs-answer", cwd: "/workspace/api",
-    activity: "waiting-for-input", exit_code: null, scrollback_bytes: 1024,
-    created_at: "2026-08-18T08:00:00Z", activity_changed_at: "2026-08-18T08:00:30Z",
+    id: "sess-wait",
+    name: "needs-answer",
+    cwd: "/workspace/api",
+    activity: "waiting-for-input",
+    exit_code: null,
+    scrollback_bytes: 1024,
+    created_at: "2026-08-18T08:00:00Z",
+    activity_changed_at: "2026-08-18T08:00:30Z",
   },
   {
-    id: "sess-busy", name: "running-build", cwd: "/workspace/web",
-    activity: "running", exit_code: null, scrollback_bytes: 1024,
-    created_at: "2026-08-18T08:00:00Z", activity_changed_at: "2026-08-18T08:00:10Z",
+    id: "sess-busy",
+    name: "running-build",
+    cwd: "/workspace/web",
+    activity: "running",
+    exit_code: null,
+    scrollback_bytes: 1024,
+    created_at: "2026-08-18T08:00:00Z",
+    activity_changed_at: "2026-08-18T08:00:10Z",
   },
 ];
 
@@ -2894,13 +3985,24 @@ const THREE_SESSIONS = [
 async function stubTerminalAttach(page: Page): Promise<void> {
   await page.routeWebSocket(/\/api\/sessions\/[^/]+\/attach$/, (socket) => {
     socket.onMessage(() => undefined);
-    socket.send(JSON.stringify({ type: "snapshot-start", scrollback_bytes: 0, scrollback_pos: 0 }));
+    socket.send(
+      JSON.stringify({
+        type: "snapshot-start",
+        scrollback_bytes: 0,
+        scrollback_pos: 0,
+      }),
+    );
     socket.send(JSON.stringify({ type: "snapshot-done" }));
   });
 }
 
-test("Phone Sessions shell keeps the terminal on screen and folds the header", async ({ page }) => {
-  test.skip(test.info().project.name !== "phone", "The collapsed shell is the narrow client's");
+test("Phone Sessions shell keeps the terminal on screen and folds the header", async ({
+  page,
+}) => {
+  test.skip(
+    test.info().project.name !== "phone",
+    "The collapsed shell is the narrow client's",
+  );
   await installFixtures(page, {}, THREE_SESSIONS);
   await stubTerminalAttach(page);
 
@@ -2920,41 +4022,70 @@ test("Phone Sessions shell keeps the terminal on screen and folds the header", a
   });
   // The 1px tolerance is subpixel: 40dvh of a 664px viewport is 265.6, and the
   // layout measures 265.594 — the floor is met, the remainder is rounding.
-  expect(geometry.layout, JSON.stringify(geometry)).toBeGreaterThanOrEqual(geometry.viewport * 0.4 - 1);
-  expect(geometry.host, JSON.stringify(geometry)).toBeGreaterThanOrEqual(geometry.viewport * 0.35);
+  expect(geometry.layout, JSON.stringify(geometry)).toBeGreaterThanOrEqual(
+    geometry.viewport * 0.4 - 1,
+  );
+  expect(geometry.host, JSON.stringify(geometry)).toBeGreaterThanOrEqual(
+    geometry.viewport * 0.35,
+  );
 
   // The redesigned session bar owns this route. The generic Sessions header
   // must not stack a second title/tools block above it.
   await expect(page.locator(".sessions-header")).toBeHidden();
   const sessionBar = page.locator(".terminal-mobile-header");
-  await expect(sessionBar.getByRole("link", { name: "Back to Sessions" })).toBeVisible();
+  await expect(
+    sessionBar.getByRole("link", { name: "Back to Sessions" }),
+  ).toBeVisible();
   await expect(sessionBar).toContainText("idle-shell");
 });
 
-test("Phone machine tools open with their work in the first screen, not below a wall of header", async ({ page }) => {
-  test.skip(test.info().project.name !== "phone", "The first-screen floor is the narrow client's");
+test("Phone machine tools open with their work in the first screen, not below a wall of header", async ({
+  page,
+}) => {
+  test.skip(
+    test.info().project.name !== "phone",
+    "The first-screen floor is the narrow client's",
+  );
   await installFixtures(page, { assistant_enabled: true }, THREE_SESSIONS);
   await stubTerminalAttach(page);
-  await page.route("**/api/history/**", async (route) => route.fulfill({ json: [] }));
+  await page.route("**/api/history/**", async (route) =>
+    route.fulfill({ json: [] }),
+  );
   await page.route("**/api/assistant/**", async (route) =>
     route.fulfill({ json: { transcript: [], pending_action: null } }),
   );
-  await page.route("**/api/git/status**", async (route) => route.fulfill({ json: {
-    repo: "vogt", is_repo: true, branch: "main", ahead: 0, behind: 0, entries: [],
-  } }));
+  await page.route("**/api/git/status**", async (route) =>
+    route.fulfill({
+      json: {
+        repo: "vogt",
+        is_repo: true,
+        branch: "main",
+        ahead: 0,
+        behind: 0,
+        entries: [],
+      },
+    }),
+  );
   await page.route("**/api/git/branch**", async (route) =>
     route.fulfill({ json: { current: "main", all: ["main"] } }),
   );
-  await page.route("**/api/git/log**", async (route) => route.fulfill({ json: [] }));
+  await page.route("**/api/git/log**", async (route) =>
+    route.fulfill({ json: [] }),
+  );
 
   const topOf = async (selector: string): Promise<number> =>
-    page.locator(selector).first().evaluate((node) => node.getBoundingClientRect().top);
+    page
+      .locator(selector)
+      .first()
+      .evaluate((node) => node.getBoundingClientRect().top);
   // Navigate within the loaded shell (a hash change, not a fresh load), so the
   // public config a tool route consults to open its tab is already in hand —
   // the Assistant tab in particular opens only once `assistant_enabled` is
   // known.
   const openTool = async (hash: string) => {
-    await page.evaluate((next) => { window.location.hash = next; }, hash);
+    await page.evaluate((next) => {
+      window.location.hash = next;
+    }, hash);
   };
 
   await page.goto("/#/sessions");
@@ -2966,31 +4097,49 @@ test("Phone machine tools open with their work in the first screen, not below a 
 
   await openTool("#/g");
   await expect(page.locator(".git-repository-picker")).toBeVisible();
-  expect(await topOf(".git-repository-picker"), "Git chooser").toBeLessThan(400);
+  expect(await topOf(".git-repository-picker"), "Git chooser").toBeLessThan(
+    400,
+  );
 
   await openTool("#/assistant");
   const composer = page.getByPlaceholder("Ask about your sessions…");
   await expect(composer).toBeVisible();
   // The Assistant content region begins high on the screen — the pane top is
   // where the compact Sessions header had once pushed everything to ~855px.
-  expect(await topOf('[data-tab-kind="assistant"]'), "Assistant pane").toBeLessThan(400);
+  expect(
+    await topOf('[data-tab-kind="assistant"]'),
+    "Assistant pane",
+  ).toBeLessThan(400);
 });
 
-test("Phone Sessions overview reaches idle and busy sessions, not only the waiting card", async ({ page }) => {
-  test.skip(test.info().project.name !== "phone", "The overview list is the narrow body");
+test("Phone Sessions overview reaches idle and busy sessions, not only the waiting card", async ({
+  page,
+}) => {
+  test.skip(
+    test.info().project.name !== "phone",
+    "The overview list is the narrow body",
+  );
   await installFixtures(page, {}, THREE_SESSIONS);
   await page.goto("/#/sessions");
 
   // The waiting session is an attention card above; the idle and busy ones are
   // reachable as rows in the list, each a link to its terminal.
-  await expect(page.getByRole("article", { name: /needs-answer is waiting for input/ })).toBeVisible();
+  await expect(
+    page.getByRole("article", { name: /needs-answer is waiting for input/ }),
+  ).toBeVisible();
   const list = page.locator(".session-list");
-  await expect(list.locator('a[href="#/t/sess-idle"]')).toContainText("idle-shell");
-  await expect(list.locator('a[href="#/t/sess-busy"]')).toContainText("running-build");
+  await expect(list.locator('a[href="#/t/sess-idle"]')).toContainText(
+    "idle-shell",
+  );
+  await expect(list.locator('a[href="#/t/sess-busy"]')).toContainText(
+    "running-build",
+  );
   // The waiting session is also a row, under Needs you (WI-1736): the card
   // answers it, the list keeps the full state of the machine.
   await expect(list.locator('a[href="#/t/sess-wait"]')).toHaveCount(1);
-  await expect(list.locator(".session-list-head", { hasText: "Needs you" })).toBeVisible();
+  await expect(
+    list.locator(".session-list-head", { hasText: "Needs you" }),
+  ).toBeVisible();
 
   await list.locator('a[href="#/t/sess-idle"]').click();
   await expect(page).toHaveURL(/#\/t\/sess-idle$/);
@@ -2999,128 +4148,208 @@ test("Phone Sessions overview reaches idle and busy sessions, not only the waiti
 // WI-1830: with sessions waiting for input the phone overview locked — the
 // cards sat in a non-scrolling band above the only scroller and squeezed it to
 // nothing, so nothing moved until every waiting session had been answered.
-test("Phone Sessions overview scrolls past three waiting cards from a swipe on a preview", TOUCH, async ({ page, context }) => {
-  test.skip(!isPhoneProject(), "The waiting cards are the narrow body's");
-  const waiting = [1, 2, 3].map((n) => ({
-    id: `sess-wait-${n}`, name: `waiting-${n}`, cwd: `/workspace/w${n}`,
-    activity: "waiting-for-input", exit_code: null, scrollback_bytes: 1024,
-    created_at: "2026-08-18T08:00:00Z", activity_changed_at: `2026-08-18T08:00:3${n}Z`,
-  }));
-  const idle = Array.from({ length: 12 }, (_, n) => ({
-    id: `sess-idle-${n}`, name: `idle-${n}`, cwd: "/workspace/vogt",
-    activity: "idle", exit_code: null, scrollback_bytes: 1024,
-    created_at: "2026-08-18T08:00:00Z", activity_changed_at: "2026-08-18T08:00:00Z",
-  }));
-  // A Claude Code permission prompt as a TUI draws it: cursor moves for
-  // spacing and rows, box rules around it, blank padding below.
-  const prompt = [
-    "\x1b[2J\x1b[1;1H\u256d" + "\u2500".repeat(30) + "\u256e",
-    "\x1b[2;1H\u2502\x1b[1CBash\x1b[1Ccommand",
-    "\x1b[3;1H\u2502\x1b[3Cgit\x1b[1Cpush\x1b[1Corigin",
-    "\x1b[4;1H\u2502\x1b[1CDo\x1b[1Cyou\x1b[1Cwant\x1b[1Cto\x1b[1Cproceed?",
-    "\x1b[5;1H\u2502\x1b[1C\u276f\x1b[1C1.\x1b[1CYes",
-    "\x1b[6;1H\u2502\x1b[3C2.\x1b[1CNo",
-    "\x1b[7;1H\u2570" + "\u2500".repeat(30) + "\u256f",
-    "\x1b[8;1H   \x1b[9;1H \u00b7 \u00b7 \u00b7",
-  ].join("");
-  // The fixture base64s a byte string; hand it the prompt's UTF-8 bytes.
-  const promptBytes = String.fromCharCode(...new TextEncoder().encode(prompt));
-  await installFixtures(page, {}, [...waiting, ...idle], undefined, { scrollback: promptBytes });
-  await page.goto("/#/sessions");
-
-  const tails = page.getByTestId("waiting-tail");
-  await expect(tails).toHaveCount(3);
-  // The preview shows the prompt's words, not an empty dotted box.
-  await expect(tails.first()).toContainText("Do you want to proceed?");
-  await expect(tails.first()).toContainText("1. Yes");
-  // And it is short: six lines at most, so cards never fill the screen.
-  expect((await tails.first().textContent())!.split("\n").length).toBeLessThanOrEqual(6);
-
-  const last = page.locator('.session-list a[href="#/t/sess-idle-11"]');
-  await expect(last).toHaveCount(1);
-  await expect(last).not.toBeInViewport();
-
-  const client = await context.newCDPSession(page);
-  for (let swipe = 0; swipe < 20 && !(await last.isVisible() && await last.evaluate((node) => {
-    const rect = node.getBoundingClientRect();
-    const nav = document.querySelector(".phone-bottom-nav")?.getBoundingClientRect();
-    return rect.bottom <= (nav ? nav.top : window.innerHeight) && rect.top >= 0;
-  })); swipe++) {
-    // Start inside a preview while one is on screen; once they have all
-    // scrolled away, mid-list (never on the bottom navigation).
-    const box = await tails.evaluateAll((nodes) => {
-      for (const node of nodes) {
-        const rect = node.getBoundingClientRect();
-        if (rect.top >= 0 && rect.bottom <= window.innerHeight) return { x: rect.x + rect.width / 2, y: rect.bottom - 4 };
-      }
-      return null;
+test(
+  "Phone Sessions overview scrolls past three waiting cards from a swipe on a preview",
+  TOUCH,
+  async ({ page, context }) => {
+    test.skip(!isPhoneProject(), "The waiting cards are the narrow body's");
+    const waiting = [1, 2, 3].map((n) => ({
+      id: `sess-wait-${n}`,
+      name: `waiting-${n}`,
+      cwd: `/workspace/w${n}`,
+      activity: "waiting-for-input",
+      exit_code: null,
+      scrollback_bytes: 1024,
+      created_at: "2026-08-18T08:00:00Z",
+      activity_changed_at: `2026-08-18T08:00:3${n}Z`,
+    }));
+    const idle = Array.from({ length: 12 }, (_, n) => ({
+      id: `sess-idle-${n}`,
+      name: `idle-${n}`,
+      cwd: "/workspace/vogt",
+      activity: "idle",
+      exit_code: null,
+      scrollback_bytes: 1024,
+      created_at: "2026-08-18T08:00:00Z",
+      activity_changed_at: "2026-08-18T08:00:00Z",
+    }));
+    // A Claude Code permission prompt as a TUI draws it: cursor moves for
+    // spacing and rows, box rules around it, blank padding below.
+    const prompt = [
+      "\x1b[2J\x1b[1;1H\u256d" + "\u2500".repeat(30) + "\u256e",
+      "\x1b[2;1H\u2502\x1b[1CBash\x1b[1Ccommand",
+      "\x1b[3;1H\u2502\x1b[3Cgit\x1b[1Cpush\x1b[1Corigin",
+      "\x1b[4;1H\u2502\x1b[1CDo\x1b[1Cyou\x1b[1Cwant\x1b[1Cto\x1b[1Cproceed?",
+      "\x1b[5;1H\u2502\x1b[1C\u276f\x1b[1C1.\x1b[1CYes",
+      "\x1b[6;1H\u2502\x1b[3C2.\x1b[1CNo",
+      "\x1b[7;1H\u2570" + "\u2500".repeat(30) + "\u256f",
+      "\x1b[8;1H   \x1b[9;1H \u00b7 \u00b7 \u00b7",
+    ].join("");
+    // The fixture base64s a byte string; hand it the prompt's UTF-8 bytes.
+    const promptBytes = String.fromCharCode(
+      ...new TextEncoder().encode(prompt),
+    );
+    await installFixtures(page, {}, [...waiting, ...idle], undefined, {
+      scrollback: promptBytes,
     });
-    const x = box?.x ?? 200;
-    const y = box ? Math.max(box.y, 320) : 420;
-    await client.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y }] });
-    for (let dy = 10; dy <= 300; dy += 10) {
-      await client.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x, y: y - dy }] });
+    await page.goto("/#/sessions");
+
+    const tails = page.getByTestId("waiting-tail");
+    await expect(tails).toHaveCount(3);
+    // The preview shows the prompt's words, not an empty dotted box.
+    await expect(tails.first()).toContainText("Do you want to proceed?");
+    await expect(tails.first()).toContainText("1. Yes");
+    // And it is short: six lines at most, so cards never fill the screen.
+    expect(
+      (await tails.first().textContent())!.split("\n").length,
+    ).toBeLessThanOrEqual(6);
+
+    const last = page.locator('.session-list a[href="#/t/sess-idle-11"]');
+    await expect(last).toHaveCount(1);
+    await expect(last).not.toBeInViewport();
+
+    const client = await context.newCDPSession(page);
+    for (
+      let swipe = 0;
+      swipe < 20 &&
+      !(
+        (await last.isVisible()) &&
+        (await last.evaluate((node) => {
+          const rect = node.getBoundingClientRect();
+          const nav = document
+            .querySelector(".phone-bottom-nav")
+            ?.getBoundingClientRect();
+          return (
+            rect.bottom <= (nav ? nav.top : window.innerHeight) && rect.top >= 0
+          );
+        }))
+      );
+      swipe++
+    ) {
+      // Start inside a preview while one is on screen; once they have all
+      // scrolled away, mid-list (never on the bottom navigation).
+      const box = await tails.evaluateAll((nodes) => {
+        for (const node of nodes) {
+          const rect = node.getBoundingClientRect();
+          if (rect.top >= 0 && rect.bottom <= window.innerHeight)
+            return { x: rect.x + rect.width / 2, y: rect.bottom - 4 };
+        }
+        return null;
+      });
+      const x = box?.x ?? 200;
+      const y = box ? Math.max(box.y, 320) : 420;
+      await client.send("Input.dispatchTouchEvent", {
+        type: "touchStart",
+        touchPoints: [{ x, y }],
+      });
+      for (let dy = 10; dy <= 300; dy += 10) {
+        await client.send("Input.dispatchTouchEvent", {
+          type: "touchMove",
+          touchPoints: [{ x, y: y - dy }],
+        });
+      }
+      await client.send("Input.dispatchTouchEvent", {
+        type: "touchEnd",
+        touchPoints: [],
+      });
     }
-    await client.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
-  }
 
-  // No dead band: the scroller runs down to the bottom navigation (bar the
-  // few pixels of safe-area padding `main` keeps), and the last row ends
-  // above the navigation rather than under it.
-  const layout = await page.evaluate(() => {
-    const place = document.querySelector(".sessions-place")!.getBoundingClientRect();
-    const nav = document.querySelector(".phone-bottom-nav")?.getBoundingClientRect();
-    const row = document.querySelector('.session-list a[href="#/t/sess-idle-11"]')!.getBoundingClientRect();
-    const navTop = nav ? nav.top : window.innerHeight;
-    return { band: navTop - place.bottom, rowBottom: row.bottom, navTop };
-  });
-  expect(layout.band, JSON.stringify(layout)).toBeLessThan(16);
-  expect(layout.rowBottom, JSON.stringify(layout)).toBeLessThanOrEqual(layout.navTop);
-});
+    // No dead band: the scroller runs down to the bottom navigation (bar the
+    // few pixels of safe-area padding `main` keeps), and the last row ends
+    // above the navigation rather than under it.
+    const layout = await page.evaluate(() => {
+      const place = document
+        .querySelector(".sessions-place")!
+        .getBoundingClientRect();
+      const nav = document
+        .querySelector(".phone-bottom-nav")
+        ?.getBoundingClientRect();
+      const row = document
+        .querySelector('.session-list a[href="#/t/sess-idle-11"]')!
+        .getBoundingClientRect();
+      const navTop = nav ? nav.top : window.innerHeight;
+      return { band: navTop - place.bottom, rowBottom: row.bottom, navTop };
+    });
+    expect(layout.band, JSON.stringify(layout)).toBeLessThan(16);
+    expect(layout.rowBottom, JSON.stringify(layout)).toBeLessThanOrEqual(
+      layout.navTop,
+    );
+  },
+);
 
-test("Desktop Sessions overview lists the running sessions as links", async ({ page }) => {
-  test.skip(test.info().project.name === "phone", "The overview panel is the desktop body");
-  await installFixtures(page, {}, THREE_SESSIONS);
-  await page.goto("/#/sessions");
+test(
+  "Desktop Sessions overview lists the running sessions as links",
+  mockOnly(LIVE_SKIP.data),
+  async ({ page }) => {
+    test.skip(
+      test.info().project.name === "phone",
+      "The overview panel is the desktop body",
+    );
+    await installFixtures(page, {}, THREE_SESSIONS);
+    await page.goto("/#/sessions");
 
-  const overview = page.locator(".sessions-overview-list");
-  await expect(overview).toBeVisible();
-  // All three, waiting included — there are no attention cards on a desk.
-  await expect(overview.locator('.session-list a[href="#/t/sess-idle"]')).toContainText("idle-shell");
-  await expect(overview.locator('.session-list a[href="#/t/sess-wait"]')).toContainText("needs-answer");
-  await expect(overview.locator('.session-list a[href="#/t/sess-busy"]')).toContainText("running-build");
+    const overview = page.locator(".sessions-overview-list");
+    await expect(overview).toBeVisible();
+    // All three, waiting included — there are no attention cards on a desk.
+    await expect(
+      overview.locator('.session-list a[href="#/t/sess-idle"]'),
+    ).toContainText("idle-shell");
+    await expect(
+      overview.locator('.session-list a[href="#/t/sess-wait"]'),
+    ).toContainText("needs-answer");
+    await expect(
+      overview.locator('.session-list a[href="#/t/sess-busy"]'),
+    ).toContainText("running-build");
 
-  await overview.locator('.session-list a[href="#/t/sess-busy"]').click();
-  await expect(page).toHaveURL(/#\/t\/sess-busy$/);
-});
+    await overview.locator('.session-list a[href="#/t/sess-busy"]').click();
+    await expect(page).toHaveURL(/#\/t\/sess-busy$/);
+  },
+);
 
-test("Desktop Sessions overview points an empty machine at a start", async ({ page }) => {
-  test.skip(test.info().project.name === "phone", "The overview panel is the desktop body");
-  await installFixtures(page, {}, []);
-  await page.goto("/#/sessions");
+test(
+  "Desktop Sessions overview points an empty machine at a start",
+  mockOnly(LIVE_SKIP.data),
+  async ({ page }) => {
+    test.skip(
+      test.info().project.name === "phone",
+      "The overview panel is the desktop body",
+    );
+    await installFixtures(page, {}, []);
+    await page.goto("/#/sessions");
 
-  // With no sessions the body is a call to action, not an empty panel that
-  // never says how to leave it.
-  await expect(page.locator(".sessions-overview")).toBeVisible();
-  await expect(page.getByRole("button", { name: "Start a session" })).toBeVisible();
-});
+    // With no sessions the body is a call to action, not an empty panel that
+    // never says how to leave it.
+    await expect(page.locator(".sessions-overview")).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Start a session" }),
+    ).toBeVisible();
+  },
+);
 
-test("Phone Sessions overview and collapsed terminal header look right", async ({ page }) => {
-  test.skip(test.info().project.name !== "phone", "Phone composition is the narrow client's");
+test("Phone Sessions overview and collapsed terminal header look right", async ({
+  page,
+}) => {
+  test.skip(
+    test.info().project.name !== "phone",
+    "Phone composition is the narrow client's",
+  );
   await installFixtures(page, {}, THREE_SESSIONS);
   await stubTerminalAttach(page);
 
   await page.goto("/#/sessions");
   await expect(page.locator(".session-list").first()).toBeVisible();
-  await expect(page.locator(".sessions-place")).toHaveScreenshot("sessions-phone-overview.png", {
-    // The age beside each state word and the live connection line are wall-clock
-    // and stream-state relative; the composition around them is what is pinned.
-    mask: [
-      page.locator(".session-list .state"),
-      page.locator(".sessions-header-honesty"),
-      page.locator(".session-waiting-age"),
-    ],
-  });
+  await expect(page.locator(".sessions-place")).toHaveScreenshot(
+    "sessions-phone-overview.png",
+    {
+      // The age beside each state word and the live connection line are wall-clock
+      // and stream-state relative; the composition around them is what is pinned.
+      mask: [
+        page.locator(".session-list .state"),
+        page.locator(".sessions-header-honesty"),
+        page.locator(".session-waiting-age"),
+      ],
+    },
+  );
 
   await page.goto("/#/t/sess-idle");
   await expect(page.locator(".terminal-host").first()).toBeVisible();
@@ -3130,258 +4359,403 @@ test("Phone Sessions overview and collapsed terminal header look right", async (
   );
 });
 
-test("Git chooser is addressable and a failed panel recovers in place", async ({ page }) => {
-  await installFixtures(page);
-  let historyUnavailable = true;
-  await page.route("**/api/git/status**", async (route) => route.fulfill({ json: {
-    repo: "vogt", is_repo: true, branch: "main", ahead: 0, behind: 0, entries: [],
-  } }));
-  await page.route("**/api/git/branch**", async (route) =>
-    route.fulfill({ json: { current: "main", all: ["main"] } }),
-  );
-  await page.route("**/api/git/log**", async (route) => {
-    if (historyUnavailable) {
-      return route.fulfill({ status: 503, body: "history service offline" });
-    }
-    return route.fulfill({ json: [{
-      hash: "abc1234", short: "abc1234", author: "Ada",
-      date: "2026-08-18T08:00:00Z", subject: "Recovered in browser",
-    }] });
-  });
-
-  await page.goto("/#/g");
-  await expect(page.getByRole("heading", { name: "Choose a repository" })).toBeVisible();
-  const choice = page.getByRole("button", { name: /Vogt/ });
-  if (test.info().project.name === "phone") {
-    await choice.tap();
-  } else {
-    await choice.focus();
-    await page.keyboard.press("Enter");
-  }
-  await expect(page).toHaveURL(/#\/g\/vogt$/);
-
-  const error = page.getByRole("alert").filter({ hasText: "Commit history" });
-  await expect(error).toContainText("history service offline");
-  historyUnavailable = false;
-  await error.getByRole("button", { name: "Retry history" }).click();
-  await expect(page.getByText("Recovered in browser")).toBeVisible();
-
-  await page.goBack();
-  await expect(page.getByRole("heading", { name: "Choose a repository" })).toBeVisible();
-  await page.goForward();
-  await expect(page).toHaveURL(/#\/g\/vogt$/);
-  await page.reload();
-  await expect(page.getByText("Recovered in browser")).toBeVisible();
-});
-
-test("terminal split commits atomically, nests, closes and survives reload", async ({ page }) => {
-  test.skip(test.info().project.name === "phone", "Split geometry is validated in the desktop browser project");
-  await installFixtures(page, {}, [liveSession]);
-  const resizeMessages: unknown[] = [];
-  await page.routeWebSocket(/\/api\/sessions\/[^/]+\/attach$/, (socket) => {
-    socket.onMessage((message) => {
-      if (typeof message !== "string") return;
-      const parsed = JSON.parse(message) as { type?: string };
-      if (parsed.type === "resize") resizeMessages.push(parsed);
+test(
+  "Git chooser is addressable and a failed panel recovers in place",
+  mockOnly(LIVE_SKIP.data),
+  async ({ page }) => {
+    await installFixtures(page);
+    let historyUnavailable = true;
+    await page.route("**/api/git/status**", async (route) =>
+      route.fulfill({
+        json: {
+          repo: "vogt",
+          is_repo: true,
+          branch: "main",
+          ahead: 0,
+          behind: 0,
+          entries: [],
+        },
+      }),
+    );
+    await page.route("**/api/git/branch**", async (route) =>
+      route.fulfill({ json: { current: "main", all: ["main"] } }),
+    );
+    await page.route("**/api/git/log**", async (route) => {
+      if (historyUnavailable) {
+        return route.fulfill({ status: 503, body: "history service offline" });
+      }
+      return route.fulfill({
+        json: [
+          {
+            hash: "abc1234",
+            short: "abc1234",
+            author: "Ada",
+            date: "2026-08-18T08:00:00Z",
+            subject: "Recovered in browser",
+          },
+        ],
+      });
     });
-    socket.send(JSON.stringify({ type: "snapshot-start", scrollback_bytes: 0, scrollback_pos: 0 }));
-    socket.send(JSON.stringify({ type: "snapshot-done" }));
-  });
-  await page.goto("/#/t/browser-session");
-  await expect(page.locator(".terminal-pane")).toHaveCount(1);
 
-  await page.getByRole("button", { name: "Split right" }).click();
-  await expect(page.locator(".terminal-pane")).toHaveCount(2);
-  await page.getByRole("button", { name: "Split down" }).click();
-  await expect(page.locator(".terminal-pane")).toHaveCount(3);
-  await expect(page.locator(".terminal-split.row .terminal-split.column"))
-    .toHaveCount(1);
-  await expect(page.locator(".terminal-pane.active")).toHaveCount(1);
-
-  resizeMessages.length = 0;
-  await page.setViewportSize({ width: 1100, height: 760 });
-  await expect.poll(() => resizeMessages.length).toBeGreaterThanOrEqual(3);
-
-  await page.reload();
-  await expect(page.locator(".terminal-pane")).toHaveCount(3);
-  // "Close pane" detaches the active pane now: the session keeps running,
-  // so there is no kill confirmation and the layout simply drops a pane.
-  await page.getByRole("button", { name: "Close pane" }).click();
-  await expect(page.locator(".terminal-pane")).toHaveCount(2);
-});
-
-test("a split composes an existing session, and closing a pane detaches it without killing", async ({ page }) => {
-  test.skip(test.info().project.name === "phone", "Split geometry is validated in the desktop browser project");
-  const besideSession = {
-    ...liveSession,
-    id: "beside-session",
-    name: "beside-session",
-    cwd: "/workspace/other",
-  };
-  const fixture = await installFixtures(page, {}, [liveSession, besideSession]);
-  await page.routeWebSocket(/\/api\/sessions\/[^/]+\/attach$/, (socket) => {
-    socket.onMessage(() => undefined);
-    socket.send(JSON.stringify({ type: "snapshot-start", scrollback_bytes: 0, scrollback_pos: 0 }));
-    socket.send(JSON.stringify({ type: "snapshot-done" }));
-  });
-
-  await page.goto("/#/t/browser-session");
-  await expect(page.locator(".terminal-pane")).toHaveCount(1);
-
-  // "Split right" offers a picker because a session that is not on screen
-  // exists; choosing it composes that existing session into the new pane.
-  await page.getByRole("button", { name: "Split right" }).click();
-  await page.getByRole("dialog").getByRole("button", { name: /beside-session/ }).click();
-  await expect(page.locator(".terminal-pane")).toHaveCount(2);
-  // The whole point of "Split with…": composing an existing session spawns nothing.
-  expect(fixture.createdSessions()).toBe(0);
-
-  // "Close pane" detaches the active pane: the layout drops back to one pane
-  // and the session is left running — no kill, so no DELETE ever fires.
-  await page.getByRole("button", { name: "Close pane" }).click();
-  await expect(page.locator(".terminal-pane")).toHaveCount(1);
-  expect(fixture.sessionDeletes()).toBe(0);
-});
-
-test("terminal split retries at the default cwd when the source cwd is outside the workspace", async ({ page }) => {
-  test.skip(test.info().project.name === "phone", "Split fallback is validated in the desktop browser project");
-  await installFixtures(page, {}, [liveSession]);
-  await page.routeWebSocket(/\/api\/sessions\/[^/]+\/attach$/, (socket) => {
-    socket.onMessage(() => undefined);
-    socket.send(JSON.stringify({ type: "snapshot-start", scrollback_bytes: 0, scrollback_pos: 0 }));
-    socket.send(JSON.stringify({ type: "snapshot-done" }));
-  });
-
-  const requests: Record<string, unknown>[] = [];
-  await page.route(/\/api\/sessions(\?.*)?$/, async (route) => {
-    if (route.request().method() !== "POST") return route.fallback();
-    const body = route.request().postDataJSON() as Record<string, unknown>;
-    requests.push(body);
-    if (body.cwd) {
-      return route.fulfill({ status: 400, body: "cwd escapes workspace_root" });
+    await page.goto("/#/g");
+    await expect(
+      page.getByRole("heading", { name: "Choose a repository" }),
+    ).toBeVisible();
+    const choice = page.getByRole("button", { name: /Vogt/ });
+    if (test.info().project.name === "phone") {
+      await choice.tap();
+    } else {
+      await choice.focus();
+      await page.keyboard.press("Enter");
     }
-    return route.fulfill({ json: {
+    await expect(page).toHaveURL(/#\/g\/vogt$/);
+
+    const error = page.getByRole("alert").filter({ hasText: "Commit history" });
+    await expect(error).toContainText("history service offline");
+    historyUnavailable = false;
+    await error.getByRole("button", { name: "Retry history" }).click();
+    await expect(page.getByText("Recovered in browser")).toBeVisible();
+
+    await page.goBack();
+    await expect(
+      page.getByRole("heading", { name: "Choose a repository" }),
+    ).toBeVisible();
+    await page.goForward();
+    await expect(page).toHaveURL(/#\/g\/vogt$/);
+    await page.reload();
+    await expect(page.getByText("Recovered in browser")).toBeVisible();
+  },
+);
+
+test(
+  "terminal split commits atomically, nests, closes and survives reload",
+  mockOnly(LIVE_SKIP.data),
+  async ({ page }) => {
+    test.skip(
+      test.info().project.name === "phone",
+      "Split geometry is validated in the desktop browser project",
+    );
+    await installFixtures(page, {}, [liveSession]);
+    const resizeMessages: unknown[] = [];
+    await page.routeWebSocket(/\/api\/sessions\/[^/]+\/attach$/, (socket) => {
+      socket.onMessage((message) => {
+        if (typeof message !== "string") return;
+        const parsed = JSON.parse(message) as { type?: string };
+        if (parsed.type === "resize") resizeMessages.push(parsed);
+      });
+      socket.send(
+        JSON.stringify({
+          type: "snapshot-start",
+          scrollback_bytes: 0,
+          scrollback_pos: 0,
+        }),
+      );
+      socket.send(JSON.stringify({ type: "snapshot-done" }));
+    });
+    await page.goto("/#/t/browser-session");
+    await expect(page.locator(".terminal-pane")).toHaveCount(1);
+
+    await page.getByRole("button", { name: "Split right" }).click();
+    await expect(page.locator(".terminal-pane")).toHaveCount(2);
+    await page.getByRole("button", { name: "Split down" }).click();
+    await expect(page.locator(".terminal-pane")).toHaveCount(3);
+    await expect(
+      page.locator(".terminal-split.row .terminal-split.column"),
+    ).toHaveCount(1);
+    await expect(page.locator(".terminal-pane.active")).toHaveCount(1);
+
+    resizeMessages.length = 0;
+    await page.setViewportSize({ width: 1100, height: 760 });
+    await expect.poll(() => resizeMessages.length).toBeGreaterThanOrEqual(3);
+
+    await page.reload();
+    await expect(page.locator(".terminal-pane")).toHaveCount(3);
+    // "Close pane" detaches the active pane now: the session keeps running,
+    // so there is no kill confirmation and the layout simply drops a pane.
+    await page.getByRole("button", { name: "Close pane" }).click();
+    await expect(page.locator(".terminal-pane")).toHaveCount(2);
+  },
+);
+
+test(
+  "a split composes an existing session, and closing a pane detaches it without killing",
+  mockOnly(LIVE_SKIP.data),
+  async ({ page }) => {
+    test.skip(
+      test.info().project.name === "phone",
+      "Split geometry is validated in the desktop browser project",
+    );
+    const besideSession = {
       ...liveSession,
-      id: "fallback-split",
-      name: String(body.name),
-    } });
-  });
+      id: "beside-session",
+      name: "beside-session",
+      cwd: "/workspace/other",
+    };
+    const fixture = await installFixtures(page, {}, [
+      liveSession,
+      besideSession,
+    ]);
+    await page.routeWebSocket(/\/api\/sessions\/[^/]+\/attach$/, (socket) => {
+      socket.onMessage(() => undefined);
+      socket.send(
+        JSON.stringify({
+          type: "snapshot-start",
+          scrollback_bytes: 0,
+          scrollback_pos: 0,
+        }),
+      );
+      socket.send(JSON.stringify({ type: "snapshot-done" }));
+    });
 
-  await page.goto("/#/t/browser-session");
-  await page.getByRole("button", { name: "Split right" }).click();
-  await expect(page.locator(".terminal-pane")).toHaveCount(2);
-  await expect(page.getByText("Split opened at the default cwd")).toBeVisible();
-  expect(requests).toHaveLength(2);
-  expect(requests[0]?.cwd).toBe("/workspace/vogt");
-  expect(requests[1]).not.toHaveProperty("cwd");
-});
+    await page.goto("/#/t/browser-session");
+    await expect(page.locator(".terminal-pane")).toHaveCount(1);
 
-test("terminal split deletes the created session if its pane disappears in flight", async ({ page }) => {
-  test.skip(test.info().project.name === "phone", "Split rollback is validated in the desktop browser project");
-  await installFixtures(page, {}, [liveSession]);
-  await page.routeWebSocket(/\/api\/sessions\/[^/]+\/attach$/, (socket) => {
-    socket.onMessage(() => undefined);
-    socket.send(JSON.stringify({ type: "snapshot-start", scrollback_bytes: 0, scrollback_pos: 0 }));
-    socket.send(JSON.stringify({ type: "snapshot-done" }));
-  });
+    // "Split right" offers a picker because a session that is not on screen
+    // exists; choosing it composes that existing session into the new pane.
+    await page.getByRole("button", { name: "Split right" }).click();
+    await page
+      .getByRole("dialog")
+      .getByRole("button", { name: /beside-session/ })
+      .click();
+    await expect(page.locator(".terminal-pane")).toHaveCount(2);
+    // The whole point of "Split with…": composing an existing session spawns nothing.
+    expect(fixture.createdSessions()).toBe(0);
 
-  let releaseCreate: (() => void) | null = null;
-  let deletedId: string | null = null;
-  await page.route(/\/api\/sessions(\?.*)?$/, async (route) => {
-    if (route.request().method() !== "POST") return route.fallback();
-    await new Promise<void>((resolve) => { releaseCreate = resolve; });
-    return route.fulfill({ json: {
-      ...liveSession,
-      id: "orphan-candidate",
-      name: "orphan-candidate",
-    } });
-  });
-  await page.route("**/api/sessions/orphan-candidate", async (route) => {
-    if (route.request().method() !== "DELETE") return route.fallback();
-    deletedId = "orphan-candidate";
-    return route.fulfill({ json: { ok: true } });
-  });
+    // "Close pane" detaches the active pane: the layout drops back to one pane
+    // and the session is left running — no kill, so no DELETE ever fires.
+    await page.getByRole("button", { name: "Close pane" }).click();
+    await expect(page.locator(".terminal-pane")).toHaveCount(1);
+    expect(fixture.sessionDeletes()).toBe(0);
+  },
+);
 
-  await page.goto("/#/t/browser-session");
-  await page.getByRole("button", { name: "Split right" }).click();
-  await page.getByTitle("Kill & remove").click();
-  await page.getByRole("dialog").getByRole("button", { name: "Confirm" }).click();
-  await expect(page.getByRole("heading", { name: "Session not found" })).toBeVisible();
-  expect(releaseCreate).not.toBeNull();
-  releaseCreate?.();
-  await expect.poll(() => deletedId).toBe("orphan-candidate");
-});
+test(
+  "terminal split retries at the default cwd when the source cwd is outside the workspace",
+  mockOnly(LIVE_SKIP.data),
+  async ({ page }) => {
+    test.skip(
+      test.info().project.name === "phone",
+      "Split fallback is validated in the desktop browser project",
+    );
+    await installFixtures(page, {}, [liveSession]);
+    await page.routeWebSocket(/\/api\/sessions\/[^/]+\/attach$/, (socket) => {
+      socket.onMessage(() => undefined);
+      socket.send(
+        JSON.stringify({
+          type: "snapshot-start",
+          scrollback_bytes: 0,
+          scrollback_pos: 0,
+        }),
+      );
+      socket.send(JSON.stringify({ type: "snapshot-done" }));
+    });
 
-test("terminal leaves browser zoom gestures alone and offers explicit font controls", async ({ page }) => {
-  await installFixtures(page, {}, [liveSession]);
-  await page.routeWebSocket(/\/api\/sessions\/[^/]+\/attach$/, (socket) => {
-    socket.onMessage(() => undefined);
-    socket.send(JSON.stringify({ type: "snapshot-start", scrollback_bytes: 0, scrollback_pos: 0 }));
-    socket.send(JSON.stringify({ type: "snapshot-done" }));
-  });
-  await page.goto("/#/t/browser-session");
-  const host = page.locator(".terminal-host");
-  await expect(host).toBeVisible();
+    const requests: Record<string, unknown>[] = [];
+    await page.route(/\/api\/sessions(\?.*)?$/, async (route) => {
+      if (route.request().method() !== "POST") return route.fallback();
+      const body = route.request().postDataJSON() as Record<string, unknown>;
+      requests.push(body);
+      if (body.cwd) {
+        return route.fulfill({
+          status: 400,
+          body: "cwd escapes workspace_root",
+        });
+      }
+      return route.fulfill({
+        json: {
+          ...liveSession,
+          id: "fallback-split",
+          name: String(body.name),
+        },
+      });
+    });
 
-  const cancelled = await host.evaluate((element) =>
-    !element.dispatchEvent(new WheelEvent("wheel", {
-      bubbles: true,
-      cancelable: true,
-      ctrlKey: true,
-      deltaY: -120,
-    })),
-  );
-  expect(cancelled).toBe(false);
-  expect(await page.evaluate(() => localStorage.getItem("vogt.terminalFontSize.v1")))
-    .toBeNull();
+    await page.goto("/#/t/browser-session");
+    await page.getByRole("button", { name: "Split right" }).click();
+    await expect(page.locator(".terminal-pane")).toHaveCount(2);
+    await expect(
+      page.getByText("Split opened at the default cwd"),
+    ).toBeVisible();
+    expect(requests).toHaveLength(2);
+    expect(requests[0]?.cwd).toBe("/workspace/vogt");
+    expect(requests[1]).not.toHaveProperty("cwd");
+  },
+);
 
-  await page.getByRole("button", { name: "Increase terminal font size" }).click();
-  expect(await page.evaluate(() => localStorage.getItem("vogt.terminalFontSize.v1")))
-    .toBe("14");
+test(
+  "terminal split deletes the created session if its pane disappears in flight",
+  mockOnly(LIVE_SKIP.data),
+  async ({ page }) => {
+    test.skip(
+      test.info().project.name === "phone",
+      "Split rollback is validated in the desktop browser project",
+    );
+    await installFixtures(page, {}, [liveSession]);
+    await page.routeWebSocket(/\/api\/sessions\/[^/]+\/attach$/, (socket) => {
+      socket.onMessage(() => undefined);
+      socket.send(
+        JSON.stringify({
+          type: "snapshot-start",
+          scrollback_bytes: 0,
+          scrollback_pos: 0,
+        }),
+      );
+      socket.send(JSON.stringify({ type: "snapshot-done" }));
+    });
 
-  for (const zoom of ["80%", "100%", "125%", "150%", "200%"] as const) {
-    await page.locator("html").evaluate((element, nextZoom) => {
-      element.style.zoom = nextZoom;
-    }, zoom);
-    await expect(page.getByRole("navigation", { name: "Session tools" })).toBeVisible();
+    let releaseCreate: (() => void) | null = null;
+    let deletedId: string | null = null;
+    await page.route(/\/api\/sessions(\?.*)?$/, async (route) => {
+      if (route.request().method() !== "POST") return route.fallback();
+      await new Promise<void>((resolve) => {
+        releaseCreate = resolve;
+      });
+      return route.fulfill({
+        json: {
+          ...liveSession,
+          id: "orphan-candidate",
+          name: "orphan-candidate",
+        },
+      });
+    });
+    await page.route("**/api/sessions/orphan-candidate", async (route) => {
+      if (route.request().method() !== "DELETE") return route.fallback();
+      deletedId = "orphan-candidate";
+      return route.fulfill({ json: { ok: true } });
+    });
+
+    await page.goto("/#/t/browser-session");
+    await page.getByRole("button", { name: "Split right" }).click();
+    await page.getByTitle("Kill & remove").click();
+    await page
+      .getByRole("dialog")
+      .getByRole("button", { name: "Confirm" })
+      .click();
+    await expect(
+      page.getByRole("heading", { name: "Session not found" }),
+    ).toBeVisible();
+    expect(releaseCreate).not.toBeNull();
+    releaseCreate?.();
+    await expect.poll(() => deletedId).toBe("orphan-candidate");
+  },
+);
+
+test(
+  "terminal leaves browser zoom gestures alone and offers explicit font controls",
+  mockOnly(LIVE_SKIP.data),
+  async ({ page }) => {
+    await installFixtures(page, {}, [liveSession]);
+    await page.routeWebSocket(/\/api\/sessions\/[^/]+\/attach$/, (socket) => {
+      socket.onMessage(() => undefined);
+      socket.send(
+        JSON.stringify({
+          type: "snapshot-start",
+          scrollback_bytes: 0,
+          scrollback_pos: 0,
+        }),
+      );
+      socket.send(JSON.stringify({ type: "snapshot-done" }));
+    });
+    await page.goto("/#/t/browser-session");
+    const host = page.locator(".terminal-host");
     await expect(host).toBeVisible();
-  }
-});
 
-test("terminal find bar searches the live buffer and navigates matches", async ({ page }) => {
-  test.skip(test.info().project.name === "phone", "Find is exercised in the desktop browser project");
-  await installFixtures(page, {}, [liveSession]);
-  await page.routeWebSocket(/\/api\/sessions\/[^/]+\/attach$/, (socket) => {
-    socket.onMessage(() => undefined);
-    socket.send(JSON.stringify({ type: "snapshot-start", scrollback_bytes: 0, scrollback_pos: 0 }));
-    // Two lines carrying a unique token, so a search has something to find and
-    // more than one match to step through.
-    socket.send(Buffer.from("FINDTHISLINE alpha\r\nFINDTHISLINE beta\r\n"));
-    socket.send(JSON.stringify({ type: "snapshot-done" }));
-  });
-  await page.goto("/#/t/browser-session");
-  await expect(page.locator(".terminal-host")).toBeVisible();
+    const cancelled = await host.evaluate(
+      (element) =>
+        !element.dispatchEvent(
+          new WheelEvent("wheel", {
+            bubbles: true,
+            cancelable: true,
+            ctrlKey: true,
+            deltaY: -120,
+          }),
+        ),
+    );
+    expect(cancelled).toBe(false);
+    expect(
+      await page.evaluate(() =>
+        localStorage.getItem("vogt.terminalFontSize.v1"),
+      ),
+    ).toBeNull();
 
-  await page.getByRole("button", { name: "Find in terminal" }).click();
-  const input = page.getByRole("textbox", { name: "Find in terminal" });
-  await expect(input).toBeFocused();
-  await input.fill("FINDTHISLINE");
+    await page
+      .getByRole("button", { name: "Increase terminal font size" })
+      .click();
+    expect(
+      await page.evaluate(() =>
+        localStorage.getItem("vogt.terminalFontSize.v1"),
+      ),
+    ).toBe("14");
 
-  const count = page.locator(".terminal-find-count");
-  // The xterm write queue drains on animation frames, so drive Next until the
-  // buffer has been indexed and both matches are reported.
-  await expect.poll(async () => {
-    await page.getByRole("button", { name: "Next match" }).click();
-    return (await count.textContent()) ?? "";
-  }, { timeout: 5000 }).toContain("of 2");
+    for (const zoom of ["80%", "100%", "125%", "150%", "200%"] as const) {
+      await page.locator("html").evaluate((element, nextZoom) => {
+        element.style.zoom = nextZoom;
+      }, zoom);
+      await expect(
+        page.getByRole("navigation", { name: "Session tools" }),
+      ).toBeVisible();
+      await expect(host).toBeVisible();
+    }
+  },
+);
 
-  await input.focus();
-  await page.keyboard.press("Escape");
-  await expect(page.locator(".terminal-find-bar")).toHaveCount(0);
-});
+test(
+  "terminal find bar searches the live buffer and navigates matches",
+  mockOnly(LIVE_SKIP.data),
+  async ({ page }) => {
+    test.skip(
+      test.info().project.name === "phone",
+      "Find is exercised in the desktop browser project",
+    );
+    await installFixtures(page, {}, [liveSession]);
+    await page.routeWebSocket(/\/api\/sessions\/[^/]+\/attach$/, (socket) => {
+      socket.onMessage(() => undefined);
+      socket.send(
+        JSON.stringify({
+          type: "snapshot-start",
+          scrollback_bytes: 0,
+          scrollback_pos: 0,
+        }),
+      );
+      // Two lines carrying a unique token, so a search has something to find and
+      // more than one match to step through.
+      socket.send(Buffer.from("FINDTHISLINE alpha\r\nFINDTHISLINE beta\r\n"));
+      socket.send(JSON.stringify({ type: "snapshot-done" }));
+    });
+    await page.goto("/#/t/browser-session");
+    await expect(page.locator(".terminal-host")).toBeVisible();
 
-test("Phone terminal folds pane actions into a ··· menu, keeps errors visible, and never scrolls sideways", async ({ page }) => {
-  test.skip(test.info().project.name !== "phone", "The overflow menu is the narrow toolbar's");
+    await page.getByRole("button", { name: "Find in terminal" }).click();
+    const input = page.getByRole("textbox", { name: "Find in terminal" });
+    await expect(input).toBeFocused();
+    await input.fill("FINDTHISLINE");
+
+    const count = page.locator(".terminal-find-count");
+    // The xterm write queue drains on animation frames, so drive Next until the
+    // buffer has been indexed and both matches are reported.
+    await expect
+      .poll(
+        async () => {
+          await page.getByRole("button", { name: "Next match" }).click();
+          return (await count.textContent()) ?? "";
+        },
+        { timeout: 5000 },
+      )
+      .toContain("of 2");
+
+    await input.focus();
+    await page.keyboard.press("Escape");
+    await expect(page.locator(".terminal-find-bar")).toHaveCount(0);
+  },
+);
+
+test("Phone terminal folds pane actions into a ··· menu, keeps errors visible, and never scrolls sideways", async ({
+  page,
+}) => {
+  test.skip(
+    test.info().project.name !== "phone",
+    "The overflow menu is the narrow toolbar's",
+  );
   await installFixtures(page, {}, [liveSession]);
   await stubTerminalAttach(page);
   // A split that fails, so the error span has something to show — the point of
@@ -3395,18 +4769,26 @@ test("Phone terminal folds pane actions into a ··· menu, keeps errors visible
 
   // The pane-management buttons are behind the ··· menu, not inline: the
   // toolbar carries no hidden horizontal scroll strip.
-  const overflowToggle = page.getByRole("button", { name: "More terminal actions" });
+  const overflowToggle = page.getByRole("button", {
+    name: "More terminal actions",
+  });
   await expect(overflowToggle).toBeVisible();
-  await expect(page.getByRole("button", { name: "Broadcast off" })).toHaveCount(0);
-  const fit = await page.locator(".terminal-workspace-toolbar").evaluate((el) => ({
-    scroll: el.scrollWidth,
-    client: el.clientWidth,
-  }));
+  await expect(page.getByRole("button", { name: "Broadcast off" })).toHaveCount(
+    0,
+  );
+  const fit = await page
+    .locator(".terminal-workspace-toolbar")
+    .evaluate((el) => ({
+      scroll: el.scrollWidth,
+      client: el.clientWidth,
+    }));
   expect(fit.scroll, JSON.stringify(fit)).toBeLessThanOrEqual(fit.client + 1);
 
   // Open the menu; the collapsed actions live here.
   await overflowToggle.click();
-  await expect(page.getByRole("button", { name: "Broadcast off" })).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Broadcast off" }),
+  ).toBeVisible();
   await expect(page.getByRole("button", { name: "Split right" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Close pane" })).toBeVisible();
 
@@ -3418,12 +4800,23 @@ test("Phone terminal folds pane actions into a ··· menu, keeps errors visible
   await expect(error).toContainText("split failed");
 });
 
-test("Phone terminal surfaces a Copy chip over a live selection", async ({ page }) => {
-  test.skip(test.info().project.name !== "phone", "The Copy chip is the coarse-pointer copy affordance");
+test("Phone terminal surfaces a Copy chip over a live selection", async ({
+  page,
+}) => {
+  test.skip(
+    test.info().project.name !== "phone",
+    "The Copy chip is the coarse-pointer copy affordance",
+  );
   await installFixtures(page, {}, [liveSession]);
   await page.routeWebSocket(/\/api\/sessions\/[^/]+\/attach$/, (socket) => {
     socket.onMessage(() => undefined);
-    socket.send(JSON.stringify({ type: "snapshot-start", scrollback_bytes: 0, scrollback_pos: 0 }));
+    socket.send(
+      JSON.stringify({
+        type: "snapshot-start",
+        scrollback_bytes: 0,
+        scrollback_pos: 0,
+      }),
+    );
     // Selectable content on the first row for the drag to land on.
     socket.send(Buffer.from("SELECTME-ALPHA SELECTME-BETA SELECTME-GAMMA\r\n"));
     socket.send(JSON.stringify({ type: "snapshot-done" }));
@@ -3439,48 +4832,68 @@ test("Phone terminal surfaces a Copy chip over a live selection", async ({ page 
   expect(box).not.toBeNull();
   // Drag across the first row to select text. xterm's write queue drains on
   // animation frames, so retry the drag until the selection registers.
-  await expect.poll(async () => {
-    await page.mouse.move(box!.x + 8, box!.y + 8);
-    await page.mouse.down();
-    await page.mouse.move(box!.x + 160, box!.y + 8, { steps: 6 });
-    await page.mouse.up();
-    return page.locator(".terminal-copy-chip").count();
-  }, { timeout: 6000 }).toBeGreaterThan(0);
+  await expect
+    .poll(
+      async () => {
+        await page.mouse.move(box!.x + 8, box!.y + 8);
+        await page.mouse.down();
+        await page.mouse.move(box!.x + 160, box!.y + 8, { steps: 6 });
+        await page.mouse.up();
+        return page.locator(".terminal-copy-chip").count();
+      },
+      { timeout: 6000 },
+    )
+    .toBeGreaterThan(0);
 
   const chip = page.locator(".terminal-copy-chip");
   await expect(chip).toBeVisible();
   await expect(chip).toHaveText("Copy");
 });
 
-test("exited session shows a banner and Remove skips the kill confirm", async ({ page }) => {
-  const exitedSession = {
-    ...liveSession,
-    id: "exited-session",
-    name: "exited-session",
-    exit_code: 137,
-  };
-  await installFixtures(page, {}, [exitedSession]);
-  await page.routeWebSocket(/\/api\/sessions\/[^/]+\/attach$/, (socket) => {
-    socket.onMessage(() => undefined);
-    socket.send(JSON.stringify({ type: "snapshot-start", scrollback_bytes: 0, scrollback_pos: 0 }));
-    socket.send(JSON.stringify({ type: "snapshot-done" }));
-  });
-  await page.goto("/#/t/exited-session");
+test(
+  "exited session shows a banner and Remove skips the kill confirm",
+  mockOnly(LIVE_SKIP.data),
+  async ({ page }) => {
+    const exitedSession = {
+      ...liveSession,
+      id: "exited-session",
+      name: "exited-session",
+      exit_code: 137,
+    };
+    await installFixtures(page, {}, [exitedSession]);
+    await page.routeWebSocket(/\/api\/sessions\/[^/]+\/attach$/, (socket) => {
+      socket.onMessage(() => undefined);
+      socket.send(
+        JSON.stringify({
+          type: "snapshot-start",
+          scrollback_bytes: 0,
+          scrollback_pos: 0,
+        }),
+      );
+      socket.send(JSON.stringify({ type: "snapshot-done" }));
+    });
+    await page.goto("/#/t/exited-session");
 
-  const banner = page.locator(".terminal-exited-banner");
-  await expect(banner).toContainText("Exited (code 137)");
+    const banner = page.locator(".terminal-exited-banner");
+    await expect(banner).toContainText("Exited (code 137)");
 
-  await banner.getByRole("button", { name: "Remove" }).click();
-  // Removing an exited session is not destructive, so no confirm dialog appears
-  // and the session is gone: the workspace drops to its session-unavailable
-  // state and the exited banner with it.
-  await expect(page.getByText(/no longer available/i)).toBeVisible();
-  await expect(page.getByRole("button", { name: "Confirm" })).toHaveCount(0);
-  await expect(banner).toHaveCount(0);
-});
+    await banner.getByRole("button", { name: "Remove" }).click();
+    // Removing an exited session is not destructive, so no confirm dialog appears
+    // and the session is gone: the workspace drops to its session-unavailable
+    // state and the exited banner with it.
+    await expect(page.getByText(/no longer available/i)).toBeVisible();
+    await expect(page.getByRole("button", { name: "Confirm" })).toHaveCount(0);
+    await expect(banner).toHaveCount(0);
+  },
+);
 
-test("dirty editor requests browser exit confirmation only until save", async ({ page }) => {
-  test.skip(test.info().project.name === "phone", "Monaco lifecycle is validated in the desktop browser project");
+test("dirty editor requests browser exit confirmation only until save", async ({
+  page,
+}) => {
+  test.skip(
+    test.info().project.name === "phone",
+    "Monaco lifecycle is validated in the desktop browser project",
+  );
   await installFixtures(page);
   let saved = "export const answer = 42;\n";
   await page.route("**/api/files**", async (route) => {
@@ -3488,13 +4901,15 @@ test("dirty editor requests browser exit confirmation only until save", async ({
       saved = (route.request().postDataJSON() as { content: string }).content;
       return route.fulfill({ json: { ok: true, bytes: saved.length } });
     }
-    return route.fulfill({ json: {
-      path: "src/an-identifiable-long-filename.tsx",
-      size: saved.length,
-      content: saved,
-      content_base64: null,
-      is_binary: false,
-    } });
+    return route.fulfill({
+      json: {
+        path: "src/an-identifiable-long-filename.tsx",
+        size: saved.length,
+        content: saved,
+        content_base64: null,
+        is_binary: false,
+      },
+    });
   });
   await page.route("**/api/history/sessions**", async (route) =>
     route.fulfill({ json: [] }),
@@ -3506,11 +4921,13 @@ test("dirty editor requests browser exit confirmation only until save", async ({
   await page.keyboard.press("Control+A");
   await page.keyboard.type("export const answer = 43;");
 
-  expect(await page.evaluate(() => {
-    const event = new Event("beforeunload", { cancelable: true });
-    window.dispatchEvent(event);
-    return event.defaultPrevented;
-  })).toBe(true);
+  expect(
+    await page.evaluate(() => {
+      const event = new Event("beforeunload", { cancelable: true });
+      window.dispatchEvent(event);
+      return event.defaultPrevented;
+    }),
+  ).toBe(true);
 
   await page.goto("/#/history");
   await expect(page.locator(".monaco-editor")).toHaveCount(0);
@@ -3519,90 +4936,138 @@ test("dirty editor requests browser exit confirmation only until save", async ({
 
   await page.getByRole("button", { name: "Save", exact: true }).click();
   await expect.poll(() => saved).toContain("43");
-  await expect.poll(() => page.evaluate(() => {
-    const event = new Event("beforeunload", { cancelable: true });
-    window.dispatchEvent(event);
-    return event.defaultPrevented;
-  })).toBe(false);
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const event = new Event("beforeunload", { cancelable: true });
+        window.dispatchEvent(event);
+        return event.defaultPrevented;
+      }),
+    )
+    .toBe(false);
 });
 
-test("Editor surfaces an on-disk change with Overwrite / Reload", async ({ page }) => {
-  test.skip(test.info().project.name === "phone", "Monaco lifecycle is validated in the desktop browser project");
-  const editFile = "src/an-identifiable-long-filename.tsx";
-  const fixture = await installFixtures(page, {}, [], undefined, {
-    files: { [editFile]: "export const answer = 42;\n" },
-  });
-  await page.goto("/#/e/src%2Fan-identifiable-long-filename.tsx");
-  const editor = page.locator(".monaco-editor");
-  await expect(editor).toBeVisible();
-  // Make an edit so the tab is dirty and Save is live.
-  await editor.click();
-  await page.keyboard.type(" // mine");
-  const save = page.getByRole("button", { name: "Save", exact: true });
-  await expect(save).toBeEnabled();
+test(
+  "Editor surfaces an on-disk change with Overwrite / Reload",
+  mockOnly(LIVE_SKIP.data),
+  async ({ page }) => {
+    test.skip(
+      test.info().project.name === "phone",
+      "Monaco lifecycle is validated in the desktop browser project",
+    );
+    const editFile = "src/an-identifiable-long-filename.tsx";
+    const fixture = await installFixtures(page, {}, [], undefined, {
+      files: { [editFile]: "export const answer = 42;\n" },
+    });
+    await page.goto("/#/e/src%2Fan-identifiable-long-filename.tsx");
+    const editor = page.locator(".monaco-editor");
+    await expect(editor).toBeVisible();
+    // Make an edit so the tab is dirty and Save is live.
+    await editor.click();
+    await page.keyboard.type(" // mine");
+    const save = page.getByRole("button", { name: "Save", exact: true });
+    await expect(save).toBeEnabled();
 
-  // Someone changes the file on disk behind the editor's back.
-  fixture.externalChange(editFile, "export const answer = 99;\n");
-  await save.click();
+    // Someone changes the file on disk behind the editor's back.
+    fixture.externalChange(editFile, "export const answer = 99;\n");
+    await save.click();
 
-  // The save is refused and the choice is surfaced inline, not applied silently.
-  const banner = page.getByRole("alert").filter({ hasText: "File changed on disk" });
-  await expect(banner).toBeVisible();
-  await expect(banner.getByRole("button", { name: "Overwrite" })).toBeVisible();
-  await expect(banner.getByRole("button", { name: "Reload" })).toBeVisible();
+    // The save is refused and the choice is surfaced inline, not applied silently.
+    const banner = page
+      .getByRole("alert")
+      .filter({ hasText: "File changed on disk" });
+    await expect(banner).toBeVisible();
+    await expect(
+      banner.getByRole("button", { name: "Overwrite" }),
+    ).toBeVisible();
+    await expect(banner.getByRole("button", { name: "Reload" })).toBeVisible();
 
-  // Reload takes the disk's newer content; the tab is clean again.
-  await banner.getByRole("button", { name: "Reload" }).click();
-  await expect(page.locator(".monaco-editor .view-lines")).toContainText("99");
-  await expect(save).toBeDisabled();
-});
+    // Reload takes the disk's newer content; the tab is clean again.
+    await banner.getByRole("button", { name: "Reload" }).click();
+    await expect(page.locator(".monaco-editor .view-lines")).toContainText(
+      "99",
+    );
+    await expect(save).toBeDisabled();
+  },
+);
 
-test("Editor workspace keeps its file-tree expansion across a tab switch", async ({ page }) => {
-  test.skip(test.info().project.name === "phone", "The retained editor workspace is a desktop shell");
-  await installFixtures(page, {}, [], undefined, {
-    files: { "src/an-identifiable-long-filename.tsx": "export const answer = 42;\n" },
-  });
-  await page.addInitScript(() => {
-    localStorage.setItem("vogt.layoutMode.v1", "ide");
-  });
-  await page.goto("/#/e/src%2Fan-identifiable-long-filename.tsx");
+test(
+  "Editor workspace keeps its file-tree expansion across a tab switch",
+  mockOnly(LIVE_SKIP.data),
+  async ({ page }) => {
+    test.skip(
+      test.info().project.name === "phone",
+      "The retained editor workspace is a desktop shell",
+    );
+    await installFixtures(page, {}, [], undefined, {
+      files: {
+        "src/an-identifiable-long-filename.tsx": "export const answer = 42;\n",
+      },
+    });
+    await page.addInitScript(() => {
+      localStorage.setItem("vogt.layoutMode.v1", "ide");
+    });
+    await page.goto("/#/e/src%2Fan-identifiable-long-filename.tsx");
 
-  const sidebar = page.locator(".editor-sidebar .file-tree");
-  await expect(sidebar).toBeVisible();
-  await sidebar.getByRole("button", { name: "Files", exact: true }).click();
-  await sidebar.getByRole("button", { name: "Expand src" }).click();
-  await expect(sidebar.getByText("nested-component.tsx")).toBeVisible();
+    const sidebar = page.locator(".editor-sidebar .file-tree");
+    await expect(sidebar).toBeVisible();
+    await sidebar.getByRole("button", { name: "Files", exact: true }).click();
+    await sidebar.getByRole("button", { name: "Expand src" }).click();
+    await expect(sidebar.getByText("nested-component.tsx")).toBeVisible();
 
-  // Switch to a non-editor place and back: the workspace stays mounted, so the
-  // expansion is retained rather than collapsing.
-  await page.goto("/#/sessions");
-  await page.goto("/#/e/src%2Fan-identifiable-long-filename.tsx");
+    // Switch to a non-editor place and back: the workspace stays mounted, so the
+    // expansion is retained rather than collapsing.
+    await page.goto("/#/sessions");
+    await page.goto("/#/e/src%2Fan-identifiable-long-filename.tsx");
 
-  const sidebarAgain = page.locator(".editor-sidebar .file-tree");
-  await expect(sidebarAgain.getByRole("button", { name: "Collapse src" })).toBeVisible();
-  await expect(sidebarAgain.getByText("nested-component.tsx")).toBeVisible();
-});
+    const sidebarAgain = page.locator(".editor-sidebar .file-tree");
+    await expect(
+      sidebarAgain.getByRole("button", { name: "Collapse src" }),
+    ).toBeVisible();
+    await expect(sidebarAgain.getByText("nested-component.tsx")).toBeVisible();
+  },
+);
 
-test("Git Stage all stages every change and unblocks committing", async ({ page }) => {
-  test.skip(test.info().project.name === "phone", "The full Git tab is validated in the desktop browser project");
+test("Git Stage all stages every change and unblocks committing", async ({
+  page,
+}) => {
+  test.skip(
+    test.info().project.name === "phone",
+    "The full Git tab is validated in the desktop browser project",
+  );
   await installFixtures(page);
   let staged = false;
-  await page.route("**/api/git/status**", async (route) => route.fulfill({ json: {
-    repo: "vogt", is_repo: true, branch: "dev", ahead: 0, behind: 0,
-    entries: staged
-      ? [
-          { path: "src/a.ts", index: "M", worktree: " ", kind: "staged" },
-          { path: "src/b.ts", index: "A", worktree: " ", kind: "staged" },
-        ]
-      : [
-          { path: "src/a.ts", index: " ", worktree: "M", kind: "modified" },
-          { path: "src/b.ts", index: "?", worktree: "?", kind: "untracked" },
-        ],
-  } }));
+  await page.route("**/api/git/status**", async (route) =>
+    route.fulfill({
+      json: {
+        repo: "vogt",
+        is_repo: true,
+        branch: "dev",
+        ahead: 0,
+        behind: 0,
+        entries: staged
+          ? [
+              { path: "src/a.ts", index: "M", worktree: " ", kind: "staged" },
+              { path: "src/b.ts", index: "A", worktree: " ", kind: "staged" },
+            ]
+          : [
+              { path: "src/a.ts", index: " ", worktree: "M", kind: "modified" },
+              {
+                path: "src/b.ts",
+                index: "?",
+                worktree: "?",
+                kind: "untracked",
+              },
+            ],
+      },
+    }),
+  );
   await page.route("**/api/git/branch**", async (route) =>
     route.fulfill({ json: { current: "dev", all: ["dev"] } }),
   );
-  await page.route("**/api/git/log**", async (route) => route.fulfill({ json: [] }));
+  await page.route("**/api/git/log**", async (route) =>
+    route.fulfill({ json: [] }),
+  );
   await page.route("**/api/git/op**", async (route) => {
     const body = route.request().postDataJSON() as { op: string };
     if (body.op === "stage") staged = true;
@@ -3614,43 +5079,56 @@ test("Git Stage all stages every change and unblocks committing", async ({ page 
   // A message alone is not enough while nothing is staged — the hint says why.
   await page.getByPlaceholder("Commit message").fill("stage it all");
   await expect(commit).toBeDisabled();
-  await expect(page.getByText(/Stage a file to enable committing/)).toBeVisible();
+  await expect(
+    page.getByText(/Stage a file to enable committing/),
+  ).toBeVisible();
 
   await page.getByRole("button", { name: "Stage all" }).click();
 
   // Staging flips the working tree to the index and unblocks the commit.
   await expect(commit).toBeEnabled();
-  await expect(page.getByText(/Stage a file to enable committing/)).toHaveCount(0);
+  await expect(page.getByText(/Stage a file to enable committing/)).toHaveCount(
+    0,
+  );
 });
 
-test("History distinguishes an archive outage from an empty archive and recovers", async ({ page }) => {
-  await installFixtures(page);
-  let failed = false;
-  await page.route("**/api/history/sessions**", async (route) => {
-    if (!failed) {
-      failed = true;
-      return route.fulfill({ status: 503, json: { error: "archive offline" } });
-    }
-    return route.fulfill({ json: [] });
-  });
+test(
+  "History distinguishes an archive outage from an empty archive and recovers",
+  mockOnly(LIVE_SKIP.data),
+  async ({ page }) => {
+    await installFixtures(page);
+    let failed = false;
+    await page.route("**/api/history/sessions**", async (route) => {
+      if (!failed) {
+        failed = true;
+        return route.fulfill({
+          status: 503,
+          json: { error: "archive offline" },
+        });
+      }
+      return route.fulfill({ json: [] });
+    });
 
-  await page.goto("/#/history");
-  const error = page.getByRole("alert");
-  await expect(error).toContainText("Failed to load history");
-  await expect(error).toContainText("archive offline");
-  await expect(page.getByText("0 archived sessions")).toHaveCount(0);
-  await expect(page.getByText("No sessions yet.")).toHaveCount(0);
+    await page.goto("/#/history");
+    const error = page.getByRole("alert");
+    await expect(error).toContainText("Failed to load history");
+    await expect(error).toContainText("archive offline");
+    await expect(page.getByText("0 archived sessions")).toHaveCount(0);
+    await expect(page.getByText("No sessions yet.")).toHaveCount(0);
 
-  const retry = page.getByRole("button", { name: "Retry history" });
-  if (test.info().project.name === "phone") await retry.tap();
-  else await retry.click();
+    const retry = page.getByRole("button", { name: "Retry history" });
+    if (test.info().project.name === "phone") await retry.tap();
+    else await retry.click();
 
-  await expect(page.getByText("0 archived sessions")).toBeVisible();
-  await expect(page.getByText("No sessions yet.")).toBeVisible();
-  await expect(error).toHaveCount(0);
-});
+    await expect(page.getByText("0 archived sessions")).toBeVisible();
+    await expect(page.getByText("No sessions yet.")).toBeVisible();
+    await expect(error).toHaveCount(0);
+  },
+);
 
-test("dirty Agent Task drafts guard navigation and browser exit", async ({ page }) => {
+test("dirty Agent Task drafts guard navigation and browser exit", async ({
+  page,
+}) => {
   await installFixtures(page);
   const task = {
     id: "browser-task",
@@ -3682,16 +5160,20 @@ test("dirty Agent Task drafts guard navigation and browser exit", async ({ page 
   await name.fill("Protected browser draft");
   await expect(page.getByText("Unsaved draft")).toBeVisible();
 
-  expect(await page.evaluate(() => {
-    const event = new Event("beforeunload", { cancelable: true });
-    window.dispatchEvent(event);
-    return event.defaultPrevented;
-  })).toBe(true);
+  expect(
+    await page.evaluate(() => {
+      const event = new Event("beforeunload", { cancelable: true });
+      window.dispatchEvent(event);
+      return event.defaultPrevented;
+    }),
+  ).toBe(true);
 
   await page.getByRole("link", { name: /Board/ }).click();
-  await expect(page.getByRole("dialog", {
-    name: "Leave Agent Tasks with an unsaved draft?",
-  })).toBeVisible();
+  await expect(
+    page.getByRole("dialog", {
+      name: "Leave Agent Tasks with an unsaved draft?",
+    }),
+  ).toBeVisible();
   await page.getByRole("button", { name: "Stay here" }).click();
   await expect(page).toHaveURL(/#\/tasks$/);
   await expect(name).toHaveValue("Protected browser draft");
@@ -3701,93 +5183,125 @@ test("dirty Agent Task drafts guard navigation and browser exit", async ({ page 
     ctrlKey: true,
     shiftKey: true,
   });
-  await expect(page.getByRole("dialog", {
-    name: "Save task draft before continuing?",
-  })).toBeVisible();
+  await expect(
+    page.getByRole("dialog", {
+      name: "Save task draft before continuing?",
+    }),
+  ).toBeVisible();
   await page.getByRole("button", { name: "Stay here" }).click();
   await expect(name).toHaveValue("Protected browser draft");
 
   await page.getByRole("link", { name: /Board/ }).click();
-  await page.getByRole("button", { name: "Discard draft", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Discard draft", exact: true })
+    .click();
   await expect(page).toHaveURL(/#\/board$/);
-  await expect.poll(() => page.evaluate(() => {
-    const event = new Event("beforeunload", { cancelable: true });
-    window.dispatchEvent(event);
-    return event.defaultPrevented;
-  })).toBe(false);
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const event = new Event("beforeunload", { cancelable: true });
+        window.dispatchEvent(event);
+        return event.defaultPrevented;
+      }),
+    )
+    .toBe(false);
 });
 
+test(
+  "Agent Tasks show bindings and findings, relabel Run Now, and survive reload",
+  mockOnly(LIVE_SKIP.data),
+  async ({ page }) => {
+    const boundTask = {
+      id: "bound-task",
+      name: "Bound task",
+      prompt: "Original prompt",
+      schedule: { kind: "manual" },
+      status: "active",
+      command: null,
+      cwd: null,
+      env: [],
+      context: null,
+      vogt_project: "vogt",
+      vogt_work_item: "WI-7",
+      notify_on_start: false,
+      notify_on_phrase: null,
+      auto_retry_on_rate_limit: true,
+      next_run: null,
+      last_run: "2026-08-18T00:05:00Z",
+      run_count: 1,
+      runs: [
+        {
+          id: "run-0",
+          task_id: "bound-task",
+          started_at: "2026-08-18T00:00:00Z",
+          trigger: "scheduled",
+          session_id: "session-0",
+          session_name: "nightly-run",
+          prompt_file: "prompt.txt",
+          context_file: "context.txt",
+          status: "completed",
+          completed_at: "2026-08-18T00:05:00Z",
+          exit_code: 0,
+          summary: null,
+          findings: [
+            {
+              at: "2026-08-18T00:03:00Z",
+              text: "Queue is clear",
+              source: "notify",
+            },
+          ],
+        },
+      ],
+      created_at: "2026-08-18T00:00:00Z",
+      updated_at: "2026-08-18T00:00:00Z",
+    };
+    await installFixtures(page, {}, [], undefined, {}, [boundTask]);
 
-test("Agent Tasks show bindings and findings, relabel Run Now, and survive reload", async ({ page }) => {
-  const boundTask = {
-    id: "bound-task",
-    name: "Bound task",
-    prompt: "Original prompt",
-    schedule: { kind: "manual" },
-    status: "active",
-    command: null,
-    cwd: null,
-    env: [],
-    context: null,
-    vogt_project: "vogt",
-    vogt_work_item: "WI-7",
-    notify_on_start: false,
-    notify_on_phrase: null,
-    auto_retry_on_rate_limit: true,
-    next_run: null,
-    last_run: "2026-08-18T00:05:00Z",
-    run_count: 1,
-    runs: [{
-      id: "run-0",
-      task_id: "bound-task",
-      started_at: "2026-08-18T00:00:00Z",
-      trigger: "scheduled",
-      session_id: "session-0",
-      session_name: "nightly-run",
-      prompt_file: "prompt.txt",
-      context_file: "context.txt",
-      status: "completed",
-      completed_at: "2026-08-18T00:05:00Z",
-      exit_code: 0,
-      summary: null,
-      findings: [{ at: "2026-08-18T00:03:00Z", text: "Queue is clear", source: "notify" }],
-    }],
-    created_at: "2026-08-18T00:00:00Z",
-    updated_at: "2026-08-18T00:00:00Z",
-  };
-  await installFixtures(page, {}, [], undefined, {}, [boundTask]);
+    await page.goto("/#/tasks");
+    // The Vogt bindings the engine stores now round-trip into the form.
+    await expect(
+      page.getByRole("textbox", { name: "Vogt project" }),
+    ).toHaveValue("vogt");
+    await expect(
+      page.getByRole("textbox", { name: "Vogt work item" }),
+    ).toHaveValue("WI-7");
+    // A run's finding is rendered under its row, not lost to a push.
+    await expect(page.getByText("Queue is clear")).toBeVisible();
 
-  await page.goto("/#/tasks");
-  // The Vogt bindings the engine stores now round-trip into the form.
-  await expect(page.getByRole("textbox", { name: "Vogt project" })).toHaveValue("vogt");
-  await expect(page.getByRole("textbox", { name: "Vogt work item" })).toHaveValue("WI-7");
-  // A run's finding is rendered under its row, not lost to a push.
-  await expect(page.getByText("Queue is clear")).toBeVisible();
+    const name = page.getByRole("textbox", { name: "Name", exact: true });
+    await expect(name).toHaveValue("Bound task");
+    await expect(page.getByRole("button", { name: "Run Now" })).toBeVisible();
 
-  const name = page.getByRole("textbox", { name: "Name", exact: true });
-  await expect(name).toHaveValue("Bound task");
-  await expect(page.getByRole("button", { name: "Run Now" })).toBeVisible();
+    await name.fill("Bound task edited");
+    // A dirty draft relabels Run Now so a click saves before it runs.
+    await expect(
+      page.getByRole("button", { name: "Save & Run" }),
+    ).toBeVisible();
+    await expect(page.getByRole("button", { name: "Run Now" })).toHaveCount(0);
 
-  await name.fill("Bound task edited");
-  // A dirty draft relabels Run Now so a click saves before it runs.
-  await expect(page.getByRole("button", { name: "Save & Run" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Run Now" })).toHaveCount(0);
+    // A full reload keeps the unsaved draft, carried in sessionStorage.
+    await page.reload();
+    await expect(
+      page.getByRole("textbox", { name: "Name", exact: true }),
+    ).toHaveValue("Bound task edited");
+    await expect(page.getByText("Unsaved draft")).toBeVisible();
+  },
+);
 
-  // A full reload keeps the unsaved draft, carried in sessionStorage.
-  await page.reload();
-  await expect(page.getByRole("textbox", { name: "Name", exact: true }))
-    .toHaveValue("Bound task edited");
-  await expect(page.getByText("Unsaved draft")).toBeVisible();
-});
-
-
-test("Backlog filters are chips, a + Filter disclosure and a named lens", async ({ page }) => {
+test("Backlog filters are chips, a + Filter disclosure and a named lens", async ({
+  page,
+}) => {
   await installFixtures(page);
   await page.goto("/#/backlog?project=vogt");
 
-  const filters = page.getByRole("group", { name: "Backlog filters", exact: true });
+  const filters = page.getByRole("group", {
+    name: "Backlog filters",
+    exact: true,
+  });
   await expect(filters.getByText("Project: Vogt")).toBeVisible();
-  await expect(page.getByRole("group", { name: "Add Backlog filters" })).toBeHidden();
+  await expect(
+    page.getByRole("group", { name: "Add Backlog filters" }),
+  ).toBeHidden();
   // The legacy always-open select grid is gone: the selects live behind the
   // disclosure, not above the ranked work.
   await expect(page.locator(".vogt-backlog-filter-grid")).toHaveCount(0);
@@ -3802,14 +5316,20 @@ test("Backlog filters are chips, a + Filter disclosure and a named lens", async 
   // Escape closes the disclosure and gives focus back to what opened it.
   await page.keyboard.press("Escape");
   await expect(panel).toBeHidden();
-  await expect(filters.getByRole("button", { name: "+ Filter", exact: true })).toBeFocused();
+  await expect(
+    filters.getByRole("button", { name: "+ Filter", exact: true }),
+  ).toBeFocused();
 
   await openFilterPanel(filters);
   await page.getByLabel("Lens name").fill("Vogt features");
   await page.getByRole("button", { name: "Save lens" }).click();
-  await expect(page.locator(".vogt-backlog-saved-recall")).toHaveText("Vogt features");
+  await expect(page.locator(".vogt-backlog-saved-recall")).toHaveText(
+    "Vogt features",
+  );
 
-  await filters.getByRole("button", { name: "Remove filter Project: Vogt" }).click();
+  await filters
+    .getByRole("button", { name: "Remove filter Project: Vogt" })
+    .click();
   await expect(page).not.toHaveURL(/project=vogt/);
   await expect(page).toHaveURL(/kind=feature/);
 
@@ -3826,143 +5346,235 @@ test("Backlog filters are chips, a + Filter disclosure and a named lens", async 
   await expect(filters.getByText("Type: feature")).toBeVisible();
 });
 
-test("Backlog ranked rows size to their content and expand in place", async ({ page }) => {
-  const longTitle =
-    "A ranked title long enough to need a second line and then some more of one ".repeat(3);
-  await installFixtures(page, {}, [], undefined, {
-    backlogItems: [
-      {
-        ref: "WI-7", title: longTitle, kind: "feature", state: "open", priority: "normal",
-        project_slug: "vogt", trust_state: "verified", labels: ["infra"], score: 1.25,
-        updated_at: "2026-08-17T10:00:00Z", origin: "declared",
-      },
-      {
-        ref: "gh:vogt#12", title: "An observed subject nobody has adopted", kind: "bug",
-        state: "observed", priority: "normal", project_slug: "vogt", trust_state: "unverified",
-        labels: [], score: 0.5, updated_at: "2026-08-16T10:00:00Z", origin: "observed",
-        observation_kind: "forge issue", observed_at: "2026-08-16T10:00:00Z",
-        source_url: "https://example.invalid/12",
-      },
-    ],
-  });
-  await page.goto("/#/backlog");
+test(
+  "Backlog ranked rows size to their content and expand in place",
+  mockOnly(LIVE_SKIP.data),
+  async ({ page }) => {
+    const longTitle =
+      "A ranked title long enough to need a second line and then some more of one ".repeat(
+        3,
+      );
+    await installFixtures(page, {}, [], undefined, {
+      backlogItems: [
+        {
+          ref: "WI-7",
+          title: longTitle,
+          kind: "feature",
+          state: "open",
+          priority: "normal",
+          project_slug: "vogt",
+          trust_state: "verified",
+          labels: ["infra"],
+          score: 1.25,
+          updated_at: "2026-08-17T10:00:00Z",
+          origin: "declared",
+        },
+        {
+          ref: "gh:vogt#12",
+          title: "An observed subject nobody has adopted",
+          kind: "bug",
+          state: "observed",
+          priority: "normal",
+          project_slug: "vogt",
+          trust_state: "unverified",
+          labels: [],
+          score: 0.5,
+          updated_at: "2026-08-16T10:00:00Z",
+          origin: "observed",
+          observation_kind: "forge issue",
+          observed_at: "2026-08-16T10:00:00Z",
+          source_url: "https://example.invalid/12",
+        },
+      ],
+    });
+    await page.goto("/#/backlog");
 
-  const declared = page.locator(".vogt-backlog-row").filter({ hasText: "A ranked title" });
-  const observed = page.locator(".vogt-backlog-row").filter({ hasText: "An observed subject" });
-  await expect(declared).toBeVisible();
+    const declared = page
+      .locator(".vogt-backlog-row")
+      .filter({ hasText: "A ranked title" });
+    const observed = page
+      .locator(".vogt-backlog-row")
+      .filter({ hasText: "An observed subject" });
+    await expect(declared).toBeVisible();
 
-  // The collapsed row keeps the facts a reader ranks by.
-  await expect(declared.locator(".vogt-backlog-rank")).toHaveText("1");
-  await expect(declared.getByRole("button", { name: "WI-7" })).toBeVisible();
-  await expect(declared.locator(".vogt-backlog-trust")).toHaveText("verified");
-  await expect(declared.locator(".vogt-backlog-age")).not.toBeEmpty();
-  await expect(declared.locator(".vogt-backlog-score")).toContainText("1.25");
+    // The collapsed row keeps the facts a reader ranks by.
+    await expect(declared.locator(".vogt-backlog-rank")).toHaveText("1");
+    await expect(declared.getByRole("button", { name: "WI-7" })).toBeVisible();
+    await expect(declared.locator(".vogt-backlog-trust")).toHaveText(
+      "verified",
+    );
+    await expect(declared.locator(".vogt-backlog-age")).not.toBeEmpty();
+    await expect(declared.locator(".vogt-backlog-score")).toContainText("1.25");
 
-  // The title wraps rather than ending in an ellipsis: nothing it says is
-  // taller than the box drawn for it.
-  const title = declared.locator(".vogt-backlog-row-title");
-  const clipping = await title.evaluate((node) => {
-    const line = Number.parseFloat(getComputedStyle(node).lineHeight) || 16;
-    return {
-      scroll: node.scrollHeight,
-      client: node.clientHeight,
-      lines: Math.round(node.getBoundingClientRect().height / line),
+    // The title wraps rather than ending in an ellipsis: nothing it says is
+    // taller than the box drawn for it.
+    const title = declared.locator(".vogt-backlog-row-title");
+    const clipping = await title.evaluate((node) => {
+      const line = Number.parseFloat(getComputedStyle(node).lineHeight) || 16;
+      return {
+        scroll: node.scrollHeight,
+        client: node.clientHeight,
+        lines: Math.round(node.getBoundingClientRect().height / line),
+      };
+    });
+    expect(clipping.scroll).toBeLessThanOrEqual(clipping.client + 1);
+    expect(clipping.lines).toBeGreaterThanOrEqual(2);
+
+    // Every control below is reached from the keyboard: it is the operable path
+    // the row has to keep, and it does not depend on where a phone's shell has
+    // pushed the list (first-viewport containment is its own issue).
+    const press = async (control: ReturnType<typeof page.getByRole>) => {
+      await control.focus();
+      await page.keyboard.press("Enter");
     };
-  });
-  expect(clipping.scroll).toBeLessThanOrEqual(clipping.client + 1);
-  expect(clipping.lines).toBeGreaterThanOrEqual(2);
 
-  // Every control below is reached from the keyboard: it is the operable path
-  // the row has to keep, and it does not depend on where a phone's shell has
-  // pushed the list (first-viewport containment is its own issue).
-  const press = async (control: ReturnType<typeof page.getByRole>) => {
-    await control.focus();
-    await page.keyboard.press("Enter");
-  };
+    const before = await declared.evaluate(
+      (node) => node.getBoundingClientRect().height,
+    );
+    await press(declared.getByRole("button", { name: "More" }));
+    // Declared rows offer what a work item can do, and nothing a subject can.
+    await expect(
+      declared.getByRole("button", { name: "Open", exact: true }),
+    ).toBeVisible();
+    await expect(
+      declared.getByRole("button", { name: "Select", exact: true }),
+    ).toBeVisible();
+    await expect(
+      declared.getByRole("button", { name: "Start a session…" }),
+    ).toBeVisible();
+    await expect(
+      declared.getByRole("button", { name: "Adopt as work item…" }),
+    ).toHaveCount(0);
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    const expanded = await declared.evaluate(
+      (node) => node.getBoundingClientRect().height,
+    );
+    expect(expanded).toBeGreaterThan(before);
 
-  const before = await declared.evaluate((node) => node.getBoundingClientRect().height);
-  await press(declared.getByRole("button", { name: "More" }));
-  // Declared rows offer what a work item can do, and nothing a subject can.
-  await expect(declared.getByRole("button", { name: "Open", exact: true })).toBeVisible();
-  await expect(declared.getByRole("button", { name: "Select", exact: true })).toBeVisible();
-  await expect(declared.getByRole("button", { name: "Start a session…" })).toBeVisible();
-  await expect(declared.getByRole("button", { name: "Adopt as work item…" })).toHaveCount(0);
-  await expect(page.getByRole("dialog")).toHaveCount(0);
-  const expanded = await declared.evaluate((node) => node.getBoundingClientRect().height);
-  expect(expanded).toBeGreaterThan(before);
+    // The ranking evidence belongs to the row it explains.
+    await press(declared.getByRole("button", { name: /1\.25/ }));
+    await expect(
+      declared.getByText("raised 9 days ago and still open"),
+    ).toBeVisible();
 
-  // The ranking evidence belongs to the row it explains.
-  await press(declared.getByRole("button", { name: /1\.25/ }));
-  await expect(declared.getByText("raised 9 days ago and still open")).toBeVisible();
+    // A write from a row still asks for a reason of its own.
+    await press(declared.getByRole("button", { name: "Start a session…" }));
+    const confirm = declared.getByRole("button", { name: "Confirm" });
+    await expect(confirm).toBeDisabled();
+    await declared.locator("textarea").fill("picking this up now");
+    await expect(confirm).toBeEnabled();
+    await press(declared.getByRole("button", { name: "Cancel" }));
 
-  // A write from a row still asks for a reason of its own.
-  await press(declared.getByRole("button", { name: "Start a session…" }));
-  const confirm = declared.getByRole("button", { name: "Confirm" });
-  await expect(confirm).toBeDisabled();
-  await declared.locator("textarea").fill("picking this up now");
-  await expect(confirm).toBeEnabled();
-  await press(declared.getByRole("button", { name: "Cancel" }));
+    // Observed rows offer the two writes a subject has, and no transition.
+    await press(observed.getByRole("button", { name: "More" }));
+    await expect(observed.getByText("Observed forge issue")).toBeVisible();
+    await expect(
+      observed.getByRole("button", { name: "Adopt as work item…" }),
+    ).toBeVisible();
+    await expect(
+      observed.getByRole("button", { name: "Suppress source…" }),
+    ).toBeVisible();
+    await expect(
+      observed.getByRole("button", { name: "Start a session…" }),
+    ).toHaveCount(0);
+    await expect(observed.getByRole("checkbox")).toBeDisabled();
 
-  // Observed rows offer the two writes a subject has, and no transition.
-  await press(observed.getByRole("button", { name: "More" }));
-  await expect(observed.getByText("Observed forge issue")).toBeVisible();
-  await expect(observed.getByRole("button", { name: "Adopt as work item…" })).toBeVisible();
-  await expect(observed.getByRole("button", { name: "Suppress source…" })).toBeVisible();
-  await expect(observed.getByRole("button", { name: "Start a session…" })).toHaveCount(0);
-  await expect(observed.getByRole("checkbox")).toBeDisabled();
-
-  await press(declared.getByRole("button", { name: "Less" }));
-  await expect(declared.getByRole("button", { name: "Open", exact: true })).toHaveCount(0);
-});
+    await press(declared.getByRole("button", { name: "Less" }));
+    await expect(
+      declared.getByRole("button", { name: "Open", exact: true }),
+    ).toHaveCount(0);
+  },
+);
 
 // The row's most common act is reachable from the collapsed row rather
 // than hidden inside the expanded detail, and the page-only State filter says
 // so — a suffixed chip and an "N of M loaded rows" summary — because the ranked
 // views take no state parameter.
-test("Backlog reaches Start a session… from the collapsed row and counts a page-only State filter", async ({ page }) => {
-  test.skip(test.info().project.name === "phone", "Collapsed-row reach and the summary are the desktop contract");
-  await installFixtures(page, {}, [], undefined, {
-    backlogTotal: 2,
-    backlogItems: [
-      {
-        ref: "WI-1", title: "First ranked item", kind: "feature", state: "open",
-        priority: "normal", project_slug: "vogt", trust_state: "verified", labels: [],
-        score: 2, updated_at: "2026-08-17T10:00:00Z", origin: "declared",
-      },
-      {
-        ref: "WI-2", title: "Second ranked item", kind: "feature", state: "in_progress",
-        priority: "normal", project_slug: "vogt", trust_state: "verified", labels: [],
-        score: 1, updated_at: "2026-08-17T10:00:00Z", origin: "declared",
-      },
-    ],
-  });
-  await page.goto("/#/backlog");
+test(
+  "Backlog reaches Start a session… from the collapsed row and counts a page-only State filter",
+  mockOnly(LIVE_SKIP.data),
+  async ({ page }) => {
+    test.skip(
+      test.info().project.name === "phone",
+      "Collapsed-row reach and the summary are the desktop contract",
+    );
+    await installFixtures(page, {}, [], undefined, {
+      backlogTotal: 2,
+      backlogItems: [
+        {
+          ref: "WI-1",
+          title: "First ranked item",
+          kind: "feature",
+          state: "open",
+          priority: "normal",
+          project_slug: "vogt",
+          trust_state: "verified",
+          labels: [],
+          score: 2,
+          updated_at: "2026-08-17T10:00:00Z",
+          origin: "declared",
+        },
+        {
+          ref: "WI-2",
+          title: "Second ranked item",
+          kind: "feature",
+          state: "in_progress",
+          priority: "normal",
+          project_slug: "vogt",
+          trust_state: "verified",
+          labels: [],
+          score: 1,
+          updated_at: "2026-08-17T10:00:00Z",
+          origin: "declared",
+        },
+      ],
+    });
+    await page.goto("/#/backlog");
 
-  const first = page.locator(".vogt-backlog-row").filter({ hasText: "First ranked item" });
-  await expect(first).toBeVisible();
-  // The row is collapsed — no detail — yet "Start a session…" is right there in
-  // the facts row's overflow next to More, not one disclosure away.
-  await expect(first.locator(".vogt-backlog-row-detail")).toHaveCount(0);
-  await expect(first.getByRole("button", { name: "Less" })).toHaveCount(0);
-  await expect(
-    first.locator(".vogt-backlog-row-quick .vogt-backlog-row-session"),
-  ).toBeVisible();
-  await expect(first.getByRole("button", { name: "Start a session…" })).toBeVisible();
+    const first = page
+      .locator(".vogt-backlog-row")
+      .filter({ hasText: "First ranked item" });
+    await expect(first).toBeVisible();
+    // The row is collapsed — no detail — yet "Start a session…" is right there in
+    // the facts row's overflow next to More, not one disclosure away.
+    await expect(first.locator(".vogt-backlog-row-detail")).toHaveCount(0);
+    await expect(first.getByRole("button", { name: "Less" })).toHaveCount(0);
+    await expect(
+      first.locator(".vogt-backlog-row-quick .vogt-backlog-row-session"),
+    ).toBeVisible();
+    await expect(
+      first.getByRole("button", { name: "Start a session…" }),
+    ).toBeVisible();
 
-  // Applying a State filter marks it page-only and re-counts the loaded page.
-  const filters = page.getByRole("group", { name: "Backlog filters", exact: true });
-  await filters.getByRole("button", { name: "+ Filter", exact: true }).click();
-  const panel = page.getByRole("group", { name: "Add Backlog filters" });
-  await panel.getByRole("button", { name: "open", exact: true }).click();
-  await expect(filters.getByText("State: open · this page only")).toBeVisible();
-  await expect(page.locator(".vogt-backlog-count")).toContainText("1 of 2 loaded rows");
-});
+    // Applying a State filter marks it page-only and re-counts the loaded page.
+    const filters = page.getByRole("group", {
+      name: "Backlog filters",
+      exact: true,
+    });
+    await filters
+      .getByRole("button", { name: "+ Filter", exact: true })
+      .click();
+    const panel = page.getByRole("group", { name: "Add Backlog filters" });
+    await panel.getByRole("button", { name: "open", exact: true }).click();
+    await expect(
+      filters.getByText("State: open · this page only"),
+    ).toBeVisible();
+    await expect(page.locator(".vogt-backlog-count")).toContainText(
+      "1 of 2 loaded rows",
+    );
+  },
+);
 
 // The backlog on the phone: the row leads with its title, keeps one compact meta line
 // under it, and the bulk bar follows the selection to the top of the scroller
 // rather than sitting off-screen above the ranked page.
-test("Phone Backlog leads with title-first rows, marks the page-only State filter and sticks the bulk bar", async ({ page }) => {
-  test.skip(test.info().project.name !== "phone", "The compact phone row and sticky bulk bar are the narrow-shell contract");
+test("Phone Backlog leads with title-first rows, marks the page-only State filter and sticks the bulk bar", async ({
+  page,
+}) => {
+  test.skip(
+    test.info().project.name !== "phone",
+    "The compact phone row and sticky bulk bar are the narrow-shell contract",
+  );
   const items = Array.from({ length: 6 }, (_, index) => ({
     ref: `WI-${index + 1}`,
     title: `Row ${index + 1}`,
@@ -3991,18 +5603,30 @@ test("Phone Backlog leads with title-first rows, marks the page-only State filte
   // At least three rows fit inside the list's own visible viewport: the compact
   // title-first layout, not a facts row that pushes the third row past the fold.
   const withinList = await page.evaluate(() => {
-    const list = document.querySelector(".vogt-backlog-list")!.getBoundingClientRect();
-    return [...document.querySelectorAll(".vogt-backlog-row")].filter((node) => {
-      const box = node.getBoundingClientRect();
-      return box.height > 0 && box.top >= list.top - 1 && box.bottom <= list.bottom + 1;
-    }).length;
+    const list = document
+      .querySelector(".vogt-backlog-list")!
+      .getBoundingClientRect();
+    return [...document.querySelectorAll(".vogt-backlog-row")].filter(
+      (node) => {
+        const box = node.getBoundingClientRect();
+        return (
+          box.height > 0 &&
+          box.top >= list.top - 1 &&
+          box.bottom <= list.bottom + 1
+        );
+      },
+    ).length;
   });
   expect(withinList).toBeGreaterThanOrEqual(3);
 
   // Title first: the title box sits above the meta (facts) line in the row.
   const order = await rows.first().evaluate((row) => {
-    const title = row.querySelector<HTMLElement>(".vogt-backlog-row-title")!.getBoundingClientRect();
-    const facts = row.querySelector<HTMLElement>(".vogt-backlog-row-facts")!.getBoundingClientRect();
+    const title = row
+      .querySelector<HTMLElement>(".vogt-backlog-row-title")!
+      .getBoundingClientRect();
+    const facts = row
+      .querySelector<HTMLElement>(".vogt-backlog-row-facts")!
+      .getBoundingClientRect();
     return { titleTop: title.top, factsTop: facts.top };
   });
   expect(order.titleTop).toBeLessThan(order.factsTop);
@@ -4011,20 +5635,25 @@ test("Phone Backlog leads with title-first rows, marks the page-only State filte
   await rows.first().getByRole("checkbox").check();
   const bar = page.locator(".vogt-backlog-bulk");
   await expect(bar).toBeVisible();
-  expect(await bar.evaluate((element) => getComputedStyle(element).position)).toBe("sticky");
+  expect(
+    await bar.evaluate((element) => getComputedStyle(element).position),
+  ).toBe("sticky");
   const barBox = (await bar.boundingBox())!;
   const listBox = (await page.locator(".vogt-backlog-list").boundingBox())!;
   expect(Math.round(barBox.y)).toBeLessThanOrEqual(Math.round(listBox.y) + 2);
 
   // The State chip, once applied, is marked page-only here too.
-  const filters = page.getByRole("group", { name: "Backlog filters", exact: true });
+  const filters = page.getByRole("group", {
+    name: "Backlog filters",
+    exact: true,
+  });
   await filters.getByRole("button", { name: "+ Filter", exact: true }).click();
   const panel = page.getByRole("group", { name: "Add Backlog filters" });
   await panel.getByRole("button", { name: "in_progress", exact: true }).click();
-  await expect(filters.getByText("State: in_progress · this page only")).toBeVisible();
+  await expect(
+    filters.getByText("State: in_progress · this page only"),
+  ).toBeVisible();
 });
-
-
 
 /**
  * Stage 10's two phone rules, measured rather than asserted in prose: no
@@ -4037,8 +5666,17 @@ test("Phone Backlog leads with title-first rows, marks the page-only State filte
  * able to break it as one added to Inbox.
  */
 const PHONE_ROUTES = [
-  "sessions", "inbox", "board", "backlog",
-  "projects", "audit", "settings", "git", "history", "tasks", "w/WI-7",
+  "sessions",
+  "inbox",
+  "board",
+  "backlog",
+  "projects",
+  "audit",
+  "settings",
+  "git",
+  "history",
+  "tasks",
+  "w/WI-7",
 ] as const;
 
 async function undersizedControls(page: Page): Promise<string[]> {
@@ -4054,11 +5692,16 @@ async function undersizedControls(page: Page): Promise<string[]> {
       const tick =
         node.tagName === "INPUT" &&
         /^(checkbox|radio)$/.test((node as HTMLInputElement).type);
-      const target = tick ? (node.closest("label") ?? node).getBoundingClientRect() : box;
+      const target = tick
+        ? (node.closest("label") ?? node).getBoundingClientRect()
+        : box;
       const font = Number.parseFloat(getComputedStyle(node).fontSize);
-      const name = `${node.tagName.toLowerCase()}.${node.className || "-"}`.slice(0, 50);
+      const name =
+        `${node.tagName.toLowerCase()}.${node.className || "-"}`.slice(0, 50);
       if (target.height < 44 || target.width < 44) {
-        found.push(`${name} is ${Math.round(target.width)}x${Math.round(target.height)}`);
+        found.push(
+          `${name} is ${Math.round(target.width)}x${Math.round(target.height)}`,
+        );
       }
       if (/^(INPUT|TEXTAREA|SELECT)$/.test(node.tagName) && font < 16) {
         found.push(`${name} types at ${font}px`);
@@ -4068,35 +5711,49 @@ async function undersizedControls(page: Page): Promise<string[]> {
   });
 }
 
-test("Phone controls keep the 44px target and 16px form-text floors", { timeout: 90_000 }, async ({ page }) => {
-  test.skip(test.info().project.name !== "phone", "The floors are the narrow shell's");
-  await installFixtures(page);
+test(
+  "Phone controls keep the 44px target and 16px form-text floors",
+  { timeout: 90_000 },
+  async ({ page }) => {
+    test.skip(
+      test.info().project.name !== "phone",
+      "The floors are the narrow shell's",
+    );
+    await installFixtures(page);
 
-  for (const route of PHONE_ROUTES) {
-    await page.goto(`/#/${route}`);
-    await page.waitForLoadState("networkidle");
-    await page.waitForTimeout(200);
-    expect(await undersizedControls(page), `at 390px on /${route}`).toEqual([]);
-    const overflow = await page.evaluate(() => ({
-      doc: document.documentElement.scrollWidth,
-      win: window.innerWidth,
-    }));
-    expect(overflow.doc, `no sideways scroll on /${route}`).toBeLessThanOrEqual(overflow.win);
-  }
-
-  // The narrowest and widest phones the shell claims, because a 44px floor
-  // that only holds at one width is a coincidence.
-  for (const width of [320, 430]) {
-    await page.setViewportSize({ width, height: 844 });
-    for (const route of ["sessions", "inbox", "board", "backlog"]) {
+    for (const route of PHONE_ROUTES) {
       await page.goto(`/#/${route}`);
       await page.waitForLoadState("networkidle");
       await page.waitForTimeout(200);
-      expect(await undersizedControls(page), `at ${width}px on /${route}`).toEqual([]);
+      expect(await undersizedControls(page), `at 390px on /${route}`).toEqual(
+        [],
+      );
+      const overflow = await page.evaluate(() => ({
+        doc: document.documentElement.scrollWidth,
+        win: window.innerWidth,
+      }));
+      expect(
+        overflow.doc,
+        `no sideways scroll on /${route}`,
+      ).toBeLessThanOrEqual(overflow.win);
     }
-  }
-});
 
+    // The narrowest and widest phones the shell claims, because a 44px floor
+    // that only holds at one width is a coincidence.
+    for (const width of [320, 430]) {
+      await page.setViewportSize({ width, height: 844 });
+      for (const route of ["sessions", "inbox", "board", "backlog"]) {
+        await page.goto(`/#/${route}`);
+        await page.waitForLoadState("networkidle");
+        await page.waitForTimeout(200);
+        expect(
+          await undersizedControls(page),
+          `at ${width}px on /${route}`,
+        ).toEqual([]);
+      }
+    }
+  },
+);
 
 /**
  * F1 of the live restructure report: a phone that spends its first screen on
@@ -4105,8 +5762,13 @@ test("Phone controls keep the 44px target and 16px form-text floors", { timeout:
  * have to still be reachable, which is the half that makes it a composition
  * fix rather than a deletion.
  */
-test("Phone primary surfaces lead with their work, not their controls", async ({ page }) => {
-  test.skip(test.info().project.name !== "phone", "First-viewport composition is the phone's");
+test("Phone primary surfaces lead with their work, not their controls", async ({
+  page,
+}) => {
+  test.skip(
+    test.info().project.name !== "phone",
+    "First-viewport composition is the phone's",
+  );
   await installFixtures(page);
 
   const firstUseful = {
@@ -4121,7 +5783,10 @@ test("Phone primary surfaces lead with their work, not their controls", async ({
   for (const [route, selector] of Object.entries(firstUseful)) {
     await page.goto(`/#/${route}`);
     const first = page.locator(selector).first();
-    await expect(first, `/${route} draws something to steer with`).toBeVisible();
+    await expect(
+      first,
+      `/${route} draws something to steer with`,
+    ).toBeVisible();
 
     const geometry = await first.evaluate((node) => ({
       top: node.getBoundingClientRect().top,
@@ -4131,24 +5796,32 @@ test("Phone primary surfaces lead with their work, not their controls", async ({
     expect(geometry.sideways, `/${route} does not scroll sideways`).toBe(false);
     // Inside the first screen, and with room to be read rather than peeking
     // over the fold by a pixel.
-    expect(geometry.top, `/${route} first content at ${geometry.top}`)
-      .toBeLessThan(geometry.viewport - 80);
+    expect(
+      geometry.top,
+      `/${route} first content at ${geometry.top}`,
+    ).toBeLessThan(geometry.viewport - 80);
   }
 
   // What moved out of the first screen is one control away, not gone.
   await page.goto("/#/board");
   const header = page.locator("[data-surface-header]:visible");
-  await expect(header.locator('[data-surface-header-slot="controls"]')).toBeHidden();
+  await expect(
+    header.locator('[data-surface-header-slot="controls"]'),
+  ).toBeHidden();
   await header.getByRole("button", { name: "View controls" }).click();
-  await expect(header.locator('[data-surface-header-slot="controls"]')).toBeVisible();
+  await expect(
+    header.locator('[data-surface-header-slot="controls"]'),
+  ).toBeVisible();
   await expect(page.getByRole("button", { name: "Refresh now" })).toBeVisible();
 
-  const filters = page.getByRole("group", { name: "Board filters", exact: true });
+  const filters = page.getByRole("group", {
+    name: "Board filters",
+    exact: true,
+  });
   await expect(page.getByLabel("Lens name")).toBeHidden();
   await filters.getByRole("button", { name: "+ Filter", exact: true }).click();
   await expect(page.getByLabel("Lens name")).toBeVisible();
 });
-
 
 /**
  * Stage 3's route matrix, walked on a phone.
@@ -4173,8 +5846,13 @@ const SECONDARY_ROUTES = [
   { path: "e/src/main.ts", title: "Sessions" },
 ] as const;
 
-test("Phone secondary routes are contained, titled and addressable", async ({ page }) => {
-  test.skip(test.info().project.name !== "phone", "Containment is the narrow shell's");
+test("Phone secondary routes are contained, titled and addressable", async ({
+  page,
+}) => {
+  test.skip(
+    test.info().project.name !== "phone",
+    "Containment is the narrow shell's",
+  );
   await installFixtures(page);
 
   for (const route of SECONDARY_ROUTES) {
@@ -4184,18 +5862,27 @@ test("Phone secondary routes are contained, titled and addressable", async ({ pa
     // Inside the phone shell, not instead of it. Go to… rides inline in the
     // surface header on a phone (WI-75); the standalone bar is the fallback
     // for a screen with no header of its own.
-    await expect(page.locator(".mobile-go-to, .go-to-inline").first(), `/${route.path} keeps Go to`).toBeVisible();
+    await expect(
+      page.locator(".mobile-go-to, .go-to-inline").first(),
+      `/${route.path} keeps Go to`,
+    ).toBeVisible();
     await expect(
       page.getByRole("navigation", { name: "Primary navigation" }),
       `/${route.path} keeps the bottom bar`,
     ).toBeVisible();
 
     // Saying what it is.
-    const titled = page.getByRole("heading", { name: route.title, exact: false }).first();
-    await expect(titled, `/${route.path} says it is ${route.title}`).toBeVisible();
+    const titled = page
+      .getByRole("heading", { name: route.title, exact: false })
+      .first();
+    await expect(
+      titled,
+      `/${route.path} says it is ${route.title}`,
+    ).toBeVisible();
     if ("tool" in route && route.tool) {
       await expect(
-        page.getByRole("navigation", { name: "Session tools" })
+        page
+          .getByRole("navigation", { name: "Session tools" })
           .getByRole("link", { name: route.tool }),
         `/${route.path} marks its tool`,
       ).toHaveAttribute("aria-current", "page");
@@ -4218,7 +5905,9 @@ test("Phone secondary routes are contained, titled and addressable", async ({ pa
     const box = backdrop.getBoundingClientRect();
     return box.top <= 0 && box.height >= window.innerHeight - 1;
   });
-  expect(covered, "the Settings backdrop covers the shell it opened over").toBe(true);
+  expect(covered, "the Settings backdrop covers the shell it opened over").toBe(
+    true,
+  );
   await expect(settings.getByLabel("Bearer token")).toBeVisible();
 
   // A deep link with a query survives a reload and the back button.
@@ -4234,7 +5923,6 @@ test("Phone secondary routes are contained, titled and addressable", async ({ pa
   await expect(page).toHaveURL(/#\/projects/);
 });
 
-
 /**
  * Stage 9's waiting session, on the surface a phone actually steers from.
  *
@@ -4243,8 +5931,13 @@ test("Phone secondary routes are contained, titled and addressable", async ({ pa
  * sends exactly the bytes a person at that terminal would have typed. Neither
  * is an approval, and the card says so.
  */
-test("Phone waiting sessions show the prompt and send terminal input", async ({ page }) => {
-  test.skip(test.info().project.name !== "phone", "Waiting cards are the narrow shell's");
+test("Phone waiting sessions show the prompt and send terminal input", async ({
+  page,
+}) => {
+  test.skip(
+    test.info().project.name !== "phone",
+    "Waiting cards are the narrow shell's",
+  );
   const waiting = {
     ...liveSession,
     id: "waiting-session",
@@ -4258,23 +5951,35 @@ test("Phone waiting sessions show the prompt and send terminal input", async ({ 
     activity: "waiting-for-input",
     exit_code: 0,
   };
-  const fixture = await installFixtures(page, {}, [liveSession, waiting, exited], undefined, {
-    scrollback: "running migration 0011\nApply this migration? (y/n) ",
-  });
+  const fixture = await installFixtures(
+    page,
+    {},
+    [liveSession, waiting, exited],
+    undefined,
+    {
+      scrollback: "running migration 0011\nApply this migration? (y/n) ",
+    },
+  );
 
   await page.goto("/#/sessions");
 
-  const card = page.locator(".session-waiting").filter({ hasText: "needs-attention" });
+  const card = page
+    .locator(".session-waiting")
+    .filter({ hasText: "needs-attention" });
   await expect(card).toBeVisible();
   // The Live Sessions roster was removed; the waiting card is the
   // prompt the phone came for, and it leads the surface.
 
   // It shows before it asks: the session's own output, and the target it belongs to.
-  await expect(card.getByTestId("waiting-tail")).toContainText("Apply this migration? (y/n)");
+  await expect(card.getByTestId("waiting-tail")).toContainText(
+    "Apply this migration? (y/n)",
+  );
   await expect(card).toContainText("/workspace/vogt");
   await expect(card).toContainText("not Vogt approvals");
 
-  const acts = card.getByRole("group", { name: "Terminal input for needs-attention" });
+  const acts = card.getByRole("group", {
+    name: "Terminal input for needs-attention",
+  });
   await acts.getByRole("button", { name: "Send y + Enter" }).click();
   await expect.poll(() => fixture.sessionInputs.length).toBe(1);
   expect(fixture.sessionInputs[0]).toEqual({
@@ -4293,12 +5998,17 @@ test("Phone waiting sessions show the prompt and send terminal input", async ({ 
 
   // An exited session refuses safely, and says why rather than offering a
   // control that could only fail at whoever pressed it.
-  const dead = page.locator(".session-waiting").filter({ hasText: "already-finished" });
+  const dead = page
+    .locator(".session-waiting")
+    .filter({ hasText: "already-finished" });
   await expect(dead).toContainText("has exited");
-  await expect(dead.getByRole("button", { name: "Send y + Enter" })).toHaveCount(0);
-  await expect(dead.getByRole("button", { name: "Send Ctrl-C" })).toHaveCount(0);
+  await expect(
+    dead.getByRole("button", { name: "Send y + Enter" }),
+  ).toHaveCount(0);
+  await expect(dead.getByRole("button", { name: "Send Ctrl-C" })).toHaveCount(
+    0,
+  );
 });
-
 
 /**
  * The chunk split's middle criterion, asserted where it is falsifiable: a reader on
@@ -4306,26 +6016,42 @@ test("Phone waiting sessions show the prompt and send terminal input", async ({ 
  * or the terminal. The budget script measures the built graph; this measures
  * what the browser actually asks for.
  */
-test("Non-editor routes fetch neither the editor nor the terminal", async ({ page }) => {
-  const deferred = /monaco|xterm|TerminalWorkspace|EditorWorkspace|\.worker/i;
-  const asked: string[] = [];
-  page.on("request", (request) => {
-    const url = request.url();
-    if (deferred.test(url)) asked.push(new URL(url).pathname);
-  });
+test(
+  "Non-editor routes fetch neither the editor nor the terminal",
+  mockOnly(LIVE_SKIP.harness),
+  async ({ page }) => {
+    const deferred = /monaco|xterm|TerminalWorkspace|EditorWorkspace|\.worker/i;
+    const asked: string[] = [];
+    page.on("request", (request) => {
+      const url = request.url();
+      if (deferred.test(url)) asked.push(new URL(url).pathname);
+    });
 
-  await installFixtures(page);
-  for (const route of ["board", "backlog", "inbox", "sessions", "projects", "audit"]) {
-    await page.goto(`/#/${route}`);
-    await page.waitForLoadState("networkidle");
-  }
-  expect(asked, "no editor or terminal code on a route that has neither").toEqual([]);
+    await installFixtures(page);
+    for (const route of [
+      "board",
+      "backlog",
+      "inbox",
+      "sessions",
+      "projects",
+      "audit",
+    ]) {
+      await page.goto(`/#/${route}`);
+      await page.waitForLoadState("networkidle");
+    }
+    expect(
+      asked,
+      "no editor or terminal code on a route that has neither",
+    ).toEqual([]);
 
-  // And it does arrive when a route needs it: the editor route is what pays
-  // for the editor.
-  await page.goto("/#/e/src/main.ts");
-  await expect.poll(() => asked.length, { timeout: 15_000 }).toBeGreaterThan(0);
-});
+    // And it does arrive when a route needs it: the editor route is what pays
+    // for the editor.
+    await page.goto("/#/e/src/main.ts");
+    await expect
+      .poll(() => asked.length, { timeout: 15_000 })
+      .toBeGreaterThan(0);
+  },
+);
 
 /**
  * Server-owned bounded pages, from the client's side: a cell that has
@@ -4333,47 +6059,65 @@ test("Non-editor routes fetch neither the editor nor the terminal", async ({ pag
  * server gave it*, and appends. The scale requirement's point is that scrolling a column
  * must not become a read of the estate.
  */
-test("A bounded Board cell continues from its cursor rather than re-reading", async ({ page }) => {
-  test.skip(test.info().project.name === "phone", "Cell scrolling is the desk's column");
-  const many = Array.from({ length: 8 }, (_, index) => ({
-    ...boardItems[0],
-    ref: `WI-${index + 1}`,
-    title: `Ranked card ${index + 1}`,
-  }));
-  const fixture = await installFixtures(page, {}, [], undefined, {
-    boardItems: many,
-    boardPageSize: 3,
-    boardTotal: many.length,
-  });
-  await page.goto("/#/board");
+test(
+  "A bounded Board cell continues from its cursor rather than re-reading",
+  mockOnly(LIVE_SKIP.data),
+  async ({ page }) => {
+    test.skip(
+      test.info().project.name === "phone",
+      "Cell scrolling is the desk's column",
+    );
+    const many = Array.from({ length: 8 }, (_, index) => ({
+      ...boardItems[0],
+      ref: `WI-${index + 1}`,
+      title: `Ranked card ${index + 1}`,
+    }));
+    const fixture = await installFixtures(page, {}, [], undefined, {
+      boardItems: many,
+      boardPageSize: 3,
+      boardTotal: many.length,
+    });
+    await page.goto("/#/board");
 
-  await expect(page.getByText("Ranked card 1")).toBeVisible();
-  await expect(page.getByText("Ranked card 4")).toHaveCount(0);
-  // The column says how long it really is, not how much of it arrived.
-  await expect(page.locator('.board-cell[data-state="open"]')).toHaveAttribute("data-wip", "8");
+    await expect(page.getByText("Ranked card 1")).toBeVisible();
+    await expect(page.getByText("Ranked card 4")).toHaveCount(0);
+    // The column says how long it really is, not how much of it arrived.
+    await expect(
+      page.locator('.board-cell[data-state="open"]'),
+    ).toHaveAttribute("data-wip", "8");
 
-  const cell = page.locator('.board-cell[data-state="open"] .board-cell-cards');
-  await cell.evaluate((node) => {
-    node.scrollTop = node.scrollHeight;
-    node.dispatchEvent(new Event("scroll"));
-  });
+    const cell = page.locator(
+      '.board-cell[data-state="open"] .board-cell-cards',
+    );
+    await cell.evaluate((node) => {
+      node.scrollTop = node.scrollHeight;
+      node.dispatchEvent(new Event("scroll"));
+    });
 
-  await expect(page.getByText("Ranked card 4")).toBeVisible();
-  const last = fixture.boardRequests.at(-1) as {
-    cells?: { state?: string; cursor?: string }[];
-    snapshot?: string;
-  };
-  expect(last.cells).toEqual([{ lane_key: "", state: "open", cursor: "cursor-1" }]);
-  expect(last.snapshot).toBe("browser-board-snapshot");
-});
+    await expect(page.getByText("Ranked card 4")).toBeVisible();
+    const last = fixture.boardRequests.at(-1) as {
+      cells?: { state?: string; cursor?: string }[];
+      snapshot?: string;
+    };
+    expect(last.cells).toEqual([
+      { lane_key: "", state: "open", cursor: "cursor-1" },
+    ]);
+    expect(last.snapshot).toBe("browser-board-snapshot");
+  },
+);
 
 /**
  * The crowded rail: many live sessions scroll inside the session area. The
  * rail itself does not scroll, so nav and the footer stay put, and Files
  * keeps a usable minimum — asserted as geometry, because "usable" is a height.
  */
-test("A crowded places rail keeps the file tree reachable", async ({ page }) => {
-  test.skip(test.info().project.name === "phone", "The places rail is a desktop surface");
+test("A crowded places rail keeps the file tree reachable", async ({
+  page,
+}) => {
+  test.skip(
+    test.info().project.name === "phone",
+    "The places rail is a desktop surface",
+  );
   const crowd = Array.from({ length: 24 }, (_, index) => ({
     ...liveSession,
     id: `crowd-${index}`,
@@ -4389,7 +6133,9 @@ test("A crowded places rail keeps the file tree reachable", async ({ page }) => 
   await expect(filesToggle).toHaveAttribute("aria-expanded", "false");
   await filesToggle.click();
   await expect(page.getByRole("heading", { name: "Files" })).toBeVisible();
-  await expect(page.getByRole("searchbox", { name: "Search files" })).toBeVisible();
+  await expect(
+    page.getByRole("searchbox", { name: "Search files" }),
+  ).toBeVisible();
 
   const geometry = await rail.evaluate((node) => {
     const tree = node.querySelector(".file-tree");
@@ -4418,12 +6164,16 @@ test("A crowded places rail keeps the file tree reachable", async ({ page }) => 
 
   // Reachable without scrolling the rail: Files and its search are already
   // on screen, and nav stayed put.
-  const reached = await page.getByRole("heading", { name: "Files" }).evaluate((node) => {
-    const box = node.getBoundingClientRect();
-    return box.top >= 0 && box.bottom <= window.innerHeight;
-  });
+  const reached = await page
+    .getByRole("heading", { name: "Files" })
+    .evaluate((node) => {
+      const box = node.getBoundingClientRect();
+      return box.top >= 0 && box.bottom <= window.innerHeight;
+    });
   expect(reached).toBe(true);
-  await expect(page.getByRole("searchbox", { name: "Search files" })).toBeVisible();
+  await expect(
+    page.getByRole("searchbox", { name: "Search files" }),
+  ).toBeVisible();
   await expect(page.getByRole("link", { name: "Board" })).toBeInViewport();
   await expect(page.getByRole("button", { name: "Settings" })).toBeInViewport();
 });
@@ -4432,77 +6182,95 @@ test("A crowded places rail keeps the file tree reachable", async ({ page }) => 
  * WI-1411: a long session list scrolls inside `.places-rail-session-area`.
  * The rail, the nav and the footer do not move.
  */
-test("A long session list scrolls inside the session area, not the rail", async ({ page }) => {
-  test.skip(test.info().project.name === "phone", "The places rail is a desktop surface");
-  const crowd = Array.from({ length: 40 }, (_, index) => ({
-    ...liveSession,
-    id: `scroll-${index}`,
-    name: `scroll-session-${index}`,
-    // Running, so the crowd sits in the Running section this test scrolls.
-    activity: "running",
-  }));
-  await installFixtures(page, {}, crowd);
-  await page.setViewportSize({ width: 1280, height: 800 });
-  await page.goto("/#/sessions");
-
-  const rail = page.locator(".places-rail");
-  const sessionArea = page.locator(".places-rail-session-area");
-  await expect(sessionArea).toBeVisible();
-  const before = await rail.evaluate((node) => {
-    const list = node.querySelector(".places-rail-session-area > div");
-    const board = node.querySelector(".places-nav");
-    const footer = node.querySelector(".places-rail-footer");
-    const toggle = node.querySelector(".places-rail-session-area .places-section-toggle");
-    return {
-      railScrolls: node.scrollHeight > node.clientHeight + 1,
-      listScrolls: list ? list.scrollHeight > list.clientHeight + 1 : false,
-      boardTop: board?.getBoundingClientRect().top ?? -1,
-      footerTop: footer?.getBoundingClientRect().top ?? -1,
-      toggleTop: toggle?.getBoundingClientRect().top ?? -1,
-    };
-  });
-  expect(before.railScrolls).toBe(false);
-  expect(before.listScrolls).toBe(true);
-
-  await sessionArea.locator(":scope > div").evaluate((node) => {
-    node.scrollTop = node.scrollHeight;
-  });
-  const after = await rail.evaluate((node) => {
-    const board = node.querySelector(".places-nav");
-    const footer = node.querySelector(".places-rail-footer");
-    const toggle = node.querySelector(".places-rail-session-area .places-section-toggle");
-    const list = node.querySelector(".places-rail-session-area > div");
-    const rows = [...(list?.querySelectorAll(".session-row") ?? [])].filter(
-      (row) => getComputedStyle(row).display !== "none",
+test(
+  "A long session list scrolls inside the session area, not the rail",
+  mockOnly(LIVE_SKIP.data),
+  async ({ page }) => {
+    test.skip(
+      test.info().project.name === "phone",
+      "The places rail is a desktop surface",
     );
-    const last = rows[rows.length - 1] ?? null;
-    const listBox = list?.getBoundingClientRect();
-    const lastBox = last?.getBoundingClientRect();
-    return {
-      railScrollTop: node.scrollTop,
-      boardTop: board?.getBoundingClientRect().top ?? -1,
-      footerTop: footer?.getBoundingClientRect().top ?? -1,
-      toggleTop: toggle?.getBoundingClientRect().top ?? -1,
-      lastVisible: !!(lastBox && listBox
-        && lastBox.bottom <= listBox.bottom + 2
-        && lastBox.top < listBox.bottom),
-      listTop: listBox ? Math.round(listBox.top) : -1,
-      listBottom: listBox ? Math.round(listBox.bottom) : -1,
-      scrollTop: list ? Math.round(list.scrollTop) : -1,
-      scrollHeight: list ? list.scrollHeight : -1,
-    };
-  });
-  expect(after.railScrollTop).toBe(0);
-  expect(after.boardTop).toBe(before.boardTop);
-  expect(after.footerTop).toBe(before.footerTop);
-  expect(after.toggleTop).toBe(before.toggleTop);
-  expect(after.lastVisible).toBe(true);
+    const crowd = Array.from({ length: 40 }, (_, index) => ({
+      ...liveSession,
+      id: `scroll-${index}`,
+      name: `scroll-session-${index}`,
+      // Running, so the crowd sits in the Running section this test scrolls.
+      activity: "running",
+    }));
+    await installFixtures(page, {}, crowd);
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto("/#/sessions");
 
-  // Collapsing the section still works, and the list stops scrolling.
-  await sessionArea.getByRole("button", { name: /Running/ }).click();
-  await expect(sessionArea.getByRole("button", { name: /Running/ })).toHaveAttribute("aria-expanded", "false");
-  await expect(page.locator(".places-rail-session-area .session-row").first()).toBeHidden();
-});
+    const rail = page.locator(".places-rail");
+    const sessionArea = page.locator(".places-rail-session-area");
+    await expect(sessionArea).toBeVisible();
+    const before = await rail.evaluate((node) => {
+      const list = node.querySelector(".places-rail-session-area > div");
+      const board = node.querySelector(".places-nav");
+      const footer = node.querySelector(".places-rail-footer");
+      const toggle = node.querySelector(
+        ".places-rail-session-area .places-section-toggle",
+      );
+      return {
+        railScrolls: node.scrollHeight > node.clientHeight + 1,
+        listScrolls: list ? list.scrollHeight > list.clientHeight + 1 : false,
+        boardTop: board?.getBoundingClientRect().top ?? -1,
+        footerTop: footer?.getBoundingClientRect().top ?? -1,
+        toggleTop: toggle?.getBoundingClientRect().top ?? -1,
+      };
+    });
+    expect(before.railScrolls).toBe(false);
+    expect(before.listScrolls).toBe(true);
+
+    await sessionArea.locator(":scope > div").evaluate((node) => {
+      node.scrollTop = node.scrollHeight;
+    });
+    const after = await rail.evaluate((node) => {
+      const board = node.querySelector(".places-nav");
+      const footer = node.querySelector(".places-rail-footer");
+      const toggle = node.querySelector(
+        ".places-rail-session-area .places-section-toggle",
+      );
+      const list = node.querySelector(".places-rail-session-area > div");
+      const rows = [...(list?.querySelectorAll(".session-row") ?? [])].filter(
+        (row) => getComputedStyle(row).display !== "none",
+      );
+      const last = rows[rows.length - 1] ?? null;
+      const listBox = list?.getBoundingClientRect();
+      const lastBox = last?.getBoundingClientRect();
+      return {
+        railScrollTop: node.scrollTop,
+        boardTop: board?.getBoundingClientRect().top ?? -1,
+        footerTop: footer?.getBoundingClientRect().top ?? -1,
+        toggleTop: toggle?.getBoundingClientRect().top ?? -1,
+        lastVisible: !!(
+          lastBox &&
+          listBox &&
+          lastBox.bottom <= listBox.bottom + 2 &&
+          lastBox.top < listBox.bottom
+        ),
+        listTop: listBox ? Math.round(listBox.top) : -1,
+        listBottom: listBox ? Math.round(listBox.bottom) : -1,
+        scrollTop: list ? Math.round(list.scrollTop) : -1,
+        scrollHeight: list ? list.scrollHeight : -1,
+      };
+    });
+    expect(after.railScrollTop).toBe(0);
+    expect(after.boardTop).toBe(before.boardTop);
+    expect(after.footerTop).toBe(before.footerTop);
+    expect(after.toggleTop).toBe(before.toggleTop);
+    expect(after.lastVisible).toBe(true);
+
+    // Collapsing the section still works, and the list stops scrolling.
+    await sessionArea.getByRole("button", { name: /Running/ }).click();
+    await expect(
+      sessionArea.getByRole("button", { name: /Running/ }),
+    ).toHaveAttribute("aria-expanded", "false");
+    await expect(
+      page.locator(".places-rail-session-area .session-row").first(),
+    ).toBeHidden();
+  },
+);
 
 /**
  * WI-1736: the rail sorts sessions by what they need from a person. Workers
@@ -4510,129 +6278,265 @@ test("A long session list scrolls inside the session area, not the rail", async 
  * person is lifted into "Needs you" with its parent named, the section headers
  * carry counts, and the filter narrows the list.
  */
-test("The places rail groups sessions by state, nests workers, and filters", async ({ page }) => {
-  test.skip(test.info().project.name === "phone", "The places rail is a desktop surface");
-  const minutesAgo = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString();
-  const sessions = [
-    { ...liveSession, id: "ovs-main", name: "ovs-main", role: "oversight", activity: "idle", created_at: minutesAgo(120), last_event_at: minutesAgo(1) },
-    { ...liveSession, id: "w-run", name: "w-run", activity: "running", created_at: minutesAgo(20), last_event_at: minutesAgo(1) },
-    {
-      ...liveSession,
-      id: "w-ask",
-      name: "w-ask",
-      activity: "awaiting-approval",
-      approval: { question: "Run the tests?", command_excerpt: "npm test", detected_at: minutesAgo(2) },
-      created_at: minutesAgo(30),
-      last_event_at: minutesAgo(2),
-    },
-    { ...liveSession, id: "solo", name: "solo", activity: "idle", created_at: minutesAgo(10), last_event_at: minutesAgo(3) },
-    { ...liveSession, id: "w-done", name: "w-done", activity: "exited", exit_code: 0, created_at: minutesAgo(90), last_event_at: minutesAgo(40) },
-  ];
-  await installFixtures(page, {}, sessions);
-  // Vogt says who started whom; the engine list does not.
-  await page.route((url) => url.pathname.endsWith("/vogt/sessions"), (route) => route.fulfill({
-    json: {
-      sessions: [
-        { id: "ses_run", engine_session_id: "w-run", started_by_session: "ovs-main" },
-        { id: "ses_ask", engine_session_id: "w-ask", started_by_session: "ovs-main" },
-        { id: "ses_done", engine_session_id: "w-done", started_by_session: "ovs-main" },
-      ],
-      engine: null,
-    },
-  }));
-  await page.goto("/#/sessions");
+test(
+  "The places rail groups sessions by state, nests workers, and filters",
+  mockOnly(LIVE_SKIP.data),
+  async ({ page }) => {
+    test.skip(
+      test.info().project.name === "phone",
+      "The places rail is a desktop surface",
+    );
+    const minutesAgo = (minutes: number) =>
+      new Date(Date.now() - minutes * 60_000).toISOString();
+    const sessions = [
+      {
+        ...liveSession,
+        id: "ovs-main",
+        name: "ovs-main",
+        role: "oversight",
+        activity: "idle",
+        created_at: minutesAgo(120),
+        last_event_at: minutesAgo(1),
+      },
+      {
+        ...liveSession,
+        id: "w-run",
+        name: "w-run",
+        activity: "running",
+        created_at: minutesAgo(20),
+        last_event_at: minutesAgo(1),
+      },
+      {
+        ...liveSession,
+        id: "w-ask",
+        name: "w-ask",
+        activity: "awaiting-approval",
+        approval: {
+          question: "Run the tests?",
+          command_excerpt: "npm test",
+          detected_at: minutesAgo(2),
+        },
+        created_at: minutesAgo(30),
+        last_event_at: minutesAgo(2),
+      },
+      {
+        ...liveSession,
+        id: "solo",
+        name: "solo",
+        activity: "idle",
+        created_at: minutesAgo(10),
+        last_event_at: minutesAgo(3),
+      },
+      {
+        ...liveSession,
+        id: "w-done",
+        name: "w-done",
+        activity: "exited",
+        exit_code: 0,
+        created_at: minutesAgo(90),
+        last_event_at: minutesAgo(40),
+      },
+    ];
+    await installFixtures(page, {}, sessions);
+    // Vogt says who started whom; the engine list does not.
+    await page.route(
+      (url) => url.pathname.endsWith("/vogt/sessions"),
+      (route) =>
+        route.fulfill({
+          json: {
+            sessions: [
+              {
+                id: "ses_run",
+                engine_session_id: "w-run",
+                started_by_session: "ovs-main",
+              },
+              {
+                id: "ses_ask",
+                engine_session_id: "w-ask",
+                started_by_session: "ovs-main",
+              },
+              {
+                id: "ses_done",
+                engine_session_id: "w-done",
+                started_by_session: "ovs-main",
+              },
+            ],
+            engine: null,
+          },
+        }),
+    );
+    await page.goto("/#/sessions");
 
-  const area = page.locator(".places-rail-session-area");
-  const heads = area.locator(".rail-section-head");
-  await expect(heads.filter({ hasText: "Needs you" })).toBeVisible();
-  await expect(heads.filter({ hasText: "Running" })).toBeVisible();
-  await expect(heads.filter({ hasText: "Ready / idle" })).toBeVisible();
-  await expect(heads.filter({ hasText: "Done recently" })).toBeVisible();
-  // The old single "Running" header counted every listed session; each section
-  // now counts its own.
-  await expect(area.locator('[aria-label^="1 needs you sessions"]')).toHaveText("1");
+    const area = page.locator(".places-rail-session-area");
+    const heads = area.locator(".rail-section-head");
+    await expect(heads.filter({ hasText: "Needs you" })).toBeVisible();
+    await expect(heads.filter({ hasText: "Running" })).toBeVisible();
+    await expect(heads.filter({ hasText: "Ready / idle" })).toBeVisible();
+    await expect(heads.filter({ hasText: "Done recently" })).toBeVisible();
+    // The old single "Running" header counted every listed session; each section
+    // now counts its own.
+    await expect(
+      area.locator('[aria-label^="1 needs you sessions"]'),
+    ).toHaveText("1");
 
-  // The waiting worker is lifted into Needs you, with its parent named.
-  const lifted = area.locator('.session-row[aria-label^="w-ask,"]');
-  await expect(lifted).toContainText("↳ ovs-main");
-  await expect(lifted).toHaveClass(/waiting/);
+    // The waiting worker is lifted into Needs you, with its parent named.
+    const lifted = area.locator('.session-row[aria-label^="w-ask,"]');
+    await expect(lifted).toContainText("↳ ovs-main");
+    await expect(lifted).toHaveClass(/waiting/);
 
-  // The parent rolls up its children: one running, and the lifted one counts as needing you.
-  const parent = area.locator('.session-row[aria-label^="ovs-main,"]');
-  await expect(parent.locator(".session-tally")).toContainText("1▶");
-  await expect(area.locator(".session-row--child", { hasText: "w-run" })).toBeVisible();
+    // The parent rolls up its children: one running, and the lifted one counts as needing you.
+    const parent = area.locator('.session-row[aria-label^="ovs-main,"]');
+    await expect(parent.locator(".session-tally")).toContainText("1▶");
+    await expect(
+      area.locator(".session-row--child", { hasText: "w-run" }),
+    ).toBeVisible();
 
-  // Folding the parent hides its children; a finished child stays in Done.
-  await parent.locator(".session-caret").click();
-  await expect(area.locator(".session-row--child", { hasText: "w-run" })).toBeHidden();
-  await parent.locator(".session-caret").click();
-  await expect(area.locator(".session-row--child", { hasText: "w-run" })).toBeVisible();
+    // Folding the parent hides its children; a finished child stays in Done.
+    await parent.locator(".session-caret").click();
+    await expect(
+      area.locator(".session-row--child", { hasText: "w-run" }),
+    ).toBeHidden();
+    await parent.locator(".session-caret").click();
+    await expect(
+      area.locator(".session-row--child", { hasText: "w-run" }),
+    ).toBeVisible();
 
-  // The filter narrows the list, and Escape clears it.
-  const filter = area.getByRole("searchbox", { name: "Filter sessions" });
-  await filter.fill("solo");
-  await expect(area.locator('.session-row[aria-label^="solo,"]')).toBeVisible();
-  await expect(area.locator('.session-row[aria-label^="w-run,"]')).toHaveCount(0);
-  await filter.press("Escape");
-  await expect(filter).toHaveValue("");
-  await expect(area.locator('.session-row[aria-label^="w-run,"]')).toBeVisible();
-});
+    // The filter narrows the list, and Escape clears it.
+    const filter = area.getByRole("searchbox", { name: "Filter sessions" });
+    await filter.fill("solo");
+    await expect(
+      area.locator('.session-row[aria-label^="solo,"]'),
+    ).toBeVisible();
+    await expect(
+      area.locator('.session-row[aria-label^="w-run,"]'),
+    ).toHaveCount(0);
+    await filter.press("Escape");
+    await expect(filter).toHaveValue("");
+    await expect(
+      area.locator('.session-row[aria-label^="w-run,"]'),
+    ).toBeVisible();
+  },
+);
 
 /**
  * WI-1736, phone width: the Sessions page groups sessions the way the rail
  * does: a Pinned strip, state headers, a worker lifted into Needs you with its
  * parent named, and a filter, with no horizontal scroll.
  */
-test("Phone Sessions groups by state, pins, lifts, and filters at phone width", async ({ page }) => {
-  test.skip(test.info().project.name !== "phone", "The phone Sessions body is the phone surface");
-  const minutesAgo = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString();
+test("Phone Sessions groups by state, pins, lifts, and filters at phone width", async ({
+  page,
+}) => {
+  test.skip(
+    test.info().project.name !== "phone",
+    "The phone Sessions body is the phone surface",
+  );
+  const minutesAgo = (minutes: number) =>
+    new Date(Date.now() - minutes * 60_000).toISOString();
   await page.addInitScript(() => {
     localStorage.setItem("vogt.sessionBookmarks.v1", JSON.stringify(["solo"]));
   });
   const sessions = [
-    { ...liveSession, id: "ovs-main", name: "ovs-main", role: "oversight", activity: "idle", created_at: minutesAgo(120), last_event_at: minutesAgo(1) },
-    { ...liveSession, id: "w-run", name: "w-run", activity: "running", created_at: minutesAgo(20), last_event_at: minutesAgo(1) },
+    {
+      ...liveSession,
+      id: "ovs-main",
+      name: "ovs-main",
+      role: "oversight",
+      activity: "idle",
+      created_at: minutesAgo(120),
+      last_event_at: minutesAgo(1),
+    },
+    {
+      ...liveSession,
+      id: "w-run",
+      name: "w-run",
+      activity: "running",
+      created_at: minutesAgo(20),
+      last_event_at: minutesAgo(1),
+    },
     {
       ...liveSession,
       id: "w-ask",
       name: "w-ask",
       activity: "awaiting-approval",
-      approval: { question: "Run the tests?", command_excerpt: "npm test", detected_at: minutesAgo(2) },
+      approval: {
+        question: "Run the tests?",
+        command_excerpt: "npm test",
+        detected_at: minutesAgo(2),
+      },
       created_at: minutesAgo(30),
       last_event_at: minutesAgo(2),
     },
-    { ...liveSession, id: "solo", name: "solo", activity: "idle", created_at: minutesAgo(10), last_event_at: minutesAgo(3) },
+    {
+      ...liveSession,
+      id: "solo",
+      name: "solo",
+      activity: "idle",
+      created_at: minutesAgo(10),
+      last_event_at: minutesAgo(3),
+    },
   ];
   await installFixtures(page, {}, sessions);
-  await page.route((url) => url.pathname.endsWith("/vogt/sessions"), (route) => route.fulfill({
-    json: {
-      sessions: [
-        { id: "ses_run", engine_session_id: "w-run", started_by_session: "ovs-main" },
-        { id: "ses_ask", engine_session_id: "w-ask", started_by_session: "ovs-main" },
-      ],
-      engine: null,
-    },
-  }));
+  await page.route(
+    (url) => url.pathname.endsWith("/vogt/sessions"),
+    (route) =>
+      route.fulfill({
+        json: {
+          sessions: [
+            {
+              id: "ses_run",
+              engine_session_id: "w-run",
+              started_by_session: "ovs-main",
+            },
+            {
+              id: "ses_ask",
+              engine_session_id: "w-ask",
+              started_by_session: "ovs-main",
+            },
+          ],
+          engine: null,
+        },
+      }),
+  );
   await page.goto("/#/sessions");
 
   const list = page.locator(".session-list");
-  await expect(list.locator(".session-list-head", { hasText: "Pinned" })).toBeVisible();
-  await expect(list.locator(".session-list-head", { hasText: "Needs you" })).toBeVisible();
-  await expect(list.locator(".session-list-head", { hasText: "Ready / idle" })).toBeVisible();
+  await expect(
+    list.locator(".session-list-head", { hasText: "Pinned" }),
+  ).toBeVisible();
+  await expect(
+    list.locator(".session-list-head", { hasText: "Needs you" }),
+  ).toBeVisible();
+  await expect(
+    list.locator(".session-list-head", { hasText: "Ready / idle" }),
+  ).toBeVisible();
   // The pinned session sits in the strip, once.
-  await expect(list.locator('.session-row[aria-label^="solo,"]')).toHaveCount(1);
+  await expect(list.locator('.session-row[aria-label^="solo,"]')).toHaveCount(
+    1,
+  );
   // The worker that needs a person is lifted into Needs you, with its parent named.
-  await expect(list.locator('.session-row[aria-label^="w-ask,"]')).toContainText("↳ ovs-main");
-  await expect(list.locator('.session-row[aria-label^="ovs-main,"] .session-tally')).toContainText("1▶");
+  await expect(
+    list.locator('.session-row[aria-label^="w-ask,"]'),
+  ).toContainText("↳ ovs-main");
+  await expect(
+    list.locator('.session-row[aria-label^="ovs-main,"] .session-tally'),
+  ).toContainText("1▶");
 
   // The filter narrows the list at phone width.
   const filter = page.getByRole("searchbox", { name: "Filter sessions" });
   await filter.fill("w-run");
-  await expect(list.locator('.session-row[aria-label^="w-run,"]')).toBeVisible();
-  await expect(list.locator('.session-row[aria-label^="solo,"]')).toHaveCount(0);
+  await expect(
+    list.locator('.session-row[aria-label^="w-run,"]'),
+  ).toBeVisible();
+  await expect(list.locator('.session-row[aria-label^="solo,"]')).toHaveCount(
+    0,
+  );
 
   // Nothing scrolls sideways at phone width.
-  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+  const overflow = await page.evaluate(
+    () =>
+      document.documentElement.scrollWidth -
+      document.documentElement.clientWidth,
+  );
   expect(overflow).toBeLessThanOrEqual(0);
 });
 
@@ -4642,66 +6546,85 @@ test("Phone Sessions groups by state, pins, lifts, and filters at phone width", 
  * scroll with it, and the height survives a reload. Double-click returns the
  * shipped auto height.
  */
-test("The running session list resizes by drag and remembers the height", async ({ page }) => {
-  test.skip(test.info().project.name === "phone", "The places rail is a desktop surface");
-  const crowd = Array.from({ length: 30 }, (_, index) => ({
-    ...liveSession,
-    id: `resize-${index}`,
-    name: `resize-session-${index}`,
-  }));
-  await installFixtures(page, {}, crowd);
-  await page.setViewportSize({ width: 1280, height: 800 });
-  await page.goto("/#/sessions");
+test(
+  "The running session list resizes by drag and remembers the height",
+  mockOnly(LIVE_SKIP.data),
+  async ({ page }) => {
+    test.skip(
+      test.info().project.name === "phone",
+      "The places rail is a desktop surface",
+    );
+    const crowd = Array.from({ length: 30 }, (_, index) => ({
+      ...liveSession,
+      id: `resize-${index}`,
+      name: `resize-session-${index}`,
+    }));
+    await installFixtures(page, {}, crowd);
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto("/#/sessions");
 
-  const area = page.locator(".places-rail-session-area");
-  const handle = page.getByRole("separator", { name: "Resize the running session list" });
-  await expect(handle).toBeVisible();
-  const before = (await area.boundingBox())!;
-  const box = (await handle.boundingBox())!;
-  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-  await page.mouse.down();
-  // The shipped height already fills the leftover column, so a drag down is
-  // clamped. Dragging up is the useful direction: more of the places list shows.
-  await page.mouse.move(box.x + box.width / 2, box.y - 140, { steps: 6 });
-  await page.mouse.up();
+    const area = page.locator(".places-rail-session-area");
+    const handle = page.getByRole("separator", {
+      name: "Resize the running session list",
+    });
+    await expect(handle).toBeVisible();
+    const before = (await area.boundingBox())!;
+    const box = (await handle.boundingBox())!;
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.mouse.down();
+    // The shipped height already fills the leftover column, so a drag down is
+    // clamped. Dragging up is the useful direction: more of the places list shows.
+    await page.mouse.move(box.x + box.width / 2, box.y - 140, { steps: 6 });
+    await page.mouse.up();
 
-  const shorter = (await area.boundingBox())!;
-  expect(shorter.height).toBeLessThan(before.height - 100);
-  expect(shorter.height).toBeGreaterThan(120);
+    const shorter = (await area.boundingBox())!;
+    expect(shorter.height).toBeLessThan(before.height - 100);
+    expect(shorter.height).toBeGreaterThan(120);
 
-  const scrolled = await area.evaluate((node) => {
-    const list = node.querySelector(":scope > div");
-    const rail = node.closest(".places-rail");
-    if (!list || !rail) return { listScrolls: false, railScrolls: true };
-    list.scrollTop = list.scrollHeight;
-    return {
-      listScrolls: list.scrollHeight > list.clientHeight + 1,
-      railScrolls: rail.scrollHeight > rail.clientHeight + 1,
-      moved: list.scrollTop > 0,
-    };
-  });
-  expect(scrolled.listScrolls).toBe(true);
-  expect(scrolled.railScrolls).toBe(false);
-  expect(scrolled.moved).toBe(true);
+    const scrolled = await area.evaluate((node) => {
+      const list = node.querySelector(":scope > div");
+      const rail = node.closest(".places-rail");
+      if (!list || !rail) return { listScrolls: false, railScrolls: true };
+      list.scrollTop = list.scrollHeight;
+      return {
+        listScrolls: list.scrollHeight > list.clientHeight + 1,
+        railScrolls: rail.scrollHeight > rail.clientHeight + 1,
+        moved: list.scrollTop > 0,
+      };
+    });
+    expect(scrolled.listScrolls).toBe(true);
+    expect(scrolled.railScrolls).toBe(false);
+    expect(scrolled.moved).toBe(true);
 
-  await page.reload();
-  await expect.poll(async () => (await area.boundingBox())?.height ?? 0)
-    .toBeLessThan(before.height - 100);
+    await page.reload();
+    await expect
+      .poll(async () => (await area.boundingBox())?.height ?? 0)
+      .toBeLessThan(before.height - 100);
 
-  const again = (await handle.boundingBox())!;
-  await page.mouse.dblclick(again.x + again.width / 2, again.y + again.height / 2);
-  await expect.poll(async () => page.evaluate(
-    () => localStorage.getItem("vogt.pane.places-session-area.height.v1"),
-  )).toBeNull();
+    const again = (await handle.boundingBox())!;
+    await page.mouse.dblclick(
+      again.x + again.width / 2,
+      again.y + again.height / 2,
+    );
+    await expect
+      .poll(async () =>
+        page.evaluate(() =>
+          localStorage.getItem("vogt.pane.places-session-area.height.v1"),
+        ),
+      )
+      .toBeNull();
 
-  // Arrow keys step the stored height, clamped at the three-row minimum.
-  await handle.focus();
-  await page.keyboard.press("ArrowDown");
-  const raised = Number(await handle.getAttribute("aria-valuenow"));
-  expect(raised).toBeGreaterThan(132);
-  await page.keyboard.press("ArrowUp");
-  expect(Number(await handle.getAttribute("aria-valuenow"))).toBe(raised - 24);
-});
+    // Arrow keys step the stored height, clamped at the three-row minimum.
+    await handle.focus();
+    await page.keyboard.press("ArrowDown");
+    const raised = Number(await handle.getAttribute("aria-valuenow"));
+    expect(raised).toBeGreaterThan(132);
+    await page.keyboard.press("ArrowUp");
+    expect(Number(await handle.getAttribute("aria-valuenow"))).toBe(
+      raised - 24,
+    );
+  },
+);
 
 /**
  * The other half of the chunk split, learned the hard way on the dev instance: a lazy
@@ -4711,27 +6634,31 @@ test("The running session list resizes by drag and remembers the height", async 
  * the root error boundary replaced the entire product with its own message.
  * A dialog nobody opened must not be on the boot path at all.
  */
-test("A dialog nobody opened is not downloaded at boot", async ({ page }) => {
-  const dialogs = /(^|\/)(Settings|TemplateSelector|KeyboardShortcuts)[.-]/;
-  const asked: string[] = [];
-  page.on("request", (request) => {
-    const path = new URL(request.url()).pathname;
-    if (dialogs.test(path)) asked.push(path);
-  });
+test(
+  "A dialog nobody opened is not downloaded at boot",
+  mockOnly(LIVE_SKIP.harness),
+  async ({ page }) => {
+    const dialogs = /(^|\/)(Settings|TemplateSelector|KeyboardShortcuts)[.-]/;
+    const asked: string[] = [];
+    page.on("request", (request) => {
+      const path = new URL(request.url()).pathname;
+      if (dialogs.test(path)) asked.push(path);
+    });
 
-  await installFixtures(page);
-  for (const route of ["board", "sessions", "inbox", "backlog"]) {
-    await page.goto(`/#/${route}`);
-    await page.waitForLoadState("networkidle");
-  }
-  expect(asked, "no dialog chunk on the boot path of any place").toEqual([]);
+    await installFixtures(page);
+    for (const route of ["board", "sessions", "inbox", "backlog"]) {
+      await page.goto(`/#/${route}`);
+      await page.waitForLoadState("networkidle");
+    }
+    expect(asked, "no dialog chunk on the boot path of any place").toEqual([]);
 
-  // And it does arrive when the reader asks for it — the deferral is not a
-  // deletion.
-  await page.goto("/#/settings");
-  await expect(page.getByRole("dialog", { name: "Settings" })).toBeVisible();
-  expect(asked.some((path) => /Settings/.test(path))).toBe(true);
-});
+    // And it does arrive when the reader asks for it — the deferral is not a
+    // deletion.
+    await page.goto("/#/settings");
+    await expect(page.getByRole("dialog", { name: "Settings" })).toBeVisible();
+    expect(asked.some((path) => /Settings/.test(path))).toBe(true);
+  },
+);
 
 /**
  * And when a chunk genuinely does not arrive — a deploy swapped the files
@@ -4740,9 +6667,13 @@ test("A dialog nobody opened is not downloaded at boot", async ({ page }) => {
  * chunk failed and the root boundary replaced the whole shell with "Vogt
  * could not render this view".
  */
-test("A place whose chunk never arrives costs that place, not the shell", async ({ page }) => {
+test("A place whose chunk never arrives costs that place, not the shell", async ({
+  page,
+}) => {
   await installFixtures(page);
-  await page.route(/Backlog\.tsx|Backlog-[A-Za-z0-9_-]+\.js/, (route) => route.abort());
+  await page.route(/Backlog\.tsx|Backlog-[A-Za-z0-9_-]+\.js/, (route) =>
+    route.abort(),
+  );
 
   await page.goto("/#/backlog");
 
@@ -4750,16 +6681,18 @@ test("A place whose chunk never arrives costs that place, not the shell", async 
   await expect(page.getByRole("button", { name: "Reload" })).toBeVisible();
   // The shell is still a shell: navigation is there, and the places that did
   // load still work.
-  const shell = test.info().project.name === "phone"
-    ? page.getByRole("navigation", { name: "Primary navigation" })
-    : page.getByRole("complementary", { name: "Places" });
+  const shell =
+    test.info().project.name === "phone"
+      ? page.getByRole("navigation", { name: "Primary navigation" })
+      : page.getByRole("complementary", { name: "Places" });
   await expect(shell).toBeVisible();
-  await expect(page.getByText("Vogt could not render this view")).toHaveCount(0);
+  await expect(page.getByText("Vogt could not render this view")).toHaveCount(
+    0,
+  );
 
   await page.goto("/#/board");
   await expect(page.getByRole("heading", { name: "Board" })).toBeVisible();
 });
-
 
 /**
  * The working header is one row with one vertical anchor.
@@ -4774,56 +6707,70 @@ test("A place whose chunk never arrives costs that place, not the shell", async 
  * action are on the same line as each other, and no control in the header is
  * taller than the row it is supposed to sit in.
  */
-test("The working header puts its controls and its action on one line", async ({ page }) => {
-  test.skip(test.info().project.name === "phone", "The narrow shell stacks by design");
-  await installFixtures(page);
+test(
+  "The working header puts its controls and its action on one line",
+  mockOnly(LIVE_SKIP.data),
+  async ({ page }) => {
+    test.skip(
+      test.info().project.name === "phone",
+      "The narrow shell stacks by design",
+    );
+    await installFixtures(page);
 
-  for (const route of ["board", "backlog", "inbox", "sessions"]) {
-    await page.goto(`/#/${route}`);
-    const header = page.locator("[data-surface-header]:visible").first();
-    await expect(header).toBeVisible();
+    for (const route of ["board", "backlog", "inbox", "sessions"]) {
+      await page.goto(`/#/${route}`);
+      const header = page.locator("[data-surface-header]:visible").first();
+      await expect(header).toBeVisible();
 
-    const rows = await header.evaluate((node) => {
-      const box = (selector: string) => {
-        const found = node.querySelector<HTMLElement>(selector);
-        if (!found) return null;
-        const rect = found.getBoundingClientRect();
-        return { top: rect.top, bottom: rect.bottom, mid: rect.top + rect.height / 2 };
-      };
-      return {
-        controls: box('[data-surface-header-slot="controls"]'),
-        action: box('[data-surface-header-slot="action"]'),
-        title: box('[data-surface-header-slot="title"]'),
-        // The tallest thing inside the controls: a label stacked over its
-        // select is what used to double this.
-        tallest: Math.max(
-          0,
-          ...[...node.querySelectorAll<HTMLElement>(
-            '[data-surface-header-slot="controls"] > *',
-          )].map((child) => child.getBoundingClientRect().height),
-        ),
-      };
-    });
+      const rows = await header.evaluate((node) => {
+        const box = (selector: string) => {
+          const found = node.querySelector<HTMLElement>(selector);
+          if (!found) return null;
+          const rect = found.getBoundingClientRect();
+          return {
+            top: rect.top,
+            bottom: rect.bottom,
+            mid: rect.top + rect.height / 2,
+          };
+        };
+        return {
+          controls: box('[data-surface-header-slot="controls"]'),
+          action: box('[data-surface-header-slot="action"]'),
+          title: box('[data-surface-header-slot="title"]'),
+          // The tallest thing inside the controls: a label stacked over its
+          // select is what used to double this.
+          tallest: Math.max(
+            0,
+            ...[
+              ...node.querySelectorAll<HTMLElement>(
+                '[data-surface-header-slot="controls"] > *',
+              ),
+            ].map((child) => child.getBoundingClientRect().height),
+          ),
+        };
+      });
 
-    if (rows.controls && rows.action) {
-      // Centres within a few pixels of each other: the two clusters are one
-      // row, not two anchored at different edges.
+      if (rows.controls && rows.action) {
+        // Centres within a few pixels of each other: the two clusters are one
+        // row, not two anchored at different edges.
+        expect(
+          Math.abs(rows.controls.mid - rows.action.mid),
+          `/${route} controls and action share a line`,
+        ).toBeLessThan(8);
+      }
+      if (rows.controls && rows.title) {
+        expect(
+          Math.abs(rows.controls.mid - rows.title.mid),
+          `/${route} controls sit with the title`,
+        ).toBeLessThan(20);
+      }
       expect(
-        Math.abs(rows.controls.mid - rows.action.mid),
-        `/${route} controls and action share a line`,
-      ).toBeLessThan(8);
+        rows.tallest,
+        `/${route} no stacked label doubles a control`,
+      ).toBeLessThan(46);
     }
-    if (rows.controls && rows.title) {
-      expect(
-        Math.abs(rows.controls.mid - rows.title.mid),
-        `/${route} controls sit with the title`,
-      ).toBeLessThan(20);
-    }
-    expect(rows.tallest, `/${route} no stacked label doubles a control`)
-      .toBeLessThan(46);
-  }
-});
-
+  },
+);
 
 /**
  * The Places rail and the Sessions live-list are drag-resizable and
@@ -4838,13 +6785,20 @@ test("The working header puts its controls and its action on one line", async ({
  * every phone route of two thirds of its width — caught by the existing
  * Inbox first-viewport test going red at exactly this feature's introduction).
  */
-test("The Places rail resizes, collapses, and remembers both across reload", async ({ page }) => {
-  test.skip(test.info().project.name === "phone", "The rail is a desktop surface");
+test("The Places rail resizes, collapses, and remembers both across reload", async ({
+  page,
+}) => {
+  test.skip(
+    test.info().project.name === "phone",
+    "The rail is a desktop surface",
+  );
   await installFixtures(page);
   await page.goto("/#/board");
 
   const rail = page.locator(".places-rail");
-  const before = await rail.evaluate((node) => node.getBoundingClientRect().width);
+  const before = await rail.evaluate(
+    (node) => node.getBoundingClientRect().width,
+  );
   expect(Math.round(before)).toBe(248);
 
   const handle = page.locator(".rail-resize-handle");
@@ -4854,14 +6808,17 @@ test("The Places rail resizes, collapses, and remembers both across reload", asy
   await page.mouse.move(box.x + 120, box.y + box.height / 2, { steps: 5 });
   await page.mouse.up();
 
-  const widened = await rail.evaluate((node) => node.getBoundingClientRect().width);
+  const widened = await rail.evaluate(
+    (node) => node.getBoundingClientRect().width,
+  );
   expect(widened).toBeGreaterThan(before + 80);
 
   // Reload before collapsing: the width survives on its own, independent of
   // the collapsed flag.
   await page.reload();
-  await expect(rail.evaluate((node) => node.getBoundingClientRect().width))
-    .resolves.toBeCloseTo(widened, 0);
+  await expect(
+    rail.evaluate((node) => node.getBoundingClientRect().width),
+  ).resolves.toBeCloseTo(widened, 0);
 
   await page.getByRole("button", { name: "Hide the Places rail" }).click();
   await expect(rail).toBeHidden();
@@ -4874,13 +6831,20 @@ test("The Places rail resizes, collapses, and remembers both across reload", asy
     if (!banner) return false;
     const a = node.getBoundingClientRect();
     const b = banner.getBoundingClientRect();
-    return a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+    return (
+      a.left < b.right &&
+      a.right > b.left &&
+      a.top < b.bottom &&
+      a.bottom > b.top
+    );
   });
   expect(overlap).toBe(false);
 
   await page.reload();
   await expect(page.locator(".places-rail")).toBeHidden();
-  await expect(page.getByRole("button", { name: "Show the Places rail" })).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Show the Places rail" }),
+  ).toBeVisible();
 
   // And nothing about a collapsed, resized rail narrowed the surface it made
   // room for — the whole point of collapsing it.
@@ -4888,30 +6852,39 @@ test("The Places rail resizes, collapses, and remembers both across reload", asy
   await expect(page.locator(".places-rail")).toBeVisible();
 });
 
-test("A resized, collapsed rail does not leak its width into the narrow shell", async ({ page }) => {
-  test.skip(test.info().project.name === "phone", "seeds a desktop width, then narrows");
-  await installFixtures(page);
-  await page.goto("/#/board");
-  const handle = page.locator(".rail-resize-handle");
-  const box = (await handle.boundingBox())!;
-  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-  await page.mouse.down();
-  await page.mouse.move(box.x + 120, box.y + box.height / 2, { steps: 5 });
-  await page.mouse.up();
+test(
+  "A resized, collapsed rail does not leak its width into the narrow shell",
+  mockOnly(LIVE_SKIP.harness),
+  async ({ page }) => {
+    test.skip(
+      test.info().project.name === "phone",
+      "seeds a desktop width, then narrows",
+    );
+    await installFixtures(page);
+    await page.goto("/#/board");
+    const handle = page.locator(".rail-resize-handle");
+    const box = (await handle.boundingBox())!;
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(box.x + 120, box.y + box.height / 2, { steps: 5 });
+    await page.mouse.up();
 
-  // Narrow the same page rather than reloading at a narrow viewport: the
-  // regression this guards was the *inline* style outliving the width that
-  // made it correct, not a fresh render choosing the wrong one.
-  await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto("/#/inbox");
-  await page.waitForLoadState("networkidle");
+    // Narrow the same page rather than reloading at a narrow viewport: the
+    // regression this guards was the *inline* style outliving the width that
+    // made it correct, not a fresh render choosing the wrong one.
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto("/#/inbox");
+    await page.waitForLoadState("networkidle");
 
-  const geometry = await page.evaluate(() => ({
-    entryWidth: document.querySelector(".inbox-entry")?.getBoundingClientRect().width ?? 0,
-    viewport: window.innerWidth,
-  }));
-  expect(geometry.entryWidth).toBeGreaterThan(geometry.viewport * 0.8);
-});
+    const geometry = await page.evaluate(() => ({
+      entryWidth:
+        document.querySelector(".inbox-entry")?.getBoundingClientRect().width ??
+        0,
+      viewport: window.innerWidth,
+    }));
+    expect(geometry.entryWidth).toBeGreaterThan(geometry.viewport * 0.8);
+  },
+);
 
 // The Sessions live-list resize/collapse test was removed with the Live
 // Sessions sub-panel; the places rail is where sessions are listed now.
@@ -4921,16 +6894,22 @@ test("A resized, collapsed rail does not leak its width into the narrow shell", 
  * a running shell from the live registry is unioned into the list even when
  * the archive is empty, and badged live rather than hidden until it exits.
  */
-test("History lists a live session even when the archive is empty", async ({ page }) => {
-  await installFixtures(page, {}, [liveSession]);
-  await page.route("**/api/history/sessions*", (route) => route.fulfill({ json: [] }));
-  await page.goto("/#/history");
+test(
+  "History lists a live session even when the archive is empty",
+  mockOnly(LIVE_SKIP.data),
+  async ({ page }) => {
+    await installFixtures(page, {}, [liveSession]);
+    await page.route("**/api/history/sessions*", (route) =>
+      route.fulfill({ json: [] }),
+    );
+    await page.goto("/#/history");
 
-  const row = page.getByRole("button", { name: /browser-session/ });
-  await expect(row).toBeVisible();
-  await expect(row.getByText("Live")).toBeVisible();
-  await expect(page.getByText("No sessions yet.")).toHaveCount(0);
-});
+    const row = page.getByRole("button", { name: /browser-session/ });
+    await expect(row).toBeVisible();
+    await expect(row.getByText("Live")).toBeVisible();
+    await expect(page.getByText("No sessions yet.")).toHaveCount(0);
+  },
+);
 
 // -- editing and moving a work item from its own page -----------------------
 //
@@ -4940,30 +6919,44 @@ test("History lists a live session even when the archive is empty", async ({ pag
 // follows the server's answer, on the desk and the phone alike, since a phone
 // has no drag and the detail page is where it moves a card at all.
 
-test("Work item state is changed from the detail page via Move to", async ({ page }) => {
-  const fixture = await installFixtures(page);
-  await page.goto("/#/w/WI-7");
-  await expect(page.locator(".wid-view")).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Measured board card" })).toBeVisible();
+test(
+  "Work item state is changed from the detail page via Move to",
+  mockOnly(LIVE_SKIP.data),
+  async ({ page }) => {
+    const fixture = await installFixtures(page);
+    await page.goto("/#/w/WI-7");
+    await expect(page.locator(".wid-view")).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: "Measured board card" }),
+    ).toBeVisible();
 
-  // The rail says the item is open.
-  const rail = page.locator(".wid-rail");
-  await expect(rail.locator(".wid-rail-state.is-current")).toHaveText("open");
+    // The rail says the item is open.
+    const rail = page.locator(".wid-rail");
+    await expect(rail.locator(".wid-rail-state.is-current")).toHaveText("open");
 
-  // Move to → reason → confirm, the same optimistic transition a drag commits.
-  const move = page.locator(".wid-move-to");
-  await expect(move).toBeVisible();
-  await move.getByLabel("Move to").selectOption("done");
-  await move.locator('input[type="text"]').fill("closing it from the detail page");
-  await move.getByRole("button", { name: "Move", exact: true }).click();
+    // Move to → reason → confirm, the same optimistic transition a drag commits.
+    const move = page.locator(".wid-move-to");
+    await expect(move).toBeVisible();
+    await move.getByLabel("Move to").selectOption("done");
+    await move
+      .locator('input[type="text"]')
+      .fill("closing it from the detail page");
+    await move.getByRole("button", { name: "Move", exact: true }).click();
 
-  // Exactly that transition was requested — ref, target, and the typed reason.
-  await expect.poll(() => fixture.transitionRequests).toEqual([
-    { ref: "WI-7", to_state: "done", reason: "closing it from the detail page" },
-  ]);
-  // And the rail follows the server's answer rather than what was typed.
-  await expect(rail.locator(".wid-rail-state.is-current")).toHaveText("done");
-});
+    // Exactly that transition was requested — ref, target, and the typed reason.
+    await expect
+      .poll(() => fixture.transitionRequests)
+      .toEqual([
+        {
+          ref: "WI-7",
+          to_state: "done",
+          reason: "closing it from the detail page",
+        },
+      ]);
+    // And the rail follows the server's answer rather than what was typed.
+    await expect(rail.locator(".wid-rail-state.is-current")).toHaveText("done");
+  },
+);
 
 // The branch panel is layout-bearing — declared and observed branches
 // are shown side by side, an observed one says when it was last active, and a
@@ -5017,7 +7010,9 @@ test("The item detail page shows the branches it is worked on, with age", async 
   const panel = page.locator('[data-testid="branches"]');
   await expect(panel).toBeVisible();
   // The observed-and-declared branch: named, badged `both`, active 2h ago.
-  await expect(panel.locator('[data-testid="branch-wi-7"]')).toContainText("wi-7");
+  await expect(panel.locator('[data-testid="branch-wi-7"]')).toContainText(
+    "wi-7",
+  );
   await expect(panel).toContainText("active 2h ago");
   await expect(
     panel.locator('[data-testid="branch-wi-7"] .wid-branch-source--both'),
@@ -5089,8 +7084,7 @@ test("The item detail page shows its derived git story — phase, PR, drift", as
           drift: [
             {
               code: "merged_pr_open_item",
-              message:
-                "the pull request merged but the item is still open",
+              message: "the pull request merged but the item is still open",
               provenance: "forge PR #7",
             },
           ],
@@ -5102,11 +7096,15 @@ test("The item detail page shows its derived git story — phase, PR, drift", as
 
   await page.goto("/#/w/WI-7");
   // The derived phase sits beside the workflow state, marked as git.
-  await expect(page.locator('[data-testid="git-phase"]')).toContainText("merged");
+  await expect(page.locator('[data-testid="git-phase"]')).toContainText(
+    "merged",
+  );
   const panel = page.locator('[data-testid="git-story"]');
   await expect(panel).toBeVisible();
   // The PR row carries its derived state and its checks rollup.
-  await expect(panel.locator('[data-testid="git-pr-state"]')).toHaveText("merged");
+  await expect(panel.locator('[data-testid="git-pr-state"]')).toHaveText(
+    "merged",
+  );
   await expect(panel.locator('[data-testid="git-pr-checks"]')).toContainText(
     "success",
   );
@@ -5116,54 +7114,64 @@ test("The item detail page shows its derived git story — phase, PR, drift", as
   ).toContainText("still open");
 });
 
-test("The item editor's assignee picker is keyboard-operable", async ({ page }) => {
-  await installFixtures(page, {}, [], undefined, {
-    actors: [
-      { identity_ref: "local:ana", display_name: "Ana" },
-      { identity_ref: "local:bo", display_name: "Bo" },
-    ],
-  });
-  await page.goto("/#/w/WI-7");
-  await expect(page.locator(".wid-view")).toBeVisible();
+test(
+  "The item editor's assignee picker is keyboard-operable",
+  mockOnly(LIVE_SKIP.data),
+  async ({ page }) => {
+    await installFixtures(page, {}, [], undefined, {
+      actors: [
+        { identity_ref: "local:ana", display_name: "Ana" },
+        { identity_ref: "local:bo", display_name: "Bo" },
+      ],
+    });
+    await page.goto("/#/w/WI-7");
+    await expect(page.locator(".wid-view")).toBeVisible();
 
-  await page.getByRole("button", { name: "Edit", exact: true }).click();
-  const picker = page.getByLabel("Assignee");
-  await expect(picker).toBeVisible();
-  // It offers "nobody" and the two actors, and starts on the item's assignee.
-  await expect(picker.locator("option")).toHaveText([
-    "nobody",
-    "Ana (local:ana)",
-    "Bo (local:bo)",
-  ]);
+    await page.getByRole("button", { name: "Edit", exact: true }).click();
+    const picker = page.getByLabel("Assignee");
+    await expect(picker).toBeVisible();
+    // It offers "nobody" and the two actors, and starts on the item's assignee.
+    await expect(picker.locator("option")).toHaveText([
+      "nobody",
+      "Ana (local:ana)",
+      "Bo (local:bo)",
+    ]);
 
-  // Focus it from nothing but the keyboard, and change the selection with the
-  // arrow keys — no pointer touches it.
-  await picker.focus();
-  await expect(picker).toBeFocused();
-  await picker.press("ArrowDown");
-  await expect(picker).toHaveValue("local:ana");
-  await picker.press("ArrowDown");
-  await expect(picker).toHaveValue("local:bo");
-});
+    // Focus it from nothing but the keyboard, and change the selection with the
+    // arrow keys — no pointer touches it.
+    await picker.focus();
+    await expect(picker).toBeFocused();
+    await picker.press("ArrowDown");
+    await expect(picker).toHaveValue("local:ana");
+    await picker.press("ArrowDown");
+    await expect(picker).toHaveValue("local:bo");
+  },
+);
 
-test("The item page leads with comments and keeps the session form collapsed", async ({ page }) => {
-  await installFixtures(page);
-  await page.goto("/#/w/WI-7");
-  await expect(page.locator(".wid-view")).toBeVisible();
+test(
+  "The item page leads with comments and keeps the session form collapsed",
+  mockOnly(LIVE_SKIP.data),
+  async ({ page }) => {
+    await installFixtures(page);
+    await page.goto("/#/w/WI-7");
+    await expect(page.locator(".wid-view")).toBeVisible();
 
-  // Comments is the panel immediately after Description in the main column.
-  const texts = await page.locator(".wid-main .wid-panel h3").allTextContents();
-  const description = texts.indexOf("Description");
-  expect(description).toBeGreaterThanOrEqual(0);
-  expect(texts[description + 1]).toBe("Comments");
+    // Comments is the panel immediately after Description in the main column.
+    const texts = await page
+      .locator(".wid-main .wid-panel h3")
+      .allTextContents();
+    const description = texts.indexOf("Description");
+    expect(description).toBeGreaterThanOrEqual(0);
+    expect(texts[description + 1]).toBe("Comments");
 
-  // Start a session is collapsed by default: the opener is on the page, the
-  // form is not, and clicking the opener reveals it.
-  await expect(page.locator(".wid-start-open")).toBeVisible();
-  await expect(page.locator(".wid-start form")).toHaveCount(0);
-  await page.locator(".wid-start-open").click();
-  await expect(page.locator(".wid-start form")).toBeVisible();
-});
+    // Start a session is collapsed by default: the opener is on the page, the
+    // form is not, and clicking the opener reveals it.
+    await expect(page.locator(".wid-start-open")).toBeVisible();
+    await expect(page.locator(".wid-start form")).toHaveCount(0);
+    await page.locator(".wid-start-open").click();
+    await expect(page.locator(".wid-start form")).toBeVisible();
+  },
+);
 
 // -- the item body is rendered Markdown, with a raw escape hatch -------------
 //
@@ -5171,47 +7179,56 @@ test("The item page leads with comments and keeps the session form collapsed", a
 // a list and a fenced block must become real nodes rather than arriving as
 // literal `#`, `-` and backticks — and the reader can still see the source.
 
-test("The item body renders Markdown, and the raw toggle shows its source", async ({ page }) => {
-  const body = [
-    "# Heading one",
-    "",
-    "A paragraph before the list.",
-    "",
-    "- first item",
-    "- second item",
-    "",
-    "```ts",
-    "const answer = 42;",
-    "```",
-  ].join("\n");
-  await installFixtures(page, {}, [], undefined, { workBody: body });
-  await page.goto("/#/w/WI-7");
-  await expect(page.locator(".wid-view")).toBeVisible();
+test(
+  "The item body renders Markdown, and the raw toggle shows its source",
+  mockOnly(LIVE_SKIP.data),
+  async ({ page }) => {
+    const body = [
+      "# Heading one",
+      "",
+      "A paragraph before the list.",
+      "",
+      "- first item",
+      "- second item",
+      "",
+      "```ts",
+      "const answer = 42;",
+      "```",
+    ].join("\n");
+    await installFixtures(page, {}, [], undefined, { workBody: body });
+    await page.goto("/#/w/WI-7");
+    await expect(page.locator(".wid-view")).toBeVisible();
 
-  const description = page.locator(".wid-main .wid-panel", { hasText: "Description" });
-  const rendered = description.locator(".md-body");
+    const description = page.locator(".wid-main .wid-panel", {
+      hasText: "Description",
+    });
+    const rendered = description.locator(".md-body");
 
-  // A real heading, a real list and a real fenced code block — not literals.
-  await expect(rendered.locator("h1")).toHaveText("Heading one");
-  await expect(rendered.locator("ul > li")).toHaveText(["first item", "second item"]);
-  await expect(rendered.locator("pre code")).toHaveText("const answer = 42;");
+    // A real heading, a real list and a real fenced code block — not literals.
+    await expect(rendered.locator("h1")).toHaveText("Heading one");
+    await expect(rendered.locator("ul > li")).toHaveText([
+      "first item",
+      "second item",
+    ]);
+    await expect(rendered.locator("pre code")).toHaveText("const answer = 42;");
 
-  // None of the Markdown punctuation survives as text in the rendered view.
-  const renderedText = (await rendered.innerText()).trim();
-  expect(renderedText).not.toContain("# Heading");
-  expect(renderedText).not.toContain("- first");
-  expect(renderedText).not.toContain("```");
+    // None of the Markdown punctuation survives as text in the rendered view.
+    const renderedText = (await rendered.innerText()).trim();
+    expect(renderedText).not.toContain("# Heading");
+    expect(renderedText).not.toContain("- first");
+    expect(renderedText).not.toContain("```");
 
-  // The raw toggle swaps to the Markdown source, verbatim.
-  await description.getByRole("button", { name: "Raw" }).click();
-  const raw = description.locator(".wid-body-raw");
-  await expect(raw).toBeVisible();
-  await expect(raw).toContainText("# Heading one");
-  await expect(raw).toContainText("```ts");
-  // And back again.
-  await description.getByRole("button", { name: "Rendered" }).click();
-  await expect(description.locator(".md-body h1")).toHaveText("Heading one");
-});
+    // The raw toggle swaps to the Markdown source, verbatim.
+    await description.getByRole("button", { name: "Raw" }).click();
+    const raw = description.locator(".wid-body-raw");
+    await expect(raw).toBeVisible();
+    await expect(raw).toContainText("# Heading one");
+    await expect(raw).toContainText("```ts");
+    // And back again.
+    await description.getByRole("button", { name: "Rendered" }).click();
+    await expect(description.locator(".md-body h1")).toHaveText("Heading one");
+  },
+);
 
 // -- the assistant composer's ergonomics ----------------------------
 //
@@ -5225,118 +7242,167 @@ async function openAssistant(page: Page): Promise<void> {
   await expect(page.locator(".assistant-input")).toBeVisible();
 }
 
-test("a failed assistant send keeps the draft and offers a retry", async ({ page }) => {
-  await openAssistant(page);
-  // The engine refuses this turn.
-  await page.route("**/api/assistant/message", async (route) =>
-    route.fulfill({ status: 502, body: "upstream down" }),
-  );
+test(
+  "a failed assistant send keeps the draft and offers a retry",
+  mockOnly(LIVE_SKIP.assistant),
+  async ({ page }) => {
+    await openAssistant(page);
+    // The engine refuses this turn.
+    await page.route("**/api/assistant/message", async (route) =>
+      route.fulfill({ status: 502, body: "upstream down" }),
+    );
 
-  await page.locator(".assistant-input").fill("what is on top?");
-  await page.getByRole("button", { name: "Send" }).click();
+    await page.locator(".assistant-input").fill("what is on top?");
+    await page.getByRole("button", { name: "Send" }).click();
 
-  // The message is not eaten by the failure, and a Retry is offered.
-  await expect(page.locator(".assistant-input")).toHaveValue("what is on top?");
-  await expect(page.getByTestId("assistant-retry")).toBeVisible();
-  await expect(page.locator(".assistant-row--failed")).toBeVisible();
-});
+    // The message is not eaten by the failure, and a Retry is offered.
+    await expect(page.locator(".assistant-input")).toHaveValue(
+      "what is on top?",
+    );
+    await expect(page.getByTestId("assistant-retry")).toBeVisible();
+    await expect(page.locator(".assistant-row--failed")).toBeVisible();
+  },
+);
 
-test("Stop cancels an assistant send in flight", async ({ page }) => {
-  await openAssistant(page);
-  // A turn that never answers on its own: only the client's abort ends it.
-  await page.route("**/api/assistant/message", async (route) => {
-    await new Promise((resolve) => setTimeout(resolve, 10_000));
-    try {
-      await route.fulfill({ json: { reply: "late", pending_action: null, tool_trace: [] } });
-    } catch {
-      /* aborted by Stop before it could answer */
-    }
-  });
+test(
+  "Stop cancels an assistant send in flight",
+  mockOnly(LIVE_SKIP.assistant),
+  async ({ page }) => {
+    await openAssistant(page);
+    // A turn that never answers on its own: only the client's abort ends it.
+    await page.route("**/api/assistant/message", async (route) => {
+      await new Promise((resolve) => setTimeout(resolve, 10_000));
+      try {
+        await route.fulfill({
+          json: { reply: "late", pending_action: null, tool_trace: [] },
+        });
+      } catch {
+        /* aborted by Stop before it could answer */
+      }
+    });
 
-  await page.locator(".assistant-input").fill("summarise the backlog");
-  await page.getByRole("button", { name: "Send" }).click();
+    await page.locator(".assistant-input").fill("summarise the backlog");
+    await page.getByRole("button", { name: "Send" }).click();
 
-  // While busy, Stop replaces Send; clicking it aborts the request and the
-  // composer comes back with the message intact and Send restored.
-  const stop = page.getByTestId("assistant-stop");
-  await expect(stop).toBeVisible();
-  await stop.click();
-  await expect(page.getByRole("button", { name: "Send" })).toBeVisible();
-  await expect(page.locator(".assistant-input")).toHaveValue("summarise the backlog");
-});
+    // While busy, Stop replaces Send; clicking it aborts the request and the
+    // composer comes back with the message intact and Send restored.
+    const stop = page.getByTestId("assistant-stop");
+    await expect(stop).toBeVisible();
+    await stop.click();
+    await expect(page.getByRole("button", { name: "Send" })).toBeVisible();
+    await expect(page.locator(".assistant-input")).toHaveValue(
+      "summarise the backlog",
+    );
+  },
+);
 
-test("Shift+Enter inserts a newline while Enter sends", async ({ page }) => {
-  await openAssistant(page);
+test(
+  "Shift+Enter inserts a newline while Enter sends",
+  mockOnly(LIVE_SKIP.assistant),
+  async ({ page }) => {
+    await openAssistant(page);
 
-  const composer = page.locator(".assistant-input");
-  await composer.click();
-  await composer.pressSequentially("line one");
-  await composer.press("Shift+Enter");
-  await composer.pressSequentially("line two");
+    const composer = page.locator(".assistant-input");
+    await composer.click();
+    await composer.pressSequentially("line one");
+    await composer.press("Shift+Enter");
+    await composer.pressSequentially("line two");
 
-  // The newline is in the value, and nothing was sent yet.
-  await expect(composer).toHaveValue("line one\nline two");
-  await expect(page.getByText("Acknowledged.")).toHaveCount(0);
+    // The newline is in the value, and nothing was sent yet.
+    await expect(composer).toHaveValue("line one\nline two");
+    await expect(page.getByText("Acknowledged.")).toHaveCount(0);
 
-  // Plain Enter sends the whole multi-line message.
-  await composer.press("Enter");
-  await expect(page.getByText("Acknowledged.")).toBeVisible();
-});
+    // Plain Enter sends the whole multi-line message.
+    await composer.press("Enter");
+    await expect(page.getByText("Acknowledged.")).toBeVisible();
+  },
+);
 
-test("an assistant Markdown reply renders a code block", async ({ page }) => {
-  await openAssistant(page);
-  await page.route("**/api/assistant/message", async (route) =>
-    route.fulfill({ json: {
-      reply: "Run this:\n\n```sh\ncargo test\n```\n",
-      pending_action: null,
-      tool_trace: [],
-    } }),
-  );
-
-  await page.locator(".assistant-input").fill("how do I test?");
-  await page.getByRole("button", { name: "Send" }).click();
-
-  const code = page.locator("pre.md-pre code");
-  await expect(code).toBeVisible();
-  await expect(code).toContainText("cargo test");
-  await expect(page.getByTestId("assistant-copy")).toBeVisible();
-});
-
-test("Phone Assistant renders structured transcript and compact approval", async ({ page }) => {
-  test.skip(test.info().project.name !== "phone", "The redesigned transcript is the narrow client's");
-  const sessionId = "assistant-deploy";
-  await installFixtures(page, { assistant_enabled: true }, [{
-    id: sessionId,
-    name: "deploy-agent",
-    cwd: "/workspace/vogt",
-    activity: "waiting-for-input",
-    exit_code: null,
-    scrollback_bytes: 1024,
-    created_at: "2026-08-30T10:00:00Z",
-    activity_changed_at: "2026-08-30T10:04:00Z",
-  }]);
-  await page.route("**/api/assistant/history**", async (route) =>
-    route.fulfill({ json: {
-      transcript: [
-        { role: "user", text: "What needs me?", created_at: "2026-08-30T10:05:00Z" },
-        {
-          role: "assistant",
-          text: "The deploy agent is waiting at a migration prompt.",
-          created_at: "2026-08-30T10:05:25Z",
-          tool_trace: ["listed sessions", "read deploy-agent tail"],
-          session_refs: [{ id: sessionId, name: "deploy-agent", activity: "waiting-for-input" }],
-          actions: [{ kind: "open-session", session_id: sessionId, label: "Open deploy-agent" }],
+test(
+  "an assistant Markdown reply renders a code block",
+  mockOnly(LIVE_SKIP.assistant),
+  async ({ page }) => {
+    await openAssistant(page);
+    await page.route("**/api/assistant/message", async (route) =>
+      route.fulfill({
+        json: {
+          reply: "Run this:\n\n```sh\ncargo test\n```\n",
+          pending_action: null,
+          tool_trace: [],
         },
-      ],
-      pending_action: {
-        kind: "send_input",
-        id: "pending-input",
-        session_id: sessionId,
-        session_name: "deploy-agent",
-        text: "y",
-        submit: true,
+      }),
+    );
+
+    await page.locator(".assistant-input").fill("how do I test?");
+    await page.getByRole("button", { name: "Send" }).click();
+
+    const code = page.locator("pre.md-pre code");
+    await expect(code).toBeVisible();
+    await expect(code).toContainText("cargo test");
+    await expect(page.getByTestId("assistant-copy")).toBeVisible();
+  },
+);
+
+test("Phone Assistant renders structured transcript and compact approval", async ({
+  page,
+}) => {
+  test.skip(
+    test.info().project.name !== "phone",
+    "The redesigned transcript is the narrow client's",
+  );
+  const sessionId = "assistant-deploy";
+  await installFixtures(page, { assistant_enabled: true }, [
+    {
+      id: sessionId,
+      name: "deploy-agent",
+      cwd: "/workspace/vogt",
+      activity: "waiting-for-input",
+      exit_code: null,
+      scrollback_bytes: 1024,
+      created_at: "2026-08-30T10:00:00Z",
+      activity_changed_at: "2026-08-30T10:04:00Z",
+    },
+  ]);
+  await page.route("**/api/assistant/history**", async (route) =>
+    route.fulfill({
+      json: {
+        transcript: [
+          {
+            role: "user",
+            text: "What needs me?",
+            created_at: "2026-08-30T10:05:00Z",
+          },
+          {
+            role: "assistant",
+            text: "The deploy agent is waiting at a migration prompt.",
+            created_at: "2026-08-30T10:05:25Z",
+            tool_trace: ["listed sessions", "read deploy-agent tail"],
+            session_refs: [
+              {
+                id: sessionId,
+                name: "deploy-agent",
+                activity: "waiting-for-input",
+              },
+            ],
+            actions: [
+              {
+                kind: "open-session",
+                session_id: sessionId,
+                label: "Open deploy-agent",
+              },
+            ],
+          },
+        ],
+        pending_action: {
+          kind: "send_input",
+          id: "pending-input",
+          session_id: sessionId,
+          session_name: "deploy-agent",
+          text: "y",
+          submit: true,
+        },
       },
-    } }),
+    }),
   );
   await page.goto("/#/assistant");
 
@@ -5354,12 +7420,17 @@ test("Phone Assistant renders structured transcript and compact approval", async
   await expect(page.locator(".assistant-open-session")).toContainText(
     "Open deploy-agent ›",
   );
-  await expect(page.getByRole("region", { name: "Pending approval" })).toContainText(
-    "Send y ⏎ to deploy-agent",
-  );
+  await expect(
+    page.getByRole("region", { name: "Pending approval" }),
+  ).toContainText("Send y ⏎ to deploy-agent");
   await expect(page.locator(".assistant")).toHaveScreenshot(
     "assistant-phone-structured.png",
-    { mask: [page.locator(".assistant-time-separator"), page.locator(".assistant-countdown")] },
+    {
+      mask: [
+        page.locator(".assistant-time-separator"),
+        page.locator(".assistant-countdown"),
+      ],
+    },
   );
 });
 
@@ -5372,54 +7443,81 @@ test("Phone Assistant renders structured transcript and compact approval", async
  */
 const SURFACE_HEADERS = [
   { name: "board", goto: "/#/board", content: ".board-scroll, .board-empty" },
-  { name: "backlog", goto: "/#/backlog", content: ".vogt-backlog-listwrap, .vogt-backlog-empty" },
+  {
+    name: "backlog",
+    goto: "/#/backlog",
+    content: ".vogt-backlog-listwrap, .vogt-backlog-empty",
+  },
   { name: "inbox", goto: "/#/inbox", content: ".inbox-list" },
   { name: "sessions", goto: "/#/sessions", content: ".sessions-place-body" },
   { name: "projects", goto: "/#/projects", content: ".vogt-projects-list" },
   { name: "workitem", goto: "/#/w/WI-7", content: ".wid-facts" },
 ] as const;
 
-test("all six surface headers share the grammar and read the same at both sizes", async ({ page }) => {
-  await installFixtures(page, {}, [liveSession]);
-  // "goto" is the phone's inline Go to… (WI-75), present only on a narrow client.
-  const order = ["title", "goto", "honesty", "spacer", "controls", "action", "detail"];
+test(
+  "all six surface headers share the grammar and read the same at both sizes",
+  mockOnly(LIVE_SKIP.baseline),
+  async ({ page }) => {
+    await installFixtures(page, {}, [liveSession]);
+    // "goto" is the phone's inline Go to… (WI-75), present only on a narrow client.
+    const order = [
+      "title",
+      "goto",
+      "honesty",
+      "spacer",
+      "controls",
+      "action",
+      "detail",
+    ];
 
-  for (const surface of SURFACE_HEADERS) {
-    await page.goto(surface.goto);
-    const header = page.locator("[data-surface-header]:visible").first();
-    await expect(header).toBeVisible();
-    await expect(page.locator(surface.content).first()).toBeVisible();
+    for (const surface of SURFACE_HEADERS) {
+      await page.goto(surface.goto);
+      const header = page.locator("[data-surface-header]:visible").first();
+      await expect(header).toBeVisible();
+      await expect(page.locator(surface.content).first()).toBeVisible();
 
-    // A narrow shell folds a surface's chrome behind one disclosure; open it so
-    // the whole header is in the shot rather than half of it.
-    const more = header.locator(".surface-header-more");
-    if (await more.count()) {
-      if ((await more.getAttribute("aria-expanded")) === "false") await more.click();
-    }
+      // A narrow shell folds a surface's chrome behind one disclosure; open it so
+      // the whole header is in the shot rather than half of it.
+      const more = header.locator(".surface-header-more");
+      if (await more.count()) {
+        if ((await more.getAttribute("aria-expanded")) === "false")
+          await more.click();
+      }
 
-    const slots = await header
-      .locator(":scope > [data-surface-header-slot]")
-      .evaluateAll((elements) =>
-        elements.map((element) => element.getAttribute("data-surface-header-slot")),
+      const slots = await header
+        .locator(":scope > [data-surface-header-slot]")
+        .evaluateAll((elements) =>
+          elements.map((element) =>
+            element.getAttribute("data-surface-header-slot"),
+          ),
+        );
+      expect(slots, `${surface.name} keeps the shared slot order`).toEqual(
+        order.filter((slot) => slots.includes(slot)),
       );
-    expect(slots, `${surface.name} keeps the shared slot order`).toEqual(
-      order.filter((slot) => slots.includes(slot)),
-    );
 
-    await expect(header).toHaveScreenshot(`surface-header-${surface.name}.png`, {
-      // The age pill counts seconds; masking it is what keeps the shot stable.
-      mask: [header.locator('[data-surface-header-slot="honesty"]')],
-    });
-  }
-});
+      await expect(header).toHaveScreenshot(
+        `surface-header-${surface.name}.png`,
+        {
+          // The age pill counts seconds; masking it is what keeps the shot stable.
+          mask: [header.locator('[data-surface-header-slot="honesty"]')],
+        },
+      );
+    }
+  },
+);
 
 /**
  * The desktop half of the rail fix: a surface remembered under two different
  * queries is one place, so its chip appears once — not two identically
  * labelled chips, the bug the query-keyed-but-path-labelled recents had.
  */
-test("Recent places dedupes a surface visited under different queries", async ({ page }) => {
-  test.skip(test.info().project.name === "phone", "The places rail is a desktop surface");
+test("Recent places dedupes a surface visited under different queries", async ({
+  page,
+}) => {
+  test.skip(
+    test.info().project.name === "phone",
+    "The places rail is a desktop surface",
+  );
   await installFixtures(page);
 
   await page.goto("/#/board?project=vogt");
@@ -5442,8 +7540,13 @@ test("Recent places dedupes a surface visited under different queries", async ({
  * Settings, Sign out, the connection dot — used to sit below the fold and be
  * unreachable at 1440×900. Pinned now, it is in the viewport without scrolling.
  */
-test("The rail footer stays reachable at 1440x900 with sessions present", async ({ page }) => {
-  test.skip(test.info().project.name === "phone", "The places rail is a desktop surface");
+test("The rail footer stays reachable at 1440x900 with sessions present", async ({
+  page,
+}) => {
+  test.skip(
+    test.info().project.name === "phone",
+    "The places rail is a desktop surface",
+  );
   const crowd = Array.from({ length: 30 }, (_, index) => ({
     ...liveSession,
     id: `footer-crowd-${index}`,
@@ -5464,24 +7567,34 @@ test("The rail footer stays reachable at 1440x900 with sessions present", async 
  * Clear filters, Register a project — not four per-column "Nothing here" with
  * no way out.
  */
-test("An empty Board offers one panel with a next action, not four dead cells", async ({ page }) => {
-  await installFixtures(page, {}, [], undefined, {
-    boardItems: [],
-    boardTotal: 0,
-  });
-  await page.goto("/#/board");
+test(
+  "An empty Board offers one panel with a next action, not four dead cells",
+  mockOnly(LIVE_SKIP.data),
+  async ({ page }) => {
+    await installFixtures(page, {}, [], undefined, {
+      boardItems: [],
+      boardTotal: 0,
+    });
+    await page.goto("/#/board");
 
-  const empty = page.locator(".board-empty--actions");
-  await expect(empty).toBeVisible();
-  await expect(empty).toContainText("No work items match");
-  await expect(empty.getByRole("button", { name: "Quick create" })).toBeVisible();
-  await expect(empty.getByRole("link", { name: "Register a project" })).toBeVisible();
-  // The four per-column "Nothing here" are gone.
-  await expect(page.locator(".board-cell-empty")).toHaveCount(0);
+    const empty = page.locator(".board-empty--actions");
+    await expect(empty).toBeVisible();
+    await expect(empty).toContainText("No work items match");
+    await expect(
+      empty.getByRole("button", { name: "Quick create" }),
+    ).toBeVisible();
+    await expect(
+      empty.getByRole("link", { name: "Register a project" }),
+    ).toBeVisible();
+    // The four per-column "Nothing here" are gone.
+    await expect(page.locator(".board-cell-empty")).toHaveCount(0);
 
-  await empty.getByRole("button", { name: "Quick create" }).click();
-  await expect(page.getByRole("textbox", { name: "Title" }).first()).toBeVisible();
-});
+    await empty.getByRole("button", { name: "Quick create" }).click();
+    await expect(
+      page.getByRole("textbox", { name: "Title" }).first(),
+    ).toBeVisible();
+  },
+);
 
 // ---------------------------------------------------------------------------
 // Selectable app themes: Vogt Dark, Dim, Light and High contrast are
@@ -5493,14 +7606,27 @@ test("An empty Board offers one panel with a next action, not four dead cells", 
 const APP_THEME_IDS = ["dark", "dim", "light", "hc-dark", "hc-light"] as const;
 
 const THEME_SURFACES = [
-  { name: "board", goto: "/#/board?project=vogt", ready: ".board-scroll, .board-empty" },
-  { name: "backlog", goto: "/#/backlog?project=vogt", ready: ".vogt-backlog-listwrap, .vogt-backlog-empty" },
+  {
+    name: "board",
+    goto: "/#/board?project=vogt",
+    ready: ".board-scroll, .board-empty",
+  },
+  {
+    name: "backlog",
+    goto: "/#/backlog?project=vogt",
+    ready: ".vogt-backlog-listwrap, .vogt-backlog-empty",
+  },
   { name: "workitem", goto: "/#/w/WI-7", ready: ".wid-facts" },
   { name: "sessions", goto: "/#/sessions", ready: ".sessions-place-body" },
 ] as const;
 
-test("mobile redesign keeps its layout across all themes and required widths", async ({ page }) => {
-  test.skip(test.info().project.name !== "phone", "The responsive matrix belongs to the narrow client");
+test("mobile redesign keeps its layout across all themes and required widths", async ({
+  page,
+}) => {
+  test.skip(
+    test.info().project.name !== "phone",
+    "The responsive matrix belongs to the narrow client",
+  );
   await installFixtures(page, { assistant_enabled: true }, THREE_SESSIONS);
   await stubTerminalAttach(page);
   await page.goto("/#/sessions");
@@ -5510,20 +7636,36 @@ test("mobile redesign keeps its layout across all themes and required widths", a
       const { setAppTheme } = await import("/src/appThemes.ts");
       setAppTheme(id);
     }, themeId);
-    expect(await page.evaluate(() => document.documentElement.dataset.theme)).toBe(themeId);
+    expect(
+      await page.evaluate(() => document.documentElement.dataset.theme),
+    ).toBe(themeId);
   };
   const expectNoHorizontalOverflow = async (selector: string) => {
-    const dimensions = await page.locator(selector).first().evaluate((element) => ({
-      client: element.clientWidth,
-      scroll: element.scrollWidth,
-    }));
-    expect(dimensions.scroll, `${selector} overflows: ${JSON.stringify(dimensions)}`)
-      .toBeLessThanOrEqual(dimensions.client + 1);
+    const dimensions = await page
+      .locator(selector)
+      .first()
+      .evaluate((element) => ({
+        client: element.clientWidth,
+        scroll: element.scrollWidth,
+      }));
+    expect(
+      dimensions.scroll,
+      `${selector} overflows: ${JSON.stringify(dimensions)}`,
+    ).toBeLessThanOrEqual(dimensions.client + 1);
   };
 
   // Every named token set must preserve the Sessions composition; this is a
   // geometry smoke test rather than eight near-identical screenshot files.
-  for (const themeId of ["dark", "dim", "hc-dark", "light", "soft", "sepia", "rose", "hc-light"]) {
+  for (const themeId of [
+    "dark",
+    "dim",
+    "hc-dark",
+    "light",
+    "soft",
+    "sepia",
+    "rose",
+    "hc-light",
+  ]) {
     await page.setViewportSize({ width: 390, height: 844 });
     await page.goto("/#/sessions");
     await setTheme(themeId);
@@ -5553,14 +7695,24 @@ test("mobile redesign keeps its layout across all themes and required widths", a
       await expect(page.locator(".terminal-mobile-header")).toBeVisible();
       await expect(page.locator(".terminal-host").first()).toBeVisible();
       await expect(page.locator(".sessions-header")).toBeHidden();
-      const terminalHeight = await page.locator(".terminal-host").first()
+      const terminalHeight = await page
+        .locator(".terminal-host")
+        .first()
         .evaluate((element) => element.getBoundingClientRect().height);
-      expect(terminalHeight, `${themeId} terminal at ${width}px`).toBeGreaterThan(250);
+      expect(
+        terminalHeight,
+        `${themeId} terminal at ${width}px`,
+      ).toBeGreaterThan(250);
 
       if (themeId === "light" && width === 375) {
-        await page.getByRole("button", { name: "More terminal actions" }).click();
-        await expect(page.locator(".terminal-mobile-overflow").getByLabel("Terminal color theme"))
-          .toHaveValue("GitHub Light");
+        await page
+          .getByRole("button", { name: "More terminal actions" })
+          .click();
+        await expect(
+          page
+            .locator(".terminal-mobile-overflow")
+            .getByLabel("Terminal color theme"),
+        ).toHaveValue("GitHub Light");
       }
     }
   }
@@ -5585,22 +7737,31 @@ async function useThemeViewport(page: Page) {
 
 for (const themeId of APP_THEME_IDS) {
   for (const surface of THEME_SURFACES) {
-    test(`app theme ${themeId}: ${surface.name} renders and matches its baseline`, async ({ page }) => {
-      await installFixtures(page, {}, [liveSession]);
-      await pinAppTheme(page, themeId);
-      await useThemeViewport(page);
-      await page.goto(surface.goto);
-      await expect(page.locator(surface.ready).first()).toBeVisible();
-      expect(
-        await page.evaluate(() => document.documentElement.getAttribute("data-theme")),
-      ).toBe(themeId);
-      await expect(page).toHaveScreenshot(`theme-${themeId}-${surface.name}.png`, {
-        fullPage: true,
-        animations: "disabled",
-        // Relative-age pills tick, so masking them is what keeps the shot stable.
-        mask: [page.locator(".vogt-age")],
-      });
-    });
+    test(
+      `app theme ${themeId}: ${surface.name} renders and matches its baseline`,
+      mockOnly(LIVE_SKIP.baseline),
+      async ({ page }) => {
+        await installFixtures(page, {}, [liveSession]);
+        await pinAppTheme(page, themeId);
+        await useThemeViewport(page);
+        await page.goto(surface.goto);
+        await expect(page.locator(surface.ready).first()).toBeVisible();
+        expect(
+          await page.evaluate(() =>
+            document.documentElement.getAttribute("data-theme"),
+          ),
+        ).toBe(themeId);
+        await expect(page).toHaveScreenshot(
+          `theme-${themeId}-${surface.name}.png`,
+          {
+            fullPage: true,
+            animations: "disabled",
+            // Relative-age pills tick, so masking them is what keeps the shot stable.
+            mask: [page.locator(".vogt-age")],
+          },
+        );
+      },
+    );
   }
 }
 
@@ -5613,17 +7774,25 @@ for (const themeId of APP_THEME_IDS) {
 test("app theme is applied before first paint (no flash)", async ({ page }) => {
   await installFixtures(page);
   await page.addInitScript(() => {
-    (window as unknown as { __themeAtFirstFrame?: string | null }).__themeAtFirstFrame = "unset";
+    (
+      window as unknown as { __themeAtFirstFrame?: string | null }
+    ).__themeAtFirstFrame = "unset";
     requestAnimationFrame(() => {
-      (window as unknown as { __themeAtFirstFrame?: string | null }).__themeAtFirstFrame =
+      (
+        window as unknown as { __themeAtFirstFrame?: string | null }
+      ).__themeAtFirstFrame =
         document.documentElement.getAttribute("data-theme");
     });
   });
   await pinAppTheme(page, "light");
   await page.goto("/#/board?project=vogt");
-  await expect(page.locator(".board-scroll, .board-empty").first()).toBeVisible();
+  await expect(
+    page.locator(".board-scroll, .board-empty").first(),
+  ).toBeVisible();
   const themeAtFirstFrame = await page.evaluate(
-    () => (window as unknown as { __themeAtFirstFrame?: string | null }).__themeAtFirstFrame,
+    () =>
+      (window as unknown as { __themeAtFirstFrame?: string | null })
+        .__themeAtFirstFrame,
   );
   expect(themeAtFirstFrame).toBe("light");
 });
@@ -5633,19 +7802,31 @@ test("app theme is applied before first paint (no flash)", async ({ page }) => {
 // hand-rolled relative-luminance ratio, no new dependency. Body text must
 // clear 4.5:1; state/accent (large/chip) text must clear 3:1.
 for (const themeId of ["light", "hc-light", "hc-dark"] as const) {
-  test(`app theme ${themeId}: palette clears WCAG AA contrast`, async ({ page }) => {
+  test(`app theme ${themeId}: palette clears WCAG AA contrast`, async ({
+    page,
+  }) => {
     await installFixtures(page);
     await pinAppTheme(page, themeId);
     await page.goto("/#/board?project=vogt");
-    await expect(page.locator(".board-scroll, .board-empty").first()).toBeVisible();
+    await expect(
+      page.locator(".board-scroll, .board-empty").first(),
+    ).toBeVisible();
 
     const ratios = await page.evaluate(() => {
       const cs = getComputedStyle(document.documentElement);
       const tok = (n: string) => cs.getPropertyValue(n).trim();
       const hex = (c: string) => {
         let h = c.replace("#", "");
-        if (h.length === 3) h = h.split("").map((x) => x + x).join("");
-        return { r: parseInt(h.slice(0, 2), 16), g: parseInt(h.slice(2, 4), 16), b: parseInt(h.slice(4, 6), 16) };
+        if (h.length === 3)
+          h = h
+            .split("")
+            .map((x) => x + x)
+            .join("");
+        return {
+          r: parseInt(h.slice(0, 2), 16),
+          g: parseInt(h.slice(2, 4), 16),
+          b: parseInt(h.slice(4, 6), 16),
+        };
       };
       const lum = ({ r, g, b }: { r: number; g: number; b: number }) => {
         const f = (v: number) => {
@@ -5655,8 +7836,10 @@ for (const themeId of ["light", "hc-light", "hc-dark"] as const) {
         return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b);
       };
       const ratio = (a: string, b: string) => {
-        const la = lum(hex(a)), lb = lum(hex(b));
-        const hi = Math.max(la, lb), lo = Math.min(la, lb);
+        const la = lum(hex(a)),
+          lb = lum(hex(b));
+        const hi = Math.max(la, lb),
+          lo = Math.min(la, lb);
         return (hi + 0.05) / (lo + 0.05);
       };
       return {
@@ -5675,36 +7858,69 @@ for (const themeId of ["light", "hc-light", "hc-dark"] as const) {
     // Large / chip / state text and the ink on accent controls.
     expect(ratios.accentOnBg, "--accent on --bg").toBeGreaterThanOrEqual(3);
     expect(ratios.dangerOnBg, "--danger on --bg").toBeGreaterThanOrEqual(3);
-    expect(ratios.doneOnBg, "--activity-done on --bg").toBeGreaterThanOrEqual(3);
-    expect(ratios.onAccentOnAccent, "--on-accent on --accent").toBeGreaterThanOrEqual(3);
+    expect(ratios.doneOnBg, "--activity-done on --bg").toBeGreaterThanOrEqual(
+      3,
+    );
+    expect(
+      ratios.onAccentOnAccent,
+      "--on-accent on --accent",
+    ).toBeGreaterThanOrEqual(3);
   });
 }
 
-test("Assistant completes a voice-shaped turn through approval denial and TTS fallback", async ({ page }) => {
-  await installFixtures(page, { assistant_enabled: true, assistant_tts_enabled: true });
-  let denied = false;
-  await page.route("**/api/assistant/message", async (route) =>
-    route.fulfill({ json: {
-      reply: "I found a pending change.",
-      pending_action: { kind: "vogt_write", id: "voice-action", operation: "work.transition", target: "WI-7", payload: "done", reason: "voice request" },
-      tool_trace: ["voice turn received"],
-    } }),
-  );
-  await page.route("**/api/assistant/actions/voice-action", async (route) => {
-    denied = JSON.parse(route.request().postData() ?? "{}").approve === false;
-    await route.fulfill({ json: { reply: "The change was denied.", pending_action: null, tool_trace: [] } });
-  });
-  await page.route("**/api/assistant/tts", async (route) => route.fulfill({ status: 404, body: "speech unavailable" }));
-  await page.goto("/#/assistant");
-  const composer = page.locator(".assistant-input");
-  await composer.fill("mark WI-7 done");
-  await page.getByRole("button", { name: "Send" }).click();
-  await expect(page.getByText("I found a pending change.")).toBeVisible();
-  await expect(page.getByRole("region", { name: "Pending approval" })).toBeVisible();
-  await page.getByRole("button", { name: "Deny" }).click();
-  await expect.poll(() => denied).toBe(true);
-  await expect(page.getByRole("region", { name: "Pending approval" })).toHaveCount(0);
-});
+test(
+  "Assistant completes a voice-shaped turn through approval denial and TTS fallback",
+  mockOnly(LIVE_SKIP.assistant),
+  async ({ page }) => {
+    await installFixtures(page, {
+      assistant_enabled: true,
+      assistant_tts_enabled: true,
+    });
+    let denied = false;
+    await page.route("**/api/assistant/message", async (route) =>
+      route.fulfill({
+        json: {
+          reply: "I found a pending change.",
+          pending_action: {
+            kind: "vogt_write",
+            id: "voice-action",
+            operation: "work.transition",
+            target: "WI-7",
+            payload: "done",
+            reason: "voice request",
+          },
+          tool_trace: ["voice turn received"],
+        },
+      }),
+    );
+    await page.route("**/api/assistant/actions/voice-action", async (route) => {
+      denied = JSON.parse(route.request().postData() ?? "{}").approve === false;
+      await route.fulfill({
+        json: {
+          reply: "The change was denied.",
+          pending_action: null,
+          tool_trace: [],
+        },
+      });
+    });
+    await page.route("**/api/assistant/tts", async (route) =>
+      route.fulfill({ status: 404, body: "speech unavailable" }),
+    );
+    await page.goto("/#/assistant");
+    const composer = page.locator(".assistant-input");
+    await composer.fill("mark WI-7 done");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(page.getByText("I found a pending change.")).toBeVisible();
+    await expect(
+      page.getByRole("region", { name: "Pending approval" }),
+    ).toBeVisible();
+    await page.getByRole("button", { name: "Deny" }).click();
+    await expect.poll(() => denied).toBe(true);
+    await expect(
+      page.getByRole("region", { name: "Pending approval" }),
+    ).toHaveCount(0);
+  },
+);
 
 // -- a voice turn, end to end, in a real browser --------------------
 //
@@ -5750,7 +7966,10 @@ function silentWav(): Buffer {
  * so STT and TTS both go through the engine routes, and replaces `getUserMedia`
  * / `MediaRecorder` with fakes that release-to-send drives without hardware.
  */
-async function primeVoiceEnv(page: Page, opts: { tts?: boolean } = {}): Promise<void> {
+async function primeVoiceEnv(
+  page: Page,
+  opts: { tts?: boolean } = {},
+): Promise<void> {
   await page.addInitScript((ttsOn: boolean) => {
     // Spoken replies on from the start, so a reply is voiced through TTS.
     if (ttsOn) localStorage.setItem("vogt.assistant.tts", "1");
@@ -5791,7 +8010,8 @@ async function primeVoiceEnv(page: Page, opts: { tts?: boolean } = {}): Promise<
     class FakeMediaRecorder {
       state = "inactive";
       mimeType = "audio/webm";
-      private listeners: Record<string, ((event: { data?: Blob }) => void)[]> = {};
+      private listeners: Record<string, ((event: { data?: Blob }) => void)[]> =
+        {};
       addEventListener(type: string, cb: (event: { data?: Blob }) => void) {
         (this.listeners[type] ??= []).push(cb);
       }
@@ -5832,107 +8052,164 @@ async function speakTake(page: Page): Promise<void> {
   await mic.click();
 }
 
-test("Assistant voice turn: capture, STT, the {text, utterance} contract, approval, and a spoken reply", async ({ page }) => {
-  await primeVoiceEnv(page, { tts: true });
-  await installFixtures(page, {
-    assistant_enabled: true,
-    assistant_stt_enabled: true,
-    assistant_tts_enabled: true,
-  });
-  // The engine's transcription of the take: the ref is heard as words, which
-  // the client's repair pass turns back into `WI-7` before it is sent.
-  await page.route("**/api/assistant/stt", async (route) =>
-    route.fulfill({ json: { text: "open issue seven" } }),
-  );
-  let sent: Record<string, unknown> | null = null;
-  await page.route("**/api/assistant/message", async (route) => {
-    sent = JSON.parse(route.request().postData() ?? "{}") as Record<string, unknown>;
-    await route.fulfill({ json: {
-      reply: "WI-7 is ready to close.",
-      pending_action: { kind: "vogt_write", id: "voice-action", operation: "work.transition", target: "WI-7", payload: "done", reason: "close on request" },
-      tool_trace: ["voice turn received"],
-    } });
-  });
-  let approved: boolean | null = null;
-  await page.route("**/api/assistant/actions/voice-action", async (route) => {
-    approved = JSON.parse(route.request().postData() ?? "{}").approve === true;
-    await route.fulfill({ json: { reply: "Done — WI-7 is closed.", pending_action: null, tool_trace: [] } });
-  });
-  const spoken: string[] = [];
-  await page.route("**/api/assistant/tts", async (route) => {
-    spoken.push(JSON.parse(route.request().postData() ?? "{}").text as string);
-    await route.fulfill({ contentType: "audio/wav", body: silentWav() });
-  });
+test(
+  "Assistant voice turn: capture, STT, the {text, utterance} contract, approval, and a spoken reply",
+  mockOnly(LIVE_SKIP.assistant),
+  async ({ page }) => {
+    await primeVoiceEnv(page, { tts: true });
+    await installFixtures(page, {
+      assistant_enabled: true,
+      assistant_stt_enabled: true,
+      assistant_tts_enabled: true,
+    });
+    // The engine's transcription of the take: the ref is heard as words, which
+    // the client's repair pass turns back into `WI-7` before it is sent.
+    await page.route("**/api/assistant/stt", async (route) =>
+      route.fulfill({ json: { text: "open issue seven" } }),
+    );
+    let sent: Record<string, unknown> | null = null;
+    await page.route("**/api/assistant/message", async (route) => {
+      sent = JSON.parse(route.request().postData() ?? "{}") as Record<
+        string,
+        unknown
+      >;
+      await route.fulfill({
+        json: {
+          reply: "WI-7 is ready to close.",
+          pending_action: {
+            kind: "vogt_write",
+            id: "voice-action",
+            operation: "work.transition",
+            target: "WI-7",
+            payload: "done",
+            reason: "close on request",
+          },
+          tool_trace: ["voice turn received"],
+        },
+      });
+    });
+    let approved: boolean | null = null;
+    await page.route("**/api/assistant/actions/voice-action", async (route) => {
+      approved =
+        JSON.parse(route.request().postData() ?? "{}").approve === true;
+      await route.fulfill({
+        json: {
+          reply: "Done — WI-7 is closed.",
+          pending_action: null,
+          tool_trace: [],
+        },
+      });
+    });
+    const spoken: string[] = [];
+    await page.route("**/api/assistant/tts", async (route) => {
+      spoken.push(
+        JSON.parse(route.request().postData() ?? "{}").text as string,
+      );
+      await route.fulfill({ contentType: "audio/wav", body: silentWav() });
+    });
 
-  await openVoiceAssistant(page);
-  await speakTake(page);
+    await openVoiceAssistant(page);
+    await speakTake(page);
 
-  // The raw transcript was repaired to the domain's vocabulary and *both* forms
-  // crossed the wire: repaired `text`, raw `utterance`. This is the contract
-  // gap the issue names — voice provenance kept at the API boundary.
-  await expect(page.getByTestId("voice-repair")).toContainText("WI-7");
-  await expect.poll(() => sent).toEqual({ text: "open WI-7", utterance: "open issue seven" });
-  await expect(page.getByText("WI-7 is ready to close.")).toBeVisible();
+    // The raw transcript was repaired to the domain's vocabulary and *both* forms
+    // crossed the wire: repaired `text`, raw `utterance`. This is the contract
+    // gap the issue names — voice provenance kept at the API boundary.
+    await expect(page.getByTestId("voice-repair")).toContainText("WI-7");
+    await expect
+      .poll(() => sent)
+      .toEqual({ text: "open WI-7", utterance: "open issue seven" });
+    await expect(page.getByText("WI-7 is ready to close.")).toBeVisible();
 
-  // Spoken replies are on and the browser has no synthesis, so the reply was
-  // voiced through the server TTS route rather than silently dropped.
-  await expect.poll(() => spoken).toContain("WI-7 is ready to close.");
+    // Spoken replies are on and the browser has no synthesis, so the reply was
+    // voiced through the server TTS route rather than silently dropped.
+    await expect.poll(() => spoken).toContain("WI-7 is ready to close.");
 
-  // The write waits for an on-screen approval; approving carries `approve:
-  // true` and clears the card. (The card is rendered by the Assistant on a
-  // narrow client and hosted by the Sessions shell on a wide one; the approval
-  // and its dismissal are the same on both, which is what this asserts.)
-  await expect(page.getByRole("region", { name: "Pending approval" })).toBeVisible();
-  await page.getByRole("button", { name: "Approve on screen" }).click();
-  await expect.poll(() => approved).toBe(true);
-  await expect(page.getByRole("region", { name: "Pending approval" })).toHaveCount(0);
-});
+    // The write waits for an on-screen approval; approving carries `approve:
+    // true` and clears the card. (The card is rendered by the Assistant on a
+    // narrow client and hosted by the Sessions shell on a wide one; the approval
+    // and its dismissal are the same on both, which is what this asserts.)
+    await expect(
+      page.getByRole("region", { name: "Pending approval" }),
+    ).toBeVisible();
+    await page.getByRole("button", { name: "Approve on screen" }).click();
+    await expect.poll(() => approved).toBe(true);
+    await expect(
+      page.getByRole("region", { name: "Pending approval" }),
+    ).toHaveCount(0);
+  },
+);
 
-test("A voice turn whose STT route is unconfigured retires the mic and shows an actionable notice", async ({ page }) => {
-  await primeVoiceEnv(page);
-  await installFixtures(page, { assistant_enabled: true, assistant_stt_enabled: true });
-  // Advertised at boot, but 404 at use — the unconfigured case reached on the
-  // first take rather than at mount.
-  await page.route("**/api/assistant/stt", async (route) =>
-    route.fulfill({ status: 404, body: "speech unavailable" }),
-  );
-  let sent = 0;
-  await page.route("**/api/assistant/message", async (route) => {
-    sent += 1;
-    await route.fulfill({ json: { reply: "ack", pending_action: null, tool_trace: [] } });
-  });
+test(
+  "A voice turn whose STT route is unconfigured retires the mic and shows an actionable notice",
+  mockOnly(LIVE_SKIP.assistant),
+  async ({ page }) => {
+    await primeVoiceEnv(page);
+    await installFixtures(page, {
+      assistant_enabled: true,
+      assistant_stt_enabled: true,
+    });
+    // Advertised at boot, but 404 at use — the unconfigured case reached on the
+    // first take rather than at mount.
+    await page.route("**/api/assistant/stt", async (route) =>
+      route.fulfill({ status: 404, body: "speech unavailable" }),
+    );
+    let sent = 0;
+    await page.route("**/api/assistant/message", async (route) => {
+      sent += 1;
+      await route.fulfill({
+        json: { reply: "ack", pending_action: null, tool_trace: [] },
+      });
+    });
 
-  await openVoiceAssistant(page);
-  await speakTake(page);
+    await openVoiceAssistant(page);
+    await speakTake(page);
 
-  // The take degrades cleanly: an actionable notice, the mic retired to its
-  // disabled form, and no empty turn sent.
-  await expect(page.getByTestId("speech-status")).toHaveText(/Voice input is unavailable/);
-  await expect(page.getByTestId("mic-unavailable")).toBeVisible();
-  expect(sent).toBe(0);
-});
+    // The take degrades cleanly: an actionable notice, the mic retired to its
+    // disabled form, and no empty turn sent.
+    await expect(page.getByTestId("speech-status")).toHaveText(
+      /Voice input is unavailable/,
+    );
+    await expect(page.getByTestId("mic-unavailable")).toBeVisible();
+    expect(sent).toBe(0);
+  },
+);
 
-test("A spoken reply whose TTS route is unconfigured shows the fallback notice without failing the turn", async ({ page }) => {
-  await primeVoiceEnv(page, { tts: true });
-  await installFixtures(page, { assistant_enabled: true, assistant_tts_enabled: true });
-  await page.route("**/api/assistant/message", async (route) =>
-    route.fulfill({ json: { reply: "The backlog is clear.", pending_action: null, tool_trace: [] } }),
-  );
-  await page.route("**/api/assistant/tts", async (route) =>
-    route.fulfill({ status: 404, body: "speech unavailable" }),
-  );
+test(
+  "A spoken reply whose TTS route is unconfigured shows the fallback notice without failing the turn",
+  mockOnly(LIVE_SKIP.assistant),
+  async ({ page }) => {
+    await primeVoiceEnv(page, { tts: true });
+    await installFixtures(page, {
+      assistant_enabled: true,
+      assistant_tts_enabled: true,
+    });
+    await page.route("**/api/assistant/message", async (route) =>
+      route.fulfill({
+        json: {
+          reply: "The backlog is clear.",
+          pending_action: null,
+          tool_trace: [],
+        },
+      }),
+    );
+    await page.route("**/api/assistant/tts", async (route) =>
+      route.fulfill({ status: 404, body: "speech unavailable" }),
+    );
 
-  await openVoiceAssistant(page);
-  await page.locator(".assistant-input").fill("anything on the backlog?");
-  await page.getByRole("button", { name: "Send" }).click();
+    await openVoiceAssistant(page);
+    await page.locator(".assistant-input").fill("anything on the backlog?");
+    await page.getByRole("button", { name: "Send" }).click();
 
-  // The text reply is a normal, successful turn — shown and unmarked...
-  await expect(page.getByText("The backlog is clear.")).toBeVisible();
-  await expect(page.locator(".assistant-row--failed")).toHaveCount(0);
-  // ...while the spoken half degrades with a visible, actionable notice rather
-  // than making the answer look failed.
-  await expect(page.getByTestId("speech-status")).toHaveText(/Spoken replies are unavailable/);
-});
+    // The text reply is a normal, successful turn — shown and unmarked...
+    await expect(page.getByText("The backlog is clear.")).toBeVisible();
+    await expect(page.locator(".assistant-row--failed")).toHaveCount(0);
+    // ...while the spoken half degrades with a visible, actionable notice rather
+    // than making the answer look failed.
+    await expect(page.getByTestId("speech-status")).toHaveText(
+      /Spoken replies are unavailable/,
+    );
+  },
+);
 
 /**
  * Steer the browser onto a *controllable* on-device recognizer and synthesis,
@@ -5998,48 +8275,92 @@ async function primeConversationEnv(page: Page): Promise<void> {
       state,
       say(text: string) {
         const r = state.current as { onresult?: (e: unknown) => void } | null;
-        r?.onresult?.({ results: { length: 1, 0: { length: 1, 0: { transcript: text } } } });
+        r?.onresult?.({
+          results: { length: 1, 0: { length: 1, 0: { transcript: text } } },
+        });
       },
     };
   });
 }
 
-test("Assistant hands-free conversation: sends on silence, speaks the reply, and re-opens the mic with no touch", async ({ page }) => {
-  await primeConversationEnv(page);
-  await installFixtures(page, { assistant_enabled: true });
-  const sent: string[] = [];
-  await page.route("**/api/assistant/message", async (route) => {
-    sent.push(JSON.parse(route.request().postData() ?? "{}").text as string);
-    await route.fulfill({
-      json: { reply: "On top is the forge adapter.", pending_action: null, tool_trace: [] },
+test(
+  "Assistant hands-free conversation: sends on silence, speaks the reply, and re-opens the mic with no touch",
+  mockOnly(LIVE_SKIP.assistant),
+  async ({ page }) => {
+    await primeConversationEnv(page);
+    await installFixtures(page, { assistant_enabled: true });
+    const sent: string[] = [];
+    await page.route("**/api/assistant/message", async (route) => {
+      sent.push(JSON.parse(route.request().postData() ?? "{}").text as string);
+      await route.fulfill({
+        json: {
+          reply: "On top is the forge adapter.",
+          pending_action: null,
+          tool_trace: [],
+        },
+      });
     });
-  });
 
-  await openVoiceAssistant(page);
+    await openVoiceAssistant(page);
 
-  // Turn hands-free on: the mic opens itself, and the status chip goes live.
-  await page.getByTestId("assistant-conversation").click();
-  await expect(page.getByTestId("assistant-conversation")).toHaveAttribute("aria-pressed", "true");
-  await expect(page.getByTestId("voice-status")).toBeVisible();
-  await expect
-    .poll(() => page.evaluate(() => (window as unknown as { __vogtVoice: { state: { starts: number } } }).__vogtVoice.state.starts))
-    .toBeGreaterThanOrEqual(1);
+    // Turn hands-free on: the mic opens itself, and the status chip goes live.
+    await page.getByTestId("assistant-conversation").click();
+    await expect(page.getByTestId("assistant-conversation")).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    await expect(page.getByTestId("voice-status")).toBeVisible();
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (
+              window as unknown as {
+                __vogtVoice: { state: { starts: number } };
+              }
+            ).__vogtVoice.state.starts,
+        ),
+      )
+      .toBeGreaterThanOrEqual(1);
 
-  // Speak, then go quiet: the silence window ends the turn and sends it — no
-  // button pressed. The transcript that crossed the wire is what was heard.
-  await page.evaluate(() => (window as unknown as { __vogtVoice: { say(t: string): void } }).__vogtVoice.say("what is on top"));
-  await expect.poll(() => sent).toContain("what is on top");
-  await expect(page.getByText("On top is the forge adapter.")).toBeVisible();
+    // Speak, then go quiet: the silence window ends the turn and sends it — no
+    // button pressed. The transcript that crossed the wire is what was heard.
+    await page.evaluate(() =>
+      (
+        window as unknown as { __vogtVoice: { say(t: string): void } }
+      ).__vogtVoice.say("what is on top"),
+    );
+    await expect.poll(() => sent).toContain("what is on top");
+    await expect(page.getByText("On top is the forge adapter.")).toBeVisible();
 
-  // The reply is spoken and, when it finishes, the mic re-opens for the next
-  // turn on its own — the half a device demo cannot show you.
-  await expect
-    .poll(() => page.evaluate(() => (window as unknown as { __vogtVoice: { state: { spoken: string[] } } }).__vogtVoice.state.spoken))
-    .toContain("On top is the forge adapter.");
-  await expect
-    .poll(() => page.evaluate(() => (window as unknown as { __vogtVoice: { state: { starts: number } } }).__vogtVoice.state.starts))
-    .toBeGreaterThanOrEqual(2);
-});
+    // The reply is spoken and, when it finishes, the mic re-opens for the next
+    // turn on its own — the half a device demo cannot show you.
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (
+              window as unknown as {
+                __vogtVoice: { state: { spoken: string[] } };
+              }
+            ).__vogtVoice.state.spoken,
+        ),
+      )
+      .toContain("On top is the forge adapter.");
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (
+              window as unknown as {
+                __vogtVoice: { state: { starts: number } };
+              }
+            ).__vogtVoice.state.starts,
+        ),
+      )
+      .toBeGreaterThanOrEqual(2);
+  },
+);
 
 /**
  * Barge-in (v2): `interrupt_response` on, a reply that keeps playing (the fake
@@ -6093,7 +8414,9 @@ async function primeBargeInEnv(page: Page): Promise<void> {
     // detector crosses its threshold and fires.
     Object.defineProperty(navigator, "mediaDevices", {
       configurable: true,
-      value: { getUserMedia: async () => ({ getTracks: () => [{ stop() {} }] }) },
+      value: {
+        getUserMedia: async () => ({ getTracks: () => [{ stop() {} }] }),
+      },
     });
     class FakeAnalyser {
       fftSize = 1024;
@@ -6117,100 +8440,178 @@ async function primeBargeInEnv(page: Page): Promise<void> {
   });
 }
 
-test("Assistant hands-free barge-in: the speaker cuts in, the reply is halted, and the mic re-opens", async ({ page }) => {
-  await primeBargeInEnv(page);
-  await installFixtures(page, { assistant_enabled: true });
-  await page.route("**/api/assistant/message", async (route) =>
-    route.fulfill({
-      json: { reply: "This is a long spoken reply you can talk over.", pending_action: null, tool_trace: [] },
-    }),
-  );
+test(
+  "Assistant hands-free barge-in: the speaker cuts in, the reply is halted, and the mic re-opens",
+  mockOnly(LIVE_SKIP.assistant),
+  async ({ page }) => {
+    await primeBargeInEnv(page);
+    await installFixtures(page, { assistant_enabled: true });
+    await page.route("**/api/assistant/message", async (route) =>
+      route.fulfill({
+        json: {
+          reply: "This is a long spoken reply you can talk over.",
+          pending_action: null,
+          tool_trace: [],
+        },
+      }),
+    );
 
-  await openVoiceAssistant(page);
-  await page.getByTestId("assistant-conversation").click();
-  await expect
-    .poll(() => page.evaluate(() => (window as unknown as { __vogtVoice: { state: { starts: number } } }).__vogtVoice.state.starts))
-    .toBeGreaterThanOrEqual(1);
+    await openVoiceAssistant(page);
+    await page.getByTestId("assistant-conversation").click();
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (
+              window as unknown as {
+                __vogtVoice: { state: { starts: number } };
+              }
+            ).__vogtVoice.state.starts,
+        ),
+      )
+      .toBeGreaterThanOrEqual(1);
 
-  // One turn, so a reply starts playing (and keeps playing — the fake synth
-  // never ends on its own).
-  await page.evaluate(() => {
-    const r = (window as unknown as { __vogtVoice: { state: { current: { onresult?: (e: unknown) => void } } } }).__vogtVoice.state.current;
-    r.onresult?.({ results: { length: 1, 0: { length: 1, 0: { transcript: "tell me a long story" } } } });
-  });
-  await expect(page.getByText("This is a long spoken reply you can talk over.")).toBeVisible();
+    // One turn, so a reply starts playing (and keeps playing — the fake synth
+    // never ends on its own).
+    await page.evaluate(() => {
+      const r = (
+        window as unknown as {
+          __vogtVoice: {
+            state: { current: { onresult?: (e: unknown) => void } };
+          };
+        }
+      ).__vogtVoice.state.current;
+      r.onresult?.({
+        results: {
+          length: 1,
+          0: { length: 1, 0: { transcript: "tell me a long story" } },
+        },
+      });
+    });
+    await expect(
+      page.getByText("This is a long spoken reply you can talk over."),
+    ).toBeVisible();
 
-  // ~400 ms of "loud" capture during playback fires the onset: the reply is
-  // cancelled and the mic re-opens (a second recognizer start) with no
-  // speechFinished — the speaker talked over it.
-  await expect
-    .poll(() => page.evaluate(() => (window as unknown as { __vogtVoice: { state: { cancels: number } } }).__vogtVoice.state.cancels))
-    .toBeGreaterThanOrEqual(1);
-  await expect
-    .poll(() => page.evaluate(() => (window as unknown as { __vogtVoice: { state: { starts: number } } }).__vogtVoice.state.starts))
-    .toBeGreaterThanOrEqual(2);
-});
+    // ~400 ms of "loud" capture during playback fires the onset: the reply is
+    // cancelled and the mic re-opens (a second recognizer start) with no
+    // speechFinished — the speaker talked over it.
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (
+              window as unknown as {
+                __vogtVoice: { state: { cancels: number } };
+              }
+            ).__vogtVoice.state.cancels,
+        ),
+      )
+      .toBeGreaterThanOrEqual(1);
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (
+              window as unknown as {
+                __vogtVoice: { state: { starts: number } };
+              }
+            ).__vogtVoice.state.starts,
+        ),
+      )
+      .toBeGreaterThanOrEqual(2);
+  },
+);
 
 for (const mouseTracking of [false, true]) {
-  test(`terminal swipe owns ${mouseTracking ? "reports wheels to a normal-buffer application" : "moves saved rows once"}`, TOUCH, async ({ page, context }) => {
-    test.skip(!isPhoneProject(), "Touch input needs the phone context");
-    // Quarantined (WI-2710, docs/known-flakes.md): the row count moved per
-    // swipe disagrees with floor(120 / row height) on every run since WI-2694.
-    test.fixme(!mouseTracking, "WI-2710: saved-row count off since WI-2694");
-    await installFixtures(page, {}, [liveSession]);
-    await pinDomTerminalRenderer(page);
-    const input: string[] = [];
-    await page.routeWebSocket(/\/api\/sessions\/[^/]+\/attach$/, (socket) => {
-      socket.onMessage((message) => {
-        if (typeof message !== "string") input.push(Buffer.from(message).toString());
+  test(
+    `terminal swipe owns ${mouseTracking ? "reports wheels to a normal-buffer application" : "moves saved rows once"}`,
+    TOUCH,
+    async ({ page, context }) => {
+      test.skip(!isPhoneProject(), "Touch input needs the phone context");
+      // Quarantined (WI-2710, docs/known-flakes.md): the row count moved per
+      // swipe disagrees with floor(120 / row height) on every run since WI-2694.
+      test.fixme(!mouseTracking, "WI-2710: saved-row count off since WI-2694");
+      await installFixtures(page, {}, [liveSession]);
+      await pinDomTerminalRenderer(page);
+      const input: string[] = [];
+      await page.routeWebSocket(/\/api\/sessions\/[^/]+\/attach$/, (socket) => {
+        socket.onMessage((message) => {
+          if (typeof message !== "string")
+            input.push(Buffer.from(message).toString());
+        });
+        const output =
+          Array.from(
+            { length: 150 },
+            (_, i) => `ROW-${String(i).padStart(3, "0")}\r\n`,
+          ).join("") + (mouseTracking ? "\x1b[?1000h\x1b[?1006h" : "");
+        socket.send(
+          JSON.stringify({
+            type: "snapshot-start",
+            scrollback_bytes: output.length,
+            scrollback_pos: output.length,
+          }),
+        );
+        socket.send(Buffer.from(output));
+        socket.send(JSON.stringify({ type: "snapshot-done" }));
       });
-      const output = Array.from({ length: 150 }, (_, i) => `ROW-${String(i).padStart(3, "0")}\r\n`).join("")
-        + (mouseTracking ? "\x1b[?1000h\x1b[?1006h" : "");
-      socket.send(JSON.stringify({ type: "snapshot-start", scrollback_bytes: output.length, scrollback_pos: output.length }));
-      socket.send(Buffer.from(output));
-      socket.send(JSON.stringify({ type: "snapshot-done" }));
-    });
-    await page.goto("/#/t/browser-session");
-    const rows = page.locator(".terminal-host .xterm-rows").first();
-    await expect(rows).toContainText("ROW-149");
-    const firstRow = () => rows.locator(":scope > div").first().textContent();
-    const before = await firstRow();
-    const height = (await rows.locator(":scope > div").first().boundingBox())!.height;
-    const box = await rows.boundingBox();
-    expect(box).toBeTruthy();
-    const client = await context.newCDPSession(page);
-    const x = box!.x + box!.width / 2;
-    const y = box!.y + 40;
-    await client.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y }] });
-    for (let dy = 4; dy <= 120; dy += 4) {
-      await client.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x, y: y + dy }] });
-    }
-    // Inspect while held so xterm's release inertia cannot hide duplicate scrolling.
-    if (mouseTracking) {
-      await expect.poll(() => input.join("")).toMatch(/\x1b\[<64;\d+;\d+M/);
-      expect(await firstRow()).toBe(before);
-    } else {
-      await expect.poll(async () => Number((await firstRow())?.match(/ROW-(\d+)/)?.[1])).toBe(Number(before?.match(/ROW-(\d+)/)?.[1]) - Math.floor(120 / height));
-    }
-    await client.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
-    const held = await firstRow();
-    await page.waitForTimeout(350);
-    expect(await firstRow()).toBe(held);
-  });
+      await page.goto("/#/t/browser-session");
+      const rows = page.locator(".terminal-host .xterm-rows").first();
+      await expect(rows).toContainText("ROW-149");
+      const firstRow = () => rows.locator(":scope > div").first().textContent();
+      const before = await firstRow();
+      const height = (await rows.locator(":scope > div").first().boundingBox())!
+        .height;
+      const box = await rows.boundingBox();
+      expect(box).toBeTruthy();
+      const client = await context.newCDPSession(page);
+      const x = box!.x + box!.width / 2;
+      const y = box!.y + 40;
+      await client.send("Input.dispatchTouchEvent", {
+        type: "touchStart",
+        touchPoints: [{ x, y }],
+      });
+      for (let dy = 4; dy <= 120; dy += 4) {
+        await client.send("Input.dispatchTouchEvent", {
+          type: "touchMove",
+          touchPoints: [{ x, y: y + dy }],
+        });
+      }
+      // Inspect while held so xterm's release inertia cannot hide duplicate scrolling.
+      if (mouseTracking) {
+        await expect.poll(() => input.join("")).toMatch(/\x1b\[<64;\d+;\d+M/);
+        expect(await firstRow()).toBe(before);
+      } else {
+        await expect
+          .poll(async () => Number((await firstRow())?.match(/ROW-(\d+)/)?.[1]))
+          .toBe(
+            Number(before?.match(/ROW-(\d+)/)?.[1]) - Math.floor(120 / height),
+          );
+      }
+      await client.send("Input.dispatchTouchEvent", {
+        type: "touchEnd",
+        touchPoints: [],
+      });
+      const held = await firstRow();
+      await page.waitForTimeout(350);
+      expect(await firstRow()).toBe(held);
+    },
+  );
 }
 
 // ── Quick chat (WI-1097) ─────────────────────────────────────────────────
 
 const CHAT_CONFIG = {
   chat: {
-    drivers: [{
-      name: "klaudia",
-      label: "Klaudia",
-      models: [
-        { id: "grok-4.7", label: "Grok 4.7" },
-        { id: "deepseek-v4-pro", label: "DeepSeek V4 Pro" },
-      ],
-    }],
+    drivers: [
+      {
+        name: "klaudia",
+        label: "Klaudia",
+        models: [
+          { id: "grok-4.7", label: "Grok 4.7" },
+          { id: "deepseek-v4-pro", label: "DeepSeek V4 Pro" },
+        ],
+      },
+    ],
   },
 };
 
@@ -6225,17 +8626,37 @@ async function installChatApi(page: Page) {
     decisions: [] as Record<string, unknown>[],
     models: [] as string[],
   };
-  const summary = () => ({ ...state.chat, message_count: state.entries.length });
-  const say = (kind: string, text: string, extra: Record<string, unknown> = {}) =>
-    state.entries.push({ seq: state.entries.length + 1, at: "2026-10-08T09:00:00Z", kind, text, ...extra });
+  const summary = () => ({
+    ...state.chat,
+    message_count: state.entries.length,
+  });
+  const say = (
+    kind: string,
+    text: string,
+    extra: Record<string, unknown> = {},
+  ) =>
+    state.entries.push({
+      seq: state.entries.length + 1,
+      at: "2026-10-08T09:00:00Z",
+      kind,
+      text,
+      ...extra,
+    });
   const reply = (text: string) => {
     say("user", text, { by: "human:ada" });
     if (text.startsWith("run:")) {
       say("tool-call", text.slice(4), { tool_name: "Bash" });
-      state.approvals = [{
-        id: "a1", tool_name: "Bash", summary: text.slice(4), source: "gate", status: "pending",
-        requested_at: "2026-10-08T09:00:00Z", expires_at: "2026-10-08T09:10:00Z",
-      }];
+      state.approvals = [
+        {
+          id: "a1",
+          tool_name: "Bash",
+          summary: text.slice(4),
+          source: "gate",
+          status: "pending",
+          requested_at: "2026-10-08T09:00:00Z",
+          expires_at: "2026-10-08T09:10:00Z",
+        },
+      ];
       state.chat = { ...state.chat, state: "awaiting-approval" };
     } else {
       say("assistant", `**${state.chat?.model}**: ${text}`);
@@ -6245,33 +8666,60 @@ async function installChatApi(page: Page) {
     const request = route.request();
     const path = new URL(request.url()).pathname;
     const method = request.method();
-    const body = method === "POST" ? (request.postDataJSON() as Record<string, unknown>) : {};
+    const body =
+      method === "POST"
+        ? (request.postDataJSON() as Record<string, unknown>)
+        : {};
     if (path.endsWith("/events")) {
-      return route.fulfill({ status: 200, headers: { "content-type": "text/event-stream" }, body: "" });
+      return route.fulfill({
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+        body: "",
+      });
     }
     if (path === "/api/chats" && method === "GET") {
       return route.fulfill({ json: state.chat ? [summary()] : [] });
     }
     if (path === "/api/chats" && method === "POST") {
       state.chat = {
-        id: chatId, title: String(body.message ?? "New chat"), driver: "klaudia",
-        model: body.model ?? "grok-4.7", creator: "human:ada",
-        created_at: "2026-10-08T09:00:00Z", updated_at: "2026-10-08T09:00:00Z",
-        archived: false, state: "idle", live: true, message_count: 0,
+        id: chatId,
+        title: String(body.message ?? "New chat"),
+        driver: "klaudia",
+        model: body.model ?? "grok-4.7",
+        creator: "human:ada",
+        created_at: "2026-10-08T09:00:00Z",
+        updated_at: "2026-10-08T09:00:00Z",
+        archived: false,
+        state: "idle",
+        live: true,
+        message_count: 0,
       };
       if (body.message) reply(String(body.message));
-      return route.fulfill({ json: { chat: summary(), entries: state.entries, finished: true } });
+      return route.fulfill({
+        json: { chat: summary(), entries: state.entries, finished: true },
+      });
     }
     if (path.endsWith("/messages")) {
       reply(String(body.text));
-      return route.fulfill({ json: { chat: summary(), entries: state.entries.slice(-2), finished: true } });
+      return route.fulfill({
+        json: {
+          chat: summary(),
+          entries: state.entries.slice(-2),
+          finished: true,
+        },
+      });
     }
     if (path.includes("/approvals/")) {
       state.decisions.push(body);
       state.approvals = [];
-      say("tool-result", body.allow ? "ok" : "A person denied this in Vogt.", { tool_name: "Bash", is_error: !body.allow });
+      say("tool-result", body.allow ? "ok" : "A person denied this in Vogt.", {
+        tool_name: "Bash",
+        is_error: !body.allow,
+      });
       state.chat = { ...state.chat, state: "idle" };
-      return route.fulfill({ json: { id: "a1", status: body.allow ? "allowed" : "denied" } });
+      return route.fulfill({
+        json: { id: "a1", status: body.allow ? "allowed" : "denied" },
+      });
     }
     if (path.endsWith("/model")) {
       state.models.push(String(body.model));
@@ -6279,43 +8727,61 @@ async function installChatApi(page: Page) {
       return route.fulfill({ json: summary() });
     }
     // GET /api/chats/{id}
-    return route.fulfill({ json: { ...summary(), entries: state.entries, approvals: state.approvals } });
+    return route.fulfill({
+      json: {
+        ...summary(),
+        entries: state.entries,
+        approvals: state.approvals,
+      },
+    });
   });
   return state;
 }
 
-test("Chat: ask, switch model, answer an approval, find it again", async ({ page }) => {
-  await installFixtures(page, CHAT_CONFIG);
-  const chat = await installChatApi(page);
-  await page.goto("/#/chat");
-  await page.getByRole("button", { name: "New chat" }).click();
-  await page.getByLabel("Model for the new chat").selectOption("deepseek-v4-pro");
-  await page.getByLabel("Message").fill("is bedrock in sydney?");
-  await page.getByRole("button", { name: "Send" }).click();
-  await expect(page).toHaveURL(/#\/chat\/0c0c0c0c-/);
-  await expect(page.locator(".chat-bubble--assistant")).toContainText("deepseek-v4-pro: is bedrock in sydney?");
+test(
+  "Chat: ask, switch model, answer an approval, find it again",
+  mockOnly(LIVE_SKIP.assistant),
+  async ({ page }) => {
+    await installFixtures(page, CHAT_CONFIG);
+    const chat = await installChatApi(page);
+    await page.goto("/#/chat");
+    await page.getByRole("button", { name: "New chat" }).click();
+    await page
+      .getByLabel("Model for the new chat")
+      .selectOption("deepseek-v4-pro");
+    await page.getByLabel("Message").fill("is bedrock in sydney?");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(page).toHaveURL(/#\/chat\/0c0c0c0c-/);
+    await expect(page.locator(".chat-bubble--assistant")).toContainText(
+      "deepseek-v4-pro: is bedrock in sydney?",
+    );
 
-  await page.getByLabel("Model", { exact: true }).selectOption("grok-4.7");
-  await expect.poll(() => chat.models).toEqual(["grok-4.7"]);
+    await page.getByLabel("Model", { exact: true }).selectOption("grok-4.7");
+    await expect.poll(() => chat.models).toEqual(["grok-4.7"]);
 
-  await page.getByLabel("Message").fill("run:make test");
-  await page.getByLabel("Message").press("Enter");
-  const card = page.getByRole("region", { name: "Approval: Bash" });
-  await expect(card).toContainText("make test");
-  await card.getByRole("button", { name: "Deny" }).click();
-  await expect.poll(() => chat.decisions).toEqual([{ allow: false }]);
-  await expect(card).toHaveCount(0);
+    await page.getByLabel("Message").fill("run:make test");
+    await page.getByLabel("Message").press("Enter");
+    const card = page.getByRole("region", { name: "Approval: Bash" });
+    await expect(card).toContainText("make test");
+    await card.getByRole("button", { name: "Deny" }).click();
+    await expect.poll(() => chat.decisions).toEqual([{ allow: false }]);
+    await expect(card).toHaveCount(0);
 
-  // No horizontal scroll at either size.
-  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
-  expect(overflow).toBeLessThanOrEqual(0);
+    // No horizontal scroll at either size.
+    const overflow = await page.evaluate(
+      () => document.documentElement.scrollWidth - window.innerWidth,
+    );
+    expect(overflow).toBeLessThanOrEqual(0);
 
-  // Back to the list (on a phone, the conversation replaced it).
-  if (await page.getByRole("button", { name: "Back to chats" }).isVisible()) {
-    await page.getByRole("button", { name: "Back to chats" }).click();
-  }
-  await expect(page.locator(".chat-list__item")).toContainText("is bedrock in sydney?");
-});
+    // Back to the list (on a phone, the conversation replaced it).
+    if (await page.getByRole("button", { name: "Back to chats" }).isVisible()) {
+      await page.getByRole("button", { name: "Back to chats" }).click();
+    }
+    await expect(page.locator(".chat-list__item")).toContainText(
+      "is bedrock in sydney?",
+    );
+  },
+);
 
 test("Chat is hidden when the engine has chats off", async ({ page }) => {
   await installFixtures(page);
@@ -6339,7 +8805,10 @@ interface AttachLog {
 /** These specs read `.xterm-rows`, which only the DOM renderer fills; headless
  *  Chromium would otherwise pick WebGL and paint on a canvas (WI-2694). */
 async function pinDomTerminalRenderer(page: Page): Promise<void> {
-  await page.addInitScript((key) => localStorage.setItem(key, "dom"), TERMINAL_RENDERER_STORAGE_KEY);
+  await page.addInitScript(
+    (key) => localStorage.setItem(key, "dom"),
+    TERMINAL_RENDERER_STORAGE_KEY,
+  );
 }
 
 async function countTerminalAttaches(page: Page): Promise<AttachLog> {
@@ -6359,9 +8828,18 @@ async function countTerminalAttaches(page: Page): Promise<AttachLog> {
     socket.onMessage((message) => {
       if (typeof message !== "string") return;
       const ctrl = JSON.parse(message) as { type?: string; id?: number };
-      if (ctrl.type === "ping") socket.send(JSON.stringify({ type: "pong", id: ctrl.id, pos: screen.length }));
+      if (ctrl.type === "ping")
+        socket.send(
+          JSON.stringify({ type: "pong", id: ctrl.id, pos: screen.length }),
+        );
     });
-    socket.send(JSON.stringify({ type: "snapshot-start", scrollback_bytes: screen.length, scrollback_pos: screen.length }));
+    socket.send(
+      JSON.stringify({
+        type: "snapshot-start",
+        scrollback_bytes: screen.length,
+        scrollback_pos: screen.length,
+      }),
+    );
     socket.send(Buffer.from(screen));
     socket.send(JSON.stringify({ type: "snapshot-done" }));
   });
@@ -6369,7 +8847,9 @@ async function countTerminalAttaches(page: Page): Promise<AttachLog> {
 }
 
 /** Record, from inside the page, whether a "Reconnecting" line ever showed. */
-async function watchForReconnectFlash(page: Page): Promise<() => Promise<boolean>> {
+async function watchForReconnectFlash(
+  page: Page,
+): Promise<() => Promise<boolean>> {
   await page.evaluate(() => {
     const w = window as unknown as { __reconnectSeen: boolean };
     w.__reconnectSeen = false;
@@ -6378,110 +8858,169 @@ async function watchForReconnectFlash(page: Page): Promise<() => Promise<boolean
       // stream's banner is a separate signal: a fake-clock jump starves the
       // mocked stream of heartbeats, so it is not asserted here; the
       // real-device smoke in docs/mobile-release-validation.md covers it.
-      if (/Reconnecting \(try/.test(document.body.innerText)) w.__reconnectSeen = true;
+      if (/Reconnecting \(try/.test(document.body.innerText))
+        w.__reconnectSeen = true;
     };
-    new MutationObserver(check).observe(document.body, { subtree: true, childList: true, characterData: true });
+    new MutationObserver(check).observe(document.body, {
+      subtree: true,
+      childList: true,
+      characterData: true,
+    });
     check();
   });
-  return () => page.evaluate(() => (window as unknown as { __reconnectSeen: boolean }).__reconnectSeen);
+  return () =>
+    page.evaluate(
+      () => (window as unknown as { __reconnectSeen: boolean }).__reconnectSeen,
+    );
 }
 
 async function setPageVisible(page: Page, visible: boolean): Promise<void> {
   await page.evaluate((next) => {
-    Object.defineProperty(document, "visibilityState", { configurable: true, value: next ? "visible" : "hidden" });
-    Object.defineProperty(document, "hidden", { configurable: true, value: !next });
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      value: next ? "visible" : "hidden",
+    });
+    Object.defineProperty(document, "hidden", {
+      configurable: true,
+      value: !next,
+    });
     document.dispatchEvent(new Event("visibilitychange"));
     window.dispatchEvent(new Event(next ? "pageshow" : "pagehide"));
     if (next) window.dispatchEvent(new Event("focus"));
   }, visible);
 }
 
-test("Phone terminal resumes after 60 s in the background with one attach and no Reconnecting flash", TOUCH, async ({ page }) => {
-  test.skip(!isPhoneProject(), "Backgrounding is the phone shell's lifecycle");
-  await page.clock.install();
-  await installFixtures(page, {}, THREE_SESSIONS);
-  const attaches = await countTerminalAttaches(page);
-  await page.goto("/#/t/sess-idle");
-  await expect(page.locator(".terminal-host .xterm-rows").first()).toContainText("screen of sess-idle");
-  expect(attaches.bySession.get("sess-idle")).toBe(1);
-  const reconnectSeen = await watchForReconnectFlash(page);
+test(
+  "Phone terminal resumes after 60 s in the background with one attach and no Reconnecting flash",
+  TOUCH,
+  async ({ page }) => {
+    test.skip(
+      !isPhoneProject(),
+      "Backgrounding is the phone shell's lifecycle",
+    );
+    await page.clock.install();
+    await installFixtures(page, {}, THREE_SESSIONS);
+    const attaches = await countTerminalAttaches(page);
+    await page.goto("/#/t/sess-idle");
+    await expect(
+      page.locator(".terminal-host .xterm-rows").first(),
+    ).toContainText("screen of sess-idle");
+    expect(attaches.bySession.get("sess-idle")).toBe(1);
+    const reconnectSeen = await watchForReconnectFlash(page);
 
-  await setPageVisible(page, false);
-  // Past the 30 s hidden-park threshold, so the pane really lets go.
-  // A second at a time, so timers fire in the order real time would fire them.
-  for (let second = 0; second < 60; second += 1) await page.clock.runFor(1_000);
-  const beforeResume = attaches.total();
-  await setPageVisible(page, true);
+    await setPageVisible(page, false);
+    // Past the 30 s hidden-park threshold, so the pane really lets go.
+    // A second at a time, so timers fire in the order real time would fire them.
+    for (let second = 0; second < 60; second += 1)
+      await page.clock.runFor(1_000);
+    const beforeResume = attaches.total();
+    await setPageVisible(page, true);
 
-  await expect(page.locator(".terminal-host .xterm-rows").first()).toContainText("screen of sess-idle");
-  await page.clock.runFor(2_000);
-  // At most one fresh attach on the way back — none if the socket survived.
-  expect(attaches.total() - beforeResume).toBeLessThanOrEqual(1);
-  expect(attaches.bySession.get("sess-idle")).toBeLessThanOrEqual(2);
-  expect(await reconnectSeen()).toBe(false);
-});
+    await expect(
+      page.locator(".terminal-host .xterm-rows").first(),
+    ).toContainText("screen of sess-idle");
+    await page.clock.runFor(2_000);
+    // At most one fresh attach on the way back — none if the socket survived.
+    expect(attaches.total() - beforeResume).toBeLessThanOrEqual(1);
+    expect(attaches.bySession.get("sess-idle")).toBeLessThanOrEqual(2);
+    expect(await reconnectSeen()).toBe(false);
+  },
+);
 
-test("Phone terminal reconnects once after the server drops its socket", TOUCH, async ({ page }) => {
-  test.skip(!isPhoneProject(), "The reconnect path is exercised on the phone shell");
-  await installFixtures(page, {}, THREE_SESSIONS);
-  const attaches = await countTerminalAttaches(page);
-  await page.goto("/#/t/sess-idle");
-  await expect(page.locator(".terminal-host .xterm-rows").first()).toContainText("screen of sess-idle");
-  expect(attaches.total()).toBe(1);
+test(
+  "Phone terminal reconnects once after the server drops its socket",
+  TOUCH,
+  async ({ page }) => {
+    test.skip(
+      !isPhoneProject(),
+      "The reconnect path is exercised on the phone shell",
+    );
+    await installFixtures(page, {}, THREE_SESSIONS);
+    const attaches = await countTerminalAttaches(page);
+    await page.goto("/#/t/sess-idle");
+    await expect(
+      page.locator(".terminal-host .xterm-rows").first(),
+    ).toContainText("screen of sess-idle");
+    expect(attaches.total()).toBe(1);
 
-  attaches.sockets[0].close();
-  await expect.poll(() => attaches.total()).toBe(2);
-  await expect(page.locator(".terminal-host .xterm-rows").first()).toContainText("screen of sess-idle");
-  // Recovered: no retry storm and no overlay left behind.
-  await page.waitForTimeout(1_500);
-  expect(attaches.total()).toBe(2);
-  await expect(page.getByText(/Reconnecting \(try/)).toHaveCount(0);
-});
+    attaches.sockets[0].close();
+    await expect.poll(() => attaches.total()).toBe(2);
+    await expect(
+      page.locator(".terminal-host .xterm-rows").first(),
+    ).toContainText("screen of sess-idle");
+    // Recovered: no retry storm and no overlay left behind.
+    await page.waitForTimeout(1_500);
+    expect(attaches.total()).toBe(2);
+    await expect(page.getByText(/Reconnecting \(try/)).toHaveCount(0);
+  },
+);
 
-test("Phone terminal swipe to the next session opens one attach per swipe", TOUCH, async ({ page, context }) => {
-  test.skip(!isPhoneProject(), "The session pager is the narrow terminal's");
-  await installFixtures(page, {}, THREE_SESSIONS);
-  const attaches = await countTerminalAttaches(page);
-  await page.goto("/#/t/sess-idle");
-  await expect(page.locator(".terminal-host .xterm-rows").first()).toContainText("screen of sess-idle");
-  expect(attaches.total()).toBe(1);
+test(
+  "Phone terminal swipe to the next session opens one attach per swipe",
+  TOUCH,
+  async ({ page, context }) => {
+    test.skip(!isPhoneProject(), "The session pager is the narrow terminal's");
+    await installFixtures(page, {}, THREE_SESSIONS);
+    const attaches = await countTerminalAttaches(page);
+    await page.goto("/#/t/sess-idle");
+    await expect(
+      page.locator(".terminal-host .xterm-rows").first(),
+    ).toContainText("screen of sess-idle");
+    expect(attaches.total()).toBe(1);
 
-  // The session bar takes a horizontal swipe from anywhere on it; the stage
-  // under the terminal would leave a diagonal drag to the terminal's scroll.
-  const bar = page.locator(".terminal-mobile-header");
-  const client = await context.newCDPSession(page);
-  const swipe = async (towardNext: boolean) => {
-    const box = (await bar.boundingBox())!;
-    const y = box.y + box.height / 2;
-    const start = towardNext ? box.x + box.width * 0.85 : box.x + box.width * 0.15;
-    const step = towardNext ? -12 : 12;
-    await client.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: start, y }] });
-    for (let i = 1; i <= 20; i += 1) {
-      await client.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x: start + step * i, y }] });
-    }
-    await client.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
-  };
-  const current = () => new URL(page.url()).hash.replace("#/t/", "");
+    // The session bar takes a horizontal swipe from anywhere on it; the stage
+    // under the terminal would leave a diagonal drag to the terminal's scroll.
+    const bar = page.locator(".terminal-mobile-header");
+    const client = await context.newCDPSession(page);
+    const swipe = async (towardNext: boolean) => {
+      const box = (await bar.boundingBox())!;
+      const y = box.y + box.height / 2;
+      const start = towardNext
+        ? box.x + box.width * 0.85
+        : box.x + box.width * 0.15;
+      const step = towardNext ? -12 : 12;
+      await client.send("Input.dispatchTouchEvent", {
+        type: "touchStart",
+        touchPoints: [{ x: start, y }],
+      });
+      for (let i = 1; i <= 20; i += 1) {
+        await client.send("Input.dispatchTouchEvent", {
+          type: "touchMove",
+          touchPoints: [{ x: start + step * i, y }],
+        });
+      }
+      await client.send("Input.dispatchTouchEvent", {
+        type: "touchEnd",
+        touchPoints: [],
+      });
+    };
+    const current = () => new URL(page.url()).hash.replace("#/t/", "");
 
-  // The pager is attention-ordered, so the start may sit at either end: the
-  // first swipe goes whichever way has a neighbour, the second comes back.
-  let towardNext = true;
-  for (const leg of [1, 2]) {
-    const from = current();
-    const before = attaches.total();
-    await swipe(towardNext);
-    await page.waitForTimeout(600);
-    if (leg === 1 && current() === from) {
-      towardNext = !towardNext;
+    // The pager is attention-ordered, so the start may sit at either end: the
+    // first swipe goes whichever way has a neighbour, the second comes back.
+    let towardNext = true;
+    for (const leg of [1, 2]) {
+      const from = current();
+      const before = attaches.total();
       await swipe(towardNext);
+      await page.waitForTimeout(600);
+      if (leg === 1 && current() === from) {
+        towardNext = !towardNext;
+        await swipe(towardNext);
+      }
+      await expect.poll(current).not.toBe(from);
+      const now = current();
+      await expect(
+        page
+          .locator(".terminal-mobile-slide-current .terminal-host .xterm-rows")
+          .first(),
+      ).toContainText(`screen of ${now}`);
+      await page.waitForTimeout(500);
+      expect(
+        attaches.total() - before,
+        `swipe ${from} -> ${now}: ${JSON.stringify([...attaches.bySession])}`,
+      ).toBeLessThanOrEqual(1);
+      towardNext = !towardNext;
     }
-    await expect.poll(current).not.toBe(from);
-    const now = current();
-    await expect(page.locator(".terminal-mobile-slide-current .terminal-host .xterm-rows").first())
-      .toContainText(`screen of ${now}`);
-    await page.waitForTimeout(500);
-    expect(attaches.total() - before, `swipe ${from} -> ${now}: ${JSON.stringify([...attaches.bySession])}`)
-      .toBeLessThanOrEqual(1);
-    towardNext = !towardNext;
-  }
-});
+  },
+);

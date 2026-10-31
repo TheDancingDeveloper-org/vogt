@@ -24,8 +24,9 @@ async function mockedFixtures(page: Page): Promise<void> {
     localStorage.setItem("vogt.token", "browser-test-token");
     localStorage.setItem("vogt.appTheme.v1", "dark");
   });
-  const json = (body: unknown) => (route: { fulfill: (o: unknown) => Promise<void> }) =>
-    route.fulfill({ json: body });
+  const json =
+    (body: unknown) => (route: { fulfill: (o: unknown) => Promise<void> }) =>
+      route.fulfill({ json: body });
   await page.route("**/api/install/status", json({ install_mode: false }));
   await page.route(
     "**/api/auth/check",
@@ -46,9 +47,12 @@ async function mockedFixtures(page: Page): Promise<void> {
       vogt: { configured: true },
     }),
   );
-  await page.route(/\/api\/sessions(\?.*)?$/, (route) => route.fulfill({ json: [SESSION] }));
+  await page.route(/\/api\/sessions(\?.*)?$/, (route) =>
+    route.fulfill({ json: [SESSION] }),
+  );
   await page.route("**/api/sessions/*", (route) => {
-    if (route.request().method() !== "GET") return route.fulfill({ json: { ok: true } });
+    if (route.request().method() !== "GET")
+      return route.fulfill({ json: { ok: true } });
     return route.fulfill({ json: { ...SESSION, scrollback_base64: "" } });
   });
   await page.route("**/api/events", (route) =>
@@ -63,10 +67,21 @@ async function mockedFixtures(page: Page): Promise<void> {
 // Klaudia's frame at `cols` wide: transcript, the bordered input box and the
 // status line, cursor parked at the start of the status row.
 function initialFrame(cols: number): string {
-  const transcript = Array.from({ length: 8 }, (_, i) => `transcript line ${i + 1}`);
+  const transcript = Array.from(
+    { length: 8 },
+    (_, i) => `transcript line ${i + 1}`,
+  );
   const top = `╭${"─".repeat(cols - 3)}╮`;
   const bottom = `╰${"─".repeat(cols - 3)}╯`;
-  return [...transcript, top, boxLine(cols, true), bottom, "  grok-4.7 · 58 turns"].join("\r\n") + "\r";
+  return (
+    [
+      ...transcript,
+      top,
+      boxLine(cols, true),
+      bottom,
+      "  grok-4.7 · 58 turns",
+    ].join("\r\n") + "\r"
+  );
 }
 
 function boxLine(cols: number, cursorOn: boolean): string {
@@ -96,7 +111,11 @@ async function routeAttach(page: Page): Promise<{ ready: Promise<Pty> }> {
     let authed = false;
     ws.onMessage((raw) => {
       if (typeof raw !== "string") return; // keystrokes
-      const msg = JSON.parse(raw) as { type: string; cols?: number; rows?: number };
+      const msg = JSON.parse(raw) as {
+        type: string;
+        cols?: number;
+        rows?: number;
+      };
       if (msg.type === "auth" && !authed) {
         authed = true;
         const frame = Buffer.from(initialFrame(178));
@@ -129,7 +148,10 @@ const rowsText = (page: Page) =>
 
 test.describe("terminal size sync (WI-1089)", () => {
   test.beforeEach(({}, testInfo) => {
-    test.skip(testInfo.project.name !== "phone", "the phone viewport is the narrow viewer");
+    test.skip(
+      testInfo.project.name !== "phone",
+      "the phone viewport is the narrow viewer",
+    );
   });
 
   // WI-2714: quarantined; fails on the phone project and runs in no required
@@ -146,13 +168,18 @@ test.describe("terminal size sync (WI-1089)", () => {
     expect(phone.cols).toBeLessThan(178);
 
     // The engine applies the phone's size, then the desktop takes it back.
-    pty.ws.send(JSON.stringify({ type: "resize", cols: phone.cols, rows: phone.rows }));
+    pty.ws.send(
+      JSON.stringify({ type: "resize", cols: phone.cols, rows: phone.rows }),
+    );
     pty.ws.send(JSON.stringify({ type: "resize", cols: 178, rows: 32 }));
     pty.ws.send(Buffer.from(`\x1b[2J\x1b[H${initialFrame(178)}`));
-    for (let tick = 0; tick < 30; tick++) pty.ws.send(Buffer.from(repaint(178, tick)));
+    for (let tick = 0; tick < 30; tick++)
+      pty.ws.send(Buffer.from(repaint(178, tick)));
     pty.ws.send(Buffer.from("\x1b[3A\nDONE-MARKER\x1b[K\r\n\n\r"));
 
-    await expect.poll(() => rowsText(page), { timeout: 10_000 }).toContain("DONE-MARKER");
+    await expect
+      .poll(() => rowsText(page), { timeout: 10_000 })
+      .toContain("DONE-MARKER");
     const text = await rowsText(page);
     // One input box, not a stack of ghosts, and the transcript still on screen.
     expect(text.match(/Ask Klaudia/g) ?? []).toHaveLength(0); // the last tick replaced it
@@ -168,7 +195,8 @@ test.describe("terminal size sync (WI-1089)", () => {
     await expect(chip).toContainText("178×32");
     const before = pty.resizes.length;
     // More output and a refit at the same size take nothing back.
-    for (let tick = 0; tick < 10; tick++) pty.ws.send(Buffer.from(repaint(178, tick)));
+    for (let tick = 0; tick < 10; tick++)
+      pty.ws.send(Buffer.from(repaint(178, tick)));
     await page.evaluate(() => window.dispatchEvent(new Event("resize")));
     await page.waitForTimeout(300);
     expect(pty.resizes.length).toBe(before);
@@ -179,7 +207,9 @@ test.describe("terminal size sync (WI-1089)", () => {
     await expect.poll(() => pty.resizes.length).toBeGreaterThan(before);
     const asked = pty.resizes.at(-1)!;
     expect(asked.cols).toBe(phone.cols);
-    pty.ws.send(JSON.stringify({ type: "resize", cols: asked.cols, rows: asked.rows }));
+    pty.ws.send(
+      JSON.stringify({ type: "resize", cols: asked.cols, rows: asked.rows }),
+    );
     await expect(chip).toBeHidden();
   });
 });
