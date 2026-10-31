@@ -99,7 +99,9 @@ fn host_port(raw: &str) -> Option<(String, u16)> {
     let host = match url.host()? {
         url::Host::Domain(d) => d.trim_end_matches('.').to_ascii_lowercase(),
         url::Host::Ipv4(ip) => ip.to_string(),
-        url::Host::Ipv6(ip) => ip.to_string(),
+        // `[::ffff:127.0.0.1]` is 127.0.0.1: compare and classify the
+        // canonical form so a mapped address is not a second spelling.
+        url::Host::Ipv6(ip) => ip.to_canonical().to_string(),
     };
     if host.is_empty() {
         return None;
@@ -108,21 +110,28 @@ fn host_port(raw: &str) -> Option<(String, u16)> {
 }
 
 /// A host on this deployment's own network: loopback, `localhost`, a private
-/// or tailnet (100.64.0.0/10) address.
+/// or tailnet (100.64.0.0/10) address, or link-local. IPv4-mapped IPv6 is
+/// judged as the IPv4 address it maps.
 fn is_local_host(host: &str) -> bool {
     if host == "localhost" || host.ends_with(".localhost") {
         return true;
     }
-    match host.parse::<std::net::IpAddr>() {
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    match host.parse::<std::net::IpAddr>().map(|ip| ip.to_canonical()) {
         Ok(std::net::IpAddr::V4(ip)) => {
             let [a, b, ..] = ip.octets();
             ip.is_loopback()
                 || ip.is_private()
                 || ip.is_unspecified()
+                || ip.is_link_local()
                 || (a == 100 && (64..128).contains(&b))
         }
         Ok(std::net::IpAddr::V6(ip)) => {
-            ip.is_loopback() || ip.is_unspecified() || (ip.segments()[0] & 0xfe00) == 0xfc00
+            let s0 = ip.segments()[0];
+            ip.is_loopback()
+                || ip.is_unspecified()
+                || (s0 & 0xfe00) == 0xfc00
+                || (s0 & 0xffc0) == 0xfe80
         }
         Err(_) => false,
     }
@@ -178,17 +187,88 @@ fn cmd_args(e: &serde_json::Value) -> Vec<&str> {
     v
 }
 
+/// The credential an entry carries: env var names that hold a token
+/// (`bearer_token_env_var`, env keys other than the tool profile) and the
+/// literal values of its headers and env (8 characters or more).
+struct Creds {
+    names: Vec<String>,
+    values: Vec<String>,
+}
+
+fn vogt_creds(vogt: Option<&serde_json::Value>) -> Creds {
+    let mut c = Creds {
+        names: Vec::new(),
+        values: Vec::new(),
+    };
+    let Some(v) = vogt else { return c };
+    if let Some(n) = v.get("bearer_token_env_var").and_then(|n| n.as_str()) {
+        c.names.push(n.to_string());
+    }
+    for key in ["env", "headers", "http_headers"] {
+        let Some(map) = v.get(key).and_then(|m| m.as_object()) else {
+            continue;
+        };
+        for (k, val) in map {
+            if k == TOOL_PROFILE_ENV {
+                continue;
+            }
+            if key == "env" {
+                c.names.push(k.clone());
+            }
+            if let Some(s) = val.as_str().filter(|s| s.len() >= 8) {
+                c.values.push(s.to_string());
+            }
+        }
+    }
+    c
+}
+
+/// A token variable named after vogt (`VOGT_HTTP_TOKEN`, `VOGT_MCP_TOKEN`).
+fn is_vogt_token_name(s: &str) -> bool {
+    let s = s.to_ascii_uppercase();
+    s.contains("VOGT") && s.contains("TOKEN")
+}
+
+/// Whether an extra carries vogt's credential: its token variable, a vogt
+/// token name anywhere in it (`Bearer ${VOGT_HTTP_TOKEN}`), or a header or
+/// env value of vogt's own entry. This catches an alias under another DNS
+/// name, which the host checks cannot see.
+fn uses_vogt_creds(entry: &serde_json::Value, creds: &Creds) -> bool {
+    let mut strings: Vec<&str> = entry_strings(entry);
+    if let Some(n) = entry.get("bearer_token_env_var").and_then(|n| n.as_str()) {
+        strings.push(n);
+    }
+    if let Some(u) = entry.get("url").and_then(|u| u.as_str()) {
+        strings.push(u);
+    }
+    for key in ["env", "headers", "http_headers", "env_http_headers"] {
+        if let Some(map) = entry.get(key).and_then(|m| m.as_object()) {
+            strings.extend(map.keys().map(String::as_str));
+            strings.extend(map.values().filter_map(|v| v.as_str()));
+        }
+    }
+    if let Some(vars) = entry.get("env_vars").and_then(|v| v.as_array()) {
+        strings.extend(vars.iter().filter_map(|v| v.as_str()));
+    }
+    strings.iter().any(|s| {
+        is_vogt_token_name(s)
+            || creds.names.iter().any(|n| s.contains(n.as_str()))
+            || creds.values.iter().any(|v| s.contains(v.as_str()))
+    })
+}
+
 /// Whether an extra is a second door onto vogt. Fails closed: an extra URL
-/// that does not parse counts as one.
+/// that does not parse counts as one, and with no `vogt` entry to compare
+/// against every local host counts as vogt's.
 fn aliases_vogt(
     entry: &serde_json::Value,
     vogt: Option<&serde_json::Value>,
     hosts: &[(String, u16)],
 ) -> bool {
-    if runs_vogt_bridge(entry, vogt) {
+    if runs_vogt_bridge(entry, vogt) || uses_vogt_creds(entry, &vogt_creds(vogt)) {
         return true;
     }
-    let vogt_local = hosts.iter().any(|(h, _)| is_local_host(h));
+    let vogt_local = vogt.is_none() || hosts.iter().any(|(h, _)| is_local_host(h));
     let hits = |target: &(String, u16)| {
         hosts.iter().any(|(h, _)| h == &target.0) || (vogt_local && is_local_host(&target.0))
     };
@@ -216,6 +296,11 @@ fn aliases_vogt(
 /// with a warning. So is a name that is not valid, and anything past
 /// [`MCP_EXTRA_MAX`]. `servers` is the config's server map, as JSON; with no
 /// map nothing is added.
+///
+/// Limits: a stdio extra is judged only by its command, args and env. A
+/// wrapper script that reaches vogt on its own cannot be seen from here;
+/// the host config that defines these entries is written by the operator,
+/// and that is the trust boundary, not this check.
 pub fn safe_extra(
     servers: Option<&serde_json::Map<String, serde_json::Value>>,
     extra: &[String],
@@ -818,6 +903,12 @@ mod tests {
             "http://localhost:8910/mcp",
             "http://100.100.1.1/mcp",
             "http://[::1]:8910/mcp",
+            "http://[::ffff:127.0.0.1]:8910/mcp",
+            "http://[::ffff:7f00:1]:8910/mcp",
+            "http://[::ffff:10.0.0.5]/mcp",
+            "http://[::ffff:100.64.1.1]/mcp",
+            "http://169.254.169.254/mcp",
+            "http://[fe80::1]/mcp",
         ] {
             assert!(
                 dropped(vogt.clone(), serde_json::json!({"url": url})),
@@ -829,6 +920,56 @@ mod tests {
             public,
             serde_json::json!({"url": "http://127.0.0.1:9000/mcp"})
         ));
+    }
+
+    #[test]
+    fn a_mapped_spelling_of_vogts_address_is_dropped() {
+        let vogt = serde_json::json!({"url": "https://203.0.113.7/mcp"});
+        assert!(dropped(
+            vogt,
+            serde_json::json!({"url": "https://[::ffff:203.0.113.7]/mcp"})
+        ));
+    }
+
+    #[test]
+    fn extras_carrying_vogts_credential_are_dropped() {
+        let vogt = serde_json::json!({
+            "url": "https://v.example/mcp",
+            "bearer_token_env_var": "MY_TOK",
+            "headers": {"Authorization": "Bearer abcdefgh1234"}
+        });
+        for extra in [
+            serde_json::json!({"url": "https://alias.example/mcp", "bearer_token_env_var": "MY_TOK"}),
+            serde_json::json!({"url": "https://alias.example/mcp", "headers": {"Authorization": "Bearer abcdefgh1234"}}),
+            serde_json::json!({"url": "https://alias.example/mcp", "headers": {"Authorization": "Bearer ${VOGT_HTTP_TOKEN}"}}),
+            serde_json::json!({"command": "p", "env": {"T": "$MY_TOK"}}),
+            serde_json::json!({"command": "p", "env": {"VOGT_MCP_TOKEN": "x"}}),
+        ] {
+            assert!(dropped(vogt.clone(), extra.clone()), "{extra}");
+        }
+        assert!(!dropped(
+            vogt,
+            serde_json::json!({"url": "https://komodo.example/mcp", "bearer_token_env_var": "KOMODO_TOKEN"})
+        ));
+    }
+
+    #[test]
+    fn with_no_vogt_entry_local_and_credentialed_extras_are_dropped() {
+        let keep = |extra: serde_json::Value| {
+            let mut m = serde_json::Map::new();
+            m.insert("x".into(), extra);
+            safe_extra(Some(&m), &["x".to_string()]) == vec!["x".to_string()]
+        };
+        assert!(!keep(
+            serde_json::json!({"url": "http://127.0.0.1:8910/mcp"})
+        ));
+        assert!(!keep(
+            serde_json::json!({"url": "http://[::ffff:10.1.1.1]/mcp"})
+        ));
+        assert!(!keep(
+            serde_json::json!({"url": "https://a.example/mcp", "bearer_token_env_var": "VOGT_HTTP_TOKEN"})
+        ));
+        assert!(keep(serde_json::json!({"url": "https://a.example/mcp"})));
     }
 
     #[test]
