@@ -690,7 +690,10 @@ keystroke, `esc` included, is an answer. Nothing is typed (WI-983). The
 refusal is an escalation: its `details` carry `outcome: escalated`, `needs:
 person`, `boundary: permission_prompt`, the `escalation_key` and the
 `inbox_entry_key` of the entry the person sees. Wait for that entry to be
-resolved; do not retry (WI-996). If you
+resolved; do not retry (WI-996). A refused `session_answer` that names an
+option the dialog shows is kept as your recommendation (`details.recommendation:
+recorded`): the Inbox entry shows "<you> recommends <n>. <label>" beside the
+person's buttons and never chooses it for them. If you
 are an oversight session (role `oversight`), you may answer a worker's
 `permission` prompt with `session_answer` or `session_input` keys: read the
 command first and answer as its supervisor. The engine checks your role and

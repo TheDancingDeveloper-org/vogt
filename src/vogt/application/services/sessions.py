@@ -167,6 +167,11 @@ from vogt.core.entities import (
     WorkItem,
     WorkOverlay,
 )
+from vogt.core.escalation import (
+    RECOMMENDATION_ENTITY,
+    SESSION_ANSWER_RECOMMENDED,
+    approval_key,
+)
 from vogt.core.session_economics import SessionEconomics, meter
 from vogt.errors import (
     BypassRefused,
@@ -3464,7 +3469,7 @@ def answer_session(ctx: AppContext, params: AnswerSessionParams) -> SessionAnswe
             overseer=_caller_engine_session_id(ctx) if by_oversight else None,
         )
     except PersonRequired as refused:
-        raise _escalated(ctx, params.id, refused) from None
+        raise _escalated(ctx, params.id, refused, pick=params, reason=reason) from None
     if answered is None:
         msg = (
             f"the engine has no session {params.id!r}, or predates answering "
@@ -3988,7 +3993,12 @@ class _Target:
 
 
 def _escalated(
-    ctx: AppContext, session_id: str, refused: PersonRequired
+    ctx: AppContext,
+    session_id: str,
+    refused: PersonRequired,
+    *,
+    pick: AnswerSessionParams | None = None,
+    reason: str | None = None,
 ) -> PersonRequired:
     """The engine's refusal of an agent's answer to a permission prompt
     (WI-983), handed back as an escalation (WI-996): the prompt already
@@ -3996,6 +4006,10 @@ def _escalated(
     the dialog's content key — `session:permission_prompt:hash(question)`,
     the shape a blocked report's key has — with `outcome: escalated`. The
     caller waits on it or reports blocked; it does not retry.
+
+    When the refused call was an answer (`pick`), the agent's choice is
+    recorded under the dialog's key as a recommendation (E0b): the Inbox
+    shows it beside the person's buttons and never chooses it.
 
     Built from the engine's read of the session. When that read fails the
     refusal still carries the outcome; only the keys are missing.
@@ -4013,20 +4027,72 @@ def _escalated(
     if seen is not None:
         details["session_id"] = seen.id
         question = "" if seen.approval is None else seen.approval.question.strip()
-        digest = hashlib.sha256(question.encode()).hexdigest()[:16]
-        details["escalation_key"] = f"{seen.id}:permission_prompt:{digest}"
+        details["escalation_key"] = approval_key(seen.id, question)
         if seen.activity == "awaiting-approval":
             details["inbox_entry_key"] = (
                 f"agent:session:{seen.id}:awaiting-approval:"
                 f"{seen.activity_changed_at or 'unknown'}"
             )
+        if (
+            pick is not None
+            and reason is not None
+            and seen.approval is not None
+            and _recommend(ctx, details["escalation_key"], seen.approval, pick, reason)
+        ):
+            details["recommendation"] = "recorded"
     escalated = PersonRequired(
         f"{refused} The prompt is escalated to a person in the Inbox"
         + (f" ({details['inbox_entry_key']})" if "inbox_entry_key" in details else "")
         + "; wait for it, do not retry."
+        + (
+            " Your pick is shown to them as a recommendation."
+            if "recommendation" in details
+            else ""
+        )
     )
     escalated.details = details
     return escalated
+
+
+def _recommend(
+    ctx: AppContext,
+    key: str,
+    approval: EngineApproval,
+    pick: AnswerSessionParams,
+    reason: str,
+) -> bool:
+    """Record a refused answer as a recommendation on the dialog `key`.
+
+    Only an option the dialog shows is recorded, by its number and the
+    engine's label, so the Inbox never repeats the caller's own text. A
+    label that matches no option, or more than one, records nothing.
+    """
+    wanted = None if pick.label is None else pick.label.strip().casefold()
+    matches = [
+        (number, label)
+        for number, label, _selected in approval.options
+        if (pick.option is not None and number == pick.option)
+        or (wanted is not None and label.strip().casefold() == wanted)
+    ]
+    if len(matches) != 1:
+        return False
+    number, label = matches[0]
+    audited_action(
+        ctx,
+        operation=SESSION_ANSWER_RECOMMENDED,
+        reason=reason,
+        entity_kind=RECOMMENDATION_ENTITY,
+        entity_id=key,
+        outcome={
+            "escalation_key": key,
+            "question": approval.question.strip()[:300],
+            "option": number,
+            "label": label[:200],
+            "by": ctx.principal.identity_ref,
+        },
+        event_kind=SESSION_ANSWER_RECOMMENDED,
+    )
+    return True
 
 
 def _target(ctx: AppContext, session_id: str) -> _Target:

@@ -80,6 +80,7 @@ from vogt.core.entities import (
     SessionReport,
     TrustState,
 )
+from vogt.core.escalation import SESSION_ANSWER_RECOMMENDED, approval_key
 from vogt.errors import (
     InboxEntryNotFound,
     InvalidCursor,
@@ -1315,6 +1316,7 @@ def _session_entry(
     project = None if declared is None else projects.get(declared.project_id)
     ref = _bound_ref(view, declared, work_label)
     label = f"{ref} {name or session_id}" if ref else (name or session_id)
+    evidence: dict[str, object] | None = None
     if activity == "awaiting-approval":
         # A permission dialog denies itself on a countdown: say what it asks
         # and how long is left, so it can be answered from the Inbox row.
@@ -1325,6 +1327,16 @@ def _session_entry(
             if approval is None or approval.deadline_seconds is None
             else f" Auto-deny in {approval.deadline_seconds}s."
         )
+        recommended = (
+            None if approval is None else _recommendation(view, session_id, approval)
+        )
+        if recommended is not None:
+            evidence = {"recommendation": recommended}
+            # Before the screen text, so the 1000-character cut never drops it.
+            left += (
+                f" {recommended['by']} recommends {recommended['option']}."
+                f" {recommended['label']}."
+            )
         summary = (
             f"{approval.question if approval else 'Permission dialog.'}{left} {what}"
         )[:1000].strip()
@@ -1349,8 +1361,43 @@ def _session_entry(
         freshness="live",
         provisional=True,
         action=InboxAction(kind="session", session_id=session_id),
+        evidence_snapshot=evidence,
         **_actor_fields(SYSTEM_ACTOR),
     )
+
+
+#: The most recommendation events read for one dialog.
+_RECOMMENDATION_SCAN = 50
+
+
+def _recommendation(
+    view: ReadView, session_id: str, approval: EngineApproval
+) -> dict[str, object] | None:
+    """The newest recommendation recorded on this dialog (WI-996 E0b).
+
+    An agent whose answer the engine refused has its pick recorded under the
+    dialog's escalation key. It is shown beside the person's buttons, never
+    chosen for them, and only while it still names an option the dialog
+    shows with the same label.
+    """
+    key = approval_key(session_id, approval.question)
+    events = view.list_events(after=0, limit=_RECOMMENDATION_SCAN, entity_id=key)
+    shown = {number: text for number, text, _selected in approval.options}
+    for event in reversed(events):
+        if event.kind != SESSION_ANSWER_RECOMMENDED:
+            continue
+        option = event.summary.get("option")
+        label = event.summary.get("label")
+        if not isinstance(option, int) or shown.get(option) != label:
+            continue
+        return {
+            "option": option,
+            "label": label,
+            "by": str(event.summary.get("by", "an agent")),
+            "at": event.at.isoformat(),
+            "escalation_key": key,
+        }
+    return None
 
 
 def _bound_ref(
