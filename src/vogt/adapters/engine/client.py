@@ -16,6 +16,7 @@ import json
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -820,6 +821,8 @@ class EngineClient:
         autopilot: bool = False,
         role: str = "worker",
         work_item: str | None = None,
+        supervisor: str | None = None,
+        wake_on: list[str] | None = None,
         companion: str | None = None,
         policy: dict[str, Any] | None = None,
         budget: dict[str, Any] | None = None,
@@ -884,6 +887,12 @@ class EngineClient:
             # The item the session serves (WI-998), as a label the engine
             # keeps with the record and reports back on the summary.
             spec["work_item"] = work_item
+        if supervisor and _is_uuid(supervisor):
+            # The session that started this one (WI-1521): the engine wakes
+            # it when this one changes, if it asked to be woken.
+            spec["supervisor"] = supervisor
+        if wake_on:
+            spec["wake_on"] = list(wake_on)
         if companion:
             # The standing guide written beside the brief (WI-1243). The
             # brief points at it by name; the engine writes the text.
@@ -1834,3 +1843,12 @@ __all__ = [
     "EngineWait",
     "Transport",
 ]
+
+
+def _is_uuid(text: str) -> bool:
+    """True when `text` is an engine session id."""
+    try:
+        uuid.UUID(text)
+    except ValueError:
+        return False
+    return True

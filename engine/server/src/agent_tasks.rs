@@ -1510,6 +1510,8 @@ impl AgentTaskRegistry {
             // The rail shows the item a run works on, like any session's
             // (WI-998).
             work_item: task.vogt_work_item.clone(),
+            supervisor: None,
+            wake_on: Vec::new(),
             worktree: None,
             cols: Some(100),
             rows: Some(30),
