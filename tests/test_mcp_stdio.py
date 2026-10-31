@@ -284,3 +284,45 @@ def test_work_writes_are_compact_text_unless_verbose_wi1525(
     moved = responses[2]["result"]
     assert moved["isError"] is False, moved
     assert json.loads(moved["content"][0]["text"])["ref"] == "WI-1"
+
+
+def test_work_update_and_comment_are_compact_unless_verbose_wi1525(
+    instance: AppContext,
+) -> None:
+    """WI-1525: work_update text is {ref, state, title, updated_at};
+    work_comment text is the comment's id, kind, time and write-back, not its
+    body. `verbose: true` returns the full result as text."""
+    create = {"kind": "bug", "title": "Compact", "reason": "compact test"}
+    update = {"ref": "WI-1", "title": "Renamed", "reason": "rename"}
+    comment = {"ref": "WI-1", "body": "x" * 2000, "reason": "note"}
+    responses, _ = _session(
+        instance,
+        _request(1, "tools/call", name="work_create", arguments=create),
+        _request(2, "tools/call", name="work_update", arguments=update),
+        _request(
+            3, "tools/call", name="work_update", arguments={**update, "verbose": True}
+        ),
+        _request(4, "tools/call", name="work_comment", arguments=comment),
+        _request(
+            5,
+            "tools/call",
+            name="work_comment",
+            arguments={**comment, "verbose": True},
+        ),
+    )
+    updated = responses[1]["result"]
+    assert updated["isError"] is False, updated
+    text = updated["content"][0]["text"]
+    assert len(text) <= 300
+    assert json.loads(text)["title"] == "Renamed"
+    assert set(json.loads(text)) == {"ref", "state", "title", "updated_at"}
+    assert "item" in json.loads(responses[2]["result"]["content"][0]["text"])
+
+    commented = responses[3]["result"]
+    assert commented["isError"] is False, commented
+    text = commented["content"][0]["text"]
+    assert len(text) <= 300
+    assert set(json.loads(text)) == {"id", "kind", "created_at", "write_back"}
+    assert commented["structuredContent"]["comment"]["body"] == "x" * 2000
+    full = json.loads(responses[4]["result"]["content"][0]["text"])
+    assert full["comment"]["body"] == "x" * 2000

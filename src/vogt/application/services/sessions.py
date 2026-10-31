@@ -26,13 +26,17 @@ Three rules this module exists to keep:
 
 from __future__ import annotations
 
+import base64
 import contextlib
+import hashlib
+import json
 import logging
 import os
 import re
 import subprocess
 import threading
 import time
+import zlib
 from collections.abc import Sequence
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -810,6 +814,61 @@ def list_sessions(ctx: AppContext, params: ListSessionsParams) -> SessionListRes
 #: Screen lines the sweep always reads, to find an input box (WI-1870).
 _SWEEP_INPUT_LINES = 8
 
+# WI-1525: a sweep cursor is the sweep's own fingerprint of every row it saw,
+# so a later sweep can say what changed without Vogt keeping state per caller.
+_CURSOR_PREFIX = "sw1."
+_CURSOR_TTL = timedelta(hours=24)
+
+
+def _row_fingerprint(row: SessionSweepRow) -> str:
+    """What a driver acts on: attention, activity, blocked, report, item."""
+    summary = row.session
+    assert summary is not None
+    blocked = summary.blocked
+    report = summary.latest_report
+    basis = [
+        row.attention,
+        summary.activity,
+        summary.work_item,
+        None if blocked is None else blocked.blocker,
+        None if blocked is None or blocked.since is None else blocked.since.isoformat(),
+        row.blocked_stale,
+        None if report is None else report.id,
+        None if summary.approval is None else summary.approval.question,
+    ]
+    digest = hashlib.sha256(json.dumps(basis, default=str).encode()).digest()
+    return base64.urlsafe_b64encode(digest[:6]).decode()
+
+
+def _encode_cursor(at: datetime, prints: dict[str, str]) -> str:
+    raw = json.dumps({"t": at.isoformat(), "f": prints}, separators=(",", ":"))
+    packed = base64.urlsafe_b64encode(zlib.compress(raw.encode(), 9)).decode()
+    return _CURSOR_PREFIX + packed.rstrip("=")
+
+
+def _decode_cursor(cursor: str, now: datetime) -> dict[str, str] | None:
+    """The fingerprints a cursor carries, or None when it is invalid or expired."""
+    if not cursor.startswith(_CURSOR_PREFIX):
+        return None
+    body = cursor[len(_CURSOR_PREFIX) :]
+    try:
+        raw = zlib.decompress(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
+        data = json.loads(raw)
+        at = datetime.fromisoformat(data["t"])
+        prints = data["f"]
+    except (ValueError, KeyError, TypeError, zlib.error):
+        return None
+    if not isinstance(prints, dict) or not all(
+        isinstance(k, str) and isinstance(v, str) for k, v in prints.items()
+    ):
+        return None
+    try:
+        if now - at > _CURSOR_TTL or at > now + timedelta(minutes=5):
+            return None
+    except TypeError:  # a naive timestamp against an aware clock
+        return None
+    return prints
+
 
 def sweep_sessions(ctx: AppContext, params: SweepSessionsParams) -> SessionSweepResult:
     """Every live and hibernated session at once, for a driver overseeing
@@ -972,6 +1031,28 @@ def sweep_sessions(ctx: AppContext, params: SweepSessionsParams) -> SessionSweep
         counts[row.attention] = counts.get(row.attention, 0) + 1
         if row.attention in oversight.NEEDS_YOU:
             counts["needs_you"] += 1
+    prints = {
+        row.session.engine_session_id: _row_fingerprint(row)
+        for row in rows
+        if row.session is not None
+    }
+    cursor = _encode_cursor(now, prints)
+    delta: dict[str, Any] = {}
+    if params.since is not None:
+        before = _decode_cursor(params.since, now)
+        if before is None:
+            delta["cursor_reset"] = True
+        else:
+            changed = [
+                row
+                for row in rows
+                if row.session is None
+                or before.get(row.session.engine_session_id)
+                != prints[row.session.engine_session_id]
+            ]
+            delta["unchanged"] = len(rows) - len(changed)
+            delta["gone"] = sorted(set(before) - set(prints))
+            rows = changed
     if params.mode == "digest":
         kept: list[SessionSweepRow] = []
         for row in rows:
@@ -1007,7 +1088,9 @@ def sweep_sessions(ctx: AppContext, params: SweepSessionsParams) -> SessionSweep
                 )
             )
         rows = kept[: params.limit]
-    return SessionSweepResult(rows=rows, counts=counts, swept_at=now, engine=None)
+    return SessionSweepResult(
+        rows=rows, counts=counts, swept_at=now, engine=None, cursor=cursor, **delta
+    )
 
 
 def _block_is_stale(summary: SessionSummary) -> bool:

@@ -2082,6 +2082,14 @@ class BoardListResult(Result):
 
 
 class UpdateWorkParams(Params):
+    verbose: bool = Field(
+        default=False,
+        description=(
+            "MCP only: `true` returns the full result as the tool text. The "
+            "default text is a compact digest (WI-1525); structuredContent, "
+            "REST and the CLI always carry the full result."
+        ),
+    )
     ref: str
     title: Name | None = None
     body: str | None = None
@@ -2174,6 +2182,14 @@ class BindBranchParams(Params):
 
 
 class CommentParams(Params):
+    verbose: bool = Field(
+        default=False,
+        description=(
+            "MCP only: `true` returns the full result as the tool text. The "
+            "default text is a compact digest (WI-1525); structuredContent, "
+            "REST and the CLI always carry the full result."
+        ),
+    )
     ref: str
     body: Name = Field(description="The comment text.")
     kind: CommentKind = Field(
@@ -4689,6 +4705,16 @@ class EngineSessionTokenResult(BaseModel):
 
 
 class SweepSessionsParams(Params):
+    since: str | None = Field(
+        default=None,
+        description=(
+            "The `cursor` of an earlier sweep: return only rows whose "
+            "attention, activity, blocked report, latest report or work item "
+            "changed since, plus `gone` for sessions no longer swept. An "
+            "invalid or expired cursor returns every row with "
+            "`cursor_reset: true`. Counts always cover every session."
+        ),
+    )
     project: str | None = Field(
         default=None,
         description="Only sessions Vogt linked to this project (slug).",
@@ -4822,6 +4848,28 @@ class SessionSweepResult(Result):
     engine: str | None = Field(
         default=None,
         description="Why the engine could not be asked, when it could not.",
+    )
+    cursor: str | None = Field(
+        default=None,
+        description=(
+            "Opaque: pass it as `since` on the next sweep to get only what "
+            "changed. Absent when the engine could not be asked."
+        ),
+    )
+    cursor_reset: bool | None = Field(
+        default=None,
+        description=("Set when `since` was invalid or expired: every row is returned."),
+    )
+    unchanged: int | None = Field(
+        default=None,
+        description="With `since`: how many rows were left out as unchanged.",
+    )
+    gone: list[str] | None = Field(
+        default=None,
+        description=(
+            "With `since`: engine ids of sessions in the earlier sweep that "
+            "are no longer in it."
+        ),
     )
 
 

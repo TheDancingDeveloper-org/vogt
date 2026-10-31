@@ -460,11 +460,14 @@ Rules:
   reads what happened. `session_sweep(supervised_by=<your id>)` keeps only
   the sessions you started. A `truncated` page means events were dropped;
   sweep once. The digest leaves out the operator's own hand-typed sessions
-  (`exclude_roles`, default `["operator"]`).
+  (`exclude_roles`, default `["operator"]`). Pass the last sweep's `cursor`
+  as `since` to get only the rows that changed (`cursor_reset: true` means
+  it was unreadable or expired, and every row came back).
 - **Write results are compact.** `session_start`, `session_hibernate`,
-  `session_wake`, `session_stop`, `session_bind_work`, `work_create` and
-  `work_transition` return a digest (the session row, or the item's ref,
-  state and title) as tool text. Pass `verbose: true` when you need the
+  `session_wake`, `session_stop`, `session_bind_work`, `work_create`,
+  `work_update`, `work_transition` and `work_comment` return a digest (the
+  session row, the item's ref, state and title, or the comment's id) as tool
+  text. Pass `verbose: true` when you need the
   whole object.
 - **Hibernated sessions** (`activity: "hibernated"`) have had their
   processes stopped to free memory. Their screen is the last one they

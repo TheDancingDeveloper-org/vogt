@@ -35,14 +35,24 @@ def _work(payload: dict[str, Any]) -> dict[str, Any]:
     return {key: item.get(key) for key in _WORK_KEYS}
 
 
+def _comment(payload: dict[str, Any]) -> dict[str, Any]:
+    """The comment's id and kind, not its body and structured fields."""
+    comment = payload.get("comment") or {}
+    out = {key: comment.get(key) for key in ("id", "kind", "created_at")}
+    out["write_back"] = payload.get("write_back")
+    return out
+
+
 COMPACTORS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "session.bind_work": _session,
     "session.hibernate": _session,
     "session.start": _session,
     "session.stop": _session,
     "session.wake": _session,
+    "work.comment": _comment,
     "work.create": _work,
     "work.transition": _work,
+    "work.update": _work,
 }
 
 
