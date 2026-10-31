@@ -415,6 +415,12 @@ handed the token, and never on git's command line where `/proc/<pid>/cmdline`
 shows it. The hand-written `git -c http.extraheader="Authorization: token
 $TOKEN"` breaks the moment a layer of shell drops its quotes.
 
+**Graft.** Every engine session has the graft wrapper `g` at `/usr/local/bin/g`.
+It resolves the graft endpoint from `GRAFT_ENDPOINT` or `VOGT_GRAFT_ENDPOINT`,
+and reads the session's token from `~/.config/graft/sessions/<session id>/`,
+so an agent can `g clone`, `g sync` and `g land` without a hand-set token. The
+wrapper never prints the token.
+
 **Vogt.** A session started for a project or work item registers Vogt's own MCP
 server automatically, carrying a per-session actor-scoped token, so an agent's
 writes are attributed to that session's actor rather than to a shared
