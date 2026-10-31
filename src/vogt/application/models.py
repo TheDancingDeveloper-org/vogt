@@ -735,6 +735,16 @@ class UpdateProjectParams(Params):
             "an empty list to collect everything."
         ),
     )
+    mcp_extra: list[str] | None = Field(
+        default=None,
+        description=(
+            "MCP server names this project's worker sessions get on top of "
+            "the worker set (vogt, cadastre, crw). Add-only: the worker "
+            "servers are always kept. A name the host does not register is "
+            "skipped with a warning, not a failed launch. Replaces the "
+            "current list; leave unset to keep it, pass [] to clear it."
+        ),
+    )
     agent_policy: AgentPolicy | None = Field(
         default=None,
         description=(
@@ -997,6 +1007,13 @@ class ProjectBriefResult(Result):
         )
     )
     open_bugs: int
+    mcp_extra_unregistered: list[str] = Field(
+        default=[],
+        description=(
+            "Drift: names in the project's `mcp_extra` that no MCP config on "
+            "this host registers, so worker sessions start without them."
+        ),
+    )
     declared_work: int = Field(
         default=0, description="Of `open_work`, how much somebody typed in."
     )

@@ -313,6 +313,10 @@ class Project(Entity):
     #: answer everywhere rather than one per credential lookup.
     link_state: LinkState = "unlinked"
     exclusions: list[str] = []
+    #: MCP servers a worker session of this project gets on top of the
+    #: worker set (WI-2746). Add-only: the worker servers are always kept,
+    #: and a name the host does not register is skipped with a warning.
+    mcp_extra: list[str] = []
     trust_state: TrustState = "unverified"
     created_at: datetime
     updated_at: datetime

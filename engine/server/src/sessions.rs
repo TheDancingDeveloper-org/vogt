@@ -548,8 +548,14 @@ impl SessionRegistry {
             .map(|(_, v)| std::path::PathBuf::from(v))
             .or_else(|| std::env::var_os("CLAUDE_CONFIG_DIR").map(std::path::PathBuf::from));
         let claude_json = crate::mcp_set::claude_json_path(claude_dir.as_deref(), home.as_deref());
+        let mcp_extra: Vec<String> = spec
+            .mcp_extra
+            .clone()
+            .or_else(|| recorded.map(|r| r.mcp_extra.clone()))
+            .unwrap_or_default();
         let mcp_trim = crate::mcp_set::prepare(
             mcp_set,
+            &mcp_extra,
             home.as_deref(),
             claude_json.as_deref(),
             &self.cfg.state_dir,
@@ -729,7 +735,24 @@ impl SessionRegistry {
             }
         }
 
-        let prompt_file = match brief {
+        // A worker brief says which MCP servers the session got (WI-2746).
+        let brief_text = brief.map(|text| {
+            if mcp_set != crate::mcp_set::McpSet::Worker {
+                return text.to_string();
+            }
+            let servers = match self
+                .agent_of(&spec.command, spec.template.as_deref())
+                .as_deref()
+            {
+                Some("codex") => &mcp_trim.codex_servers,
+                _ => &mcp_trim.claude_servers,
+            };
+            format!(
+                "{text}{}",
+                crate::mcp_set::brief_section(servers, &mcp_trim.unregistered)
+            )
+        });
+        let prompt_file = match brief_text.as_deref() {
             Some(text) => Some(prompt_files::write_session_prompt(
                 &self.cfg.state_dir,
                 id,
@@ -930,6 +953,11 @@ impl SessionRegistry {
                 record.settings_file = applied_settings.clone();
                 record.mcp_set =
                     (mcp_set == crate::mcp_set::McpSet::Worker).then(|| "worker".to_string());
+                record.mcp_extra = if mcp_set == crate::mcp_set::McpSet::Worker {
+                    mcp_extra.clone()
+                } else {
+                    Vec::new()
+                };
                 record.add_dirs = prompt_file
                     .as_ref()
                     .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
@@ -1724,6 +1752,7 @@ impl SessionRegistry {
             effort: record.effort.clone(),
             permission_mode: record.permission_mode.clone(),
             mcp_set: record.mcp_set.clone(),
+            mcp_extra: (!record.mcp_extra.is_empty()).then(|| record.mcp_extra.clone()),
             account: record.account.clone(),
             autopilot: record.autopilot,
             policy: record.policy.clone(),

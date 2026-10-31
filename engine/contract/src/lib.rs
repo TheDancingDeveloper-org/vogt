@@ -133,6 +133,11 @@ pub struct SessionSpec {
     /// tool profile, and cadastre. Claude Code and Codex only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_set: Option<String>,
+    /// MCP servers added on top of the `worker` set (WI-2746): the
+    /// project's `mcp_extra`. Add-only; a name the host does not register
+    /// is warned about and skipped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_extra: Option<Vec<String>>,
     /// Which Claude Code subscription account to run under: a name from the
     /// deployment's `ENGINE_AGENT_CLAUDE_ACCOUNTS`, which the engine maps to
     /// that account's `CLAUDE_CONFIG_DIR`. Absent runs the engine's default

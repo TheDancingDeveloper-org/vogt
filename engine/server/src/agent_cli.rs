@@ -886,6 +886,7 @@ mod tests {
         let trim = crate::mcp_set::McpTrim {
             claude_config: Some(PathBuf::from("/state/s.mcp.json")),
             codex_args: vec!["-c".into(), "mcp_servers.komodo.enabled=false".into()],
+            ..Default::default()
         };
         let req = LaunchRequest {
             mcp: Some(&trim),

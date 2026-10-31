@@ -1610,9 +1610,9 @@ class SqliteWriteTxn(SqliteReadView):
             "INSERT INTO projects (id, slug, name, root_path, repo_url, "
             "lifecycle_state, current_version, contract_version, "
             "compliance_status, compliance_checked_at, contract_adopted_at, "
-            "write_back, link_state, exclusions, agent_policy, trust_state, "
+            "write_back, link_state, exclusions, mcp_extra, agent_policy, trust_state, "
             "created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 project.id,
                 project.slug,
@@ -1632,6 +1632,7 @@ class SqliteWriteTxn(SqliteReadView):
                 project.write_back,
                 project.link_state,
                 json.dumps(project.exclusions),
+                json.dumps(project.mcp_extra),
                 project.agent_policy.model_dump_json(),
                 project.trust_state,
                 to_iso(project.created_at),
@@ -1666,6 +1667,9 @@ class SqliteWriteTxn(SqliteReadView):
         if update.exclusions is not None:
             assignments.append("exclusions = ?")
             params.append(json.dumps(list(update.exclusions)))
+        if update.mcp_extra is not None:
+            assignments.append("mcp_extra = ?")
+            params.append(json.dumps(list(update.mcp_extra)))
         if update.agent_policy is not None:
             assignments.append("agent_policy = ?")
             params.append(update.agent_policy.model_dump_json())
@@ -2618,6 +2622,7 @@ def _row_to_project(row: sqlite3.Row) -> Project:
                 None if checked_at is None else from_iso(str(checked_at))
             ),
             "exclusions": json.loads(str(row["exclusions"])),
+            "mcp_extra": json.loads(str(row["mcp_extra"])),
             "agent_policy": json.loads(str(row["agent_policy"])),
             "contract_adopted_at": (
                 None if adopted_at is None else from_iso(str(adopted_at))
