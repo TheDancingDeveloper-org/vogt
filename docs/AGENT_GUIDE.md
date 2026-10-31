@@ -603,8 +603,12 @@ need, in a sentence), `items` (the concrete things to do) and a `reason`,
 then stop. From inside a session Vogt started, omit `id`; otherwise pass
 `$VOGT_ENGINE_SESSION_ID`. It shows as `blocked` on `session_list` and
 `session_screen`, raises an Inbox entry "… is blocked on you" and a push,
-and ends a driver's `session_wait`. Call `session_report_unblocked` once you
-can go on. A driver that sees `blocked` does what it asks, or relays it to
+and ends a driver's `session_wait`. Say what you hit with `boundary`
+(`permission_prompt`, `denied_action`, `credential`, `decision`, `other`) and
+who can resolve it with `needs` (`person`, the default; `overseer` for a
+denied action or a grant your overseer can arrange; `either`). The report
+carries a content `key`: reporting the same ask again keeps one Inbox entry.
+Call `session_report_unblocked` once you can go on. A driver that sees `blocked` does what it asks, or relays it to
 the operator — it does not re-prompt the agent to "continue".
 
 **A choice, not a stop.** When what you need is a person's *choice* between

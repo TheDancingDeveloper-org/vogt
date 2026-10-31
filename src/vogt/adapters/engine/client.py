@@ -112,6 +112,9 @@ class EngineBlocked:
     reason: str
     items: tuple[str, ...] = ()
     since: str | None = None
+    needs: str = "person"
+    boundary: str = "other"
+    key: str | None = None
 
     @classmethod
     def from_payload(cls, payload: object) -> EngineBlocked | None:
@@ -122,6 +125,9 @@ class EngineBlocked:
             reason=str(payload.get("reason", "")),
             items=tuple(str(i) for i in items) if isinstance(items, list) else (),
             since=_optional_str(payload.get("since")),
+            needs=_optional_str(payload.get("needs")) or "person",
+            boundary=_optional_str(payload.get("boundary")) or "other",
+            key=_optional_str(payload.get("key")),
         )
 
 
@@ -1301,12 +1307,20 @@ class EngineClient:
         blocked: bool,
         reason: str | None = None,
         items: list[str] | None = None,
+        needs: str = "person",
+        boundary: str = "other",
     ) -> EngineSession | None:
         """Set or clear a session's blocked report; `None` on a 404."""
         payload = self._call(
             f"/api/sessions/{urllib.parse.quote(session_id)}/blocked",
             method="POST",
-            payload={"blocked": blocked, "reason": reason, "items": items or []},
+            payload={
+                "blocked": blocked,
+                "reason": reason,
+                "items": items or [],
+                "needs": needs,
+                "boundary": boundary,
+            },
             allow_missing=True,
         )
         if not isinstance(payload, dict):
