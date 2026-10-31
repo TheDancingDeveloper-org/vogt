@@ -54,6 +54,10 @@ export default defineConfig({
           {
             name: "live",
             use: { ...devices["Desktop Chrome"], baseURL: liveBaseURL },
+            // WI-1842: specs tagged `@mock-only` (see tests/browser/mockOnly.ts)
+            // need fixture data, mocked routes or dev-server hooks the real
+            // stack doesn't have, so live skips them.
+            grepInvert: /@mock-only/,
           },
         ]
       : []),
