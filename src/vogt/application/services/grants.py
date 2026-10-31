@@ -9,9 +9,10 @@ invariants each check here enforces, are `docs/design/oversight-grants.md`.
 Three rules shape this module:
 
 - **Only a person decides.** `decide_grant` refuses every agent principal —
-  session tokens, `agent:engine:` tokens, the brokered pod token — before
-  anything else. The engine half of the same rule is that it accepts a grant
-  only from the core's own credential.
+  session tokens, `agent:engine:` tokens, the brokered pod token — and the
+  engine's own credential, even when the stack secret is bound to a person
+  (WI-1000), before anything else. The engine half of the same rule is that
+  it accepts a grant only from the core's own credential.
 - **The engine applies before the row says approved.** The engine and SQLite
   cannot share a transaction, so the approval is sent first and recorded only
   once the engine has said yes. A refusal leaves the request pending and says
@@ -36,8 +37,8 @@ from vogt.application.models import (
     SessionGrantResult,
     SessionGrantView,
 )
-from vogt.application.services.sessions import _engine, _target
-from vogt.application.writes import WriteOutcome, audited_write
+from vogt.application.services.sessions import _answers_as_person, _engine, _target
+from vogt.application.writes import WriteOutcome, audited_action, audited_write
 from vogt.core.entities import Actor, SessionGrant
 from vogt.errors import Conflict, GrantRefused, InvalidRequest, NotFound
 from vogt.storage.interface import ReadView, WriteTxn
@@ -48,6 +49,7 @@ SESSION_GRANT_REVOKE = "session.grant_revoke"
 SESSION_GRANT_REQUESTED_EVENT = "session.grant_requested"
 SESSION_GRANT_DECIDED_EVENT = "session.grant_decided"
 SESSION_GRANT_REVOKED_EVENT = "session.grant_revoked"
+SESSION_GRANT_REFUSED_EVENT = "session.grant_decide_refused"
 
 _PLAIN = re.compile(r"^[A-Za-z0-9._/-]{1,256}$")
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
@@ -125,10 +127,27 @@ def request_grant(ctx: AppContext, params: RequestGrantParams) -> SessionGrantRe
 def decide_grant(ctx: AppContext, params: DecideGrantParams) -> SessionGrantResult:
     """Approve or deny a pending grant. A person's decision, never an agent's."""
     reason = writes.validate_reason(params.reason)
-    if ctx.principal.kind == "agent":
+    if not _answers_as_person(ctx):
         msg = (
-            "only a person decides a grant, not an agent "
-            f"({ctx.principal.identity_ref}); approve or deny it from the Inbox"
+            "only a person decides a grant, not an agent or the engine's own "
+            f"credential ({ctx.principal.identity_ref}); approve or deny it "
+            "from the Inbox"
+        )
+        # The refusal is itself a record: who tried, as what (WI-1000).
+        kind = "engine" if ctx.principal.kind == "human" else ctx.principal.kind
+        audited_action(
+            ctx,
+            operation=SESSION_GRANT_DECIDE,
+            reason=reason,
+            entity_kind="session_grant",
+            entity_id=params.id,
+            outcome={
+                "refused": True,
+                "principal_kind": kind,
+                "decision": params.decision,
+            },
+            event_kind=SESSION_GRANT_REFUSED_EVENT,
+            summary={"refused": True, "principal_kind": kind},
         )
         raise GrantRefused(msg)
     grant = _load(ctx, params.id)

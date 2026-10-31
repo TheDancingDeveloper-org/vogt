@@ -11,6 +11,7 @@ from __future__ import annotations
 import dataclasses
 import json
 from datetime import timedelta
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -20,7 +21,9 @@ from vogt.application.context import AppContext
 from vogt.application.models import (
     DecideGrantParams,
     InboxListParams,
+    IssueTokenParams,
     ListAuditParams,
+    ListEventsParams,
     ListGrantsParams,
     RequestGrantParams,
     RevokeGrantParams,
@@ -36,7 +39,9 @@ from vogt.application.services import (
     set_session_role,
 )
 from vogt.application.services import grants as grants_service
+from vogt.application.services.auth import authenticate, issue_token
 from vogt.application.services.grants import default_var
+from vogt.application.services.history import list_events
 from vogt.core.principal import Principal
 from vogt.errors import Conflict, GrantRefused, InvalidRequest, RoleRefused
 
@@ -135,6 +140,21 @@ def ask(ctx: AppContext, target: str = "eng-worker", **extra: Any) -> str:
     return request_grant(ctx, RequestGrantParams(**fields)).grant.id
 
 
+def refusals(ctx: AppContext, grant_id: str) -> list[object]:
+    """The principal kinds each audited refusal to decide this grant names."""
+    audited = [
+        row.operation
+        for row in list_audit(ctx, ListAuditParams(entity_id=grant_id)).records
+    ]
+    kinds = [
+        event.summary.get("principal_kind")
+        for event in list_events(ctx, ListEventsParams(entity_id=grant_id)).events
+        if event.kind == "session.grant_decide_refused"
+    ]
+    assert audited.count("session.grant_decide") == len(kinds)
+    return kinds
+
+
 # -- invariant 1: a person decides, an agent cannot -------------------------
 
 
@@ -151,6 +171,52 @@ def test_an_agent_cannot_decide_a_grant_even_the_overseer(
     assert engine.applied == [], "nothing reached the engine"
     (row,) = list_grants(ctx, ListGrantsParams()).grants
     assert row.state == "pending"
+    assert refusals(ctx, grant_id) == ["agent", "agent"], "a session token each"
+
+
+def test_the_engine_credential_cannot_decide_even_when_bound_to_a_person(
+    ctx: AppContext, engine: GrantEngine, tmp_path: Path
+) -> None:
+    """WI-1000: a stack secret first issued by hand is bound to a person, so
+    its principal is `human`. Whoever presents it is the engine (or any
+    process that read it), not that person; the same person's other
+    credential still decides."""
+
+    def issued(name: str) -> str:
+        return issue_token(
+            ctx,
+            IssueTokenParams(
+                actor=ctx.principal.identity_ref, name=name, scopes="admin", reason=WHY
+            ),
+        ).secret
+
+    stack_secret, phone = issued("stack secret"), issued("phone")
+    secret_file = tmp_path / "vogt-core-token"
+    secret_file.write_text(stack_secret + "\n", encoding="utf-8")
+    wired = dataclasses.replace(
+        ctx,
+        config=ctx.config.model_copy(update={"bootstrap_core_token_file": secret_file}),
+    )
+
+    def as_bearer(secret: str) -> AppContext:
+        who = authenticate(wired, bearer=secret)
+        return dataclasses.replace(wired, principal=who.principal, token=who.token)
+
+    stack = as_bearer(stack_secret)
+    assert stack.principal.kind == "human", "a person, as on the estate"
+    grant_id = ask(as_agent(ctx, "eng-overseer"))
+    with pytest.raises(GrantRefused, match="only a person decides"):
+        decide_grant(
+            stack, DecideGrantParams(id=grant_id, decision="approve", reason=WHY)
+        )
+    assert engine.applied == [], "nothing reached the engine"
+    assert refusals(ctx, grant_id) == ["engine"]
+    decided = decide_grant(
+        as_bearer(phone),
+        DecideGrantParams(id=grant_id, decision="approve", reason=WHY),
+    ).grant
+    assert decided.state == "approved"
+    assert len(engine.applied) == 1
 
 
 def test_a_person_approves_and_the_engine_holds_it_before_the_record_says_so(
