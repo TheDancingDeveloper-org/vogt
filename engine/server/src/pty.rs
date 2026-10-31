@@ -995,6 +995,11 @@ impl Session {
         *self.last_person_input_at.lock() = Some(time::OffsetDateTime::now_utc());
     }
 
+    /// How long ago anything was last written to the session's input.
+    pub fn input_age(&self) -> Option<Duration> {
+        self.last_input.lock().map(|at| at.elapsed())
+    }
+
     pub fn last_person_input_at(&self) -> Option<time::OffsetDateTime> {
         *self.last_person_input_at.lock()
     }

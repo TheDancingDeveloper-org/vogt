@@ -575,6 +575,9 @@ pub enum HibernateTrigger {
     Recovered,
     /// A budget reached its hard limit (WI-1245 / C7).
     Budget,
+    /// The agent declared itself done and had no input since
+    /// (`ENGINE_HIBERNATE_DONE_AFTER`, WI-1523).
+    Done,
 }
 
 /// What an agent's done declaration came from (WI-1518).

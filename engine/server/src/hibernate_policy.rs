@@ -7,6 +7,14 @@
 //! pod is below it. Both keep every exemption, and each exemption is a reason
 //! a person can read — the same sentence the watcher logs.
 //!
+//! `ENGINE_HIBERNATE_DONE_AFTER` (a duration, `10m`) hibernates a session
+//! whose agent declared itself done (WI-1518 `AUTOPILOT: DONE`, or a
+//! `result` report, WI-1520) at least that long ago and has had no input
+//! since (WI-1523), with trigger `done`. An oversight session is never
+//! hibernated this way: it declares a sweep done and is then woken by the
+//! next one. Autopilot does not exempt it — the declaration is the end of
+//! the backlog the exemption protects.
+//!
 //! `ENGINE_HIBERNATE_LIVE_CAP` is not a watcher trigger. It is the number of
 //! live sessions at which the assistant refuses to start another one (WI-1269).
 //! Set on its own it leaves the watcher off: idle and memory are still what
@@ -62,13 +70,16 @@ pub struct Policy {
     /// trigger: `is_off` ignores it, and the watcher never reads it. Unset
     /// means the assistant does not count live sessions before a start.
     pub live_cap: Option<usize>,
+    /// Hibernate an eligible session whose agent declared itself done at
+    /// least this long ago, with no input since (WI-1523).
+    pub done_after: Option<Duration>,
 }
 
 impl Policy {
     /// Whether the watcher has nothing to do. A live cap alone does not turn
     /// it on: the cap is enforced at the assistant's start gate, not here.
     pub fn is_off(&self) -> bool {
-        self.idle_after.is_none() && self.memavailable_below.is_none()
+        self.idle_after.is_none() && self.memavailable_below.is_none() && self.done_after.is_none()
     }
 }
 
@@ -211,9 +222,11 @@ fn host_mem_available() -> Option<u64> {
     kib.checked_mul(1024)
 }
 
-/// A session policy may hibernate: its id, how long it has been quiet, and
-/// whether the idle trigger must leave it alone (on autopilot).
-pub type Candidate = (Uuid, Duration, bool);
+/// A session policy may hibernate: its id, how long it has been quiet,
+/// whether the idle trigger must leave it alone (on autopilot), and how long
+/// ago it declared itself done when the done trigger may take it (no input
+/// since, not an overseer).
+pub type Candidate = (Uuid, Duration, bool, Option<Duration>);
 
 /// One pass of the policy: which sessions to hibernate, and why each one.
 /// Pure over its inputs, so the rules are testable without a clock or a
@@ -225,7 +238,7 @@ pub fn choose(
 ) -> Vec<(Uuid, HibernateTrigger, String)> {
     let mut chosen: Vec<(Uuid, HibernateTrigger, String)> = Vec::new();
     if let Some(after) = policy.idle_after {
-        for &(id, quiet, idle_exempt) in candidates {
+        for &(id, quiet, idle_exempt, _) in candidates {
             if quiet >= after && !idle_exempt {
                 chosen.push((
                     id,
@@ -239,13 +252,31 @@ pub fn choose(
             }
         }
     }
+    if let Some(after) = policy.done_after {
+        for &(id, _, _, done_for) in candidates {
+            if chosen.iter().any(|(c, _, _)| *c == id) {
+                continue;
+            }
+            if let Some(done_for) = done_for.filter(|d| *d >= after) {
+                chosen.push((
+                    id,
+                    HibernateTrigger::Done,
+                    format!(
+                        "done {} min ago with no input since (threshold {} min)",
+                        done_for.as_secs() / 60,
+                        after.as_secs() / 60
+                    ),
+                ));
+            }
+        }
+    }
     if let (Some(floor), Some(available)) = (policy.memavailable_below, available) {
         if available < floor {
             let quietest = candidates
                 .iter()
-                .filter(|(id, _, _)| !chosen.iter().any(|(c, _, _)| c == id))
-                .max_by_key(|(_, quiet, _)| *quiet);
-            if let Some(&(id, quiet, _)) = quietest {
+                .filter(|(id, _, _, _)| !chosen.iter().any(|(c, _, _)| c == id))
+                .max_by_key(|(_, quiet, _, _)| *quiet);
+            if let Some(&(id, quiet, _, _)) = quietest {
                 chosen.push((
                     id,
                     HibernateTrigger::Memory,
@@ -287,7 +318,7 @@ pub async fn run_once(registry: &SessionRegistry, policy: &Policy) {
         .live_sessions()
         .iter()
         .filter_map(|s| match exemption(registry, s) {
-            None => Some((s.id, s.output_quiet_for(), s.autopilot())),
+            None => Some((s.id, s.output_quiet_for(), s.autopilot(), done_for(s))),
             Some(why) => {
                 tracing::debug!(session = %s.id, reason = %why, "not hibernating");
                 None
@@ -309,6 +340,30 @@ pub async fn run_once(registry: &SessionRegistry, policy: &Policy) {
                 tracing::warn!(session = %id, error = %e, "policy could not hibernate a session")
             }
         }
+    }
+}
+
+/// How long ago the session's agent declared itself done, when the done
+/// trigger may take it: not an overseer, and no input written to it since
+/// the declaration (WI-1523).
+fn done_for(session: &Session) -> Option<Duration> {
+    if session.role() == SessionRole::Oversight {
+        return None;
+    }
+    let at = session.done_at()?;
+    let at =
+        time::OffsetDateTime::parse(&at, &time::format_description::well_known::Rfc3339).ok()?;
+    let age = time::OffsetDateTime::now_utc() - at;
+    let age = Duration::try_from(age).ok()?;
+    done_quiet(age, session.input_age())
+}
+
+/// The done age, when no input arrived after the declaration: input `input_age`
+/// ago is after a declaration `done_age` ago when it is the younger of the two.
+fn done_quiet(done_age: Duration, input_age: Option<Duration>) -> Option<Duration> {
+    match input_age {
+        Some(input) if input < done_age => None,
+        _ => Some(done_age),
     }
 }
 
@@ -481,14 +536,15 @@ mod tests {
         let (a, b, c) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
         let mins = |m: u64| Duration::from_secs(m * 60);
         let candidates = [
-            (a, mins(200), false),
-            (b, mins(30), false),
-            (c, mins(90), false),
+            (a, mins(200), false, None),
+            (b, mins(30), false, None),
+            (c, mins(90), false, None),
         ];
         let idle = Policy {
             idle_after: Some(mins(120)),
             memavailable_below: None,
             live_cap: None,
+            done_after: None,
         };
         let chosen: Vec<_> = choose(&idle, &candidates, None)
             .into_iter()
@@ -500,6 +556,7 @@ mod tests {
             idle_after: Some(mins(120)),
             memavailable_below: Some(2 << 30),
             live_cap: None,
+            done_after: None,
         };
         let chosen: Vec<_> = choose(&both, &candidates, Some(1 << 30))
             .into_iter()
@@ -523,11 +580,15 @@ mod tests {
         let (looping, idle) = (Uuid::new_v4(), Uuid::new_v4());
         let mins = |m: u64| Duration::from_secs(m * 60);
         // The looping session is the quietest: it paused between items.
-        let candidates = [(looping, mins(300), true), (idle, mins(150), false)];
+        let candidates = [
+            (looping, mins(300), true, None),
+            (idle, mins(150), false, None),
+        ];
         let idle_only = Policy {
             idle_after: Some(mins(120)),
             memavailable_below: None,
             live_cap: None,
+            done_after: None,
         };
         let chosen: Vec<_> = choose(&idle_only, &candidates, None)
             .into_iter()
@@ -542,6 +603,7 @@ mod tests {
             idle_after: None,
             memavailable_below: Some(2 << 30),
             live_cap: None,
+            done_after: None,
         };
         let chosen: Vec<_> = choose(&pressure, &candidates, Some(1 << 30))
             .into_iter()
@@ -564,5 +626,54 @@ mod tests {
             ..Policy::default()
         }
         .is_off());
+    }
+
+    #[test]
+    fn done_takes_a_quiet_done_session_and_spares_one_given_input_since() {
+        let (done, fresh, typed, undone) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        let mins = |m: u64| Duration::from_secs(m * 60);
+        let candidates = [
+            (done, mins(11), true, done_quiet(mins(11), Some(mins(20)))),
+            (fresh, mins(3), true, done_quiet(mins(3), None)),
+            (typed, mins(11), false, done_quiet(mins(15), Some(mins(2)))),
+            (undone, mins(60), false, None),
+        ];
+        let policy = Policy {
+            done_after: Some(mins(10)),
+            ..Policy::default()
+        };
+        assert!(!policy.is_off());
+        let chosen: Vec<_> = choose(&policy, &candidates, None)
+            .into_iter()
+            .map(|(id, t, _)| (id, t))
+            .collect();
+        assert_eq!(
+            chosen,
+            vec![(done, HibernateTrigger::Done)],
+            "autopilot does not exempt a done session; input since the declaration does"
+        );
+        let both = Policy {
+            idle_after: Some(mins(10)),
+            done_after: Some(mins(10)),
+            ..Policy::default()
+        };
+        let chosen: Vec<_> = choose(&both, &candidates, None)
+            .into_iter()
+            .map(|(id, t, _)| (id, t))
+            .collect();
+        assert_eq!(
+            chosen,
+            vec![
+                (typed, HibernateTrigger::Idle),
+                (undone, HibernateTrigger::Idle),
+                (done, HibernateTrigger::Done),
+            ],
+            "a session is chosen once"
+        );
     }
 }

@@ -1144,7 +1144,8 @@ class SessionHibernation(Result):
     trigger: str = Field(
         description=(
             "manual / idle / memory / shutdown (the engine was stopping) / "
-            "recovered (found at the engine's boot without a process)."
+            "recovered (found at the engine's boot without a process) / "
+            "budget (a hard budget limit) / done (declared done, then quiet)."
         )
     )
     reason: str | None = None
