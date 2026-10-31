@@ -823,6 +823,18 @@ and recorded, or ask a person to close the item. A person is never refused.
 `work_get` shows where the change has got to in `delivery`: `landed`,
 `deployed` per lane, `verified`, each with the evidence behind it.
 
+### Landing a reviewed branch
+
+On a project whose `agent_policy.landing.merge_by` is `oversight`, an
+oversight session (or a person) lands a worker's branch with `work_land`
+(`ref`, `head_sha`, `reason`). It lands the branch the latest hand-off names
+onto the landing rule's base, as a fast-forward or a rebase, never a merge
+commit, and only when the latest `verdict` comment is `no_blockers` for
+exactly that `head_sha` from a review session a person or oversight started
+for this item (or from a person), and not from the worker. A worker calling it
+is refused; so is a stale SHA. Every refusal is `403 land_refused` and names
+the rule. On success the item gets a `landed <sha> onto <base>` note.
+
 ### Comment, adopt, suppress
 
 - **Comment** (`work_comment`) when you need to leave a note on the item — a
