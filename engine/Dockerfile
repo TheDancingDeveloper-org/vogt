@@ -645,6 +645,9 @@ COPY engine/deploy/git-forgejo.sh /usr/local/bin/git-forgejo
 COPY engine/deploy/claude-session-hook.sh /usr/local/bin/vogt-claude-session-hook
 COPY engine/deploy/cargo-cache.sh /usr/local/bin/vogt-cargo-cache
 COPY engine/deploy/policy-hook.sh /usr/local/bin/vogt-policy-hook
+# `g`: graft with the session's endpoint and token (WI-2755). An executable,
+# not a shell function, so Codex (a fresh shell per command) has it too.
+COPY --chmod=755 engine/deploy/graft-session.sh /usr/local/bin/g
 RUN chmod +x \
     /usr/local/bin/vogt-lifecycle \
     /usr/local/bin/vogt-entrypoint \
