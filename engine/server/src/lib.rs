@@ -23,6 +23,7 @@ pub mod chats;
 pub mod claude_config;
 pub mod client_diag;
 pub mod codex_guidance;
+mod codex_rollout;
 pub mod config;
 pub mod core_auth;
 pub mod economics;
