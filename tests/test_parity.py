@@ -447,6 +447,10 @@ SCRIPT: list[tuple[str, StepParams]] = [
     # proves the three surfaces agree on the engine's canned answers.
     ("session.history_list", {}),
     ("workspace.list", {}),
+    (
+        "workspace.clean",
+        {"path": "/w/wi-1", "mode": "build_output", "reason": WHY},
+    ),
     ("session.search_output", {"q": "needle"}),
     # Runtime-pinned agent CLIs, against the same stand-in engine.
     ("agent_cli.list", {}),
@@ -1293,6 +1297,16 @@ def _stand_in_engine() -> EngineClient:
                     "activity": "idle",
                     "cwd": "/tmp",
                     "blocked": blocked,
+                }
+            ).encode()
+        if method == "POST" and path.endswith("/api/workspaces/clean"):
+            return 200, json.dumps(
+                {
+                    "path": "/w/wi-1",
+                    "mode": "build_output",
+                    "bytes_freed": 0,
+                    "removed": False,
+                    "cleaned_at": "2026-10-31T00:00:00Z",
                 }
             ).encode()
         if method == "GET" and path.endswith("/api/workspaces"):

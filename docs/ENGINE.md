@@ -832,6 +832,22 @@ than these routes.
   most once per `ENGINE_WORKSPACE_SIZE_TTL` seconds (default 60), and a
   request waits at most 2 s for a stale one; until the first walk finishes
   `size_bytes` is `null`. Requires `sessions`.
+- `POST /api/workspaces/clean {path, mode, force?, reason?}` -> `{path, mode,
+  bytes_freed, removed, branch_deleted?, cleaned_at?}` (WI-1325).
+  `mode: "build_output"` removes `target/`, `node_modules` and `.venv` from a
+  linked worktree (the WI-1304 cleanup) and stamps `cleaned_at` on its
+  workspace block; refused (409) while a running session works in the tree.
+  `mode: "remove"` runs `git worktree remove --force` from the main checkout,
+  and `git branch -D` only when the branch is merged. It is refused (409)
+  while a running or hibernated session's directory is in the tree; when the
+  tree is dirty (`git status --porcelain`, untracked files included,
+  git-ignored ones not), `force` or not; and, without `force`, when `HEAD` is
+  in none of the workspace's `base_ref`, its upstream, `origin/HEAD` or
+  `origin/main`, or the repo's stash holds an entry made on the branch. A
+  forced removal keeps the branch. A main checkout is never removed (400).
+  `force` is accepted from a person, break-glass or vogt-core only (403
+  otherwise). Every outcome logs `event=workspace.clean` (path, mode, actor,
+  outcome, bytes freed; never a file list). Requires `sessions`.
 - `GET /api/sessions/sweep[?screen_lines=N&include_exited=true]` ->
   `SessionSweepEntry[]` — every live and hibernated session (exited ones
   only when asked) with the last N (default 8, at most 40) non-blank lines
@@ -4076,6 +4092,7 @@ can affect the forge; the same approval gate and core writeback policy apply.
 | `agent_cli.update` | Operator-only | Unavailable: Installs executable tooling on the host. |
 | `session.history_list` | Voice-readable | Available: List archived sessions (history), newest first. |
 | `workspace.list` | Voice-readable | Available: List live and hibernated sessions' working trees (path, branch, size, merged state), read-only. |
+| `workspace.clean` | Operator-only | Unavailable: Deletes build output or a whole worktree; run from the GUI, CLI or MCP, not by voice. |
 | `agent_activity.search` | Operator-only | Unavailable: Agent transcript activity is not curated for the voice assistant; read it over MCP, REST or the CLI. |
 | `agent_activity.summary` | Operator-only | Unavailable: Agent transcript activity is not curated for the voice assistant; read it over MCP, REST or the CLI. |
 | `session.search_output` | Voice-readable | Available: Search session output (live sessions included). |

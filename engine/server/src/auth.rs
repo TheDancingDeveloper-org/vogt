@@ -576,7 +576,8 @@ fn required_capability(method: &Method, path: &str) -> Option<TokenCapability> {
     }
     // Every session's tree, branch and base (WI-1340): what a session read
     // needs, not less.
-    if path == "/api/workspaces" {
+    // Cleaning one deletes build output or a whole worktree (WI-1325).
+    if path == "/api/workspaces" || path == "/api/workspaces/clean" {
         return Some(TokenCapability::Sessions);
     }
     // A quick chat starts an agent, and its transcript is a shared record,

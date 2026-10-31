@@ -611,10 +611,14 @@ class EngineWorkspace:
     repo_root: str
     branch: str
     base_sha: str | None
+    base_ref: str | None = None
+    cleaned_at: str | None = None
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> EngineWorkspace:
         base_sha = payload.get("base_sha")
+        base_ref = payload.get("base_ref")
+        cleaned_at = payload.get("cleaned_at")
         return cls(
             session_id=str(payload.get("session_id", "")),
             alive=bool(payload.get("alive", False)),
@@ -624,6 +628,8 @@ class EngineWorkspace:
             repo_root=str(payload.get("repo_root", "")),
             branch=str(payload.get("branch", "")),
             base_sha=base_sha if isinstance(base_sha, str) else None,
+            base_ref=base_ref if isinstance(base_ref, str) else None,
+            cleaned_at=cleaned_at if isinstance(cleaned_at, str) else None,
         )
 
 
@@ -1234,6 +1240,20 @@ class EngineClient:
         if not isinstance(rows, list):
             return []
         return [EngineWorkspace.from_payload(r) for r in rows if isinstance(r, dict)]
+
+    def clean_workspace(
+        self, *, path: str, mode: str, force: bool, reason: str
+    ) -> dict[str, Any] | None:
+        """`POST /api/workspaces/clean` (WI-1325). `None` on a 404 (an engine
+        without the route); a refusal raises `Conflict` (409) or
+        `InvalidRequest` (400) with the engine's reason."""
+        payload = self._call(
+            "/api/workspaces/clean",
+            method="POST",
+            payload={"path": path, "mode": mode, "force": force, "reason": reason},
+            allow_missing=True,
+        )
+        return payload if isinstance(payload, dict) else None
 
     def wait_any(
         self,

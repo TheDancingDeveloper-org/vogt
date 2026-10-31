@@ -2671,6 +2671,16 @@ class SweepReportView(Result):
     failures: dict[str, str] = {}
 
 
+class WorkspaceCleanCandidate(BaseModel):
+    """A merged, stopped workspace a sweep suggests removing (WI-1325)."""
+
+    path: str
+    branch: str
+    size_bytes: int | None = None
+    session: str
+    call: str = Field(description="The `workspace_clean` call that would remove it.")
+
+
 class SweepResult(Result):
     scope: str
     projects: int
@@ -2682,6 +2692,14 @@ class SweepResult(Result):
         description=(
             "The workspace volume, when a session engine answers. "
             "needs_attention once used space passes its threshold."
+        ),
+    )
+    disk_candidates: list[WorkspaceCleanCandidate] = Field(
+        default_factory=list,
+        description=(
+            "Only while disk.needs_attention: the largest stopped workspaces "
+            "whose branch is merged, each with the workspace_clean call that "
+            "removes it. A suggestion; nothing is removed by the sweep."
         ),
     )
 
@@ -7084,6 +7102,10 @@ class WorkspaceRow(BaseModel):
     size_bytes: int | None = Field(
         default=None, description="Bytes under `path`; null until first measured."
     )
+    cleaned_at: str | None = Field(
+        default=None,
+        description="When `workspace.clean` last dropped its build output.",
+    )
     alive: bool
     merged: bool | None = Field(
         default=None,
@@ -7099,3 +7121,36 @@ class WorkspaceRow(BaseModel):
 
 class WorkspaceListResult(Result):
     workspaces: list[WorkspaceRow] = []
+
+
+class WorkspaceCleanParams(Params):
+    id: str | None = Field(
+        default=None,
+        description="The session whose workspace to clean (`ses_…` or engine UUID).",
+    )
+    path: str | None = Field(
+        default=None, description="The workspace path, instead of `id`."
+    )
+    mode: Literal["build_output", "remove"] = Field(
+        description=(
+            "`build_output`: drop target/, node_modules, .venv. `remove`: "
+            "`git worktree remove` it, deleting the branch when merged."
+        )
+    )
+    force: bool = Field(
+        default=False,
+        description=(
+            "Remove a worktree whose branch is unmerged (the branch is kept). "
+            "A person only. Never removes a dirty tree or one a session uses."
+        ),
+    )
+    reason: str
+
+
+class WorkspaceCleanResult(Result):
+    path: str
+    mode: str
+    bytes_freed: int
+    removed: bool = False
+    branch_deleted: str | None = None
+    cleaned_at: str | None = None

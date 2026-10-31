@@ -39,6 +39,7 @@ ENGINE_COUNTERPARTS: Mapping[str, str] = {
     "GET /api/sessions/{id}/wait": "session.wait",
     "GET /api/sessions/changes": "session.changes",
     "GET /api/workspaces": "workspace.list",
+    "POST /api/workspaces/clean": "workspace.clean",
     "GET /api/sessions/wait-any": "session.wait_any",
     "POST /api/sessions/{id}/blocked": "session.report_blocked",
     "POST /api/sessions/{id}/report": "session.report",
