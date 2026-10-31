@@ -80,7 +80,10 @@ pub fn worker_names(extra: &[String]) -> Vec<String> {
 }
 
 /// The bridge command that speaks to the vogt endpoint.
-const VOGT_BRIDGE: &str = "vogt-mcp-remote";
+/// Every vogt MCP door's binary name contains this (`vogt-mcp`,
+/// `vogt-mcp-remote`).
+const VOGT_MCP: &str = "vogt-mcp";
+const VOGT_HTTP_TOKEN: &str = "VOGT_HTTP_TOKEN";
 /// The most extra names a project may add; matches the Python model.
 pub const MCP_EXTRA_MAX: usize = 16;
 
@@ -165,31 +168,72 @@ fn vogt_hosts(entry: &serde_json::Value) -> Vec<(String, u16)> {
         .collect()
 }
 
-/// A stdio entry that runs the vogt bridge: `vogt-mcp-remote` anywhere in
-/// the command or its args (`npx vogt-mcp-remote`, `sh -c "vogt-mcp-remote
-/// ..."`), or the same command and args as vogt's own stdio entry.
+/// Generic launchers: a vogt entry run through one of these says nothing
+/// about vogt by its command alone.
+const LAUNCHERS: &[&str] = &[
+    "sh", "bash", "zsh", "dash", "env", "npx", "node", "uvx", "uv", "python", "python3", "docker",
+    "podman", "exec", "sudo",
+];
+
+/// The basename of vogt's own stdio command, unless it is a generic launcher.
+fn vogt_command_base(vogt: Option<&serde_json::Value>) -> Option<&str> {
+    let cmd = vogt?.get("command")?.as_str()?.trim();
+    let base = cmd.rsplit('/').next()?;
+    (!base.is_empty() && !LAUNCHERS.contains(&base)).then_some(base)
+}
+
+/// A stdio extra that runs vogt's MCP door. Any of its strings (command,
+/// args, env keys and values) naming `vogt-mcp` (which covers
+/// `vogt-mcp-remote`), vogt's own command basename, the tool profile
+/// variable or `VOGT_HTTP_TOKEN` counts: this catches the bare name, extra
+/// args, an `env VAR=... vogt-mcp` wrapper and `sh -c vogt-mcp`, all of
+/// which would get a vogt session without the worker profile.
 fn runs_vogt_bridge(entry: &serde_json::Value, vogt: Option<&serde_json::Value>) -> bool {
     if entry.get("url").is_some() {
         return false;
     }
-    let mine = entry_strings(entry);
-    if mine.iter().any(|s| s.contains(VOGT_BRIDGE)) {
-        return true;
+    let mut strings = entry_strings(entry);
+    if let Some(env) = entry.get("env").and_then(|v| v.as_object()) {
+        strings.extend(env.keys().map(String::as_str));
     }
-    vogt.is_some_and(|v| v.get("command").is_some() && cmd_args(v) == cmd_args(entry))
+    let base = vogt_command_base(vogt);
+    strings.iter().any(|s| {
+        s.contains(VOGT_MCP)
+            || s.contains(TOOL_PROFILE_ENV)
+            || s.contains(VOGT_HTTP_TOKEN)
+            || base.is_some_and(|b| {
+                s.split(|c: char| {
+                    c.is_whitespace() || c == '/' || c == '"' || c == '\'' || c == ';'
+                })
+                .any(|w| w == b)
+            })
+    })
 }
 
-fn cmd_args(e: &serde_json::Value) -> Vec<&str> {
-    let mut v = vec![e.get("command").and_then(|c| c.as_str()).unwrap_or("")];
-    if let Some(args) = e.get("args").and_then(|a| a.as_array()) {
-        v.extend(args.iter().filter_map(|a| a.as_str()));
-    }
-    v
+/// An env or header name that holds a secret.
+fn is_secret_name(name: &str) -> bool {
+    let n = name.to_ascii_uppercase();
+    ["TOKEN", "KEY", "SECRET", "AUTH", "PASSWORD"]
+        .iter()
+        .any(|w| n.contains(w))
 }
 
-/// The credential an entry carries: env var names that hold a token
-/// (`bearer_token_env_var`, env keys other than the tool profile) and the
-/// literal values of its headers and env (8 characters or more).
+/// A header that carries a credential: `Authorization`, `Cookie`,
+/// `X-Api-Key`, or `X-*-Token`.
+fn is_auth_header(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    n == "authorization"
+        || n == "proxy-authorization"
+        || n == "cookie"
+        || n == "x-api-key"
+        || (n.starts_with("x-") && n.ends_with("-token"))
+}
+
+/// The credential vogt's entry carries: the names of its token variables
+/// (`bearer_token_env_var`, secret-looking env keys) and the literal values
+/// of those env keys and of its auth headers (8 characters or more).
+/// Ordinary keys (`PATH`, `HOME`, a URL) and headers (`Content-Type`) are
+/// not credentials and would only cause false drops.
 struct Creds {
     names: Vec<String>,
     values: Vec<String>,
@@ -209,7 +253,12 @@ fn vogt_creds(vogt: Option<&serde_json::Value>) -> Creds {
             continue;
         };
         for (k, val) in map {
-            if k == TOOL_PROFILE_ENV {
+            let secret = if key == "env" {
+                k != TOOL_PROFILE_ENV && is_secret_name(k)
+            } else {
+                is_auth_header(k)
+            };
+            if !secret {
                 continue;
             }
             if key == "env" {
@@ -223,16 +272,23 @@ fn vogt_creds(vogt: Option<&serde_json::Value>) -> Creds {
     c
 }
 
+/// The identifier-shaped words of a string (`Bearer ${VOGT_HTTP_TOKEN}`
+/// gives `Bearer`, `VOGT_HTTP_TOKEN`).
+fn words(s: &str) -> impl Iterator<Item = &str> {
+    s.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .filter(|w| !w.is_empty())
+}
+
 /// A token variable named after vogt (`VOGT_HTTP_TOKEN`, `VOGT_MCP_TOKEN`).
 fn is_vogt_token_name(s: &str) -> bool {
     let s = s.to_ascii_uppercase();
     s.contains("VOGT") && s.contains("TOKEN")
 }
 
-/// Whether an extra carries vogt's credential: its token variable, a vogt
-/// token name anywhere in it (`Bearer ${VOGT_HTTP_TOKEN}`), or a header or
-/// env value of vogt's own entry. This catches an alias under another DNS
-/// name, which the host checks cannot see.
+/// Whether an extra carries vogt's credential: its token variable named as
+/// a whole word, a vogt token name anywhere in it (`Bearer
+/// ${VOGT_HTTP_TOKEN}`), or a secret value of vogt's own entry. This catches
+/// an alias under another DNS name, which the host checks cannot see.
 fn uses_vogt_creds(entry: &serde_json::Value, creds: &Creds) -> bool {
     let mut strings: Vec<&str> = entry_strings(entry);
     if let Some(n) = entry.get("bearer_token_env_var").and_then(|n| n.as_str()) {
@@ -251,8 +307,7 @@ fn uses_vogt_creds(entry: &serde_json::Value, creds: &Creds) -> bool {
         strings.extend(vars.iter().filter_map(|v| v.as_str()));
     }
     strings.iter().any(|s| {
-        is_vogt_token_name(s)
-            || creds.names.iter().any(|n| s.contains(n.as_str()))
+        words(s).any(|w| is_vogt_token_name(w) || creds.names.iter().any(|n| n == w))
             || creds.values.iter().any(|v| s.contains(v.as_str()))
     })
 }
@@ -844,12 +899,72 @@ mod tests {
         let servers = serde_json::json!({
             "vogt": {"command": "vogt-mcp", "args": ["--remote"]},
             "again": {"command": "vogt-mcp", "args": ["--remote"], "env": {"X": "1"}},
-            "other": {"command": "vogt-mcp", "args": ["--other"]},
+            "other": {"command": "komodo-mcp", "args": ["--other"]},
         });
         assert_eq!(
             safe_extra(servers.as_object(), &names(&["again", "other", "ghost"])),
             ["other", "ghost"]
         );
+    }
+
+    #[test]
+    fn stdio_aliases_of_a_stdio_vogt_entry_are_dropped() {
+        // This host's shape: a bare stdio entry that execs the bridge.
+        let vogt = serde_json::json!({"type": "stdio", "command": "/usr/local/bin/vogt-mcp"});
+        for extra in [
+            serde_json::json!({"command": "vogt-mcp"}),
+            serde_json::json!({"command": "/usr/local/bin/vogt-mcp", "args": ["--verbose"]}),
+            serde_json::json!({"command": "env", "args": ["VOGT_MCP_TOOL_PROFILE=full", "/usr/local/bin/vogt-mcp"]}),
+            serde_json::json!({"command": "sh", "args": ["-c", "/usr/local/bin/vogt-mcp"]}),
+            serde_json::json!({"command": "sh", "args": ["-c", "exec vogt-mcp-remote"]}),
+            serde_json::json!({"command": "p", "env": {"VOGT_MCP_TOOL_PROFILE": "full"}}),
+            serde_json::json!({"command": "p", "args": ["--token-env", "VOGT_HTTP_TOKEN"]}),
+        ] {
+            assert!(dropped(vogt.clone(), extra.clone()), "{extra}");
+        }
+        // vogt's own command basename, under another name.
+        let renamed = serde_json::json!({"command": "/opt/bin/vbridge"});
+        assert!(dropped(
+            renamed.clone(),
+            serde_json::json!({"command": "sh", "args": ["-c", "/opt/bin/vbridge --x"]})
+        ));
+        assert!(!dropped(
+            renamed,
+            serde_json::json!({"command": "/usr/local/bin/komodo-mcp"})
+        ));
+    }
+
+    #[test]
+    fn ordinary_env_and_headers_do_not_drop_a_legitimate_extra() {
+        let vogt = serde_json::json!({
+            "url": "https://v.example/mcp",
+            "env": {"PATH": "/usr/local/bin:/usr/bin", "HOME": "/home/agent",
+                    "VOGT_URL": "https://v.example/mcp"},
+            "headers": {"Content-Type": "application/json"}
+        });
+        let extra = serde_json::json!({
+            "command": "/usr/local/bin/komodo-mcp",
+            "env": {"PATH": "/usr/local/bin:/usr/bin", "HOME": "/home/agent",
+                    "KOMODO_URL": "https://komodo.example"},
+            "headers": {"Content-Type": "application/json"}
+        });
+        assert!(!dropped(vogt.clone(), extra));
+        assert!(!dropped(
+            vogt,
+            serde_json::json!({"url": "https://k.example/mcp",
+                               "headers": {"Content-Type": "application/json"}})
+        ));
+        // A secret-looking key is still matched, as a whole name only.
+        let keyed = serde_json::json!({"url": "https://v.example/mcp",
+                                       "env": {"V_TOKEN": "abcdefgh1234"}});
+        assert!(dropped(
+            keyed.clone(),
+            serde_json::json!({"command": "p", "env": {"T": "$V_TOKEN"}})
+        ));
+        assert!(!dropped(
+            keyed,
+            serde_json::json!({"command": "p", "env": {"MY_V_TOKEN_2": "x"}})
+        ));
     }
 
     #[test]
