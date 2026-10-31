@@ -268,6 +268,35 @@ pub fn alert_body(rung: &Rung, reminder: u32, ends_at: Option<&str>) -> serde_js
     json!([alert])
 }
 
+/// Write the audit line for a ladder action: `promote`, `page`, `reminder`,
+/// `resolve` or `webhook_failed`. Ids and the content key only, never the
+/// ask or any other worker text.
+pub fn audit(action: &str, rung: &Rung, reminder: u32, detail: &str) {
+    tracing::info!(
+        target: "vogt::audit",
+        event = "escalation.ladder",
+        action,
+        session_id = %rung.session_id,
+        key = %rung.key,
+        boundary = %rung.boundary,
+        needs = needs_name(rung.needs),
+        promoted = rung.promoted,
+        reminder,
+        detail,
+        "escalation ladder"
+    );
+}
+
+/// The audit action for a step.
+fn step_action(step: &Step) -> (&'static str, &Rung, u32) {
+    match step {
+        Step::Promote(rung) => ("promote", rung, 0),
+        Step::Page { rung, reminder: 0 } => ("page", rung, 0),
+        Step::Page { rung, reminder } => ("reminder", rung, *reminder),
+        Step::Resolve(rung) => ("resolve", rung, 0),
+    }
+}
+
 /// Every escalation the live sessions hold open now.
 fn open_escalations(state: &AppState) -> Vec<OpenEscalation> {
     let mut out = Vec::new();
@@ -320,6 +349,8 @@ pub fn spawn_escalation_ladder(state: Arc<AppState>) {
             let wall_now = rfc3339_now();
             let steps = ladder.step(Instant::now(), &wall_now, open_escalations(&state));
             for step in steps {
+                let (action, rung, reminder) = step_action(&step);
+                audit(action, rung, reminder, "");
                 let (body, what) = match &step {
                     Step::Promote(rung) => {
                         let title = format!("{} is blocked on you", rung.session_name);
@@ -354,9 +385,16 @@ pub fn spawn_escalation_ladder(state: Arc<AppState>) {
                     }
                     Ok(resp) => {
                         warn!(step = what, status = %resp.status(), "escalation webhook refused");
+                        audit("webhook_failed", rung, reminder, resp.status().as_str());
                     }
                     Err(error) => {
+                        let kind = if error.is_timeout() {
+                            "timeout"
+                        } else {
+                            "send"
+                        };
                         warn!(step = what, error = %error.without_url(), "escalation webhook failed");
+                        audit("webhook_failed", rung, reminder, kind);
                     }
                 }
             }
@@ -504,5 +542,74 @@ mod tests {
             assert!(body.contains("s:credential:abc"));
             assert!(body.contains("\"needs\":\"overseer\""));
         }
+    }
+
+    /// Captures what the subscriber writes, for the audit test.
+    #[derive(Clone, Default)]
+    struct Captured(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Captured {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn every_ladder_action_is_audited_without_the_ask() {
+        let token = "ghp_0123456789abcdefABCDEF0123456789abcd";
+        let mut esc = open("s:credential:abc", EscalationNeeds::Overseer);
+        esc.escalation.ask = format!("need a token, tried {token}");
+        let config = LadderConfig {
+            remind_every: MIN,
+            ..LadderConfig::default()
+        };
+        let mut ladder = Ladder::new(config);
+        let t0 = Instant::now();
+        let mut steps = Vec::new();
+        for m in [0, 10, 25, 26] {
+            steps.extend(ladder.step(t0 + m * MIN, "t", vec![esc.clone()]));
+        }
+        steps.extend(ladder.step(t0 + 27 * MIN, "t", vec![]));
+
+        let out = Captured::default();
+        let writer = out.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            for step in &steps {
+                let (action, rung, reminder) = step_action(step);
+                audit(action, rung, reminder, "");
+            }
+            if let Step::Page { rung, .. } = &steps[1] {
+                audit("webhook_failed", rung, 0, "503 Service Unavailable");
+            }
+        });
+        let text = String::from_utf8(out.0.lock().unwrap().clone()).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        let actions: Vec<&str> = lines
+            .iter()
+            .map(|l| {
+                assert!(l.contains("vogt::audit"), "{l}");
+                assert!(l.contains("event=\"escalation.ladder\""), "{l}");
+                assert!(l.contains("key=s:credential:abc"), "{l}");
+                assert!(!l.contains(token) && !l.contains("need a token"), "{l}");
+                l.split("action=\"")
+                    .nth(1)
+                    .unwrap()
+                    .split('"')
+                    .next()
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(
+            actions,
+            ["promote", "page", "reminder", "resolve", "webhook_failed"]
+        );
     }
 }
