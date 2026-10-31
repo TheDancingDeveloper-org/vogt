@@ -784,6 +784,15 @@ compliance, drift, an open `implemented_by` PR — **never** gates an operation.
 That is the "reports, never enforces" promise in force: Vogt will let you close
 an item whose PR is still open, and simply record the contradiction as drift.
 
+One exception is a project's own policy. When its
+`agent_policy.verification.required_for_done` is on (vogt, msp-agent and
+rustnzb), an agent cannot move a `feature` or `bug` to `done` until someone
+other than the worker has posted a `work_comment kind=verification` on one of
+the policy's lanes. The refusal is `403 person_required`: get the check done
+and recorded, or ask a person to close the item. A person is never refused.
+`work_get` shows where the change has got to in `delivery`: `landed`,
+`deployed` per lane, `verified`, each with the evidence behind it.
+
 ### Comment, adopt, suppress
 
 - **Comment** (`work_comment`) when you need to leave a note on the item — a

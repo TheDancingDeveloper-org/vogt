@@ -511,7 +511,8 @@ def build_operations() -> list[Operation[Any, Any]]:
             name="work.get",
             summary=(
                 "Fetch one work item with its relations, labels and comments "
-                "(`id` is accepted for `ref`)."
+                "(`id` is accepted for `ref`), and its `delivery`: landed, "
+                "deployed per lane, verified, each with its evidence."
             ),
             scope="read",
             mutating=False,
@@ -581,7 +582,10 @@ def build_operations() -> list[Operation[Any, Any]]:
             summary=(
                 "Move a work item to another state, validating the edge; a "
                 "refusal lists the allowed edges and the shortest path. "
-                "walk=true takes that path, one audited hop per edge."
+                "walk=true takes that path, one audited hop per edge. An "
+                "agent closing a feature or bug on a project whose policy "
+                "has verification.required_for_done is refused (403 "
+                "person_required) until a verification comment exists."
             ),
             scope="work.write",
             mutating=True,

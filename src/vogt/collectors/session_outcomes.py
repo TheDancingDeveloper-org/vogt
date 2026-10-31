@@ -88,6 +88,9 @@ class SessionRecord:
     started_at: datetime
     stopped_at: datetime | None = None
     work_item: str | None = None
+    #: Who posted the newest `verification` comment on the session's work
+    #: item, when one exists (WI-1330).
+    verified_by: str | None = None
 
 
 class DeclaredSessions(Protocol):
@@ -154,6 +157,8 @@ class SessionOutcomeCollector:
             "cwd": record.cwd,
             "started_at": record.started_at.isoformat(),
         }
+        if record.verified_by is not None:
+            payload["verified_by"] = record.verified_by
 
         if running:
             payload["state"] = "running"

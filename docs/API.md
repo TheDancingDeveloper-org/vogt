@@ -771,6 +771,21 @@ fits in context.
   close and reopen an issue on the way. A `depends_on` blocker or an upstream
   write-through refusal is checked before the first hop, so a walk that would
   stop part-way is refused before it moves anything.
+- **Delivery and the verification gate** (WI-1330). `work.get` carries
+  `delivery`: `landed` (the newest hand-off's `branch`, observed by the
+  branch sweep with nothing ahead of the default branch; its `sha` is the
+  tip), `deployed` (one row per `deployed.versions` lane of the project:
+  `deployed` when the lane is `at_head`, or `behind` with the sha outside a
+  complete `unpromoted_commits` list; `not_deployed` when it is inside the
+  list or the lane is `diverged`; `unknown` for a truncated list, `unknown`
+  and `not_collected`) and `verified` (the newest `verification` comment on
+  one of `agent_policy.verification.lanes`, any lane when empty). Each carries
+  its `evidence`. When a project's `agent_policy.verification.required_for_done`
+  is set, an **agent's** `work.transition` to `done` of a `feature` or `bug`
+  with no such verification is refused `403 person_required` ("post a
+  verification comment (work_comment kind=verification), or ask a person to
+  close it"); a walk is refused before its first hop. A person is never
+  refused, and chores and questions never need a verification.
 - **Summary mode and paging.** `work.list`, `backlog` and `project.brief`
   take `mode`: `summary` (the default) returns compact rows — `work.list`
   items carry only `ref`, `title`, `kind`, `state`, `priority` and
