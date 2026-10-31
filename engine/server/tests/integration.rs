@@ -17064,3 +17064,184 @@ async fn the_workspaces_route_lists_each_session_tree_with_its_size() {
             .await;
     }
 }
+
+/// WI-1341: a land fetches, checks the pinned tip, rebases or refuses, checks
+/// history and messages, and pushes the base forward without a merge commit
+/// or `--force` — all in a temporary worktree that is gone afterwards. Only
+/// vogt-core's own credential may ask.
+#[tokio::test]
+async fn land_fast_forwards_or_rebases_and_refuses_by_name() {
+    let door = wi1255_front_door().await;
+    let root = door.repo.parent().unwrap().to_path_buf();
+    let origin = root.join("origin.git");
+    let dev = root.join("dev");
+    worktree_git(&root, &["init", "-q", "--bare", "-b", "main", "origin.git"]);
+    worktree_git(
+        &door.repo,
+        &["remote", "add", "origin", &origin.to_string_lossy()],
+    );
+    worktree_git(&door.repo, &["push", "-q", "origin", "main"]);
+    worktree_git(
+        &root,
+        &[
+            "clone",
+            "-q",
+            &origin.to_string_lossy(),
+            &dev.to_string_lossy(),
+        ],
+    );
+    worktree_git(&dev, &["config", "user.email", "t@t"]);
+    worktree_git(&dev, &["config", "user.name", "t"]);
+    let init = worktree_git(&dev, &["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
+    // A branch cut from `from`, one commit writing `file`, pushed.
+    let branch = |name: &str, from: &str, file: &str, body: &str, message: &str| -> String {
+        worktree_git(&dev, &["fetch", "-q", "origin"]);
+        worktree_git(&dev, &["checkout", "-q", "-b", name, from]);
+        std::fs::write(dev.join(file), body).unwrap();
+        worktree_git(&dev, &["add", file]);
+        worktree_git(&dev, &["commit", "-q", "-m", message]);
+        worktree_git(&dev, &["push", "-q", "origin", name]);
+        worktree_git(&dev, &["rev-parse", "HEAD"])
+            .trim()
+            .to_string()
+    };
+    let on_origin = |name: &str| -> String {
+        worktree_git(&origin, &["rev-parse", &format!("refs/heads/{name}")])
+            .trim()
+            .to_string()
+    };
+    let land = |branch: &str, head: &str, mode: &str| {
+        json!({
+            "op": "land", "repo": "repo", "branch": branch, "head_sha": head,
+            "onto": "main", "mode": mode, "linear_history": true,
+            "forbidden_text": ["grok"],
+        })
+    };
+    let worktrees = || {
+        worktree_git(&door.repo, &["worktree", "list"])
+            .lines()
+            .count()
+    };
+    let worktrees_before = worktrees();
+    let refused = |said: &Value, needle: &str| {
+        assert!(
+            said["error"].as_str().unwrap_or("").contains(needle),
+            "wanted {needle:?}: {said}"
+        );
+    };
+
+    let f1 = branch("f1", &init, "a.txt", "f1\n", "f1 change");
+    // Wrong caller: a person, an overseer, break-glass.
+    for token in [WI1255_PERSON, WI1255_OVERSEER, TEST_TOKEN] {
+        let (status, said) = door.git_op(token, land("f1", &f1, "fast_forward")).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{token} {said}");
+        refused(&said, "only vogt-core lands");
+    }
+    assert_eq!(on_origin("main"), init);
+
+    // Fast-forward.
+    let (status, said) = door
+        .git_op(WI1255_STACK, land("f1", &f1, "fast_forward"))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{said}");
+    assert_eq!(said["onto_before"], init.as_str());
+    assert_eq!(said["onto_after"], f1.as_str());
+    assert_eq!(said["commits"], json!([f1]));
+    assert_eq!(said["rebased"], false);
+    assert_eq!(on_origin("main"), f1);
+
+    // Stale tip.
+    let f2 = branch("f2", &f1, "c.txt", "c\n", "f2 change");
+    let (status, said) = door
+        .git_op(WI1255_STACK, land("f2", &init, "fast_forward"))
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{said}");
+    refused(&said, "stale tip");
+    assert_eq!(on_origin("f2"), f2);
+    assert_eq!(on_origin("main"), f1);
+
+    // Behind: fast_forward refuses, rebase lands.
+    let f3 = branch("f3", &init, "b.txt", "b\n", "f3 change");
+    let (status, said) = door
+        .git_op(WI1255_STACK, land("f3", &f3, "fast_forward"))
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{said}");
+    refused(&said, "rebase first");
+    assert_eq!(on_origin("f3"), f3);
+    let (status, said) = door.git_op(WI1255_STACK, land("f3", &f3, "rebase")).await;
+    assert_eq!(status, StatusCode::OK, "{said}");
+    assert_eq!(said["rebased"], true);
+    assert_eq!(said["onto_before"], f1.as_str());
+    let tip = on_origin("main");
+    assert_eq!(said["onto_after"], tip.as_str());
+    assert_eq!(on_origin("f3"), tip, "the branch is rebased too");
+    assert_eq!(
+        worktree_git(&origin, &["rev-parse", "main^"]).trim(),
+        f1,
+        "one commit on top of the old base, no merge"
+    );
+    assert!(worktree_git(&origin, &["rev-list", "--merges", "main"])
+        .trim()
+        .is_empty());
+
+    // Rebase conflict.
+    let f4 = branch("f4", &init, "a.txt", "f4\n", "f4 change");
+    let (status, said) = door.git_op(WI1255_STACK, land("f4", &f4, "rebase")).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{said}");
+    refused(&said, "rebase conflict");
+    refused(&said, "a.txt");
+    assert_eq!(on_origin("f4"), f4);
+    assert_eq!(on_origin("main"), tip);
+
+    // Merge commit.
+    branch("f5", &tip, "d.txt", "d\n", "f5 change");
+    worktree_git(&dev, &["checkout", "-q", "-b", "f5side", &tip]);
+    std::fs::write(dev.join("e.txt"), "e\n").unwrap();
+    worktree_git(&dev, &["add", "e.txt"]);
+    worktree_git(&dev, &["commit", "-q", "-m", "side"]);
+    worktree_git(&dev, &["checkout", "-q", "f5"]);
+    worktree_git(
+        &dev,
+        &["merge", "-q", "--no-ff", "-m", "merge side", "f5side"],
+    );
+    worktree_git(&dev, &["push", "-q", "origin", "f5"]);
+    let f5 = worktree_git(&dev, &["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
+    let (status, said) = door
+        .git_op(WI1255_STACK, land("f5", &f5, "fast_forward"))
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{said}");
+    refused(&said, "merge commits");
+    refused(&said, &f5);
+    assert_eq!(on_origin("main"), tip);
+
+    // Forbidden text.
+    let f6 = branch("f6", &tip, "g.txt", "g\n", "written by grok");
+    let (status, said) = door
+        .git_op(WI1255_STACK, land("f6", &f6, "fast_forward"))
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{said}");
+    refused(&said, "forbidden text");
+    assert_eq!(on_origin("main"), tip);
+
+    // An https GitHub origin with no agent-auth helper entry cannot push.
+    worktree_git(
+        &door.repo,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "https://github.com/example/none.git",
+        ],
+    );
+    let (status, said) = door
+        .git_op(WI1255_STACK, land("f6", &f6, "fast_forward"))
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{said}");
+    refused(&said, "agent-auth helper");
+
+    assert_eq!(worktrees(), worktrees_before, "every temp worktree is gone");
+}
