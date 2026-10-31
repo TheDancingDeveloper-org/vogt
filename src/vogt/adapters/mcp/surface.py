@@ -39,6 +39,10 @@ _TOOL_CACHE: weakref.WeakKeyDictionary[OperationRegistry, list[McpTool]] = (
 )
 
 
+#: Tool-name verbs that remove or end something (`destructiveHint`).
+_DESTRUCTIVE_VERBS = frozenset({"remove", "stop", "kill", "delete", "revoke"})
+
+
 @dataclass(frozen=True)
 class McpTool:
     """One entry of `tools/list`."""
@@ -55,7 +59,25 @@ class McpTool:
             "name": self.name,
             "description": self.description,
             "inputSchema": self.input_schema,
+            "annotations": self.annotations(),
         }
+
+    def annotations(self) -> dict[str, bool]:
+        """MCP tool hints (WI-1574).
+
+        Codex prompts for approval on any tool without `readOnlyHint: true`,
+        so a non-mutating op says so. Hints are advisory; the token's scope
+        stays the real guard.
+        """
+        hints: dict[str, bool] = {
+            "readOnlyHint": not self.mutating,
+            "openWorldHint": False,
+        }
+        if self.mutating:
+            hints["destructiveHint"] = any(
+                verb in self.name.split("_") for verb in _DESTRUCTIVE_VERBS
+            )
+        return hints
 
 
 class McpSurface:
