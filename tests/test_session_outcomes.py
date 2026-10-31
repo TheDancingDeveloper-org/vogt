@@ -27,6 +27,7 @@ import pytest
 from vogt.adapters.engine import EngineClient, EngineUnavailable
 from vogt.application.context import AppContext
 from vogt.application.models import (
+    CommentParams,
     CoverageParams,
     ObservationsParams,
     RegisterProjectParams,
@@ -35,6 +36,7 @@ from vogt.application.models import (
     SweepParams,
 )
 from vogt.application.services import (
+    comment_work,
     coverage,
     observations,
     register_project,
@@ -44,7 +46,7 @@ from vogt.application.services import (
 )
 from vogt.application.services.collect import collector_registry
 from vogt.collectors.session_outcomes import KIND_SESSION_OUTCOME, KIND_TASK_RUN
-from vogt.core.entities import Observation
+from vogt.core.entities import Observation, VerificationFields
 
 from tests.conftest import native_work_item
 
@@ -257,6 +259,28 @@ def test_a_finished_session_reports_its_exit_code_and_duration(
     # Duration is the process's own lifetime, from the engine's archive —
     # 05:00 to 06:00 — not the gap between Vogt's two writes.
     assert outcome.payload["duration_seconds"] == 3600
+
+
+def test_an_outcome_names_who_verified_its_item(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """WI-1330: the outcome carries `verified_by` once a verification exists."""
+    start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+    engine.finish("eng-1", exit_code=0)
+    _sweep(wired)
+    assert "verified_by" not in _outcomes(wired)[0].payload
+    comment_work(
+        wired,
+        CommentParams(
+            ref="WI-1",
+            body="checked",
+            kind="verification",
+            verification=VerificationFields(lane="dev", what="x", evidence="y"),
+            reason=WHY,
+        ),
+    )
+    _sweep(wired)
+    assert _outcomes(wired)[0].payload["verified_by"] == wired.principal.identity_ref
 
 
 def test_a_nonzero_exit_is_recorded_as_itself(

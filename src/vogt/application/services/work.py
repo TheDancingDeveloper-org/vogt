@@ -36,6 +36,7 @@ from vogt.application.models import (
     CommentParams,
     CommentResult,
     CreateWorkParams,
+    DeployedVersionsParams,
     GetManyWorkParams,
     GetWorkParams,
     ListSessionsParams,
@@ -44,6 +45,7 @@ from vogt.application.models import (
     TransitionWorkParams,
     UnrelateWorkParams,
     UpdateWorkParams,
+    WorkItemBranchView,
     WorkItemRow,
     WorkListResult,
     WorkManyResult,
@@ -52,12 +54,14 @@ from vogt.application.models import (
 from vogt.application.services import _resolve, upstream, writeback
 from vogt.application.services.branches import branch_views_for
 from vogt.application.services.claims import check_claim, record_claim_check
+from vogt.application.services.deployed import deployed_versions
 from vogt.application.services.git_story import git_story_for
 from vogt.application.services.sessions import (
     _caller_engine_session_id,
     list_sessions,
 )
 from vogt.application.writes import WriteOutcome, audited_write
+from vogt.core import delivery_state
 from vogt.core.branches import default_branch_name
 from vogt.core.entities import (
     DECLARABLE_RELATION_KINDS,
@@ -81,6 +85,7 @@ from vogt.errors import (
     InvalidRequest,
     NotFound,
     NotLinked,
+    PersonRequired,
     UpstreamWriteFailed,
     UpstreamWriteRefused,
 )
@@ -585,6 +590,8 @@ def get_work(ctx: AppContext, params: GetWorkParams) -> WorkResult:
         # with the contradictions between them as drift. Read-only — never
         # written back onto the item.
         git = git_story_for(ctx, view, item, branches)
+        delivery_inputs = _delivery_inputs(view, item, native)
+    delivery = _delivery_of(ctx, *delivery_inputs, branches)
     sessions = (
         list_sessions(ctx, ListSessionsParams(work_item=item.ref, mode="full")).sessions
         if native
@@ -594,8 +601,132 @@ def get_work(ctx: AppContext, params: GetWorkParams) -> WorkResult:
         item = item.model_copy(update={"body": ""})
         comments = []
     return WorkResult(
-        item=item, comments=comments, sessions=sessions, branches=branches, git=git
+        item=item,
+        comments=comments,
+        sessions=sessions,
+        branches=branches,
+        git=git,
+        delivery=delivery,
     )
+
+
+#: How many of an item's comments the delivery projection reads, newest
+#: first. A hand-off or verification older than this is not looked for.
+_DELIVERY_COMMENT_LIMIT = 500
+
+
+def _delivery_inputs(
+    view: ReadView, item: WorkItem, native: bool
+) -> tuple[Project | None, list[Comment]]:
+    project = None if item.project_id is None else view.project_by_id(item.project_id)
+    comments = (
+        view.comments_for(item.id, limit=_DELIVERY_COMMENT_LIMIT, order="newest")
+        if native
+        else []
+    )
+    return project, comments
+
+
+def _delivery_of(
+    ctx: AppContext,
+    project: Project | None,
+    comments: list[Comment],
+    branches: list[WorkItemBranchView],
+) -> delivery_state.Delivery:
+    """The `delivery` projection (WI-1330): every input is already recorded.
+
+    `landed` is the newest hand-off's branch, observed with nothing ahead of
+    the default branch (every commit of it is on the default branch).
+    `deployed` reads the project's `deployed.versions` lanes. `verified` reads
+    the item's `verification` comments against the policy's lanes.
+    """
+    landed = _landed_of(comments, branches)
+    lanes: list[delivery_state.LaneView] = []
+    if landed is not None and project is not None:
+        result = deployed_versions(ctx, DeployedVersionsParams(project=project.slug))
+        lanes = [
+            delivery_state.LaneView(
+                name=lane.name,
+                status=lane.status,
+                commits_behind=lane.commits_behind,
+                unpromoted_shas=[commit.sha for commit in lane.unpromoted_commits],
+                deployed_sha=lane.deployed_sha,
+                receipt_at=lane.receipt_at,
+            )
+            for lane in result.lanes
+        ]
+    policy = None if project is None else project.agent_policy.verification
+    return delivery_state.project(
+        landed,
+        lanes,
+        _verification_records(comments),
+        [] if policy is None else policy.lanes,
+    )
+
+
+def _landed_of(
+    comments: list[Comment], branches: list[WorkItemBranchView]
+) -> delivery_state.Landed | None:
+    handoff = next(
+        (
+            comment.handoff
+            for comment in sorted(comments, key=lambda c: c.created_at, reverse=True)
+            if comment.kind == "handoff"
+            and comment.handoff is not None
+            and comment.handoff.branch
+        ),
+        None,
+    )
+    if handoff is None:
+        return None
+    row = next((b for b in branches if b.name == handoff.branch), None)
+    if row is None or row.tip is None or row.ahead != 0:
+        return None
+    base = row.default_branch or handoff.base or "the default branch"
+    return delivery_state.Landed(
+        sha=row.tip,
+        branch=handoff.branch,
+        evidence=f"branch {handoff.branch} tip {row.tip} has nothing ahead of {base}",
+    )
+
+
+def _verification_records(
+    comments: list[Comment],
+) -> list[delivery_state.VerificationRecord]:
+    return [
+        delivery_state.VerificationRecord(
+            comment_id=comment.id, at=comment.created_at, fields=comment.verification
+        )
+        for comment in comments
+        if comment.kind == "verification" and comment.verification is not None
+    ]
+
+
+def _require_verification(ctx: AppContext, txn: ReadView, item: WorkItem) -> None:
+    """Refuse an agent's close of an item that needs a verification record.
+
+    Needed when the project's `agent_policy.verification.required_for_done`
+    is set and the item is a feature or bug (`delivery_state.VERIFIED_KINDS`).
+    A verification on one of the policy's lanes (any lane when none are
+    listed) lets it through. A person is never refused.
+    """
+    if ctx.principal.kind != "agent":
+        return
+    project = None if item.project_id is None else txn.project_by_id(item.project_id)
+    policy = None if project is None else project.agent_policy.verification
+    if not delivery_state.needs_verification(item.kind, policy):
+        return
+    assert policy is not None
+    records = _verification_records(
+        txn.comments_for(item.id, limit=_DELIVERY_COMMENT_LIMIT, order="newest")
+    )
+    if delivery_state.project(None, [], records, policy.lanes).verified is None:
+        lanes = f" on lane {', '.join(policy.lanes)}" if policy.lanes else ""
+        msg = (
+            f"{item.ref} needs a verification record{lanes} before an agent "
+            f"closes it: {delivery_state.VERIFICATION_REQUIRED_MESSAGE}"
+        )
+        raise PersonRequired(msg)
 
 
 def get_many_work(ctx: AppContext, params: GetManyWorkParams) -> WorkManyResult:
@@ -1079,6 +1210,8 @@ def _walk_transition(ctx: AppContext, params: TransitionWorkParams) -> WorkResul
             if native
             else []
         )
+        if native and params.to_state == "done":
+            _require_verification(ctx, view, item)
     path = workflow.shortest_path(item.state, params.to_state)
     if path is None or len(path) < 3:
         # No path, no-op, unknown state or a single edge: the one-edge
@@ -1151,6 +1284,8 @@ def _transition_native(ctx: AppContext, params: TransitionWorkParams) -> WorkRes
             to_state=params.to_state,
             blockers=[(blocker.ref, blocker.state) for blocker in blockers],
         )
+        if params.to_state == "done":
+            _require_verification(ctx, txn, item)
         txn.update_work_item(
             item.id, WorkItemUpdate(state=params.to_state), at=ctx.clock()
         )

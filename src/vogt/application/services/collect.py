@@ -169,12 +169,14 @@ class _DeclaredSessions:
                 offset=0,
             )
             refs: dict[str, str] = {}
+            verified_by: dict[str, str | None] = {}
             for session in sessions:
                 if session.work_item_id is None or session.work_item_id in refs:
                     continue
                 item = view.work_item_by_id(session.work_item_id)
                 if item is not None:
                     refs[session.work_item_id] = item.ref
+                    verified_by[session.work_item_id] = _verified_by(view, item.id)
             return [
                 SessionRecord(
                     id=session.id,
@@ -186,6 +188,11 @@ class _DeclaredSessions:
                         None
                         if session.work_item_id is None
                         else refs.get(session.work_item_id)
+                    ),
+                    verified_by=(
+                        None
+                        if session.work_item_id is None
+                        else verified_by.get(session.work_item_id)
                     ),
                 )
                 for session in sessions
@@ -728,3 +735,11 @@ def _named(view: ReadView, ref: DepRef) -> DepRef:
             "to_project_slug": None if to_project is None else to_project.slug,
         }
     )
+
+
+def _verified_by(view: ReadView, work_item_id: str) -> str | None:
+    """Who posted the newest `verification` comment on an item (WI-1330)."""
+    for comment in view.comments_for(work_item_id, limit=500, order="newest"):
+        if comment.kind == "verification" and comment.verification is not None:
+            return comment.verification.by or comment.actor_display_name
+    return None

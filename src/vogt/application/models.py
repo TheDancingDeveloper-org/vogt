@@ -24,6 +24,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from vogt.core.delivery_state import Delivery
 from vogt.core.dispatch import Purpose
 from vogt.core.entities import (
     Actor,
@@ -1797,6 +1798,12 @@ class WorkResult(Result):
     #: session's claim checked against git and the forge (WI-1835). A
     #: mismatch is also recorded as a comment on the item; nothing is refused.
     claim_check: ClaimCheck | None = None
+    #: Where the item's change has got to (WI-1330): `landed` (the latest
+    #: hand-off's branch, observed fully merged into the default branch),
+    #: `deployed` (per deploy lane, from `deployed.versions`) and `verified`
+    #: (the newest `verification` comment on an allowed lane), each with the
+    #: evidence that set it. Populated by `work.get`; None elsewhere.
+    delivery: Delivery | None = None
 
 
 class GetWorkParams(Params):
