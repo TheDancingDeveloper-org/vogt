@@ -15,6 +15,11 @@
 //! silences apply. Each escalation is one alert, its labels keyed by the
 //! escalation's content key, so a re-post updates rather than duplicates.
 //!
+//! Nothing the worker wrote leaves the box: not the blocked reason, not the
+//! dialog's question or command, not the session's name. The alert and the
+//! promotion push carry only the boundary, who it needs and the content key,
+//! and the person reads the ask in the Inbox.
+//!
 //! "Unacknowledged" is "still open" here: the engine does not see the Inbox
 //! archive. Clocks are the engine's own and start when the ladder first sees
 //! an escalation, so an engine restart restarts them.
@@ -113,7 +118,6 @@ pub struct Rung {
     pub session_name: String,
     pub needs: EscalationNeeds,
     pub boundary: String,
-    pub ask: String,
     pub promoted: bool,
     /// Wall-clock time the ladder first saw it (RFC 3339).
     pub started_at: String,
@@ -167,7 +171,6 @@ impl Ladder {
                     session_name: open.session_name.clone(),
                     needs: esc.needs,
                     boundary: boundary_name(&esc),
-                    ask: esc.ask.clone(),
                     promoted: false,
                     started_at: wall_now.to_string(),
                 },
@@ -235,21 +238,25 @@ fn needs_name(needs: EscalationNeeds) -> &'static str {
 }
 
 /// The Alertmanager v2 body for one escalation. `ends_at` is set on a
-/// resolved post. Built from the engine's own fields and the clipped ask.
+/// resolved post. Only the engine's own fields: boundary, needs, the content
+/// key and the session's id. No worker text (ask, question, session name),
+/// since the post goes on to Telegram unredacted.
 pub fn alert_body(rung: &Rung, reminder: u32, ends_at: Option<&str>) -> serde_json::Value {
     let mut alert = json!({
         "labels": {
             "alertname": "VogtEscalation",
             "source": "vogt-engine",
-            "session": rung.session_name,
             "session_id": rung.session_id.to_string(),
             "boundary": rung.boundary,
             "needs": needs_name(rung.needs),
             "key": rung.key,
         },
         "annotations": {
-            "summary": format!("{} is blocked on you", rung.session_name),
-            "description": rung.ask,
+            "summary": format!(
+                "A Vogt session is blocked on a {} and needs the {}; open the Inbox",
+                rung.boundary.replace('_', " "),
+                needs_name(rung.needs),
+            ),
             "promoted": rung.promoted.to_string(),
             "reminder": reminder.to_string(),
         },
@@ -316,7 +323,11 @@ pub fn spawn_escalation_ladder(state: Arc<AppState>) {
                 let (body, what) = match &step {
                     Step::Promote(rung) => {
                         let title = format!("{} is blocked on you", rung.session_name);
-                        let body = format!("Its overseer did not resolve it: {}", rung.ask);
+                        // The ask stays in the Inbox: a push leaves the box.
+                        let body = format!(
+                            "Its overseer did not resolve a {} in time; open the Inbox.",
+                            rung.boundary.replace('_', " ")
+                        );
                         let data = json!({
                             "kind": "escalation-promoted",
                             "session_id": rung.session_id.to_string(),
@@ -457,7 +468,6 @@ mod tests {
             session_name: "worker".into(),
             needs: EscalationNeeds::Person,
             boundary: "denied_action".into(),
-            ask: "merge the PR".into(),
             promoted: false,
             started_at: "2026-10-31T00:00:00Z".into(),
         };
@@ -468,5 +478,31 @@ mod tests {
         assert!(firing[0].get("endsAt").is_none());
         let resolved = alert_body(&rung, 0, Some("2026-10-31T01:00:00Z"));
         assert_eq!(resolved[0]["endsAt"], "2026-10-31T01:00:00Z");
+    }
+
+    #[test]
+    fn no_worker_text_reaches_the_webhook() {
+        // A blocked reason carrying a token-shaped string climbs the whole
+        // ladder; neither the alert nor the session's name carries it.
+        let token = "ghp_0123456789abcdefABCDEF0123456789abcd";
+        let mut esc = open("s:credential:abc", EscalationNeeds::Overseer);
+        esc.escalation.ask = format!("need a token, tried {token}");
+        esc.session_name = format!("worker {token}");
+        let mut ladder = Ladder::new(LadderConfig::default());
+        let t0 = Instant::now();
+        let mut steps = Vec::new();
+        for m in [0, 10, 25] {
+            steps.extend(ladder.step(t0 + m * MIN, "t", vec![esc.clone()]));
+        }
+        steps.extend(ladder.step(t0 + 26 * MIN, "t", vec![]));
+        assert_eq!(kinds(&steps), ["promote", "page0", "resolve"]);
+        for step in &steps {
+            let (Step::Promote(rung) | Step::Page { rung, .. } | Step::Resolve(rung)) = step;
+            let body = alert_body(rung, 0, Some("t")).to_string();
+            assert!(!body.contains(token), "{body}");
+            assert!(!body.contains("need a token"), "{body}");
+            assert!(body.contains("s:credential:abc"));
+            assert!(body.contains("\"needs\":\"overseer\""));
+        }
     }
 }
