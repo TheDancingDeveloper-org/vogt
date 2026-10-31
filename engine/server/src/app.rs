@@ -264,6 +264,9 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
     // never fired).
     push_api::spawn_idle_stall_watcher(Arc::clone(&state));
     push_api::spawn_digest_flusher(Arc::clone(&state));
+    // Background task: the human fallback ladder for open escalations
+    // (WI-996 E3): promote, page the webhook, remind, resolve.
+    crate::escalation_ladder::spawn_escalation_ladder(Arc::clone(&state));
     // One background reader of vogt-core's event cursor, and everything that
     // cares about a core-side change hangs off it. The follower republishes
     // each change onto this server's bus as `VogtChanged`; the

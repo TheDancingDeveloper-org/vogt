@@ -28,6 +28,7 @@ pub mod config;
 pub mod core_auth;
 pub mod economics;
 pub mod error;
+pub mod escalation_ladder;
 pub mod events;
 pub mod files;
 pub mod gates;
