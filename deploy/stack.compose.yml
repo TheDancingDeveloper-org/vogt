@@ -85,6 +85,10 @@ services:
       # advertise an address it is not told, so set it once the stack is
       # reachable at a stable URL.
       ENGINE_PUBLIC_URL: "${ENGINE_PUBLIC_URL:-}"
+      # Optional: the graft server agent sessions land through. The `g`
+      # wrapper every session has on PATH uses it as GRAFT_ENDPOINT, with the
+      # session's token from ~/.config/graft/sessions/<session id>/.
+      VOGT_GRAFT_ENDPOINT: "${VOGT_GRAFT_ENDPOINT:-}"
 
       # ── Voice (STT + TTS) ──────────────────────────────────────────────────
       # Server-side speech points at the bundled `voice` sidecar below over the
