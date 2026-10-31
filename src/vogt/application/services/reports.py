@@ -16,6 +16,14 @@ Two rules:
   agent-activity redactor before it is stored, so a token pasted into
   `checks` or `blockers` is not copied into the comment, the Inbox or the
   audit event. The SHA is left as given: it is a commit id, not text.
+- **A retry is not a second report.** The same idempotency key (the
+  caller's, else a hash of the canonical body) from the same session within
+  24 h returns the first report with `duplicate: true` (WI-1520).
+- **The engine hears it.** Every report is announced as a `reported` change
+  (`session_wait_any(until=[reported])` wakes on it); a `result` also
+  declares the session done (source `report`) and turns its autopilot off,
+  and a `blocker` sets the session's blocked report, so the Inbox, the push
+  and `session_wait` see it as they see `session_report_blocked`.
 - **The text is untrusted.** It is the agent's account, shown verbatim and
   never acted on; the claim check still judges a DONE against git and the
   forge.
@@ -24,6 +32,9 @@ Two rules:
 from __future__ import annotations
 
 import contextlib
+import hashlib
+import json
+from datetime import timedelta
 
 from vogt.application import writes
 from vogt.application.context import AppContext
@@ -45,6 +56,10 @@ SESSION_REPORT = "session.report"
 SESSION_REPORTED_EVENT = "session.reported"
 #: How many characters of a report the one-line digest form keeps.
 _LINE_LIMIT = 200
+#: How long a repeated idempotency key returns the first report.
+_DUPLICATE_WINDOW = timedelta(hours=24)
+#: How many of a session's newest reports a repeat is looked for among.
+_DUPLICATE_SCAN = 200
 
 
 def report(ctx: AppContext, params: SessionReportParams) -> SessionReportResult:
@@ -64,6 +79,13 @@ def report(ctx: AppContext, params: SessionReportParams) -> SessionReportResult:
         blockers=[redact(b.strip()) for b in params.blockers if b.strip()],
         next_step=_blank(params.next_step),
     )
+    key = (params.idempotency_key or "").strip() or _canonical_key(
+        params.kind, summary, params.work_item, fields
+    )
+    fields = fields.model_copy(update={"idempotency_key": key})
+    first = _earlier_report(ctx, engine_id, key)
+    if first is not None:
+        return SessionReportResult(report=first, duplicate=True)
 
     def body(txn: WriteTxn, actor: Actor) -> WriteOutcome[SessionReportResult]:
         work_item_id = _work_item_id(txn, params.work_item, engine_id)
@@ -107,9 +129,71 @@ def report(ctx: AppContext, params: SessionReportParams) -> SessionReportResult:
         )
 
     result = audited_write(ctx, operation=SESSION_REPORT, reason=reason, body=body)
+    if params.kind == "blocker":
+        _delegate_blocked(ctx, engine_id, summary, fields.blockers, reason)
+    _announce(ctx, engine_id, params.kind, summary)
     if params.kind == "result":
         _close_unbound_chore(ctx, result.report.work_item)
     return result
+
+
+def _canonical_key(
+    kind: str, summary: str, work_item: str | None, fields: SessionReportFields
+) -> str:
+    """The default idempotency key: a hash of what the report says."""
+    body = {
+        "kind": kind,
+        "summary": summary,
+        "work_item": (work_item or "").strip() or None,
+        **fields.model_dump(mode="json", exclude={"idempotency_key"}),
+    }
+    canonical = json.dumps(body, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def _earlier_report(
+    ctx: AppContext, engine_id: str, key: str
+) -> SessionReportView | None:
+    """The session's report under `key` in the last 24 h, if it posted one."""
+    since = ctx.clock() - _DUPLICATE_WINDOW
+    with ctx.declared.read() as view:
+        for row in view.list_session_reports(
+            engine_session_id=engine_id, limit=_DUPLICATE_SCAN
+        ):
+            if row.created_at < since:
+                return None
+            if row.fields.idempotency_key == key:
+                return view_of(view, row)
+    return None
+
+
+def _delegate_blocked(
+    ctx: AppContext, engine_id: str, summary: str, items: list[str], reason: str
+) -> None:
+    """A `blocker` report sets the session's blocked report too, through the
+    same path as `session.report_blocked`, so the Inbox, the push and a
+    driver's wait see it. Best effort: the report has landed already."""
+    from vogt.application.services.sessions import _set_blocked
+
+    with contextlib.suppress(VogtError):
+        _set_blocked(
+            ctx,
+            engine_id,
+            reason=reason,
+            blocker=summary,
+            items=[item[:500] for item in items[:20]],
+        )
+
+
+def _announce(ctx: AppContext, engine_id: str, kind: str, summary: str) -> None:
+    """Tell the engine, which publishes the `reported` change (and for a
+    `result` the `done` one). Best effort: an engine that is down or no
+    longer has the session loses only the wake, not the report."""
+    engine = ctx.engine
+    if engine is None:
+        return
+    with contextlib.suppress(VogtError):
+        engine.report_session(engine_id, kind=kind, summary=summary)
 
 
 def _close_unbound_chore(ctx: AppContext, ref: str | None) -> None:

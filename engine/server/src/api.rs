@@ -196,6 +196,53 @@ pub async fn set_session_blocked(
     Ok(Json(session.summary()))
 }
 
+/// A session's own typed report (WI-1520): announce it as a `reported`
+/// change, and for a `result` declare the session done (source `report`) and
+/// turn its autopilot off, as the `AUTOPILOT: DONE` marker does. Vogt stores
+/// the report and checks who may post it; the engine only announces it.
+pub async fn report_session(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<vogt_engine_contract::ReportSession>,
+) -> Result<Json<SessionSummary>> {
+    let session = state.sessions.get(id)?;
+    let kind = req.kind.trim();
+    if !matches!(kind, "progress" | "result" | "question" | "blocker") {
+        return Err(crate::error::ApiError::BadRequest(
+            "a report's kind is progress, result, question or blocker".into(),
+        ));
+    }
+    if req.summary.len() > 2000 {
+        return Err(crate::error::ApiError::BadRequest(
+            "a report's summary is at most 2000 bytes".into(),
+        ));
+    }
+    let summary: String = req.summary.trim().chars().take(120).collect();
+    state
+        .bus
+        .publish(vogt_engine_contract::ServerEvent::SessionReported {
+            id,
+            kind: kind.to_string(),
+            summary,
+        });
+    if kind == "result" {
+        let at = time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_default();
+        if state.sessions.mark_done(id, at.clone()) {
+            state
+                .bus
+                .publish(vogt_engine_contract::ServerEvent::SessionDone {
+                    id,
+                    at,
+                    source: vogt_engine_contract::DoneSource::Report,
+                });
+        }
+        let _ = state.sessions.set_autopilot(id, false);
+    }
+    Ok(Json(session.summary()))
+}
+
 /// Stop the session's process tree and keep it listed as hibernated
 /// (WI-912). `409` with the reason when it cannot be: no conversation to
 /// resume (unless `allow_shell`), an agent-task run, or already exited.
