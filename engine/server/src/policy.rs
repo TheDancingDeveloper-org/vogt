@@ -23,6 +23,19 @@
 //! contains a write verb (`git commit|push|merge|tag`, `gh pr
 //! create|edit|merge`), which a `bash -c "git commit -m …"` still contains
 //! as text; a read such as `git log --grep` is never refused by it.
+//!
+//! Two rules read the session's workspace (WI-1326). The discard guard, after
+//! msp-klaudia's gitguard, refuses a git command in the session's own repo
+//! that would throw away a path in `discard_baseline` — the paths that were
+//! already dirty when the session started; `reset --hard`, `clean`, `stash`
+//! and a command whose paths cannot be read (a glob, an expansion, `xargs`,
+//! `eval`, a `cd` earlier on the line) count as reaching every one. A fresh
+//! worktree has an empty baseline, so the guard is a no-op there. The
+//! protected-checkout rule holds only a `worktree` session: it refuses a git
+//! write whose repo is a registered project checkout other than the
+//! session's own worktree. Repos are resolved by `git rev-parse
+//! --show-toplevel`; a lookup that fails is the session's own repo for the
+//! first rule and not protected for the second.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -71,6 +84,22 @@ pub fn check(policy: &SessionPolicy, command: &str, cwd: &Path) -> Option<String
             if let Some(reason) = deploy(&simple, cwd, &mains) {
                 return Some(reason);
             }
+        }
+    }
+    let worktree = policy.workspace_kind.as_deref() == Some("worktree");
+    if policy.discard_baseline.is_empty() && !(worktree && !policy.protected_checkouts.is_empty()) {
+        return None;
+    }
+    let calls = git_calls(command, cwd);
+    let mut repos = Repos::default();
+    if !policy.discard_baseline.is_empty() {
+        if let Some(reason) = discard(policy, &calls, &mut repos) {
+            return Some(reason);
+        }
+    }
+    if worktree {
+        if let Some(reason) = protected(policy, &calls, &mut repos) {
+            return Some(reason);
         }
     }
     None
@@ -337,29 +366,55 @@ fn resolve_dir(path: &str, cwd: &Path) -> PathBuf {
 /// [`BRANCH_LOOKUP_TIMEOUT`]: a rule that needs the branch then does not fire,
 /// and the test that needs it to fire gives a directory with a HEAD.
 fn current_branch(dir: &Path) -> Option<String> {
+    let branch = git_line(dir, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+    (branch != "HEAD").then_some(branch)
+}
+
+/// The worktree toplevel `git rev-parse --show-toplevel` names for `dir`,
+/// canonicalised. Never `--git-common-dir`: a linked worktree is its own
+/// repo here, not the checkout it was cut from. `None` when the lookup fails
+/// or times out — "unknown repo".
+fn toplevel(dir: &Path) -> Option<PathBuf> {
+    let top = git_line(dir, &["rev-parse", "--show-toplevel"])?;
+    Some(canonical(Path::new(&top)))
+}
+
+/// What `git -C dir <args>` prints, trimmed, bounded by
+/// [`BRANCH_LOOKUP_TIMEOUT`]. `None` on failure, empty output or timeout.
+fn git_line(dir: &Path, args: &[&str]) -> Option<String> {
+    let out = git_output(dir, args, BRANCH_LOOKUP_TIMEOUT)?;
+    let line = out.trim();
+    (!line.is_empty()).then(|| line.to_string())
+}
+
+/// What `git -C dir <args>` prints, or `None` when it fails or does not
+/// return within `timeout`. Stdout is drained while git runs, so a large
+/// answer cannot fill the pipe and stall it into the timeout.
+fn git_output(dir: &Path, args: &[&str], timeout: Duration) -> Option<String> {
     let mut child = std::process::Command::new("git")
         .args(["--no-optional-locks", "-C"])
         .arg(dir)
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .args(args)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .spawn()
         .ok()?;
+    let mut stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        stdout.read_to_end(&mut buf).map(|_| buf)
+    });
     let started = Instant::now();
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                if !status.success() {
-                    return None;
-                }
-                let mut stdout = child.stdout.take()?;
-                let mut buf = String::new();
-                stdout.read_to_string(&mut buf).ok()?;
-                let branch = buf.trim();
-                return (!branch.is_empty() && branch != "HEAD").then(|| branch.to_string());
+                let buf = reader.join().ok()?.ok()?;
+                return status
+                    .success()
+                    .then(|| String::from_utf8_lossy(&buf).into_owned());
             }
-            Ok(None) if started.elapsed() < BRANCH_LOOKUP_TIMEOUT => {
-                std::thread::sleep(Duration::from_millis(50));
+            Ok(None) if started.elapsed() < timeout => {
+                std::thread::sleep(Duration::from_millis(20));
             }
             _ => {
                 let _ = child.kill();
@@ -368,6 +423,448 @@ fn current_branch(dir: &Path) -> Option<String> {
             }
         }
     }
+}
+
+/// `policy` with the session's workspace block (WI-1324) filled in for the
+/// discard and protected-checkout rules (WI-1326): its kind, its toplevel and
+/// the paths already dirty in it when the session first started. The engine
+/// captures that block before the child runs, and a wake passes the record's
+/// copy, so the session's own edits never become its baseline. With no
+/// block (a session from before WI-1324, or a cwd outside any repository)
+/// the policy is returned as it is: neither rule applies, and the agent's
+/// own guard (Klaudia's gitguard) stays the one that judges discards.
+pub fn with_workspace(
+    policy: Option<SessionPolicy>,
+    workspace: Option<&vogt_engine_contract::Workspace>,
+) -> Option<SessionPolicy> {
+    let Some(ws) = workspace else {
+        return policy;
+    };
+    let mut policy = policy.unwrap_or_default();
+    policy.workspace_kind = Some(ws.kind.as_str().to_string());
+    let mut baseline = ws.baseline_dirty.clone();
+    baseline.sort();
+    baseline.dedup();
+    policy.discard_baseline = baseline;
+    policy.workspace_path = Some(ws.path.clone());
+    Some(policy)
+}
+
+/// How deep `bash -c`, `eval` and `xargs` payloads are followed.
+const MAX_DEPTH: usize = 4;
+
+/// One git invocation on the line, with the directory it runs in as far as
+/// it can be read.
+#[derive(Debug)]
+struct GitCall {
+    words: Vec<String>,
+    /// The session cwd, or the target of a literal `cd` earlier on the line.
+    cwd: PathBuf,
+    /// The paths the command names cannot be read: a `cd`, `eval` or `xargs`
+    /// before it, an expansion in it, or git pointed elsewhere by
+    /// `--git-dir`, `--work-tree`, `GIT_DIR` or `core.worktree`. The discard
+    /// guard then counts every protected path as reached.
+    unreadable: bool,
+}
+
+/// Every git invocation in `command`, following `sh -c` payloads, `eval`,
+/// `xargs` and `cd` the conservative way gitguard does: whatever moves the
+/// shell or hides the paths makes the paths after it unreadable.
+fn git_calls(command: &str, cwd: &Path) -> Vec<GitCall> {
+    let mut out = Vec::new();
+    let moved = [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_COMMON_DIR",
+        "CDPATH",
+    ]
+    .iter()
+    .any(|v| command.contains(v))
+        || command.to_ascii_lowercase().contains("core.worktree");
+    walk(command, cwd, moved, 0, &mut out);
+    out
+}
+
+fn walk(command: &str, cwd: &Path, unreadable: bool, depth: usize, out: &mut Vec<GitCall>) {
+    if depth > MAX_DEPTH {
+        return;
+    }
+    let mut dir = cwd.to_path_buf();
+    let mut unreadable = unreadable;
+    for simple in split_commands(command) {
+        let words = command_words(&simple);
+        let Some(first) = words.first() else {
+            continue;
+        };
+        match base(first) {
+            "cd" | "pushd" | "popd" => {
+                // Whether the cd ran, and where CDPATH sent it, is not
+                // something this reading knows: the paths after it are
+                // unreadable. The directory is followed for the
+                // protected-checkout rule, which only needs the repo.
+                unreadable = true;
+                if base(first) == "cd" && words.len() == 2 {
+                    let target = &words[1];
+                    if !target.starts_with(['-', '~']) && !target.contains(['$', '`']) {
+                        dir = resolve_dir(target, &dir);
+                    }
+                }
+            }
+            "bash" | "sh" | "zsh" | "dash" | "ksh" => {
+                if let Some(payload) = shell_payload(&words) {
+                    walk(payload, &dir, unreadable, depth + 1, out);
+                }
+            }
+            "eval" => {
+                walk(&words[1..].join(" "), &dir, true, depth + 1, out);
+                // eval runs in this shell: a cd inside it moves the rest.
+                unreadable = true;
+            }
+            "xargs" => {
+                // The paths arrive on stdin.
+                walk(&xargs_command(&words).join(" "), &dir, true, depth + 1, out);
+            }
+            "git" => {
+                let hidden = simple.contains(['$', '`'])
+                    || words
+                        .iter()
+                        .any(|w| w.starts_with("--git-dir") || w.starts_with("--work-tree"));
+                out.push(GitCall {
+                    words,
+                    cwd: dir.clone(),
+                    unreadable: unreadable || hidden,
+                });
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The script a `sh -c` runs: the word after the first option cluster that
+/// contains `c` (`-c`, `-lc`, `-ec`).
+fn shell_payload(words: &[String]) -> Option<&str> {
+    let mut args = words.iter().skip(1);
+    while let Some(arg) = args.next() {
+        if arg.starts_with('-') && !arg.starts_with("--") && arg.contains('c') {
+            return args.next().map(String::as_str);
+        }
+        if !arg.starts_with('-') {
+            return None;
+        }
+    }
+    None
+}
+
+/// The command `xargs` runs, its own options removed.
+fn xargs_command(words: &[String]) -> &[String] {
+    let mut i = 1;
+    while i < words.len() && words[i].starts_with('-') {
+        if matches!(
+            words[i].as_str(),
+            "-I" | "-n" | "-P" | "-d" | "-L" | "-s" | "-a" | "-E" | "-e"
+        ) {
+            i += 1;
+        }
+        i += 1;
+    }
+    &words[i.min(words.len())..]
+}
+
+/// Toplevel lookups, one per directory per check: the whole check runs
+/// under the policy-check route's bound.
+#[derive(Default)]
+struct Repos(std::collections::HashMap<PathBuf, Option<PathBuf>>);
+
+impl Repos {
+    fn top(&mut self, dir: &Path) -> Option<PathBuf> {
+        self.0
+            .entry(dir.to_path_buf())
+            .or_insert_with(|| toplevel(dir))
+            .clone()
+    }
+}
+
+/// What a discarding git invocation can reach: every protected path, or the
+/// pathspecs it names (an empty list reaches everything).
+struct Reach {
+    all: bool,
+    paths: Vec<String>,
+}
+
+/// The discard guard (WI-1326), after msp-klaudia's gitguard: refuse a git
+/// command that would throw away a path that had uncommitted changes when
+/// the session started. Only commands in the session's own repo count; a
+/// repo that cannot be resolved is taken to be the session's own.
+fn discard(policy: &SessionPolicy, calls: &[GitCall], repos: &mut Repos) -> Option<String> {
+    let own = policy
+        .workspace_path
+        .as_deref()
+        .map(|p| canonical(Path::new(p)));
+    for call in calls {
+        let args = git_args(&call.words);
+        let Some(sub) = args.first() else {
+            continue;
+        };
+        let Some(reach) = discards(sub, &args[1..]) else {
+            continue;
+        };
+        let dir = canonical(&git_dir(&call.words, &call.cwd));
+        let top = if call.unreadable {
+            None
+        } else {
+            repos.top(&dir)
+        };
+        if let (Some(top), Some(own)) = (&top, &own) {
+            if top != own {
+                continue;
+            }
+        }
+        let root = top.or_else(|| own.clone()).unwrap_or_else(|| dir.clone());
+        let unreadable = call.unreadable || reach.paths.iter().any(|p| !readable_spec(p));
+        let hits = if reach.all || unreadable || reach.paths.is_empty() {
+            policy.discard_baseline.len()
+        } else {
+            let specs: Vec<String> = reach
+                .paths
+                .iter()
+                .filter_map(|p| repo_relative(p, &dir, &root))
+                .collect();
+            policy
+                .discard_baseline
+                .iter()
+                .filter(|entry| specs.iter().any(|spec| reaches(spec, entry)))
+                .count()
+        };
+        if hits > 0 {
+            return Some(format!(
+                "refusing: discard guard: git {sub} would discard {hits} path(s) that had \
+                 uncommitted changes before this session started; name only files this \
+                 session changed"
+            ));
+        }
+    }
+    None
+}
+
+/// Which discarding form `git <sub> <args>` is, if any. Mirrors gitguard's
+/// `discard`, minus its staging rules.
+fn discards(sub: &str, args: &[String]) -> Option<Reach> {
+    let (flags, paths, dashdash) = split_args(args);
+    let has = |names: &[&str]| {
+        flags.iter().any(|f| {
+            names
+                .iter()
+                .any(|n| f == n || f.starts_with(&format!("{n}=")))
+        })
+    };
+    let short = |letter: char| {
+        flags
+            .iter()
+            .any(|f| f.len() > 1 && !f.starts_with("--") && f[1..].contains(letter))
+    };
+    let all = || {
+        Some(Reach {
+            all: true,
+            paths: Vec::new(),
+        })
+    };
+    let these = |paths: Vec<String>| Some(Reach { all: false, paths });
+    match sub {
+        "checkout" => {
+            if has(&["-f", "--force"]) {
+                return all();
+            }
+            if has(&["-b", "-B", "--orphan"]) && !dashdash {
+                return None;
+            }
+            if dashdash {
+                return these(after_dashdash(args));
+            }
+            // `git checkout <x>` is a branch switch, which git refuses over
+            // local changes, or a path restore: every word may be a path.
+            (!paths.is_empty()).then_some(Reach { all: false, paths })
+        }
+        "restore" => {
+            let staged = has(&["--staged", "-S"]) || short('S');
+            let worktree = has(&["--worktree", "-W"]) || short('W');
+            if staged && !worktree {
+                return None; // unstages only; the working tree is left alone
+            }
+            these(paths)
+        }
+        "reset" => has(&["--hard", "--merge", "--keep"]).then_some(Reach {
+            all: true,
+            paths: Vec::new(),
+        }),
+        "clean" => {
+            if has(&["-n", "--dry-run"]) || short('n') {
+                return None;
+            }
+            (has(&["-f", "--force"]) || short('f')).then_some(Reach { all: false, paths })
+        }
+        "stash" => match paths.first().map(String::as_str) {
+            None | Some("push") => these(paths.into_iter().skip(1).collect()),
+            Some("save") => all(),
+            // A bare `git stash -- <paths>` is a push.
+            Some(_) if dashdash => these(after_dashdash(args)),
+            _ => None,
+        },
+        "rm" => ((has(&["-f", "--force"]) || short('f')) && !has(&["--cached"]))
+            .then_some(Reach { all: false, paths }),
+        "switch" => has(&["-f", "--force", "--discard-changes"]).then_some(Reach {
+            all: true,
+            paths: Vec::new(),
+        }),
+        _ => None,
+    }
+}
+
+/// Flags and positional words, the value of an option that takes one
+/// consumed with it. Everything after `--` is positional.
+fn split_args(args: &[String]) -> (Vec<String>, Vec<String>, bool) {
+    const VALUED: &[&str] = &[
+        "-s",
+        "--source",
+        "-m",
+        "--message",
+        "-b",
+        "-B",
+        "--orphan",
+        "-e",
+        "--exclude",
+        "--pathspec-from-file",
+        "--conflict",
+    ];
+    let mut flags = Vec::new();
+    let mut paths = Vec::new();
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        if arg == "--" {
+            paths.extend(rest.cloned());
+            return (flags, paths, true);
+        }
+        if arg.starts_with('-') && arg != "-" {
+            flags.push(arg.clone());
+            if VALUED.contains(&arg.as_str()) {
+                rest.next();
+            }
+        } else {
+            paths.push(arg.clone());
+        }
+    }
+    (flags, paths, false)
+}
+
+fn after_dashdash(args: &[String]) -> Vec<String> {
+    args.iter()
+        .skip_while(|a| *a != "--")
+        .skip(1)
+        .cloned()
+        .collect()
+}
+
+/// A pathspec this reading can resolve: no glob, expansion or pathspec magic.
+fn readable_spec(spec: &str) -> bool {
+    !spec.starts_with([':', '~']) && !spec.contains(['*', '?', '[', '$', '`'])
+}
+
+/// `spec`, relative to `dir`, as a path relative to `root`; `""` is the
+/// whole tree. `None` when it lies outside `root`.
+fn repo_relative(spec: &str, dir: &Path, root: &Path) -> Option<String> {
+    let path = normalize(&resolve_dir(spec, dir));
+    let rel = path.strip_prefix(root).ok()?;
+    Some(rel.to_string_lossy().trim_end_matches('/').to_string())
+}
+
+/// Whether the repo-relative pathspec `spec` reaches the baseline `entry`:
+/// the same path, a directory holding it, or a file inside an untracked
+/// directory entry (`scratch/`).
+fn reaches(spec: &str, entry: &str) -> bool {
+    let entry_path = entry.trim_end_matches('/');
+    spec.is_empty()
+        || spec == entry_path
+        || entry_path.starts_with(&format!("{spec}/"))
+        || (entry.ends_with('/') && spec.starts_with(entry))
+}
+
+/// The protected-checkout rule (WI-1326), only for a `worktree` session:
+/// refuse a git write whose repo is a registered project's checkout and not
+/// the session's own worktree. A repo that cannot be resolved is not
+/// protected, so a broken git never refuses an ordinary command.
+fn protected(policy: &SessionPolicy, calls: &[GitCall], repos: &mut Repos) -> Option<String> {
+    let own = policy
+        .workspace_path
+        .as_deref()
+        .map(|p| canonical(Path::new(p)));
+    let checkouts: Vec<PathBuf> = policy
+        .protected_checkouts
+        .iter()
+        .map(|p| canonical(Path::new(p)))
+        .collect();
+    for call in calls {
+        let args = git_args(&call.words);
+        let Some(sub) = args.first() else {
+            continue;
+        };
+        if !git_write(sub, &args[1..]) {
+            continue;
+        }
+        let Some(top) = repos.top(&canonical(&git_dir(&call.words, &call.cwd))) else {
+            continue;
+        };
+        if own.as_ref() == Some(&top) || !checkouts.contains(&top) {
+            continue;
+        }
+        return Some(format!(
+            "refusing: protected checkout: git {sub} writes to a project checkout, not this \
+             session's worktree; run it in {}",
+            own.as_deref()
+                .map_or_else(|| "the worktree".into(), |p| p.display().to_string())
+        ));
+    }
+    None
+}
+
+/// Whether `git <sub> <args>` writes to the repository or its work tree.
+fn git_write(sub: &str, args: &[String]) -> bool {
+    match sub {
+        "commit" | "push" | "merge" | "rebase" | "reset" | "checkout" | "switch" | "restore"
+        | "clean" | "add" | "rm" | "mv" | "cherry-pick" | "revert" | "am" => true,
+        "stash" => !matches!(args.first().map(String::as_str), Some("list" | "show")),
+        "branch" => args.iter().any(|a| {
+            matches!(
+                a.as_str(),
+                "-d" | "-D" | "--delete" | "-m" | "-M" | "--move" | "-f" | "--force"
+            )
+        }),
+        "worktree" => matches!(
+            args.first().map(String::as_str),
+            Some("remove" | "move" | "prune")
+        ),
+        _ => false,
+    }
+}
+
+/// `path` with symlinks resolved when it exists, else with `.` and `..`
+/// folded lexically, so a path and its canonical spelling compare equal.
+fn canonical(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| normalize(path))
+}
+
+fn normalize(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for part in path.components() {
+        match part {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 /// The git subcommand: the first argument that is not a global option.
@@ -564,6 +1061,7 @@ mod tests {
             forbidden_text: forbidden.iter().map(|s| s.to_string()).collect(),
             merge_deploys_prod: merge,
             main_branches: mains.iter().map(|s| s.to_string()).collect(),
+            ..SessionPolicy::default()
         }
     }
 
@@ -762,5 +1260,253 @@ mod tests {
     fn a_bad_pattern_is_skipped() {
         let p = policy(&["["], false, &[]);
         assert!(check(&p, "git commit -m anything", &cwd()).is_none());
+    }
+
+    fn workspace(baseline: &[&str], kind: Option<&str>, path: &Path) -> SessionPolicy {
+        SessionPolicy {
+            discard_baseline: baseline.iter().map(|s| s.to_string()).collect(),
+            workspace_kind: kind.map(str::to_string),
+            workspace_path: Some(path.display().to_string()),
+            ..SessionPolicy::default()
+        }
+    }
+
+    /// gitguard's `TestCheckCommand` table, minus its staging cases. `/r`
+    /// does not exist, so every repo lookup fails and resolves to the
+    /// session's own — the case a broken git must not weaken.
+    #[test]
+    fn discard_guard_ports_gitguards_table() {
+        let root = Path::new("/r");
+        let p = workspace(
+            &["README.md", "src/a.py", "scratch/", "todo.txt"],
+            Some("checkout"),
+            root,
+        );
+        for command in [
+            "git checkout -- AGENTS.md README.md docs/DISPATCH.md src/a.py && git status --short",
+            "git checkout -- .",
+            "git checkout -- src",
+            "git checkout -- 'src/*.py'",
+            "git checkout HEAD -- src/a.py",
+            "git checkout README.md",
+            "git checkout -f main",
+            "git restore src/a.py",
+            "git restore --worktree --staged src/a.py",
+            "git restore .",
+            "git reset --hard",
+            "git reset --hard HEAD~1",
+            "git clean -fd",
+            "git clean -f scratch",
+            "git clean -f scratch/notes.txt",
+            "git stash",
+            "git stash push src/a.py",
+            "git stash -u",
+            "git rm -f README.md",
+            "git switch --discard-changes main",
+            "git -C src checkout -- a.py",
+            "cd src && git checkout -- b.py",
+            "git checkout -- $FILES",
+            "echo README.md | xargs git checkout --",
+            "sh -c 'git checkout -- README.md'",
+            "bash -lc \"cd /r && git reset --hard\"",
+            "eval git checkout -- other.md",
+            "sudo git checkout -- README.md",
+            "git status; git checkout -- src/a.py",
+            "GIT_DIR=/elsewhere/.git git checkout -- other.md",
+        ] {
+            let reason = check(&p, command, root).unwrap_or_else(|| panic!("allowed: {command}"));
+            assert!(reason.contains("discard guard"), "{command}: {reason}");
+            assert!(reason.contains("path(s)"), "{command}: {reason}");
+            assert!(
+                !reason.contains("a.py") && !reason.contains("README"),
+                "{reason}"
+            );
+        }
+        for command in [
+            "git status --short",
+            "git diff",
+            "git log --oneline",
+            "git checkout -- src/b.py",
+            "git checkout -- docs/other.md",
+            "git restore --staged src/a.py",
+            "git checkout -b klaudia/goal-x",
+            "git switch main",
+            "git reset HEAD~1",
+            "git reset --soft HEAD~1",
+            "git clean -n",
+            "git clean -f build",
+            "git stash list",
+            "git stash show -p",
+            "git rm --cached -f README.md",
+            "git revert HEAD",
+            "rm -rf build",
+            "go test ./...",
+            "echo 'git checkout -- README.md'",
+            "git checkout -- /elsewhere/README.md",
+        ] {
+            assert_eq!(check(&p, command, root), None, "{command}");
+        }
+    }
+
+    #[test]
+    fn a_fresh_worktree_allows_every_discard() {
+        let root = Path::new("/r");
+        let p = workspace(&[], Some("worktree"), root);
+        for command in [
+            "git checkout -- .",
+            "git reset --hard",
+            "git clean -fdx",
+            "git stash -u",
+            "git restore src/a.py",
+            "echo x | xargs git checkout --",
+        ] {
+            assert_eq!(check(&p, command, root), None, "{command}");
+        }
+    }
+
+    #[test]
+    fn a_checkout_session_keeps_the_roots_dirty_files() {
+        let root = repo("dirty-root");
+        let p = workspace(&["engine/server/src/budget.rs"], Some("checkout"), &root);
+        let reason = check(&p, "git restore engine/server/src/budget.rs", &root).unwrap();
+        assert!(
+            reason.contains("discard guard") && reason.contains("1 path(s)"),
+            "{reason}"
+        );
+        std::fs::create_dir_all(root.join("engine")).unwrap();
+        assert!(check(&p, "git restore server/src/budget.rs", &root.join("engine")).is_some());
+        assert_eq!(check(&p, "git restore some_other_file", &root), None);
+        // A repo the session does not work in is judged by its own baseline,
+        // which this session does not hold.
+        let other = repo("dirty-other");
+        let command = format!(
+            "git -C {} restore engine/server/src/budget.rs",
+            other.display()
+        );
+        assert_eq!(check(&p, &command, &root), None);
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&other).ok();
+    }
+
+    /// A project checkout and a linked worktree cut from it.
+    fn checkout_and_worktree(name: &str) -> (PathBuf, PathBuf) {
+        let main = repo(name);
+        let wt = main.with_file_name(format!(
+            "{}-wt",
+            main.file_name().unwrap().to_string_lossy()
+        ));
+        let _ = std::fs::remove_dir_all(&wt);
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&main)
+            .args(["worktree", "add", "-q", "-b", "wi-x"])
+            .arg(&wt)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        (main, wt)
+    }
+
+    #[test]
+    fn a_worktree_session_may_not_write_to_the_project_checkout() {
+        let (main, wt) = checkout_and_worktree("protected");
+        let mut p = workspace(&[], Some("worktree"), &wt);
+        p.protected_checkouts = vec![main.display().to_string()];
+        let c = main.display();
+        for command in [
+            format!("git -C {c} commit --allow-empty -m x"),
+            format!("git -C {c} push origin wi-x"),
+            format!("git -C {c} reset --hard"),
+            format!("git -C {c} branch -D old"),
+            format!("git -C {c} worktree remove ../x"),
+            format!("git -C {c} add ."),
+            format!("git -C {c} stash"),
+            format!("cd {c} && git commit -m x"),
+            format!("bash -c 'git -C {c} rebase main'"),
+        ] {
+            let reason = check(&p, &command, &wt).unwrap_or_else(|| panic!("allowed: {command}"));
+            assert!(reason.contains("protected checkout"), "{command}: {reason}");
+        }
+        // Run from inside the checkout too.
+        assert!(check(&p, "git commit -m x", &main).is_some());
+        for command in [
+            format!("git -C {c} log"),
+            format!("git -C {c} status"),
+            format!("git -C {c} diff"),
+            format!("git -C {c} stash list"),
+            format!("git -C {c} branch -a"),
+            format!("git -C {c} worktree list"),
+            "git status".to_string(),
+            "git commit --allow-empty -m x".to_string(),
+            "git push origin wi-x".to_string(),
+        ] {
+            assert_eq!(check(&p, &command, &wt), None, "{command}");
+        }
+        // A broken lookup is not protected.
+        assert_eq!(check(&p, "git -C /nonexistent commit -m x", &wt), None);
+        std::fs::remove_dir_all(&wt).ok();
+        std::fs::remove_dir_all(&main).ok();
+    }
+
+    #[test]
+    fn a_checkout_session_may_write_to_the_project_checkout() {
+        let (main, wt) = checkout_and_worktree("oversight");
+        let mut p = workspace(&[], Some("checkout"), &main);
+        p.protected_checkouts = vec![main.display().to_string()];
+        let command = format!("git -C {} commit --allow-empty -m x", main.display());
+        assert_eq!(check(&p, &command, &wt), None);
+        assert_eq!(check(&p, &command, &main), None);
+        // No workspace at all: only the existing rules apply.
+        let none = SessionPolicy {
+            protected_checkouts: vec![main.display().to_string()],
+            ..SessionPolicy::default()
+        };
+        assert_eq!(check(&none, &command, &wt), None);
+        assert_eq!(check(&none, "git reset --hard", &main), None);
+        std::fs::remove_dir_all(&wt).ok();
+        std::fs::remove_dir_all(&main).ok();
+    }
+
+    #[test]
+    fn the_policy_is_filled_from_the_workspace_block() {
+        let root = repo("capture");
+        std::fs::write(root.join("f"), "changed").unwrap();
+        std::fs::create_dir_all(root.join("scratch")).unwrap();
+        std::fs::write(root.join("scratch/n"), "x").unwrap();
+        std::fs::write(root.join("new.txt"), "x").unwrap();
+        let ws = crate::git::capture_workspace(&root, None).unwrap();
+        let p = with_workspace(None, Some(&ws)).unwrap();
+        assert_eq!(p.workspace_kind.as_deref(), Some("checkout"));
+        assert_eq!(p.workspace_path, Some(ws.path.clone()));
+        assert_eq!(p.discard_baseline, ["f", "new.txt", "scratch/"]);
+        // The rules judge it: the baseline file is refused, another allowed.
+        assert!(check(&p, "git restore f", &root).is_some_and(|r| r.contains("discard")));
+        assert_eq!(check(&p, "git restore other", &root), None);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn no_workspace_block_leaves_the_policy_as_it_is() {
+        // A record from before WI-1324, or a start outside a repository: the
+        // engine adds nothing, and the agent's own guard keeps judging.
+        assert_eq!(with_workspace(None, None), None);
+        let bare = SessionPolicy::default();
+        assert_eq!(with_workspace(Some(bare.clone()), None), Some(bare));
+    }
+
+    #[test]
+    fn a_linked_worktree_keeps_the_dirt_it_started_with() {
+        let (main, wt) = checkout_and_worktree("linked");
+        std::fs::write(wt.join("f"), "edited before the session").unwrap();
+        let ws = crate::git::capture_workspace(&wt, None).unwrap();
+        // The session then edits another file of its own.
+        std::fs::write(wt.join("g"), "the session's own").unwrap();
+        let p = with_workspace(None, Some(&ws)).unwrap();
+        assert_eq!(p.workspace_kind.as_deref(), Some("worktree"));
+        assert_eq!(p.discard_baseline, ["f"]);
+        assert!(check(&p, "git checkout -- f", &wt).is_some());
+        assert_eq!(check(&p, "git checkout -- g", &wt), None);
+        std::fs::remove_dir_all(&wt).ok();
+        std::fs::remove_dir_all(&main).ok();
     }
 }
