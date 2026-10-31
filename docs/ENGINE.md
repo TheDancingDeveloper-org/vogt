@@ -1281,10 +1281,19 @@ root, on a `worktree` or `cwd` start. A repo is resolved with `git rev-parse
   relative or expanded `cd` earlier on the line, a program spelled `$GIT`,
   `$(which git)` or `` `which git` ``) reach every one. A literal absolute
   `cd /path` is followed, so the paths after it resolve from there. A line
-  that defines a git alias inline (`git -c alias.x=…`) reaches every path and
-  counts as a write. Long options match by any prefix git accepts (`--ha` is
+  that defines a git alias inline (`git -c alias.x=…`, or `include.path` /
+  `includeIf.*.path`) or from the environment (`GIT_CONFIG_COUNT`,
+  `GIT_CONFIG_KEY_n`, `GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_GLOBAL`) reaches
+  every path and counts as a write. A subcommand git does not ship (`git x`
+  after `git config alias.x …`) may be an alias and reaches every path; the
+  common external ones (`lfs`, `flow`, `filter-repo`, `subtree`) are read as
+  git's own. Commands inside `$( … )`, backticks and `coproc` are read too. A
+  program spelled `$VAR` is git only when the name says git (`$GIT`,
+  `${GIT_BIN}`). Long options match by any prefix git accepts (`--ha` is
   `--hard`), short ones inside a cluster (`-qf`), and an attached value is
-  not read as flags (`-sSTABLE` is not `-S`). A repo that cannot be resolved
+  not read as flags (`-sSTABLE` is not `-S`). Which options take a value is
+  per subcommand: `checkout -m` is `--merge` and reaches its paths, `stash -m`
+  takes a message, and `switch -cf` creates a branch named `f`. A repo that cannot be resolved
   counts as the session's own. `git restore --staged` only unstages and is
   allowed, as in gitguard (pending an operator call).
 - **protected checkout** — only a `worktree` session: a git write (`commit`,
@@ -1296,6 +1305,12 @@ root, on a `worktree` or `cwd` start. A repo is resolved with `git rev-parse
   shell on the project root) is never held to it.
 
 Reasons name the rule and a path count, never a path's contents.
+
+Neither rule, nor the core's verification gate (WI-1330, `agent_policy.
+verification.required_for_done`), covers everything: the verification gate
+applies to native items only. An agent's `work.transition` to `done` of a
+forge-hosted item (a GitHub or Forgejo issue the overlay tracks) is not
+refused for a missing verification.
 
 A denial exits 2 with the reason on stderr and the command does not run. When
 the engine cannot be reached, or answers anything but 2xx, the hook fails
