@@ -11569,6 +11569,7 @@ async fn a_claude_session_starts_with_its_directory_trusted_and_its_brief_readab
         settings_file: None,
         opencode_config: None,
         accounts: Vec::new(),
+        accounts_root: None,
         codex_policy: Ok(None),
     };
     let state_dir = cfg.state_dir.clone();
@@ -11647,6 +11648,7 @@ async fn a_named_claude_account_runs_the_session_in_its_own_config_dir() {
             "acct2={}",
             acct2.display()
         ))),
+        accounts_root: None,
         codex_policy: Ok(None),
     };
     let stub = tmp.path().join("bin").join("claude");
@@ -11729,6 +11731,69 @@ async fn a_named_claude_account_runs_the_session_in_its_own_config_dir() {
             .await
             .unwrap();
         assert_eq!(refused.status(), StatusCode::BAD_REQUEST, "{body}");
+    }
+}
+
+#[tokio::test]
+async fn a_claude_profile_prepared_after_the_engine_starts_is_usable_at_once() {
+    let (tmp, mut cfg, _stub) = hibernation_sandbox();
+    let root = tmp.path().join("claude-accounts");
+    std::fs::create_dir_all(&root).unwrap();
+    let workspace = cfg.workspace_root.clone();
+    cfg.agent_onboarding = vogt_engine_server::claude_config::Onboarding {
+        enabled: false,
+        accounts_root: Some(root.clone()),
+        ..Default::default()
+    };
+    let stub = tmp.path().join("bin").join("claude");
+    std::fs::write(
+        &stub,
+        "#!/bin/sh\nprintf 'cfg=[%s]\\n' \"$CLAUDE_CONFIG_DIR\"\nsleep 300 &\nprintf '> '\nwait\n",
+    )
+    .unwrap();
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let start = |account: &str| {
+        client.post(format!("{base}/api/sessions")).json(&json!({
+            "name": format!("on-{account}"),
+            "command": [stub.to_string_lossy()],
+            "account": account,
+            "cwd": workspace.to_string_lossy(),
+        }))
+    };
+
+    // Not prepared yet: refused, as an unknown name always was.
+    let refused = start("probe").send().await.unwrap();
+    assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+
+    // Prepared after boot, as `claude-profile prepare probe` would: works
+    // with no restart.
+    let probe = root.join("probe");
+    std::fs::create_dir_all(&probe).unwrap();
+    std::fs::write(
+        probe.join(vogt_engine_server::claude_config::PROFILE_MARKER),
+        "",
+    )
+    .unwrap();
+    let created: Value = start("probe").send().await.unwrap().json().await.unwrap();
+    assert_eq!(created["account"], "probe", "{created}");
+    let id = created["id"].as_str().unwrap().to_string();
+    let want = format!("cfg=[{}]", std::fs::canonicalize(&probe).unwrap().display());
+    live_output_containing(&client, &base, &id, &[&want]).await;
+
+    // An unmarked directory, a link out of the root, and a path for a name
+    // are all refused.
+    std::fs::create_dir_all(root.join("bare")).unwrap();
+    let outside = tmp.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join(".claude.json"), "{}").unwrap();
+    std::os::unix::fs::symlink(&outside, root.join("escape")).unwrap();
+    for account in ["bare", "escape", "../outside", "/tmp"] {
+        let refused = start(account).send().await.unwrap();
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST, "{account}");
     }
 }
 

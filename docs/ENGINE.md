@@ -1944,6 +1944,28 @@ Entries are `name=/absolute/dir`, comma-separated; a name is
 `[a-z0-9][a-z0-9_-]{0,31}`. A malformed or duplicate entry is skipped with a
 warning and the rest are kept.
 
+Accounts are also discovered, so adding one needs no redeploy or restart
+(WI-2734). A name not in `ENGINE_AGENT_CLAUDE_ACCOUNTS` is looked up, on every
+session start, under `ENGINE_AGENT_CLAUDE_ACCOUNTS_ROOT` (default
+`$HOME/.claude-accounts`; `off` turns discovery off; a relative path is
+ignored with a warning). `<root>/<name>` is account `<name>` when:
+
+- the name passes the rule above, so a caller can never pass a path;
+- its real path, symlinks resolved, is a directory inside the root's real
+  path. A link out of the root is refused, and the session gets the resolved
+  directory as `CLAUDE_CONFIG_DIR`;
+- it holds `.vogt-claude-profile` (the marker `claude-profile prepare`
+  writes) or `.claude.json`, as a regular file, not a symlink.
+
+Anything else is the same `400` as an unknown name. A listed account wins over
+a discovered one of the same name. Discovered accounts' `projects/` are
+searched for transcripts like listed ones.
+
+The usage board's `VOGT_USAGE_ACCOUNTS` is not filled from discovery: it is
+core configuration, read by the core, which can run in another container from
+the engine and does not see the engine's home. List a discovered account there
+too to have the board report it.
+
 - **`account` on `POST /api/sessions`** (and `session.start`) names one. The
   engine looks the name up itself and sets `CLAUDE_CONFIG_DIR` for the session,
   after the caller's own `env`, so a caller can pick a listed account but never

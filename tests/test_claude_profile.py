@@ -169,7 +169,8 @@ def test_prepare_builds_a_profile_with_shared_settings_and_its_own_login(
     assert not (profile / "projects").exists()
     assert oct(profile.stat().st_mode & 0o777) == "0o700"
     assert "login: none yet" in proc.stdout
-    assert "ENGINE_AGENT_CLAUDE_ACCOUNTS" in proc.stdout
+    assert (profile / ".vogt-claude-profile").is_file()
+    assert "the engine finds it as account acct2" in proc.stdout
 
     config = json.loads((profile / ".claude.json").read_text())
     assert config["autoModeEnvSetup"] == {"dismissed": True}
