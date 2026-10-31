@@ -1259,6 +1259,59 @@ def test_a_refused_answer_is_shown_to_the_person_as_a_recommendation(
     assert "recommends" not in entry.summary
 
 
+def test_a_recommendation_is_not_carried_to_a_later_dialog_asking_the_same(
+    wired: AppContext, engine: Engine
+) -> None:
+    """WI-996 E0b review: nearly every dialog asks "Do you want to proceed?",
+    so a pick is tied to the one showing of the dialog it was made on. A
+    later dialog with the same question but another command shows no pick,
+    on the Inbox or the oversight board."""
+    from vogt.application.models import AnswerSessionParams, SweepSessionsParams
+    from vogt.application.services import answer_session
+    from vogt.application.services.sessions import sweep_sessions
+    from vogt.errors import PersonRequired
+
+    ses_id, engine_id = _started(wired)
+    engine.permission_prompt = True
+    options = [
+        {"number": 1, "label": "Yes", "selected": True},
+        {"number": 2, "label": "No", "selected": False},
+    ]
+
+    def dialog(at: str, command: str) -> dict[str, object]:
+        return {
+            "activity": "awaiting-approval",
+            "activity_changed_at": at,
+            "approval": {
+                "question": "Do you want to proceed?",
+                "command_excerpt": command,
+                "detected_at": at,
+                "options": options,
+            },
+        }
+
+    def shown() -> object:
+        entry = next(
+            e
+            for e in list_inbox(wired, InboxListParams()).entries
+            if e.kind == "session.attention" and e.session_id == engine_id
+        )
+        return (entry.evidence_snapshot or {}).get("recommendation")
+
+    engine.extra = dialog("2026-10-31T01:02:03Z", "ls build/")
+    with pytest.raises(PersonRequired) as refused:
+        answer_session(
+            _as(wired, AGENTS[0]), AnswerSessionParams(id=ses_id, option=1, reason=WHY)
+        )
+    assert (refused.value.details or {})["recommendation"] == "recorded"
+    assert isinstance(shown(), dict)
+
+    engine.extra = dialog("2026-10-31T01:09:00Z", "rm -rf /srv/data")
+    assert shown() is None
+    rows = sweep_sessions(wired, SweepSessionsParams(mode="full")).rows
+    assert all(r.recommendation is None for r in rows if r.attention == "approval")
+
+
 def test_an_oversight_session_answers_a_permission_prompt_and_is_audited(
     wired: AppContext, engine: Engine
 ) -> None:

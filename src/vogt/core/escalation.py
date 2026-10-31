@@ -33,3 +33,15 @@ def approval_key(engine_session_id: str, question: str) -> str:
     computed here only for an engine that does not send its own."""
     digest = hashlib.sha256(question.strip().encode()).hexdigest()[:16]
     return f"{engine_session_id}:permission_prompt:{digest}"
+
+
+def dialog_instance(detected_at: str, command_excerpt: str) -> str:
+    """Which showing of a dialog a recommendation was made on.
+
+    Nearly every dialog asks the same question, so the escalation key alone
+    would carry an overseer's pick onto a later dialog running a different
+    command. A pick is recorded with this value and shown only while the
+    dialog on screen has the same detection time and command text.
+    """
+    text = f"{detected_at.strip()}\0{command_excerpt.strip()}"
+    return hashlib.sha256(text.encode()).hexdigest()[:16]
