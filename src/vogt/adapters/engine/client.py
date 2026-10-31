@@ -80,6 +80,9 @@ class EngineApproval:
     kind: str = "permission"
     #: `(number, label, selected)` per option, in menu order.
     options: tuple[tuple[int, str, bool], ...] = ()
+    #: The dialog's escalation key as the engine computes it (WI-996); empty
+    #: from an older engine. Use `vogt.core.escalation.dialog_key`.
+    key: str = ""
 
     @classmethod
     def from_payload(cls, payload: object) -> EngineApproval | None:
@@ -101,6 +104,7 @@ class EngineApproval:
                 for o in payload.get("options") or []
                 if isinstance(o, dict)
             ),
+            key=str(payload.get("key") or ""),
         )
 
 

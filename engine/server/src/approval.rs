@@ -278,6 +278,7 @@ impl Pending {
                     selected: o.selected,
                 })
                 .collect(),
+            key: String::new(),
         }
     }
 }

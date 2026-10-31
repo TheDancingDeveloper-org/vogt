@@ -171,6 +171,7 @@ from vogt.core.escalation import (
     RECOMMENDATION_ENTITY,
     SESSION_ANSWER_RECOMMENDED,
     approval_key,
+    dialog_key,
 )
 from vogt.core.session_economics import SessionEconomics, meter
 from vogt.errors import (
@@ -4026,8 +4027,12 @@ def _escalated(
         seen = None
     if seen is not None:
         details["session_id"] = seen.id
-        question = "" if seen.approval is None else seen.approval.question.strip()
-        details["escalation_key"] = approval_key(seen.id, question)
+        approval = seen.approval
+        details["escalation_key"] = (
+            approval_key(seen.id, "")
+            if approval is None
+            else dialog_key(seen.id, approval.key, approval.question)
+        )
         if seen.activity == "awaiting-approval":
             details["inbox_entry_key"] = (
                 f"agent:session:{seen.id}:awaiting-approval:"
