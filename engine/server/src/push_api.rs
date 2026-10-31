@@ -227,21 +227,7 @@ pub fn spawn_activity_watcher(state: Arc<AppState>) {
                 blocked: Some(report),
             } = &ev
             {
-                let name = state
-                    .sessions
-                    .get(*id)
-                    .map(|s| s.name())
-                    .unwrap_or_else(|_| id.to_string());
-                let title = format!("{name} is blocked on you");
-                let body: String = report.reason.chars().take(200).collect();
-                let data = json!({
-                    "kind": "session-blocked",
-                    "session_id": id.to_string(),
-                    "needs": report.needs,
-                    "boundary": report.boundary,
-                    "key": report.key,
-                    "url": format!("/#/t/{id}"),
-                });
+                let PushMessage { title, body, data } = blocked_push(*id, report);
                 let counts = state
                     .push
                     .notify(NotificationKind::WaitingForInput, &title, &body, data)
@@ -370,6 +356,32 @@ fn grant_request_push(
         "url": "/#/inbox",
     });
     Some(PushMessage { title, body, data })
+}
+
+/// The push for a blocked report. A push leaves the box, and both the
+/// reason and the session's name are worker-set text, so it carries neither:
+/// only the boundary, who it needs and the content key. The ask stays in
+/// the Inbox.
+fn blocked_push(id: uuid::Uuid, report: &vogt_engine_contract::BlockedReport) -> PushMessage {
+    let title = "A Vogt session is blocked on you".to_string();
+    let body = format!(
+        "A {} needs {}; open the Inbox.",
+        report.boundary.as_str().replace('_', " "),
+        match report.needs {
+            vogt_engine_contract::EscalationNeeds::Person => "you",
+            vogt_engine_contract::EscalationNeeds::Overseer => "its overseer",
+            vogt_engine_contract::EscalationNeeds::Either => "you or its overseer",
+        }
+    );
+    let data = json!({
+        "kind": "session-blocked",
+        "session_id": id.to_string(),
+        "needs": report.needs,
+        "boundary": report.boundary,
+        "key": report.key,
+        "url": format!("/#/t/{id}"),
+    });
+    PushMessage { title, body, data }
 }
 
 /// A push body for a permission dialog: the deadline, when there is one, and
@@ -612,6 +624,31 @@ mod tests {
         assert!(validate_webpush_endpoint("https://[::1]/x").is_err());
         assert!(validate_webpush_endpoint("https://[fd00::1]/x").is_err());
         assert!(validate_webpush_endpoint("not a url").is_err());
+    }
+
+    #[test]
+    fn a_blocked_push_carries_no_worker_text() {
+        let token = "ghp_0123456789abcdefABCDEF0123456789abcd";
+        let report = vogt_engine_contract::BlockedReport {
+            reason: format!("need a token, tried {token}"),
+            items: vec![format!("paste {token}")],
+            since: "2026-10-31T00:00:00Z".into(),
+            needs: vogt_engine_contract::EscalationNeeds::Overseer,
+            boundary: vogt_engine_contract::EscalationBoundary::Credential,
+            key: "s:credential:abc".into(),
+        };
+        let id = uuid::Uuid::nil();
+        let PushMessage { title, body, data } = blocked_push(id, &report);
+        assert_eq!(title, "A Vogt session is blocked on you");
+        assert_eq!(body, "A credential needs its overseer; open the Inbox.");
+        for text in [&title, &body, &data.to_string()] {
+            assert!(!text.contains(token), "{text}");
+            assert!(!text.contains("need a token"), "{text}");
+        }
+        assert_eq!(data["key"], "s:credential:abc");
+        assert_eq!(data["needs"], "overseer");
+        assert_eq!(data["boundary"], "credential");
+        assert_eq!(data["session_id"], id.to_string());
     }
 
     #[test]

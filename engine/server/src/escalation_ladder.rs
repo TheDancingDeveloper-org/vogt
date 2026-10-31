@@ -330,6 +330,25 @@ fn rfc3339_now() -> String {
         .unwrap_or_default()
 }
 
+/// The person's push when an overseer escalation is promoted. A push leaves
+/// the box and the session's name is worker-set, so the title is fixed; the
+/// ask stays in the Inbox.
+fn promotion_push(rung: &Rung) -> (String, String, serde_json::Value) {
+    let title = "A Vogt session is blocked on you".to_string();
+    let body = format!(
+        "Its overseer did not resolve a {} in time; open the Inbox.",
+        rung.boundary.replace('_', " ")
+    );
+    let data = json!({
+        "kind": "escalation-promoted",
+        "session_id": rung.session_id.to_string(),
+        "key": rung.key,
+        "needs": "person",
+        "url": format!("/#/t/{}", rung.session_id),
+    });
+    (title, body, data)
+}
+
 /// Spawn the ladder. It polls every 30 s; without a webhook URL it still
 /// promotes overseer escalations to the person's push.
 pub fn spawn_escalation_ladder(state: Arc<AppState>) {
@@ -353,19 +372,7 @@ pub fn spawn_escalation_ladder(state: Arc<AppState>) {
                 audit(action, rung, reminder, "");
                 let (body, what) = match &step {
                     Step::Promote(rung) => {
-                        let title = format!("{} is blocked on you", rung.session_name);
-                        // The ask stays in the Inbox: a push leaves the box.
-                        let body = format!(
-                            "Its overseer did not resolve a {} in time; open the Inbox.",
-                            rung.boundary.replace('_', " ")
-                        );
-                        let data = json!({
-                            "kind": "escalation-promoted",
-                            "session_id": rung.session_id.to_string(),
-                            "key": rung.key,
-                            "needs": "person",
-                            "url": format!("/#/t/{}", rung.session_id),
-                        });
+                        let (title, body, data) = promotion_push(rung);
                         let counts = state
                             .push
                             .notify(NotificationKind::WaitingForInput, &title, &body, data)
@@ -541,6 +548,14 @@ mod tests {
             assert!(!body.contains("need a token"), "{body}");
             assert!(body.contains("s:credential:abc"));
             assert!(body.contains("\"needs\":\"overseer\""));
+            if let Step::Promote(rung) = step {
+                let (title, body, data) = promotion_push(rung);
+                for text in [title, body, data.to_string()] {
+                    assert!(!text.contains(token), "{text}");
+                    assert!(!text.contains("worker"), "{text}");
+                    assert!(!text.contains("need a token"), "{text}");
+                }
+            }
         }
     }
 
