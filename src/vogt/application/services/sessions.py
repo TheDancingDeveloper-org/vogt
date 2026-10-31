@@ -58,6 +58,7 @@ from vogt.application.models import (
     BindSessionWorkParams,
     BindSessionWorkResult,
     CancelWatchParams,
+    CommentParams,
     CommitForSessionParams,
     CommitForSessionResult,
     CreateWorkParams,
@@ -118,6 +119,7 @@ from vogt.application.models import (
     StartSessionParams,
     StopSessionParams,
     SweepSessionsParams,
+    TransitionWorkParams,
     WakeSessionParams,
     WhyParams,
     WhyResult,
@@ -290,80 +292,85 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
     _refuse_forbidden_model(ctx, params)
     started_by_session, started_by_kind = _started_by(ctx, engine)
     session_id = ctx.id_factory("ses")
-    params = _bind_unbound_worker(ctx, params)
-    subject = _subject(ctx, params, session_id)
-    if params.cwd:
-        subject.cwd = _existing_worktree_cwd(params.cwd, subject.cwd)
-    caller_merges = _caller_merges(subject.policy, params, started_by_kind)
-    actor_ref = f"agent:session:{session_id}"
-    session_scopes = _session_scopes(ctx)
-    credential = issue(session_scopes)
-
-    # How long the engine took to accept the session (WI-927): on the audit
-    # row, and logged, so a slow or refused start is attributable afterwards.
-    # A refusal raises before any audit write, so it is logged here; the
-    # engine audits its own side (`event=session.start`) either way.
-    autopilot = _autopilot(params)
-    budget = _budget(params, subject.policy)
-    spawn_started = time.monotonic()
+    params, created_chore = _bind_unbound_worker(ctx, params)
     try:
-        started = _start_on_engine(
-            engine,
-            name=params.name or subject.default_name,
-            template=params.template,
-            cwd=subject.cwd,
-            env=_session_env(
-                ctx, session_id, credential.secret, work_item=subject.work_item_ref
-            ),
-            brief=_brief_with_task(
-                subject.brief,
-                params,
+        subject = _subject(ctx, params, session_id)
+        if params.cwd:
+            subject.cwd = _existing_worktree_cwd(params.cwd, subject.cwd)
+        caller_merges = _caller_merges(subject.policy, params, started_by_kind)
+        actor_ref = f"agent:session:{session_id}"
+        session_scopes = _session_scopes(ctx)
+        credential = issue(session_scopes)
+
+        # How long the engine took to accept the session (WI-927): on the audit
+        # row, and logged, so a slow or refused start is attributable afterwards.
+        # A refusal raises before any audit write, so it is logged here; the
+        # engine audits its own side (`event=session.start`) either way.
+        autopilot = _autopilot(params)
+        budget = _budget(params, subject.policy)
+        spawn_started = time.monotonic()
+        try:
+            started = _start_on_engine(
+                engine,
+                name=params.name or subject.default_name,
+                template=params.template,
                 cwd=subject.cwd,
+                env=_session_env(
+                    ctx, session_id, credential.secret, work_item=subject.work_item_ref
+                ),
+                brief=_brief_with_task(
+                    subject.brief,
+                    params,
+                    cwd=subject.cwd,
+                    autopilot=autopilot,
+                    read_only=read_only,
+                    landing=subject.policy.landing,
+                    caller_merges=caller_merges,
+                ),
+                companion=subject.brief.companion,
+                charter=subject.brief.charter,
+                model=params.model,
+                effort=params.effort,
+                resume=params.resume,
+                permission_mode=params.permission_mode,
+                account=params.account,
                 autopilot=autopilot,
-                read_only=read_only,
-                landing=subject.policy.landing,
-                caller_merges=caller_merges,
-            ),
-            companion=subject.brief.companion,
-            charter=subject.brief.charter,
-            model=params.model,
-            effort=params.effort,
-            resume=params.resume,
-            permission_mode=params.permission_mode,
-            account=params.account,
-            autopilot=autopilot,
-            role=params.role,
-            work_item=subject.work_item_ref,
-            policy=subject.policy,
-            budget=budget,
-            worktree=(
-                {
-                    "branch": _worktree_branch(subject, session_id),
-                    "base_ref": _worktree_base(subject.policy),
-                }
-                if params.worktree
-                else None
-            ),
-        )
-    except VogtError as error:
-        _LOG.warning(
-            "session.start failed session_id=%s template=%s "
-            "engine_spawn_ms=%d error=%s",
+                role=params.role,
+                work_item=subject.work_item_ref,
+                policy=subject.policy,
+                budget=budget,
+                worktree=(
+                    {
+                        "branch": _worktree_branch(subject, session_id),
+                        "base_ref": _worktree_base(subject.policy),
+                    }
+                    if params.worktree
+                    else None
+                ),
+            )
+        except VogtError as error:
+            _LOG.warning(
+                "session.start failed session_id=%s template=%s "
+                "engine_spawn_ms=%d error=%s",
+                session_id,
+                params.template,
+                int((time.monotonic() - spawn_started) * 1000),
+                error.code,
+            )
+            raise
+        engine_spawn_ms = int((time.monotonic() - spawn_started) * 1000)
+        _LOG.info(
+            "session.start session_id=%s engine_session_id=%s template=%s "
+            "engine_spawn_ms=%d",
             session_id,
+            started.id,
             params.template,
-            int((time.monotonic() - spawn_started) * 1000),
-            error.code,
+            engine_spawn_ms,
         )
+    except Exception:
+        if created_chore is not None:
+            _abandon_unbound_chore(ctx, created_chore)
         raise
-    engine_spawn_ms = int((time.monotonic() - spawn_started) * 1000)
-    _LOG.info(
-        "session.start session_id=%s engine_session_id=%s template=%s "
-        "engine_spawn_ms=%d",
-        session_id,
-        started.id,
-        params.template,
-        engine_spawn_ms,
-    )
 
     # A resumed conversation is started by the engine in the directory its
     # transcript records, which may be below or beside the project root
@@ -3981,7 +3988,7 @@ def _unbound_chore_title(params: StartSessionParams) -> str:
 
 def _bind_unbound_worker(
     ctx: AppContext, params: StartSessionParams
-) -> StartSessionParams:
+) -> tuple[StartSessionParams, str | None]:
     """Give an autopilot worker started on a bare project an item (WI-1338).
 
     Without one it has nowhere to post its hand-off. The chore is
@@ -3989,9 +3996,12 @@ def _bind_unbound_worker(
     line, its body the task. A resume reuses the open chore of the same
     title rather than making a second. The subject is then the chore,
     exactly as if the caller had named it.
+
+    Returns the params and the ref of a chore this call made (None when the
+    start was not unbound, or reused one), so a start that fails can close it.
     """
     if not _wants_unbound_chore(params):
-        return params
+        return params, None
     from vogt.application.services.work import create_work
 
     title = _unbound_chore_title(params)
@@ -4002,8 +4012,11 @@ def _bind_unbound_worker(
                 WorkFilter(project_id=project.id, exclude_terminal=True, limit=500)
             ):
                 if item.title == title and item.body.endswith(UNBOUND_CHORE_MARKER):
-                    return params.model_copy(
-                        update={"work_item": item.ref, "project": None}
+                    return (
+                        params.model_copy(
+                            update={"work_item": item.ref, "project": None}
+                        ),
+                        None,
                     )
     task = (params.task or "").strip()
     created = create_work(
@@ -4018,7 +4031,40 @@ def _bind_unbound_worker(
             reason=UNBOUND_CHORE_REASON,
         ),
     )
-    return params.model_copy(update={"work_item": created.item.ref, "project": None})
+    bound = params.model_copy(update={"work_item": created.item.ref, "project": None})
+    return bound, created.item.ref
+
+
+def _abandon_unbound_chore(ctx: AppContext, ref: str) -> None:
+    """Close the chore made for a start that never reached the engine (WI-1338).
+
+    The chore is made before the spawn, because the brief and the session's
+    environment name it. When the start then fails, no session runs against
+    it, so it is walked to won't-do with a note saying why. Best effort: the
+    caller needs the start's own error, not a failed cleanup.
+    """
+    from vogt.application.services.work import comment_work, transition_work
+    from vogt.core.workflow import WONT_DO
+
+    with contextlib.suppress(VogtError):
+        comment_work(
+            ctx,
+            CommentParams(
+                ref=ref,
+                body="The session did not start, so this chore was closed unworked.",
+                reason=UNBOUND_CHORE_REASON,
+            ),
+        )
+    with contextlib.suppress(VogtError):
+        transition_work(
+            ctx,
+            TransitionWorkParams(
+                ref=ref,
+                to_state=WONT_DO,
+                walk=True,
+                reason="the session for this unbound autopilot worker did not start",
+            ),
+        )
 
 
 def _review_subject(ctx: AppContext, params: StartSessionParams) -> StartSessionParams:

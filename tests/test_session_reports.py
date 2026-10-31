@@ -38,7 +38,7 @@ from vogt.application.services import (
 from vogt.core.entities import HandoffFields
 from vogt.core.oversight import DONE_WITHOUT_REPORT, result_reported
 from vogt.core.principal import Principal
-from vogt.errors import InvalidRequest, ReportRefused
+from vogt.errors import InvalidRequest, ReportRefused, VogtError
 
 from tests.test_session_sweep import ROOT, Engine
 
@@ -358,3 +358,24 @@ def test_a_progress_report_leaves_the_chore_open(wired: AppContext) -> None:
     report_session(_as_session(wired, result.session.id), _result(kind="progress"))
     item = get_work(wired, GetWorkParams(ref=result.session.work_item or "")).item
     assert item.state != "done"
+
+
+def test_a_refused_start_closes_the_chore_it_made(
+    wired: AppContext, engine: Engine
+) -> None:
+    engine.refuse_starts = True
+    with pytest.raises(VogtError):
+        start_session(wired, _unbound(wired))
+    item = get_work(wired, GetWorkParams(ref="WI-2")).item
+    assert item.state == "wont_do"
+
+
+def test_a_refused_resume_leaves_the_chore_it_reused_open(
+    wired: AppContext, engine: Engine
+) -> None:
+    first = start_session(wired, _unbound(wired))
+    engine.refuse_starts = True
+    with pytest.raises(VogtError):
+        start_session(wired, _unbound(wired, resume="conv-1"))
+    item = get_work(wired, GetWorkParams(ref=first.session.work_item or "")).item
+    assert item.state == "open"
