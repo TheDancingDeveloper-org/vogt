@@ -17437,6 +17437,45 @@ async fn workspace_clean_refuses_live_dirty_and_unmerged_trees() {
     assert_eq!(body["branch_deleted"], "wi-1325-worker");
     assert!(!tree.exists());
     assert!(!has_branch(&repo, "wi-1325-worker"));
+
+    // A linked worktree outside the workspace root that no session recorded
+    // is refused, directly or through a symlink inside the root.
+    let outside = tempfile::tempdir().unwrap();
+    let foreign = outside.path().join("repo");
+    worktree_checkout(&foreign);
+    let foreign_tree = outside.path().join("foreign-wt");
+    worktree_git(
+        &foreign,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "foreign",
+            &foreign_tree.to_string_lossy(),
+            "main",
+        ],
+    );
+    std::fs::create_dir_all(foreign_tree.join("target")).unwrap();
+    let link = tmp.path().join("innocent");
+    std::os::unix::fs::symlink(&foreign_tree, &link).unwrap();
+    for target in [&foreign_tree, &link] {
+        for mode in ["build_output", "remove"] {
+            let resp = client
+                .post(format!("{base}/api/workspaces/clean"))
+                .json(&json!({ "path": target.to_string_lossy(), "mode": mode, "force": true }))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::FORBIDDEN,
+                "{mode} {}",
+                target.display()
+            );
+        }
+    }
+    assert!(foreign_tree.join("target").is_dir());
 }
 
 /// WI-1774: with `worktree_remove_on_stop`, the last session out of a clean,

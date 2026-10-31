@@ -14,7 +14,10 @@
 //!   `origin/HEAD` or `origin/main`, or whose branch has stash entries, is
 //!   unmerged work: refused unless the caller forces it, and a forced removal
 //!   keeps the branch so its commits survive;
-//! - a git command that fails is a refusal, never a guess.
+//! - a git command that fails is a refusal, never a guess;
+//! - a path outside the engine's workspace root that is no workspace a
+//!   session recorded is refused, symlinks resolved first, so the route
+//!   cannot reach an arbitrary worktree on the host.
 //!
 //! Every outcome is an audit line (`event=workspace.clean`) with the path,
 //! mode, caller and bytes freed — never a file list.
@@ -121,6 +124,27 @@ fn git_ok(dir: &Path, args: &[&str]) -> Result<String, Refusal> {
         )));
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Whether the canonical `path` is a tree the engine may clean: inside its
+/// `workspace_root`, or exactly a workspace a session recorded. Both sides
+/// are canonicalised, so a symlink under the root that points outside it
+/// resolves outside and is refused.
+pub fn confined<I, S>(workspace_root: &Path, known: I, path: &Path) -> bool
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let canonical = |p: &Path| std::fs::canonicalize(p).ok();
+    let Some(path) = canonical(path) else {
+        return false;
+    };
+    if canonical(workspace_root).is_some_and(|root| path.starts_with(root)) {
+        return true;
+    }
+    known
+        .into_iter()
+        .any(|ws| canonical(Path::new(ws.as_ref())).is_some_and(|ws| ws == path))
 }
 
 /// Check whether the linked worktree at `path` may be removed. `base_ref` is
@@ -267,7 +291,8 @@ pub async fn clean_workspace(
                     req.reason.as_deref(),
                 );
                 return Err(ApiError::Forbidden(
-                    "only a person forces a workspace removal; ask one to do it".into(),
+                    "only a person forces a workspace removal, not an agent; ask a person to do it"
+                        .into(),
                 ));
             }
             None => return Err(ApiError::Unauthorized),
@@ -275,6 +300,24 @@ pub async fn clean_workspace(
     }
     let path = std::fs::canonicalize(&req.path)
         .map_err(|_| ApiError::BadRequest(format!("no directory at {}", req.path)))?;
+    let workspaces = state.sessions.workspaces();
+    if !confined(
+        &state.config.workspace_root,
+        workspaces.iter().map(|(_, _, ws)| ws.path.as_str()),
+        &path,
+    ) {
+        audit(
+            &req.path,
+            req.mode,
+            &actor,
+            "refused",
+            0,
+            req.reason.as_deref(),
+        );
+        return Err(ApiError::Forbidden(
+            "the path is outside the engine's workspace root and is no session's workspace".into(),
+        ));
+    }
     let in_use = state
         .sessions
         .cwds_in_use(None, req.mode == CleanMode::Remove);
@@ -292,9 +335,7 @@ pub async fn clean_workspace(
         ));
     }
     let shown = path.to_string_lossy().into_owned();
-    let base_ref = state
-        .sessions
-        .workspaces()
+    let base_ref = workspaces
         .into_iter()
         .find(|(_, _, ws)| Path::new(&ws.path) == path)
         .and_then(|(_, _, ws)| ws.base_ref);
@@ -361,4 +402,39 @@ pub async fn clean_workspace(
         req.reason.as_deref(),
     );
     Ok(Json(result))
+}
+
+#[cfg(test)]
+mod confinement_tests {
+    use super::confined;
+
+    #[test]
+    fn confined_to_the_root_or_a_known_workspace() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let inside = root.path().join("wt");
+        std::fs::create_dir(&inside).unwrap();
+        let foreign = outside.path().join("wt");
+        std::fs::create_dir(&foreign).unwrap();
+        let link = root.path().join("link");
+        std::os::unix::fs::symlink(&foreign, &link).unwrap();
+        let none: [&str; 0] = [];
+
+        assert!(confined(root.path(), none, &inside));
+        assert!(!confined(root.path(), none, &foreign));
+        assert!(
+            !confined(root.path(), none, &link),
+            "a symlink out of the root"
+        );
+        let known = [foreign.to_string_lossy().into_owned()];
+        assert!(
+            confined(root.path(), &known, &foreign),
+            "a recorded workspace"
+        );
+        assert!(
+            confined(root.path(), &known, &link),
+            "resolves to the recorded workspace"
+        );
+        assert!(!confined(root.path(), none, &root.path().join("missing")));
+    }
 }
