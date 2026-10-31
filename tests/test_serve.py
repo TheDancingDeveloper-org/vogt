@@ -258,6 +258,53 @@ def test_ungranted_tools_are_invisible_not_erroring(
     assert "token_issue" not in writer, "nor does a writer see admin tools"
 
 
+def test_the_worker_profile_lists_only_the_worker_tools(
+    authed: TestClient, secrets: dict[str, str]
+) -> None:
+    """WI-2740: a worker asks for a short list; the grant is unchanged."""
+    from vogt.adapters.mcp.profiles import WORKER_TOOLS
+
+    def tools(
+        profile_header: str | None = None, query: dict[str, str] | None = None
+    ) -> set[str]:
+        headers = {"Authorization": f"Bearer {secrets['write']}"}
+        if profile_header:
+            headers["X-Vogt-Tool-Profile"] = profile_header
+        response = authed.post(
+            "/mcp",
+            json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+            headers=headers,
+            params=query,
+        )
+        return {entry["name"] for entry in response.json()["result"]["tools"]}
+
+    full = tools()
+    by_header = tools(profile_header="worker")
+    by_query = tools(query={"profile": "worker"})
+    unknown = tools(query={"profile": "nonsense"})
+
+    assert by_header == by_query
+    assert by_header <= WORKER_TOOLS
+    missing = WORKER_TOOLS - full
+    assert not missing, f"worker profile names unknown tools: {missing}"
+    assert {"work_get", "work_comment", "work_create"} <= by_header
+    assert "session_start" in full and "session_start" not in by_header
+    assert unknown == full
+
+    # Trimmed from the list, not from the grant: a call still dispatches.
+    response = authed.post(
+        "/mcp?profile=worker",
+        json={
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {"name": "backlog", "arguments": {}},
+        },
+        headers={"Authorization": f"Bearer {secrets['write']}"},
+    )
+    assert response.json()["result"].get("isError") is not True
+
+
 def test_calling_an_ungranted_tool_is_refused_and_recorded(
     instance: AppContext, authed: TestClient, secrets: dict[str, str]
 ) -> None:
