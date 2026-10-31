@@ -3403,6 +3403,34 @@ def test_an_agent_is_refused_the_wrong_model_and_a_person_is_noted(
     assert any("grok-9" in note for note in summary["dispatch_notes"])
 
 
+@pytest.mark.parametrize(
+    ("purpose", "model", "expected"),
+    [
+        (None, "grok-9", "implement"),
+        ("implement-careful", "sonnet", "implement-careful"),
+    ],
+)
+def test_the_model_rule_holds_without_a_purpose_and_for_careful(
+    wired: AppContext,
+    engine: StandInEngine,
+    purpose: str | None,
+    model: str,
+    expected: str,
+) -> None:
+    _enforce(wired)
+    engine.roles[ENGINE_SESSION] = "oversight"
+    with pytest.raises(InvalidRequest, match=f"purpose={expected}"):
+        start_session(
+            _as(wired, f"agent:engine:{ENGINE_SESSION}"),
+            StartSessionParams(
+                work_item="WI-1",
+                purpose=purpose,  # type: ignore[arg-type]
+                model=model,
+                reason=WHY,
+            ),
+        )
+
+
 def test_the_sixth_worker_from_one_overseer_is_refused(
     wired: AppContext, engine: StandInEngine
 ) -> None:
@@ -3450,8 +3478,9 @@ def test_an_override_from_oversight_is_audited_with_an_inbox_row(
     assert row.summary == "urgent prod fix"
 
 
+@pytest.mark.parametrize("purpose", ["implement", None])
 def test_an_item_that_failed_review_escalates_to_implement_careful(
-    wired: AppContext, engine: StandInEngine
+    wired: AppContext, engine: StandInEngine, purpose: str | None
 ) -> None:
     from vogt.application.models import CommentParams
     from vogt.application.services import comment_work
@@ -3474,7 +3503,7 @@ def test_an_item_that_failed_review_escalates_to_implement_careful(
     engine.roles[ENGINE_SESSION] = "oversight"
     result = start_session(
         _as(wired, f"agent:engine:{ENGINE_SESSION}"),
-        StartSessionParams(work_item="WI-1", purpose="implement", reason=WHY),
+        StartSessionParams(work_item="WI-1", purpose=purpose, reason=WHY),  # type: ignore[arg-type]
     )
     assert result.escalated_to == "implement-careful"
     assert engine.last_spec["model"] == "opus"

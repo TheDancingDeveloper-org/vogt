@@ -227,12 +227,14 @@ naming the rule and its values, before any terminal starts) when:
 
 - it starts a review (`purpose=review` or `review_of`) from a `worker`
   session while `dispatch.review_by_oversight_only` is true;
-- `purpose` is `implement` or `mechanical` and the model is not the
-  profile's (after `dispatch.profiles`);
+- it names a model that is not its purpose's profile model (after
+  `dispatch.profiles`), for every purpose but `review`, `implement-careful`
+  included. A start that names no purpose is judged as `implement`, so
+  leaving the purpose out does not free the model;
 - the caller already has `dispatch.max_workers_per_overseer` live sessions it
   started (`max_workers_per_overseer=5 reached`).
 
-An `implement` start for an item with at least
+An `implement` start (or one with no purpose) for an item with at least
 `dispatch.escalate_after_failed_reviews` `verdict=blockers` comments runs as
 `implement-careful`, and the result's `escalated_to` says so. A project's
 `review.never_models` is refused for every caller, with or without

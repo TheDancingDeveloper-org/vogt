@@ -169,7 +169,9 @@ def test_a_worker_starting_a_review_breaks_review_by_oversight_only() -> None:
     assert _rules(_check(review=True, caller_role="worker", settings=off)) == []
 
 
-@pytest.mark.parametrize("purpose", ["implement", "mechanical"])
+@pytest.mark.parametrize(
+    "purpose", ["implement", "implement-careful", "mechanical", "investigate"]
+)
 def test_a_model_other_than_the_profiles_is_named(purpose: str) -> None:
     decision = _check(purpose=purpose, model="something-else")
     [violation] = decision.violations
@@ -205,3 +207,21 @@ def test_failed_reviews_escalate_implement() -> None:
         == "implement-careful"
     )
     assert _check(purpose="mechanical", blockers_count=5).escalated_to is None
+
+
+def test_no_purpose_is_judged_as_implement() -> None:
+    [violation] = _check(purpose=None, model="something-else").violations
+    assert violation.rule == "profile_model"
+    assert "purpose=implement" in violation.message
+    implement_model = _SETTINGS.profiles["implement"].model
+    assert _rules(_check(purpose=None, model=implement_model)) == []
+
+
+def test_a_review_is_not_held_to_the_profile_model() -> None:
+    assert _rules(_check(purpose="review", review=True, model="other")) == []
+
+
+def test_failed_reviews_escalate_a_start_with_no_purpose() -> None:
+    assert _check(purpose=None, blockers_count=2).escalated_to == "implement-careful"
+    assert dispatch.escalation(None, 2, _SETTINGS) == "implement-careful"
+    assert dispatch.escalation(None, 1, _SETTINGS) is None
