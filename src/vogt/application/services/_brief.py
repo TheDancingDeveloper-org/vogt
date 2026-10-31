@@ -80,7 +80,10 @@ WHEN_BLOCKED = (
     "If you cannot go on without a person — a decision, a credential, an "
     "action only they can take — call `session_report_blocked` with "
     "`blocker` (what you need, in a sentence) and `items` (the concrete "
-    "things to do), then stop and wait. It shows on this session, raises an "
+    "things to do), then stop and wait. Say what you hit with `boundary` "
+    "(`permission_prompt`, `denied_action`, `credential`, `decision`, "
+    "`other`) and who can resolve it with `needs` (`person`, the default; "
+    "`overseer`; `either`). It shows on this session, raises an "
     "Inbox entry and a push, and tells anyone driving you not to re-prompt. "
     "When you can go on again, call `session_report_unblocked`. Both need a "
     "`reason` and, from inside this session, no `id`.\n"
@@ -88,7 +91,9 @@ WHEN_BLOCKED = (
     "A permission denial is one of these. When the permission check refuses "
     "an action, do not retry it, rephrase it, or reach the same result "
     "another way: report yourself blocked, naming the action, the denial "
-    "and what a person would need to do, and stop.\n"
+    "and what a person would need to do, and stop. A refusal whose "
+    "`outcome` is `escalated` has already reached a person in the Inbox: "
+    "wait for it, do not retry.\n"
 )
 
 #: The autopilot convention, added when `session.start` asks for it.

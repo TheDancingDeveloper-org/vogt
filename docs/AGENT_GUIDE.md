@@ -602,7 +602,8 @@ only they can take — call `session_report_blocked` with `blocker` (what you
 need, in a sentence), `items` (the concrete things to do) and a `reason`,
 then stop. From inside a session Vogt started, omit `id`; otherwise pass
 `$VOGT_ENGINE_SESSION_ID`. It shows as `blocked` on `session_list` and
-`session_screen`, raises an Inbox entry "… is blocked on you" and a push,
+`session_screen`, raises an Inbox entry "… is blocked on you" (or "on its overseer" for
+`needs: overseer`) and a push,
 and ends a driver's `session_wait`. Say what you hit with `boundary`
 (`permission_prompt`, `denied_action`, `credential`, `decision`, `other`) and
 who can resolve it with `needs` (`person`, the default; `overseer` for a
@@ -682,7 +683,11 @@ the Inbox as "asking for approval".
 `permission` or `read-outside-cwd`). An ask rule means a person decides, so
 an agent's `session_answer` to one is refused with `403 person_required`,
 and so is any `session_input` while it shows — on a modal dialog every
-keystroke, `esc` included, is an answer. Nothing is typed (WI-983). If you
+keystroke, `esc` included, is an answer. Nothing is typed (WI-983). The
+refusal is an escalation: its `details` carry `outcome: escalated`, `needs:
+person`, `boundary: permission_prompt`, the `escalation_key` and the
+`inbox_entry_key` of the entry the person sees. Wait for that entry to be
+resolved; do not retry (WI-996). If you
 are an oversight session (role `oversight`), you may answer a worker's
 `permission` prompt with `session_answer` or `session_input` keys: read the
 command first and answer as its supervisor. The engine checks your role and
