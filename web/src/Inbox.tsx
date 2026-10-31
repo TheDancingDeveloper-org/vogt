@@ -59,6 +59,18 @@ interface Props {
 const SOURCES = INBOX_SOURCES;
 
 /** "From mallory · external person" — who caused it, where that is known. */
+// WI-996 E0b: an overseer's pick on a permission dialog, shown beside the
+// person's own choice and never pre-selected. Read defensively: the
+// snapshot is server JSON, so anything malformed shows nothing.
+export function dialogRecommendation(entry: InboxEntry): string | null {
+  const rec = entry.evidence_snapshot?.recommendation;
+  if (!rec || typeof rec !== "object") return null;
+  const { option, label, by } = rec as Record<string, unknown>;
+  if ((typeof option !== "number" && typeof option !== "string") || typeof label !== "string") return null;
+  const who = typeof by === "string" && by ? by : "An overseer";
+  return `${who} recommends ${option}. ${label}`;
+}
+
 function actorCopy(entry: InboxEntry): string | null {
   if (entry.actor_kind === "bot" && !entry.actor_login) return null;
   if (!entry.actor_login) return null;
@@ -256,6 +268,13 @@ const Entry: Component<EntryProps> = (props) => {
           <h2>{props.entry.title}</h2>
         </div>
         <p class="inbox-entry-summary">{props.entry.summary ?? "No summary was provided by the server."}</p>
+        <Show when={dialogRecommendation(props.entry)}>
+          {(copy) => (
+            <p class="inbox-recommendation" aria-label="Overseer recommendation">
+              <strong>Recommendation</strong> {copy()}. The choice is yours.
+            </p>
+          )}
+        </Show>
         <Show when={props.entry.evidence_snapshot || props.entry.proposed_change}>
           <details class="inbox-evidence" open={evidenceOpen()}>
             <summary>Evidence</summary>
