@@ -1233,6 +1233,16 @@ def test_a_refused_answer_is_shown_to_the_person_as_a_recommendation(
     assert shown["by"] == AGENTS[0]
     assert shown["escalation_key"] == details["escalation_key"]
     assert f"{AGENTS[0]} recommends 2." in entry.summary
+    # The oversight board's answer buttons carry the same pick.
+    from vogt.application.models import SweepSessionsParams
+    from vogt.application.services.sessions import sweep_sessions
+
+    for mode in ("full", "digest"):
+        rows = sweep_sessions(wired, SweepSessionsParams(mode=mode)).rows
+        # Only the session whose dialog was answered carries a pick.
+        picks = [r.recommendation for r in rows if r.attention == "approval"]
+        assert picks.count(shown) == 1
+        assert all(p in (shown, None) for p in picks)
 
     # The next dialog asks something else: the old pick is not carried over.
     engine.extra = {

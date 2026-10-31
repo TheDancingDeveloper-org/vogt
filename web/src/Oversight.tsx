@@ -9,6 +9,7 @@
 import { Component, For, Show, createEffect, createSignal, onCleanup, onMount, on } from "solid-js";
 import { sessionsStore } from "./store";
 import { SafeSnippet } from "./SafeSnippet";
+import { recommendationCopy } from "./recommendation";
 import { formatBytes } from "./sessionRowModel";
 import {
   VogtUnavailable,
@@ -232,6 +233,14 @@ const Oversight: Component<Props> = (props) => {
               <p class="oversight-reason">{row.attention_reason}</p>
               <Show when={row.attention === "approval" && row.session.approval?.options?.length ? row.session.approval : null}>
                 {(approval) => (
+                  <>
+                  <Show when={recommendationCopy(row.recommendation)}>
+                    {(copy) => (
+                      <p class="inbox-recommendation" aria-label="Overseer recommendation">
+                        <strong>Recommendation</strong> {copy()}. The choice is yours.
+                      </p>
+                    )}
+                  </Show>
                   <div class="oversight-answers" role="group" aria-label={`Answer: ${approval().question}`}>
                     <For each={approval().options ?? []}>
                       {(option) => (
@@ -253,6 +262,7 @@ const Oversight: Component<Props> = (props) => {
                       )}
                     </For>
                   </div>
+                  </>
                 )}
               </Show>
               <Show when={row.session.last_reply_excerpt}>

@@ -4949,6 +4949,14 @@ class SessionSweepRow(Result):
             "checked against git and the forge (WI-1835)."
         ),
     )
+    recommendation: dict[str, object] | None = Field(
+        default=None,
+        description=(
+            "On an `approval` row: an overseer's recorded pick for the dialog "
+            "it shows {option, label, by, at, escalation_key} (WI-996 E0b). "
+            "Shown beside the person's buttons, never chosen for them."
+        ),
+    )
 
 
 class SessionSweepResult(Result):

@@ -1,4 +1,5 @@
 import { Component, For, Show, createEffect, createSignal, on, onCleanup, onMount, untrack } from "solid-js";
+import { recommendationCopy } from "./recommendation";
 import { useLocation, useNavigate } from "@solidjs/router";
 import {
   VogtUnavailable,
@@ -59,16 +60,9 @@ interface Props {
 const SOURCES = INBOX_SOURCES;
 
 /** "From mallory · external person" — who caused it, where that is known. */
-// WI-996 E0b: an overseer's pick on a permission dialog, shown beside the
-// person's own choice and never pre-selected. Read defensively: the
-// snapshot is server JSON, so anything malformed shows nothing.
+// WI-996 E0b: the Inbox entry's recorded recommendation, if any.
 export function dialogRecommendation(entry: InboxEntry): string | null {
-  const rec = entry.evidence_snapshot?.recommendation;
-  if (!rec || typeof rec !== "object") return null;
-  const { option, label, by } = rec as Record<string, unknown>;
-  if ((typeof option !== "number" && typeof option !== "string") || typeof label !== "string") return null;
-  const who = typeof by === "string" && by ? by : "An overseer";
-  return `${who} recommends ${option}. ${label}`;
+  return recommendationCopy(entry.evidence_snapshot?.recommendation);
 }
 
 function actorCopy(entry: InboxEntry): string | null {
