@@ -1680,6 +1680,30 @@ curl -s -H "$AUTH" -H 'content-type: application/json' \
 curl -s -H "$AUTH" -X POST "$VOGT_ENGINE_URL/api/sessions/$ID/kill"
 ```
 
+##### The escalation fallback ladder
+
+An escalation a live session holds open (a blocked report, or a permission
+dialog) climbs a ladder while nobody resolves it (WI-996 E3,
+`escalation_ladder.rs`). The engine polls every 30 s:
+
+- `needs: overseer` is promoted to the person after
+  `ENGINE_ESCALATION_PROMOTE_AFTER_SECS` (default 600): a push under the
+  `waiting_for_input` preference, `data.kind: escalation-promoted`.
+- A person-facing escalation still open after
+  `ENGINE_ESCALATION_PAGE_AFTER_SECS` (default 900) is posted to
+  `ENGINE_ESCALATION_WEBHOOK_URL`, then again every
+  `ENGINE_ESCALATION_REMIND_EVERY_SECS` (default 21600), at most
+  `ENGINE_ESCALATION_MAX_REMINDERS` (default 4) more times.
+- When a paged escalation closes, a resolved post (with `endsAt`) follows.
+
+The post is an Alertmanager v2 alert list (`POST /api/v2/alerts`): one alert,
+`alertname: VogtEscalation`, labelled by session, boundary, needs and the
+content `key`, with the clipped ask as `description`. Point the URL at
+Alertmanager and its routes and silences apply. With no URL the ladder still
+promotes. "Unacknowledged" means still open: the engine does not see the Inbox
+archive. The clocks start when the ladder first sees an escalation, so an
+engine restart restarts them.
+
 #### Permission posture
 
 A driven session usually has no person watching it, so its permission
