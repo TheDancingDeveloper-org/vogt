@@ -1994,6 +1994,12 @@ too to have the board report it.
   auto-mode flag, and registers the MCP servers there by running
   `vogt-mcp-bootstrap` with `CLAUDE_CONFIG_DIR` set. Then log in once with
   `CLAUDE_CONFIG_DIR=<dir> claude` and `/login`.
+  A profile that signs in with an API key (`apiKeyHelper`) instead needs API
+  credit that covers interactive Claude Code: the API can accept the key for
+  `claude -p` and plain calls yet refuse every interactive session, which is
+  what the engine runs, with "Credit balance too low" (WI-2741). Run
+  `claude-profile check <name>` before using such a profile; it sends one
+  interactive-shaped request and says whether the key is accepted.
 - Logins are never copied between accounts. Claude Code's OAuth refresh token
   rotates on use, so a copied credentials file signs one of the two copies out.
 
