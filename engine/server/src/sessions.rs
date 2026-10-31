@@ -533,6 +533,19 @@ impl SessionRegistry {
             ),
             None => self.cfg.agent_onboarding.settings_file.as_deref(),
         };
+        let mcp_set = crate::mcp_set::McpSet::parse(
+            spec.mcp_set
+                .as_deref()
+                .or_else(|| recorded.and_then(|r| r.mcp_set.as_deref())),
+        )?;
+        let mcp_trim = crate::mcp_set::prepare(
+            mcp_set,
+            std::env::var_os("HOME")
+                .map(std::path::PathBuf::from)
+                .as_deref(),
+            &self.cfg.state_dir,
+            id,
+        );
         let launch = agent_cli::launch(
             spec.command.as_deref(),
             &agent_cli::LaunchRequest {
@@ -549,6 +562,7 @@ impl SessionRegistry {
                 add_dirs: recorded.map(|r| r.add_dirs.as_slice()).unwrap_or(&[]),
                 opencode_config: self.cfg.agent_onboarding.opencode_config.as_deref(),
                 codex_approval_policy: self.cfg.codex_approval_policy.as_str(),
+                mcp: Some(&mcp_trim),
             },
         )?;
         if let Some(rewritten) = launch.command {
@@ -905,6 +919,8 @@ impl SessionRegistry {
                 record.permission_mode = posture.clone();
                 record.account = account.clone();
                 record.settings_file = applied_settings.clone();
+                record.mcp_set =
+                    (mcp_set == crate::mcp_set::McpSet::Worker).then(|| "worker".to_string());
                 record.add_dirs = prompt_file
                     .as_ref()
                     .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
@@ -1698,6 +1714,7 @@ impl SessionRegistry {
             model: record.model.clone(),
             effort: record.effort.clone(),
             permission_mode: record.permission_mode.clone(),
+            mcp_set: record.mcp_set.clone(),
             account: record.account.clone(),
             autopilot: record.autopilot,
             policy: record.policy.clone(),

@@ -403,6 +403,29 @@ def test_an_explicit_task_wins_over_the_reason(
     assert "not that" not in brief
 
 
+def test_the_purpose_picks_the_mcp_set(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """WI-2740: workers and reviewers start on the short MCP set."""
+    start_session(
+        wired, StartSessionParams(work_item="WI-1", purpose="review", reason=WHY)
+    )
+    assert engine.last_spec["mcp_set"] == "worker"
+    start_session(
+        wired, StartSessionParams(work_item="WI-1", purpose="design", reason=WHY)
+    )
+    assert "mcp_set" not in engine.last_spec, "full is the request it always was"
+    start_session(
+        wired,
+        StartSessionParams(
+            work_item="WI-1", purpose="review", mcp_set="full", reason=WHY
+        ),
+    )
+    assert "mcp_set" not in engine.last_spec, "the caller's choice wins"
+    start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+    assert "mcp_set" not in engine.last_spec
+
+
 def test_a_review_purpose_gets_a_default_review_task(
     wired: AppContext, engine: StandInEngine
 ) -> None:

@@ -92,6 +92,7 @@ pub fn remove_session_prompt(state_dir: &Path, session_id: Uuid) {
     for path in [
         session_prompt_path(state_dir, session_id),
         session_guide_path(state_dir, session_id),
+        crate::mcp_set::claude_config_path(state_dir, session_id),
     ] {
         match std::fs::remove_file(&path) {
             Ok(()) => {}
@@ -122,6 +123,7 @@ pub fn session_id_from_prompt_file(file_name: &str) -> Option<Uuid> {
 pub fn session_id_from_artifact(file_name: &str) -> Option<Uuid> {
     let stem = file_name
         .strip_suffix(".guide.md")
+        .or_else(|| file_name.strip_suffix(".mcp.json"))
         .or_else(|| file_name.strip_suffix(".md"))?;
     Uuid::parse_str(stem).ok()
 }

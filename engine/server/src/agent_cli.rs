@@ -120,6 +120,8 @@ pub struct LaunchRequest<'a> {
     /// to have a person (or an oversight session) answer each command.
     /// `bypass` ignores it, and `codex exec` rejects `-a`.
     pub codex_approval_policy: &'a str,
+    /// The trimmed MCP set, when the start asked for one (WI-2740).
+    pub mcp: Option<&'a crate::mcp_set::McpTrim>,
 }
 
 impl<'a> LaunchRequest<'a> {
@@ -138,6 +140,7 @@ impl<'a> LaunchRequest<'a> {
             add_dirs: &[],
             opencode_config: None,
             codex_approval_policy: CODEX_APPROVAL_DEFAULT,
+            mcp: None,
         }
     }
 }
@@ -429,6 +432,12 @@ pub fn launch(command: Option<&[String]>, req: &LaunchRequest<'_>) -> Result<Lau
                 // `--add-dir`, so it can never take a following positional.
                 rewritten.push(format!("--settings={}", file.display()));
             }
+            if let Some(file) = req.mcp.and_then(|m| m.claude_config.as_deref()) {
+                // Only the servers in this file, not the user's own set
+                // (WI-2740). `=` form: `--mcp-config` is variadic.
+                rewritten.push("--strict-mcp-config".to_string());
+                rewritten.push(format!("--mcp-config={}", file.display()));
+            }
             // The brief lives under the engine's state directory, outside the
             // session's working directory, and reading it there would stop a
             // fresh session at a permission prompt before it began (WI-912).
@@ -498,6 +507,9 @@ pub fn launch(command: Option<&[String]>, req: &LaunchRequest<'_>) -> Result<Lau
                 "-c".to_string(),
                 "tui.animations=false".to_string(),
             ]);
+            if let Some(mcp) = req.mcp {
+                rewritten.extend(mcp.codex_args.iter().cloned());
+            }
             // Fresh only, and only when the binary accepts the flag (WI-1126,
             // on by default since WI-1354). A resume already names its id via
             // the subcommand, and a template with arguments of its own is left
@@ -867,6 +879,33 @@ mod tests {
 
     fn cmd(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_worker_mcp_set_reaches_claude_and_codex_and_nothing_else() {
+        let trim = crate::mcp_set::McpTrim {
+            claude_config: Some(PathBuf::from("/state/s.mcp.json")),
+            codex_args: vec!["-c".into(), "mcp_servers.komodo.enabled=false".into()],
+        };
+        let req = LaunchRequest {
+            mcp: Some(&trim),
+            ..LaunchRequest::bare()
+        };
+        let claude = launch(Some(&cmd(&["claude"])), &req)
+            .unwrap()
+            .command
+            .unwrap();
+        assert!(claude.contains(&"--strict-mcp-config".to_string()));
+        assert!(claude.contains(&"--mcp-config=/state/s.mcp.json".to_string()));
+        assert!(!claude.iter().any(|a| a.contains("komodo")));
+        let codex = launch(Some(&cmd(&["codex"])), &req)
+            .unwrap()
+            .command
+            .unwrap();
+        assert!(codex.contains(&"mcp_servers.komodo.enabled=false".to_string()));
+        assert!(!codex.iter().any(|a| a.contains("mcp-config")));
+        let opencode = launch(Some(&cmd(&["opencode"])), &req).unwrap().command;
+        assert!(opencode.is_none(), "opencode is left as it was");
     }
 
     #[test]

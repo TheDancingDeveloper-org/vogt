@@ -73,6 +73,9 @@ class Profile(BaseModel):
     #: A hint carried into the brief: the session should read and report,
     #: not change the tree. Advisory; enforcement is the engine policy's.
     read_only: bool = False
+    #: The MCP servers a start gets (WI-2740): `worker` keeps the vogt worker
+    #: tool subset and cadastre, so the first request stays small.
+    mcp_set: Literal["full", "worker"] = "full"
 
     @field_validator("budget_turns_by_model")
     @classmethod
@@ -120,6 +123,7 @@ class ProfileOverride(BaseModel):
     repo_map: bool | None = None
     autopilot: bool | None = None
     read_only: bool | None = None
+    mcp_set: Literal["full", "worker"] | None = None
 
     @field_validator("budget_turns_by_model")
     @classmethod
@@ -139,9 +143,14 @@ DEFAULT_PROFILES: dict[Purpose, Profile] = {
         worktree=True,
         repo_map=True,
         autopilot=True,
+        mcp_set="worker",
     ),
     "implement-careful": Profile(
-        template="claude", model="opus", effort="low", budget_turns=150
+        template="claude",
+        model="opus",
+        effort="low",
+        budget_turns=150,
+        mcp_set="worker",
     ),
     "review": Profile(
         template="claude",
@@ -150,8 +159,11 @@ DEFAULT_PROFILES: dict[Purpose, Profile] = {
         budget_turns=40,
         autopilot=False,
         read_only=True,
+        mcp_set="worker",
     ),
-    "mechanical": Profile(template="claude", model="haiku", budget_turns=60),
+    "mechanical": Profile(
+        template="claude", model="haiku", budget_turns=60, mcp_set="worker"
+    ),
     "investigate": Profile(
         template="claude", model="opus", effort="low", budget_turns=60
     ),

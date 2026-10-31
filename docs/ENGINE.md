@@ -485,6 +485,30 @@ stays pinned and the bypass posture stays person-only.
 Any further MCP server an agent should reach is registered by hand inside the
 session, the way the Rust LSP entry above shows.
 
+### Per-session MCP sets (WI-2740)
+
+Every tool definition rides on every request, and the full estate set
+(vogt, cadastre, komodo, grafana-ro, github-ro, forgejo-ro) is about 85k
+tokens of schema. A start names `mcp_set` on its `SessionSpec`:
+
+- `full` (or absent): the user's own registrations, unchanged.
+- `worker`: `vogt` on its worker tool profile (18 tools: work items,
+  `session_report*`, `decision_ask`, `project_brief`, …) and `cadastre`.
+
+The engine never edits the shared home configs. Claude Code gets
+`--strict-mcp-config --mcp-config=<state>/agent-task-prompts/sessions/<id>.mcp.json`,
+a 0600 copy of the kept `~/.claude.json` entries with
+`VOGT_MCP_TOOL_PROFILE=worker` on vogt's bridge. Codex gets `-c` overrides:
+`mcp_servers.<name>.enabled=false` for every other entry of
+`~/.codex/config.toml`, and vogt's URL with `?profile=worker`. OpenCode and
+Klaudia are left as they are. A wake replays the recorded set. The core sets
+`mcp_set` from the dispatch profile: `worker` for implement,
+implement-careful, mechanical and review; `full` for investigate and design.
+
+The vogt tool profile trims `tools/list` only (header `X-Vogt-Tool-Profile`
+or `?profile=` on `/mcp`); `tools/call` still checks the grant alone, so a
+worker that needs another tool can still call it by name.
+
 ---
 
 ## 5. The wire contract

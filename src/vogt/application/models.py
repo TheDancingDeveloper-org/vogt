@@ -4548,6 +4548,17 @@ class StartSessionParams(Params):
             "not otherwise. The outline is capped; it is a map, not a listing."
         ),
     )
+    mcp_set: Literal["full", "worker"] | None = Field(
+        default=None,
+        description=(
+            "Which MCP servers the agent starts with (WI-2740). `worker`: the "
+            "vogt worker tool subset and cadastre, for a short first request; "
+            "`full`: every server the deployment registers. Unset takes the "
+            "purpose's dispatch profile (worker for implement, mechanical and "
+            "review; full otherwise), and full with no purpose. Claude Code "
+            "and Codex templates."
+        ),
+    )
     permission_mode: Literal["default", "accept_edits", "bypass"] = Field(
         default="default",
         description=(

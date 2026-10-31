@@ -529,11 +529,28 @@ ROUTER_GROUPS = (
     "premium",
 )
 
-def _catalog_model(priority: int, slug: str) -> dict[str, object]:
+OURS = "Estate LiteLLM "
+DEFAULT_CONTEXT = 256000
+#: Families whose real window the router misreports (swack-haiku says 1M;
+#: Claude serves 200k). Matched on a dash-separated word of the slug.
+FAMILY_CONTEXT = {"haiku": 200000, "sonnet": 200000, "opus": 200000, "claude": 200000}
+
+def _context_window(slug: str, reported: object) -> int:
+    words = slug.lower().replace(".", "-").split("-")
+    for family, window in FAMILY_CONTEXT.items():
+        if family in words:
+            return window
+    if isinstance(reported, int) and reported > 0:
+        return reported
+    return DEFAULT_CONTEXT
+
+def _catalog_model(
+    priority: int, slug: str, context_window: int = DEFAULT_CONTEXT
+) -> dict[str, object]:
     return {
         "slug": slug,
         "display_name": slug,
-        "description": f"Estate LiteLLM {slug} group.",
+        "description": f"{OURS}{slug} group.",
         "supported_reasoning_levels": [],
         "shell_type": "unified_exec",
         "visibility": "hide" if slug == "premium" else "list",
@@ -556,13 +573,116 @@ def _catalog_model(priority: int, slug: str) -> dict[str, object]:
         "default_verbosity": None,
         "apply_patch_tool_type": "freeform",
         "truncation_policy": {"mode": "bytes", "limit": 10000},
-        "context_window": 256000,
+        "context_window": context_window,
         "effective_context_window_percent": 95,
         "experimental_supported_tools": [],
     }
 
-CATALOG = {"models": [_catalog_model(i, slug) for i, slug in enumerate(ROUTER_GROUPS)]}
 catalog_path = os.path.join(os.path.dirname(path), "vogt-model-catalog.json")
+probe_path = os.path.join(os.path.dirname(path), "vogt-model-catalog.probe.json")
+
+# WI-2740: the groups come from the router itself when the session key is at
+# hand: every group /model/info lists that answers a one-token completion,
+# with its context window. The answers are cached for a few hours so a launch
+# does not wait on the probes. Without a key, or with the router down, the
+# last answers (or the list above) stand.
+def _discover() -> dict[str, int] | None:
+    import time
+    import urllib.request
+    from concurrent.futures import ThreadPoolExecutor
+
+    key = os.environ.get("HOMELAB_LITELLM_SESSION_KEY", "").strip()
+    base = os.environ.get("VOGT_LITELLM_BASE_URL", "http://100.92.54.45:4000/v1").rstrip("/")
+    ttl = int(os.environ.get("VOGT_CODEX_CATALOG_TTL", "21600") or 0)
+    try:
+        with open(probe_path, encoding="utf-8") as fh:
+            cached = json.load(fh)
+        if (
+            cached.get("base") == base
+            and time.time() - float(cached.get("at", 0)) < ttl
+            and isinstance(cached.get("groups"), dict)
+        ):
+            return {str(k): int(v) for k, v in cached["groups"].items()}
+    except (OSError, ValueError, TypeError):
+        cached = None
+    if not key or os.environ.get("VOGT_CODEX_CATALOG_PROBE", "1") == "0":
+        if cached and isinstance(cached.get("groups"), dict):
+            return {str(k): int(v) for k, v in cached["groups"].items()}
+        return None
+    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+
+    def _get(url: str) -> object:
+        request = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return json.load(response)
+
+    try:
+        info = _get(f"{base}/model/info")
+        rows = info.get("data", []) if isinstance(info, dict) else []
+        reported = {
+            str(row.get("model_name")): (row.get("model_info") or {}).get("max_input_tokens")
+            for row in rows
+            if isinstance(row, dict) and row.get("model_name")
+        }
+    except Exception as exc:  # the router is optional at bootstrap
+        print(f"mcp-bootstrap: LiteLLM groups not listed ({type(exc).__name__}); catalog kept", file=sys.stderr)
+        return None
+
+    def _answers(slug: str) -> bool:
+        body = json.dumps(
+            {"model": slug, "max_tokens": 1, "messages": [{"role": "user", "content": "ok"}]}
+        ).encode()
+        request = urllib.request.Request(
+            f"{base}/chat/completions", data=body, headers=headers, method="POST"
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=20) as response:
+                return 200 <= response.status < 300
+        except Exception:
+            return False
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        ok = dict(zip(reported, pool.map(_answers, reported)))
+    groups = {slug: _context_window(slug, reported[slug]) for slug in reported if ok[slug]}
+    if not groups:
+        return None
+    try:
+        fd, tmp = tempfile.mkstemp(prefix=".vogt-model-catalog.probe.", dir=os.path.dirname(path) or ".")
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump({"at": time.time(), "base": base, "groups": groups}, fh)
+        os.replace(tmp, probe_path)
+    except OSError:
+        pass
+    return groups
+
+discovered = _discover()
+if discovered is None:
+    ordered = [(slug, _context_window(slug, None)) for slug in ROUTER_GROUPS]
+else:
+    # The known order first (grok stays the default where it is served),
+    # then the rest by name.
+    known = [slug for slug in ROUTER_GROUPS if slug in discovered]
+    ordered = [(slug, discovered[slug]) for slug in known] + [
+        (slug, discovered[slug]) for slug in sorted(discovered) if slug not in known
+    ]
+OUR_MODELS = [_catalog_model(i, slug, window) for i, (slug, window) in enumerate(ordered)]
+SLUGS = [slug for slug, _ in ordered]
+
+# An entry an operator added by hand (any description but ours) is kept,
+# after the router's groups, unless a group of the same slug replaces it.
+try:
+    with open(catalog_path, encoding="utf-8") as fh:
+        _previous = json.load(fh).get("models", [])
+except (OSError, ValueError, AttributeError):
+    _previous = []
+OPERATOR_MODELS = [
+    row
+    for row in _previous
+    if isinstance(row, dict)
+    and not str(row.get("description", "")).startswith(OURS)
+    and row.get("slug") not in SLUGS
+]
+CATALOG = {"models": OUR_MODELS + OPERATOR_MODELS}
 try:
     with open(path, encoding="utf-8") as fh:
         text = fh.read()
@@ -695,8 +815,9 @@ _set_root("model_provider", "litellm", {None, "litellm", "theclawbay"})
 # default moves to grok unless it already names a catalog group.
 if _root_value("model_provider") == "litellm":
     _model = _root_value("model")
-    if _model not in ROUTER_GROUPS:
-        _set_root("model", "grok", {_model})
+    _served = SLUGS + [str(row.get("slug")) for row in OPERATOR_MODELS]
+    if _model not in _served and SLUGS:
+        _set_root("model", SLUGS[0], {_model})
 # Point at the catalog this writer owns. A path an operator chose stays.
 _set_root("model_catalog_json", catalog_path, {None, catalog_path})
 

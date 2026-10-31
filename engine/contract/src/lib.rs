@@ -128,6 +128,11 @@ pub struct SessionSpec {
     /// permission check. Claude Code only; refused for anything else.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<String>,
+    /// Which MCP servers the agent starts with (WI-2740): `full` (absent)
+    /// keeps the user's own registrations; `worker` keeps vogt, on its worker
+    /// tool profile, and cadastre. Claude Code and Codex only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_set: Option<String>,
     /// Which Claude Code subscription account to run under: a name from the
     /// deployment's `ENGINE_AGENT_CLAUDE_ACCOUNTS`, which the engine maps to
     /// that account's `CLAUDE_CONFIG_DIR`. Absent runs the engine's default
