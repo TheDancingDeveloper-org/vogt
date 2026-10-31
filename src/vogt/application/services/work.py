@@ -27,6 +27,7 @@ from datetime import datetime
 from itertools import pairwise
 from typing import Literal
 
+from vogt.adapters.engine import EngineClient
 from vogt.adapters.forge import ForgeProvider
 from vogt.adapters.forge.models import RepoRef
 from vogt.adapters.forge.writeback import WriteBackResult, permits
@@ -39,6 +40,8 @@ from vogt.application.models import (
     DeployedVersionsParams,
     GetManyWorkParams,
     GetWorkParams,
+    LandWorkParams,
+    LandWorkResult,
     ListSessionsParams,
     ListWorkParams,
     RelateWorkParams,
@@ -57,10 +60,17 @@ from vogt.application.services.claims import check_claim, record_claim_check
 from vogt.application.services.deployed import deployed_versions
 from vogt.application.services.git_story import git_story_for
 from vogt.application.services.sessions import (
+    _answers_as_person,
     _caller_engine_session_id,
+    _engine,
     list_sessions,
 )
-from vogt.application.writes import WriteOutcome, audited_write
+from vogt.application.writes import (
+    WriteOutcome,
+    audited_action,
+    audited_write,
+    validate_reason,
+)
 from vogt.core import delivery_state
 from vogt.core.branches import default_branch_name
 from vogt.core.entities import (
@@ -83,6 +93,7 @@ from vogt.errors import (
     CommentRefused,
     Conflict,
     InvalidRequest,
+    LandRefused,
     NotFound,
     NotLinked,
     PersonRequired,
@@ -98,6 +109,7 @@ WORK_RELATE = "work.relate"
 WORK_UNRELATE = "work.unrelate"
 WORK_COMMENT = "work.comment"
 WORK_BIND_BRANCH = "work.bind_branch"
+WORK_LAND = "work.land"
 
 WORK_CREATED_EVENT = "work.created"
 WORK_UPDATED_EVENT = "work.updated"
@@ -106,6 +118,8 @@ WORK_RELATED_EVENT = "work.related"
 WORK_UNRELATED_EVENT = "work.unrelated"
 WORK_COMMENTED_EVENT = "work.commented"
 WORK_BRANCH_BOUND_EVENT = "work.branch_bound"
+WORK_LANDED_EVENT = "work.landed"
+WORK_LAND_REFUSED_EVENT = "work.land_refused"
 
 
 # -- the linked/unlinked gate ----------------------------------------------
@@ -1816,4 +1830,199 @@ def _linked_subject(txn: WriteTxn, item: WorkItem) -> str | None:
     for subject, ref in txn.work_links_for_subjects_by_item(item.id).items():
         del ref
         return subject
+    return None
+
+
+# -- landing (WI-1328) -----------------------------------------------------
+
+
+def land_work(ctx: AppContext, params: LandWorkParams) -> LandWorkResult:
+    """Land an item's reviewed branch onto the project's base (design §2.2).
+
+    The gate that decides what merges. A person or an oversight session asks;
+    the project's merges must be oversight's; the latest hand-off names the
+    branch; and the latest verdict is `no_blockers` for exactly `head_sha`,
+    from someone other than the worker. A reviewer session's provenance is
+    re-read from the session store, never taken from the comment, so the land
+    does not rest on the comment gate alone. The engine then lands with the
+    core's own credential and its refusal is surfaced verbatim. Every refusal
+    is audited with the rule it broke; the diff never is.
+    """
+    reason = validate_reason(params.reason)
+    head_sha = params.head_sha.strip()
+    engine = _engine(ctx)
+    with ctx.declared.read() as view:
+        item = _resolve.work_item(view, params.ref)
+        project = (
+            None if item.project_id is None else view.project_by_id(item.project_id)
+        )
+        thread = view.comments_for(item.id, limit=500, order="newest")
+        reviewers = {
+            c.verdict.reviewer_session: view.session_by_engine_id(
+                c.verdict.reviewer_session
+            )
+            for c in thread
+            if c.kind == "verdict"
+            and c.verdict is not None
+            and c.verdict.reviewer_session
+        }
+
+    def refuse(rule: str) -> LandRefused:
+        audited_action(
+            ctx,
+            operation=WORK_LAND,
+            reason=reason,
+            entity_kind="work_item",
+            entity_id=item.id,
+            outcome={"ref": item.ref, "head_sha": head_sha, "refused": rule},
+            event_kind=WORK_LAND_REFUSED_EVENT,
+        )
+        return LandRefused(f"{item.ref} not landed: {rule}")
+
+    caller_rule = _land_caller_refusal(ctx, engine)
+    if caller_rule is not None:
+        raise refuse(caller_rule)
+    landing = None if project is None else project.agent_policy.landing
+    if project is None or landing is None or landing.merge_by != "oversight":
+        raise refuse("this project's merges are the operator's")
+    handoffs = [c.handoff for c in thread if c.kind == "handoff" and c.handoff]
+    branch = next((h.branch for h in handoffs if h.branch), None)
+    if branch is None:
+        raise refuse("no hand-off names a branch")
+    verdict = next((c.verdict for c in thread if c.kind == "verdict"), None)
+    if verdict is None:
+        raise refuse("there is no review verdict")
+    verdict_rule = _verdict_refusal(
+        verdict,
+        head_sha=head_sha,
+        item=item,
+        workers={h.session for h in handoffs if h.session},
+        reviewer=reviewers.get(verdict.reviewer_session or ""),
+    )
+    if verdict_rule is not None:
+        raise refuse(verdict_rule)
+
+    landed = engine.land(
+        repo=project.root_path,
+        branch=branch,
+        head_sha=head_sha,
+        onto=landing.base_branch,
+        mode=landing.merge_mode,
+        forbidden_text=list(project.agent_policy.forbidden_text),
+        linear_history=landing.linear_history,
+    )
+    result = LandWorkResult(
+        onto_before=str(landed.get("onto_before") or ""),
+        onto_after=str(landed.get("onto_after") or ""),
+        commits=[str(sha) for sha in landed.get("commits") or []],
+        rebased=bool(landed.get("rebased")),
+    )
+    by = verdict.reviewer_session or "a person"
+    note = (
+        f"landed {result.onto_after} onto {landing.base_branch} "
+        f"({len(result.commits)} commits; verdict by {by})"
+    )
+
+    def body(txn: WriteTxn, actor: Actor) -> WriteOutcome[LandWorkResult]:
+        comment = Comment(
+            id=ctx.id_factory("cmt"),
+            work_item_id=item.id,
+            actor_id=actor.id,
+            actor_display_name=actor.display_name,
+            body=note,
+            created_at=ctx.clock(),
+            kind="note",
+        )
+        txn.insert_comment(comment)
+        return WriteOutcome(
+            result=result,
+            entity_kind="work_item",
+            entity_id=item.id,
+            payload={
+                "ref": item.ref,
+                "branch": branch,
+                "head_sha": head_sha,
+                "onto": landing.base_branch,
+                "onto_before": result.onto_before,
+                "onto_after": result.onto_after,
+                "commits": len(result.commits),
+                "rebased": result.rebased,
+                "actor": actor.identity_ref,
+                "reviewer_session": verdict.reviewer_session,
+                "comment_id": comment.id,
+            },
+            event_kind=WORK_LANDED_EVENT,
+            summary={
+                "ref": item.ref,
+                "branch": branch,
+                "onto": landing.base_branch,
+                "onto_after": result.onto_after,
+                "reviewer_session": verdict.reviewer_session,
+            },
+        )
+
+    return audited_write(ctx, operation=WORK_LAND, reason=reason, body=body)
+
+
+def _land_caller_refusal(ctx: AppContext, engine: EngineClient) -> str | None:
+    """Who may land (operator decision 1, 2026-10-13): a person, or a session
+    whose engine role is `oversight`. The role is read from the engine."""
+    if _answers_as_person(ctx):
+        return None
+    caller_id = _caller_engine_session_id(ctx)
+    if caller_id is None:
+        return (
+            "only a person or an oversight session lands a branch "
+            f"({ctx.principal.identity_ref} is neither)"
+        )
+    caller = engine.get_session(caller_id)
+    role = "unknown" if caller is None else caller.role
+    if role != "oversight":
+        return (
+            f"only a person or an oversight session lands a branch "
+            f"({caller_id} is {role})"
+        )
+    return None
+
+
+def _verdict_refusal(
+    verdict: VerdictFields,
+    *,
+    head_sha: str,
+    item: WorkItem,
+    workers: set[str],
+    reviewer: CodingSession | None,
+) -> str | None:
+    """Why the latest verdict does not license this land, or None."""
+    if verdict.verdict != "no_blockers":
+        return "the latest verdict has blockers"
+    if verdict.head_sha != head_sha:
+        return (
+            f"the latest verdict is for {verdict.head_sha}, not {head_sha}; "
+            "the branch moved since the review"
+        )
+    if verdict.reviewer_session is None:
+        # A person's verdict: no session to re-check.
+        return None
+    if verdict.reviewer_session in workers:
+        return "the verdict is the worker's own"
+    if reviewer is None:
+        return (
+            f"the verdict's reviewer session {verdict.reviewer_session} "
+            "is not in the session store"
+        )
+    if workers & {reviewer.id, reviewer.engine_session_id}:
+        return "the verdict is the worker's own"
+    if reviewer.purpose != "review":
+        return f"the reviewer session {verdict.reviewer_session} is not a review"
+    if reviewer.started_by_kind not in ("person", "oversight"):
+        return (
+            f"the reviewer session {verdict.reviewer_session} was started by "
+            f"{reviewer.started_by_kind or 'an unknown starter'}"
+        )
+    if reviewer.work_item_id != item.id:
+        return (
+            f"the reviewer session {verdict.reviewer_session} is not bound "
+            f"to {item.ref}"
+        )
     return None
