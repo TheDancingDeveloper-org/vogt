@@ -13,6 +13,10 @@
 //! the kept entries from `~/.claude.json`; Codex gets `-c` overrides that
 //! turn every other `[mcp_servers]` entry off and point `vogt` at its worker
 //! profile.
+//!
+//! A project can add servers on top of the worker set (`mcp_extra`,
+//! WI-2746). Add-only: the worker servers are always kept, and an extra name
+//! the host has not registered is warned about, never a launch failure.
 
 use std::path::{Path, PathBuf};
 
@@ -55,22 +59,44 @@ pub struct McpTrim {
     pub claude_config: Option<PathBuf>,
     /// The `-c` overrides (flag and value pairs) a Codex launch carries.
     pub codex_args: Vec<String>,
+    /// The servers a Claude Code launch gets, in order.
+    pub claude_servers: Vec<String>,
+    /// The servers a Codex launch keeps enabled, in order.
+    pub codex_servers: Vec<String>,
+    /// Extra names neither config registers.
+    pub unregistered: Vec<String>,
+}
+
+/// The names a worker session keeps: [`WORKER_SERVERS`], then each extra
+/// once, in the order given. Blank names are dropped.
+pub fn worker_names(extra: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = WORKER_SERVERS.iter().map(|s| s.to_string()).collect();
+    for name in extra.iter().map(|n| n.trim()).filter(|n| !n.is_empty()) {
+        if !out.iter().any(|n| n == name) {
+            out.push(name.to_string());
+        }
+    }
+    out
 }
 
 /// The `mcpServers` object a worker Claude Code session gets: the kept
 /// entries of `~/.claude.json`, vogt told to ask for its worker profile.
-pub fn claude_worker_config(claude_json: &serde_json::Value) -> serde_json::Value {
+/// `extra` adds the project's servers (WI-2746); unregistered ones are skipped.
+pub fn claude_worker_config(
+    claude_json: &serde_json::Value,
+    extra: &[String],
+) -> serde_json::Value {
     let mut kept = serde_json::Map::new();
     if let Some(servers) = claude_json.get("mcpServers").and_then(|v| v.as_object()) {
-        for name in WORKER_SERVERS {
-            let Some(entry) = servers.get(*name) else {
+        for name in worker_names(extra) {
+            let Some(entry) = servers.get(&name) else {
                 continue;
             };
             let mut entry = entry.clone();
-            if *name == "vogt" {
+            if name == "vogt" {
                 set_worker_profile(&mut entry);
             }
-            kept.insert((*name).to_string(), entry);
+            kept.insert(name, entry);
         }
     }
     serde_json::json!({ "mcpServers": kept })
@@ -104,8 +130,10 @@ fn with_profile(url: &str) -> String {
 }
 
 /// The `-c` overrides that give a Codex session the worker set: every
-/// server outside [`WORKER_SERVERS`] disabled, vogt on its worker profile.
-pub fn codex_worker_args(config: &toml::Table) -> Vec<String> {
+/// server outside [`WORKER_SERVERS`] and `extra` disabled, vogt on its
+/// worker profile.
+pub fn codex_worker_args(config: &toml::Table, extra: &[String]) -> Vec<String> {
+    let keep = worker_names(extra);
     let mut out = Vec::new();
     let Some(servers) = config.get("mcp_servers").and_then(|v| v.as_table()) else {
         return out;
@@ -116,7 +144,7 @@ pub fn codex_worker_args(config: &toml::Table) -> Vec<String> {
             // dotted `-c` key; leave it as the user registered it.
             continue;
         }
-        if !WORKER_SERVERS.contains(&name.as_str()) {
+        if !keep.contains(name) {
             out.extend([
                 "-c".to_string(),
                 format!("mcp_servers.{name}.enabled=false"),
@@ -157,8 +185,13 @@ pub fn claude_config_path(state_dir: &Path, session_id: uuid::Uuid) -> PathBuf {
 /// [`claude_json_path`]). A config that is missing, does not parse, or has no
 /// `vogt` entry leaves that CLI untrimmed (warned), so a fault here never
 /// stops a launch and never starts a worker without the work tracker.
+///
+/// `extra` is the project's `mcp_extra`: added to the worker set where the
+/// configs register it; a name neither registers is warned and listed in
+/// [`McpTrim::unregistered`].
 pub fn prepare(
     set: McpSet,
+    extra: &[String],
     home: Option<&Path>,
     claude_json: Option<&Path>,
     state_dir: &Path,
@@ -170,7 +203,7 @@ pub fn prepare(
     let mut trim = McpTrim::default();
     match claude_json.map(|p| (p, read_json(p))) {
         Some((_, Some(claude))) => {
-            let config = claude_worker_config(&claude);
+            let config = claude_worker_config(&claude, extra);
             if config["mcpServers"].get("vogt").is_none() {
                 tracing::warn!(
                     "no vogt entry in the Claude config; worker MCP set not applied, full set"
@@ -178,7 +211,13 @@ pub fn prepare(
             } else {
                 let path = claude_config_path(state_dir, session_id);
                 match write_private(&path, &config) {
-                    Ok(()) => trim.claude_config = Some(path),
+                    Ok(()) => {
+                        trim.claude_config = Some(path);
+                        trim.claude_servers = worker_names(extra)
+                            .into_iter()
+                            .filter(|n| config["mcpServers"].get(n).is_some())
+                            .collect();
+                    }
                     Err(e) => tracing::warn!(error = %e, "worker MCP config not written; full set"),
                 }
             }
@@ -189,16 +228,61 @@ pub fn prepare(
         ),
         None => tracing::warn!("no Claude config path; Claude MCP set left as is"),
     }
-    let Some(home) = home else {
-        return trim;
-    };
-    let codex = std::fs::read_to_string(home.join(".codex").join("config.toml"))
-        .ok()
-        .and_then(|text| text.parse::<toml::Table>().ok());
-    if let Some(codex) = codex {
-        trim.codex_args = codex_worker_args(&codex);
+    let codex = home.and_then(|home| {
+        std::fs::read_to_string(home.join(".codex").join("config.toml"))
+            .ok()
+            .and_then(|text| text.parse::<toml::Table>().ok())
+    });
+    let codex_registered: Vec<String> = codex
+        .as_ref()
+        .and_then(|c| c.get("mcp_servers").and_then(|v| v.as_table()))
+        .map(|t| t.keys().cloned().collect())
+        .unwrap_or_default();
+    if let Some(codex) = codex.as_ref() {
+        trim.codex_args = codex_worker_args(codex, extra);
+        trim.codex_servers = worker_names(extra)
+            .into_iter()
+            .filter(|n| codex_registered.contains(n))
+            .collect();
+    }
+    let claude_registered = claude_json
+        .and_then(read_json)
+        .and_then(|c| c.get("mcpServers").and_then(|v| v.as_object()).cloned())
+        .unwrap_or_default();
+    let worker: Vec<String> = worker_names(&[]);
+    trim.unregistered = worker_names(extra)
+        .into_iter()
+        .filter(|n| !worker.contains(n))
+        .filter(|n| !claude_registered.contains_key(n) && !codex_registered.contains(n))
+        .collect();
+    if !trim.unregistered.is_empty() {
+        tracing::warn!(
+            names = ?trim.unregistered,
+            "project mcp_extra names no MCP server this host registers; skipped"
+        );
     }
     trim
+}
+
+/// The brief section that tells a worker which MCP servers it got
+/// (WI-2746).
+pub fn brief_section(servers: &[String], unregistered: &[String]) -> String {
+    let mut out =
+        String::from("\n\n## MCP servers\n\nThis session started with these MCP servers: ");
+    if servers.is_empty() {
+        out.push_str("(none recorded)");
+    } else {
+        out.push_str(&servers.join(", "));
+    }
+    out.push_str(". Ask for another with `session_grant_request`.");
+    if !unregistered.is_empty() {
+        out.push_str(&format!(
+            " The project also names {}, which this host does not register.",
+            unregistered.join(", ")
+        ));
+    }
+    out.push('\n');
+    out
 }
 
 /// The Claude Code config a launch reads: `$CLAUDE_CONFIG_DIR/.claude.json`
@@ -255,7 +339,7 @@ mod tests {
                 "grafana-ro": {"type": "stdio", "command": "/usr/local/bin/vogt-readonly-mcp"},
             }
         });
-        let out = claude_worker_config(&home);
+        let out = claude_worker_config(&home, &[]);
         let servers = out["mcpServers"].as_object().unwrap();
         let mut names: Vec<_> = servers.keys().cloned().collect();
         names.sort();
@@ -269,7 +353,7 @@ mod tests {
         let home = serde_json::json!({
             "mcpServers": {"vogt": {"type": "http", "url": "https://v.example/mcp"}}
         });
-        let out = claude_worker_config(&home);
+        let out = claude_worker_config(&home, &[]);
         assert_eq!(
             out["mcpServers"]["vogt"]["url"],
             "https://v.example/mcp?profile=worker"
@@ -291,7 +375,7 @@ mod tests {
         "#
         .parse()
         .unwrap();
-        let args = codex_worker_args(&config);
+        let args = codex_worker_args(&config, &[]);
         assert_eq!(
             args,
             [
@@ -316,11 +400,19 @@ mod tests {
         let id = uuid::Uuid::nil();
         let cj = home.path().join(".claude.json");
         assert_eq!(
-            prepare(McpSet::Full, Some(home.path()), Some(&cj), state.path(), id),
+            prepare(
+                McpSet::Full,
+                &[],
+                Some(home.path()),
+                Some(&cj),
+                state.path(),
+                id
+            ),
             McpTrim::default()
         );
         let trim = prepare(
             McpSet::Worker,
+            &[],
             Some(home.path()),
             Some(&cj),
             state.path(),
@@ -345,6 +437,7 @@ mod tests {
         let id = uuid::Uuid::nil();
         let trim = prepare(
             McpSet::Worker,
+            &[],
             Some(home.path()),
             Some(&cj),
             state.path(),
@@ -352,6 +445,84 @@ mod tests {
         );
         assert!(trim.claude_config.is_none());
         assert!(!claude_config_path(state.path(), id).exists());
+    }
+
+    fn names(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn extras_add_to_the_worker_set_once_and_never_remove() {
+        assert_eq!(
+            worker_names(&names(&["komodo", " ", "vogt", "komodo"])),
+            ["vogt", "cadastre", "crw", "komodo"]
+        );
+    }
+
+    #[test]
+    fn a_claude_extra_is_kept_only_when_registered() {
+        let home = serde_json::json!({
+            "mcpServers": {
+                "vogt": {"command": "v"},
+                "komodo": {"command": "k"},
+                "grafana-ro": {"command": "g"},
+            }
+        });
+        let out = claude_worker_config(&home, &names(&["komodo", "nope"]));
+        let mut kept: Vec<_> = out["mcpServers"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        kept.sort();
+        assert_eq!(kept, ["komodo", "vogt"]);
+    }
+
+    #[test]
+    fn a_codex_extra_stays_enabled() {
+        let config: toml::Table = r#"
+            [mcp_servers.komodo]
+            command = "k"
+            [mcp_servers.grafana]
+            command = "g"
+        "#
+        .parse()
+        .unwrap();
+        assert_eq!(
+            codex_worker_args(&config, &names(&["komodo"])),
+            ["-c", "mcp_servers.grafana.enabled=false"]
+        );
+    }
+
+    #[test]
+    fn prepare_lists_what_was_kept_and_warns_unknown_extras() {
+        let home = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let cj = home.path().join(".claude.json");
+        std::fs::write(
+            &cj,
+            r#"{"mcpServers":{"vogt":{"command":"v"},"cadastre":{"command":"c"},"komodo":{"command":"k"}}}"#,
+        )
+        .unwrap();
+        let trim = prepare(
+            McpSet::Worker,
+            &names(&["komodo", "ghost"]),
+            Some(home.path()),
+            Some(&cj),
+            state.path(),
+            uuid::Uuid::nil(),
+        );
+        assert_eq!(trim.claude_servers, ["vogt", "cadastre", "komodo"]);
+        assert_eq!(trim.unregistered, ["ghost"]);
+        assert!(
+            trim.claude_config.is_some(),
+            "an unknown extra never stops the trim"
+        );
+        let section = brief_section(&trim.claude_servers, &trim.unregistered);
+        assert!(section.contains("vogt, cadastre, komodo"));
+        assert!(section.contains("session_grant_request"));
+        assert!(section.contains("ghost"));
     }
 
     #[test]

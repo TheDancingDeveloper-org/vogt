@@ -856,6 +856,7 @@ class EngineClient:
         resume: str | None = None,
         permission_mode: str | None = None,
         mcp_set: str | None = None,
+        mcp_extra: list[str] | None = None,
         account: str | None = None,
         autopilot: bool = False,
         role: str = "worker",
@@ -914,6 +915,10 @@ class EngineClient:
             # Sent only when trimmed (WI-2740); the engine builds the
             # per-session MCP config.
             spec["mcp_set"] = mcp_set
+            if mcp_extra:
+                # The project's add-only extras (WI-2746); only a trimmed set
+                # has anything to add to.
+                spec["mcp_extra"] = list(mcp_extra)
         if account:
             # A Claude Code account *name* from the engine's own allowlist;
             # the engine maps it to a config directory and refuses a name it
