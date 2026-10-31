@@ -44,6 +44,9 @@ ENGINE_SESSION_ENV = "VOGT_ENGINE_SESSION_ID"
 #: `vogt.application.identity.HEADER_ENGINE_SESSION`, spelled out: the
 #: bridge ships to clients and imports nothing from the application.
 ENGINE_SESSION_HEADER = "X-Vogt-Engine-Session"
+#: `vogt.adapters.mcp.profiles`, spelled out for the same reason (WI-2740).
+TOOL_PROFILE_ENV = "VOGT_MCP_TOOL_PROFILE"
+TOOL_PROFILE_HEADER = "X-Vogt-Tool-Profile"
 DEFAULT_TIMEOUT_SECONDS = 30
 #: A tools/call that itself waits (`timeout_s` / `wake_timeout_s`) needs the
 #: HTTP read to outlast that wait. The bridge adds the default on top and
@@ -78,6 +81,7 @@ class Bridge:
         *,
         token: str | None = None,
         engine_session: str | None = None,
+        tool_profile: str | None = None,
         stdin: TextIO | None = None,
         stdout: TextIO | None = None,
         stderr: TextIO | None = None,
@@ -86,6 +90,7 @@ class Bridge:
         self._url = url.rstrip("/")
         self._token = token
         self._engine_session = (engine_session or "").strip() or None
+        self._tool_profile = (tool_profile or "").strip() or None
         self._stdin = stdin if stdin is not None else sys.stdin
         self._stdout = stdout if stdout is not None else sys.stdout
         self._stderr = stderr if stderr is not None else sys.stderr
@@ -262,6 +267,9 @@ class Bridge:
             # the core uses it only to attribute a pod-token caller's
             # session.start, after the engine vouches for the session.
             headers[ENGINE_SESSION_HEADER] = self._engine_session
+        if self._tool_profile:
+            # Which tool list this session is shown (WI-2740).
+            headers[TOOL_PROFILE_HEADER] = self._tool_profile
         return headers
 
     def _get(
@@ -370,6 +378,7 @@ def main() -> int:  # pragma: no cover - exercised via the console script
         url,
         token=resolve_token(os.environ),
         engine_session=os.environ.get(ENGINE_SESSION_ENV),
+        tool_profile=os.environ.get(TOOL_PROFILE_ENV),
     ).serve()
     return 0
 

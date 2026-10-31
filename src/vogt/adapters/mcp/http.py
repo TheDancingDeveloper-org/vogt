@@ -21,6 +21,7 @@ from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
 from vogt.adapters.mcp.compact import text_payload
+from vogt.adapters.mcp.profiles import resolve_profile, shows
 from vogt.adapters.mcp.stdio import (
     INVALID_PARAMS,
     METHOD_NOT_FOUND,
@@ -75,8 +76,14 @@ def add_mcp_route(
         # is the slow part, so only it is offloaded.
         ctx, caller = resolve(request)
         ctx = with_claimed_engine_session(ctx, request.headers)
+        profile = resolve_profile(request.headers, request.query_params)
         response = await asyncio.to_thread(
-            _handle, message, ctx=ctx, caller=caller, registry=registry
+            _handle,
+            message,
+            ctx=ctx,
+            caller=caller,
+            registry=registry,
+            profile=profile,
         )
         if response is None:
             # A notification. 202 with no body is the streamable-HTTP shape.
@@ -92,6 +99,7 @@ def _handle(
     ctx: AppContext,
     caller: Authenticated,
     registry: OperationRegistry,
+    profile: str = "full",
 ) -> dict[str, Any] | None:
     raw_id = message.get("id")
     message_id: MessageId = raw_id if isinstance(raw_id, str | int) else None
@@ -123,6 +131,7 @@ def _handle(
             tool.to_wire()
             for tool in surface.list_tools()
             if caller.grant.allows(tool.scope, mutating=tool.mutating)[0]
+            and shows(profile, tool.name)
         ]
         return _result(message_id, {"tools": visible})
     if method == "tools/call":

@@ -418,3 +418,22 @@ def test_a_trailing_slash_does_not_double_up(url: str) -> None:
         transport=transport,
     ).serve()
     assert all("//mcp" not in call["url"] for call in transport.calls)
+
+
+def test_the_tool_profile_is_sent_as_a_header() -> None:
+    """WI-2740: a worker session asks for the short tool list."""
+    transport = _remote()
+    bridge = Bridge(
+        REMOTE,
+        token="vogt_abc",
+        tool_profile=" worker ",
+        stdin=io.StringIO(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"})),
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+        transport=transport,
+    )
+    bridge.serve()
+    assert transport.calls[0]["headers"]["X-Vogt-Tool-Profile"] == "worker"
+    transport = _remote()
+    _run(transport, {"jsonrpc": "2.0", "id": 1, "method": "ping"})
+    assert "X-Vogt-Tool-Profile" not in transport.calls[0]["headers"]
