@@ -43,20 +43,23 @@ you are accountable for what you submit and must be able to explain it.
 project space. Security reports go to the channel in
 [`../SECURITY.md`](../SECURITY.md), never to a public issue.
 
+## How changes land
+
+Changes land through graft, batched. Workers `g land` on graft line `backlog-1`. Oversight cuts one batch PR from the line (`graft-mirror pr-batch`) and merges it with `land-pr --method rebase`. When a backlog of work is under way, all of it goes into a single batch PR. Batch rules: workspace `.claude/rules/delivery-process.md` ("Landing").
+
+- Graft line: `backlog-1`; mirror: `graft-dev-mirror-vogt`
+- Required checks: `ci`, `runner-policy`, `dependency review`
+- Merge queue: yes (the `main merge queue` ruleset; see [`ci.md`](ci.md))
+
 ## 2. Workflow
 
 - `main` is the only long-lived product branch, and every release is a `v*`
   tag on `main`. `main` is rebase-only with linear history, so no merge commit
   reaches it.
-- Development lands on the integration branch `integrate/vogt-next`, not on
-  `main`:
-  - A worker branches from `origin/integrate/vogt-next` in its own worktree,
-    on `wi-<n>-<slug>`, and lands by pushing that branch. It opens no pull
-    request.
-  - Oversight reviews the pushed branch and merges it into
-    `integrate/vogt-next` by rebase or fast-forward only.
-  - The operator approves the integration pull request from
-    `integrate/vogt-next` to `main`, and approves every deploy.
+- Product work does not land by branch or pull request. Workers land through
+  graft and oversight batches the lands, as described in
+  [How changes land](#how-changes-land). The operator approves each batch
+  pull request and every deploy.
 - The integration branch is rebased onto `origin/main`. Never merge `main`
   into `integrate/*`. From now on, oversight merges into `integrate/*` by
   rebase or fast-forward only, so no merge commit lands there. The integration
@@ -67,11 +70,12 @@ project space. Security reports go to the channel in
 - A change that does not go through an integration branch, such as a fork pull
   request, branches from `origin/main` and opens its pull request against
   `main`, under the same linear-history rule.
-- Keep pull requests small and single-purpose. A nearby cleanup belongs in the
+- Each change is small and single-purpose; how changes are batched and landed
+  is in [How changes land](#how-changes-land). A nearby cleanup belongs in the
   same change only when the change is not correct without it.
-- Keep the branch rebased onto its base: `origin/integrate/vogt-next` for a
-  worker branch, `origin/main` for a fork pull request. History is linear, so a
-  stale base is the usual reason a green change cannot land.
+- Keep the change rebased onto its base before it lands: the graft line for a
+  worker land (`g sync`), `origin/main` for a fork pull request. History is
+  linear, so a stale base is the usual reason a green change cannot land.
 - Fill in the [pull request template](../.github/PULL_REQUEST_TEMPLATE.md):
   what changed, why, which gates you ran, which documents you updated.
 - Documentation changes in the same pull request as the code it describes:
@@ -375,9 +379,10 @@ docs-only diff and fails whenever any half failed. **Required status checks on
 `main` are `ci` and `runner-policy`.** The `e2e` workflow (§5) is not
 required; it runs after a merge and nightly.
 
-**Landing: the merge queue.** Push a branch and open a pull request. The PR
-gets only the fast, path-scoped checks above, so do not expect, or re-run by
-hand, the full suite on it. Land with `land-pr`, which enqueues the PR
+**Landing: the merge queue.** Landing is through graft, as described in
+[How changes land](#how-changes-land). The batch PR gets only the fast,
+path-scoped checks above, so do not expect, or re-run by hand, the full suite
+on it. Oversight lands the batch with `land-pr`, which enqueues the PR
 (`gh pr merge --auto`) and follows the queue's `merge_group` runs. The full
 suite runs there, against the exact tree `main` will become. A failed queue run
 dequeues the PR: fix, push, re-run `land-pr`. Rebase only when the queue
