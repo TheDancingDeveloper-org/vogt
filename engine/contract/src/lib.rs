@@ -564,8 +564,7 @@ pub enum HibernateTrigger {
 pub enum DoneSource {
     /// The `AUTOPILOT: DONE` line among the last lines of its screen.
     Marker,
-    /// A done declaration made through the engine's own report route. Named
-    /// here so the wire shape is settled; nothing emits it yet.
+    /// A `result` posted through the engine's report route (WI-1520).
     Report,
 }
 
@@ -773,6 +772,17 @@ pub struct SetBlocked {
     pub reason: Option<String>,
     #[serde(default)]
     pub items: Vec<String>,
+}
+
+/// `POST /api/sessions/{id}/report`: a session's own typed report (WI-1520).
+/// Vogt stores the report; the engine announces it as a `reported` change, and
+/// a `result` also declares the session done and turns its autopilot off.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ReportSession {
+    /// `progress`, `result`, `question` or `blocker`.
+    pub kind: String,
+    #[serde(default)]
+    pub summary: String,
 }
 
 /// What `GET /api/sessions/{id}/wait` waits for.
@@ -1136,6 +1146,13 @@ pub enum ServerEvent {
         /// When it was declared. RFC 3339.
         at: String,
         source: DoneSource,
+    },
+    /// A session posted its own typed report (WI-1520). `summary` is the
+    /// first 120 characters of the agent's text: untrusted data.
+    SessionReported {
+        id: Uuid,
+        kind: String,
+        summary: String,
     },
     /// A session was hibernated: its process tree is gone, the session is
     /// still listed (`activity: hibernated`) and can be woken.

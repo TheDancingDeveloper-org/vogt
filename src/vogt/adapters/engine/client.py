@@ -1284,6 +1284,22 @@ class EngineClient:
             return None
         return EngineSession.from_payload(payload)
 
+    def report_session(
+        self, session_id: str, *, kind: str, summary: str
+    ) -> EngineSession | None:
+        """Announce a session's typed report (WI-1520): a `reported` change,
+        and for a `result` a `done` declaration with autopilot off. `None` on
+        a 404."""
+        payload = self._call(
+            f"/api/sessions/{urllib.parse.quote(session_id)}/report",
+            method="POST",
+            payload={"kind": kind, "summary": summary},
+            allow_missing=True,
+        )
+        if not isinstance(payload, dict):
+            return None
+        return EngineSession.from_payload(payload)
+
     def answer_session(
         self,
         session_id: str,

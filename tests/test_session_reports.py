@@ -130,6 +130,100 @@ def test_a_caller_with_no_session_must_name_one(wired: AppContext) -> None:
         report_session(wired, _result())
 
 
+def test_a_repeated_report_returns_the_first_with_duplicate_set(
+    wired: AppContext, engine: Engine
+) -> None:
+    session_id, _ = _start(wired)
+    ctx = _as_session(wired, session_id)
+
+    first = report_session(ctx, _result())
+    again = report_session(ctx, _result())
+
+    assert not first.duplicate
+    assert again.duplicate
+    assert again.report.id == first.report.id
+    item = get_work(wired, GetWorkParams(ref="WI-1"))
+    assert sum(c.body.startswith("Session report") for c in item.comments) == 1
+    assert len(engine.reports) == 1
+    # A different body is a new report; so is the same body under a new key.
+    assert not report_session(ctx, _result(summary="pushed again")).duplicate
+    assert not report_session(ctx, _result(idempotency_key="retry-2")).duplicate
+    assert report_session(ctx, _result(idempotency_key="retry-2")).duplicate
+
+
+def test_a_key_older_than_a_day_reports_again(wired: AppContext) -> None:
+    session_id, _ = _start(wired)
+    ctx = _as_session(wired, session_id)
+    first = report_session(ctx, _result())
+    start = wired.clock()
+    later = dataclasses.replace(ctx, clock=lambda: start + timedelta(hours=25))
+
+    again = report_session(later, _result())
+
+    assert not again.duplicate
+    assert again.report.id != first.report.id
+
+
+def test_another_sessions_id_is_refused_before_any_write(
+    wired: AppContext, engine: Engine
+) -> None:
+    worker, _ = _start(wired)
+    _other, other_engine = _start(wired)
+
+    with pytest.raises(ReportRefused):
+        report_session(_as_session(wired, worker), _result(id=other_engine))
+
+    assert engine.reports == []
+    assert engine.rows[other_engine].get("blocked") is None
+
+
+def test_a_result_is_announced_to_the_engine_which_declares_done(
+    wired: AppContext, engine: Engine
+) -> None:
+    session_id, engine_id = _start(wired)
+
+    report_session(_as_session(wired, session_id), _result())
+
+    assert engine.reports == [
+        (engine_id, {"kind": "result", "summary": "pushed wi-1-reports, gates green"})
+    ]
+    assert engine.rows[engine_id]["autopilot"] is False
+
+
+def test_a_blocker_report_sets_the_sessions_blocked_report(
+    wired: AppContext, engine: Engine
+) -> None:
+    session_id, engine_id = _start(wired)
+
+    report_session(
+        _as_session(wired, session_id),
+        _result(
+            kind="blocker",
+            summary="need the deploy token",
+            blockers=["store DEPLOY_TOKEN in Infisical"],
+        ),
+    )
+
+    blocked = engine.rows[engine_id]["blocked"]
+    assert blocked["reason"] == "need the deploy token"
+    assert blocked["items"] == ["store DEPLOY_TOKEN in Infisical"]
+    assert engine.reports[0][1]["kind"] == "blocker"
+    events = list_events(wired, ListEventsParams(limit=50)).events
+    assert any(e.kind == "session.blocked" for e in events)
+
+
+def test_a_progress_report_neither_blocks_nor_declares_done(
+    wired: AppContext, engine: Engine
+) -> None:
+    session_id, engine_id = _start(wired)
+
+    report_session(_as_session(wired, session_id), _result(kind="progress"))
+
+    assert engine.rows[engine_id].get("blocked") is None
+    assert "autopilot" not in engine.rows[engine_id]
+    assert [r[1]["kind"] for r in engine.reports] == ["progress"]
+
+
 def test_the_latest_report_rides_on_the_sweep_digest_instead_of_the_excerpt(
     wired: AppContext, engine: Engine
 ) -> None:

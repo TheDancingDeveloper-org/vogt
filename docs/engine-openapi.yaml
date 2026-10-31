@@ -513,6 +513,33 @@ paths:
               schema: { $ref: "#/components/schemas/SessionSummary" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
+  /api/sessions/{id}/report:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+    post:
+      tags: [sessions]
+      summary: Announce the session's own typed report.
+      description: >-
+        `{"kind": "progress|result|question|blocker", "summary": "..."}`
+        (summary at most 2000 bytes) publishes a `session-reported` event,
+        read as a `reported` change. A `result` also declares the session
+        done (`session-done`, source `report`) and turns its autopilot off.
+        vogt-core's `session.report` stores the report and calls this.
+      operationId: reportSession
+      x-capability: sessions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ReportSession" }
+      responses:
+        "200":
+          description: The session after the report.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionSummary" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
   /api/sessions/{id}/hibernate:
     parameters:
       - $ref: "#/components/parameters/SessionId"
@@ -1147,6 +1174,14 @@ components:
         reason: { type: string }
         items: { type: array, items: { type: string } }
         since: { type: string, format: date-time }
+    ReportSession:
+      type: object
+      required: [kind]
+      properties:
+        kind:
+          type: string
+          enum: [progress, result, question, blocker]
+        summary: { type: string, maxLength: 2000 }
     SetBlocked:
       type: object
       required: [blocked]

@@ -974,6 +974,13 @@ class SessionReportFields(BaseModel):
     checks: list[str] = []
     blockers: list[str] = []
     next_step: str | None = None
+    idempotency_key: str | None = Field(
+        default=None,
+        description=(
+            "The key a repeat of this report is recognised by (WI-1520): the "
+            "caller's, else a hash of the report's canonical body."
+        ),
+    )
 
 
 class SessionReport(Entity):

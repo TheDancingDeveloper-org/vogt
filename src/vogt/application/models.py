@@ -6655,11 +6655,27 @@ class SessionReportParams(Params):
     )
     blockers: list[str] = Field(default=[], max_length=20)
     next_step: str | None = Field(default=None, max_length=1000)
+    idempotency_key: str | None = Field(
+        default=None,
+        max_length=128,
+        description=(
+            "Names this report so a retry is not posted twice: the same key "
+            "from the same session within 24 h returns the first report with "
+            "`duplicate: true`. Defaults to a hash of the report's body."
+        ),
+    )
     reason: Reason = Field(description="Why this write is being made (audited).")
 
 
 class SessionReportResult(Result):
     report: SessionReportView
+    duplicate: bool = Field(
+        default=False,
+        description=(
+            "True when this repeats a report the session already posted in the "
+            "last 24 h (same idempotency key): nothing new was recorded."
+        ),
+    )
 
 
 class SessionBlockedResult(Result):
