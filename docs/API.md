@@ -363,12 +363,15 @@ defaults to `["operator"]`: a session Vogt never linked, typed by hand. Pass
 sessions one starter started. A digest row omits an empty `screen_tail` and
 the row-level `ready` (`digest.ready` carries it) (WI-1525).
 
-Every sweep returns an opaque `cursor`. Pass it back as `since` to get only
-the rows whose attention, activity, blocked report, latest report, approval
-or work item changed since that sweep: `unchanged` counts the rows left out
-and `gone` lists the engine ids of sessions no longer swept. `counts` still
-covers every session. A cursor that cannot be read, or is older than 24
-hours, returns every row with `cursor_reset: true` (WI-1525).
+A sweep returns an opaque `cursor` only when asked (`cursor: true`) or when
+it was given `since`; a plain sweep carries none, because the cursor grows
+with every session. Pass the cursor back as `since` to get only the rows
+whose attention, activity, blocked report, latest report, approval or work
+item changed since that sweep: `unchanged` counts the rows left out and
+`gone` lists the engine ids of sessions no longer swept. `counts` still
+covers every session. `since` is at most 512 KiB of text. A cursor that
+cannot be read, that inflates past 256 KiB, or that is older than 24 hours,
+returns every row with `cursor_reset: true` (WI-1525).
 
 Over MCP, the tool text of `session.start`, `session.hibernate`,
 `session.wake`, `session.stop`, `session.bind_work` (`digest`, plus

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+from datetime import UTC
 from typing import Any
 
 import pytest
@@ -575,7 +576,7 @@ def test_since_cursor_returns_only_changed_rows_wi1525(
     first_id, first_engine = _start(wired)
     second_id, second_engine = _start(wired)
 
-    base = sweep_sessions(wired, SweepSessionsParams())
+    base = sweep_sessions(wired, SweepSessionsParams(cursor=True))
     assert base.cursor and base.cursor_reset is None and base.unchanged is None
     assert len(base.rows) == 2
 
@@ -621,3 +622,67 @@ def test_an_expired_cursor_returns_every_row_flagged_wi1525(
     old = _encode_cursor(wired.clock() - timedelta(days=2), {})
     swept = sweep_sessions(wired, SweepSessionsParams(since=old))
     assert swept.cursor_reset is True and len(swept.rows) == 1
+
+
+def test_a_plain_sweep_carries_no_cursor_until_asked_wi1525(
+    wired: AppContext, engine: Engine
+) -> None:
+    """WI-1525: the cursor grows with every session, so it rides only on
+    `cursor: true` or on a sweep that was given `since`."""
+    _start(wired)
+    plain = sweep_sessions(wired, SweepSessionsParams())
+    assert plain.cursor is None and len(plain.rows) == 1
+
+    asked = sweep_sessions(wired, SweepSessionsParams(cursor=True))
+    assert asked.cursor
+
+    chained = sweep_sessions(wired, SweepSessionsParams(since=asked.cursor))
+    assert chained.cursor and chained.unchanged == 1
+
+
+def test_a_cursor_bomb_is_an_invalid_cursor_wi1525(
+    wired: AppContext, engine: Engine
+) -> None:
+    """WI-1525: a `since` that inflates past the byte bound is refused as an
+    invalid cursor, not inflated into memory."""
+    import base64
+    import zlib
+
+    from vogt.application.services.sessions import _CURSOR_PREFIX
+
+    _start(wired)
+    bomb_raw = (
+        b'{"t":"2026-10-31T00:00:00+00:00","f":{}' + b" " * (4 * 1024 * 1024) + b"}"
+    )
+    packed = base64.urlsafe_b64encode(zlib.compress(bomb_raw, 9)).decode().rstrip("=")
+    assert len(packed) < 512 * 1024
+    swept = sweep_sessions(wired, SweepSessionsParams(since=_CURSOR_PREFIX + packed))
+    assert swept.cursor_reset is True and len(swept.rows) == 1
+
+
+def test_a_truncated_cursor_stream_is_an_invalid_cursor_wi1525(
+    wired: AppContext, engine: Engine
+) -> None:
+    import base64
+    import zlib
+    from datetime import datetime
+
+    from vogt.application.services.sessions import _CURSOR_PREFIX
+
+    _start(wired)
+    raw = f'{{"t":"{datetime.now(UTC).isoformat()}","f":{{}}}}'.encode()
+    full = zlib.compress(raw, 9)
+    cut = base64.urlsafe_b64encode(full[:-4]).decode().rstrip("=")
+    swept = sweep_sessions(wired, SweepSessionsParams(since=_CURSOR_PREFIX + cut))
+    assert swept.cursor_reset is True
+
+
+def test_since_has_a_length_bound_wi1525() -> None:
+    import pytest
+    from pydantic import ValidationError
+
+    from vogt.application.models import SWEEP_SINCE_MAX_CHARS, SweepSessionsParams
+
+    SweepSessionsParams(since="x" * SWEEP_SINCE_MAX_CHARS)
+    with pytest.raises(ValidationError):
+        SweepSessionsParams(since="x" * (SWEEP_SINCE_MAX_CHARS + 1))

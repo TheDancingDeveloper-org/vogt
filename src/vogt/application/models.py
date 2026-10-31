@@ -4704,15 +4704,28 @@ class EngineSessionTokenResult(BaseModel):
     revoked: int = 0
 
 
+#: Longest `since` a sweep accepts: a cursor inflates to at most 256 KiB
+#: (services/sessions.py), and base64 makes that about 350 KB of text.
+SWEEP_SINCE_MAX_CHARS = 512 * 1024
+
+
 class SweepSessionsParams(Params):
     since: str | None = Field(
         default=None,
+        max_length=SWEEP_SINCE_MAX_CHARS,
         description=(
             "The `cursor` of an earlier sweep: return only rows whose "
             "attention, activity, blocked report, latest report or work item "
             "changed since, plus `gone` for sessions no longer swept. An "
             "invalid or expired cursor returns every row with "
             "`cursor_reset: true`. Counts always cover every session."
+        ),
+    )
+    cursor: bool = Field(
+        default=False,
+        description=(
+            "Return a `cursor` to pass back as `since` later. Off by default; "
+            "a sweep given `since` always returns one."
         ),
     )
     project: str | None = Field(
@@ -4853,7 +4866,8 @@ class SessionSweepResult(Result):
         default=None,
         description=(
             "Opaque: pass it as `since` on the next sweep to get only what "
-            "changed. Absent when the engine could not be asked."
+            "changed. Present when asked with `cursor: true` or given `since`; "
+            "absent when the engine could not be asked."
         ),
     )
     cursor_reset: bool | None = Field(
