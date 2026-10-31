@@ -538,11 +538,20 @@ impl SessionRegistry {
                 .as_deref()
                 .or_else(|| recorded.and_then(|r| r.mcp_set.as_deref())),
         )?;
+        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+        let claude_dir = spec
+            .env
+            .iter()
+            .flatten()
+            .rev()
+            .find(|(k, _)| k == "CLAUDE_CONFIG_DIR")
+            .map(|(_, v)| std::path::PathBuf::from(v))
+            .or_else(|| std::env::var_os("CLAUDE_CONFIG_DIR").map(std::path::PathBuf::from));
+        let claude_json = crate::mcp_set::claude_json_path(claude_dir.as_deref(), home.as_deref());
         let mcp_trim = crate::mcp_set::prepare(
             mcp_set,
-            std::env::var_os("HOME")
-                .map(std::path::PathBuf::from)
-                .as_deref(),
+            home.as_deref(),
+            claude_json.as_deref(),
             &self.cfg.state_dir,
             id,
         );

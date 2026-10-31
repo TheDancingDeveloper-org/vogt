@@ -20,6 +20,7 @@ Three rules this file exists to keep:
 from __future__ import annotations
 
 import json
+import os
 import sys
 from dataclasses import dataclass
 from typing import Any, TextIO
@@ -28,6 +29,12 @@ from pydantic import ValidationError
 
 from vogt import __version__
 from vogt.adapters.mcp.compact import text_payload
+from vogt.adapters.mcp.profiles import (
+    PROFILE_ENV,
+    PROFILE_HEADER,
+    resolve_profile,
+    shows,
+)
 from vogt.adapters.mcp.surface import McpSurface
 from vogt.errors import VogtError
 
@@ -89,7 +96,11 @@ class StdioServer:
         stdin: TextIO | None = None,
         stdout: TextIO | None = None,
         stderr: TextIO | None = None,
+        tool_profile: str | None = None,
     ) -> None:
+        # A worker session's stdio entry names its profile in the env the
+        # same way the bridge does; the listing is trimmed here (WI-2744).
+        self._profile = resolve_profile({PROFILE_HEADER: tool_profile or ""}, {})
         self._surface = surface if surface is not None else McpSurface()
         self._stdin = stdin if stdin is not None else sys.stdin
         self._stdout = stdout if stdout is not None else sys.stdout
@@ -154,7 +165,13 @@ class StdioServer:
         if method == "tools/list":
             return _result(
                 message_id,
-                {"tools": [tool.to_wire() for tool in self._surface.list_tools()]},
+                {
+                    "tools": [
+                        tool.to_wire()
+                        for tool in self._surface.list_tools()
+                        if shows(self._profile, tool.name)
+                    ]
+                },
             )
         if method == "tools/call":
             return self._call(message_id, params)
@@ -287,7 +304,7 @@ def main() -> int:
     bare binary means a client config is one word rather than a quoted
     argument list.
     """
-    StdioServer().serve()
+    StdioServer(tool_profile=os.environ.get(PROFILE_ENV)).serve()
     return 0
 
 
