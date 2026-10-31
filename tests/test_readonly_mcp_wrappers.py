@@ -319,6 +319,7 @@ def test_bootstrap_reads_existing_claude_registrations_without_the_cli(
             "vogt": stdio("/usr/local/bin/vogt-mcp"),
             "github-ro": stdio(str(wrapper), "github"),
             "forgejo-ro": stdio(str(wrapper), "gitea"),
+            "crw": {"type": "http", "url": "http://100.92.54.45:18190/mcp"},
         }
     }
     (tmp_path / ".claude.json").write_text(json.dumps(config), encoding="utf-8")
@@ -1292,3 +1293,37 @@ def test_codex_catalog_lists_the_groups_that_answer_and_keeps_operator_entries(
     again = _codex_bootstrap(tmp_path, env)
     assert again.returncode == 0, again.stderr
     assert json.loads(catalog_path.read_text(encoding="utf-8")) == catalog
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="the fast path reads with jq")
+@pytest.mark.parametrize("url", ["http://crw.test:1/mcp", ""])
+def test_bootstrap_registers_crw_as_one_http_server(tmp_path: Path, url: str) -> None:
+    """WI-2742: every Claude session gets crw as a single HTTP entry, and an
+    empty VOGT_CRW_MCP_URL registers nothing."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    calls = tmp_path / "claude-calls"
+    claude = bindir / "claude"
+    claude.write_text(f'#!/bin/sh\necho "$*" >> {calls}\nexit 0\n', encoding="utf-8")
+    claude.chmod(0o755)
+    (tmp_path / ".claude.json").write_text('{"mcpServers": {}}', encoding="utf-8")
+    proc = subprocess.run(
+        ["bash", str(BOOTSTRAP)],
+        env={
+            "PATH": f"{bindir}{os.pathsep}/usr/bin{os.pathsep}/bin",
+            "HOME": str(tmp_path),
+            "VOGT_SRC": str(tmp_path / "absent"),
+            "VOGT_CRW_MCP_URL": url,
+        },
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    lines = calls.read_text(encoding="utf-8").splitlines() if calls.exists() else []
+    adds = [line for line in lines if line.startswith("mcp add") and " crw " in line]
+    if url:
+        assert adds == [f"mcp add --scope user --transport http crw {url}"]
+    else:
+        assert adds == []

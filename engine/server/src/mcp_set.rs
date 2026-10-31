@@ -5,7 +5,8 @@
 //! 85k tokens of schema before the brief is read, which pushed a Codex worker
 //! over its auto-compact limit on its first request. A worker or review
 //! session needs the work tracker and the inventory, so it starts with the
-//! `worker` set: `vogt` under its worker tool profile and `cadastre`.
+//! `worker` set: `vogt` under its worker tool profile, `cadastre` and `crw`
+//! (web scrape and search, about 3k tokens of schema; WI-2742).
 //!
 //! The trim is per session and never touches the shared home configs:
 //! Claude Code gets `--strict-mcp-config --mcp-config=<file>` with a copy of
@@ -18,7 +19,7 @@ use std::path::{Path, PathBuf};
 use crate::error::{ApiError, Result};
 
 /// The servers a worker session keeps.
-pub const WORKER_SERVERS: &[&str] = &["vogt", "cadastre"];
+pub const WORKER_SERVERS: &[&str] = &["vogt", "cadastre", "crw"];
 /// The variable the `vogt-mcp-remote` bridge sends as its tool profile.
 pub const TOOL_PROFILE_ENV: &str = "VOGT_MCP_TOOL_PROFILE";
 /// The vogt tool profile a worker session asks for.

@@ -1337,6 +1337,38 @@ _codex_link_skills() {
     ln -s "$target" "$link" 2>/dev/null || true
 }
 
+# crw, the estate's web scrape and search service (WI-2742): one streamable
+# HTTP server at the Node B tailnet address (ops personal/crw). It needs no
+# token, so the registration is a URL only. VOGT_CRW_MCP_URL moves it, and an
+# empty value removes an entry this script wrote. Each CLI is asked only when
+# the stored URL differs, so a session launch costs one jq or grep, not a CLI.
+CRW_MCP_URL="${VOGT_CRW_MCP_URL-http://100.92.54.45:18190/mcp}"
+
+install_crw_server() {
+    local url="$CRW_MCP_URL" config
+    if command -v claude >/dev/null 2>&1; then
+        config="${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json"
+        if [[ -z "$url" ]]; then
+            claude_lacks crw || claude mcp remove --scope user crw >/dev/null 2>&1 || true
+        elif ! jq -e --arg u "$url" '.mcpServers.crw.url == $u' "$config" >/dev/null 2>&1; then
+            claude mcp remove --scope user crw >/dev/null 2>&1 || true
+            claude mcp add --scope user --transport http crw "$url" >/dev/null \
+                || printf 'mcp-bootstrap: claude registration of crw failed\n' >&2
+        fi
+    fi
+    if command -v codex >/dev/null 2>&1; then
+        config="${CODEX_HOME:-$HOME/.codex}/config.toml"
+        if [[ -z "$url" ]]; then
+            grep -qsF '[mcp_servers.crw]' "$config" && codex mcp remove crw >/dev/null 2>&1 || true
+        elif ! grep -qsF "url = \"$url\"" "$config" || ! grep -qsF '[mcp_servers.crw]' "$config"; then
+            codex mcp remove crw >/dev/null 2>&1 || true
+            codex mcp add crw --url "$url" >/dev/null \
+                || printf 'mcp-bootstrap: codex registration of crw failed\n' >&2
+        fi
+    fi
+    return 0
+}
+
 # Vogt registrations are best-effort: a failure here must not cost an agent its
 # git/gh credentials.
 install_vogt_bridge
@@ -1357,6 +1389,7 @@ if command -v codex >/dev/null 2>&1; then
         || printf 'mcp-bootstrap: could not write the Codex driven-session bundle\n' >&2
 fi
 install_readonly_servers
+install_crw_server
 
 # stderr, like every other message in this script, because of who calls it.
 #
