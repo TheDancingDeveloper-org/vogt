@@ -593,22 +593,35 @@ def _discover() -> dict[str, int] | None:
 
     key = os.environ.get("HOMELAB_LITELLM_SESSION_KEY", "").strip()
     base = os.environ.get("VOGT_LITELLM_BASE_URL", "http://100.92.54.45:4000/v1").rstrip("/")
-    ttl = int(os.environ.get("VOGT_CODEX_CATALOG_TTL", "21600") or 0)
+    try:
+        ttl = int(os.environ.get("VOGT_CODEX_CATALOG_TTL", "21600") or 0)
+    except ValueError:
+        ttl = 21600
+
+    def _groups(raw: object) -> dict[str, int] | None:
+        # A cache that does not hold whole numbers is no cache (WI-2744 N3).
+        if not isinstance(raw, dict):
+            return None
+        try:
+            return {str(k): int(v) for k, v in raw.items()}
+        except (TypeError, ValueError):
+            return None
+
+    cached_groups = None
     try:
         with open(probe_path, encoding="utf-8") as fh:
             cached = json.load(fh)
+        cached_groups = _groups(cached.get("groups")) if isinstance(cached, dict) else None
         if (
-            cached.get("base") == base
+            cached_groups
+            and cached.get("base") == base
             and time.time() - float(cached.get("at", 0)) < ttl
-            and isinstance(cached.get("groups"), dict)
         ):
-            return {str(k): int(v) for k, v in cached["groups"].items()}
-    except (OSError, ValueError, TypeError):
-        cached = None
+            return cached_groups
+    except (OSError, ValueError, TypeError, AttributeError):
+        cached_groups = None
     if not key or os.environ.get("VOGT_CODEX_CATALOG_PROBE", "1") == "0":
-        if cached and isinstance(cached.get("groups"), dict):
-            return {str(k): int(v) for k, v in cached["groups"].items()}
-        return None
+        return cached_groups or None
     headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
 
     def _get(url: str) -> object:
@@ -641,8 +654,17 @@ def _discover() -> dict[str, int] | None:
         except Exception:
             return False
 
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        ok = dict(zip(reported, pool.map(_answers, reported)))
+    # WI-2744 N5: with a model asked for, only that group is probed; the rest
+    # are the groups that answered last time, else the known list. Without
+    # one, every group is probed, as on a first bootstrap.
+    requested = _requested_model()
+    if requested and requested in reported:
+        trusted = set(cached_groups or ()) or set(ROUTER_GROUPS)
+        ok = {slug: slug in trusted for slug in reported}
+        ok[requested] = _answers(requested)
+    else:
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            ok = dict(zip(reported, pool.map(_answers, reported)))
     groups = {slug: _context_window(slug, reported[slug]) for slug in reported if ok[slug]}
     if not groups:
         return None
@@ -654,6 +676,20 @@ def _discover() -> dict[str, int] | None:
     except OSError:
         pass
     return groups
+
+def _requested_model() -> str | None:
+    # The model this launch asks for: VOGT_CODEX_MODEL, else the config's
+    # own top-level model.
+    named = os.environ.get("VOGT_CODEX_MODEL", "").strip()
+    if named:
+        return named
+    try:
+        import tomllib
+        with open(path, "rb") as fh:
+            value = tomllib.load(fh).get("model")
+    except (OSError, ValueError):
+        return None
+    return value.strip() or None if isinstance(value, str) else None
 
 discovered = _discover()
 if discovered is None:
@@ -788,13 +824,22 @@ def _root_value(key: str) -> str | None:
     slots = _root_slots(key)
     if not slots:
         return None
-    return lines[slots[-1]].split("=", 1)[1].strip().strip('"').strip("'")
+    raw = lines[slots[-1]]
+    try:
+        import tomllib
+        value = tomllib.loads(raw).get(key)
+    except ValueError:
+        return raw.split("=", 1)[1].strip().strip('"').strip("'")
+    return value if isinstance(value, str) else None
 
 def _set_root(key: str, value: str, when: set[str | None]) -> None:
     current = _root_value(key)
     if current not in when:
         return
-    rendered = f'{key} = "{value}"\n'
+    # A TOML basic string: json's escapes are a subset TOML reads the same
+    # way, so a slug or path with a quote or backslash stays one value
+    # (WI-2744 N4).
+    rendered = f"{key} = {json.dumps(value)}\n"
     slots = _root_slots(key)
     if slots:
         lines[slots[-1]] = rendered

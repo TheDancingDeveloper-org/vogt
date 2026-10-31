@@ -151,32 +151,47 @@ pub fn claude_config_path(state_dir: &Path, session_id: uuid::Uuid) -> PathBuf {
     crate::prompt_files::session_prompt_dir(state_dir).join(format!("{session_id}.mcp.json"))
 }
 
-/// Build the trim for `set` from the user's configs under `home`. A config
-/// that is missing or does not parse leaves that CLI untrimmed (logged), so a
-/// fault here never stops a launch.
+/// Build the trim for `set` from the user's configs under `home`.
+/// `claude_json` is the Claude Code config the launch reads (the engine's
+/// `$CLAUDE_CONFIG_DIR/.claude.json`, else `$HOME/.claude.json`; see
+/// [`claude_json_path`]). A config that is missing, does not parse, or has no
+/// `vogt` entry leaves that CLI untrimmed (warned), so a fault here never
+/// stops a launch and never starts a worker without the work tracker.
 pub fn prepare(
     set: McpSet,
     home: Option<&Path>,
+    claude_json: Option<&Path>,
     state_dir: &Path,
     session_id: uuid::Uuid,
 ) -> McpTrim {
     if set == McpSet::Full {
         return McpTrim::default();
     }
-    let Some(home) = home else {
-        return McpTrim::default();
-    };
     let mut trim = McpTrim::default();
-    match read_json(&home.join(".claude.json")) {
-        Some(claude) => {
-            let path = claude_config_path(state_dir, session_id);
-            match write_private(&path, &claude_worker_config(&claude)) {
-                Ok(()) => trim.claude_config = Some(path),
-                Err(e) => tracing::warn!(error = %e, "worker MCP config not written; full set"),
+    match claude_json.map(|p| (p, read_json(p))) {
+        Some((_, Some(claude))) => {
+            let config = claude_worker_config(&claude);
+            if config["mcpServers"].get("vogt").is_none() {
+                tracing::warn!(
+                    "no vogt entry in the Claude config; worker MCP set not applied, full set"
+                );
+            } else {
+                let path = claude_config_path(state_dir, session_id);
+                match write_private(&path, &config) {
+                    Ok(()) => trim.claude_config = Some(path),
+                    Err(e) => tracing::warn!(error = %e, "worker MCP config not written; full set"),
+                }
             }
         }
-        None => tracing::info!("no readable ~/.claude.json; Claude MCP set left as is"),
+        Some((path, None)) => tracing::warn!(
+            path = %path.display(),
+            "no readable Claude config; Claude MCP set left as is"
+        ),
+        None => tracing::warn!("no Claude config path; Claude MCP set left as is"),
     }
+    let Some(home) = home else {
+        return trim;
+    };
     let codex = std::fs::read_to_string(home.join(".codex").join("config.toml"))
         .ok()
         .and_then(|text| text.parse::<toml::Table>().ok());
@@ -184,6 +199,15 @@ pub fn prepare(
         trim.codex_args = codex_worker_args(&codex);
     }
     trim
+}
+
+/// The Claude Code config a launch reads: `$CLAUDE_CONFIG_DIR/.claude.json`
+/// when set, else `$HOME/.claude.json`.
+pub fn claude_json_path(config_dir: Option<&Path>, home: Option<&Path>) -> Option<PathBuf> {
+    config_dir
+        .filter(|d| !d.as_os_str().is_empty())
+        .or(home)
+        .map(|d| d.join(".claude.json"))
 }
 
 fn read_json(path: &Path) -> Option<serde_json::Value> {
@@ -290,11 +314,18 @@ mod tests {
         )
         .unwrap();
         let id = uuid::Uuid::nil();
+        let cj = home.path().join(".claude.json");
         assert_eq!(
-            prepare(McpSet::Full, Some(home.path()), state.path(), id),
+            prepare(McpSet::Full, Some(home.path()), Some(&cj), state.path(), id),
             McpTrim::default()
         );
-        let trim = prepare(McpSet::Worker, Some(home.path()), state.path(), id);
+        let trim = prepare(
+            McpSet::Worker,
+            Some(home.path()),
+            Some(&cj),
+            state.path(),
+            id,
+        );
         let path = trim.claude_config.unwrap();
         assert_eq!(path, claude_config_path(state.path(), id));
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
@@ -303,5 +334,38 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert!(written["mcpServers"].get("komodo").is_none());
         assert!(trim.codex_args.is_empty(), "no codex config, no overrides");
+    }
+
+    #[test]
+    fn a_claude_config_without_vogt_leaves_the_full_set() {
+        let home = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let cj = home.path().join(".claude.json");
+        std::fs::write(&cj, r#"{"mcpServers":{"cadastre":{"command":"c"}}}"#).unwrap();
+        let id = uuid::Uuid::nil();
+        let trim = prepare(
+            McpSet::Worker,
+            Some(home.path()),
+            Some(&cj),
+            state.path(),
+            id,
+        );
+        assert!(trim.claude_config.is_none());
+        assert!(!claude_config_path(state.path(), id).exists());
+    }
+
+    #[test]
+    fn the_claude_config_follows_claude_config_dir() {
+        let dir = Path::new("/acct");
+        let home = Path::new("/home/u");
+        assert_eq!(
+            claude_json_path(Some(dir), Some(home)).unwrap(),
+            dir.join(".claude.json")
+        );
+        assert_eq!(
+            claude_json_path(Some(Path::new("")), Some(home)).unwrap(),
+            home.join(".claude.json")
+        );
+        assert_eq!(claude_json_path(None, None), None);
     }
 }
