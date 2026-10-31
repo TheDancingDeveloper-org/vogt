@@ -560,6 +560,8 @@ fn walk(
     if depth > MAX_DEPTH {
         return;
     }
+    // A quoted heredoc's body is text the shell never expands or runs.
+    let command = &strip_quoted_heredocs(command);
     let mut dir = cwd.to_path_buf();
     let mut unreadable = unreadable;
     for simple in split_commands(command) {
@@ -647,6 +649,116 @@ fn walk(
             _ => {}
         }
     }
+}
+
+/// `command` without the bodies of its quoted heredocs (`<<'X'`, `<<"X"`,
+/// `<<\X`, and the `<<-` forms), which the shell passes on as plain text.
+/// An unquoted heredoc expands `$( … )` and backticks, so its body stays.
+/// A body with no closing delimiter runs to the end, as in the shell.
+fn strip_quoted_heredocs(command: &str) -> String {
+    let mut out = String::new();
+    // Delimiters of the quoted heredocs opened on the current line, and
+    // whether each strips leading tabs (`<<-`).
+    let mut pending: Vec<(String, bool)> = Vec::new();
+    let mut quote: Option<char> = None;
+    let mut chars = command.chars().peekable();
+    while let Some(c) = chars.next() {
+        out.push(c);
+        match quote {
+            Some(q) => {
+                if c == q {
+                    quote = None;
+                } else if c == '\\' && q == '"' {
+                    if let Some(n) = chars.next() {
+                        out.push(n);
+                    }
+                }
+            }
+            None if c == '\\' => {
+                if let Some(n) = chars.next() {
+                    out.push(n);
+                }
+            }
+            None if c == '"' || c == '\'' || c == '`' => quote = Some(c),
+            None if c == '<' && chars.peek() == Some(&'<') => {
+                out.push(chars.next().unwrap_or('<'));
+                if chars.peek() == Some(&'<') {
+                    // `<<<` is a here-string, not a heredoc.
+                    out.push(chars.next().unwrap_or('<'));
+                    continue;
+                }
+                let tabs = chars.peek() == Some(&'-');
+                if tabs {
+                    out.push(chars.next().unwrap_or('-'));
+                }
+                while let Some(&n) = chars.peek().filter(|n| **n == ' ' || **n == '\t') {
+                    out.push(n);
+                    chars.next();
+                }
+                let mut word = String::new();
+                let mut quoted = false;
+                let mut wq: Option<char> = None;
+                while let Some(&n) = chars.peek() {
+                    if wq.is_none() && (n.is_whitespace() || ";&|<>()".contains(n)) {
+                        break;
+                    }
+                    out.push(n);
+                    chars.next();
+                    match wq {
+                        Some(q) if n == q => wq = None,
+                        Some(_) => word.push(n),
+                        None if n == '\'' || n == '"' => {
+                            quoted = true;
+                            wq = Some(n);
+                        }
+                        None if n == '\\' => {
+                            quoted = true;
+                            if let Some(e) = chars.next() {
+                                out.push(e);
+                                word.push(e);
+                            }
+                        }
+                        None => word.push(n),
+                    }
+                }
+                if quoted && !word.is_empty() {
+                    pending.push((word, tabs));
+                }
+            }
+            None if c == '\n' && !pending.is_empty() => {
+                for (delimiter, tabs) in std::mem::take(&mut pending) {
+                    // Skip body lines up to and including the delimiter.
+                    loop {
+                        let mut line = String::new();
+                        let mut ended = false;
+                        for n in chars.by_ref() {
+                            if n == '\n' {
+                                ended = true;
+                                break;
+                            }
+                            line.push(n);
+                        }
+                        let line = if tabs {
+                            line.trim_start_matches('\t')
+                        } else {
+                            &line
+                        };
+                        if line == delimiter {
+                            if ended {
+                                out.push('\n');
+                            }
+                            break;
+                        }
+                        if !ended {
+                            break;
+                        }
+                    }
+                }
+            }
+            None => {}
+        }
+    }
+    out
 }
 
 /// The bodies of the `$( … )` and backtick substitutions in `simple`, outside
@@ -1099,6 +1211,8 @@ const BUILTIN: &[&str] = &[
     "config",
     "count-objects",
     "credential",
+    "credential-cache",
+    "credential-store",
     "cvsexportcommit",
     "cvsimport",
     "cvsserver",
@@ -1108,6 +1222,7 @@ const BUILTIN: &[&str] = &[
     "diff",
     "diff-files",
     "diff-index",
+    "diff-pairs",
     "diff-tree",
     "difftool",
     "fast-export",
@@ -1122,6 +1237,7 @@ const BUILTIN: &[&str] = &[
     "for-each-repo",
     "format-patch",
     "fsck",
+    "fsck-objects",
     "fsmonitor--daemon",
     "gc",
     "get-tar-commit-id",
@@ -1132,24 +1248,33 @@ const BUILTIN: &[&str] = &[
     "help",
     "hook",
     "http-backend",
+    "http-fetch",
+    "http-push",
     "imap-send",
     "index-pack",
     "init",
+    "init-db",
     "instaweb",
     "interpret-trailers",
+    "last-modified",
     "lfs",
     "log",
     "ls-files",
     "ls-remote",
     "ls-tree",
-    "maintenance",
     "mailinfo",
     "mailsplit",
+    "maintenance",
     "merge",
     "merge-base",
     "merge-file",
     "merge-index",
+    "merge-octopus",
     "merge-one-file",
+    "merge-ours",
+    "merge-recursive",
+    "merge-resolve",
+    "merge-subtree",
     "merge-tree",
     "mergetool",
     "mktag",
@@ -1171,12 +1296,14 @@ const BUILTIN: &[&str] = &[
     "range-diff",
     "read-tree",
     "rebase",
+    "receive-pack",
     "reflog",
     "refs",
     "remote",
     "repack",
     "replace",
     "replay",
+    "repo",
     "request-pull",
     "rerere",
     "reset",
@@ -1188,6 +1315,7 @@ const BUILTIN: &[&str] = &[
     "scalar",
     "send-email",
     "send-pack",
+    "shell",
     "shortlog",
     "show",
     "show-branch",
@@ -1199,6 +1327,7 @@ const BUILTIN: &[&str] = &[
     "status",
     "stripspace",
     "submodule",
+    "submodule--helper",
     "subtree",
     "svn",
     "switch",
@@ -1856,6 +1985,29 @@ mod tests {
     /// The third review's routes (WI-1326): config aliases from the
     /// environment or an include, aliases from the config file, commands
     /// inside substitutions and `coproc`, and per-subcommand valued flags.
+    #[test]
+    fn a_quoted_heredoc_body_is_text_and_an_unquoted_one_runs() {
+        let root = Path::new("/r");
+        let p = workspace(&["README.md", "src/a.py"], Some("checkout"), root);
+        for command in [
+            "git commit -m \"$(cat <<'EOF'\nfix: x\n\ngit reset --hard is refused now\nEOF\n)\"",
+            "cat <<'EOF' > notes.md\n$(git reset --hard)\nEOF",
+            "cat <<\"EOF\" > notes.md\n`git stash`\nEOF\ngit status",
+            "cat <<\\EOF\ngit checkout -- README.md\nEOF",
+            "cat <<-'EOF'\n\tgit clean -fd\n\tEOF\ngit log",
+            "git status <<< 'git reset --hard'",
+        ] {
+            assert_eq!(check(&p, command, root), None, "{command}");
+        }
+        for command in [
+            "cat <<EOF > notes.md\n$(git reset --hard)\nEOF",
+            "cat <<'EOF'\ntext\nEOF\ngit reset --hard",
+        ] {
+            let reason = check(&p, command, root).unwrap_or_else(|| panic!("allowed: {command}"));
+            assert!(reason.contains("discard guard"), "{command}: {reason}");
+        }
+    }
+
     #[test]
     fn discard_guard_reads_the_remaining_routes() {
         let root = Path::new("/r");
