@@ -823,6 +823,9 @@ _SWEEP_INPUT_LINES = 8
 # so a later sweep can say what changed without Vogt keeping state per caller.
 _CURSOR_PREFIX = "sw1."
 _CURSOR_TTL = timedelta(hours=24)
+# The inflated cursor is a few dozen bytes per session, so 256 KiB covers
+# thousands of sessions. A larger stream is a crafted `since`, not a cursor.
+_CURSOR_MAX_BYTES = 256 * 1024
 
 
 def _row_fingerprint(row: SessionSweepRow) -> str:
@@ -857,7 +860,13 @@ def _decode_cursor(cursor: str, now: datetime) -> dict[str, str] | None:
         return None
     body = cursor[len(_CURSOR_PREFIX) :]
     try:
-        raw = zlib.decompress(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
+        # Inflate at most _CURSOR_MAX_BYTES: a zlib bomb must not reach memory.
+        inflater = zlib.decompressobj()
+        raw = inflater.decompress(
+            base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)), _CURSOR_MAX_BYTES
+        )
+        if inflater.unconsumed_tail or not inflater.eof:
+            return None
         data = json.loads(raw)
         at = datetime.fromisoformat(data["t"])
         prints = data["f"]
@@ -1041,7 +1050,13 @@ def sweep_sessions(ctx: AppContext, params: SweepSessionsParams) -> SessionSweep
         for row in rows
         if row.session is not None
     }
-    cursor = _encode_cursor(now, prints)
+    # The cursor rides only on request (`cursor: true`) or when this sweep
+    # itself read one (`since`), so a plain sweep does not carry it.
+    cursor = (
+        _encode_cursor(now, prints)
+        if params.cursor or params.since is not None
+        else None
+    )
     delta: dict[str, Any] = {}
     if params.since is not None:
         before = _decode_cursor(params.since, now)
