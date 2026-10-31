@@ -441,6 +441,13 @@ pub(crate) struct Tail {
     /// The snapshot JSON last written. An unchanged snapshot is not written
     /// again, and does not restart the timer.
     persisted_json: Option<String>,
+    /// Codex turn boundaries read since the tailer last took them (WI-1576).
+    events: Vec<crate::codex_rollout::RolloutEvent>,
+    /// A read of the current path has succeeded, so later events are live
+    /// rather than the history a first read replays.
+    caught_up: bool,
+    /// The events held were read by a path's first read.
+    replay: bool,
 }
 
 impl Tail {
@@ -453,6 +460,9 @@ impl Tail {
             meter: Meter::new(agent),
             persisted: None,
             persisted_json: None,
+            events: Vec::new(),
+            caught_up: false,
+            replay: false,
         }
     }
 }
@@ -572,9 +582,12 @@ pub(crate) fn advance(
             tail.offset = 0;
             tail.partial.clear();
             tail.meter = Meter::new(&tail.agent);
+            tail.caught_up = false;
             return None;
         }
     };
+    tail.replay = !tail.caught_up;
+    tail.caught_up = true;
     tail.offset = offset;
     feed_bytes(tail, &bytes);
 
@@ -602,7 +615,11 @@ fn feed_bytes(tail: &mut Tail, bytes: &[u8]) {
         } else {
             tail.partial.extend_from_slice(&rest[..at]);
             let line = String::from_utf8_lossy(&tail.partial);
-            tail.meter.feed_line(line.trim_end_matches('\r'));
+            let line = line.trim_end_matches('\r');
+            tail.meter.feed_line(line);
+            if tail.agent == "codex" {
+                tail.events.extend(crate::codex_rollout::parse_line(line));
+            }
             tail.partial.clear();
         }
         rest = &rest[at + 1..];
@@ -656,6 +673,19 @@ pub fn spawn_economics_tailer(state: Arc<AppState>, home: PathBuf, tick: Duratio
                 let Ok(Ok((mut tail, outcome))) = worked else {
                     continue;
                 };
+                // A Codex rollout's turn boundaries become ready and done
+                // (WI-1576). Applied even with no events once the rollout is
+                // read, so the screen path stands down for it.
+                if tail.agent == "codex" && tail.caught_up {
+                    let events = std::mem::take(&mut tail.events);
+                    crate::codex_rollout::apply(
+                        &session,
+                        &state.sessions,
+                        &state.bus,
+                        &events,
+                        tail.replay,
+                    );
+                }
                 let (snapshot, mut persist, now) = match &outcome {
                     Some((snapshot, due, now)) => (Some(snapshot.clone()), *due, Some(*now)),
                     None => (None, false, None),
