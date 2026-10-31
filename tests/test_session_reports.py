@@ -10,9 +10,11 @@ import pytest
 from vogt.adapters.engine import EngineClient
 from vogt.application.context import AppContext
 from vogt.application.models import (
+    CommentParams,
     CreateWorkParams,
     GetWorkParams,
     InboxListParams,
+    ListEventsParams,
     RegisterProjectParams,
     SessionDigestParams,
     SessionReportParams,
@@ -21,9 +23,11 @@ from vogt.application.models import (
     SweepSessionsParams,
 )
 from vogt.application.services import (
+    comment_work,
     create_work,
     digest,
     get_work,
+    list_events,
     list_inbox,
     register_project,
     report_session,
@@ -31,6 +35,7 @@ from vogt.application.services import (
     stop_session,
     sweep_sessions,
 )
+from vogt.core.entities import HandoffFields
 from vogt.core.oversight import DONE_WITHOUT_REPORT, result_reported
 from vogt.core.principal import Principal
 from vogt.errors import InvalidRequest, ReportRefused
@@ -254,3 +259,102 @@ def test_a_stopped_or_old_sessions_report_leaves_the_inbox(
 
     stop_session(wired, StopSessionParams(id=session_id, reason=WHY))
     assert kinds(wired) == []
+
+
+# -- an unbound autopilot worker gets a chore (WI-1338) ---------------
+
+
+def _unbound(ctx: AppContext, **over: object) -> StartSessionParams:
+    fields: dict[str, object] = {
+        "project": "vogt",
+        "autopilot": True,
+        "task": "Tidy the release notes\nand nothing else",
+        "reason": WHY,
+    }
+    fields.update(over)
+    return StartSessionParams.model_validate(fields)
+
+
+def test_an_unbound_autopilot_worker_gets_a_local_chore_it_can_hand_off_on(
+    wired: AppContext, engine: Engine
+) -> None:
+    result = start_session(wired, _unbound(wired))
+
+    ref = result.session.work_item
+    assert ref == "WI-2"
+    item = get_work(wired, GetWorkParams(ref=ref)).item
+    assert item.kind == "chore"
+    assert item.priority == "p3"
+    assert item.title == "Session: Tidy the release notes"
+    assert item.body.startswith("Tidy the release notes\nand nothing else")
+    assert item.project_slug == "vogt"
+    created = [
+        e
+        for e in list_events(wired, ListEventsParams()).events
+        if e.kind == "work.created" and e.entity_id == item.id
+    ]
+    assert created
+    comment_work(
+        _as_session(wired, result.session.id),
+        CommentParams(
+            ref=ref,
+            body="done",
+            kind="handoff",
+            handoff=HandoffFields(done=["notes"]),
+            reason=WHY,
+        ),
+    )
+
+
+def test_the_chore_is_titled_from_the_session_name(wired: AppContext) -> None:
+    result = start_session(wired, _unbound(wired, name="notes-pass"))
+    item = get_work(wired, GetWorkParams(ref=result.session.work_item or "")).item
+    assert item.title == "Session: notes-pass"
+
+
+@pytest.mark.parametrize(
+    "over",
+    [
+        {"autopilot": False},
+        {"purpose": "review", "autopilot": True},
+        {"purpose": "investigate", "autopilot": True},
+    ],
+)
+def test_no_chore_without_autopilot_or_for_a_reading_purpose(
+    wired: AppContext, over: dict[str, object]
+) -> None:
+    result = start_session(wired, _unbound(wired, **over))
+    assert result.session.work_item is None
+
+
+def test_no_chore_when_an_item_is_named(wired: AppContext) -> None:
+    result = start_session(wired, _unbound(wired, project=None, work_item="WI-1"))
+    assert result.session.work_item == "WI-1"
+    with pytest.raises(Exception):  # noqa: B017 - only WI-1 exists
+        get_work(wired, GetWorkParams(ref="WI-2"))
+
+
+def test_a_resume_reuses_the_open_chore(wired: AppContext) -> None:
+    first = start_session(wired, _unbound(wired))
+    again = start_session(wired, _unbound(wired, resume="conv-1"))
+    assert again.session.work_item == first.session.work_item
+
+
+def test_a_result_report_closes_the_chore(wired: AppContext) -> None:
+    result = start_session(wired, _unbound(wired))
+    report_session(_as_session(wired, result.session.id), _result())
+    item = get_work(wired, GetWorkParams(ref=result.session.work_item or "")).item
+    assert item.state == "done"
+
+
+def test_a_result_report_leaves_a_filed_item_open(wired: AppContext) -> None:
+    session_id, _ = _start(wired)
+    report_session(_as_session(wired, session_id), _result())
+    assert get_work(wired, GetWorkParams(ref="WI-1")).item.state != "done"
+
+
+def test_a_progress_report_leaves_the_chore_open(wired: AppContext) -> None:
+    result = start_session(wired, _unbound(wired))
+    report_session(_as_session(wired, result.session.id), _result(kind="progress"))
+    item = get_work(wired, GetWorkParams(ref=result.session.work_item or "")).item
+    assert item.state != "done"
