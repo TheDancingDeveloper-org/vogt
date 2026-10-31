@@ -48,7 +48,7 @@ def test_no_tool_lets_a_caller_choose_who_it_is(surface: McpSurface) -> None:
 
 def test_the_wire_shape_is_an_mcp_tool(surface: McpSurface) -> None:
     wire = surface.list_tools()[0].to_wire()
-    assert set(wire) == {"name", "description", "inputSchema"}
+    assert set(wire) == {"name", "description", "inputSchema", "annotations"}
 
 
 def test_calling_a_tool_returns_plain_data(surface: McpSurface) -> None:
@@ -69,3 +69,15 @@ def test_calling_a_tool_returns_plain_data(surface: McpSurface) -> None:
 def test_calling_an_unknown_tool_is_an_error(surface: McpSurface) -> None:
     with pytest.raises(RegistryError, match="unknown MCP tool"):
         surface.call_tool("nope")
+
+
+def test_tools_list_carries_annotations() -> None:
+    """WI-1574: Codex needs readOnlyHint to call a read tool without approval."""
+    from vogt.adapters.mcp.surface import McpSurface
+
+    wire = {t.name: t.to_wire() for t in McpSurface().list_tools()}
+    assert all("annotations" in tool for tool in wire.values())
+    assert wire["status"]["annotations"]["readOnlyHint"] is True
+    assert wire["session_remove"]["annotations"]["readOnlyHint"] is False
+    assert wire["session_remove"]["annotations"]["destructiveHint"] is True
+    assert wire["work_comment"]["annotations"]["destructiveHint"] is False

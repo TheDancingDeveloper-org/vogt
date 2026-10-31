@@ -2395,6 +2395,18 @@ def _screen_result(
     )
 
 
+#: The longest one wait call blocks (WI-1574). Codex cuts an MCP tool call
+#: at 300 s by default, so a longer wait would die mid-call. A wait asked
+#: for longer returns `timeout` here with `still_waiting` set; the caller
+#: calls again (with `next_cursor`, for wait-any) to keep waiting.
+WAIT_BLOCK_CAP_S = 280
+
+
+def _capped(timeout_s: int) -> tuple[int, bool]:
+    """The seconds to block for, and whether the cap shortened the ask."""
+    return min(timeout_s, WAIT_BLOCK_CAP_S), timeout_s > WAIT_BLOCK_CAP_S
+
+
 def session_wait(ctx: AppContext, params: SessionWaitParams) -> SessionWaitResult:
     """Block until the session is ready (or needs a person, or exits), exits,
     or changes — or the timeout passes — on the engine's own event bus.
@@ -2405,11 +2417,12 @@ def session_wait(ctx: AppContext, params: SessionWaitParams) -> SessionWaitResul
     engine = _engine(ctx)
     target = _target(ctx, params.id)
     engine_id = target.engine_session_id
+    block_s, capped = _capped(params.timeout_s)
     try:
         waited = engine.wait_session(
             engine_id,
             until=params.until.replace("_", "-"),
-            timeout_s=params.timeout_s,
+            timeout_s=block_s,
         )
     except Conflict:
         # Nothing happens in a hibernated session until somebody wakes it,
@@ -2449,6 +2462,7 @@ def session_wait(ctx: AppContext, params: SessionWaitParams) -> SessionWaitResul
         screen=shown if params.screen else None,
         digest=None if params.screen else _wait_digest(ctx, params.id, engine_id),
         screen_tail=[] if params.screen else _tail_of(shown),
+        still_waiting=capped and waited.outcome == "timeout",
     )
 
 
@@ -2567,12 +2581,13 @@ def session_wait_any(
     engine = _engine(ctx)
     ids = _engine_ids(ctx, params.ids, params.supervised_by)
     kinds = [one.strip() for one in params.until if one.strip()] or None
+    block_s, capped = _capped(params.timeout_s)
     try:
         waited = engine.wait_any(
             ids=ids,
             until=kinds,
             cursor=params.cursor,
-            timeout_s=params.timeout_s,
+            timeout_s=block_s,
         )
     except Conflict:
         waited = None
@@ -2590,6 +2605,7 @@ def session_wait_any(
         outcome=waited.outcome,
         change=None if waited.change is None else _change(waited.change, labels),
         next_cursor=waited.next_cursor,
+        still_waiting=capped and waited.outcome == "timeout",
     )
 
 
