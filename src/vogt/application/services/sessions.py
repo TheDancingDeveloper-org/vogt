@@ -146,6 +146,7 @@ from vogt.application.services._policy_conflicts import (
     task_named_base,
     task_policy_conflicts,
 )
+from vogt.application.services._recommendation import dialog_recommendation
 from vogt.application.services.claims import check_claim, record_claim_check
 from vogt.application.services.preferences import dispatch_settings
 from vogt.application.services.reports import latest_reports, one_line
@@ -1071,10 +1072,20 @@ def sweep_sessions(ctx: AppContext, params: SweepSessionsParams) -> SessionSweep
                 f"{reason}; posture lost on resume: it showed bypass before the "
                 "restart and was woken without it (a person re-grants it)"
             )
+        recommendation = None
+        engine_row = live.get(summary.engine_session_id)
+        if verdict.attention == "approval" and engine_row is not None:
+            approval = engine_row.approval
+            if approval is not None and approval.options:
+                with ctx.declared.read() as view:
+                    recommendation = dialog_recommendation(
+                        view, engine_row.id, approval
+                    )
         rows.append(
             SessionSweepRow(
                 attention=verdict.attention,
                 attention_reason=reason,
+                recommendation=recommendation,
                 session=summary,
                 screen_tail=list(entry.screen_tail)[-params.screen_lines :]
                 if params.screen_lines
@@ -1157,6 +1168,7 @@ def sweep_sessions(ctx: AppContext, params: SweepSessionsParams) -> SessionSweep
                     blocked_age_s=row.blocked_age_s,
                     blocked_stale=row.blocked_stale,
                     claim_check=row.claim_check,
+                    recommendation=row.recommendation,
                 )
             )
         rows = kept[: params.limit]
