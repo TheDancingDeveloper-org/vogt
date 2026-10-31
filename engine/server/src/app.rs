@@ -325,6 +325,10 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         // "wait-any" as session ids.
         .route("/api/sessions/changes", get(api::session_changes))
         .route("/api/workspaces", get(crate::workspaces::list_workspaces))
+        .route(
+            "/api/workspaces/clean",
+            post(crate::workspace_clean::clean_workspace),
+        )
         .route("/api/sessions/wait-any", get(api::session_wait_any))
         .route(
             "/api/sessions/{id}",
