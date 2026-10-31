@@ -267,6 +267,7 @@ def test_a_stopped_or_old_sessions_report_leaves_the_inbox(
 def _unbound(ctx: AppContext, **over: object) -> StartSessionParams:
     fields: dict[str, object] = {
         "project": "vogt",
+        "template": "claude",
         "autopilot": True,
         "task": "Tidy the release notes\nand nothing else",
         "reason": WHY,

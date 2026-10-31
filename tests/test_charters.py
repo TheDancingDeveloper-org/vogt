@@ -111,7 +111,10 @@ def test_the_brief_carries_charters_broadest_first(
     _set(wired, "initiative", "INITIATIVE RULE", ref="port")
 
     start_session(
-        wired, StartSessionParams(work_item="WI-1", task="TASK TEXT", reason=WHY)
+        wired,
+        StartSessionParams(
+            work_item="WI-1", template="claude", task="TASK TEXT", reason=WHY
+        ),
     )
     brief = engine.last_spec["prompt"]
     order = [

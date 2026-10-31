@@ -519,7 +519,12 @@ def test_review_of_opens_a_session_on_the_review_brief(instance: AppContext) -> 
 
     started = start_session(
         ctx,
-        StartSessionParams(review_of=item.ref, task="watch the migration", reason=WHY),
+        StartSessionParams(
+            review_of=item.ref,
+            template="claude",
+            task="watch the migration",
+            reason=WHY,
+        ),
     )
     assert started.session.work_item == item.ref
     prompt = engine.last_spec["prompt"]

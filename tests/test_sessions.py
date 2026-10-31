@@ -341,7 +341,10 @@ def test_a_task_is_folded_into_the_session_brief(
         wired,
         StartSessionParams(
             project="vogt",
+            template="claude",
             task="check how many containers need an update",
+            # Off, so no unbound chore is cut and the project brief leads.
+            autopilot=False,
             reason=WHY,
         ),
     )
@@ -350,6 +353,22 @@ def test_a_task_is_folded_into_the_session_brief(
     assert "check how many containers need an update" in brief
     # The project context is still there, under the task.
     assert brief.index("# vogt") < brief.index("## Task")
+
+
+def test_a_task_without_an_agent_template_is_refused(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """WI-1807: a plain shell never reads the brief, so a task would be dropped
+    while the session sat idle. Refused before the engine is asked."""
+    before = len(engine.alive)
+    with pytest.raises(InvalidRequest, match="without a template"):
+        start_session(
+            wired,
+            StartSessionParams(work_item="WI-1", task="fix the sweep", reason=WHY),
+        )
+    assert len(engine.alive) == before
+    # A blank task is no task: the plain shell still starts.
+    start_session(wired, StartSessionParams(project="vogt", task="  ", reason=WHY))
 
 
 def test_an_agent_start_takes_its_task_from_the_reason(
@@ -428,7 +447,11 @@ def test_autopilot_adds_the_keep_going_convention_and_is_audited(
     start_session(
         wired,
         StartSessionParams(
-            project="vogt", task="work the backlog", autopilot=True, reason=WHY
+            project="vogt",
+            template="claude",
+            task="work the backlog",
+            autopilot=True,
+            reason=WHY,
         ),
     )
     brief = engine.last_spec["prompt"]
@@ -480,10 +503,11 @@ def test_autopilot_reaches_the_engine_and_is_on_by_default_for_an_agent_task(
         wired, StartSessionParams(project="vogt", template="claude", reason=WHY)
     )
     assert "autopilot" not in engine.last_spec
-    start_session(
-        wired, StartSessionParams(project="vogt", task="look around", reason=WHY)
-    )
-    assert "autopilot" not in engine.last_spec
+    # And with no agent the task is refused outright (WI-1807).
+    with pytest.raises(InvalidRequest, match="without a template"):
+        start_session(
+            wired, StartSessionParams(project="vogt", task="look around", reason=WHY)
+        )
 
 
 def test_the_enforced_policy_reaches_the_engine_and_guidance_does_not(
@@ -2600,6 +2624,7 @@ def test_touch_points_render_and_the_map_stays_inside_the_tree(
         ctx,
         StartSessionParams(
             project="mapped",
+            template="claude",
             task="wire the map",
             files=["src/lib.py", "README.md:1-3", "/etc/passwd"],
             symbols=["lib"],
@@ -2663,7 +2688,12 @@ def test_purpose_implement_resolves_the_implement_profile(
 def test_only_an_implement_start_gets_the_stop_at_push_footer(
     wired: AppContext, engine: StandInEngine
 ) -> None:
-    start_session(wired, StartSessionParams(work_item="WI-1", task="look", reason=WHY))
+    start_session(
+        wired,
+        StartSessionParams(
+            work_item="WI-1", template="claude", task="look", reason=WHY
+        ),
+    )
     assert IMPLEMENT_FOOTER not in engine.last_spec["prompt"]
 
 
@@ -3170,6 +3200,7 @@ def test_a_task_asking_for_a_pr_on_a_push_only_project_is_overridden(
         StartSessionParams(
             work_item=item.ref,
             reason=WHY,
+            template="claude",
             task="Fix it, then open a PR against main.",
         ),
     )
@@ -3198,6 +3229,7 @@ def test_a_task_that_agrees_with_the_policy_adds_no_override(
         StartSessionParams(
             work_item=item.ref,
             reason=WHY,
+            template="claude",
             task="Open NO PR, push the branch only. Never merge or deploy.",
         ),
     )
@@ -3248,6 +3280,7 @@ def test_an_initiative_base_replaces_the_project_base(
             work_item=item.ref,
             reason=WHY,
             worktree=True,
+            template="claude",
             task="Cut a branch from rust-core and land it onto rust-core.",
         ),
     )
@@ -3276,7 +3309,10 @@ def test_a_task_naming_a_known_long_lived_branch_is_taken_at_its_word(
     result = start_session(
         wired,
         StartSessionParams(
-            work_item=item.ref, reason=WHY, task="Branch off rust-core and fix it."
+            work_item=item.ref,
+            reason=WHY,
+            template="claude",
+            task="Branch off rust-core and fix it.",
         ),
     )
     assert result.effective_policy is not None
@@ -3300,7 +3336,10 @@ def test_an_unknown_base_in_a_task_is_still_overridden(
     result = start_session(
         wired,
         StartSessionParams(
-            work_item=item.ref, reason=WHY, task="Branch off develop and fix it."
+            work_item=item.ref,
+            reason=WHY,
+            template="claude",
+            task="Branch off develop and fix it.",
         ),
     )
     assert result.effective_policy is not None

@@ -4442,8 +4442,9 @@ class StartSessionParams(Params):
             "to read the brief and carry that task out, so 'start a session "
             "on X and check its containers' opens an agent already checking "
             "them. A plain shell only gets the brief's path in "
-            "VOGT_ENGINE_AGENT_TASK_PROMPT_FILE, so pair a task with "
-            "`template` when it is something to carry out. Omitted on an "
+            "VOGT_ENGINE_AGENT_TASK_PROMPT_FILE and never reads it, so a "
+            "task with no `template` (none given and none set by the "
+            "`purpose`) is refused rather than silently dropped. Omitted on an "
             "agent start, the task is taken from `reason` (a leading "
             "`Task:` dropped); a `review` purpose gets a default review task."
         ),

@@ -44,6 +44,7 @@ def test_session_start_says_a_task_is_the_agents_first_prompt(
     assert "first prompt" in task
     assert "Task section" in task
     assert "VOGT_ENGINE_AGENT_TASK_PROMPT_FILE" in task
+    assert "refused" in task, "WI-1807: a task without a template is refused"
 
 
 def test_session_start_documents_resume(tools: dict[str, Any]) -> None:
