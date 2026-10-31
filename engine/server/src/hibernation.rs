@@ -100,6 +100,9 @@ pub struct Record {
     /// The MCP set the first start asked for (WI-2740); a wake keeps it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_set: Option<String>,
+    /// The worker set's extra servers the first start asked for (WI-2746).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mcp_extra: Vec<String>,
     /// What a wake resumes. `None` only for a shell hibernated on request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation: Option<AgentConversation>,
@@ -233,6 +236,7 @@ impl Record {
             settings_file: None,
             add_dirs: Vec::new(),
             mcp_set: None,
+            mcp_extra: Vec::new(),
             conversation: None,
             brief_file: None,
             keep_awake: false,

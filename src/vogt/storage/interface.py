@@ -204,6 +204,8 @@ class ProjectUpdate:
     write_back: str | None = None
     link_state: str | None = None
     exclusions: tuple[str, ...] | None = None
+    #: Replaces the worker MCP extras (WI-2746). `None` leaves them alone.
+    mcp_extra: tuple[str, ...] | None = None
     #: Replaces the project's agent policy wholesale. `None` leaves it alone.
     agent_policy: AgentPolicy | None = None
     contract_adopted_at: datetime | None = None
