@@ -426,6 +426,26 @@ def test_the_purpose_picks_the_mcp_set(
     assert "mcp_set" not in engine.last_spec
 
 
+def test_project_mcp_extra_rides_a_worker_start_only(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """WI-2746: the project's extras go with a worker set, never a full one."""
+    update_project(
+        wired,
+        UpdateProjectParams(
+            slug="vogt", mcp_extra=["komodo", " ", "komodo"], reason=WHY
+        ),
+    )
+    start_session(
+        wired, StartSessionParams(work_item="WI-1", purpose="review", reason=WHY)
+    )
+    assert engine.last_spec["mcp_extra"] == ["komodo"]
+    start_session(
+        wired, StartSessionParams(work_item="WI-1", purpose="design", reason=WHY)
+    )
+    assert "mcp_extra" not in engine.last_spec
+
+
 def test_a_review_purpose_gets_a_default_review_task(
     wired: AppContext, engine: StandInEngine
 ) -> None:
