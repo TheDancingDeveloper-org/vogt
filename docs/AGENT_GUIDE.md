@@ -461,6 +461,17 @@ $ uv run vogt session input --id <session-id> --text "now fix the first failure"
 $ uv run vogt session stop --id <session-id> --reason "done"
 ```
 
+**The overseer's loop (v2).** An overseer does not re-sweep on a timer. It
+calls `session_wait_any(supervised_by=me, until=[done, reported, blocked,
+approval, errored, budget], cursor=<last>, timeout_s=600)`, then
+`session_changes(since=<cursor>)`, and acts only on the sessions listed,
+keeping the new `next_cursor`. A full `session_sweep(supervised_by=me,
+exclude_roles=[operator])` runs at most hourly. Model policy, merge rules and
+the follow-up list are not in the loop prompt: they live in the overseer's
+brief, the project's `agent_policy` and a Vogt query (`work_list(state=review)`
+or the initiative). See
+[Oversight loop v2](design/oversight-sessions.md#oversight-loop-v2-wi-1524).
+
 Rules:
 
 - **Never send a blind Enter.** Read the screen first; an Enter at a menu you
