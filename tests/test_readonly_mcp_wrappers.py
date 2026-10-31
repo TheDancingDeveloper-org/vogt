@@ -1295,6 +1295,109 @@ def test_codex_catalog_lists_the_groups_that_answer_and_keeps_operator_entries(
     assert json.loads(catalog_path.read_text(encoding="utf-8")) == catalog
 
 
+def _counting_router(posts: list[str]) -> Any:
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    class Router(BaseHTTPRequestHandler):
+        def log_message(self, *args: object) -> None:
+            pass
+
+        def _send(self, status: int, body: object) -> None:
+            data = json.dumps(body).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def do_GET(self) -> None:
+            rows = [{"model_name": n, "model_info": {}} for n in ("grok", "gpt-5.4")]
+            self._send(200, {"data": rows})
+
+        def do_POST(self) -> None:
+            length = int(self.headers.get("Content-Length", "0"))
+            posts.append(json.loads(self.rfile.read(length))["model"])
+            self._send(200, {"choices": []})
+
+    server = HTTPServer(("127.0.0.1", 0), Router)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+@pytest.mark.skipif(
+    shutil.which("python3") is None or shutil.which("flock") is None,
+    reason="the Codex config rewrite needs python3 and flock",
+)
+def test_codex_catalog_probes_only_the_requested_model(tmp_path: Path) -> None:
+    """WI-2744 N5: a cache miss with a model asked for probes that one only."""
+    posts: list[str] = []
+    server = _counting_router(posts)
+    env = {
+        "HOMELAB_LITELLM_SESSION_KEY": "test-key",
+        "VOGT_LITELLM_BASE_URL": f"http://127.0.0.1:{server.server_address[1]}/v1",
+        "VOGT_CODEX_MODEL": "gpt-5.4",
+    }
+    try:
+        proc = _codex_bootstrap(tmp_path, env)
+    finally:
+        server.shutdown()
+    assert proc.returncode == 0, proc.stderr
+    assert posts == ["gpt-5.4"]
+    catalog = json.loads(
+        (tmp_path / "codex" / "vogt-model-catalog.json").read_text(encoding="utf-8")
+    )
+    assert {row["slug"] for row in catalog["models"]} == {"grok", "gpt-5.4"}
+
+
+@pytest.mark.skipif(
+    shutil.which("python3") is None or shutil.which("flock") is None,
+    reason="the Codex config rewrite needs python3 and flock",
+)
+def test_codex_catalog_survives_a_corrupt_probe_cache_and_bad_ttl(
+    tmp_path: Path,
+) -> None:
+    """WI-2744 N3: a cache with non-numeric windows, or a bad TTL, falls back
+    to the static list instead of failing the bootstrap."""
+    codex_home = tmp_path / "codex"
+    codex_home.mkdir()
+    (codex_home / "vogt-model-catalog.probe.json").write_text(
+        json.dumps({"at": 9e12, "base": "x", "groups": {"grok": "wide"}}),
+        encoding="utf-8",
+    )
+    proc = _codex_bootstrap(
+        tmp_path, {"VOGT_CODEX_CATALOG_TTL": "soon", "VOGT_CODEX_CATALOG_PROBE": "0"}
+    )
+    assert proc.returncode == 0, proc.stderr
+    catalog = json.loads(
+        (codex_home / "vogt-model-catalog.json").read_text(encoding="utf-8")
+    )
+    assert catalog["models"][0]["slug"] == "grok"
+
+
+@pytest.mark.skipif(
+    shutil.which("python3") is None or shutil.which("flock") is None,
+    reason="the Codex config rewrite needs python3 and flock",
+)
+def test_codex_root_values_are_escaped(tmp_path: Path) -> None:
+    """WI-2744 N4: a path with a quote or backslash stays one TOML string."""
+    import tomllib
+
+    codex_home = tmp_path / 'co"de\\x'
+    proc = _codex_bootstrap(tmp_path, {"CODEX_HOME": str(codex_home)})
+    assert proc.returncode == 0, proc.stderr
+    parsed = tomllib.loads((codex_home / "config.toml").read_text(encoding="utf-8"))
+    assert parsed["model_catalog_json"] == str(codex_home / "vogt-model-catalog.json")
+    assert parsed["model"] == "grok"
+    # A rerun reads its own escaped value back and leaves it be.
+    again = _codex_bootstrap(tmp_path, {"CODEX_HOME": str(codex_home)})
+    assert again.returncode == 0, again.stderr
+    assert (
+        tomllib.loads((codex_home / "config.toml").read_text(encoding="utf-8"))
+        == parsed
+    )
+
+
 @pytest.mark.skipif(shutil.which("jq") is None, reason="the fast path reads with jq")
 @pytest.mark.parametrize("url", ["http://crw.test:1/mcp", ""])
 def test_bootstrap_registers_crw_as_one_http_server(tmp_path: Path, url: str) -> None:

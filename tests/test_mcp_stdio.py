@@ -326,3 +326,23 @@ def test_work_update_and_comment_are_compact_unless_verbose_wi1525(
     assert commented["structuredContent"]["comment"]["body"] == "x" * 2000
     full = json.loads(responses[4]["result"]["content"][0]["text"])
     assert full["comment"]["body"] == "x" * 2000
+
+
+def test_a_worker_profile_trims_the_stdio_listing(instance: AppContext) -> None:
+    """A stdio vogt-mcp entry honours VOGT_MCP_TOOL_PROFILE (WI-2744 N2)."""
+    from vogt.adapters.mcp.profiles import WORKER_TOOLS
+
+    stdin = io.StringIO(json.dumps(_request(1, "tools/list")) + "\n")
+    stdout = io.StringIO()
+    StdioServer(
+        McpSurface(context_factory=lambda: instance),
+        stdin=stdin,
+        stdout=stdout,
+        stderr=io.StringIO(),
+        tool_profile="worker",
+    ).serve()
+    names = {tool["name"] for tool in json.loads(stdout.getvalue())["result"]["tools"]}
+    assert names
+    assert names <= WORKER_TOOLS
+    full, _ = _session(instance, _request(1, "tools/list"))
+    assert len(full[0]["result"]["tools"]) > len(names)
