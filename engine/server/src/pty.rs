@@ -808,6 +808,10 @@ impl Session {
                 "the session has exited; there is nothing to block".into(),
             ));
         }
+        let report = report.map(|mut r| {
+            r.key = escalation_key(self.id, &r);
+            r
+        });
         *self.blocked.lock() = report.clone();
         self.reset_unblock();
         bus.publish(ServerEvent::SessionBlocked {
@@ -2538,5 +2542,51 @@ mod secret_env_tests {
             "/opt/other/vogt-agent-auth",
             helper
         ));
+    }
+}
+
+/// The content key of a blocked report (WI-996): `session:boundary:hash`,
+/// where the hash covers the reason and the items. The same ask reported
+/// twice keeps its key, so a re-report does not raise a second Inbox entry.
+pub fn escalation_key(session: Uuid, report: &vogt_engine_contract::BlockedReport) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(report.reason.trim().as_bytes());
+    for item in &report.items {
+        h.update([0u8]);
+        h.update(item.trim().as_bytes());
+    }
+    let digest = h.finalize();
+    let hex: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
+    format!("{session}:{}:{hex}", report.boundary.as_str())
+}
+
+#[cfg(test)]
+mod escalation_key_tests {
+    use super::*;
+    use vogt_engine_contract::{BlockedReport, EscalationBoundary};
+
+    fn report(reason: &str, since: &str) -> BlockedReport {
+        BlockedReport {
+            reason: reason.into(),
+            items: vec!["merge it".into()],
+            since: since.into(),
+            boundary: EscalationBoundary::DeniedAction,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_key_follows_content_not_time() {
+        let id = Uuid::from_u128(3);
+        let a = escalation_key(id, &report("gh pr merge denied", "2026-01-01T00:00:00Z"));
+        let b = escalation_key(id, &report("gh pr merge denied ", "2026-02-01T00:00:00Z"));
+        assert_eq!(a, b);
+        assert!(a.starts_with(&format!("{id}:denied_action:")));
+        assert_ne!(a, escalation_key(id, &report("another ask", "x")));
+        assert_ne!(
+            a,
+            escalation_key(Uuid::from_u128(4), &report("gh pr merge denied", "x"))
+        );
     }
 }

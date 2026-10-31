@@ -781,8 +781,48 @@ pub struct KeepAwakeRequest {
     pub keep_awake: bool,
 }
 
+/// Who can resolve an escalation (WI-996): a person, the session's overseer,
+/// or either. An untyped blocked report needs a person.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EscalationNeeds {
+    #[default]
+    Person,
+    Overseer,
+    Either,
+}
+
+/// What kind of boundary a session hit (WI-996). An untyped blocked report is
+/// `other`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EscalationBoundary {
+    /// A permission dialog the agent cannot answer itself.
+    PermissionPrompt,
+    /// An action the harness or a guard refused.
+    DeniedAction,
+    /// A credential the session does not hold.
+    Credential,
+    /// A choice that belongs to someone else.
+    Decision,
+    #[default]
+    Other,
+}
+
+impl EscalationBoundary {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::PermissionPrompt => "permission_prompt",
+            Self::DeniedAction => "denied_action",
+            Self::Credential => "credential",
+            Self::Decision => "decision",
+            Self::Other => "other",
+        }
+    }
+}
+
 /// An agent's own report that it cannot go on without a person.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlockedReport {
     /// Why, in the agent's words. Untrusted text.
     pub reason: String,
@@ -791,6 +831,17 @@ pub struct BlockedReport {
     pub items: Vec<String>,
     /// When it was reported (RFC 3339).
     pub since: String,
+    /// Who can resolve it (WI-996).
+    #[serde(default)]
+    pub needs: EscalationNeeds,
+    /// What kind of boundary it is (WI-996).
+    #[serde(default)]
+    pub boundary: EscalationBoundary,
+    /// `session:boundary:hash(reason)`, set by the engine: the same ask
+    /// reported again keeps its key, so the Inbox and push dedupe on content,
+    /// not on `since`. Empty only on a report from an older engine.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub key: String,
 }
 
 /// `POST /api/sessions/{id}/blocked`: set (`blocked: true`, with a reason) or
@@ -802,6 +853,12 @@ pub struct SetBlocked {
     pub reason: Option<String>,
     #[serde(default)]
     pub items: Vec<String>,
+    /// Who can resolve it; a person when absent.
+    #[serde(default)]
+    pub needs: EscalationNeeds,
+    /// What kind of boundary it is; `other` when absent.
+    #[serde(default)]
+    pub boundary: EscalationBoundary,
 }
 
 /// `POST /api/sessions/{id}/report`: a session's own typed report (WI-1520).

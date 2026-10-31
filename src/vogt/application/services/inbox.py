@@ -1023,8 +1023,10 @@ def _blocked_entry(
 ) -> InboxEntry:
     """A session whose agent reported it cannot go on without a person.
 
-    One occurrence per report: its key carries the report's time, so a new
-    report after an archived one surfaces again. The text is the agent's —
+    One occurrence per ask: its key is the report's content key (WI-996), so
+    the same ask reported again stays one entry (archived stays archived) and
+    a different ask surfaces anew. A report from an engine without content
+    keys falls back to the report's time. The text is the agent's —
     untrusted, shown verbatim.
     """
     project = None if declared is None else projects.get(declared.project_id)
@@ -1032,7 +1034,11 @@ def _blocked_entry(
     todo = "; ".join(blocked.items)
     summary = f"{blocked.reason}{' — to do: ' + todo if todo else ''}"[:1000]
     return InboxEntry(
-        entry_key=f"agent:session:{session_id}:blocked:{blocked.since or 'unknown'}",
+        entry_key=(
+            f"agent:session:{session_id}:blocked:{blocked.key}"
+            if blocked.key
+            else f"agent:session:{session_id}:blocked:{blocked.since or 'unknown'}"
+        ),
         source=AGENT_KIND,
         kind="session.blocked",
         occurred_at=_when(blocked.since) or ctx.clock(),

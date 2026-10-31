@@ -3300,6 +3300,7 @@ mod tests {
             reason: "needs a person".into(),
             items: vec![],
             since: "2020-01-01T00:00:00Z".into(),
+            ..Default::default()
         });
         assert!(!hidden(&blocked));
 
@@ -3356,6 +3357,7 @@ mod tests {
             reason: "x".into(),
             items: vec![],
             since: "2026-10-12T09:00:00Z".into(),
+            ..Default::default()
         });
         summary.last_person_input_at = Some("2026-10-12T08:00:00Z".into());
         assert_eq!(super::latest_event_at(&summary), "2026-10-12T09:00:00Z");

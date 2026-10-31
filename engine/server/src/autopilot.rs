@@ -206,6 +206,7 @@ fn refused_report(line: &str) -> vogt_engine_contract::BlockedReport {
         since: time::OffsetDateTime::now_utc()
             .format(&time::format_description::well_known::Rfc3339)
             .unwrap_or_default(),
+        ..Default::default()
     }
 }
 
@@ -222,6 +223,7 @@ fn cap_report(nudges: u32) -> vogt_engine_contract::BlockedReport {
         since: time::OffsetDateTime::now_utc()
             .format(&time::format_description::well_known::Rfc3339)
             .unwrap_or_default(),
+        ..Default::default()
     }
 }
 
