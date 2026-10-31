@@ -2246,6 +2246,16 @@ what is free, the percent used, and `needs_attention` once that passes
 which is a different fact from a volume that is fine.
 
 
+With `ENGINE_WORKTREE_REMOVE_ON_STOP=true` (off by default, WI-1774), a
+stop goes on to remove the worktree itself after the cleanup, through the
+same checks as `POST /api/workspaces/clean` with `mode: "remove"` and no
+`force`: the tree must be clean (untracked files count; git-ignored ones are
+regenerable and do not), `HEAD` must be in its base ref, upstream,
+`origin/HEAD` or `origin/main`, the branch must have no stash entries, and
+no other running or hibernated session may work there. Then
+`git worktree remove` runs from the main checkout and the merged branch is
+deleted. Any doubt keeps the tree. A hibernation never removes one.
+
 #### Session scratch, background processes and free space
 
 Claude Code keeps each session's scratchpad at

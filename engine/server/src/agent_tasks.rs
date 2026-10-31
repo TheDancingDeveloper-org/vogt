@@ -5239,6 +5239,7 @@ mod tests {
             session_rss_warn_bytes: None,
             worktree_clean_on_hibernate: false,
             worktree_clean_on_stop: false,
+            worktree_remove_on_stop: false,
             disk_warn_percent: 85,
             scratch_prune_bytes: 2 << 30,
             min_free_percent: 0,

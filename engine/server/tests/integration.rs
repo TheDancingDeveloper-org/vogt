@@ -90,6 +90,7 @@ fn test_config() -> Config {
         session_rss_warn_bytes: None,
         worktree_clean_on_hibernate: false,
         worktree_clean_on_stop: false,
+        worktree_remove_on_stop: false,
         disk_warn_percent: 85,
         scratch_prune_bytes: 2 << 30,
         min_free_percent: 0,
@@ -17436,6 +17437,112 @@ async fn workspace_clean_refuses_live_dirty_and_unmerged_trees() {
     assert_eq!(body["branch_deleted"], "wi-1325-worker");
     assert!(!tree.exists());
     assert!(!has_branch(&repo, "wi-1325-worker"));
+}
+
+/// WI-1774: with `worktree_remove_on_stop`, the last session out of a clean,
+/// merged worktree removes it and its branch; a worktree another live session
+/// still uses, or a dirty one, is kept.
+#[tokio::test]
+async fn a_stop_removes_a_clean_merged_worktree_and_keeps_live_or_dirty_ones() {
+    let (tmp, mut cfg, stub) = hibernation_sandbox();
+    std::fs::write(&stub, "#!/bin/sh\nprintf '> '\nsleep 300\n").unwrap();
+    cfg.worktree_clean_on_stop = true;
+    cfg.worktree_remove_on_stop = true;
+    let repo = tmp.path().join("repo");
+    worktree_checkout(&repo);
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let command = json!([stub.to_string_lossy()]);
+    let start = |body: Value| {
+        let client = client.clone();
+        let base = base.clone();
+        async move {
+            let created: Value = client
+                .post(format!("{base}/api/sessions"))
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            created["id"].as_str().unwrap().to_string()
+        }
+    };
+    let path_of = |id: String| {
+        let client = client.clone();
+        let base = base.clone();
+        async move {
+            let listed: Value = client
+                .get(format!("{base}/api/workspaces"))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            let row = listed["workspaces"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r["session_id"] == id.as_str())
+                .cloned()
+                .unwrap();
+            std::path::PathBuf::from(row["path"].as_str().unwrap())
+        }
+    };
+    let kill = |id: String| {
+        let client = client.clone();
+        let base = base.clone();
+        async move {
+            let resp = client
+                .post(format!("{base}/api/sessions/{id}/kill"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+    };
+
+    let a = start(
+        json!({ "name": "a", "command": command, "cwd": repo.to_string_lossy(),
+                          "worktree": { "branch": "wi-1774-a", "base_ref": "main" } }),
+    )
+    .await;
+    let tree = path_of(a.clone()).await;
+    let b = start(json!({ "name": "b", "command": command, "cwd": tree.to_string_lossy() })).await;
+    let dirty = start(
+        json!({ "name": "c", "command": command, "cwd": repo.to_string_lossy(),
+                              "worktree": { "branch": "wi-1774-c", "base_ref": "main" } }),
+    )
+    .await;
+    let dirty_tree = path_of(dirty.clone()).await;
+    std::fs::write(dirty_tree.join("notes.txt"), "unsaved\n").unwrap();
+
+    kill(a).await;
+    kill(dirty).await;
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    assert!(tree.is_dir(), "session b still works in the worktree");
+    assert!(
+        dirty_tree.join("notes.txt").exists(),
+        "a dirty tree is kept"
+    );
+    assert!(has_branch(&repo, "wi-1774-c"));
+
+    kill(b).await;
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while tree.exists() && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        !tree.exists(),
+        "the last session out removes the merged worktree"
+    );
+    assert!(!has_branch(&repo, "wi-1774-a"));
+    assert!(dirty_tree.join("notes.txt").exists());
 }
 
 /// WI-1341: a land fetches, checks the pinned tip, rebases or refuses, checks
