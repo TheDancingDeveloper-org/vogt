@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import os
+import tomllib
 from datetime import datetime
 from pathlib import Path
 
@@ -406,6 +409,7 @@ def brief_project(ctx: AppContext, params: ProjectBriefParams) -> ProjectBriefRe
         project=project,
         open_work=len(gathered.ranked),
         open_bugs=sum(1 for entry in gathered.ranked if entry.kind == "bug"),
+        mcp_extra_unregistered=unregistered_mcp(project.mcp_extra),
         declared_work=gathered.declared,
         observed_work=gathered.observed,
         by_state=dict(sorted(by_state.items())),
@@ -437,6 +441,41 @@ def brief_project(ctx: AppContext, params: ProjectBriefParams) -> ProjectBriefRe
         freshness=freshness_of(ctx),
         digest=digest,
     )
+
+
+def _mcp_names(names: list[str]) -> list[str]:
+    """Trimmed, blank-free, first occurrence kept."""
+    out: list[str] = []
+    for name in (n.strip() for n in names):
+        if name and name not in out:
+            out.append(name)
+    return out
+
+
+def unregistered_mcp(names: list[str], home: Path | None = None) -> list[str]:
+    """Extras no MCP config on this host registers (WI-2746 drift).
+
+    Reads the same configs the engine trims from: `~/.claude.json` (or
+    `$CLAUDE_CONFIG_DIR/.claude.json`) and `~/.codex/config.toml`. A config
+    that is missing or unreadable registers nothing.
+    """
+    if not names:
+        return []
+    root = home if home is not None else Path.home()
+    registered: set[str] = set()
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR") if home is None else None
+    for claude in {Path(config_dir) if config_dir else root, root}:
+        try:
+            data = json.loads((claude / ".claude.json").read_text())
+            registered.update(data.get("mcpServers") or {})
+        except (OSError, ValueError, AttributeError):
+            pass
+    try:
+        codex = tomllib.loads((root / ".codex" / "config.toml").read_text())
+        registered.update(codex.get("mcp_servers") or {})
+    except (OSError, ValueError):
+        pass
+    return [n for n in names if n not in registered]
 
 
 #: Caps on the digest (WI-2747): each list is bounded and each entry one line.
@@ -686,11 +725,12 @@ def update_project(ctx: AppContext, params: UpdateProjectParams) -> ProjectResul
         if (
             params.repo_url is None
             and params.exclusions is None
+            and params.mcp_extra is None
             and params.agent_policy is None
         ):
             msg = (
-                "give --repo-url, --exclusions or --agent-policy; there is "
-                "nothing else to update"
+                "give --repo-url, --exclusions, --mcp-extra or --agent-policy; "
+                "there is nothing else to update"
             )
             raise InvalidRequest(msg)
         if params.agent_policy is not None:
@@ -707,6 +747,11 @@ def update_project(ctx: AppContext, params: UpdateProjectParams) -> ProjectResul
                 exclusions=(
                     None if params.exclusions is None else tuple(params.exclusions)
                 ),
+                mcp_extra=(
+                    None
+                    if params.mcp_extra is None
+                    else tuple(_mcp_names(params.mcp_extra))
+                ),
                 agent_policy=params.agent_policy,
             ),
             at=ctx.clock(),
@@ -722,6 +767,7 @@ def update_project(ctx: AppContext, params: UpdateProjectParams) -> ProjectResul
             summary={
                 "slug": project.slug,
                 "exclusions": list(updated.exclusions),
+                "mcp_extra": list(updated.mcp_extra),
                 "repo_url": updated.repo_url,
                 "agent_policy": updated.agent_policy.model_dump(mode="json"),
             },

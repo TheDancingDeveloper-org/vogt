@@ -379,6 +379,7 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
                 resume=params.resume,
                 permission_mode=params.permission_mode,
                 mcp_set=params.mcp_set,
+                mcp_extra=subject.mcp_extra,
                 account=params.account,
                 autopilot=autopilot,
                 role=params.role,
@@ -4151,7 +4152,11 @@ class _Subject:
         brief: ComposedBrief,
         policy: AgentPolicy,
         is_scratch: bool = False,
+        mcp_extra: list[str] | None = None,
     ) -> None:
+        #: The project's worker MCP extras (WI-2746); the engine adds them
+        #: only to a `worker` set.
+        self.mcp_extra = list(mcp_extra or [])
         self.project_id = project_id
         self.project_slug = project_slug
         self.cwd = cwd
@@ -4562,6 +4567,7 @@ def _resolve_subject(
                 )
             ),
             policy=project.agent_policy,
+            mcp_extra=project.mcp_extra,
         )
 
     project = _resolve.project(view, params.project or "")
@@ -4573,6 +4579,7 @@ def _resolve_subject(
         work_item=None,
         brief=brief_for_project(view, project.slug, session_id, project=project),
         policy=project.agent_policy,
+        mcp_extra=project.mcp_extra,
     )
 
 
@@ -5474,6 +5481,7 @@ def _start_on_engine(
     resume: str | None = None,
     permission_mode: str | None = None,
     mcp_set: str | None = None,
+    mcp_extra: list[str] | None = None,
     account: str | None = None,
     autopilot: bool = False,
     role: str = "worker",
@@ -5508,6 +5516,7 @@ def _start_on_engine(
         resume=resume,
         permission_mode=permission_mode,
         mcp_set=mcp_set,
+        mcp_extra=mcp_extra,
         account=account,
         autopilot=autopilot,
         role=role,
