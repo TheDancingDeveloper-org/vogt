@@ -77,7 +77,7 @@ fn resolve_for(boundary: EscalationBoundary) -> Vec<String> {
     ways.iter().map(|w| (*w).to_string()).collect()
 }
 
-fn blocked_escalation(report: &BlockedReport) -> ChangeEscalation {
+pub(crate) fn blocked_escalation(report: &BlockedReport) -> ChangeEscalation {
     ChangeEscalation {
         needs: report.needs,
         boundary: report.boundary,
@@ -89,7 +89,7 @@ fn blocked_escalation(report: &BlockedReport) -> ChangeEscalation {
 
 /// A permission dialog as an escalation. The key is the one the WI-983
 /// refusal names: `session:permission_prompt:sha256(question)[:16]`.
-fn approval_escalation(
+pub(crate) fn approval_escalation(
     id: Uuid,
     approval: Option<&vogt_engine_contract::ApprovalPrompt>,
 ) -> ChangeEscalation {
