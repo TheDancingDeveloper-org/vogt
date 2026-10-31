@@ -702,6 +702,17 @@ store. Without roots the collector is not registered, and both reads say so in
   `ci_watch_notify_sessions` is off, types a one-line notice plus Enter into
   each live session started for the item. Subscribe to the event feed to wake
   on it; nothing needs to poll a forge.
+- **Hung CI runs (WI-1334).** `inbox.list` raises one `ci.run_hung` entry,
+  with `work_item_ref`, per run on a bound branch's newest revision that is
+  still queued past `ci_hung_queued_after_minutes` (default 30) or in
+  progress past `ci_hung_running_after_minutes` (default 90), measured from
+  the run's `run_started_at` (or its `updated_at` when the forge gave none,
+  which the summary says). The summary names the workflow, run id, elapsed
+  minutes and the suggested `gh run cancel <run_id>`; the `entry_key` is the
+  run (id and attempt), and the entry disappears when the run concludes. The
+  sweep publishes one `ci.run_hung` event per run (entity
+  `run:<repo>:<run_id>.<attempt>`) and types one notice into the item's live
+  sessions. Detection only: nothing is cancelled.
 - **`usage.board`** (`GET /api/usage-board`, `vogt usage board`, MCP
   `usage_board`; `read`) — each `usage_accounts` entry's reported limit
   windows (Codex `primary`/`secondary` with `used_percent` and `resets_at`;
