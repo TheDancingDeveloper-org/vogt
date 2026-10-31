@@ -464,25 +464,41 @@ def _handoff_claims(fields: HandoffFields) -> list[str]:
 
 
 def _review_diff(fields: HandoffFields) -> list[str]:
-    """The concrete diff command, with the hand-off's own base and head."""
-    head = fields.head_sha or fields.branch
+    """The concrete diff command: the branch's current tip, not a stale head.
+
+    A worker can push again without a fresh hand-off, so the hand-off's head
+    may be behind the branch (WI-1837). Reviewing that head would leave the
+    newer commits unreviewed, so the reviewer resolves the remote tip and
+    reviews it, and shows the hand-off head beside it when the two differ.
+    """
+    resolve = (
+        f"`git fetch origin {fields.branch}` and resolve the tip with "
+        f"`git rev-parse origin/{fields.branch}`"
+    )
     lines = [
-        f"Review `git diff {fields.base}...{head}` — branch `{fields.branch}` "
-        f"against `{fields.base}` — and nothing older.",
+        f"Review `git diff {fields.base}...<tip>` — branch `{fields.branch}` "
+        f"against `{fields.base}` — where `<tip>` is the branch's current "
+        "remote tip, and nothing older.",
         "",
     ]
     if fields.head_sha:
         lines += [
-            f"Check the branch tip first (`git rev-parse {fields.branch}`). If "
-            f"it is not `{fields.head_sha}`, review `{fields.head_sha}` and say "
-            "the branch has moved.",
+            f"Before you start, {resolve}. The hand-off names head "
+            f"`{fields.head_sha}`. If the tip is that sha, review it. If the "
+            f"tip has moved past it, review the tip, not `{fields.head_sha}`: "
+            "the newer commits are part of the change and nobody else will "
+            f"review them. Read `git log {fields.head_sha}..<tip>` as well, and "
+            "put both heads side by side at the top of the verdict: "
+            f"`hand-off head {fields.head_sha} · reviewed tip <tip>`. If the "
+            "tip does not contain the hand-off head (a force-push), say so and "
+            "review the tip.",
             "",
         ]
     else:
         lines += [
-            "The hand-off names no head sha. Resolve one with "
-            f"`git rev-parse {fields.branch}` before you start, review that "
-            "sha, and say in the verdict that the hand-off left it out.",
+            f"The hand-off names no head sha. Before you start, {resolve}, "
+            "review that sha, and say in the verdict that the hand-off left "
+            "it out.",
             "",
         ]
     return lines
