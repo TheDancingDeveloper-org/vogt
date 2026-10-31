@@ -17,6 +17,14 @@ ROOT = Path(__file__).resolve().parents[1]
 WRAPPER = ROOT / "engine" / "deploy" / "graft-session.sh"
 DOCKERFILE = ROOT / "engine" / "Dockerfile"
 
+# The `core alone` CI job deletes engine/ before pytest (ci.yml), so the wrapper
+# and the image that installs it are absent there. Skip the module, as the
+# other engine-dependent tests do, rather than error on the missing files.
+pytestmark = pytest.mark.skipif(
+    not (WRAPPER.is_file() and DOCKERFILE.is_file()),
+    reason="engine tree absent (the `core alone` job deletes it)",
+)
+
 FAKE_GRAFT = """#!/usr/bin/env bash
 printf 'endpoint=%s\\n' "${GRAFT_ENDPOINT:-}"
 printf 'arg=%s\\n' "$@"
