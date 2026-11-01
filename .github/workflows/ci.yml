@@ -353,7 +353,7 @@ jobs:
         id: cargo-audit
         # Runs after a failed step too, so one round reports every failure.
         if: always() && !cancelled() && needs.changes.outputs.rust == 'true'
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: /root/.cargo/bin/cargo-audit
           key: cargo-audit-0.22.2-${{ runner.os }}-${{ runner.arch }}
