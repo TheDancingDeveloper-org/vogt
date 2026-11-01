@@ -392,3 +392,46 @@ def test_codex_without_token_count_is_estimated() -> None:
     assert result.usage_measured is False
     assert result.context_tokens > 0
     assert result.context_window_tokens == 0
+
+
+def _compact() -> str:
+    return _line(
+        {"type": "user", "isCompactSummary": True, "message": {"content": "s"}}
+    )
+
+
+def _calls(n: int, tag: str = "m") -> str:
+    blocks = [{"type": "tool_use", "id": f"{tag}{i}", "name": "Bash"} for i in range(n)]
+    return _line({"type": "assistant", "message": {"id": tag, "content": blocks}})
+
+
+def test_compactions_with_at_most_one_call_between_are_a_streak() -> None:
+    lines = [_calls(1), _compact(), _calls(1, "b"), _compact(), _compact()]
+    result = meter(lines, agent="claude")
+    assert result.compactions == 3
+    assert result.compaction_streak == 3
+
+
+def test_two_tool_calls_after_a_compaction_end_the_streak() -> None:
+    lines = [_compact(), _compact(), _calls(2), _compact()]
+    assert meter(lines, agent="claude").compaction_streak == 1
+    # Calls split across entries count together.
+    split = [_compact(), _compact(), _calls(1), _calls(1, "b")]
+    assert meter(split, agent="claude").compaction_streak == 0
+
+
+def test_codex_response_item_calls_end_the_streak() -> None:
+    def call() -> str:
+        return _line({"type": "response_item", "payload": {"type": "function_call"}})
+
+    lines = [_line({"type": "compacted"}), call(), _line({"type": "compacted"})]
+    assert meter(lines, agent="codex").compaction_streak == 2
+    lines = [_line({"type": "compacted"}), call(), call()]
+    assert meter(lines, agent="codex").compaction_streak == 0
+
+
+@_needs_fixtures
+def test_shared_loop_fixture_matches_the_engine_port() -> None:
+    lines = (_FIXTURES / "claude_loop.jsonl").read_text().splitlines()
+    result = meter(lines, agent="claude")
+    assert (result.compactions, result.compaction_streak) == (3, 3)

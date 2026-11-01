@@ -99,6 +99,7 @@ fn test_config() -> Config {
         metrics_bind: None,
         chat: Default::default(),
         economics_tick: std::time::Duration::ZERO,
+        compaction_loop_threshold: 0,
         economics_home: None,
     }
 }
