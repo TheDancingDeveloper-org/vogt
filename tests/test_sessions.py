@@ -414,14 +414,14 @@ def test_the_purpose_picks_the_mcp_set(
     start_session(
         wired, StartSessionParams(work_item="WI-1", purpose="design", reason=WHY)
     )
-    assert "mcp_set" not in engine.last_spec, "full is the request it always was"
+    assert "mcp_set" not in engine.last_spec, "no profile ask leaves the engine default"
     start_session(
         wired,
         StartSessionParams(
             work_item="WI-1", purpose="review", mcp_set="full", reason=WHY
         ),
     )
-    assert "mcp_set" not in engine.last_spec, "the caller's choice wins"
+    assert engine.last_spec["mcp_set"] == "full", "the caller's choice wins"
     start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
     assert "mcp_set" not in engine.last_spec
 

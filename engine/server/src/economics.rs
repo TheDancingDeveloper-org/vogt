@@ -131,7 +131,11 @@ impl Meter {
             self.live_chars = 0;
         } else {
             self.calls_since_compaction += tool_calls(entry);
-            if self.calls_since_compaction >= PRODUCTIVE_TOOL_CALLS {
+            // An assistant turn with no tool call is the session answering, so
+            // a chat-only session is not a compaction loop; a loop compacts
+            // back to back, with at most a call between.
+            let answered = kind == Some("assistant") && tool_calls(entry) == 0;
+            if self.calls_since_compaction >= PRODUCTIVE_TOOL_CALLS || answered {
                 self.compaction_streak = 0;
             }
         }
@@ -970,7 +974,7 @@ mod tests {
             context_tokens: 80,
             peak_context_tokens: 175,
             compactions: 1,
-            compaction_streak: 1,
+            compaction_streak: 0,
             tool_result_bytes: BTreeMap::from([("Bash".to_string(), 40), ("Read".to_string(), 16)]),
             reads_repeated: 1,
             wall_clock: TurnTiming {
@@ -990,7 +994,7 @@ mod tests {
             context_tokens: 67,
             peak_context_tokens: 117,
             compactions: 1,
-            compaction_streak: 1,
+            compaction_streak: 0,
             tool_result_bytes: BTreeMap::from([("Read".to_string(), 16), ("shell".to_string(), 6)]),
             reads_repeated: 1,
             wall_clock: TurnTiming {
@@ -1086,6 +1090,19 @@ mod tests {
             feed_all("claude", &[compact, compact, &a]).compaction_streak,
             2
         );
+    }
+
+    /// Python: test_an_assistant_turn_ends_the_streak
+    #[test]
+    fn an_assistant_turn_ends_the_streak() {
+        let compact = r#"{"type":"user","isCompactSummary":true,"message":{"content":"s"}}"#;
+        let reply =
+            r#"{"type":"assistant","message":{"id":"r","content":[{"type":"text","text":"hi"}]}}"#;
+        assert_eq!(
+            feed_all("claude", &[compact, compact, reply]).compaction_streak,
+            0
+        );
+        assert_eq!(feed_all("claude", &[compact, compact]).compaction_streak, 2);
     }
 
     /// Python: test_codex_response_item_calls_end_the_streak

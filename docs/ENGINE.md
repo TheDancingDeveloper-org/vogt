@@ -420,7 +420,7 @@ It resolves the graft endpoint from `GRAFT_ENDPOINT` or `VOGT_GRAFT_ENDPOINT`,
 and reads the session's token from `~/.config/graft/sessions/<session id>/`,
 so an agent can `g clone`, `g sync` and `g land` without a hand-set token. The
 wrapper never prints the token.
-The stack sets VOGT_GRAFT_ENDPOINT to the graft-dev server.
+The stack sets `VOGT_GRAFT_ENDPOINT` to the graft-dev server.
 
 **Vogt.** A session started for a project or work item registers Vogt's own MCP
 server automatically, carrying a per-session actor-scoped token, so an agent's

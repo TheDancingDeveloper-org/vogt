@@ -420,6 +420,17 @@ def test_two_tool_calls_after_a_compaction_end_the_streak() -> None:
     assert meter(split, agent="claude").compaction_streak == 0
 
 
+def test_an_assistant_turn_ends_the_streak() -> None:
+    reply = _line(
+        {
+            "type": "assistant",
+            "message": {"id": "r", "content": [{"type": "text", "text": "hi"}]},
+        }
+    )
+    assert meter([_compact(), _compact(), reply], agent="claude").compaction_streak == 0
+    assert meter([_compact(), _compact()], agent="claude").compaction_streak == 2
+
+
 def test_codex_response_item_calls_end_the_streak() -> None:
     def call() -> str:
         return _line({"type": "response_item", "payload": {"type": "function_call"}})

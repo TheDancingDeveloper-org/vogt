@@ -74,8 +74,9 @@ class Profile(BaseModel):
     #: not change the tree. Advisory; enforcement is the engine policy's.
     read_only: bool = False
     #: The MCP servers a start gets (WI-2740): `worker` keeps the vogt worker
-    #: tool subset and cadastre, so the first request stays small.
-    mcp_set: Literal["full", "worker"] = "full"
+    #: tool subset and cadastre, so the first request stays small. None
+    #: leaves the engine's default (worker for Codex); "full" asks for all.
+    mcp_set: Literal["full", "worker"] | None = None
 
     @field_validator("budget_turns_by_model")
     @classmethod

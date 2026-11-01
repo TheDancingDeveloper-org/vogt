@@ -911,9 +911,11 @@ class EngineClient:
             # Sent only when not the default, so a default start is the
             # request this client has always made.
             spec["permission_mode"] = permission_mode.replace("_", "-")
-        if mcp_set and mcp_set != "full":
-            # Sent only when trimmed (WI-2740); the engine builds the
-            # per-session MCP config.
+        if mcp_set:
+            # Sent whenever named, "full" included: an unset value lets the
+            # engine pick its agent default (Codex: worker, WI-2833), so
+            # "full" has to travel. The engine builds the per-session MCP
+            # config (WI-2740).
             spec["mcp_set"] = mcp_set
             if mcp_extra:
                 # The project's add-only extras (WI-2746); only a trimmed set
