@@ -535,6 +535,11 @@ pub struct Config {
     /// each live session's transcript (`economics`). Zero disables it. A
     /// hand-built config starts disabled.
     pub economics_tick: std::time::Duration,
+    /// `ENGINE_COMPACTION_LOOP_THRESHOLD` (3): compactions in a row with fewer
+    /// than two tool calls between them after which the economics tailer marks
+    /// the session blocked (WI-2834). Zero disables the guard, as does a
+    /// disabled tailer. A hand-built config starts disabled.
+    pub compaction_loop_threshold: u32,
     /// The home the economics tailer reads transcripts under. `None` uses the
     /// process home; tests set it so they never touch the real one.
     pub economics_home: Option<std::path::PathBuf>,
@@ -1104,6 +1109,12 @@ pub fn load(
             Some(0) => std::time::Duration::ZERO,
             Some(secs) => std::time::Duration::from_secs(secs),
             None => std::time::Duration::from_secs(15),
+        },
+        compaction_loop_threshold: match parse_u64_env("ENGINE_COMPACTION_LOOP_THRESHOLD")? {
+            Some(n) => u32::try_from(n).map_err(|_| {
+                ApiError::Config(format!("ENGINE_COMPACTION_LOOP_THRESHOLD={n} is too large"))
+            })?,
+            None => 3,
         },
         economics_home: None,
         vogt_import_root: std::env::var("VOGT_IMPORT_ROOT")

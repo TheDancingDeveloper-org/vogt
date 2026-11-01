@@ -1,0 +1,6 @@
+{"type":"user","message":{"role":"user","content":"go"}}
+{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{}}]}}
+{"type":"user","isCompactSummary":true,"message":{"role":"user","content":"summary"}}
+{"type":"assistant","message":{"id":"m2","content":[{"type":"tool_use","id":"t2","name":"Bash","input":{}}]}}
+{"type":"user","isCompactSummary":true,"message":{"role":"user","content":"summary"}}
+{"type":"user","isCompactSummary":true,"message":{"role":"user","content":"summary"}}
