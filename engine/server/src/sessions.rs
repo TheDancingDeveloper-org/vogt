@@ -533,10 +533,12 @@ impl SessionRegistry {
             ),
             None => self.cfg.agent_onboarding.settings_file.as_deref(),
         };
-        let mcp_set = crate::mcp_set::McpSet::parse(
+        let mcp_set = crate::mcp_set::McpSet::for_agent(
             spec.mcp_set
                 .as_deref()
                 .or_else(|| recorded.and_then(|r| r.mcp_set.as_deref())),
+            self.agent_of(&spec.command, spec.template.as_deref())
+                .as_deref(),
         )?;
         let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
         let claude_dir = spec
@@ -951,8 +953,7 @@ impl SessionRegistry {
                 record.permission_mode = posture.clone();
                 record.account = account.clone();
                 record.settings_file = applied_settings.clone();
-                record.mcp_set =
-                    (mcp_set == crate::mcp_set::McpSet::Worker).then(|| "worker".to_string());
+                record.mcp_set = Some(mcp_set.name().to_string());
                 record.mcp_extra = if mcp_set == crate::mcp_set::McpSet::Worker {
                     mcp_extra.clone()
                 } else {
