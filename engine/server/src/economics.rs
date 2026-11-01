@@ -12,6 +12,13 @@ use vogt_engine_contract::{SessionEconomics, TurnTiming};
 /// agent records no usage.
 const CHARS_PER_TOKEN: i64 = 4;
 
+/// Tool calls after a compaction that count as progress and end a compaction
+/// streak. Mirrors `PRODUCTIVE_TOOL_CALLS` in the Python reader.
+const PRODUCTIVE_TOOL_CALLS: i64 = 2;
+
+/// Codex response items that are a tool call.
+const CODEX_CALLS: [&str; 3] = ["function_call", "custom_tool_call", "local_shell_call"];
+
 /// Tool names whose input names a file. A repeated value is a repeated read.
 const READ_TOOLS: [&str; 3] = ["Read", "read_file", "cat"];
 const PATH_KEYS: [&str; 3] = ["file_path", "path", "filePath"];
@@ -40,6 +47,9 @@ pub struct Meter {
     /// A Codex `compacted` line not yet followed by a `token_count`: an
     /// `item_completed` ContextCompaction in that gap is the same compaction.
     codex_compaction_open: bool,
+    /// Compactions in a row with too few tool calls between them (WI-2834).
+    compaction_streak: i64,
+    calls_since_compaction: i64,
 }
 
 /// What Codex's `token_count` events said, latest and largest.
@@ -69,6 +79,8 @@ impl Meter {
             stamps: Vec::new(),
             codex: None,
             codex_compaction_open: false,
+            compaction_streak: 0,
+            calls_since_compaction: 0,
         }
     }
 
@@ -113,8 +125,15 @@ impl Meter {
 
         if codex_compaction || is_compaction(entry) {
             self.compactions += 1;
+            self.compaction_streak += 1;
+            self.calls_since_compaction = 0;
             // The compacted history is no longer in the window.
             self.live_chars = 0;
+        } else {
+            self.calls_since_compaction += tool_calls(entry);
+            if self.calls_since_compaction >= PRODUCTIVE_TOOL_CALLS {
+                self.compaction_streak = 0;
+            }
         }
         // Characters, as Python's len(str) counts them, not UTF-8 bytes.
         self.live_chars += text.chars().count() as i64;
@@ -196,7 +215,41 @@ impl Meter {
             output_tokens: output,
             usage_measured: (self.measured && peak > 0) || self.codex.is_some(),
             context_window_tokens: window,
+            compaction_streak: self.compaction_streak,
         }
+    }
+}
+
+/// Tool calls one line makes: `tool_use` blocks on a Claude or Klaudia
+/// assistant entry, or one Codex `response_item` call.
+fn tool_calls(entry: &serde_json::Map<String, Value>) -> i64 {
+    match entry.get("type").and_then(Value::as_str) {
+        Some("response_item") => {
+            let kind = entry
+                .get("payload")
+                .and_then(Value::as_object)
+                .and_then(|payload| payload.get("type"))
+                .and_then(Value::as_str);
+            i64::from(kind.is_some_and(|kind| CODEX_CALLS.contains(&kind)))
+        }
+        Some("assistant") => entry
+            .get("message")
+            .and_then(Value::as_object)
+            .and_then(|message| message.get("content"))
+            .and_then(Value::as_array)
+            .map_or(0, |content| {
+                content
+                    .iter()
+                    .filter(|block| {
+                        block
+                            .as_object()
+                            .and_then(|b| b.get("type"))
+                            .and_then(Value::as_str)
+                            == Some("tool_use")
+                    })
+                    .count() as i64
+            }),
+        _ => 0,
     }
 }
 
@@ -556,6 +609,10 @@ pub(crate) struct Tail {
     caught_up: bool,
     /// The events held were read by a path's first read.
     replay: bool,
+    /// The compaction count a loop report was last raised at, so one loop is
+    /// reported once and a later compaction in it does not re-block a session
+    /// a person has since released.
+    loop_reported: i64,
 }
 
 impl Tail {
@@ -571,6 +628,7 @@ impl Tail {
             events: Vec::new(),
             caught_up: false,
             replay: false,
+            loop_reported: 0,
         }
     }
 }
@@ -812,6 +870,30 @@ pub fn spawn_economics_tailer(state: Arc<AppState>, home: PathBuf, tick: Duratio
                     tail.persisted = now;
                     tail.persisted_json = json.clone();
                 }
+                if let Some(snapshot) = &snapshot {
+                    let threshold = state.config.compaction_loop_threshold;
+                    if session.blocked().is_none() {
+                        if let Some(report) =
+                            compaction_loop_report(snapshot, threshold, tail.loop_reported)
+                        {
+                            tail.loop_reported = snapshot.compactions;
+                            if let Err(e) = session.set_blocked(Some(report), &state.bus) {
+                                tracing::warn!(
+                                    session = %session.id,
+                                    error = %e,
+                                    "could not report a compaction loop"
+                                );
+                            } else {
+                                tracing::warn!(
+                                    session = %session.id,
+                                    compactions = snapshot.compactions,
+                                    event = "economics.compaction_loop",
+                                    "compaction loop; session marked blocked"
+                                );
+                            }
+                        }
+                    }
+                }
                 session.store_economics_tail(tail, snapshot.clone());
                 // The hibernation record is what a later removal counts, so it
                 // has to carry the snapshot the session ends with.
@@ -826,6 +908,39 @@ pub fn spawn_economics_tailer(state: Arc<AppState>, home: PathBuf, tick: Duratio
             }
         }
     });
+}
+
+/// The blocked report for a session stuck compacting (WI-2834), or None. A
+/// loop is `threshold` compactions in a row with fewer than two tool calls
+/// between them; `reported` is the compaction count it was last raised at, so
+/// the same loop is not raised twice. Zero `threshold` is off.
+pub(crate) fn compaction_loop_report(
+    snapshot: &SessionEconomics,
+    threshold: u32,
+    reported: i64,
+) -> Option<vogt_engine_contract::BlockedReport> {
+    if threshold == 0
+        || snapshot.compaction_streak < i64::from(threshold)
+        || snapshot.compactions <= reported
+    {
+        return None;
+    }
+    Some(vogt_engine_contract::BlockedReport {
+        reason: format!(
+            "compaction loop: {} compactions without progress; likely oversized fixed prompt",
+            snapshot.compaction_streak
+        ),
+        items: vec![
+            "read the session: its fixed prompt (instructions, tools, files) probably \
+             leaves no room under the compaction limit"
+                .to_string(),
+            "shrink the prompt or raise the limit, then restart or stop the session".to_string(),
+        ],
+        since: OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_default(),
+        ..Default::default()
+    })
 }
 
 async fn persist_snapshot(state: &AppState, id: uuid::Uuid, json: String) {
@@ -855,6 +970,7 @@ mod tests {
             context_tokens: 80,
             peak_context_tokens: 175,
             compactions: 1,
+            compaction_streak: 1,
             tool_result_bytes: BTreeMap::from([("Bash".to_string(), 40), ("Read".to_string(), 16)]),
             reads_repeated: 1,
             wall_clock: TurnTiming {
@@ -874,6 +990,7 @@ mod tests {
             context_tokens: 67,
             peak_context_tokens: 117,
             compactions: 1,
+            compaction_streak: 1,
             tool_result_bytes: BTreeMap::from([("Read".to_string(), 16), ("shell".to_string(), 6)]),
             reads_repeated: 1,
             wall_clock: TurnTiming {
@@ -893,6 +1010,7 @@ mod tests {
             context_tokens: 625,
             peak_context_tokens: 940,
             compactions: 1,
+            compaction_streak: 1,
             tool_result_bytes: BTreeMap::from([
                 ("cat".to_string(), 10),
                 ("grep".to_string(), 9),
@@ -935,6 +1053,78 @@ mod tests {
             "/tests/fixtures/economics/codex.jsonl"
         ));
         assert_eq!(feed("codex", transcript), expected_codex());
+    }
+
+    /// Python: test_shared_loop_fixture_matches_the_engine_port
+    #[test]
+    fn loop_fixture_matches_python() {
+        let reading = feed(
+            "claude",
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/economics/claude_loop.jsonl"
+            )),
+        );
+        assert_eq!((reading.compactions, reading.compaction_streak), (3, 3));
+    }
+
+    /// Python: test_two_tool_calls_after_a_compaction_end_the_streak
+    #[test]
+    fn two_tool_calls_end_the_streak_even_across_entries() {
+        let compact = r#"{"type":"user","isCompactSummary":true,"message":{"content":"s"}}"#;
+        let call = |id: &str| {
+            format!(
+                r#"{{"type":"assistant","message":{{"id":"{id}","content":[{{"type":"tool_use","id":"{id}","name":"Bash"}}]}}}}"#
+            )
+        };
+        let (a, b) = (call("a"), call("b"));
+        assert_eq!(
+            feed_all("claude", &[compact, compact, &a, &b]).compaction_streak,
+            0
+        );
+        assert_eq!(
+            feed_all("claude", &[compact, compact, &a]).compaction_streak,
+            2
+        );
+    }
+
+    /// Python: test_codex_response_item_calls_end_the_streak
+    #[test]
+    fn codex_calls_end_the_streak() {
+        let compacted = r#"{"type":"compacted"}"#;
+        let call = r#"{"type":"response_item","payload":{"type":"function_call"}}"#;
+        assert_eq!(
+            feed_all("codex", &[compacted, call, compacted]).compaction_streak,
+            2
+        );
+        assert_eq!(
+            feed_all("codex", &[compacted, call, call]).compaction_streak,
+            0
+        );
+    }
+
+    #[test]
+    fn loop_report_needs_the_threshold_a_new_compaction_and_is_off_at_zero() {
+        let looping = SessionEconomics {
+            compactions: 3,
+            compaction_streak: 3,
+            ..Default::default()
+        };
+        let report = compaction_loop_report(&looping, 3, 0).expect("report");
+        assert_eq!(
+            report.reason,
+            "compaction loop: 3 compactions without progress; likely oversized fixed prompt"
+        );
+        assert!(compaction_loop_report(&looping, 4, 0).is_none());
+        assert!(compaction_loop_report(&looping, 0, 0).is_none());
+        // Already raised at this count: not raised again.
+        assert!(compaction_loop_report(&looping, 3, 3).is_none());
+        let more = SessionEconomics {
+            compactions: 4,
+            compaction_streak: 4,
+            ..Default::default()
+        };
+        assert!(compaction_loop_report(&more, 3, 3).is_some());
     }
 
     #[test]
@@ -986,6 +1176,7 @@ mod tests {
             ("codex", "codex.jsonl"),
             ("klaudia", "klaudia.jsonl"),
             ("klaudia", "klaudia_unicode.jsonl"),
+            ("claude", "claude_loop.jsonl"),
         ];
         for (agent, name) in fixtures {
             let bytes = std::fs::read(format!(

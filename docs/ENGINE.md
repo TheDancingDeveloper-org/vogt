@@ -2497,6 +2497,14 @@ its `budget` line. A session with no reported conversation, or an agent whose
 transcript the engine cannot find, simply has no `economics`; the core then
 falls back to reading the transcript itself.
 
+Compaction loop guard (WI-2834): the meter also keeps `compaction_streak`,
+the compactions in a row with fewer than two tool calls between them (two
+calls reset it to zero). When the streak reaches
+`ENGINE_COMPACTION_LOOP_THRESHOLD` (default 3, `0` off) the tailer marks the
+session blocked with `compaction loop: N compactions without progress; likely
+oversized fixed prompt`, once per loop, unless it is already blocked. The Python
+reader computes the same streak.
+
 The same snapshot is what the scrape records. The engine observes three
 histograms once, at the session's real end — when its process exits, or when
 a hibernated session's record is removed. A hibernation itself records

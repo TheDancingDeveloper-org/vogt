@@ -54,6 +54,13 @@ CHARS_PER_TOKEN = 4
 
 _MILLISECOND = timedelta(milliseconds=1)
 
+#: Tool calls after a compaction that count as progress. One call between two
+#: compactions is still a loop; this many end the streak.
+PRODUCTIVE_TOOL_CALLS = 2
+
+#: Codex response items that are a tool call.
+_CODEX_CALLS = frozenset({"function_call", "custom_tool_call", "local_shell_call"})
+
 #: Tool names whose input names a file. A repeated value is a repeated read.
 _READ_TOOLS = frozenset({"Read", "read_file", "cat"})
 _PATH_KEYS = ("file_path", "path", "filePath")
@@ -88,6 +95,12 @@ class SessionEconomics:
     #: The model's context window when the agent records it (Codex's
     #: `model_context_window`); 0 when unknown.
     context_window_tokens: int = 0
+    #: Compactions in a row with at most `PRODUCTIVE_TOOL_CALLS - 1` tool calls
+    #: between them (WI-2834). Two tool calls after a compaction end the run
+    #: and reset it to zero. A session that compacts, makes a call or none and
+    #: compacts again is looping on a fixed prompt too big to compact below
+    #: the limit.
+    compaction_streak: int = 0
 
     def budget_line(self, turn_budget: int | None, window_tokens: int | None) -> str:
         """The one line a digest row carries: `96/120 turns, 61% ctx, 2 compactions`.
@@ -137,6 +150,8 @@ def meter(lines: Iterable[str], *, agent: str) -> SessionEconomics:
     #: A `compacted` line not yet followed by a token_count; a ContextCompaction
     #: item in that gap is the same compaction.
     codex_compaction_open = False
+    compaction_streak = 0
+    calls_since_compaction = 0
 
     for raw in lines:
         text = raw.strip()
@@ -174,8 +189,14 @@ def meter(lines: Iterable[str], *, agent: str) -> SessionEconomics:
 
         if codex_compaction or _is_compaction(entry):
             compactions += 1
+            compaction_streak += 1
+            calls_since_compaction = 0
             # The compacted history is no longer in the window.
             live_chars = 0
+        else:
+            calls_since_compaction += _tool_calls(entry)
+            if calls_since_compaction >= PRODUCTIVE_TOOL_CALLS:
+                compaction_streak = 0
         live_chars += len(text)
 
         if kind == "assistant":
@@ -233,6 +254,7 @@ def meter(lines: Iterable[str], *, agent: str) -> SessionEconomics:
         output_tokens=output,
         usage_measured=(measured and peak > 0) or codex is not None,
         context_window_tokens=window,
+        compaction_streak=compaction_streak,
     )
 
 
@@ -245,6 +267,25 @@ def _is_compaction(entry: Mapping[str, object]) -> bool:
         return True
     message = entry.get("message")
     return isinstance(message, dict) and message.get("isCompactSummary") is True
+
+
+def _tool_calls(entry: Mapping[str, object]) -> int:
+    """Tool calls one line makes: `tool_use` blocks on a Claude or Klaudia
+    assistant entry, or one Codex `response_item` call."""
+    if entry.get("type") == "response_item":
+        payload = entry.get("payload")
+        if isinstance(payload, dict) and payload.get("type") in _CODEX_CALLS:
+            return 1
+        return 0
+    if entry.get("type") != "assistant":
+        return 0
+    message = entry.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    if not isinstance(content, list):
+        return 0
+    return sum(
+        1 for b in content if isinstance(b, dict) and b.get("type") == "tool_use"
+    )
 
 
 def _codex_compaction(entry: Mapping[str, object]) -> str | None:

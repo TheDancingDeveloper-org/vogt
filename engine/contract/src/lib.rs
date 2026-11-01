@@ -472,6 +472,10 @@ pub struct SessionEconomics {
     /// `model_context_window`); 0 when unknown.
     #[serde(default, skip_serializing_if = "is_zero_i64")]
     pub context_window_tokens: i64,
+    /// Compactions in a row with fewer than two tool calls between them
+    /// (WI-2834); zero once the session does real work again.
+    #[serde(default, skip_serializing_if = "is_zero_i64")]
+    pub compaction_streak: i64,
 }
 
 fn is_zero_i64(value: &i64) -> bool {
