@@ -195,7 +195,11 @@ def meter(lines: Iterable[str], *, agent: str) -> SessionEconomics:
             live_chars = 0
         else:
             calls_since_compaction += _tool_calls(entry)
-            if calls_since_compaction >= PRODUCTIVE_TOOL_CALLS:
+            # An assistant turn with no tool call is the session answering, so
+            # a chat-only session is not a compaction loop; a loop compacts
+            # back to back, with at most a call between.
+            answered = kind == "assistant" and _tool_calls(entry) == 0
+            if calls_since_compaction >= PRODUCTIVE_TOOL_CALLS or answered:
                 compaction_streak = 0
         live_chars += len(text)
 
