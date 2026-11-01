@@ -220,7 +220,7 @@ jobs:
       # Pinned to an exact version, not `@v9`: from v8 onwards setup-uv stopped
       # publishing major and minor tags, so `@v9` does not resolve. Renovate
       # bumps this line.
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2
 
       # The self-hosted image preinstalls no language runtime.
       - name: install matrix Python
@@ -273,7 +273,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2
 
       - name: install Python
         run: uv python install 3.13
@@ -316,7 +316,7 @@ jobs:
       # The post-job save is itself ~2 min (build-cycle review, 2026-10-15),
       # and a pull request's cache is never reused by another ref, so only
       # main writes it back. Every ref still restores the cache main saved.
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
         if: needs.changes.outputs.rust == 'true'
         with:
           workspaces: engine
@@ -328,7 +328,7 @@ jobs:
         working-directory: engine
         run: cargo fmt --all -- --check
 
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2
         # Runs after a failed step too, so one round reports every failure.
         if: always() && !cancelled()
 
@@ -671,7 +671,7 @@ jobs:
 
       # Same as the engine job: only main writes the cache back. A pull
       # request still restores what main saved, and skips the post-job save.
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
         with:
           workspaces: voice
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -703,7 +703,7 @@ jobs:
         working-directory: voice
         run: cargo fmt --all -- --check
 
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2
 
       # `rust-version` is a promise about the oldest toolchain that builds the
       # locked tree. CI builds with current stable, so nothing else would
@@ -731,7 +731,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
-      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad
         with:
           distribution: temurin
           java-version: "21"

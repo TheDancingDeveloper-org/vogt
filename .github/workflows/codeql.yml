@@ -115,7 +115,7 @@ jobs:
       # the current CodeQL bundle. That keeps this security analysis separate
       # from the authoritative build/test jobs and avoids rebuilding the PWA
       # or engine only to extract source a second time.
-      - uses: github/codeql-action/init@24c54180a607b1449ed407dd24f251e4e9147c8d
+      - uses: github/codeql-action/init@9b3254085494b55a0f7c4c2b3d2d52cc712ce370
         if: needs.changes.outputs[matrix.language] == 'true'
         with:
           languages: ${{ matrix.language }}
@@ -124,7 +124,7 @@ jobs:
           # file so they are described once, with rationale, rather than inline.
           config-file: ./.github/codeql/codeql-config.yml
 
-      - uses: github/codeql-action/analyze@24c54180a607b1449ed407dd24f251e4e9147c8d
+      - uses: github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370
         if: needs.changes.outputs[matrix.language] == 'true'
         with:
           category: /language:${{ matrix.language }}
