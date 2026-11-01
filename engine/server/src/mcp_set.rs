@@ -50,6 +50,28 @@ impl McpSet {
             ))),
         }
     }
+
+    /// The set a start gets for `agent` (WI-2833). A named set is used as
+    /// named; with none named a Codex session gets [`McpSet::Worker`], since
+    /// Codex loads every server in `~/.codex/config.toml` and the full estate
+    /// set alone is over its auto-compact limit. Other agents keep `full`.
+    pub fn for_agent(raw: Option<&str>, agent: Option<&str>) -> Result<Self> {
+        if raw.map(str::trim).is_some_and(|s| !s.is_empty()) {
+            return Self::parse(raw);
+        }
+        Ok(match agent {
+            Some("codex") => Self::Worker,
+            _ => Self::Full,
+        })
+    }
+
+    /// The name a session record keeps, so a wake starts on the same set.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Worker => "worker",
+        }
+    }
 }
 
 /// What a launch adds for a trimmed set.
@@ -655,6 +677,81 @@ mod tests {
         assert_eq!(McpSet::parse(Some("full")).unwrap(), McpSet::Full);
         assert_eq!(McpSet::parse(Some("worker")).unwrap(), McpSet::Worker);
         assert!(McpSet::parse(Some("everything")).is_err());
+    }
+
+    #[test]
+    fn codex_defaults_to_the_worker_set_and_full_only_when_asked() {
+        assert_eq!(
+            McpSet::for_agent(None, Some("codex")).unwrap(),
+            McpSet::Worker
+        );
+        assert_eq!(
+            McpSet::for_agent(Some(" "), Some("codex")).unwrap(),
+            McpSet::Worker
+        );
+        assert_eq!(
+            McpSet::for_agent(Some("full"), Some("codex")).unwrap(),
+            McpSet::Full
+        );
+        assert_eq!(
+            McpSet::for_agent(None, Some("claude")).unwrap(),
+            McpSet::Full
+        );
+        assert_eq!(McpSet::for_agent(None, None).unwrap(), McpSet::Full);
+        assert!(McpSet::for_agent(Some("everything"), Some("codex")).is_err());
+        for set in [McpSet::Full, McpSet::Worker] {
+            assert_eq!(McpSet::parse(Some(set.name())).unwrap(), set);
+        }
+    }
+
+    #[test]
+    fn a_default_codex_launch_disables_the_estate_servers_and_full_keeps_them() {
+        let home = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        std::fs::create_dir(home.path().join(".codex")).unwrap();
+        let mut toml = String::new();
+        for name in [
+            "vogt",
+            "cadastre",
+            "crw",
+            "browser",
+            "codex-subagent",
+            "forgejo-ro",
+            "github-ro",
+            "grafana-ro",
+            "komodo",
+        ] {
+            toml.push_str(&format!("[mcp_servers.{name}]\ncommand = \"{name}\"\n"));
+        }
+        std::fs::write(home.path().join(".codex").join("config.toml"), toml).unwrap();
+        let id = uuid::Uuid::nil();
+        let default = McpSet::for_agent(None, Some("codex")).unwrap();
+        let trim = prepare(default, &[], Some(home.path()), None, state.path(), id);
+        for name in [
+            "browser",
+            "codex-subagent",
+            "forgejo-ro",
+            "github-ro",
+            "grafana-ro",
+            "komodo",
+        ] {
+            let off = format!("mcp_servers.{name}.enabled=false");
+            assert!(
+                trim.codex_args.contains(&off),
+                "{name} left on: {:?}",
+                trim.codex_args
+            );
+        }
+        assert_eq!(trim.codex_servers, ["vogt", "cadastre", "crw"]);
+        for name in ["vogt", "cadastre", "crw"] {
+            let off = format!("mcp_servers.{name}.enabled=false");
+            assert!(!trim.codex_args.contains(&off));
+        }
+        let full = McpSet::for_agent(Some("full"), Some("codex")).unwrap();
+        assert_eq!(
+            prepare(full, &[], Some(home.path()), None, state.path(), id),
+            McpTrim::default()
+        );
     }
 
     #[test]
