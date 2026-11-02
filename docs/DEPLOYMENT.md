@@ -230,7 +230,7 @@ markdown` renders the connection document for a running instance so nothing
 about the address is hand-copied.
 
 **Read-only MCP servers for agents.** The image carries pinned GitHub,
-Grafana and Gitea/Forgejo MCP servers, and each session registers the ones
+Grafana, Gitea/Forgejo and Kubernetes MCP servers, and each session registers the ones
 whose token it holds, read-only ([`ENGINE.md`](ENGINE.md) §4). Nothing is on
 by default. To turn one on, put its variables in the session's environment —
 with the reference agent-auth helper, as launch-time lines in
@@ -241,6 +241,7 @@ launch), with the non-secret URLs in the overlay's `environment:`:
 GITHUB_MCP_TOKEN               <project-id> <github-readonly-pat-name>
 GRAFANA_SERVICE_ACCOUNT_TOKEN  <project-id> <grafana-viewer-token-name>
 GITEA_MCP_TOKEN                <project-id> <forgejo-readonly-token-name>
+K8S_AGENT_READONLY_KUBECONFIG  <project-id> K8S_AGENT_READONLY_KUBECONFIG
 ```
 
 ```yaml

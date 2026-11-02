@@ -162,6 +162,7 @@ readonly READONLY_SERVERS=(
     "github-ro|github|github-mcp-server|GITHUB_MCP_TOKEN|VOGT_GITHUB_MCP_TOOLSETS"
     "grafana-ro|grafana|mcp-grafana|GRAFANA_URL GRAFANA_SERVICE_ACCOUNT_TOKEN|"
     "forgejo-ro|gitea|gitea-mcp|GITEA_HOST GITEA_MCP_TOKEN|"
+    "k8s-ro|k8s|kubernetes-mcp-server|K8S_AGENT_READONLY_KUBECONFIG|"
 )
 
 readonly_wanted() {
@@ -1190,8 +1191,8 @@ PY
 # [mcp_servers] is an identity allowlist. The list mirrors what the Claude
 # driven-session policy lets a Claude session call without a person: vogt and
 # cadastre (the session's own scoped token decides what it may write), the
-# klaudia browser and isolated sub-agent, and the three read-only forge and
-# Grafana wrappers. komodo is deliberately absent, because its deploy_stack and
+# klaudia browser and isolated sub-agent, and the read-only forge, Grafana
+# and Kubernetes wrappers. komodo is deliberately absent, because its deploy_stack and
 # write_stack_file mutate running stacks, and so is every server not named
 # here: those keep the person gate. A table an operator gave an explicit mode
 # keeps it, and a server nobody registered is not created. The key lives in the
@@ -1253,6 +1254,7 @@ APPROVED_SERVERS = (
     "github-ro",
     "forgejo-ro",
     "grafana-ro",
+    "k8s-ro",
 )
 APPROVAL_ROW = 'default_tools_approval_mode = "approve"\n'
 

@@ -166,6 +166,17 @@ RUN api="https://api.github.com/repos/github/github-mcp-server/releases/latest" 
     && install -m 755 /tmp/github-mcp-server /usr/local/bin/github-mcp-server \
     && rm -f /tmp/github-mcp-server-release.json /tmp/github-mcp-server.tar.gz /tmp/github-mcp-server
 
+# Kubernetes MCP server (containers/kubernetes-mcp-server), read-only cluster
+# access for agents (docs/ENGINE.md §4). Pinned to one release and verified
+# against the sha256 digest GitHub publishes for that asset; bump both together.
+ARG K8S_MCP_VERSION=v0.0.67
+ARG K8S_MCP_SHA256=d791c22b5367813cc9e7c66e405d8ff7f7d51189b5bd619fdd84a99cf7a1c116
+RUN curl -fsSL "https://github.com/containers/kubernetes-mcp-server/releases/download/${K8S_MCP_VERSION}/kubernetes-mcp-server-linux-amd64" \
+        -o /tmp/kubernetes-mcp-server \
+    && echo "${K8S_MCP_SHA256}  /tmp/kubernetes-mcp-server" | sha256sum -c - \
+    && install -m 755 /tmp/kubernetes-mcp-server /usr/local/bin/kubernetes-mcp-server \
+    && rm -f /tmp/kubernetes-mcp-server
+
 # rclone — official installer resolves + verifies latest itself.
 RUN curl -fsSL https://rclone.org/install.sh | bash
 
