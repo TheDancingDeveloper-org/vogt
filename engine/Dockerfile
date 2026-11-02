@@ -356,7 +356,7 @@ ARG CODEX_ACP_VERSION
 ARG CLAUDE_CODE_VERSION
 ARG OPENCODE_VERSION
 ARG KLAUDIA_VERSION
-ARG INSTALL_KLAUDIA=false
+ARG INSTALL_KLAUDIA=true
 # --prefix=/usr/local (not the ambient $NPM_CONFIG_PREFIX, which points at
 # /home/sprooty/.npm-global) so these survive the runtime /home/sprooty bind
 # mount — same reasoning as the system pnpm install in the base. The dev pod is
@@ -493,11 +493,11 @@ RUN set -eu; \
         fi; \
     fi
 
-# Opt-in (WI-3068): `--build-arg INSTALL_KLAUDIA=true`, default false. The
-# source, https://github.com/TheDancingDeveloper-org/msp-klaudia
-# (VOGT_KLAUDIA_SOURCE), now answers an unauthenticated fetch with "could not
-# read Username" (private or moved), which failed every image build. Fix the
-# source access properly, with no credential baked in, before turning this on.
+# Installed by default (WI-3069): the source,
+# https://github.com/TheDancingDeveloper-org/msp-klaudia
+# (VOGT_KLAUDIA_SOURCE), is public and fetches anonymously, and Klaudia is the
+# Codex gitguard hook. `--build-arg INSTALL_KLAUDIA=false` remains only as an
+# escape hatch (WI-3068) if the source is ever unreachable.
 # Without it /usr/local/bin/klaudia is absent and a Codex launch is refused
 # (claude_config.rs protected_hook_binary), not crashed.
 # Klaudia (WI-950), built from the pinned commit with the pinned Go: no
