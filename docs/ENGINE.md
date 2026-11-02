@@ -383,6 +383,7 @@ does not register anything) and off by removing it.
 | `github-ro` | `GITHUB_MCP_TOKEN` — a fine-grained, read-only PAT; `VOGT_GITHUB_MCP_TOOLSETS` overrides the toolsets (default `actions,pull_requests,repos,code_security,dependabot`) | `--read-only` and `GITHUB_READ_ONLY=1` (write tools are not offered), plus the token's scope |
 | `grafana-ro` | `GRAFANA_URL` + `GRAFANA_SERVICE_ACCOUNT_TOKEN` — a Viewer-role service account | `--disable-write` (create/update tools and raw-SQL query tools are not offered), plus the Viewer role; `--usage-stats=disabled` |
 | `forgejo-ro` | `GITEA_HOST` + `GITEA_MCP_TOKEN` — a read-scoped token; works against Forgejo's Gitea-compatible API | `-r` and `GITEA_READONLY=true` (only read tools are offered), plus the token's scope |
+| `k8s-ro` | `K8S_AGENT_READONLY_KUBECONFIG` — the kubeconfig of a read-only service account (no Secrets, no writes); raw or base64 | `--read-only` (write tools are not offered), plus the account's RBAC; the kubeconfig is written to a 0600 file for the run and never appears in argv |
 
 The registration stores `vogt-readonly-mcp <server>` and nothing else: no
 token value (Claude Code, opencode and Klaudia pass a stdio server the
