@@ -356,6 +356,7 @@ ARG CODEX_ACP_VERSION
 ARG CLAUDE_CODE_VERSION
 ARG OPENCODE_VERSION
 ARG KLAUDIA_VERSION
+ARG INSTALL_KLAUDIA=false
 # --prefix=/usr/local (not the ambient $NPM_CONFIG_PREFIX, which points at
 # /home/sprooty/.npm-global) so these survive the runtime /home/sprooty bind
 # mount — same reasoning as the system pnpm install in the base. The dev pod is
@@ -492,6 +493,13 @@ RUN set -eu; \
         fi; \
     fi
 
+# Opt-in (WI-3068): `--build-arg INSTALL_KLAUDIA=true`, default false. The
+# source, https://github.com/TheDancingDeveloper-org/msp-klaudia
+# (VOGT_KLAUDIA_SOURCE), now answers an unauthenticated fetch with "could not
+# read Username" (private or moved), which failed every image build. Fix the
+# source access properly, with no credential baked in, before turning this on.
+# Without it /usr/local/bin/klaudia is absent and a Codex launch is refused
+# (claude_config.rs protected_hook_binary), not crashed.
 # Klaudia (WI-950), built from the pinned commit with the pinned Go: no
 # registry publishes it. Its own layer, so a Klaudia pin moves without
 # reinstalling the npm CLIs above. Only that commit is fetched, the build
@@ -504,7 +512,7 @@ RUN set -eu; \
 # `VOGT_KLAUDIA_VERSION` pin lands under the session-owned /opt/vogt/agent-clis
 # and is never what the hook runs (WI-1146).
 RUN set -eu; \
-    if [ "$INSTALL_AI_CLIENTS" = "true" ]; then \
+    if [ "$INSTALL_AI_CLIENTS" = "true" ] && [ "$INSTALL_KLAUDIA" = "true" ]; then \
         . /usr/local/share/vogt/agent-versions.env; \
         klaudia_version="${KLAUDIA_VERSION:-${VOGT_KLAUDIA_VERSION}}"; \
         git init -q /tmp/klaudia; \
