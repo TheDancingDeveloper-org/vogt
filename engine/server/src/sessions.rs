@@ -2341,6 +2341,9 @@ impl SessionRegistry {
         }
         let tree = self.tree_for_clean(&s);
         s.kill()?;
+        // The exit hook returns the slot too; doing it here as well means a
+        // stop never leaves it held, whichever runs first.
+        self.account_leases.remove(&id);
         self.finish_for_clean(id, &s, tree);
         Ok(())
     }
@@ -2519,6 +2522,9 @@ impl SessionRegistry {
         }
         let recorded_record = recorded;
         let recorded = recorded_record.is_some();
+        // Whatever the session was (live, hibernated, or recovered after a
+        // restart and never woken), its end returns its account slot.
+        self.account_leases.remove(&id);
         hibernation::remove(&self.cfg.state_dir, id);
         if live.is_none() && !recorded {
             return Err(ApiError::NotFound);
@@ -2750,8 +2756,7 @@ fn recover_records(
                 hibernation::remove(state_dir, id);
                 continue;
             }
-            account_pool.restore(record.account.as_deref());
-            if let Some(lease) = account_pool.restored_lease(record.account.as_deref()) {
+            if let Some(lease) = account_pool.restore(record.account.as_deref()) {
                 account_leases.insert(id, Arc::new(lease));
             }
             record.hibernation = Some(Hibernation {
