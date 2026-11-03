@@ -63,6 +63,10 @@ const SESSION_INPUT_MAX_BYTES: usize = 64 * 1024;
 /// this many screen reads, this far apart.
 const CONFIRM_READS: usize = 10;
 const CONFIRM_INTERVAL: Duration = Duration::from_millis(200);
+const MAX_ENTERS: usize = 3;
+const SETTLE: Duration = Duration::from_secs(10);
+const READY_GATE: Duration = Duration::from_secs(30);
+const TYPED_READS: usize = 10;
 
 /// The keys `session.input` accepts.
 const INPUT_KEYS: [&str; 10] = [
@@ -1972,24 +1976,40 @@ where
     // answer a worker's permission prompt and audits it (WI-2028).
     let overseer = relayed_overseer(ctx, engine, person)?;
     let confirming = submitted && params.confirm;
-    let mut before = if confirming {
-        engine
-            .get_session(&engine_id)
-            .ok()
-            .flatten()
-            .map(|seen| seen.activity)
+    let seen = if confirming {
+        engine.get_session(&engine_id).ok().flatten()
     } else {
         None
     };
+    let mut before = seen.as_ref().map(|seen| seen.activity.clone());
+    let stepwise = confirming && params.submit && !text.is_empty() && keys.is_empty();
     let mut woke = false;
-    if let Err(refused) = send_all(
-        engine,
-        &engine_id,
-        &params.id,
-        &writes_in_order,
-        person,
-        overseer.as_deref(),
-    ) {
+    let mut stepwise_verdict = None;
+    let sent = if stepwise && seen.as_ref().is_some_and(has_input_box) {
+        if seen.as_ref().is_some_and(EngineSession::hibernated) {
+            Err(VogtError::Conflict("hibernated".to_string()))
+        } else {
+            type_then_submit(
+                engine,
+                &engine_id,
+                &params.id,
+                &text,
+                before.as_deref(),
+                person,
+            )
+            .map(|verdict| stepwise_verdict = Some(verdict))
+        }
+    } else {
+        send_all(
+            engine,
+            &engine_id,
+            &params.id,
+            &writes_in_order,
+            person,
+            overseer.as_deref(),
+        )
+    };
+    if let Err(refused) = sent {
         // The engine refuses input to a hibernated session. Typing into one is
         // asking for it back: wake it, wait until it is at its prompt, then
         // type. Anything else the engine refused stays refused.
@@ -2027,19 +2047,37 @@ where
         }
         // Freshly woken and at its prompt: nothing was running.
         before = Some("waiting-for-input".to_string());
-        send_all(
+        if stepwise && current.as_ref().is_some_and(has_input_box) {
+            stepwise_verdict = Some(type_then_submit(
+                engine,
+                &engine_id,
+                &params.id,
+                &text,
+                before.as_deref(),
+                person,
+            )?);
+        } else {
+            send_all(
+                engine,
+                &engine_id,
+                &params.id,
+                &writes_in_order,
+                person,
+                overseer.as_deref(),
+            )?;
+        }
+    }
+    let verdict = if let Some(verdict) = stepwise_verdict {
+        verdict
+    } else if confirming {
+        confirm_delivery(
             engine,
             &engine_id,
-            &params.id,
-            &writes_in_order,
-            person,
-            overseer.as_deref(),
-        )?;
-    }
-    let verdict = if confirming {
-        confirm_delivery(engine, &engine_id, before.as_deref())
+            before.as_deref(),
+            (!text.is_empty()).then_some(text.as_str()),
+        )
     } else {
-        delivery::judge(submitted, None, &[])
+        delivery::judge(submitted, None, &[], None)
     };
     let entity = found
         .session
@@ -3477,6 +3515,7 @@ fn confirm_delivery(
     engine: &EngineClient,
     engine_id: &str,
     before: Option<&str>,
+    pending: Option<&str>,
 ) -> delivery::Verdict {
     let mut seen = Vec::new();
     for _ in 0..CONFIRM_READS {
@@ -3495,7 +3534,140 @@ fn confirm_delivery(
             break;
         }
     }
-    delivery::judge(true, before, &seen)
+    delivery::judge(true, before, &seen, pending)
+}
+
+fn has_input_box(session: &EngineSession) -> bool {
+    matches!(
+        session.conversation_agent.as_deref(),
+        Some("claude" | "codex")
+    )
+}
+
+fn read_screen(engine: &EngineClient, engine_id: &str) -> Option<delivery::Observation> {
+    let screen = engine.session_screen(engine_id, 0).ok()??;
+    Some(delivery::Observation {
+        activity: screen.activity,
+        lines: screen.lines,
+    })
+}
+
+fn type_then_submit(
+    engine: &EngineClient,
+    engine_id: &str,
+    named: &str,
+    text: &str,
+    before: Option<&str>,
+    person: bool,
+) -> Result<delivery::Verdict, VogtError> {
+    let mut boxed = read_screen(engine, engine_id)
+        .is_some_and(|seen| delivery::composer_text(&seen.lines).is_some());
+    if !boxed && !matches!(before, Some("running" | "awaiting-approval")) {
+        let _ = engine.wait_session(engine_id, "ready", READY_GATE);
+        boxed = read_screen(engine, engine_id)
+            .is_some_and(|seen| delivery::composer_text(&seen.lines).is_some());
+    }
+    send_all(
+        engine,
+        engine_id,
+        named,
+        &[(text.to_string(), false)],
+        person,
+        None,
+    )?;
+    if boxed {
+        for _ in 0..TYPED_READS {
+            let Some(seen) = read_screen(engine, engine_id) else {
+                break;
+            };
+            if delivery::composer_holds(&seen.lines, text) {
+                break;
+            }
+            std::thread::sleep(CONFIRM_INTERVAL);
+        }
+    }
+    send_all(
+        engine,
+        engine_id,
+        named,
+        &[(String::new(), true)],
+        person,
+        None,
+    )?;
+    submit_until_taken(engine, engine_id, named, before, text, person)
+}
+
+fn submit_until_taken(
+    engine: &EngineClient,
+    engine_id: &str,
+    named: &str,
+    before: Option<&str>,
+    text: &str,
+    person: bool,
+) -> Result<delivery::Verdict, VogtError> {
+    let mut verdict = settled(
+        engine,
+        engine_id,
+        text,
+        confirm_delivery(engine, engine_id, before, Some(text)),
+    );
+    for _ in 0..MAX_ENTERS - 1 {
+        if !matches!(
+            verdict.delivery,
+            delivery::Delivery::Unconfirmed | delivery::Delivery::Stuck
+        ) {
+            break;
+        }
+        if engine.wait_session(engine_id, "ready", SETTLE).is_err() {
+            break;
+        }
+        let Some(seen) = read_screen(engine, engine_id) else {
+            break;
+        };
+        if !delivery::safe_to_resubmit(&seen, text) {
+            if delivery::composer_text(&seen.lines).is_some() {
+                verdict = delivery::Verdict {
+                    delivery: delivery::Delivery::Delivered,
+                    evidence: "the input box cleared after the Enter".to_string(),
+                };
+            }
+            break;
+        }
+        send_all(
+            engine,
+            engine_id,
+            named,
+            &[(String::new(), true)],
+            person,
+            None,
+        )?;
+        verdict = settled(
+            engine,
+            engine_id,
+            text,
+            confirm_delivery(engine, engine_id, before, Some(text)),
+        );
+    }
+    Ok(verdict)
+}
+
+fn settled(
+    engine: &EngineClient,
+    engine_id: &str,
+    text: &str,
+    verdict: delivery::Verdict,
+) -> delivery::Verdict {
+    if verdict.delivery != delivery::Delivery::Delivered {
+        return verdict;
+    }
+    std::thread::sleep(CONFIRM_INTERVAL);
+    let Some(seen) = read_screen(engine, engine_id) else {
+        return verdict;
+    };
+    if seen.activity.as_deref() == Some("running") {
+        return verdict;
+    }
+    delivery::judge(true, None, &[seen], Some(text))
 }
 
 /// The engine id to relay as `overseer` when the caller is a session the
@@ -4189,7 +4361,8 @@ mod tests {
 
     use super::{
         answers_as_person, hibernate, input, relayed_overseer, remove_session_op,
-        rename_session_op, session_token_op, wake, HibernateParams, InputParams, WakeParams,
+        rename_session_op, session_token_op, type_then_submit, wake, HibernateParams, InputParams,
+        WakeParams,
     };
 
     /// An engine that records every request and answers from `script`: each GET
@@ -4400,6 +4573,44 @@ mod tests {
             assert!(!answers_as_person(ctx).unwrap());
         });
         assert!(seen.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn codex_input_left_in_the_composer_is_resubmitted() {
+        fn screen(activity: &str, text: &str) -> Vec<u8> {
+            serde_json::to_vec(&json!({
+                "id": "eng-1",
+                "activity": activity,
+                "lines": [format!("› {text}"), "", "  gpt high · ~/work", "  ? for shortcuts"]
+            }))
+            .unwrap()
+        }
+
+        let held = screen("idle", "carry on");
+        let mut replies = vec![held.clone(), held.clone()];
+        replies.extend(std::iter::repeat_n(held.clone(), 10));
+        replies.push(br#"{"outcome":"ready"}"#.to_vec());
+        replies.push(held);
+        replies.push(screen("running", ""));
+        replies.push(screen("running", ""));
+        replies.reverse();
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let client = engine(replies, Arc::clone(&seen));
+        let verdict =
+            type_then_submit(&client, "eng-1", "ses_1", "carry on", Some("idle"), true).unwrap();
+        let calls = seen.lock().unwrap();
+        let submits = calls
+            .iter()
+            .filter(|(method, path, body)| {
+                method == "POST" && path.ends_with("/input") && body.contains(r#""submit":true"#)
+            })
+            .count();
+        assert_eq!(
+            submits, 2,
+            "the held composer gets one more Enter: {calls:?}"
+        );
+        assert_eq!(verdict.delivery.as_str(), "delivered");
     }
 
     #[test]
