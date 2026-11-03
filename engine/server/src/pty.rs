@@ -830,6 +830,28 @@ impl Session {
         self.output_tx.subscribe()
     }
 
+    /// Append bytes received from a remote session backend.  The offset is
+    /// checked so reconnects may safely resend the tail which was not
+    /// acknowledged by the engine, without duplicating bytes already stored.
+    pub fn accept_remote_output(&self, offset: u64, data: &[u8]) -> Result<u64> {
+        let mut sb = self.scrollback.lock();
+        let next = sb.total_written();
+        if offset > next {
+            return Err(ApiError::BadRequest("agent output has a gap".into()));
+        }
+        let skip = (next - offset) as usize;
+        if skip < data.len() {
+            let fresh = Bytes::copy_from_slice(&data[skip..]);
+            let pos = {
+                sb.push(&fresh);
+                self.feed_terminal(&fresh);
+                sb.total_written() - fresh.len() as u64
+            };
+            let _ = self.output_tx.send(OutputChunk { pos, data: fresh });
+        }
+        Ok(sb.total_written())
+    }
+
     /// Current absolute output position, used by the WebSocket liveness probe
     /// to detect a socket that is open but no longer delivering output.
     pub fn scrollback_position(&self) -> u64 {

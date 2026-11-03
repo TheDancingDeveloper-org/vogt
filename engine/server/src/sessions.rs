@@ -341,7 +341,7 @@ impl SessionRegistry {
                     spec.account = template.account.clone();
                 }
                 spec.command = template.command.clone();
-                if template.backend != "local" {
+                if template.backend != "local" && !self.cfg.pod_backends_enabled {
                     return Err(ApiError::BadRequest(format!(
                         "session backend {:?} is not implemented",
                         template.backend
