@@ -16,6 +16,7 @@ path = "src/lib.rs"
 
 [dependencies]
 vogt-engine-contract = { path = "../contract", version = "0.1.0" }
+vogt-session-agent = { path = "../session-agent", version = "0.1.0" }
 # The live call pipeline (WI-960), published as its own crate:
 # https://github.com/TheDancingDeveloper-org/voicepipe
 voicepipe = "0.1"
@@ -68,6 +69,8 @@ jsonwebtoken = { version = "11.1", features = ["rust_crypto"] }
 base64 = "0.23"
 sha2 = "0.11"
 ring = "0.17"
+kube = { version = "0.98", features = ["client", "rustls-tls", "config"] }
+k8s-openapi = { version = "0.24", features = ["v1_30"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
