@@ -203,6 +203,18 @@ impl SessionRegistry {
         *self.pod_launcher.lock() = Some(launcher);
     }
 
+    /// Start the loop that settles the cluster's session pods against this
+    /// engine's sessions (`pod_reconcile`). A no-op unless pod backends are on.
+    pub fn start_pod_reconciler(&self) -> Option<tokio::task::JoinHandle<()>> {
+        self.cfg.pod_backends_enabled.then(|| {
+            crate::pod_reconcile::spawn(
+                self.pod_launcher(),
+                crate::agent_stream::global(),
+                self.pod_config(),
+            )
+        })
+    }
+
     fn pod_launcher(&self) -> Arc<dyn crate::pod_backend::PodLauncher> {
         Arc::clone(self.pod_launcher.lock().get_or_insert_with(|| {
             Arc::new(crate::pod_backend::KubeLauncher::new(self.pod_config()))
