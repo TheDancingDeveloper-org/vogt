@@ -342,6 +342,13 @@ jobs:
             uv run python scripts/parity.py check --impl rust --transport mcp --golden "$golden"
           VOGT_PARITY_RUST_BIN="$GITHUB_WORKSPACE/engine/target/debug/vogt-core" \
             uv run python scripts/parity.py check --impl rust --golden "$golden" --only dump
+          # WI-2678: exercise the same corpus without deterministic clock/ID
+          # hooks. This is a conformance probe, not a golden check: normal
+          # runtime timestamps and IDs are intentionally not deterministic.
+          # Keep it non-required while the known golden drift is reconciled.
+          VOGT_PARITY_HOOKS=off VOGT_PARITY_RUST_BIN="$GITHUB_WORKSPACE/engine/target/debug/vogt-core" \
+            uv run python scripts/parity.py check --impl rust --golden "$golden" --only actor || \
+            echo "hooks-off parity probe differs from the deterministic golden (non-required)"
           uv run python scripts/parity.py check --impl python --golden "$golden" --only actor
           # Both cores migrate from the same SQL: the schema init leaves must
           # match the golden, and a Python-written store must have nothing
