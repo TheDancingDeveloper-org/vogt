@@ -433,15 +433,74 @@ pub fn validate_resume_cursor(cursor: u64, next_offset: u64) -> Result<u64> {
     Ok(cursor)
 }
 
+/// Creates and removes the pod behind a session. The Kubernetes
+/// implementation is [`PodBackendFactory`]; tests substitute a fake that runs
+/// the agent in-process.
+pub trait PodLauncher: Send + Sync {
+    /// Create the pod. `token` is the one-shot bootstrap credential already
+    /// registered with the stream; implementations only deliver it to the pod.
+    fn create<'a>(&'a self, id: Uuid, token: &'a [u8], pod: Pod) -> LaunchFuture<'a>;
+    fn delete(&self, id: Uuid) -> LaunchFuture<'_>;
+}
+pub type LaunchFuture<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>>;
+
+impl PodLauncher for PodBackendFactory {
+    fn create<'a>(&'a self, id: Uuid, token: &'a [u8], pod: Pod) -> LaunchFuture<'a> {
+        Box::pin(async move { self.create_resources(id, token, pod).await.map(|_| ()) })
+    }
+    fn delete(&self, id: Uuid) -> LaunchFuture<'_> {
+        Box::pin(PodBackendFactory::delete(self, id))
+    }
+}
+
+/// The production launcher: connects to the cluster on first use, so an
+/// engine with the flag on but no cluster still starts and local sessions
+/// are unaffected.
+pub struct KubeLauncher {
+    cfg: PodConfig,
+    factory: tokio::sync::OnceCell<PodBackendFactory>,
+}
+impl KubeLauncher {
+    pub fn new(cfg: PodConfig) -> Self {
+        Self {
+            cfg,
+            factory: tokio::sync::OnceCell::new(),
+        }
+    }
+    pub fn config(&self) -> &PodConfig {
+        &self.cfg
+    }
+    async fn factory(&self) -> Result<&PodBackendFactory> {
+        self.factory
+            .get_or_try_init(|| PodBackendFactory::new(self.cfg.clone()))
+            .await
+    }
+}
+impl PodLauncher for KubeLauncher {
+    fn create<'a>(&'a self, id: Uuid, token: &'a [u8], pod: Pod) -> LaunchFuture<'a> {
+        Box::pin(async move { PodLauncher::create(self.factory().await?, id, token, pod).await })
+    }
+    fn delete(&self, id: Uuid) -> LaunchFuture<'_> {
+        Box::pin(async move { PodLauncher::delete(self.factory().await?, id).await })
+    }
+}
+
 pub struct PodBackend {
     id: Uuid,
+    link: std::sync::Arc<crate::agent_stream::PodLink>,
     size: parking_lot::Mutex<(u16, u16)>,
 }
 impl PodBackend {
-    pub fn new(_factory: PodBackendFactory, id: Uuid) -> Self {
+    pub fn new(
+        id: Uuid,
+        link: std::sync::Arc<crate::agent_stream::PodLink>,
+        size: (u16, u16),
+    ) -> Self {
         Self {
             id,
-            size: parking_lot::Mutex::new((80, 24)),
+            link,
+            size: parking_lot::Mutex::new(size),
         }
     }
 }
@@ -462,22 +521,30 @@ impl SessionBackend for PodBackend {
         Ok(())
     }
     fn signal_stop(&self) -> Result<()> {
-        crate::agent_stream::global()
-            .send(
-                self.id,
-                vogt_session_agent::Frame::Signal {
-                    signal: "kill".into(),
-                },
-            )
-            .map_err(|e| ApiError::Pty(format!("stop: {e}")))
+        self.link.request_stop();
+        match crate::agent_stream::global().send(
+            self.id,
+            vogt_session_agent::Frame::Signal {
+                signal: "kill".into(),
+            },
+        ) {
+            Ok(()) => Ok(()),
+            // No agent is attached, so there is no child to wait for: the
+            // session ends now, and an agent that dials in later is told to
+            // kill itself.
+            Err(e) if e.kind() == std::io::ErrorKind::NotConnected => {
+                self.link.finish(137);
+                Ok(())
+            }
+            Err(e) => Err(ApiError::Pty(format!("stop: {e}"))),
+        }
     }
     fn current_size(&self) -> Result<(u16, u16)> {
         Ok(*self.size.lock())
     }
     fn wait(&self) -> std::io::Result<portable_pty::ExitStatus> {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "pod sessions are reaped by the agent stream",
+        Ok(portable_pty::ExitStatus::with_exit_code(
+            self.link.wait_exit() as u32,
         ))
     }
 }
