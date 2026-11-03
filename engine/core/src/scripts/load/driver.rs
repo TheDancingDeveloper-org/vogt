@@ -460,7 +460,7 @@ fn request_for(
     let get = |path: &str, limit: &str| {
         agent
             .get(&format!("{base}{path}"))
-            .set("Authorization", auth)
+            .header("Authorization", auth)
             .query("limit", limit)
             .call()
             .map(drop)
@@ -469,9 +469,9 @@ fn request_for(
     let post = |path: &str, body: Value| {
         agent
             .post(&format!("{base}{path}"))
-            .set("Authorization", auth)
-            .set("Content-Type", "application/json")
-            .send_string(&body.to_string())
+            .header("Authorization", auth)
+            .header("Content-Type", "application/json")
+            .send(&body.to_string())
             .map(drop)
             .map_err(|err| err.to_string())
     };
@@ -516,10 +516,11 @@ fn drive_deployed(
     plan: &DeployedPlan,
     refs: &[String],
 ) -> (SoakRecorder, f64) {
-    let agent = ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(30))
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(30)))
         .max_idle_connections_per_host(plan.concurrency as usize)
-        .build();
+        .build()
+        .into();
     let auth = format!("Bearer {token}");
     let recorder = Mutex::new(SoakRecorder::default());
     let next = AtomicUsize::new(0);
@@ -630,7 +631,7 @@ mod tests {
         let dir = scratch("refused");
         let driver = Driver::open(&dir.join("instance")).unwrap();
         let server = Server::start(&driver).unwrap();
-        let agent = ureq::AgentBuilder::new().build();
+        let agent = ureq::Agent::new_with_defaults();
         let err =
             request_for(&agent, &server.base_url, "Bearer nope", "work.list", 0, &[]).unwrap_err();
         drop(server);
