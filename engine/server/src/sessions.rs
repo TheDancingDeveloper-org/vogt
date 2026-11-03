@@ -108,6 +108,9 @@ pub struct SessionRegistry {
     /// Sessions running with a credential minted for them, revoked when they
     /// end.
     minted: Arc<DashMap<Uuid, ()>>,
+    /// The lease is retained only while a process is live. Removing it from
+    /// this map on exit makes exit and failed-start cleanup symmetric.
+    account_leases: Arc<DashMap<Uuid, Arc<crate::account_pool::AccountLease>>>,
 }
 
 const MAX_SESSION_NAME_BYTES: usize = 256;
@@ -167,7 +170,14 @@ impl SessionRegistry {
             cfg.agent_onboarding.account_concurrency_cap,
         ));
         let records = Arc::new(DashMap::new());
-        recover_records(&cfg.state_dir, history.as_deref(), &records);
+        let account_leases = Arc::new(DashMap::new());
+        recover_records(
+            &cfg.state_dir,
+            history.as_deref(),
+            &records,
+            &account_pool,
+            &account_leases,
+        );
         Self {
             cfg,
             bus,
@@ -180,6 +190,7 @@ impl SessionRegistry {
             shutting_down: Arc::new(AtomicBool::new(false)),
             core: Arc::new(std::sync::OnceLock::new()),
             minted: Arc::new(DashMap::new()),
+            account_leases,
         }
     }
 
@@ -350,6 +361,10 @@ impl SessionRegistry {
         // launch arguments and variables (a wake adds those again).
         let base_command = spec.command.clone();
         let mut base_env = spec.env.clone().unwrap_or_default();
+        let id = match &creating {
+            Creating::Wake(record) => record.id,
+            Creating::Fresh(_) => preassigned.unwrap_or_else(Uuid::new_v4),
+        };
 
         // A named Claude Code account becomes that account's config directory,
         // which the engine looked up itself: the caller never supplies a path.
@@ -373,17 +388,44 @@ impl SessionRegistry {
                 "account is applied to Claude Code only; the command is not `claude`".into(),
             ));
         }
-        let account = if is_claude && matches!(creating, Creating::Fresh(_)) {
-            self.account_pool
-                .reserve(account.as_deref())
-                .map_err(|full| {
-                    ApiError::AtCapacity(format!("cap {}; counts {:?}", full.cap, full.counts))
-                })?
-        } else if is_claude {
-            account
+        let account_lease = if is_claude {
+            let should_reserve =
+                matches!(creating, Creating::Fresh(_)) || matches!(creating, Creating::Wake(_));
+            if matches!(creating, Creating::Wake(_)) {
+                match self.account_leases.remove(&id).map(|(_, lease)| lease) {
+                    Some(lease) => Some(lease),
+                    None => Some(Arc::new(
+                        self.account_pool
+                            .lease(account.as_deref())
+                            .map_err(|full| {
+                                ApiError::AtCapacity(format!(
+                                    "cap {}; counts {:?}",
+                                    full.cap, full.counts
+                                ))
+                            })?,
+                    )),
+                }
+            } else if should_reserve {
+                Some(Arc::new(
+                    self.account_pool
+                        .lease(account.as_deref())
+                        .map_err(|full| {
+                            ApiError::AtCapacity(format!(
+                                "cap {}; counts {:?}",
+                                full.cap, full.counts
+                            ))
+                        })?,
+                ))
+            } else {
+                None
+            }
         } else {
             None
         };
+        let account = account_lease
+            .as_ref()
+            .and_then(|l| l.account().map(str::to_string))
+            .or(account);
         if let (Some(name), Creating::Fresh(_)) = (account.as_deref(), &creating) {
             if base_command
                 .as_deref()
@@ -453,10 +495,6 @@ impl SessionRegistry {
         // below can be named for the session it belongs to, so the file
         // exists before the child does, and so the agent's launch can name
         // both.
-        let id = match &creating {
-            Creating::Wake(record) => record.id,
-            Creating::Fresh(_) => preassigned.unwrap_or_else(Uuid::new_v4),
-        };
         let conversation_pin = match &creating {
             Creating::Wake(record) => record.fresh_conversation.unwrap_or(id),
             Creating::Fresh(_) => id,
@@ -754,6 +792,11 @@ impl SessionRegistry {
             Creating::Wake(_) => crate::launch::Origin::Wake,
         };
         let spawn_started = std::time::Instant::now();
+        // Install the lease before spawning: the child can exit immediately,
+        // and its exit hook must always be able to remove the reservation.
+        if let Some(lease) = account_lease.as_ref() {
+            self.account_leases.insert(id, Arc::clone(lease));
+        }
         let spawned = pty::spawn(
             id,
             &spec,
@@ -780,6 +823,9 @@ impl SessionRegistry {
         let spawned = match spawned {
             Ok(spawned) => spawned,
             Err(e) => {
+                // No exit hook is guaranteed for a failed spawn. Removing the
+                // map entry and dropping our local Arc returns the slot.
+                self.account_leases.remove(&id);
                 // A grant for a child that never started is a live token for
                 // nobody; forget it with the rest of the failed spawn.
                 self.secret_broker.revoke(id);
@@ -1226,12 +1272,12 @@ impl SessionRegistry {
         let minted = Arc::clone(&self.minted);
         let core = Arc::clone(&self.core);
         let broker = Arc::clone(&self.secret_broker);
-        let account_pool = Arc::clone(&self.account_pool);
+        let account_leases = Arc::clone(&self.account_leases);
         Box::new(move |session: &Session| {
             // An approved grant is for a running session; whatever stopped it,
             // the grant goes with the process (WI-973).
             broker.drop_grants(session.id);
-            account_pool.release(session.account().as_deref());
+            account_leases.remove(&session.id);
             if session.is_hibernating() || shutting_down.load(Ordering::Acquire) {
                 return;
             }
@@ -2558,14 +2604,23 @@ fn recover_records(
     state_dir: &std::path::Path,
     history: Option<&SessionHistory>,
     records: &DashMap<Uuid, Record>,
+    account_pool: &Arc<crate::account_pool::AccountPool>,
+    account_leases: &DashMap<Uuid, Arc<crate::account_pool::AccountLease>>,
 ) {
     for mut record in hibernation::load_all(state_dir) {
         let id = record.id;
         if record.hibernation.is_none() {
+            // This record had a live process when the previous engine stopped
+            // (or crashed). Reserve its recorded account before turning it
+            // into a wakeable recovered record, so new starts see the slot.
             let resumable = record.conversation.is_some();
             if !resumable && record.role != SessionRole::Oversight {
                 hibernation::remove(state_dir, id);
                 continue;
+            }
+            account_pool.restore(record.account.as_deref());
+            if let Some(lease) = account_pool.restored_lease(record.account.as_deref()) {
+                account_leases.insert(id, Arc::new(lease));
             }
             record.hibernation = Some(Hibernation {
                 at: now_rfc3339(),
