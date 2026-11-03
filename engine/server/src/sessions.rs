@@ -150,8 +150,17 @@ enum Creating {
 
 impl SessionRegistry {
     pub fn new(cfg: Arc<Config>, bus: EventBus, history: Option<Arc<SessionHistory>>) -> Self {
-        let secret_broker =
-            Arc::new(SecretBroker::new(&cfg).with_grant_projects(cfg.agent_grant_projects.clone()));
+        let account_dirs = cfg
+            .agent_onboarding
+            .accounts
+            .iter()
+            .map(|account| (account.name.clone(), account.dir.clone()))
+            .collect();
+        let secret_broker = Arc::new(
+            SecretBroker::new(&cfg)
+                .with_grant_projects(cfg.agent_grant_projects.clone())
+                .with_account_dirs(account_dirs),
+        );
         let records = Arc::new(DashMap::new());
         recover_records(&cfg.state_dir, history.as_deref(), &records);
         Self {
