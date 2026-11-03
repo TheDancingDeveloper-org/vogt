@@ -50,7 +50,7 @@ pub struct Session {
     /// ring (WI-990). `None` for a session restored from hibernation, which
     /// has only the tail it kept and renders by replaying that.
     terminal: Mutex<Option<crate::screen::Terminal>>,
-    backend: Mutex<Box<dyn SessionBackend>>,
+    backend: Arc<dyn SessionBackend>,
     /// Cached child PID — `child` is taken by the wait task, so SIGKILL needs
     /// its own handle on Unix.
     pid: Option<u32>,
@@ -255,7 +255,7 @@ impl Session {
     /// `limit` bytes of the same scrollback ring attach replays (aligned to a
     /// ground-state boundary), and the PTY's current rows and cols.
     pub fn screen_source(&self, limit: usize) -> (Bytes, u16, u16) {
-        let (rows, cols) = match self.backend.lock().current_size() {
+        let (rows, cols) = match self.backend.current_size() {
             Ok((rows, cols)) => (rows, cols),
             Err(_) => (24, 80),
         };
@@ -847,7 +847,7 @@ impl Session {
 
     pub fn write_input(&self, data: &[u8]) -> std::io::Result<()> {
         *self.last_input.lock() = Some(Instant::now());
-        self.backend.lock().write_input(data)
+        self.backend.write_input(data)
     }
 
     /// Stamp that a person typed. Called only by the paths that already
@@ -863,7 +863,7 @@ impl Session {
     }
 
     pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
-        self.backend.lock().resize(cols, rows)?;
+        self.backend.resize(cols, rows)?;
         // Reflow the grid to match, so a screen read before the program's own
         // repaint arrives is already the new size.
         self.resize_terminal(rows, cols);
@@ -888,7 +888,7 @@ impl Session {
     pub fn kill(&self) -> Result<()> {
         // Prefer signalling by pid: the wait task has typically already taken
         // ownership of the `Child` to call `wait()`, leaving the Mutex empty.
-        self.backend.lock().signal_stop()
+        self.backend.signal_stop()
     }
 }
 
@@ -1226,7 +1226,7 @@ pub fn spawn(
             spec.scrollback_bytes.unwrap_or(defaults.scrollback_bytes),
         )),
         terminal: Mutex::new(Some(crate::screen::Terminal::new(size.rows, size.cols))),
-        backend: Mutex::new(Box::new(backend)),
+        backend: Arc::new(backend),
         pid,
         output_tx: tx.clone(),
         size_tx: watch::Sender::new((size.cols, size.rows)),
@@ -1462,7 +1462,7 @@ fn spawn_exit_waiter(
     on_exit: Option<ExitHook>,
 ) {
     tokio::task::spawn_blocking(move || {
-        let status = match session.backend.lock().wait() {
+        let status = match session.backend.wait() {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!(session = %session.id, error = %e, "child wait failed");
