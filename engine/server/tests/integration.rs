@@ -13531,6 +13531,48 @@ async fn every_attached_client_is_told_the_pty_size() {
 }
 
 #[tokio::test]
+async fn a_live_session_accepts_input_resize_and_stop_without_blocking() {
+    let (base, _h) = boot().await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let id = create_session_with(
+        &client,
+        &base,
+        json!({ "name": "backend-lock", "command": ["/bin/cat"] }),
+    )
+    .await;
+    let mut ws = ws_attach(&base, &id).await;
+    next_control(&mut ws, "snapshot-done").await;
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        ws.send(Message::Binary(b"live\n".to_vec().into()))
+            .await
+            .unwrap();
+        ws.send(Message::Text(
+            json!({ "type": "resize", "cols": 120, "rows": 40 })
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+        next_control(&mut ws, "resize").await;
+        client
+            .post(format!("{base}/api/sessions/{id}/kill"))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        wait_for_session_row(&client, &base, &id, |s| !s["exit_code"].is_null()).await;
+    })
+    .await
+    .expect("input, resize and stop remain responsive while the child exits");
+    ws.close(None).await.ok();
+}
+
+#[tokio::test]
 async fn removing_oversight_lifts_its_pin_but_keeps_a_workers_own_pin() {
     // WI-1091: oversight pins a session awake; making it a worker again must
     // put it back under the ordinary idle policy, or a demoted overseer stays
