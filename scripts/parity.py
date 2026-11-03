@@ -12,9 +12,11 @@ the normalised answers (`record`) or diffs them against a previous recording
 
 `--impl python` resolves `VOGT_PARITY_PYTHON_BIN` (a `vogt` executable) and
 `--impl rust` resolves `VOGT_PARITY_RUST_BIN` (a `vogt-core` executable).
-Each run sets `VOGT_TEST_CLOCK_START` and `VOGT_TEST_IDS=sequential` so two
-fresh instances given the same script produce the same identifiers and
-timestamps. Exit status is non-zero when any step differs.
+By default each run sets `VOGT_TEST_CLOCK_START` and `VOGT_TEST_IDS=sequential`
+(the deterministic-hooks mode), so two fresh instances given the same script
+produce the same identifiers and timestamps. Set `VOGT_PARITY_HOOKS=off` to
+run with those hooks absent and exercise the normal runtime defaults. Exit
+status is non-zero when any step differs.
 """
 
 from __future__ import annotations
@@ -613,17 +615,22 @@ def _child_env() -> dict[str, str]:
     env = {
         key: value for key, value in os.environ.items() if not key.startswith("VOGT_")
     }
-    env.update(
-        {
-            "VOGT_TEST_CLOCK_START": CLOCK_START,
-            "VOGT_TEST_IDS": "sequential",
-            # The local principal is `local:$USER`. Pinning it keeps a golden
-            # recorded by one account comparable to a run under another,
-            # including CI's `runner` user.
-            "USER": "parity",
-            "LOGNAME": "parity",
-        }
-    )
+    hooks = os.environ.get("VOGT_PARITY_HOOKS", "on").lower()
+    if hooks not in {"on", "off"}:
+        raise SystemExit(
+            f"VOGT_PARITY_HOOKS must be `on` (default) or `off`, not {hooks!r}"
+        )
+    if hooks == "on":
+        env.update(
+            {
+                "VOGT_TEST_CLOCK_START": CLOCK_START,
+                "VOGT_TEST_IDS": "sequential",
+            }
+        )
+    # The local principal is `local:$USER`. Pinning it keeps a golden recorded
+    # by one account comparable to a run under another, including CI's
+    # `runner` user. This is not a VOGT_* deterministic hook.
+    env.update({"USER": "parity", "LOGNAME": "parity"})
     return env
 
 
