@@ -3249,6 +3249,32 @@ Notifications the engine sends carry `{kind, session_id, url}` in their data,
 where `url` is a PWA route (`/#/t/<session-id>`), so a tap lands on the
 terminal that raised it.
 
+### Pod-backed sessions
+
+With `ENGINE_POD_BACKENDS_ENABLED` on, a template whose backend is `pod` runs
+its process in a Kubernetes pod (namespace `vogt-sessions`) that dials back to
+the engine. A reconciler sweeps the namespace every `reconcile_interval` (15 s):
+it ends a live session whose pod failed, vanished or sat Pending too long, and
+deletes a pod that no live session owns.
+
+Engines can share the namespace (dev and prod, or an old process during a
+rollout), so ownership is explicit:
+
+- every pod carries `vogt.engine=<engine id>`, set from
+  `ENGINE_POD_ENGINE_ID` (default `vogt-engine`; sanitised to a label value).
+  Give each deployment its own id and keep it stable across restarts;
+- the sweep lists only `vogt.session,vogt.engine=<id>`, and ignores any pod
+  without its own label (pods made before the label existed are not deleted;
+  remove them by hand);
+- an orphan is deleted by name with a `preconditions.uid` taken from the listed
+  pod, so a decision about one pod cannot delete its replacement (the API
+  server answers 409).
+
+**An engine restart currently marks pod sessions lost.** The session token and
+the stream cursor live in memory, so an agent in a surviving pod cannot
+reconnect: the sweep deletes the pod as an orphan, and the session returns from
+its record as hibernated. WI-3205 re-adopts running pods instead.
+
 ### Session history APIs
 
 Archived scrollback for sessions. Every route requires history to be enabled —

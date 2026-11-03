@@ -11,7 +11,7 @@ use k8s_openapi::api::core::v1::{
 };
 use kube::config::{KubeConfigOptions, Kubeconfig};
 use kube::{
-    api::{Api, DeleteParams, ListParams, ObjectMeta, PostParams},
+    api::{Api, DeleteParams, ListParams, ObjectMeta, PostParams, Preconditions},
     Client, Config as KubeConfig,
 };
 use serde::{Deserialize, Serialize};
@@ -49,6 +49,53 @@ pub struct PodConfig {
     /// session is ended.
     #[serde(default = "default_pending_timeout")]
     pub pending_timeout: Duration,
+    /// Names this engine deployment. Every pod it creates carries it as the
+    /// `vogt.engine` label, and the reconciler lists and deletes only pods
+    /// that carry its own, so engines sharing a namespace (dev and prod, or an
+    /// old process during a rollout) never touch each other's pods. Keep it
+    /// stable for a deployment and distinct between deployments.
+    #[serde(default = "default_engine_id")]
+    pub engine_id: String,
+}
+/// The label that marks which engine deployment owns a session pod.
+pub const ENGINE_LABEL: &str = "vogt.engine";
+pub const DEFAULT_ENGINE_ID: &str = "vogt-engine";
+fn default_engine_id() -> String {
+    DEFAULT_ENGINE_ID.into()
+}
+/// Make an operator-supplied engine id a valid label value (at most 63
+/// characters of `[A-Za-z0-9._-]`, starting and ending alphanumeric); an id
+/// that leaves nothing falls back to the default.
+pub fn sanitize_engine_id(raw: &str) -> String {
+    let kept: String = raw
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .take(63)
+        .collect();
+    let kept = kept.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+    if kept.is_empty() {
+        default_engine_id()
+    } else {
+        kept.to_string()
+    }
+}
+/// The label selector for the pods this engine owns.
+pub fn session_pod_selector(cfg: &PodConfig) -> String {
+    format!("vogt.session,{ENGINE_LABEL}={}", cfg.engine_id)
+}
+/// Whether the pod carries this engine's label.
+pub fn pod_is_ours(pod: &Pod, cfg: &PodConfig) -> bool {
+    pod.metadata
+        .labels
+        .as_ref()
+        .and_then(|l| l.get(ENGINE_LABEL))
+        .is_some_and(|v| v == &cfg.engine_id)
 }
 fn default_reconcile_interval() -> Duration {
     Duration::from_secs(15)
@@ -106,6 +153,7 @@ impl Default for PodConfig {
             service_account: "vogt-session".into(),
             reconcile_interval: default_reconcile_interval(),
             pending_timeout: default_pending_timeout(),
+            engine_id: default_engine_id(),
         }
     }
 }
@@ -279,6 +327,7 @@ pub fn pod_template(
         ("vogt.session".into(), id.to_string()),
         ("vogt.kind".into(), kind.into()),
         ("vogt.project".into(), project.into()),
+        (ENGINE_LABEL.into(), cfg.engine_id.clone()),
     ]);
     if let Some(account) = account {
         labels.insert("vogt.account".into(), account.into());
@@ -433,28 +482,29 @@ impl PodBackendFactory {
         self.create(pod).await
     }
 
-    pub async fn delete(&self, id: Uuid) -> Result<()> {
+    /// Delete the session's pod. With `uid` the API server refuses (409) when
+    /// the pod now under that name is a different one, so a decision made
+    /// about an earlier pod cannot remove its replacement.
+    pub async fn delete(&self, id: Uuid, uid: Option<String>) -> Result<()> {
+        let params = DeleteParams {
+            preconditions: uid.map(|uid| Preconditions {
+                uid: Some(uid),
+                resource_version: None,
+            }),
+            ..Default::default()
+        };
         Api::<Pod>::namespaced(self.client.clone(), &self.cfg.namespace)
-            .delete(&pod_name(id), &DeleteParams::default())
+            .delete(&pod_name(id), &params)
             .await
             .map_err(|e| ApiError::Internal(format!("deleting session pod: {e}")))?;
         Ok(())
     }
     pub async fn reconcile(&self) -> Result<Vec<Pod>> {
         let pods = Api::<Pod>::namespaced(self.client.clone(), &self.cfg.namespace)
-            .list(&ListParams::default())
+            .list(&ListParams::default().labels(&session_pod_selector(&self.cfg)))
             .await
             .map_err(|e| ApiError::Internal(format!("listing session pods: {e}")))?;
-        Ok(pods
-            .items
-            .into_iter()
-            .filter(|p| {
-                p.metadata
-                    .labels
-                    .as_ref()
-                    .is_some_and(|l| l.contains_key("vogt.session"))
-            })
-            .collect())
+        Ok(pods.items)
     }
 }
 
@@ -492,8 +542,11 @@ pub trait PodLauncher: Send + Sync {
     /// Create the pod. `token` is the one-shot bootstrap credential already
     /// registered with the stream; implementations only deliver it to the pod.
     fn create<'a>(&'a self, id: Uuid, token: &'a [u8], pod: Pod) -> LaunchFuture<'a>;
-    fn delete(&self, id: Uuid) -> LaunchFuture<'_>;
-    /// Every pod in the sessions namespace that carries a session label.
+    /// Delete the session's pod; `uid` (from the listed pod) makes the delete
+    /// apply only to that exact pod.
+    fn delete(&self, id: Uuid, uid: Option<String>) -> LaunchFuture<'_>;
+    /// Every pod in the sessions namespace that carries a session label and
+    /// this engine's `vogt.engine` label.
     fn list(&self) -> ListFuture<'_>;
 }
 pub type ListFuture<'a> =
@@ -505,8 +558,8 @@ impl PodLauncher for PodBackendFactory {
     fn create<'a>(&'a self, id: Uuid, token: &'a [u8], pod: Pod) -> LaunchFuture<'a> {
         Box::pin(async move { self.create_resources(id, token, pod).await.map(|_| ()) })
     }
-    fn delete(&self, id: Uuid) -> LaunchFuture<'_> {
-        Box::pin(PodBackendFactory::delete(self, id))
+    fn delete(&self, id: Uuid, uid: Option<String>) -> LaunchFuture<'_> {
+        Box::pin(PodBackendFactory::delete(self, id, uid))
     }
     fn list(&self) -> ListFuture<'_> {
         Box::pin(self.reconcile())
@@ -540,8 +593,8 @@ impl PodLauncher for KubeLauncher {
     fn create<'a>(&'a self, id: Uuid, token: &'a [u8], pod: Pod) -> LaunchFuture<'a> {
         Box::pin(async move { PodLauncher::create(self.factory().await?, id, token, pod).await })
     }
-    fn delete(&self, id: Uuid) -> LaunchFuture<'_> {
-        Box::pin(async move { PodLauncher::delete(self.factory().await?, id).await })
+    fn delete(&self, id: Uuid, uid: Option<String>) -> LaunchFuture<'_> {
+        Box::pin(async move { PodLauncher::delete(self.factory().await?, id, uid).await })
     }
     fn list(&self) -> ListFuture<'_> {
         Box::pin(async move { PodLauncher::list(self.factory().await?).await })
@@ -793,5 +846,181 @@ mod tests {
                 .as_deref(),
             Some("/etc/ssl/custom.pem")
         );
+    }
+
+    /// A mocked kube API: serves one pod (list and delete) and records every
+    /// request's method, URI and body. A delete whose `preconditions.uid` does
+    /// not match the pod's uid is refused with 409, as the API server does.
+    mod mock_kube {
+        use super::*;
+        use std::sync::Mutex;
+
+        pub type Seen = Arc<Mutex<Vec<(String, String, String)>>>;
+
+        pub fn client(pods: Vec<Pod>) -> (Client, Seen, Arc<Mutex<Vec<Pod>>>) {
+            let seen: Seen = Arc::default();
+            let store = Arc::new(Mutex::new(pods));
+            let (log, state) = (seen.clone(), store.clone());
+            let service = tower::service_fn(move |req: hyper::Request<kube::client::Body>| {
+                let (log, state) = (log.clone(), state.clone());
+                async move {
+                    let (parts, body) = req.into_parts();
+                    let body =
+                        String::from_utf8_lossy(&body.collect_bytes().await.unwrap()).into_owned();
+                    let uri = parts.uri.to_string();
+                    log.lock()
+                        .unwrap()
+                        .push((parts.method.to_string(), uri.clone(), body.clone()));
+                    let json = |status: u16, value: serde_json::Value| {
+                        Ok::<_, std::convert::Infallible>(
+                            hyper::Response::builder()
+                                .status(status)
+                                .header("content-type", "application/json")
+                                .body(kube::client::Body::from(value.to_string().into_bytes()))
+                                .unwrap(),
+                        )
+                    };
+                    if parts.method == hyper::Method::GET {
+                        let items = state.lock().unwrap().clone();
+                        return json(
+                            200,
+                            serde_json::json!({
+                                "apiVersion": "v1", "kind": "PodList",
+                                "metadata": {}, "items": items,
+                            }),
+                        );
+                    }
+                    let want: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+                    let want = want["preconditions"]["uid"].as_str();
+                    let mut pods = state.lock().unwrap();
+                    let name = uri.rsplit('/').next().unwrap().split('?').next().unwrap();
+                    let Some(at) = pods
+                        .iter()
+                        .position(|p| p.metadata.name.as_deref() == Some(name))
+                    else {
+                        return json(
+                            404,
+                            serde_json::json!({"kind":"Status","apiVersion":"v1","status":"Failure","reason":"NotFound","code":404,"message":"not found"}),
+                        );
+                    };
+                    if want.is_some() && want != pods[at].metadata.uid.as_deref() {
+                        return json(
+                            409,
+                            serde_json::json!({"kind":"Status","apiVersion":"v1","status":"Failure","reason":"Conflict","code":409,"message":"uid precondition failed"}),
+                        );
+                    }
+                    let gone = pods.remove(at);
+                    json(200, serde_json::to_value(gone).unwrap())
+                }
+            });
+            (Client::new(service, "vogt-sessions"), seen, store)
+        }
+    }
+
+    fn named(id: Uuid, engine: &str, uid: &str) -> Pod {
+        let mut pod = Pod::default();
+        pod.metadata.name = Some(pod_name(id));
+        pod.metadata.uid = Some(uid.into());
+        pod.metadata.labels = Some(BTreeMap::from([
+            ("vogt.session".into(), id.to_string()),
+            (ENGINE_LABEL.into(), engine.into()),
+        ]));
+        pod
+    }
+
+    #[test]
+    fn pods_carry_the_engine_label_and_the_selector_names_it() {
+        let cfg = PodConfig {
+            engine_id: "vogt-dev".into(),
+            ..Default::default()
+        };
+        let template = SessionTemplate {
+            name: "pod".into(),
+            description: "pod".into(),
+            command: None,
+            cwd: None,
+            env: vec![],
+            default_name: None,
+            match_repo_names: vec![],
+            match_path_prefixes: vec![],
+            tags: vec![],
+            backend: "pod".into(),
+            account: None,
+        };
+        let pod = pod_template(
+            &cfg,
+            &template,
+            Uuid::nil(),
+            "demo",
+            "session",
+            None,
+            &[],
+            b"t",
+        );
+        assert_eq!(
+            pod.metadata.labels.as_ref().unwrap().get(ENGINE_LABEL),
+            Some(&"vogt-dev".to_string())
+        );
+        assert!(pod_is_ours(&pod, &cfg));
+        assert!(!pod_is_ours(&pod, &PodConfig::default()));
+        assert_eq!(
+            session_pod_selector(&cfg),
+            "vogt.session,vogt.engine=vogt-dev"
+        );
+    }
+
+    #[test]
+    fn engine_ids_become_valid_label_values() {
+        assert_eq!(sanitize_engine_id("vogt-prod"), "vogt-prod");
+        assert_eq!(sanitize_engine_id("  prod/eu 1 "), "prod-eu-1");
+        assert_eq!(sanitize_engine_id("---"), DEFAULT_ENGINE_ID);
+        assert_eq!(sanitize_engine_id(""), DEFAULT_ENGINE_ID);
+        assert_eq!(sanitize_engine_id(&"a".repeat(100)).len(), 63);
+    }
+
+    #[tokio::test]
+    async fn the_list_request_carries_the_engine_selector() {
+        let (client, seen, _) = mock_kube::client(vec![]);
+        let cfg = PodConfig {
+            engine_id: "vogt-dev".into(),
+            ..Default::default()
+        };
+        let factory = PodBackendFactory {
+            cfg: Arc::new(cfg),
+            client,
+        };
+        factory.reconcile().await.unwrap();
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].0, "GET");
+        assert!(
+            seen[0]
+                .1
+                .contains("labelSelector=vogt.session%2Cvogt.engine%3Dvogt-dev"),
+            "selector missing from {}",
+            seen[0].1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stale_decision_cannot_delete_a_recreated_pod() {
+        let id = Uuid::new_v4();
+        // The sweep listed uid-old; the pod was then recreated under the same
+        // name with a new uid.
+        let (client, seen, store) =
+            mock_kube::client(vec![named(id, DEFAULT_ENGINE_ID, "uid-new")]);
+        let factory = PodBackendFactory {
+            cfg: Arc::new(PodConfig::default()),
+            client,
+        };
+
+        assert!(factory.delete(id, Some("uid-old".into())).await.is_err());
+        assert_eq!(store.lock().unwrap().len(), 1, "the new pod survives");
+        let sent = seen.lock().unwrap()[0].2.clone();
+        assert!(sent.contains("\"uid\":\"uid-old\""), "body: {sent}");
+
+        // With the uid of the pod that is there, the delete goes through.
+        factory.delete(id, Some("uid-new".into())).await.unwrap();
+        assert!(store.lock().unwrap().is_empty());
     }
 }
