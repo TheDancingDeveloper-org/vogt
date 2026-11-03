@@ -11216,6 +11216,268 @@ async fn a_claude_session_starts_with_its_directory_trusted_and_its_brief_readab
     assert!(!woken.contains("Vogt started"), "{woken:?}");
 }
 
+/// One account holding one slot, and a `claude` stand-in that is just
+/// `sleep 300`: every cap test below starts from this.
+fn one_slot_sandbox() -> (tempfile::TempDir, Config, std::path::PathBuf) {
+    let (tmp, mut cfg, stub) = hibernation_sandbox();
+    std::fs::write(&stub, "#!/bin/sh\nprintf '> '\nexec sleep 300\n").unwrap();
+    cfg.agent_onboarding = vogt_engine_server::claude_config::Onboarding {
+        enabled: true,
+        default_dir: Some(tmp.path().join("default-home")),
+        settings_file: None,
+        opencode_config: None,
+        account_concurrency_cap: 1,
+        accounts: vogt_engine_server::claude_config::parse_accounts(Some(&format!(
+            "a={}",
+            tmp.path().join("acct-a").display()
+        ))),
+        codex_policy: Ok(None),
+    };
+    (tmp, cfg, stub)
+}
+
+fn cap_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap()
+}
+
+async fn start_on_account(
+    client: &reqwest::Client,
+    base: &str,
+    stub: &std::path::Path,
+    name: &str,
+) -> reqwest::Response {
+    client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({ "name": name, "command": [stub.to_string_lossy()], "account": "a" }))
+        .send()
+        .await
+        .unwrap()
+}
+
+/// Start a session on the account, retrying `429` until `deadline`: a slot
+/// is returned by an exit hook, which may trail the stop by a moment.
+async fn start_when_free(
+    client: &reqwest::Client,
+    base: &str,
+    stub: &std::path::Path,
+    name: &str,
+) -> Value {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let response = start_on_account(client, base, stub, name).await;
+        if response.status() == StatusCode::OK {
+            return response.json().await.unwrap();
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{name} never got a slot: {}",
+            response.status()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// A write-ahead record the previous engine left for a live session on
+/// account `a`: the next boot recovers it, holding its slot, without waking it.
+fn leave_live_record(state_dir: &std::path::Path, stub: &std::path::Path) -> uuid::Uuid {
+    let lost = uuid::Uuid::new_v4();
+    std::fs::create_dir_all(state_dir.join("sessions")).unwrap();
+    std::fs::write(
+        state_dir.join("sessions").join(format!("{lost}.json")),
+        serde_json::to_vec(&json!({
+            "version": 1,
+            "id": lost,
+            "name": "lost in a SIGKILL",
+            "created_at": "2026-10-05T00:00:00Z",
+            "command": [stub.to_string_lossy()],
+            "account": "a",
+            "conversation": { "agent": "claude", "id": lost },
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    lost
+}
+
+#[tokio::test]
+async fn a_wake_takes_a_slot_and_is_refused_when_the_account_is_full() {
+    let (_tmp, cfg, stub) = one_slot_sandbox();
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = cap_client();
+    let first: Value = start_on_account(&client, &base, &stub, "first")
+        .await
+        .json()
+        .await
+        .unwrap();
+    let first = first["id"].as_str().unwrap().to_string();
+    live_output_containing(&client, &base, &first, &["> "]).await;
+    client
+        .post(format!("{base}/api/sessions/{first}/hibernate"))
+        .send()
+        .await
+        .unwrap();
+    // Hibernating freed the slot; a second session takes it.
+    let second = start_when_free(&client, &base, &stub, "second").await;
+    // The wake needs a slot of its own and the account has none.
+    let refused = client
+        .post(format!("{base}/api/sessions/{first}/wake"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::TOO_MANY_REQUESTS);
+    // Once the second is gone the wake gets the slot, and holds it.
+    client
+        .post(format!(
+            "{base}/api/sessions/{}/kill",
+            second["id"].as_str().unwrap()
+        ))
+        .send()
+        .await
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let woken = client
+            .post(format!("{base}/api/sessions/{first}/wake"))
+            .send()
+            .await
+            .unwrap();
+        if woken.status() == StatusCode::OK {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "wake never ran");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let full = start_on_account(&client, &base, &stub, "third").await;
+    assert_eq!(full.status(), StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
+async fn a_failed_start_gives_its_slot_back() {
+    let (tmp, cfg, stub) = one_slot_sandbox();
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = cap_client();
+    let missing = tmp.path().join("nowhere").join("claude");
+    let failed = start_on_account(&client, &base, &missing, "broken").await;
+    assert!(!failed.status().is_success(), "{}", failed.status());
+    assert_ne!(failed.status(), StatusCode::TOO_MANY_REQUESTS);
+    // The slot the failed start reserved is free for the next one.
+    let ok = start_on_account(&client, &base, &stub, "fine").await;
+    assert_eq!(ok.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_recovered_session_holds_its_slot_until_it_is_removed() {
+    let (_tmp, cfg, stub) = one_slot_sandbox();
+    let lost = leave_live_record(&cfg.state_dir, &stub);
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = cap_client();
+    // The restart rebuilt the reservation, so the account is full.
+    let full = start_on_account(&client, &base, &stub, "blocked").await;
+    assert_eq!(full.status(), StatusCode::TOO_MANY_REQUESTS);
+    // Removing the never-woken session ends it, and returns the slot.
+    let removed = client
+        .delete(format!("{base}/api/sessions/{lost}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(removed.status(), StatusCode::OK);
+    let ok = start_on_account(&client, &base, &stub, "fits").await;
+    assert_eq!(ok.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_recovered_session_gives_its_slot_back_when_it_is_stopped() {
+    let (_tmp, cfg, stub) = one_slot_sandbox();
+    let lost = leave_live_record(&cfg.state_dir, &stub);
+    let (base, state, _h) = boot_with_state(cfg).await;
+    let client = cap_client();
+    let full = start_on_account(&client, &base, &stub, "blocked").await;
+    assert_eq!(full.status(), StatusCode::TOO_MANY_REQUESTS);
+    // Stopping through the registry, as an agent's stop request does.
+    state.sessions.stop(lost, Default::default()).unwrap();
+    let ok = start_on_account(&client, &base, &stub, "fits").await;
+    assert_eq!(ok.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_recovered_session_gives_its_slot_back_through_the_stop_endpoint() {
+    let (_tmp, cfg, stub) = one_slot_sandbox();
+    let lost = leave_live_record(&cfg.state_dir, &stub);
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = cap_client();
+    let full = start_on_account(&client, &base, &stub, "blocked").await;
+    assert_eq!(full.status(), StatusCode::TOO_MANY_REQUESTS);
+    let stopped = client
+        .post(format!("{base}/api/sessions/{lost}/kill"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stopped.status(), StatusCode::OK);
+    let ok = start_on_account(&client, &base, &stub, "fits").await;
+    assert_eq!(ok.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn stopping_a_live_session_frees_its_slot_by_registry_and_by_endpoint() {
+    let (_tmp, cfg, stub) = one_slot_sandbox();
+    let (base, state, _h) = boot_with_state(cfg).await;
+    let client = cap_client();
+    for (round, by_endpoint) in [("registry", false), ("endpoint", true)] {
+        let started: Value = start_on_account(&client, &base, &stub, round)
+            .await
+            .json()
+            .await
+            .unwrap();
+        let id = started["id"].as_str().unwrap().to_string();
+        live_output_containing(&client, &base, &id, &["> "]).await;
+        // Running `sleep 300`, it holds the only slot.
+        let full = start_on_account(&client, &base, &stub, "blocked").await;
+        assert_eq!(full.status(), StatusCode::TOO_MANY_REQUESTS, "{round}");
+        let pid = state
+            .sessions
+            .get(id.parse().unwrap())
+            .unwrap()
+            .pid()
+            .expect("a live session has a pid") as i32;
+        if by_endpoint {
+            let stopped = client
+                .post(format!("{base}/api/sessions/{id}/kill"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(stopped.status(), StatusCode::OK);
+        } else {
+            state
+                .sessions
+                .stop(id.parse().unwrap(), Default::default())
+                .unwrap();
+        }
+        // The stop frees the slot at once, not when the exit is noticed.
+        let ok = start_on_account(&client, &base, &stub, "next").await;
+        assert_eq!(ok.status(), StatusCode::OK, "{round}");
+        let next: Value = ok.json().await.unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while pid_alive(pid) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "{round}: still alive"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        kill_session(&client, &base, next["id"].as_str().unwrap()).await;
+        // Let the last exit return its slot before the next round.
+        start_when_free(&client, &base, &stub, "drain").await;
+        let drained = state.sessions.live_sessions();
+        for s in drained {
+            let _ = s.kill();
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
 #[tokio::test]
 async fn a_named_claude_account_runs_the_session_in_its_own_config_dir() {
     let (tmp, mut cfg, _stub) = hibernation_sandbox();
