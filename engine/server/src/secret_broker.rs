@@ -72,6 +72,7 @@ use axum::{
     Json,
 };
 use dashmap::DashMap;
+use serde::Deserialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
@@ -79,8 +80,8 @@ use uuid::Uuid;
 
 use crate::app::AppState;
 use crate::auth;
-use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path as FsPath, PathBuf};
+use std::{collections::HashMap, net::SocketAddr};
 
 use crate::config::Config;
 use crate::error::ApiError;
@@ -100,6 +101,8 @@ pub const FETCH_ROUTE: &str = "/api/agent-auth/fetch/{var}";
 /// The write route: a session stores one manifest secret it just
 /// produced. Same auth and gate placement as the read route.
 pub const STORE_ROUTE: &str = "/api/agent-auth/store/{var}";
+/// The bundle-file variant of the write broker.
+pub const BUNDLE_STORE_ROUTE: &str = "/api/agent-auth/store/{var}/bundle-file";
 /// The session's own approved grants (WI-973). Same auth as the read route.
 pub const GRANTS_ROUTE: &str = "/api/agent-auth/grants";
 
@@ -317,6 +320,8 @@ pub struct SecretBroker {
     grant_projects: Vec<String>,
     /// Session id → the person-approved credential grants it holds (WI-973).
     session_grants: DashMap<Uuid, Vec<HeldGrant>>,
+    bundle: DashMap<(String, String), Vec<u8>>,
+    account_dirs: HashMap<String, PathBuf>,
 }
 
 /// The longest a grant may live.
@@ -409,7 +414,14 @@ impl SecretBroker {
             grants: DashMap::new(),
             grant_projects: Vec::new(),
             session_grants: DashMap::new(),
+            bundle: DashMap::new(),
+            account_dirs: HashMap::new(),
         }
+    }
+
+    pub fn with_account_dirs(mut self, dirs: HashMap<String, PathBuf>) -> Self {
+        self.account_dirs = dirs;
+        self
     }
 
     /// Open more projects to approved grants than the manifest names.
@@ -735,6 +747,198 @@ impl SecretBroker {
         }
         Ok(StoreOutcome::from_helper_stdout(&output.stdout))
     }
+
+    pub fn store_bundle_file(
+        &self,
+        account: &str,
+        conversation: &str,
+        name: &str,
+        kind: BundleFileKind,
+        bytes: &[u8],
+    ) -> Result<(), BundleRefusal> {
+        if bytes.len() > MAX_BUNDLE_FILE_BYTES {
+            return Err(BundleRefusal::TooLarge);
+        }
+        let key = (account.to_string(), name.to_string());
+        match kind {
+            BundleFileKind::Credentials | BundleFileKind::Config => {
+                self.bundle.insert(key, bytes.to_vec());
+                if let Some(root) = self.account_dirs.get(account) {
+                    let filename = match kind {
+                        BundleFileKind::Credentials => ".credentials.json",
+                        BundleFileKind::Config => ".claude.json",
+                        BundleFileKind::Transcript => unreachable!(),
+                    };
+                    atomic_bundle_write(root, FsPath::new(filename), bytes)
+                        .map_err(|_| BundleRefusal::Storage)?;
+                }
+            }
+            BundleFileKind::Transcript => {
+                if !name.ends_with(&format!("/{conversation}.jsonl"))
+                    && name != format!("{conversation}.jsonl")
+                {
+                    return Err(BundleRefusal::ConversationScope);
+                }
+                let mut current = self.bundle.entry(key).or_default();
+                if current.as_slice() != bytes {
+                    if bytes.starts_with(current.as_slice()) {
+                        let offset = current.len();
+                        current.extend_from_slice(&bytes[offset..]);
+                        if let Some(root) = self.account_dirs.get(account) {
+                            atomic_bundle_write(root, FsPath::new(name), bytes)
+                                .map_err(|_| BundleRefusal::Storage)?;
+                        }
+                    } else {
+                        return Err(BundleRefusal::TranscriptRewrite);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+const MAX_BUNDLE_FILE_BYTES: usize = 4 * 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum BundleFileKind {
+    Credentials,
+    Config,
+    Transcript,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BundleFileRequest {
+    pub account: String,
+    pub conversation_id: String,
+    pub path: String,
+    pub kind: BundleFileKind,
+    pub bytes: String,
+}
+
+#[derive(Debug)]
+pub enum BundleRefusal {
+    TooLarge,
+    ConversationScope,
+    TranscriptRewrite,
+    Storage,
+}
+
+fn atomic_bundle_write(root: &FsPath, relative: &FsPath, bytes: &[u8]) -> std::io::Result<()> {
+    if relative.is_absolute()
+        || relative
+            .components()
+            .any(|c| !matches!(c, std::path::Component::Normal(_)))
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "invalid bundle path",
+        ));
+    }
+    let target = root.join(relative);
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = target.with_extension("vogt-tmp");
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(tmp, target)
+}
+
+/// Store a file from the Claude account bundle. The request carries base64 so
+/// JSON remains safe for credentials and JSONL alike; neither the payload nor
+/// its decoded contents are logged.
+pub async fn store_bundle_file(
+    State(state): State<Arc<AppState>>,
+    request: Request<Body>,
+) -> Response {
+    let broker = state.sessions.secret_broker();
+    let presented = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+    let Some(presented) = presented else {
+        return ApiError::Unauthorized.into_response();
+    };
+    let Some(session_id) = broker
+        .authenticate(presented)
+        .filter(|id| state.sessions.get(*id).is_ok())
+    else {
+        return ApiError::Unauthorized.into_response();
+    };
+    let payload: BundleFileRequest =
+        match axum::body::to_bytes(request.into_body(), MAX_BUNDLE_FILE_BYTES * 2)
+            .await
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+        {
+            Some(value) => value,
+            None => return refusal(StatusCode::BAD_REQUEST, "invalid bundle-file request"),
+        };
+    let Some(summary) = state.sessions.summary_of(session_id) else {
+        return ApiError::Unauthorized.into_response();
+    };
+    let Some(account) = summary.account.as_deref().filter(|v| *v == payload.account) else {
+        return refusal(
+            StatusCode::FORBIDDEN,
+            "bundle-file account is not owned by this session",
+        );
+    };
+    let Some(conversation) = summary
+        .conversation
+        .as_ref()
+        .map(|c| c.id.as_str())
+        .filter(|v| *v == payload.conversation_id)
+    else {
+        return refusal(
+            StatusCode::FORBIDDEN,
+            "bundle-file conversation is not owned by this session",
+        );
+    };
+    let bytes =
+        match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, payload.bytes) {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                return refusal(
+                    StatusCode::BAD_REQUEST,
+                    "bundle-file bytes are not valid base64",
+                )
+            }
+        };
+    let valid_path = match payload.kind {
+        BundleFileKind::Credentials => payload.path == ".credentials.json",
+        BundleFileKind::Config => payload.path == ".claude.json",
+        BundleFileKind::Transcript => {
+            payload.path.starts_with("projects/")
+                && payload.path.ends_with(&format!("/{}.jsonl", conversation))
+        }
+    };
+    if !valid_path {
+        return refusal(
+            StatusCode::FORBIDDEN,
+            "bundle-file path is outside the session bundle",
+        );
+    }
+    let length = bytes.len();
+    let result =
+        broker.store_bundle_file(account, conversation, &payload.path, payload.kind, &bytes);
+    if let Err(error) = result {
+        let reason = match error {
+            BundleRefusal::TooLarge => "bundle-file exceeds the size cap",
+            BundleRefusal::ConversationScope => {
+                "bundle-file transcript is outside the session conversation"
+            }
+            BundleRefusal::TranscriptRewrite => "bundle-file transcript is not append-only",
+            BundleRefusal::Storage => "bundle-file could not be persisted",
+        };
+        return refusal(StatusCode::FORBIDDEN, reason);
+    }
+    tracing::info!(target: "vogt::audit", session_id = %session_id, account = %account,
+        path = %payload.path, bytes = length, "bundle file stored");
+    Json(json!({"ok": true, "bytes": length})).into_response()
 }
 
 fn digest(token: &str) -> [u8; 32] {
