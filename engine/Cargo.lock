@@ -4463,6 +4463,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "vogt-session-agent"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "bytes",
+ "futures-util",
+ "http 1.5.0",
+ "libc",
+ "portable-pty",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-tungstenite 0.30.0",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+]
+
+[[package]]
 name = "voicepipe"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
