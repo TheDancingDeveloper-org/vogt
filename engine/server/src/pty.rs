@@ -627,6 +627,10 @@ impl Session {
         *self.account.lock() = account;
     }
 
+    pub fn account(&self) -> Option<String> {
+        self.account.lock().clone()
+    }
+
     pub fn set_template(&self, template: Option<String>) {
         *self.template.lock() = template;
     }
