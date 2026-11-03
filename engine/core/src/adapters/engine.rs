@@ -1868,6 +1868,7 @@ pub mod http1 {
     use std::time::Duration;
 
     use super::BTreeMap;
+    use crate::adapters::http_client;
 
     /// Status, body, and response headers (names lower-cased, last value wins).
     /// Named so the five exchange signatures do not each spell the triple out.
@@ -1912,11 +1913,10 @@ pub mod http1 {
         timeout: Duration,
         limit: usize,
     ) -> Exchange {
-        let agent: ureq::Agent = ureq::Agent::config_builder()
+        let agent: ureq::Agent = http_client::builder()
             .timeout_connect(Some(timeout))
             .timeout_global(Some(timeout))
             .http_status_as_error(false)
-            .tls_config(tls_config())
             .build()
             .into();
         let mut request = ureq::http::Request::builder().method(method).uri(url);
@@ -1957,7 +1957,7 @@ pub mod http1 {
     /// roots. The variables are read, never written: changing the process
     /// environment races with every other thread and with a git child spawned in
     /// between.
-    fn tls_config() -> ureq::tls::TlsConfig {
+    pub(crate) fn tls_config() -> ureq::tls::TlsConfig {
         use std::sync::OnceLock;
         static CONFIG: OnceLock<ureq::tls::TlsConfig> = OnceLock::new();
         CONFIG
