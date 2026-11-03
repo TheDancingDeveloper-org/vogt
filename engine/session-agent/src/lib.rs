@@ -478,4 +478,21 @@ mod tests {
         authorize(&mut req, "secret").unwrap();
         assert_eq!(req.headers()["authorization"], "Bearer secret");
     }
+
+    #[test]
+    fn content_marker_detects_same_length_rotation() {
+        assert_ne!(bundle_marker(b"old-token"), bundle_marker(b"new-token"));
+        assert_eq!(bundle_marker(b"old-token").len(), 32);
+    }
+
+    #[test]
+    fn exited_frame_is_serialized_as_an_authenticated_stream_frame() {
+        let mut req = http::Request::new(());
+        authorize(&mut req, "session-secret").unwrap();
+        let frame = Frame::Exited { status: Some(7) };
+        let encoded = serde_json::to_string(&frame).unwrap();
+        assert_eq!(req.headers()["authorization"], "Bearer session-secret");
+        assert!(encoded.contains("\"type\":\"exited\""));
+        assert!(encoded.contains("\"status\":7"));
+    }
 }
