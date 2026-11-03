@@ -359,7 +359,25 @@ pub fn authorize(request: &mut http::Request<()>, token: &str) -> Result<(), Age
 
 /// Spawn a command in a PTY and return its reader, writer and child handle.
 type PtyChild = Box<dyn portable_pty::Child + Send>;
-type PtyIo = (Box<dyn Read + Send>, Box<dyn Write + Send>, PtyChild);
+type PtyMaster = Box<dyn portable_pty::MasterPty + Send>;
+type PtyIo = (
+    Box<dyn Read + Send>,
+    Box<dyn Write + Send>,
+    PtyChild,
+    PtyMaster,
+);
+
+/// Apply a viewer's `resize` frame to the PTY.
+pub fn resize_pty(master: &PtyMaster, cols: u16, rows: u16) -> Result<(), AgentError> {
+    master
+        .resize(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|e| AgentError::Pty(e.to_string()))
+}
 
 pub fn spawn_pty(config: &Config) -> Result<PtyIo, AgentError> {
     let system = portable_pty::native_pty_system();
@@ -394,14 +412,14 @@ pub fn spawn_pty(config: &Config) -> Result<PtyIo, AgentError> {
         .master
         .take_writer()
         .map_err(|e| AgentError::Pty(e.to_string()))?;
-    Ok((reader, writer, child))
+    Ok((reader, writer, child, pair.master))
 }
 
 pub async fn run(config: Config) -> Result<(), AgentError> {
     let tls = tls_config()?;
     let mut bundle_seen = std::collections::HashMap::new();
     flush_bundle(&config, &tls, &mut bundle_seen).await;
-    let (reader, writer, child) = spawn_pty(&config)?;
+    let (reader, writer, child, master) = spawn_pty(&config)?;
     let writer = Arc::new(Mutex::new(writer));
     let (output_tx, mut output_rx) = mpsc::channel::<Vec<u8>>(32);
     std::thread::spawn(move || {
@@ -469,7 +487,7 @@ pub async fn run(config: Config) -> Result<(), AgentError> {
                                 let frame = serde_json::from_str::<Frame>(&text)?;
                                 match frame {
                                     Frame::Input { data } => writer.lock().await.write_all(&data).map_err(|e| AgentError::Pty(e.to_string()))?,
-                                    Frame::Resize { .. } => {},
+                                    Frame::Resize { cols, rows } => resize_pty(&master, cols, rows)?,
                                     Frame::Signal { signal } if signal == "kill" => {
                                         if let Some(c) = child.as_mut() { c.kill().map_err(|e| AgentError::Pty(e.to_string()))?; }
                                     },
@@ -529,6 +547,30 @@ where
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    #[test]
+    fn resize_changes_the_pty_size() {
+        let config = Config {
+            session_id: "s".into(),
+            engine_url: "http://127.0.0.1:1".into(),
+            token: "t".into(),
+            cli: "claude".into(),
+            cwd: None,
+            cols: 80,
+            rows: 24,
+            buffer_bytes: 1024,
+            claude_config_dir: None,
+            account: None,
+            conversation_id: None,
+        };
+        let (_reader, _writer, mut child, master) = spawn_pty(&config).unwrap();
+        let size = master.get_size().unwrap();
+        assert_eq!((size.cols, size.rows), (80, 24));
+        resize_pty(&master, 132, 43).unwrap();
+        let size = master.get_size().unwrap();
+        assert_eq!((size.cols, size.rows), (132, 43));
+        let _ = child.kill();
+    }
+
     #[test]
     fn replay_round_trip() {
         let mut b = ReplayBuffer::new(64);
