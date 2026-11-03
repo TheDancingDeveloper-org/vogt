@@ -47,24 +47,29 @@ impl VersionFetch for HttpVersionFetch {
         if !(url.starts_with("https://") || url.starts_with("http://")) {
             return Err("version_url must be http(s)".to_owned());
         }
-        let agent = ureq::AgentBuilder::new().timeout(VERSION_TIMEOUT).build();
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_global(Some(VERSION_TIMEOUT))
+            .http_status_as_error(false)
+            .build()
+            .into();
         let request = agent
             .get(url)
-            .set("Accept", "application/json")
-            .set("User-Agent", "vogt-deploy-lanes");
-        match request.call() {
-            Ok(response) => read_capped(response),
-            Err(ureq::Error::Status(status, _)) => Ok((status, Vec::new())),
-            Err(error) => Err(error.to_string()),
+            .header("Accept", "application/json")
+            .header("User-Agent", "vogt-deploy-lanes");
+        let response = request.call().map_err(|error| error.to_string())?;
+        if response.status().is_client_error() || response.status().is_server_error() {
+            return Ok((response.status().as_u16(), Vec::new()));
         }
+        read_capped(response)
     }
 }
 
-fn read_capped(response: ureq::Response) -> Result<(u16, Vec<u8>), String> {
-    let status = response.status();
+fn read_capped(response: ureq::http::Response<ureq::Body>) -> Result<(u16, Vec<u8>), String> {
+    let status = response.status().as_u16();
     let mut bytes = Vec::new();
     response
-        .into_reader()
+        .into_body()
+        .as_reader()
         .take(VERSION_BODY_CAP)
         .read_to_end(&mut bytes)
         .map_err(|error| error.to_string())?;
