@@ -21,7 +21,7 @@ on:
     # rust-core cutover) must not start this workflow. Fast jobs have no
     # if:, so listing main spent a rust job on every core-touching PR.
     # Paths stay narrow for the long-lived integration branches.
-    branches: [rust-core, wi-1443-main-sync]
+    branches: [rust-core, rust-2, wi-1443-main-sync]
     paths:
       - "engine/core/**"
       - "engine/server/**"
