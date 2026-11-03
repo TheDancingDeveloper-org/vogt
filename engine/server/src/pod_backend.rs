@@ -42,6 +42,19 @@ pub struct PodConfig {
     pub extra_ca_file: Option<String>,
     pub priority_class: Option<String>,
     pub service_account: String,
+    /// How often the reconciler compares the cluster with the engine's sessions.
+    #[serde(default = "default_reconcile_interval")]
+    pub reconcile_interval: Duration,
+    /// How long a pod may sit Pending (unschedulable, pulling) before its
+    /// session is ended.
+    #[serde(default = "default_pending_timeout")]
+    pub pending_timeout: Duration,
+}
+fn default_reconcile_interval() -> Duration {
+    Duration::from_secs(15)
+}
+fn default_pending_timeout() -> Duration {
+    Duration::from_secs(600)
 }
 impl Default for PodConfig {
     fn default() -> Self {
@@ -91,6 +104,8 @@ impl Default for PodConfig {
             extra_ca_file: None,
             priority_class: Some("vogt-session".into()),
             service_account: "vogt-session".into(),
+            reconcile_interval: default_reconcile_interval(),
+            pending_timeout: default_pending_timeout(),
         }
     }
 }
@@ -199,6 +214,43 @@ pub fn pod_phase(pod: &Pod) -> &'static str {
         Some("Pending") | None => "pending",
         Some(_) => "pending",
     }
+}
+
+/// The exit code the first terminated container reported, if any.
+pub fn pod_exit_code(pod: &Pod) -> Option<i32> {
+    pod.status
+        .as_ref()?
+        .container_statuses
+        .as_ref()?
+        .iter()
+        .filter_map(|c| c.state.as_ref()?.terminated.as_ref())
+        .map(|t| t.exit_code)
+        .next()
+}
+
+/// Why a container is stuck waiting, when the kubelet gave up on it (a bad
+/// image or config does not heal by waiting).
+pub fn pod_fatal_waiting_reason(pod: &Pod) -> Option<String> {
+    const FATAL: [&str; 5] = [
+        "ErrImagePull",
+        "ImagePullBackOff",
+        "InvalidImageName",
+        "CreateContainerConfigError",
+        "CreateContainerError",
+    ];
+    pod.status
+        .as_ref()?
+        .container_statuses
+        .as_ref()?
+        .iter()
+        .filter_map(|c| c.state.as_ref()?.waiting.as_ref())
+        .find_map(|w| {
+            let reason = w.reason.as_deref()?;
+            FATAL.contains(&reason).then(|| match w.message.as_deref() {
+                Some(m) if !m.trim().is_empty() => format!("{reason}: {m}"),
+                _ => reason.to_string(),
+            })
+        })
 }
 
 /// Extract a session id only from the engine-owned label, never from a pod
@@ -441,7 +493,11 @@ pub trait PodLauncher: Send + Sync {
     /// registered with the stream; implementations only deliver it to the pod.
     fn create<'a>(&'a self, id: Uuid, token: &'a [u8], pod: Pod) -> LaunchFuture<'a>;
     fn delete(&self, id: Uuid) -> LaunchFuture<'_>;
+    /// Every pod in the sessions namespace that carries a session label.
+    fn list(&self) -> ListFuture<'_>;
 }
+pub type ListFuture<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<Pod>>> + Send + 'a>>;
 pub type LaunchFuture<'a> =
     std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>>;
 
@@ -451,6 +507,9 @@ impl PodLauncher for PodBackendFactory {
     }
     fn delete(&self, id: Uuid) -> LaunchFuture<'_> {
         Box::pin(PodBackendFactory::delete(self, id))
+    }
+    fn list(&self) -> ListFuture<'_> {
+        Box::pin(self.reconcile())
     }
 }
 
@@ -483,6 +542,9 @@ impl PodLauncher for KubeLauncher {
     }
     fn delete(&self, id: Uuid) -> LaunchFuture<'_> {
         Box::pin(async move { PodLauncher::delete(self.factory().await?, id).await })
+    }
+    fn list(&self) -> ListFuture<'_> {
+        Box::pin(async move { PodLauncher::list(self.factory().await?).await })
     }
 }
 

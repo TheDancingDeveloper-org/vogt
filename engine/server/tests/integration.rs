@@ -16522,6 +16522,8 @@ mod pod_stream {
         created: tokio::sync::mpsc::UnboundedSender<(Uuid, Vec<u8>)>,
         deleted: Mutex<Vec<Uuid>>,
         pods: Mutex<Vec<k8s_openapi::api::core::v1::Pod>>,
+        /// What the mocked cluster lists.
+        listed: Mutex<Vec<k8s_openapi::api::core::v1::Pod>>,
         fail: bool,
     }
 
@@ -16548,6 +16550,9 @@ mod pod_stream {
                 self.deleted.lock().unwrap().push(id);
                 Ok(())
             })
+        }
+        fn list(&self) -> vogt_engine_server::pod_backend::ListFuture<'_> {
+            Box::pin(async move { Ok(self.listed.lock().unwrap().clone()) })
         }
     }
 
@@ -16582,6 +16587,7 @@ mod pod_stream {
             created: tx,
             deleted: Mutex::new(Vec::new()),
             pods: Mutex::new(Vec::new()),
+            listed: Mutex::new(Vec::new()),
             fail,
         });
         state.sessions.set_pod_launcher(launcher.clone());
@@ -16980,5 +16986,96 @@ mod pod_stream {
         .expect("a failed pod creation ends the session");
         let out = String::from_utf8_lossy(&h.scrollback(id).await).into_owned();
         assert!(out.contains("session pod could not be created"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn reconcile_ends_a_session_whose_pod_died_and_deletes_orphans() {
+        use k8s_openapi::api::core::v1::{
+            ContainerState, ContainerStateTerminated, ContainerStatus, Pod, PodStatus,
+        };
+        let mut h = harness(false).await;
+        let id = h.start().await;
+        let (_, _token) = h.created.recv().await.expect("a pod is created");
+
+        let labelled = |id: Uuid, status: PodStatus| {
+            let mut pod = Pod::default();
+            pod.metadata.labels = Some(
+                [("vogt.session".to_string(), id.to_string())]
+                    .into_iter()
+                    .collect(),
+            );
+            pod.status = Some(status);
+            pod
+        };
+        let orphan = Uuid::new_v4();
+        *h.launcher.listed.lock().unwrap() = vec![
+            labelled(
+                id,
+                PodStatus {
+                    phase: Some("Failed".into()),
+                    container_statuses: Some(vec![ContainerStatus {
+                        state: Some(ContainerState {
+                            terminated: Some(ContainerStateTerminated {
+                                exit_code: 137,
+                                message: Some("OOMKilled".into()),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }]),
+                    ..Default::default()
+                },
+            ),
+            labelled(
+                orphan,
+                PodStatus {
+                    phase: Some("Running".into()),
+                    ..Default::default()
+                },
+            ),
+        ];
+
+        // The agent stream registry is process-wide and other tests' sessions
+        // are live in it: a long grace keeps this sweep to the pods it lists.
+        let cfg = vogt_engine_server::pod_backend::PodConfig {
+            connect_timeout: Duration::from_secs(3600),
+            ..Default::default()
+        };
+        let report = vogt_engine_server::pod_reconcile::sweep(
+            h.launcher.as_ref(),
+            &h.state.agent_auth,
+            &cfg,
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.ended, vec![id]);
+        assert_eq!(report.deleted, vec![orphan]);
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while h.detail(id).await.summary.exit_code != Some(137) {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("the dead pod ends the session");
+        // The exit can be seen a moment before the reader thread has drained
+        // the note into the scrollback.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !String::from_utf8_lossy(&h.scrollback(id).await).contains("OOMKilled") {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("the reason reaches the scrollback");
+        // The session's start task removes its own pod once the session ends.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !h.launcher.deleted.lock().unwrap().contains(&id) {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("the ended session's pod is deleted");
+        assert!(h.launcher.deleted.lock().unwrap().contains(&orphan));
     }
 }

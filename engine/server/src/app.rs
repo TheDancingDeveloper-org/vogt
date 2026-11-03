@@ -713,6 +713,9 @@ pub async fn serve_forever(cfg: Config) -> std::io::Result<()> {
     if let Some(addr) = metrics_bind {
         crate::metrics::spawn_listener(addr);
     }
+    // Only a serving engine settles pods against sessions: a router built for
+    // a test must never reach for whatever cluster the host's kubeconfig names.
+    state.sessions.start_pod_reconciler();
     // Graceful shutdown: the engine had no shutdown path, so every
     // redeploy SIGKILLed the PTYs and nothing was archived. Kubernetes/compose
     // send SIGTERM with a grace window before the KILL; we use it to drain every
