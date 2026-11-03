@@ -1221,7 +1221,74 @@ pub fn spawn(
     drop(pair.slave);
 
     let (backend, reader) = crate::session_backend::local(pair.master, child)?;
+    let launcher = if spawning_agent_auth_helper {
+        "agent-auth"
+    } else {
+        "direct"
+    };
 
+    assemble_session(
+        id,
+        spec,
+        defaults,
+        bus,
+        history,
+        (size.rows, size.cols),
+        cwd_display,
+        Arc::new(backend),
+        reader,
+        pid,
+        launcher,
+    )
+}
+
+/// A session whose process runs elsewhere: `backend` forwards input, resize
+/// and stop to a remote agent, and `reader` yields the agent's output. The
+/// reader thread, exit waiter and activity watcher are the local session's,
+/// so a pod session raises the same events and history as a local one.
+pub fn spawn_remote(
+    id: Uuid,
+    spec: &SessionSpec,
+    defaults: SpawnDefaults<'_>,
+    bus: EventBus,
+    history: Option<Arc<SessionHistory>>,
+    backend: Arc<dyn SessionBackend>,
+    reader: Box<dyn Read + Send>,
+) -> Result<SpawnedSession> {
+    let cwd = spec
+        .cwd
+        .as_deref()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| defaults.default_cwd.to_path_buf());
+    assemble_session(
+        id,
+        spec,
+        defaults,
+        bus,
+        history,
+        (spec.rows.unwrap_or(24), spec.cols.unwrap_or(80)),
+        cwd.to_string_lossy().into_owned(),
+        backend,
+        reader,
+        None,
+        "pod",
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn assemble_session(
+    id: Uuid,
+    spec: &SessionSpec,
+    defaults: SpawnDefaults<'_>,
+    bus: EventBus,
+    history: Option<Arc<SessionHistory>>,
+    (rows, cols): (u16, u16),
+    cwd_display: String,
+    backend: Arc<dyn SessionBackend>,
+    reader: Box<dyn Read + Send>,
+    pid: Option<u32>,
+    launcher: &'static str,
+) -> Result<SpawnedSession> {
     let (tx, _rx) = broadcast::channel::<OutputChunk>(1024);
     let command = Some(command_display(spec, &defaults));
     let runtime = tokio::runtime::Handle::current();
@@ -1247,11 +1314,11 @@ pub fn spawn(
         scrollback: Mutex::new(Scrollback::new(
             spec.scrollback_bytes.unwrap_or(defaults.scrollback_bytes),
         )),
-        terminal: Mutex::new(Some(crate::screen::Terminal::new(size.rows, size.cols))),
-        backend: Arc::new(backend),
+        terminal: Mutex::new(Some(crate::screen::Terminal::new(rows, cols))),
+        backend,
         pid,
         output_tx: tx.clone(),
-        size_tx: watch::Sender::new((size.cols, size.rows)),
+        size_tx: watch::Sender::new((cols, rows)),
         spawned_at: Instant::now(),
         last_output: Mutex::new(None),
         screen_change: Mutex::new(crate::activity::ChangeClock::default()),
@@ -1285,11 +1352,7 @@ pub fn spawn(
         posture_lost_on_resume: AtomicBool::new(false),
         account: Mutex::new(None),
         stop: Mutex::new(None),
-        launcher: if spawning_agent_auth_helper {
-            "agent-auth"
-        } else {
-            "direct"
-        },
+        launcher,
         first_output_seen: AtomicBool::new(false),
         launch_reported: AtomicBool::new(false),
         agent_auth_degraded: parking_lot::Mutex::new(None),
