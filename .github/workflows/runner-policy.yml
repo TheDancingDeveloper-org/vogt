@@ -60,11 +60,20 @@ jobs:
           # anybody's dry run noticing.
           expr_open="\$"'{{'
           while IFS=: read -r file number line; do
+            # `ci-small` is the ARC scale set: it is allowed as a bare string
+            # or as a list, and does not carry the `self-hosted` label.
+            value="${line#*runs-on:}"
+            value="${value//[[:space:]]/}"
             case "$line" in
               *self-hosted*) ;;
               *)
+              case "$value" in
+                ci-small|\"ci-small\"|\'ci-small\'|"[ci-small]"|"[ci-small,"*|*",ci-small]"|*",ci-small,"*) ;;
+                *)
                 echo "::error file=$file,line=$number::job does not name a self-hosted runner"
                 bad=1
+                ;;
+              esac
                 ;;
             esac
             case "$line" in
