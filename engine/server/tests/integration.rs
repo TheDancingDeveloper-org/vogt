@@ -16545,7 +16545,7 @@ mod pod_stream {
                 Ok(())
             })
         }
-        fn delete(&self, id: Uuid) -> LaunchFuture<'_> {
+        fn delete(&self, id: Uuid, _uid: Option<String>) -> LaunchFuture<'_> {
             Box::pin(async move {
                 self.deleted.lock().unwrap().push(id);
                 Ok(())
@@ -17000,10 +17000,17 @@ mod pod_stream {
         let labelled = |id: Uuid, status: PodStatus| {
             let mut pod = Pod::default();
             pod.metadata.labels = Some(
-                [("vogt.session".to_string(), id.to_string())]
-                    .into_iter()
-                    .collect(),
+                [
+                    ("vogt.session".to_string(), id.to_string()),
+                    (
+                        vogt_engine_server::pod_backend::ENGINE_LABEL.to_string(),
+                        vogt_engine_server::pod_backend::DEFAULT_ENGINE_ID.to_string(),
+                    ),
+                ]
+                .into_iter()
+                .collect(),
             );
+            pod.metadata.uid = Some(format!("uid-{id}"));
             pod.status = Some(status);
             pod
         };
