@@ -376,6 +376,7 @@ fn fake_agent_template() -> SessionTemplate {
         match_repo_names: vec![],
         match_path_prefixes: vec![],
         tags: vec!["agent".to_string(), "test".to_string()],
+        backend: "local".to_string(),
     }
 }
 
@@ -10584,6 +10585,7 @@ fn conversation_sandbox() -> (tempfile::TempDir, Config, std::path::PathBuf) {
         match_repo_names: vec![],
         match_path_prefixes: vec![],
         tags: vec!["claude".to_string()],
+        backend: "local".to_string(),
     });
     (tmp, cfg, stub)
 }
