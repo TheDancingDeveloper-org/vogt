@@ -50,6 +50,7 @@ pub struct PodLink {
     exited: Condvar,
     exit_notify: Notify,
     stop_requested: AtomicBool,
+    created: Instant,
 }
 
 /// Output the agent sent that does not continue the stream.
@@ -68,7 +69,13 @@ impl PodLink {
             exited: Condvar::new(),
             exit_notify: Notify::new(),
             stop_requested: AtomicBool::new(false),
+            created: Instant::now(),
         }
+    }
+
+    /// How long ago the engine registered this link (the pod was asked for).
+    pub fn age(&self) -> Duration {
+        self.created.elapsed()
     }
 
     pub fn next_offset(&self) -> u64 {
@@ -260,6 +267,16 @@ impl AgentAuth {
             .expect("pod links lock poisoned")
             .get(&id)
             .cloned()
+    }
+
+    /// Sessions that have a pod link registered, finished or not.
+    pub fn pod_ids(&self) -> Vec<Uuid> {
+        self.pods
+            .lock()
+            .expect("pod links lock poisoned")
+            .keys()
+            .copied()
+            .collect()
     }
 
     pub fn forget_pod(&self, id: Uuid) {
