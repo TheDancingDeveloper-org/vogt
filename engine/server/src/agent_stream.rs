@@ -14,7 +14,7 @@ use std::{
     time::{Duration, Instant},
 };
 use subtle::ConstantTimeEq;
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc, Mutex};
 use uuid::Uuid;
 use vogt_session_agent::Frame;
 const BOOTSTRAP_TTL: Duration = Duration::from_secs(300);
@@ -32,6 +32,7 @@ struct SessionCredential {
 pub struct AgentAuth {
     pending: Mutex<HashMap<Uuid, Pending>>,
     sessions: Mutex<HashMap<Uuid, SessionCredential>>,
+    links: std::sync::Mutex<HashMap<Uuid, mpsc::UnboundedSender<Frame>>>,
 }
 #[derive(Debug, Deserialize)]
 pub struct BootstrapRequest {
@@ -65,12 +66,14 @@ impl AgentAuth {
     }
     async fn consume(&self, id: Uuid, candidate: &[u8]) -> bool {
         let mut p = self.pending.lock().await;
-        let Some(entry) = p.remove(&id) else {
+        let Some(entry) = p.get(&id) else {
             return false;
         };
-        if entry.expires < Instant::now() || !bool::from(entry.token.as_slice().ct_eq(candidate)) {
+        let valid = bool::from(entry.token.as_slice().ct_eq(candidate));
+        if entry.expires < Instant::now() || !valid {
             return false;
         }
+        p.remove(&id);
         let token = *Uuid::new_v4().as_bytes();
         self.sessions.lock().await.insert(
             id,
@@ -79,6 +82,34 @@ impl AgentAuth {
             },
         );
         true
+    }
+    async fn attach(&self, id: Uuid, tx: mpsc::UnboundedSender<Frame>) {
+        self.links
+            .lock()
+            .expect("agent links lock poisoned")
+            .insert(id, tx);
+    }
+    async fn detach(&self, id: Uuid) {
+        self.links
+            .lock()
+            .expect("agent links lock poisoned")
+            .remove(&id);
+    }
+    pub fn send(&self, id: Uuid, frame: Frame) -> std::io::Result<()> {
+        let result = self
+            .links
+            .lock()
+            .expect("agent links lock poisoned")
+            .get(&id)
+            .map(|tx| tx.send(frame))
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotConnected,
+                    "session-agent is not attached",
+                )
+            })?;
+        result
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "agent stream closed"))
     }
     async fn session_ok(&self, id: Uuid, candidate: &[u8]) -> bool {
         self.sessions
@@ -153,47 +184,26 @@ async fn relay(mut socket: axum::extract::ws::WebSocket, state: Arc<AppState>, i
         let _ = socket.close().await;
         return;
     }
-    let mut output = session.subscribe();
-    let mut cursor = None;
-    if let Ok(Some(Ok(axum::extract::ws::Message::Text(t)))) =
-        tokio::time::timeout(Duration::from_millis(50), socket.next()).await
-    {
-        if let Ok(Frame::Resume { cursor: c }) = serde_json::from_str(&t) {
-            cursor = Some(c);
-        }
-    }
-    let (snapshot, pos, _) = session.snapshot_for_attach(cursor, None);
-    if !snapshot.is_empty() {
-        let frame = Frame::Output {
-            offset: pos - snapshot.len() as u64,
-            data: snapshot.to_vec(),
-        };
-        let _ = socket
-            .send(axum::extract::ws::Message::Text(
-                serde_json::to_string(&frame).unwrap().into(),
-            ))
-            .await;
-    }
+    let (tx, mut commands) = mpsc::unbounded_channel();
+    state.agent_auth.attach(id, tx).await;
     loop {
         tokio::select! {
-            msg = output.recv() => match msg {
-                Ok(chunk) => {
-                    let frame = Frame::Output { offset: chunk.pos, data: chunk.data.to_vec() };
-                    if socket.send(axum::extract::ws::Message::Text(serde_json::to_string(&frame).unwrap().into())).await.is_err() { break; }
-                }
-                Err(_) => break,
-            },
+            Some(frame) = commands.recv() => {
+                if socket.send(axum::extract::ws::Message::Text(serde_json::to_string(&frame).unwrap().into())).await.is_err() { break; }
+            }
             msg = socket.next() => match msg {
                 Some(Ok(axum::extract::ws::Message::Text(t))) => if let Ok(frame) = serde_json::from_str::<Frame>(&t) {
                     match frame {
-                        Frame::Input { data } => { let _ = session.write_input(&data); }
-                        Frame::Resize { cols, rows } => { let _ = session.resize(cols, rows); }
-                        Frame::Signal { signal } if signal == "kill" => { let _ = session.kill(); }
+                        Frame::Output { offset, data } => {
+                            if let Ok(next) = session.accept_remote_output(offset, &data) {
+                                let _ = socket.send(axum::extract::ws::Message::Text(serde_json::to_string(&Frame::Ack { offset: next }).unwrap().into())).await;
+                            }
+                        }
                         Frame::Heartbeat { cursor } => {
                             let ack = Frame::Ack { offset: cursor };
                             let _ = socket.send(axum::extract::ws::Message::Text(serde_json::to_string(&ack).unwrap().into())).await;
                         }
-                        Frame::Exited { status } => { let _ = session.mark_done(status.map(|s| s.to_string()).unwrap_or_default()); break; }
+                        Frame::Exited { .. } => { break; }
                         _ => {}
                     }
                 },
@@ -201,5 +211,47 @@ async fn relay(mut socket: axum::extract::ws::WebSocket, state: Arc<AppState>, i
                 _ => {}
             }
         }
+    }
+    state.agent_auth.detach(id).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn bootstrap_is_single_use_and_rejects_bad_tokens() {
+        let auth = AgentAuth::default();
+        let id = Uuid::new_v4();
+        auth.issue(id, b"one-time").await;
+        assert!(!auth.consume(id, b"wrong").await);
+        assert!(auth.consume(id, b"one-time").await);
+        assert!(!auth.consume(id, b"one-time").await);
+        assert!(auth.session_token(id).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn commands_reach_the_connected_agent() {
+        let auth = AgentAuth::default();
+        let id = Uuid::new_v4();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        auth.attach(id, tx).await;
+        auth.send(
+            id,
+            Frame::Resize {
+                cols: 120,
+                rows: 40,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            rx.recv().await,
+            Some(Frame::Resize {
+                cols: 120,
+                rows: 40
+            })
+        );
+        auth.detach(id).await;
+        assert!(auth.send(id, Frame::Ack { offset: 1 }).is_err());
     }
 }

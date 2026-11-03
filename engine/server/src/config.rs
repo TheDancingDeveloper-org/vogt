@@ -329,6 +329,9 @@ pub struct Config {
     pub agent_grant_projects: Vec<String>,
     /// Session templates available for quick session creation.
     pub session_templates: Vec<SessionTemplate>,
+    /// Permit templates to select the optional Kubernetes pod backend.
+    /// Disabled by default so an unconfigured engine remains local-only.
+    pub pod_backends_enabled: bool,
     /// Bearer key for the assistant's LLM backend. Sourced from
     /// `ENGINE_ASSISTANT_API_KEY` env or config file. Empty disables the
     /// assistant surface entirely (routes 404, PWA hides the tab).
@@ -584,6 +587,7 @@ struct FileConfig {
     codex_session_id: Option<bool>,
     codex_approval_policy: Option<String>,
     session_templates: Option<Vec<SessionTemplate>>,
+    pod_backends_enabled: Option<bool>,
     assistant_api_key: Option<String>,
     assistant_base_url: Option<String>,
     assistant_model: Option<String>,
@@ -776,6 +780,18 @@ pub fn load(
     .or(from_file.auto_agent_auth)
     .unwrap_or(false);
 
+    let pod_backends_enabled = match engine_env("ENGINE_POD_BACKENDS_ENABLED") {
+        Ok(v) => Some(parse_bool_env("ENGINE_POD_BACKENDS_ENABLED", &v)?),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(e) => {
+            return Err(ApiError::Config(format!(
+                "reading ENGINE_POD_BACKENDS_ENABLED: {e}"
+            )))
+        }
+    }
+    .or(from_file.pod_backends_enabled)
+    .unwrap_or(false);
+
     let gui_stream_verified = match std::env::var("GUI_STREAM_VERIFIED") {
         Ok(value) => Some(parse_bool_env("GUI_STREAM_VERIFIED", &value)?),
         Err(std::env::VarError::NotPresent) => None,
@@ -940,6 +956,7 @@ pub fn load(
         session_templates: from_file
             .session_templates
             .unwrap_or_else(SessionTemplate::default_templates),
+        pod_backends_enabled,
         assistant_api_key,
         assistant_base_url: match from_file
             .assistant_base_url

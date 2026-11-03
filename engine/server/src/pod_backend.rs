@@ -434,42 +434,42 @@ pub fn validate_resume_cursor(cursor: u64, next_offset: u64) -> Result<u64> {
 }
 
 pub struct PodBackend {
-    factory: PodBackendFactory,
     id: Uuid,
     size: parking_lot::Mutex<(u16, u16)>,
 }
 impl PodBackend {
-    pub fn new(factory: PodBackendFactory, id: Uuid) -> Self {
+    pub fn new(_factory: PodBackendFactory, id: Uuid) -> Self {
         Self {
-            factory,
             id,
             size: parking_lot::Mutex::new((80, 24)),
         }
     }
 }
 impl SessionBackend for PodBackend {
-    fn write_input(&self, _: &[u8]) -> std::io::Result<()> {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::NotConnected,
-            "session-agent is not attached",
-        ))
+    fn write_input(&self, data: &[u8]) -> std::io::Result<()> {
+        crate::agent_stream::global().send(
+            self.id,
+            vogt_session_agent::Frame::Input {
+                data: data.to_vec(),
+            },
+        )
     }
     fn resize(&self, cols: u16, rows: u16) -> Result<()> {
         *self.size.lock() = (cols, rows);
+        crate::agent_stream::global()
+            .send(self.id, vogt_session_agent::Frame::Resize { cols, rows })
+            .map_err(|e| ApiError::Pty(format!("resize: {e}")))?;
         Ok(())
     }
     fn signal_stop(&self) -> Result<()> {
-        // SessionBackend is synchronous because local PTY operations are
-        // synchronous. Schedule the Kubernetes delete instead of calling
-        // block_on from an async request task (which would panic).
-        let factory = self.factory.clone();
-        let id = self.id;
-        tokio::spawn(async move {
-            if let Err(error) = factory.delete(id).await {
-                tracing::warn!(session = %id, error = %error, "pod delete failed");
-            }
-        });
-        Ok(())
+        crate::agent_stream::global()
+            .send(
+                self.id,
+                vogt_session_agent::Frame::Signal {
+                    signal: "kill".into(),
+                },
+            )
+            .map_err(|e| ApiError::Pty(format!("stop: {e}")))
     }
     fn current_size(&self) -> Result<(u16, u16)> {
         Ok(*self.size.lock())
