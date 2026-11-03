@@ -50,7 +50,7 @@ unicode-general-category = "1.1.0"
 # library; https (GitHub, an https peer) needs a TLS stack. native-certs trusts
 # the platform store, so a private CA that Python trusts is trusted here too.
 # No OpenSSL.
-ureq = { version = "2", features = ["tls"], default-features = false }
+ureq = { version = "3", features = ["rustls-no-provider"], default-features = false }
 # The same rustls ureq speaks, so the client can hand it a trust store built
 # from the platform certificates instead of only the bundled Mozilla roots.
 # ureq's own native-certs feature is not used. rustls-native-certs returns

@@ -362,10 +362,16 @@ mod tests {
         // ureq is the crate's HTTP client and it is synchronous; a thread keeps
         // it off this runtime. An error status is still a response.
         let url = url.to_string();
-        tokio::task::spawn_blocking(move || match ureq::get(&url).call() {
-            Ok(response) => (response.status(), response.into_string().unwrap()),
-            Err(ureq::Error::Status(status, response)) => (status, response.into_string().unwrap()),
-            Err(err) => panic!("the request did not connect: {err}"),
+        tokio::task::spawn_blocking(move || {
+            let mut response = ureq::get(&url)
+                .config()
+                .http_status_as_error(false)
+                .build()
+                .call()
+                .unwrap_or_else(|err| panic!("the request did not connect: {err}"));
+            let status = response.status().as_u16();
+            let body = response.body_mut().read_to_string().unwrap();
+            (status, body)
         })
         .await
         .unwrap()
