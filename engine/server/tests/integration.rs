@@ -16500,3 +16500,432 @@ async fn a_launch_with_the_secrets_manager_down_degrades_and_recovers_without_re
     )
     .await;
 }
+
+// ---- Pod-backed sessions: the engine side of the session-agent stream ------
+//
+// The test plays the in-pod vogt-session-agent: it receives the bootstrap
+// token the pod would carry, exchanges it, dials the stream and speaks the
+// frames from the vogt-session-agent README.
+
+mod pod_stream {
+    use super::*;
+    use tokio::net::TcpStream;
+    use tokio_tungstenite::{
+        tungstenite::client::IntoClientRequest, MaybeTlsStream, WebSocketStream,
+    };
+    use vogt_engine_server::pod_backend::{LaunchFuture, PodLauncher};
+    use vogt_session_agent::Frame;
+
+    type Agent = WebSocketStream<MaybeTlsStream<TcpStream>>;
+
+    struct FakeLauncher {
+        created: tokio::sync::mpsc::UnboundedSender<(Uuid, Vec<u8>)>,
+        deleted: Mutex<Vec<Uuid>>,
+        fail: bool,
+    }
+
+    impl PodLauncher for FakeLauncher {
+        fn create<'a>(
+            &'a self,
+            id: Uuid,
+            token: &'a [u8],
+            _pod: k8s_openapi::api::core::v1::Pod,
+        ) -> LaunchFuture<'a> {
+            Box::pin(async move {
+                if self.fail {
+                    return Err(vogt_engine_server::error::ApiError::Internal(
+                        "no cluster".into(),
+                    ));
+                }
+                let _ = self.created.send((id, token.to_vec()));
+                Ok(())
+            })
+        }
+        fn delete(&self, id: Uuid) -> LaunchFuture<'_> {
+            Box::pin(async move {
+                self.deleted.lock().unwrap().push(id);
+                Ok(())
+            })
+        }
+    }
+
+    struct Harness {
+        base: String,
+        state: Arc<AppState>,
+        client: reqwest::Client,
+        launcher: Arc<FakeLauncher>,
+        created: tokio::sync::mpsc::UnboundedReceiver<(Uuid, Vec<u8>)>,
+        _guard: ServerGuard,
+    }
+
+    async fn harness(fail: bool) -> Harness {
+        let mut cfg = test_config();
+        cfg.pod_backends_enabled = true;
+        cfg.session_templates = vec![SessionTemplate {
+            name: "pod".into(),
+            description: "pod-backed".into(),
+            command: Some(vec!["/bin/cat".into()]),
+            cwd: None,
+            env: Vec::new(),
+            account: None,
+            default_name: None,
+            match_repo_names: Vec::new(),
+            match_path_prefixes: Vec::new(),
+            tags: Vec::new(),
+            backend: "pod".into(),
+        }];
+        let (base, state, guard) = boot_with_state(cfg).await;
+        let (tx, created) = tokio::sync::mpsc::unbounded_channel();
+        let launcher = Arc::new(FakeLauncher {
+            created: tx,
+            deleted: Mutex::new(Vec::new()),
+            fail,
+        });
+        state.sessions.set_pod_launcher(launcher.clone());
+        let client = reqwest::Client::builder()
+            .default_headers(auth())
+            .build()
+            .unwrap();
+        Harness {
+            base,
+            state,
+            client,
+            launcher,
+            created,
+            _guard: guard,
+        }
+    }
+
+    impl Harness {
+        async fn start(&self) -> Uuid {
+            let created: Value = self
+                .client
+                .post(format!("{}/api/sessions", self.base))
+                .json(&json!({ "name": "pod-session", "template": "pod" }))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            created["id"].as_str().unwrap().parse().unwrap()
+        }
+
+        async fn bootstrap(&self, id: Uuid, bearer: &[u8]) -> reqwest::Response {
+            // The route sits outside the engine's own gate: the caller is the
+            // pod, which holds only the one-shot token.
+            reqwest::Client::new()
+                .post(format!("{}/api/agent-auth/bootstrap", self.base))
+                .bearer_auth(String::from_utf8_lossy(bearer))
+                .json(&json!({
+                    "session_id": id.to_string(),
+                    "graft_repo": "vogt",
+                    "graft_line": "rust-2",
+                    "cli": "codex",
+                }))
+                .send()
+                .await
+                .unwrap()
+        }
+
+        async fn session_token(&mut self, id: Uuid) -> String {
+            let (created_id, token) = self.created.recv().await.expect("a pod is created");
+            assert_eq!(created_id, id);
+            let res = self.bootstrap(id, &token).await;
+            assert_eq!(res.status(), StatusCode::OK);
+            res.json::<Value>().await.unwrap()["session_token"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        }
+
+        async fn connect(&self, id: Uuid, bearer: &str) -> Result<Agent, StatusCode> {
+            let url = format!(
+                "{}/api/agent-auth/sessions/{id}/agent",
+                self.base.replace("http", "ws")
+            );
+            let mut req = url.into_client_request().unwrap();
+            req.headers_mut()
+                .insert("authorization", format!("Bearer {bearer}").parse().unwrap());
+            match tokio_tungstenite::connect_async(req).await {
+                Ok((ws, _)) => Ok(ws),
+                Err(tokio_tungstenite::tungstenite::Error::Http(res)) => Err(res.status()),
+                Err(e) => panic!("connect: {e}"),
+            }
+        }
+
+        async fn dial(&self, id: Uuid, token: &str, cursor: u64) -> Agent {
+            let mut ws = self.connect(id, token).await.expect("agent connects");
+            put(
+                &mut ws,
+                Frame::Hello {
+                    session_id: id.to_string(),
+                },
+            )
+            .await;
+            put(&mut ws, Frame::Resume { cursor }).await;
+            ws
+        }
+
+        async fn detail(&self, id: Uuid) -> SessionDetail {
+            self.client
+                .get(format!("{}/api/sessions/{id}", self.base))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap()
+        }
+
+        async fn scrollback(&self, id: Uuid) -> Vec<u8> {
+            base64::engine::general_purpose::STANDARD
+                .decode(self.detail(id).await.scrollback_base64)
+                .unwrap()
+        }
+    }
+
+    async fn put(ws: &mut Agent, frame: Frame) {
+        ws.send(Message::Text(serde_json::to_string(&frame).unwrap().into()))
+            .await
+            .unwrap();
+    }
+
+    async fn take(ws: &mut Agent) -> Frame {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match ws.next().await.expect("stream open").expect("frame") {
+                    Message::Text(t) => return serde_json::from_str(&t).unwrap(),
+                    Message::Close(_) => panic!("engine closed the stream"),
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("a frame within 10s")
+    }
+
+    #[tokio::test]
+    async fn bad_and_reused_tokens_are_refused() {
+        let mut h = harness(false).await;
+        let id = h.start().await;
+        let (created_id, token) = h.created.recv().await.unwrap();
+        assert_eq!(created_id, id);
+
+        assert_eq!(
+            h.bootstrap(id, b"wrong").await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let ok = h.bootstrap(id, &token).await;
+        assert_eq!(ok.status(), StatusCode::OK);
+        let session_token = ok.json::<Value>().await.unwrap()["session_token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            h.bootstrap(id, &token).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        // The stream takes the session token, not the bootstrap one, and not
+        // a session token for some other session.
+        let bootstrap = String::from_utf8_lossy(&token).into_owned();
+        assert_eq!(
+            h.connect(id, &bootstrap).await.err(),
+            Some(StatusCode::UNAUTHORIZED)
+        );
+        assert_eq!(
+            h.connect(id, "nope").await.err(),
+            Some(StatusCode::UNAUTHORIZED)
+        );
+        assert_eq!(
+            h.connect(Uuid::new_v4(), &session_token).await.err(),
+            Some(StatusCode::UNAUTHORIZED)
+        );
+        assert!(h.connect(id, &session_token).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn output_input_resize_and_stop_round_trip() {
+        let mut h = harness(false).await;
+        let id = h.start().await;
+        let token = h.session_token(id).await;
+        let mut agent = h.dial(id, &token, 0).await;
+        assert_eq!(take(&mut agent).await, Frame::Ack { offset: 0 });
+
+        // Output reaches the session's subscribers and is acknowledged.
+        put(
+            &mut agent,
+            Frame::Output {
+                offset: 0,
+                data: b"hello pod".to_vec(),
+            },
+        )
+        .await;
+        assert_eq!(take(&mut agent).await, Frame::Ack { offset: 9 });
+        live_output_containing(&h.client, &h.base, &id.to_string(), &["hello pod"]).await;
+
+        // Input, resize and stop go to the agent.
+        let typed = h
+            .client
+            .post(format!("{}/api/sessions/{id}/input", h.base))
+            .json(&json!({ "text": "ls" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(typed.status(), StatusCode::OK);
+        match take(&mut agent).await {
+            Frame::Input { data } => assert!(String::from_utf8_lossy(&data).contains("ls")),
+            other => panic!("expected input, got {other:?}"),
+        }
+        h.state.sessions.get(id).unwrap().resize(100, 30).unwrap();
+        assert_eq!(
+            take(&mut agent).await,
+            Frame::Resize {
+                cols: 100,
+                rows: 30
+            }
+        );
+
+        let kill = h
+            .client
+            .post(format!("{}/api/sessions/{id}/kill", h.base))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(kill.status(), StatusCode::OK);
+        assert_eq!(
+            take(&mut agent).await,
+            Frame::Signal {
+                signal: "kill".into()
+            }
+        );
+
+        // The agent reports the child's exit; the session ends with it and
+        // the pod is removed.
+        put(&mut agent, Frame::Exited { status: Some(7) }).await;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if h.detail(id).await.summary.exit_code == Some(7) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("the session records the agent's exit status");
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !h.launcher.deleted.lock().unwrap().contains(&id) {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("the pod is deleted after exit");
+    }
+
+    #[tokio::test]
+    async fn reconnect_replays_exactly_the_unacked_bytes() {
+        let mut h = harness(false).await;
+        let id = h.start().await;
+        let token = h.session_token(id).await;
+
+        let mut agent = h.dial(id, &token, 0).await;
+        assert_eq!(take(&mut agent).await, Frame::Ack { offset: 0 });
+        put(
+            &mut agent,
+            Frame::Output {
+                offset: 0,
+                data: b"AAAA".to_vec(),
+            },
+        )
+        .await;
+        assert_eq!(take(&mut agent).await, Frame::Ack { offset: 4 });
+        drop(agent);
+
+        // The link drops. The agent redials believing only 2 bytes were
+        // acknowledged, so it replays from 2: the overlap must not repeat.
+        let mut agent = h.dial(id, &token, 2).await;
+        assert_eq!(take(&mut agent).await, Frame::Ack { offset: 4 });
+        put(
+            &mut agent,
+            Frame::Output {
+                offset: 2,
+                data: b"AABBBB".to_vec(),
+            },
+        )
+        .await;
+        assert_eq!(take(&mut agent).await, Frame::Ack { offset: 8 });
+        live_output_containing(&h.client, &h.base, &id.to_string(), &["AAAABBBB"]).await;
+        assert_eq!(h.scrollback(id).await, b"AAAABBBB");
+
+        // A resend of bytes already held changes nothing.
+        put(
+            &mut agent,
+            Frame::Output {
+                offset: 4,
+                data: b"BBBB".to_vec(),
+            },
+        )
+        .await;
+        assert_eq!(take(&mut agent).await, Frame::Ack { offset: 8 });
+        assert_eq!(h.scrollback(id).await, b"AAAABBBB");
+
+        // A hole is refused, not papered over.
+        put(
+            &mut agent,
+            Frame::Output {
+                offset: 100,
+                data: b"X".to_vec(),
+            },
+        )
+        .await;
+        match take(&mut agent).await {
+            Frame::Error { code, .. } => assert_eq!(code, "output_gap"),
+            other => panic!("expected an error frame, got {other:?}"),
+        }
+        assert_eq!(h.scrollback(id).await, b"AAAABBBB");
+
+        // A resume cursor past the stream is refused.
+        let mut stale = h.dial(id, &token, 99).await;
+        match take(&mut stale).await {
+            Frame::Error { code, .. } => assert_eq!(code, "resume_beyond_stream"),
+            other => panic!("expected an error frame, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn stopping_before_the_agent_attaches_ends_the_session() {
+        let mut h = harness(false).await;
+        let id = h.start().await;
+        let _ = h.created.recv().await.unwrap();
+        let kill = h
+            .client
+            .post(format!("{}/api/sessions/{id}/kill", h.base))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(kill.status(), StatusCode::OK);
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while h.detail(id).await.summary.exit_code != Some(137) {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("the session ends without an agent");
+    }
+
+    #[tokio::test]
+    async fn a_pod_that_cannot_be_created_ends_the_session() {
+        let h = harness(true).await;
+        let id = h.start().await;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while h.detail(id).await.summary.exit_code != Some(1) {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("a failed pod creation ends the session");
+        let out = String::from_utf8_lossy(&h.scrollback(id).await).into_owned();
+        assert!(out.contains("session pod could not be created"), "{out}");
+    }
+}
