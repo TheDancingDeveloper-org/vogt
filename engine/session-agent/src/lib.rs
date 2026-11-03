@@ -129,16 +129,52 @@ pub fn delta_reply(status: u16, body: &serde_json::Value) -> DeltaReply {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Frame {
-    Hello { session_id: String },
-    Resume { cursor: u64 },
-    Output { offset: u64, data: Vec<u8> },
-    Input { data: Vec<u8> },
-    Resize { cols: u16, rows: u16 },
-    Signal { signal: String },
-    Ack { offset: u64 },
-    Heartbeat { cursor: u64 },
-    Exited { status: Option<i32> },
-    Error { code: String, message: String },
+    Hello {
+        session_id: String,
+    },
+    Resume {
+        cursor: u64,
+    },
+    Output {
+        offset: u64,
+        data: Vec<u8>,
+    },
+    Input {
+        data: Vec<u8>,
+    },
+    Resize {
+        cols: u16,
+        rows: u16,
+    },
+    Signal {
+        signal: String,
+    },
+    Ack {
+        offset: u64,
+    },
+    Heartbeat {
+        cursor: u64,
+    },
+    Exited {
+        status: Option<i32>,
+    },
+    Error {
+        code: String,
+        message: String,
+    },
+    /// Engine to agent: output at `offset` would leave a hole, and `offset`
+    /// is where the engine's stream actually ends. The agent resends from
+    /// there if it still holds those bytes, and sends a `Gap` if it does not.
+    Resync {
+        offset: u64,
+    },
+    /// Agent to engine: the `lost` bytes starting at `offset` were trimmed
+    /// from the replay buffer before the engine acknowledged them. The
+    /// stream resumes at `offset + lost`; the engine records the loss.
+    Gap {
+        offset: u64,
+        lost: u64,
+    },
 }
 
 /// A bounded absolute-offset replay buffer. `next_offset` is the offset after
@@ -181,6 +217,28 @@ impl ReplayBuffer {
         self.bytes.drain(..n);
         self.start += n as u64;
     }
+    /// The frames that bring an engine whose stream ends at `from` up to the
+    /// end of this buffer: the bytes from `from` if they are still held,
+    /// otherwise a `Gap` for those trimmed away followed by what remains.
+    pub fn resend_frames(&self, from: u64) -> Vec<Frame> {
+        let mut frames = Vec::new();
+        let mut at = from;
+        if from < self.start {
+            frames.push(Frame::Gap {
+                offset: from,
+                lost: self.start - from,
+            });
+            at = self.start;
+        }
+        if let Some(bytes) = self.replay(at).filter(|b| !b.is_empty()) {
+            frames.push(Frame::Output {
+                offset: at,
+                data: bytes,
+            });
+        }
+        frames
+    }
+
     pub fn replay(&self, cursor: u64) -> Option<Vec<u8>> {
         if cursor < self.start || cursor > self.end() {
             return None;
@@ -660,10 +718,8 @@ pub async fn run(config: Config) -> Result<(), AgentError> {
             let (mut sink, mut stream) = socket.split();
             send_frame(&mut sink, &Frame::Hello { session_id: config.session_id.clone() }).await?;
             send_frame(&mut sink, &Frame::Resume { cursor: acked }).await?;
-            if let Some(bytes) = replay.replay(acked) {
-                if !bytes.is_empty() {
-                    send_frame(&mut sink, &Frame::Output { offset: acked, data: bytes }).await?;
-                }
+            for frame in replay.resend_frames(acked) {
+                send_frame(&mut sink, &frame).await?;
             }
             loop {
                 tokio::select! {
@@ -694,6 +750,14 @@ pub async fn run(config: Config) -> Result<(), AgentError> {
                                         if let Some(c) = child.as_mut() { c.kill().map_err(|e| AgentError::Pty(e.to_string()))?; }
                                     },
                                     Frame::Ack { offset } if offset <= cursor => { replay.ack(offset); acked = acked.max(offset); },
+                                    // The engine's stream ends at `offset`, short of
+                                    // what was sent. A stale one (the engine has
+                                    // since acked past it) needs nothing.
+                                    Frame::Resync { offset } if offset >= acked && offset <= cursor => {
+                                        for frame in replay.resend_frames(offset) {
+                                            send_frame(&mut sink, &frame).await?;
+                                        }
+                                    },
                                     Frame::Heartbeat { .. } => {},
                                     _ => {},
                                 }
@@ -848,6 +912,31 @@ mod tests {
         assert_eq!(b.start(), 2);
         assert!(b.replay(0).is_none());
         assert_eq!(b.replay(2).unwrap(), b"cdef");
+    }
+    #[test]
+    fn resend_frames_replay_what_is_held_and_mark_what_is_not() {
+        let mut b = ReplayBuffer::new(4);
+        b.append(b"abcdef");
+        // Bytes 0..2 were trimmed; the engine at 0 is told so, then given the rest.
+        assert_eq!(
+            b.resend_frames(0),
+            vec![
+                Frame::Gap { offset: 0, lost: 2 },
+                Frame::Output {
+                    offset: 2,
+                    data: b"cdef".to_vec()
+                }
+            ]
+        );
+        // An engine still inside the buffer needs no marker.
+        assert_eq!(
+            b.resend_frames(4),
+            vec![Frame::Output {
+                offset: 4,
+                data: b"ef".to_vec()
+            }]
+        );
+        assert!(b.resend_frames(6).is_empty());
     }
     #[test]
     fn frames_are_stable_json() {
