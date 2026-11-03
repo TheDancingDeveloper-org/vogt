@@ -112,7 +112,29 @@ readonly TOKEN_PROJECT_ID="${ENGINE_AGENT_AUTH_TOKEN_PROJECT_ID:-}"
 # inside that container, so loopback needs no DNS and no certificate. A
 # session's own `VOGT_URL` still wins where one is set.
 readonly DEFAULT_VOGT_URL="http://127.0.0.1:8910"
+readonly CURL_EXTRA_CA_FILE="${VOGT_ENGINE_EXTRA_CA_FILE:-${ENGINE_AGENT_AUTH_EXTRA_CA_FILE:-}}"
 AUTH_TMP_DIR=""
+
+broker_token_available() {
+    if [[ -n "${VOGT_ENGINE_BROKER_TOKEN_FILE:-}" ]]; then
+        [[ -r "$VOGT_ENGINE_BROKER_TOKEN_FILE" ]] || die "broker token file is not readable"
+        return
+    fi
+    [[ -n "${VOGT_ENGINE_BROKER_TOKEN:-}" ]] || return 1
+}
+
+broker_curl() {
+    broker_token_available || return 1
+    local -a tls_args=()
+    [[ -z "$CURL_EXTRA_CA_FILE" ]] || tls_args+=(--cacert "$CURL_EXTRA_CA_FILE")
+    if [[ -n "${VOGT_ENGINE_BROKER_TOKEN_FILE:-}" ]]; then
+        curl "${tls_args[@]}" \
+            -H @<(printf 'Authorization: Bearer '; cat "$VOGT_ENGINE_BROKER_TOKEN_FILE"; printf '\n') "$@"
+    else
+        curl "${tls_args[@]}" \
+            -H @<(printf 'Authorization: Bearer '; printf '%s' "$VOGT_ENGINE_BROKER_TOKEN"; printf '\n') "$@"
+    fi
+}
 
 # Names of the credential variables this helper grants the launched session,
 # accumulated as each is exported. Published as the `AGENT_AUTH_GRANTED`
@@ -196,7 +218,7 @@ report_launch() {
         printf 'agent-auth: launch took %d.%ds; the engine log (vogt::launch) has each stage\n' \
             $(( total_ms / 1000 )) $(( total_ms % 1000 / 100 )) >&2
     fi
-    [[ -n "${VOGT_ENGINE_BROKER_URL:-}" && -n "${VOGT_ENGINE_BROKER_TOKEN:-}" ]] || return 0
+    [[ -n "${VOGT_ENGINE_BROKER_URL:-}" ]] && broker_token_available || return 0
     command -v jq >/dev/null 2>&1 || return 0
     command -v curl >/dev/null 2>&1 || return 0
     for p in "${!PROJECT_MODE[@]}"; do
@@ -213,8 +235,7 @@ report_launch() {
         --argjson stages "$stages" \
         '{outcome: $outcome, command: $command, total_ms: $total_ms, stages: $stages}
          + (if $error == "" then {} else {error: $error} end)')" || return 0
-    curl -sS --max-time 2 -o /dev/null -X POST \
-        -H @<(printf 'Authorization: Bearer %s\n' "$VOGT_ENGINE_BROKER_TOKEN") \
+    broker_curl -sS --max-time 2 -o /dev/null -X POST \
         -H 'Content-Type: application/json' --data-binary @- \
         "${VOGT_ENGINE_BROKER_URL%/}/api/agent-auth/launch-report" <<<"$body" \
         >/dev/null 2>&1 || true
@@ -595,15 +616,16 @@ set_one() {
 # non-writable name is the manifest line or flag to add.
 store_one() {
     local var="$1" value response status body
-    [[ -n "${VOGT_ENGINE_BROKER_URL:-}" && -n "${VOGT_ENGINE_BROKER_TOKEN:-}" ]] || die \
-        "no secret broker in this environment (VOGT_ENGINE_BROKER_URL/_TOKEN are unset): not an engine session, or the engine declares nothing in ENGINE_AGENT_AUTH_SECRETS"
+    if [[ -z "${VOGT_ENGINE_BROKER_URL:-}" ]] || ! broker_token_available; then
+        die "no secret broker in this environment (VOGT_ENGINE_BROKER_URL/token file are unset): not an engine session, or the engine declares nothing in ENGINE_AGENT_AUTH_SECRETS"
+    fi
     require_command curl
     value="$(cat)"
     [[ -n "$value" ]] || die "no value on stdin to store for $var"
     umask 077
     response="$(mktemp)"
-    status="$(printf '%s' "$value" | curl -sS --max-time 45 -o "$response" -w '%{http_code}' \
-        -X POST -H "Authorization: Bearer $VOGT_ENGINE_BROKER_TOKEN" \
+    status="$(printf '%s' "$value" | broker_curl -sS --max-time 45 -o "$response" -w '%{http_code}' \
+        -X POST \
         -H 'Content-Type: text/plain' --data-binary @- \
         "${VOGT_ENGINE_BROKER_URL%/}/api/agent-auth/store/$var" 2>/dev/null)" || status="000"
     if [[ "$status" == "200" ]]; then
@@ -630,13 +652,14 @@ store_one() {
 # add; the identity is never involved on this side.
 fetch_one() {
     local var="$1" response status body
-    [[ -n "${VOGT_ENGINE_BROKER_URL:-}" && -n "${VOGT_ENGINE_BROKER_TOKEN:-}" ]] || die \
-        "no secret broker in this environment (VOGT_ENGINE_BROKER_URL/_TOKEN are unset): not an engine session, or the engine declares nothing in ENGINE_AGENT_AUTH_SECRETS"
+    if [[ -z "${VOGT_ENGINE_BROKER_URL:-}" ]] || ! broker_token_available; then
+        die "no secret broker in this environment (VOGT_ENGINE_BROKER_URL/token file are unset): not an engine session, or the engine declares nothing in ENGINE_AGENT_AUTH_SECRETS"
+    fi
     require_command curl
     umask 077
     response="$(mktemp)"
-    status="$(curl -sS --max-time 45 -o "$response" -w '%{http_code}' \
-        -X POST -H "Authorization: Bearer $VOGT_ENGINE_BROKER_TOKEN" \
+    status="$(broker_curl -sS --max-time 45 -o "$response" -w '%{http_code}' \
+        -X POST \
         "${VOGT_ENGINE_BROKER_URL%/}/api/agent-auth/fetch/$var" 2>/dev/null)" || status="000"
     if [[ "$status" == "200" ]]; then
         cat "$response"
@@ -659,14 +682,14 @@ fetch_one() {
 # transcript. Needs only the broker token.
 list_grants() {
     local response status
-    [[ -n "${VOGT_ENGINE_BROKER_URL:-}" && -n "${VOGT_ENGINE_BROKER_TOKEN:-}" ]] || die \
-        "no secret broker in this environment (VOGT_ENGINE_BROKER_URL/_TOKEN are unset): not an engine session, or the engine declares nothing in ENGINE_AGENT_AUTH_SECRETS"
+    if [[ -z "${VOGT_ENGINE_BROKER_URL:-}" ]] || ! broker_token_available; then
+        die "no secret broker in this environment (VOGT_ENGINE_BROKER_URL/token file are unset): not an engine session, or the engine declares nothing in ENGINE_AGENT_AUTH_SECRETS"
+    fi
     require_command curl
     require_command jq
     umask 077
     response="$(mktemp)"
-    status="$(curl -sS --max-time 15 -o "$response" -w '%{http_code}' \
-        -H @<(printf 'Authorization: Bearer %s\n' "$VOGT_ENGINE_BROKER_TOKEN") \
+    status="$(broker_curl -sS --max-time 15 -o "$response" -w '%{http_code}' \
         "${VOGT_ENGINE_BROKER_URL%/}/api/agent-auth/grants" 2>/dev/null)" || status="000"
     if [[ "$status" != "200" ]]; then
         rm -f "$response"

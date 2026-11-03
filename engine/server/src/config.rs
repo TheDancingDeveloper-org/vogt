@@ -459,6 +459,12 @@ pub struct Config {
     /// could infer its own. `None` is reported as "nobody has said", never
     /// filled in.
     pub public_url: Option<String>,
+    /// Public URL used by pod sessions to reach the engine. Local sessions
+    /// deliberately continue to use the loopback URL.
+    pub agent_auth_public_url: Option<String>,
+    /// Optional Cadastre MCP endpoint for pod sessions. Unset means no
+    /// Cadastre entry is handed to a pod (the tailnet default is unreachable).
+    pub cadastre_mcp_url: Option<String>,
     /// Base URL of vogt-core on loopback. None disables `/api/vogt` and
     /// `/mcp`: they answer 503 with a named reason rather than
     /// pretending the core is empty. The engine itself keeps
@@ -601,6 +607,8 @@ struct FileConfig {
     assistant_tts_format: Option<String>,
     assistant_speech_attempt_timeout_ms: Option<u64>,
     public_url: Option<String>,
+    agent_auth_public_url: Option<String>,
+    cadastre_mcp_url: Option<String>,
     vogt_core_url: Option<String>,
     vogt_core_token: Option<String>,
     vogt_core_token_file: Option<String>,
@@ -1043,6 +1051,22 @@ pub fn load(
             .or_else(|| engine_env("ENGINE_PUBLIC_URL").ok())
             .map(|value| value.trim().trim_end_matches('/').to_string())
             .filter(|value| !value.is_empty()),
+        agent_auth_public_url: validate_https_origin(
+            "ENGINE_AGENT_AUTH_PUBLIC_URL",
+            from_file
+                .agent_auth_public_url
+                .or_else(|| engine_env("ENGINE_AGENT_AUTH_PUBLIC_URL").ok())
+                .map(|value| value.trim().trim_end_matches('/').to_string()),
+        )?,
+        cadastre_mcp_url: validate_https_origin(
+            "ENGINE_CADASTRE_MCP_URL",
+            from_file
+                .cadastre_mcp_url
+                .or_else(|| engine_env("ENGINE_AGENT_AUTH_CADASTRE_MCP_URL").ok())
+                .or_else(|| engine_env("ENGINE_CADASTRE_MCP_URL").ok())
+                .or_else(|| engine_env("VOGT_CADASTRE_MCP_URL").ok())
+                .map(|value| value.trim().trim_end_matches('/').to_string()),
+        )?,
         // Unprefixed on purpose: these are vogt's own variable names, and the
         // same values configure its CLI inside the container. One name for one
         // thing.
@@ -1284,6 +1308,74 @@ fn read_token_file(name: &str) -> Result<Option<String>> {
 /// engine setting is read the same way.
 fn engine_env(name: &str) -> std::result::Result<String, std::env::VarError> {
     std::env::var(name)
+}
+
+fn validate_https_origin(name: &str, value: Option<String>) -> Result<Option<String>> {
+    let Some(value) = value
+        .map(|v| v.trim().trim_end_matches('/').to_string())
+        .filter(|v| !v.is_empty())
+    else {
+        return Ok(None);
+    };
+    let authority = value.strip_prefix("https://");
+    let valid_authority = authority.is_some_and(valid_origin_authority);
+    if !valid_authority {
+        return Err(ApiError::Config(format!(
+            "{name} must be an https origin with no path, query, fragment, or credentials"
+        )));
+    }
+    Ok(Some(value))
+}
+
+fn valid_origin_authority(authority: &str) -> bool {
+    if authority.is_empty() || authority.chars().any(char::is_whitespace) {
+        return false;
+    }
+    let (host, port) = if let Some(rest) = authority.strip_prefix('[') {
+        let Some(end) = rest.find(']') else {
+            return false;
+        };
+        let suffix = &rest[end + 1..];
+        let port = if suffix.is_empty() {
+            None
+        } else if let Some(port) = suffix.strip_prefix(':') {
+            Some(port)
+        } else {
+            return false;
+        };
+        (&rest[..end], port)
+    } else {
+        let (host, port) = authority
+            .rsplit_once(':')
+            .map_or((authority, None), |(host, port)| {
+                if port.chars().all(|c| c.is_ascii_digit()) {
+                    (host, Some(port))
+                } else {
+                    (authority, None)
+                }
+            });
+        (host, port)
+    };
+    if host.is_empty()
+        || host.starts_with('.')
+        || host.ends_with('.')
+        || host.contains("..")
+        || host.contains(['/', '?', '#', '@'])
+    {
+        return false;
+    }
+    let host_valid = if host.parse::<std::net::IpAddr>().is_ok() {
+        true
+    } else {
+        host.split('.').all(|label| {
+            !label.is_empty()
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        })
+    };
+    host_valid
+        && port.is_none_or(|port| !port.is_empty() && port.parse::<u16>().is_ok() && port != "0")
 }
 
 /// When worktree build output is cleaned (`ENGINE_WORKTREE_CLEAN_ON_HIBERNATE`).
@@ -2298,5 +2390,32 @@ mod prefix_tests {
             Some(std::path::PathBuf::from("/etc/engine.toml"))
         );
         clear();
+    }
+
+    #[test]
+    fn agent_auth_urls_require_https_origins_without_paths() {
+        assert_eq!(
+            validate_https_origin(
+                "ENGINE_AGENT_AUTH_PUBLIC_URL",
+                Some(" https://192.168.1.75:18197/ ".into())
+            )
+            .unwrap()
+            .as_deref(),
+            Some("https://192.168.1.75:18197")
+        );
+        for value in [
+            "http://192.168.1.75:18197",
+            "https://192.168.1.75:18197/mcp",
+            "https://user@example.test",
+            "https://example.test?x=1",
+            "https://example.test:bad",
+            "https://:443",
+            "https://example..test",
+        ] {
+            assert!(
+                validate_https_origin("url", Some(value.into())).is_err(),
+                "{value}"
+            );
+        }
     }
 }
