@@ -13,6 +13,7 @@ use std::io::Read;
 use std::path::Path;
 use std::time::Duration;
 
+use crate::adapters::http_client;
 use base64::Engine;
 use serde_json::{Map, Value};
 
@@ -264,7 +265,7 @@ struct Api {
 
 impl Api {
     fn new(repo: String, token: String) -> Self {
-        let agent: ureq::Agent = ureq::Agent::config_builder()
+        let agent: ureq::Agent = http_client::builder()
             .timeout_global(Some(TIMEOUT))
             .http_status_as_error(false)
             .build()
