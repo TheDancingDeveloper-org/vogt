@@ -22,6 +22,7 @@ use crate::{
     events::{EventBus, ServerEvent},
     history::{ArchiveRecord, SessionHistory},
     scrollback::Scrollback,
+    session_backend::SessionBackend,
 };
 
 /// One chunk of PTY output. `pos` is the byte offset (in the lifetime stream)
@@ -49,9 +50,7 @@ pub struct Session {
     /// ring (WI-990). `None` for a session restored from hibernation, which
     /// has only the tail it kept and renders by replaying that.
     terminal: Mutex<Option<crate::screen::Terminal>>,
-    writer: Mutex<Box<dyn Write + Send>>,
-    master: Mutex<Box<dyn portable_pty::MasterPty + Send>>,
-    child: Mutex<Option<Box<dyn portable_pty::Child + Send>>>,
+    backend: Mutex<Box<dyn SessionBackend>>,
     /// Cached child PID — `child` is taken by the wait task, so SIGKILL needs
     /// its own handle on Unix.
     pid: Option<u32>,
@@ -256,8 +255,8 @@ impl Session {
     /// `limit` bytes of the same scrollback ring attach replays (aligned to a
     /// ground-state boundary), and the PTY's current rows and cols.
     pub fn screen_source(&self, limit: usize) -> (Bytes, u16, u16) {
-        let (rows, cols) = match self.master.lock().get_size() {
-            Ok(size) => (size.rows, size.cols),
+        let (rows, cols) = match self.backend.lock().current_size() {
+            Ok((rows, cols)) => (rows, cols),
             Err(_) => (24, 80),
         };
         let bytes = self.scrollback.lock().snapshot_tail(limit);
@@ -844,9 +843,7 @@ impl Session {
 
     pub fn write_input(&self, data: &[u8]) -> std::io::Result<()> {
         *self.last_input.lock() = Some(Instant::now());
-        let mut w = self.writer.lock();
-        w.write_all(data)?;
-        w.flush()
+        self.backend.lock().write_input(data)
     }
 
     /// Stamp that a person typed. Called only by the paths that already
@@ -862,16 +859,7 @@ impl Session {
     }
 
     pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
-        let master = self.master.lock();
-        master
-            .resize(PtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .map_err(|e| ApiError::Pty(format!("resize: {e}")))?;
-        drop(master);
+        self.backend.lock().resize(cols, rows)?;
         // Reflow the grid to match, so a screen read before the program's own
         // repaint arrives is already the new size.
         self.resize_terminal(rows, cols);
@@ -896,27 +884,7 @@ impl Session {
     pub fn kill(&self) -> Result<()> {
         // Prefer signalling by pid: the wait task has typically already taken
         // ownership of the `Child` to call `wait()`, leaving the Mutex empty.
-        #[cfg(unix)]
-        if let Some(pid) = self.pid {
-            // SIGKILL — same semantics as portable_pty::Child::kill on unix.
-            // Ignore ESRCH (child already reaped).
-            unsafe {
-                let rc = libc::kill(pid as libc::pid_t, libc::SIGKILL);
-                if rc != 0 {
-                    let err = std::io::Error::last_os_error();
-                    if err.raw_os_error() != Some(libc::ESRCH) {
-                        return Err(ApiError::Pty(format!("kill({pid}): {err}")));
-                    }
-                }
-            }
-            return Ok(());
-        }
-        if let Some(child) = self.child.lock().as_mut() {
-            child
-                .kill()
-                .map_err(|e| ApiError::Pty(format!("kill: {e}")))?;
-        }
-        Ok(())
+        self.backend.lock().signal_stop()
     }
 }
 
@@ -1226,14 +1194,7 @@ pub fn spawn(
     let pid = child.process_id();
     drop(pair.slave);
 
-    let reader = pair
-        .master
-        .try_clone_reader()
-        .map_err(|e| ApiError::Pty(format!("clone_reader: {e}")))?;
-    let writer = pair
-        .master
-        .take_writer()
-        .map_err(|e| ApiError::Pty(format!("take_writer: {e}")))?;
+    let (backend, reader) = crate::session_backend::local(pair.master, child)?;
 
     let (tx, _rx) = broadcast::channel::<OutputChunk>(1024);
     let command = Some(command_display(spec, &defaults));
@@ -1261,9 +1222,7 @@ pub fn spawn(
             spec.scrollback_bytes.unwrap_or(defaults.scrollback_bytes),
         )),
         terminal: Mutex::new(Some(crate::screen::Terminal::new(size.rows, size.cols))),
-        writer: Mutex::new(writer),
-        master: Mutex::new(pair.master),
-        child: Mutex::new(Some(child)),
+        backend: Mutex::new(Box::new(backend)),
         pid,
         output_tx: tx.clone(),
         size_tx: watch::Sender::new((size.cols, size.rows)),
@@ -1499,11 +1458,7 @@ fn spawn_exit_waiter(
     on_exit: Option<ExitHook>,
 ) {
     tokio::task::spawn_blocking(move || {
-        let mut child = match session.child.lock().take() {
-            Some(c) => c,
-            None => return,
-        };
-        let status = match child.wait() {
+        let status = match session.backend.lock().wait() {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!(session = %session.id, error = %e, "child wait failed");

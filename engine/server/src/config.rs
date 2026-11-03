@@ -80,6 +80,13 @@ pub struct SessionTemplate {
     pub match_path_prefixes: Vec<String>,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Session execution backend. `local` is the existing PTY implementation.
+    #[serde(default = "default_session_backend")]
+    pub backend: String,
+}
+
+fn default_session_backend() -> String {
+    "local".to_string()
 }
 
 impl SessionTemplate {
@@ -95,6 +102,7 @@ impl SessionTemplate {
                 match_repo_names: vec![],
                 match_path_prefixes: vec![],
                 tags: vec!["shell".to_string()],
+                backend: default_session_backend(),
             },
             SessionTemplate {
                 name: "Node Dev".to_string(),
@@ -106,6 +114,7 @@ impl SessionTemplate {
                 match_repo_names: vec![],
                 match_path_prefixes: vec![],
                 tags: vec!["node".to_string(), "web".to_string()],
+                backend: default_session_backend(),
             },
             SessionTemplate {
                 name: "Rust Build".to_string(),
@@ -117,6 +126,7 @@ impl SessionTemplate {
                 match_repo_names: vec![],
                 match_path_prefixes: vec![],
                 tags: vec!["rust".to_string()],
+                backend: default_session_backend(),
             },
             // Agent CLIs, wrapped in the credential broker explicitly.
             // Automatic agent-auth wraps only sessions created *without* a
@@ -137,6 +147,7 @@ impl SessionTemplate {
                 match_repo_names: vec![],
                 match_path_prefixes: vec![],
                 tags: vec!["agent".to_string(), "claude".to_string()],
+                backend: default_session_backend(),
             },
             SessionTemplate {
                 name: "Codex (protected)".to_string(),
@@ -153,6 +164,7 @@ impl SessionTemplate {
                 match_repo_names: vec![],
                 match_path_prefixes: vec![],
                 tags: vec!["agent".to_string(), "codex".to_string()],
+                backend: default_session_backend(),
             },
             SessionTemplate {
                 name: "OpenCode (protected)".to_string(),
@@ -170,6 +182,7 @@ impl SessionTemplate {
                 match_repo_names: vec![],
                 match_path_prefixes: vec![],
                 tags: vec!["agent".to_string(), "opencode".to_string()],
+                backend: default_session_backend(),
             },
             // Klaudia (WI-950): a Go coding agent with its own goal loop
             // (`/goal run`), driven in its TUI like the three above.
@@ -188,6 +201,7 @@ impl SessionTemplate {
                 match_repo_names: vec![],
                 match_path_prefixes: vec![],
                 tags: vec!["agent".to_string(), "klaudia".to_string()],
+                backend: default_session_backend(),
             },
             SessionTemplate {
                 name: "Python Env".to_string(),
@@ -199,6 +213,7 @@ impl SessionTemplate {
                 match_repo_names: vec![],
                 match_path_prefixes: vec![],
                 tags: vec!["python".to_string()],
+                backend: default_session_backend(),
             },
         ]
     }
