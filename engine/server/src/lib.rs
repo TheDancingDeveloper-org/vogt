@@ -46,6 +46,7 @@ pub mod opencode;
 pub mod oversight_answer;
 pub mod person_gate;
 pub mod pod_backend;
+pub mod pod_reconcile;
 pub mod policy;
 pub mod product;
 pub mod prompt_files;
