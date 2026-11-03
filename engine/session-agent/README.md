@@ -13,7 +13,7 @@ inbound connection and never talks to the cluster API.
 
 The token is sent only as an HTTP Bearer authorization header and is never
 logged. The engine URL's `http(s)` scheme is converted to `ws(s)` and the
-agent connects to `/api/sessions/{session_id}/agent`.
+agent connects to `/api/agent-auth/sessions/{session_id}/agent`.
 
 ## Stream protocol
 
