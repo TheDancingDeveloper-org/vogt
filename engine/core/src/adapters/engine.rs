@@ -1912,38 +1912,33 @@ pub mod http1 {
         timeout: Duration,
         limit: usize,
     ) -> Exchange {
-        let agent = ureq::AgentBuilder::new()
-            .timeout_connect(timeout)
-            .timeout(timeout)
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_connect(Some(timeout))
+            .timeout_global(Some(timeout))
+            .http_status_as_error(false)
             .tls_config(tls_config())
-            .build();
-        let mut request = agent.request(method, url);
+            .build()
+            .into();
+        let mut request = ureq::http::Request::builder().method(method).uri(url);
         for (name, value) in headers {
-            request = request.set(name, value);
+            request = request.header(name, value);
         }
-        let response = if body.is_empty() {
-            request.call()
-        } else {
-            request.send_bytes(body)
-        };
-        let response = match response {
-            Ok(response) => response,
-            Err(ureq::Error::Status(_, response)) => response,
-            Err(error) => return Err(error.to_string()),
-        };
-        let status = response.status();
+        let request = request.body(body).map_err(|error| error.to_string())?;
+        let response = agent.run(request).map_err(|error| error.to_string())?;
+        let status = response.status().as_u16();
         // Names are already lower-cased. Read them before `into_reader`, which
         // consumes the response. A value that is not UTF-8 comes back `None`
         // while the name is still listed; skip it rather than invent a value.
         let mut response_headers = BTreeMap::new();
-        for name in response.headers_names() {
-            if let Some(value) = response.header(&name) {
-                response_headers.insert(name, value.to_owned());
+        for (name, value) in response.headers() {
+            if let Ok(value) = value.to_str() {
+                response_headers.insert(name.as_str().to_owned(), value.to_owned());
             }
         }
         let mut buf = Vec::new();
         response
-            .into_reader()
+            .into_body()
+            .as_reader()
             .take(limit as u64)
             .read_to_end(&mut buf)
             .map_err(|error| error.to_string())?;
@@ -1962,24 +1957,21 @@ pub mod http1 {
     /// roots. The variables are read, never written: changing the process
     /// environment races with every other thread and with a git child spawned in
     /// between.
-    fn tls_config() -> std::sync::Arc<rustls::ClientConfig> {
+    fn tls_config() -> ureq::tls::TlsConfig {
         use std::sync::OnceLock;
-        static CONFIG: OnceLock<std::sync::Arc<rustls::ClientConfig>> = OnceLock::new();
+        static CONFIG: OnceLock<ureq::tls::TlsConfig> = OnceLock::new();
         CONFIG
             .get_or_init(|| {
-                let mut store = rustls::RootCertStore::empty();
-                for cert in merged_root_certs() {
-                    let _ = store.add(cert);
-                }
-                std::sync::Arc::new(
-                    rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
+                let certs = merged_root_certs()
+                    .into_iter()
+                    .map(|cert| ureq::tls::Certificate::from_der(cert.as_ref()).to_owned())
+                    .collect::<Vec<_>>();
+                ureq::tls::TlsConfig::builder()
+                    .root_certs(ureq::tls::RootCerts::new_with_certs(&certs))
+                    .unversioned_rustls_crypto_provider(std::sync::Arc::new(
                         rustls::crypto::ring::default_provider(),
                     ))
-                    .with_safe_default_protocol_versions()
-                    .expect("ring supports the default protocol versions")
-                    .with_root_certificates(store)
-                    .with_no_client_auth(),
-                )
+                    .build()
             })
             .clone()
     }
