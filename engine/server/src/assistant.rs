@@ -3131,6 +3131,7 @@ mod tests {
             agent_auth_secrets: vec![],
             agent_grant_projects: vec![],
             session_templates: vec![],
+            pod_backends_enabled: false,
             assistant_api_key: None,
             assistant_base_url: "http://unused.invalid".into(),
             assistant_model: "test-model".into(),
