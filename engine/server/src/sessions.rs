@@ -111,6 +111,9 @@ pub struct SessionRegistry {
     /// The lease is retained only while a process is live. Removing it from
     /// this map on exit makes exit and failed-start cleanup symmetric.
     account_leases: Arc<DashMap<Uuid, Arc<crate::account_pool::AccountLease>>>,
+    /// Creates and removes pods for pod-backed templates. Unset until the
+    /// first pod session (or a test) needs it.
+    pod_launcher: parking_lot::Mutex<Option<Arc<dyn crate::pod_backend::PodLauncher>>>,
 }
 
 const MAX_SESSION_NAME_BYTES: usize = 256;
@@ -191,7 +194,97 @@ impl SessionRegistry {
             core: Arc::new(std::sync::OnceLock::new()),
             minted: Arc::new(DashMap::new()),
             account_leases,
+            pod_launcher: parking_lot::Mutex::new(None),
         }
+    }
+
+    /// Replace the pod launcher (tests run the agent in-process).
+    pub fn set_pod_launcher(&self, launcher: Arc<dyn crate::pod_backend::PodLauncher>) {
+        *self.pod_launcher.lock() = Some(launcher);
+    }
+
+    fn pod_launcher(&self) -> Arc<dyn crate::pod_backend::PodLauncher> {
+        Arc::clone(self.pod_launcher.lock().get_or_insert_with(|| {
+            Arc::new(crate::pod_backend::KubeLauncher::new(self.pod_config()))
+        }))
+    }
+
+    fn pod_config(&self) -> crate::pod_backend::PodConfig {
+        let mut cfg = crate::pod_backend::PodConfig::default();
+        if let Some(url) = self.cfg.agent_auth_public_url.clone() {
+            cfg.engine_endpoint = url;
+        }
+        cfg
+    }
+
+    /// Start a session whose process runs in a pod: register the engine's half
+    /// of the agent stream, build the session over it, then create the pod in
+    /// the background. The agent dials in; until then the session is running
+    /// with no output, and input is refused.
+    fn spawn_pod_session(
+        &self,
+        id: Uuid,
+        spec: &SessionSpec,
+        template: &crate::config::SessionTemplate,
+    ) -> Result<crate::pty::SpawnedSession> {
+        let auth = crate::agent_stream::global();
+        let launcher = self.pod_launcher();
+        let (link, reader) = auth.register_pod(id);
+        let backend = Arc::new(crate::pod_backend::PodBackend::new(
+            id,
+            Arc::clone(&link),
+            (spec.cols.unwrap_or(80), spec.rows.unwrap_or(24)),
+        ));
+        let spawned = pty::spawn_remote(
+            id,
+            spec,
+            SpawnDefaults {
+                default_shell: &self.cfg.default_shell,
+                auto_agent_auth: self.cfg.auto_agent_auth,
+                agent_auth_helper: &self.cfg.agent_auth_helper,
+                default_cwd: &self.cfg.default_cwd,
+                scrollback_bytes: self.cfg.scrollback_bytes,
+                activity_idle_after_ms: self.cfg.activity_idle_after_ms,
+                secret_broker: None,
+                on_exit: Some(self.exit_hook()),
+            },
+            self.bus.clone(),
+            self.history.clone(),
+            backend,
+            Box::new(reader),
+        );
+        if spawned.is_err() {
+            auth.forget_pod(id);
+        }
+        let spawned = spawned?;
+        let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple()).into_bytes();
+        let pod = crate::pod_backend::pod_template(
+            &self.pod_config(),
+            template,
+            id,
+            &self.pod_config().graft_repo,
+            "session",
+            spec.account.as_deref(),
+            spec.command.as_deref().unwrap_or_default(),
+            &token,
+        );
+        tokio::spawn(async move {
+            let auth = crate::agent_stream::global();
+            auth.issue(id, &token).await;
+            if let Err(e) = launcher.create(id, &token, pod).await {
+                tracing::warn!(session = %id, error = %e, "creating the session pod failed");
+                let note = format!("\r\nsession pod could not be created: {e}\r\n");
+                let _ = link.ingest(link.next_offset(), note.as_bytes());
+                link.finish(1);
+            } else {
+                link.exited().await;
+            }
+            if let Err(e) = launcher.delete(id).await {
+                tracing::debug!(session = %id, error = %e, "deleting the session pod failed");
+            }
+            auth.forget_pod(id);
+        });
+        Ok(spawned)
     }
 
     pub fn secret_broker(&self) -> &Arc<SecretBroker> {
@@ -797,22 +890,38 @@ impl SessionRegistry {
         if let Some(lease) = account_lease.as_ref() {
             self.account_leases.insert(id, Arc::clone(lease));
         }
-        let spawned = pty::spawn(
-            id,
-            &spec,
-            SpawnDefaults {
-                default_shell: &self.cfg.default_shell,
-                auto_agent_auth: self.cfg.auto_agent_auth,
-                agent_auth_helper: &self.cfg.agent_auth_helper,
-                default_cwd: &self.cfg.default_cwd,
-                scrollback_bytes: self.cfg.scrollback_bytes,
-                activity_idle_after_ms: self.cfg.activity_idle_after_ms,
-                secret_broker: self.secret_broker.grant(id),
-                on_exit: Some(self.exit_hook()),
-            },
-            self.bus.clone(),
-            self.history.clone(),
-        );
+        let pod_template = self
+            .cfg
+            .pod_backends_enabled
+            .then(|| {
+                spec.template
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+                    .and_then(|name| self.resolve_template(name).ok())
+                    .filter(|t| t.backend != "local")
+            })
+            .flatten();
+        let spawned = if let Some(template) = pod_template {
+            self.spawn_pod_session(id, &spec, template)
+        } else {
+            pty::spawn(
+                id,
+                &spec,
+                SpawnDefaults {
+                    default_shell: &self.cfg.default_shell,
+                    auto_agent_auth: self.cfg.auto_agent_auth,
+                    agent_auth_helper: &self.cfg.agent_auth_helper,
+                    default_cwd: &self.cfg.default_cwd,
+                    scrollback_bytes: self.cfg.scrollback_bytes,
+                    activity_idle_after_ms: self.cfg.activity_idle_after_ms,
+                    secret_broker: self.secret_broker.grant(id),
+                    on_exit: Some(self.exit_hook()),
+                },
+                self.bus.clone(),
+                self.history.clone(),
+            )
+        };
         crate::launch::record_start(
             launch_origin,
             spawned.as_ref().map(|s| s.session.as_ref()),
