@@ -312,6 +312,12 @@ impl SessionRegistry {
             {
                 let template = self.resolve_template(name)?;
                 spec.command = template.command.clone();
+                if template.backend != "local" {
+                    return Err(ApiError::BadRequest(format!(
+                        "session backend {:?} is not implemented",
+                        template.backend
+                    )));
+                }
                 if !template.env.is_empty() {
                     let mut env = template.env.clone();
                     if let Some(existing) = spec.env.take() {
@@ -2796,6 +2802,7 @@ mod tests {
                 match_repo_names: vec![],
                 match_path_prefixes: vec![],
                 tags: vec!["claude".into()],
+                backend: "local".to_string(),
             },
             SessionTemplate {
                 name: "Alpha Agent".into(),
@@ -2812,6 +2819,7 @@ mod tests {
                 match_repo_names: vec![],
                 match_path_prefixes: vec![],
                 tags: vec!["agent".into(), "claude".into()],
+                backend: "local".to_string(),
             },
         ];
         assert_eq!(
