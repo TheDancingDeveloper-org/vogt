@@ -377,7 +377,7 @@ impl PodBackendFactory {
                 });
             }
         }
-        let _ = id;
+        crate::agent_stream::global().issue(id, token).await;
         self.create(pod).await
     }
 
