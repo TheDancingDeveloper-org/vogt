@@ -17541,14 +17541,49 @@ mod pod_stream {
             Frame::Error { code, .. } => assert_eq!(code, "output_gap"),
             other => panic!("expected an error frame, got {other:?}"),
         }
+        assert_eq!(
+            take(&mut agent).await,
+            Frame::Resync { offset: 8 },
+            "a refused hole names where the stream ends"
+        );
         assert_eq!(h.scrollback(id).await, b"AAAABBBB");
 
-        // A resume cursor past the stream is refused.
-        let mut stale = h.dial(id, &token, 99).await;
+        // The agent had trimmed 8..100 from its buffer before the engine
+        // acknowledged it: it says so, and the output goes on after the loss.
+        put(
+            &mut agent,
+            Frame::Gap {
+                offset: 8,
+                lost: 92,
+            },
+        )
+        .await;
+        assert_eq!(take(&mut agent).await, Frame::Ack { offset: 100 });
+        put(
+            &mut agent,
+            Frame::Output {
+                offset: 100,
+                data: b"CC".to_vec(),
+            },
+        )
+        .await;
+        assert_eq!(take(&mut agent).await, Frame::Ack { offset: 102 });
+        live_output_containing(
+            &h.client,
+            &h.base,
+            &id.to_string(),
+            &["AAAABBBB", "[92 bytes lost]", "CC"],
+        )
+        .await;
+
+        // A resume cursor past the stream (now at 102) is refused.
+        let mut stale = h.dial(id, &token, 999).await;
         match take(&mut stale).await {
             Frame::Error { code, .. } => assert_eq!(code, "resume_beyond_stream"),
             other => panic!("expected an error frame, got {other:?}"),
         }
+        // End the session so the test's runtime can wind down.
+        put(&mut agent, Frame::Exited { status: Some(0) }).await;
     }
 
     #[tokio::test]
