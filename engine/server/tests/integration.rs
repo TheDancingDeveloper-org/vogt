@@ -16521,6 +16521,7 @@ mod pod_stream {
     struct FakeLauncher {
         created: tokio::sync::mpsc::UnboundedSender<(Uuid, Vec<u8>)>,
         deleted: Mutex<Vec<Uuid>>,
+        pods: Mutex<Vec<k8s_openapi::api::core::v1::Pod>>,
         fail: bool,
     }
 
@@ -16529,7 +16530,7 @@ mod pod_stream {
             &'a self,
             id: Uuid,
             token: &'a [u8],
-            _pod: k8s_openapi::api::core::v1::Pod,
+            pod: k8s_openapi::api::core::v1::Pod,
         ) -> LaunchFuture<'a> {
             Box::pin(async move {
                 if self.fail {
@@ -16537,6 +16538,7 @@ mod pod_stream {
                         "no cluster".into(),
                     ));
                 }
+                self.pods.lock().unwrap().push(pod);
                 let _ = self.created.send((id, token.to_vec()));
                 Ok(())
             })
@@ -16579,6 +16581,7 @@ mod pod_stream {
         let launcher = Arc::new(FakeLauncher {
             created: tx,
             deleted: Mutex::new(Vec::new()),
+            pods: Mutex::new(Vec::new()),
             fail,
         });
         state.sessions.set_pod_launcher(launcher.clone());
@@ -16703,6 +16706,56 @@ mod pod_stream {
         })
         .await
         .expect("a frame within 10s")
+    }
+
+    #[tokio::test]
+    async fn pod_env_and_bootstrap_carry_the_contract_fields() {
+        let mut h = harness(false).await;
+        let id = h.start().await;
+        let (_, token) = h.created.recv().await.unwrap();
+        let token = String::from_utf8_lossy(&token).into_owned();
+
+        let pod = h.launcher.pods.lock().unwrap().pop().expect("pod created");
+        let spec_env: std::collections::BTreeMap<String, String> = pod.spec.unwrap().containers[0]
+            .env
+            .clone()
+            .unwrap()
+            .into_iter()
+            .filter_map(|v| v.value.map(|value| (v.name, value)))
+            .collect();
+
+        let body: Value = h
+            .bootstrap(id, token.as_bytes())
+            .await
+            .json()
+            .await
+            .unwrap();
+        assert!(body["session_token"]
+            .as_str()
+            .is_some_and(|t| !t.is_empty()));
+        assert!(body["brief"].is_string());
+        assert!(body["bundle"].is_object());
+        for name in [
+            "VOGT_ENGINE_URL",
+            "VOGT_SESSION_ID",
+            "VOGT_BOOTSTRAP_TOKEN",
+            "VOGT_GRAFT_REPO",
+            "VOGT_GRAFT_LINE",
+            "VOGT_CLI",
+        ] {
+            assert!(spec_env.contains_key(name), "pod spec.env lacks {name}");
+            assert!(
+                body["env"][name].as_str().is_some_and(|v| !v.is_empty()),
+                "bootstrap env lacks {name}"
+            );
+        }
+        assert_eq!(body["env"]["VOGT_ENGINE_URL"], spec_env["VOGT_ENGINE_URL"]);
+        assert_eq!(spec_env["VOGT_SESSION_ID"], id.to_string());
+        assert_eq!(body["env"]["VOGT_SESSION_ID"], id.to_string());
+        assert_eq!(spec_env["VOGT_BOOTSTRAP_TOKEN"], token);
+        assert_eq!(body["env"]["VOGT_BOOTSTRAP_TOKEN"], token);
+        assert_eq!(body["env"]["VOGT_GRAFT_REPO"], "vogt");
+        assert_eq!(body["env"]["VOGT_GRAFT_LINE"], "rust-2");
     }
 
     #[tokio::test]
