@@ -15,6 +15,10 @@ ignore = [
     # and web-push pin elliptic-curve 0.13, which pins crypto-bigint 0.5.
     # Accepted by the operator 2026-10-24; WI-2373 drops it at 0.14.
     "RUSTSEC-2026-0387",
+    # RUSTSEC-2024-0449: unsafe-libyaml is unmaintained and has no published
+    # fixed release. It is pulled by kube 0.98 through deprecated serde_yaml;
+    # replacing kube or its transitive YAML stack is outside this CI fix.
+    "RUSTSEC-2024-0449",
 ]
 
 [licenses]

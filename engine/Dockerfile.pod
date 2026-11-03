@@ -2,8 +2,8 @@
 # Layered session images. The default target is base; rust and mobile are
 # additive targets selected by the project image mapping.
 
-ARG UBUNTU_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-base/ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852
-ARG RUST_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-base/rust:1.94-slim@sha256:cf09adf8c3ebaba10779e5c23ff7fe4df4cccdab8a91f199b0c142c53fef3e1a
+ARG UBUNTU_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-base/ubuntu:26.04
+ARG RUST_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-base/rust:1-bookworm
 ARG NODE_VERSION=22.14.0
 ARG PNPM_VERSION=10.12.4
 ARG UV_VERSION=0.7.12
@@ -16,7 +16,6 @@ ARG RUST_TARGETS="x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu"
 ARG FLUTTER_VERSION=3.35.3
 ARG ANDROID_CMDLINE_TOOLS_VERSION=13114758
 ARG ANDROID_PLATFORM_TOOLS_VERSION=35.0.2
-ARG CHROMIUM_VERSION=1:134.0.6998.88-1~deb12u1
 ARG NODE_X64_SHA256=69b09dba5c8dcb05c4e4273a4340db1005abeafe3927efda2bc5b249e80437ec
 ARG NODE_ARM64_SHA256=08bfbf538bad0e8cbb0269f0173cca28d705874a67a22f60b57d99dc99e30050
 ARG UV_X64_SHA256=735891fb553d0be129f3aa39dc8e9c4c49aaa76ec17f7dfb6a732e79a714873a
@@ -115,8 +114,18 @@ RUN npm install --global \
       "@openai/codex@${CODEX_VERSION}" \
       "opencode-ai@${OPENCODE_VERSION}"
 
-RUN if ! getent group vogt >/dev/null; then groupadd --gid 1000 vogt; fi \
-    && if ! id -u vogt >/dev/null 2>&1; then useradd --uid 1000 --gid vogt --create-home --shell /bin/bash vogt; fi \
+RUN if ! id -u vogt >/dev/null 2>&1; then \
+      existing_user="$(getent passwd 1000 | cut -d: -f1 || true)"; \
+      if [ -n "$existing_user" ]; then \
+        usermod --login vogt --home /home/vogt "$existing_user"; \
+      else \
+        groupadd vogt; \
+        useradd --uid 1000 --gid vogt --create-home --shell /bin/bash vogt; \
+      fi; \
+    fi \
+    && if ! getent group vogt >/dev/null; then groupadd vogt; fi \
+    && usermod --gid vogt vogt \
+    && usermod --uid 1000 vogt \
     && install -d -o vogt -g vogt /home/vogt/Working /home/vogt/.config /cache/xdg /cache/npm /cache/pnpm /cache/pip /cache/uv
 
 # Runtime hooks. The entrypoint fetches all session-specific state from the
@@ -127,7 +136,6 @@ COPY --chmod=0755 deploy/policy-hook.sh /usr/local/bin/vogt-policy-hook
 COPY --chmod=0755 deploy/session-entrypoint.sh /usr/local/bin/vogt-session-entrypoint
 COPY --from=session-agent-build /src/target/release/vogt-session-agent /usr/local/bin/vogt-session-agent
 
-USER vogt
 WORKDIR /home/vogt/Working
 ENTRYPOINT ["/usr/local/bin/vogt-session-entrypoint"]
 
@@ -155,20 +163,19 @@ RUN install -d -o vogt -g vogt /opt/rust /opt/rust/cargo /opt/rust/rustup /cache
 # This config is a placeholder for a runtime-provided sccache client. No cache
 # credentials or cache contents are baked into the image.
 RUN printf '%s\n' '[build]' '# rustc-wrapper = "/usr/local/bin/sccache"' > /etc/cargo-config.toml
-USER vogt
+USER 1000:1000
 
 FROM rust AS mobile
 ARG FLUTTER_VERSION
 ARG ANDROID_CMDLINE_TOOLS_VERSION
 ARG ANDROID_PLATFORM_TOOLS_VERSION
-ARG CHROMIUM_VERSION
 ARG FLUTTER_SHA256
 ARG ANDROID_CMDLINE_TOOLS_SHA256
 LABEL org.opencontainers.image.title="vogt-session-mobile"
 USER root
 ENV ANDROID_HOME=/opt/android-sdk ANDROID_SDK_ROOT=/opt/android-sdk FLUTTER_ROOT=/opt/flutter
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends chromium=${CHROMIUM_VERSION} xwayland libgl1-mesa-dri \
+    && apt-get install -y --no-install-recommends chromium xwayland libgl1-mesa-dri \
     && find /var/lib/apt/lists -type f -delete \
     && curl -fsSL "https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_${FLUTTER_VERSION}-stable.tar.xz" -o /tmp/flutter.tar.xz \
     && echo "${FLUTTER_SHA256}  /tmp/flutter.tar.xz" | sha256sum -c - \
@@ -183,5 +190,5 @@ RUN apt-get update \
     && /opt/android-sdk/cmdline-tools/latest/bin/sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0" \
     && chown -R vogt:vogt /opt/android-sdk \
     && find /tmp -maxdepth 1 -type f \( -name 'flutter.tar.xz' -o -name 'android.zip' \) -delete
-USER vogt
+USER 1000:1000
 RUN flutter config --no-analytics && flutter precache --android
