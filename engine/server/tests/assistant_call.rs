@@ -195,6 +195,7 @@ async fn core_mcp(Json(message): Json<Value>) -> Json<Value> {
 
 fn test_config(stub: &str) -> Config {
     Config {
+        pod_backends_enabled: false,
         bind: "127.0.0.1:0".parse().unwrap(),
         token: Some(TEST_TOKEN.to_string()),
         token_mutating_request_limit_per_minute: 600,

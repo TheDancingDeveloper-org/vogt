@@ -167,6 +167,7 @@ async fn stand_in_core() -> (String, Log) {
 
 fn base_config() -> Config {
     Config {
+        pod_backends_enabled: false,
         bind: "127.0.0.1:0".parse().unwrap(),
         token: Some(TEST_TOKEN.to_string()),
         token_mutating_request_limit_per_minute: 600,
