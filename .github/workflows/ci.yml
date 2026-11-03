@@ -515,11 +515,18 @@ jobs:
           # one, this path is used (VAPID ES256 signing, JWTs); the risk is a
           # remote timing side channel. Accepted by the operator 2026-10-24;
           # WI-2373 removes it when those crates reach elliptic-curve 0.14.
+          #
+          # RUSTSEC-2024-0449: unsafe-libyaml is unmaintained, with no fixed
+          # release. It arrives through kube-client's serde_yaml (kube 0.98
+          # through 3.x). kube 4.x drops it, but needs k8s-openapi 0.28, which
+          # replaced chrono with jiff and so edits pod_reconcile.rs. Accepted
+          # in a local-only Vogt item; the kube 4 move is the way out.
           # These ignores stay explicit while the audit denies future
           # vulnerabilities, unsound advisories, and yanks.
           cargo audit --no-fetch --db "$advisory_db" \
             --deny warnings \
             --ignore RUSTSEC-2023-0071 \
+            --ignore RUSTSEC-2024-0449 \
             --ignore RUSTSEC-2025-0134 \
             --ignore RUSTSEC-2026-0387
 

@@ -16,6 +16,7 @@ ARG RUST_TARGETS="x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu"
 ARG FLUTTER_VERSION=3.35.3
 ARG ANDROID_CMDLINE_TOOLS_VERSION=13114758
 ARG ANDROID_PLATFORM_TOOLS_VERSION=35.0.2
+ARG CHROME_VERSION=156.0.8078.80
 ARG NODE_X64_SHA256=69b09dba5c8dcb05c4e4273a4340db1005abeafe3927efda2bc5b249e80437ec
 ARG NODE_ARM64_SHA256=08bfbf538bad0e8cbb0269f0173cca28d705874a67a22f60b57d99dc99e30050
 ARG UV_X64_SHA256=735891fb553d0be129f3aa39dc8e9c4c49aaa76ec17f7dfb6a732e79a714873a
@@ -24,6 +25,7 @@ ARG GRAFT_X64_SHA256=46c64a82bbc8f218b584860662a73f69c4baeeb49a926fd7e8a36c19c1c
 ARG GRAFT_ARM64_SHA256=63253bad6117aab2c65cc86db7125fc4f66c325b1d7a7d16f9ca006a4942d427
 ARG FLUTTER_SHA256=791550652e29a9588815c0e3aac7cf7cd1d1d5d6a1f1631d46cb146e8a2e1a1d
 ARG ANDROID_CMDLINE_TOOLS_SHA256=7ec965280a073311c339e571cd5de778b9975026cfcbe79f2b1cdcb1e15317ee
+ARG CHROME_X64_SHA256=b711c720f774be355197f32edf37e0651418ba036d92446ee2da19ac017540a7
 ARG RUSTUP_SHA256=d890e2fef6fa991b19cde2e608199bc1dca4e37f41f884edf8849ff693048de6
 
 FROM ${RUST_IMAGE} AS session-agent-build
@@ -114,19 +116,19 @@ RUN npm install --global \
       "@openai/codex@${CODEX_VERSION}" \
       "opencode-ai@${OPENCODE_VERSION}"
 
-RUN if ! id -u vogt >/dev/null 2>&1; then \
-      existing_user="$(getent passwd 1000 | cut -d: -f1 || true)"; \
-      if [ -n "$existing_user" ]; then \
-        usermod --login vogt --home /home/vogt "$existing_user"; \
-      else \
-        groupadd vogt; \
-        useradd --uid 1000 --gid vogt --create-home --shell /bin/bash vogt; \
-      fi; \
-    fi \
-    && if ! getent group vogt >/dev/null; then groupadd vogt; fi \
-    && usermod --gid vogt vogt \
-    && usermod --uid 1000 vogt \
-    && install -d -o vogt -g vogt /home/vogt/Working /home/vogt/.config /cache/xdg /cache/npm /cache/pnpm /cache/pip /cache/uv
+# The session user is uid/gid 1000. Ubuntu images may already ship a user at
+# 1000, which is removed so vogt owns the id. /run/vogt (the session token) and
+# /work (the clone) are created here because the non-root user cannot create
+# them under / at runtime. The base may already have a root-owned /home/vogt,
+# which useradd leaves alone, so the home is chowned explicitly.
+RUN if existing="$(getent passwd 1000 | cut -d: -f1)" && [ -n "$existing" ]; then userdel --remove "$existing"; fi \
+    && if existing="$(getent group 1000 | cut -d: -f1)" && [ -n "$existing" ]; then groupdel "$existing"; fi \
+    && groupadd --gid 1000 vogt \
+    && useradd --uid 1000 --gid 1000 --create-home --shell /bin/bash vogt \
+    && cp -rn /etc/skel/. /home/vogt/ \
+    && chown -R 1000:1000 /home/vogt \
+    && install -d -o 1000 -g 1000 -m 0700 /run/vogt /work \
+    && install -d -o 1000 -g 1000 /home/vogt/Working /home/vogt/.config /cache/xdg /cache/npm /cache/pnpm /cache/pip /cache/uv
 
 # Runtime hooks. The entrypoint fetches all session-specific state from the
 # authenticated broker; no account or service credential is baked here.
@@ -153,13 +155,13 @@ RUN install -d -o vogt -g vogt /opt/rust /opt/rust/cargo /opt/rust/rustup /cache
     && curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs -o /tmp/rustup.sh \
     && echo "${RUSTUP_SHA256}  /tmp/rustup.sh" | sha256sum -c - \
     && chown vogt:vogt /tmp/rustup.sh \
-    && su - vogt -c "CARGO_HOME=/opt/rust/cargo sh /tmp/rustup.sh -y --default-toolchain ${RUST_VERSION} --profile minimal" \
-    && su - vogt -c "CARGO_HOME=/opt/rust/cargo rustup target add $(printf '%s' '${RUST_TARGETS}' | tr ',' ' ')" \
+    && su - vogt -c "RUSTUP_HOME=/opt/rust/rustup CARGO_HOME=/opt/rust/cargo sh /tmp/rustup.sh -y --default-toolchain ${RUST_VERSION} --profile minimal" \
+    && su - vogt -c "RUSTUP_HOME=/opt/rust/rustup CARGO_HOME=/opt/rust/cargo rustup target add $(printf '%s' "${RUST_TARGETS}" | tr ',' ' ')" \
     && apt-get update \
     && apt-get install -y --no-install-recommends clang lld cmake protobuf-compiler \
     && find /var/lib/apt/lists -type f -delete \
-    && su - vogt -c "CARGO_HOME=/opt/rust/cargo cargo install --locked cargo-nextest --version 0.9.102" \
-    && su - vogt -c "CARGO_HOME=/opt/rust/cargo rustup component add rust-analyzer"
+    && su - vogt -c "RUSTUP_HOME=/opt/rust/rustup CARGO_HOME=/opt/rust/cargo cargo install --locked cargo-nextest --version 0.9.102" \
+    && su - vogt -c "RUSTUP_HOME=/opt/rust/rustup CARGO_HOME=/opt/rust/cargo rustup component add rust-analyzer"
 # This config is a placeholder for a runtime-provided sccache client. No cache
 # credentials or cache contents are baked into the image.
 RUN printf '%s\n' '[build]' '# rustc-wrapper = "/usr/local/bin/sccache"' > /etc/cargo-config.toml
@@ -171,18 +173,33 @@ ARG ANDROID_CMDLINE_TOOLS_VERSION
 ARG ANDROID_PLATFORM_TOOLS_VERSION
 ARG FLUTTER_SHA256
 ARG ANDROID_CMDLINE_TOOLS_SHA256
+ARG CHROME_VERSION
+ARG CHROME_X64_SHA256
+ARG TARGETARCH
 LABEL org.opencontainers.image.title="vogt-session-mobile"
 USER root
 ENV ANDROID_HOME=/opt/android-sdk ANDROID_SDK_ROOT=/opt/android-sdk FLUTTER_ROOT=/opt/flutter
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends chromium xwayland libgl1-mesa-dri \
+    && apt-get install -y --no-install-recommends openjdk-21-jdk-headless xwayland libgl1-mesa-dri fonts-liberation \
+       libasound2t64 libatk-bridge2.0-0t64 libatk1.0-0t64 libcairo2 libcups2t64 libdbus-1-3 \
+       libdrm2 libgbm1 libglib2.0-0t64 libnspr4 libnss3 libpango-1.0-0 libx11-6 libxcb1 \
+       libxcomposite1 libxdamage1 libxext6 libxfixes3 libxkbcommon0 libxrandr2 \
     && find /var/lib/apt/lists -type f -delete \
+    && if [ "$TARGETARCH" != amd64 ]; then echo "Chrome for Testing is published for linux64 only; got $TARGETARCH" >&2; exit 1; fi \
+    && curl -fsSL "https://storage.googleapis.com/chrome-for-testing-public/${CHROME_VERSION}/linux64/chrome-linux64.zip" -o /tmp/chrome.zip \
+    && echo "${CHROME_X64_SHA256}  /tmp/chrome.zip" | sha256sum -c - \
+    && unzip -q /tmp/chrome.zip -d /opt \
+    && mv /opt/chrome-linux64 /opt/chrome \
+    && ln -s /opt/chrome/chrome /usr/local/bin/chromium \
+    && ln -s /opt/chrome/chrome /usr/local/bin/google-chrome \
+    && chromium --headless --no-sandbox --version \
+    && rm -f /tmp/chrome.zip \
     && curl -fsSL "https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_${FLUTTER_VERSION}-stable.tar.xz" -o /tmp/flutter.tar.xz \
     && echo "${FLUTTER_SHA256}  /tmp/flutter.tar.xz" | sha256sum -c - \
     && tar -xJf /tmp/flutter.tar.xz -C /opt \
     && chown -R vogt:vogt /opt/flutter \
     && install -d -o vogt -g vogt /opt/android-sdk/cmdline-tools \
-    && curl -fsSL "https://dl.google.com/android/repository/commandlinetools-linux-${ANDROID_CMDLINE_TOOLS_VERSION}_latest.zip" -o /tmp/android.zip \
+    && curl -fsSL --retry 5 --retry-all-errors "https://dl.google.com/android/repository/commandlinetools-linux-${ANDROID_CMDLINE_TOOLS_VERSION}_latest.zip" -o /tmp/android.zip \
     && echo "${ANDROID_CMDLINE_TOOLS_SHA256}  /tmp/android.zip" | sha256sum -c - \
     && unzip -q /tmp/android.zip -d /opt/android-sdk/cmdline-tools \
     && mv /opt/android-sdk/cmdline-tools/cmdline-tools /opt/android-sdk/cmdline-tools/latest \
