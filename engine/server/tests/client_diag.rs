@@ -57,6 +57,8 @@ fn test_config() -> Config {
         assistant_tts_format: "mp3".into(),
         assistant_speech_attempt_timeout_ms: 300,
         public_url: None,
+        agent_auth_public_url: None,
+        cadastre_mcp_url: None,
         vogt_core_url: None,
         vogt_import_root: None,
         vogt_engine_state_dir: None,
