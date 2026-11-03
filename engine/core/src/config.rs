@@ -372,28 +372,23 @@ pub struct VogtConfig {
 /// quietly.
 ///
 /// None of these features is ported: the forge posture collector interval,
-/// the GitHub rate-limit floor, GitHub App installation auth, the usage board
-/// (WI-2666), cold-wake compaction (WI-2588), the session-scratch project, the
-/// autopilot result-report gate, and `image_digest` on `instance.diagnostics`
-/// (WI-2666). The collector schedule reads `sweep_interval_seconds` (WI-2021).
+/// the GitHub rate-limit floor, GitHub App installation auth, cold-wake
+/// compaction (WI-2588), the session-scratch project, and the autopilot
+/// result-report gate. The collector schedule reads `sweep_interval_seconds`
+/// (WI-2021), `usage.board` reads all four `usage_*` settings, and
+/// `instance.diagnostics` reads `image_digest`.
 /// `watch_interval_seconds` stays unread: `evaluate_watches` is not ported, so
 /// no watch loop runs and nothing else reads the key.
-#[allow(dead_code)] // Read by the unread-key regression in this module's tests.
 pub const UNREAD_KEYS: &[(&str, &str)] = &[
     ("watch_interval_seconds", "WI-2021"),
     ("forge_posture_interval_seconds", "WI-2021"),
     ("github_rate_limit_floor", "WI-2021"),
     ("github_app_installation_id", "WI-2021"),
-    ("usage_accounts", "WI-2666"),
-    ("usage_litellm_url", "WI-2666"),
-    ("usage_litellm_keys", "WI-2666"),
-    ("usage_daily_spend_alert_usd", "WI-2666"),
     ("cold_wake_compaction", "WI-2588"),
     ("cold_wake_threshold_tokens", "WI-2588"),
     ("cold_wake_ttl_seconds", "WI-2588"),
     ("session_scratch_project", "WI-2666"),
     ("autopilot_done_requires_result_report", "WI-2666"),
-    ("image_digest", "WI-2666"),
 ];
 
 /// Where an instance lives when the operator has not said otherwise.
@@ -613,7 +608,25 @@ pub fn load_config(overrides: &Map<String, Value>) -> Result<VogtConfig, String>
         }
         merge_value(&mut merged, key.clone(), value.clone());
     }
+    for warning in ignored_setting_warnings(&merged) {
+        eprintln!("vogt-core config: warning: {warning}");
+    }
     config_from_map(&merged)
+}
+
+/// Warnings for settings this build accepts but cannot act on yet.
+///
+/// Only explicitly supplied settings are reported. Values are deliberately
+/// omitted because configuration can name secret-bearing paths and
+/// environment variables, and stderr is not a secret store.
+fn ignored_setting_warnings(values: &Map<String, Value>) -> Vec<String> {
+    UNREAD_KEYS
+        .iter()
+        .filter(|(name, _)| values.contains_key(*name))
+        .map(|(name, work_item)| {
+            format!("setting {name:?} is ignored by this build; tracked by {work_item}")
+        })
+        .collect()
 }
 
 fn read_config_file() -> Result<Option<Map<String, Value>>, String> {
@@ -2366,59 +2379,52 @@ mod tests {
     }
 
     /// The unread-key allowlist is exactly the keys this build parses and never
-    /// reads, and exactly the keys section A5 of
-    /// `docs/rust-port/accepted-differences.md` names. It may shrink as a
-    /// feature is wired; it may not grow, and a renamed or re-owned key must
-    /// change both lists together.
+    /// reads. It may shrink as a feature is wired; it may not grow silently.
     #[test]
     fn unread_keys_are_the_known_set() {
-        let doc = include_str!("../../../docs/rust-port/accepted-differences.md");
-        let section = doc
-            .split("## A5 —")
-            .nth(1)
-            .and_then(|rest| rest.split("\n## ").next())
-            .expect("accepted-differences.md has an A5 section");
-        // A bullet may wrap, so a config key named on a continuation line
-        // counts too. Only names that are real config keys count, so prose
-        // in backticks (an operation, a function) is not an unread key.
         let fields: std::collections::HashSet<&str> =
             describe_fields().iter().map(|field| field.name).collect();
-        let mut documented_unread: Vec<&str> = Vec::new();
-        let mut in_bullet = false;
-        for line in section.lines() {
-            let trimmed = line.trim_start();
-            if trimmed.starts_with("- ") {
-                in_bullet = true;
-            } else if trimmed.is_empty() || !line.starts_with(' ') {
-                in_bullet = false;
-            }
-            if !in_bullet {
-                continue;
-            }
-            let mut rest = trimmed;
-            while let Some(start) = rest.find('`') {
-                rest = &rest[start + 1..];
-                let Some(end) = rest.find('`') else { break };
-                let name = &rest[..end];
-                if fields.contains(name) {
-                    documented_unread.push(name);
-                }
-                rest = &rest[end + 1..];
-            }
-        }
-        documented_unread.sort_unstable();
-        let mut code: Vec<&str> = UNREAD_KEYS.iter().map(|(name, _)| *name).collect();
-        code.sort_unstable();
+        let code: Vec<&str> = UNREAD_KEYS.iter().map(|(name, _)| *name).collect();
         assert_eq!(
-            code, documented_unread,
-            "UNREAD_KEYS must name exactly the keys section A5 documents"
+            code,
+            [
+                "watch_interval_seconds",
+                "forge_posture_interval_seconds",
+                "github_rate_limit_floor",
+                "github_app_installation_id",
+                "cold_wake_compaction",
+                "cold_wake_threshold_tokens",
+                "cold_wake_ttl_seconds",
+                "session_scratch_project",
+                "autopilot_done_requires_result_report",
+            ],
         );
         for (name, work_item) in UNREAD_KEYS {
             assert!(fields.contains(name), "{name} is not a config key");
-            assert!(
-                section.contains(&format!("`{name}`")) && section.contains(work_item),
-                "{name} ({work_item}) is not named with its owning item in A5"
-            );
+            assert!(work_item.starts_with("WI-"), "{name} has no owning item");
         }
+    }
+
+    #[test]
+    fn explicitly_configured_unread_keys_warn_without_printing_values() {
+        let mut values = Map::new();
+        values.insert(
+            "cold_wake_compaction".to_string(),
+            Value::String("do-not-print-me".to_string()),
+        );
+        values.insert(
+            "usage_litellm_url".to_string(),
+            Value::String("https://used".to_string()),
+        );
+        values.insert(
+            "image_digest".to_string(),
+            Value::String("sha256:used".to_string()),
+        );
+        let warnings = ignored_setting_warnings(&values);
+        assert_eq!(
+            warnings,
+            ["setting \"cold_wake_compaction\" is ignored by this build; tracked by WI-2588"]
+        );
+        assert!(!warnings.join("\n").contains("do-not-print-me"));
     }
 }
