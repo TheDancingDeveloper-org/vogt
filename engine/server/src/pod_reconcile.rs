@@ -19,8 +19,8 @@ use crate::{
     agent_stream::{AgentAuth, PodLink},
     error::Result,
     pod_backend::{
-        pod_exit_code, pod_fatal_waiting_reason, pod_phase, pod_reason, session_id_from_pod,
-        PodConfig, PodLauncher,
+        pod_exit_code, pod_fatal_waiting_reason, pod_is_ours, pod_phase, pod_reason,
+        session_id_from_pod, PodConfig, PodLauncher,
     },
 };
 use k8s_openapi::api::core::v1::Pod;
@@ -115,6 +115,11 @@ pub async fn sweep(launcher: &dyn PodLauncher, auth: &AgentAuth, cfg: &PodConfig
     let mut report = Sweep::default();
     let mut seen = HashSet::new();
     for pod in &pods {
+        // The list is selected by label already; an engine's own label is
+        // checked again so a pod of another deployment is never judged.
+        if !pod_is_ours(pod, cfg) {
+            continue;
+        }
         let Some(id) = session_id_from_pod(pod) else {
             continue;
         };
@@ -129,15 +134,23 @@ pub async fn sweep(launcher: &dyn PodLauncher, auth: &AgentAuth, cfg: &PodConfig
                     report.ended.push(id);
                 }
             }
-            Verdict::Orphan => match launcher.delete(id).await {
-                Ok(()) => {
-                    tracing::info!(session = %id, "deleted an orphan session pod");
-                    report.deleted.push(id);
+            Verdict::Orphan => {
+                // Delete exactly the pod that was judged: without a UID the
+                // name could now belong to a replacement.
+                let Some(uid) = pod.metadata.uid.clone() else {
+                    tracing::warn!(session = %id, "an orphan pod without a uid is left alone");
+                    continue;
+                };
+                match launcher.delete(id, Some(uid)).await {
+                    Ok(()) => {
+                        tracing::info!(session = %id, "deleted an orphan session pod");
+                        report.deleted.push(id);
+                    }
+                    Err(e) => {
+                        tracing::warn!(session = %id, error = %e, "deleting an orphan pod failed")
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!(session = %id, error = %e, "deleting an orphan pod failed")
-                }
-            },
+            }
         }
     }
     // A live session whose pod is not in the cluster at all.
@@ -180,7 +193,7 @@ pub fn spawn(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pod_backend::{LaunchFuture, ListFuture};
+    use crate::pod_backend::{LaunchFuture, ListFuture, DEFAULT_ENGINE_ID, ENGINE_LABEL};
     use k8s_openapi::api::core::v1::{
         ContainerState, ContainerStateTerminated, ContainerStateWaiting, ContainerStatus, PodStatus,
     };
@@ -189,7 +202,7 @@ mod tests {
     /// A stand-in for the kube API: serves a fixed pod list and records deletes.
     struct MockKube {
         pods: Mutex<Vec<Pod>>,
-        deleted: Mutex<Vec<Uuid>>,
+        deleted: Mutex<Vec<(Uuid, Option<String>)>>,
         list_fails: bool,
     }
     impl MockKube {
@@ -205,9 +218,9 @@ mod tests {
         fn create<'a>(&'a self, _: Uuid, _: &'a [u8], _: Pod) -> LaunchFuture<'a> {
             Box::pin(async { Ok(()) })
         }
-        fn delete(&self, id: Uuid) -> LaunchFuture<'_> {
+        fn delete(&self, id: Uuid, uid: Option<String>) -> LaunchFuture<'_> {
             Box::pin(async move {
-                self.deleted.lock().unwrap().push(id);
+                self.deleted.lock().unwrap().push((id, uid));
                 Ok(())
             })
         }
@@ -223,7 +236,11 @@ mod tests {
 
     fn pod(id: Uuid, status: PodStatus) -> Pod {
         let mut pod = Pod::default();
-        pod.metadata.labels = Some(BTreeMap::from([("vogt.session".into(), id.to_string())]));
+        pod.metadata.labels = Some(BTreeMap::from([
+            ("vogt.session".into(), id.to_string()),
+            (ENGINE_LABEL.into(), DEFAULT_ENGINE_ID.into()),
+        ]));
+        pod.metadata.uid = Some(format!("uid-{id}"));
         pod.status = Some(status);
         pod
     }
@@ -388,7 +405,11 @@ mod tests {
         let report = sweep(&kube, &auth, &cfg()).await.unwrap();
 
         assert_eq!(report.deleted, vec![id]);
-        assert_eq!(*kube.deleted.lock().unwrap(), vec![id]);
+        // The delete is bound to the listed pod's uid.
+        assert_eq!(
+            *kube.deleted.lock().unwrap(),
+            vec![(id, Some(format!("uid-{id}")))]
+        );
     }
 
     #[tokio::test]
@@ -452,5 +473,43 @@ mod tests {
 
         assert!(sweep(&kube, &auth, &cfg()).await.is_err());
         assert!(!link.is_finished());
+    }
+
+    #[tokio::test]
+    async fn another_engines_pod_is_never_judged_or_deleted() {
+        let (mine, theirs, unlabelled) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let mut other = pod(theirs, phase("Running"));
+        other
+            .metadata
+            .labels
+            .as_mut()
+            .unwrap()
+            .insert(ENGINE_LABEL.into(), "vogt-prod".into());
+        let mut legacy = pod(unlabelled, phase("Running"));
+        legacy
+            .metadata
+            .labels
+            .as_mut()
+            .unwrap()
+            .remove(ENGINE_LABEL);
+        let kube = MockKube::with(vec![pod(mine, phase("Running")), other, legacy]);
+
+        let report = sweep(&kube, &AgentAuth::default(), &cfg()).await.unwrap();
+
+        assert_eq!(report.deleted, vec![mine]);
+        assert_eq!(kube.deleted.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_orphan_without_a_uid_is_left_alone() {
+        let id = Uuid::new_v4();
+        let mut p = pod(id, phase("Running"));
+        p.metadata.uid = None;
+        let kube = MockKube::with(vec![p]);
+
+        let report = sweep(&kube, &AgentAuth::default(), &cfg()).await.unwrap();
+
+        assert!(report.deleted.is_empty());
+        assert!(kube.deleted.lock().unwrap().is_empty());
     }
 }

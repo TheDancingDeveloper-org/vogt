@@ -226,6 +226,9 @@ impl SessionRegistry {
         if let Some(url) = self.cfg.agent_auth_public_url.clone() {
             cfg.engine_endpoint = url;
         }
+        if let Ok(id) = std::env::var("ENGINE_POD_ENGINE_ID") {
+            cfg.engine_id = crate::pod_backend::sanitize_engine_id(&id);
+        }
         cfg
     }
 
@@ -291,7 +294,7 @@ impl SessionRegistry {
             } else {
                 link.exited().await;
             }
-            if let Err(e) = launcher.delete(id).await {
+            if let Err(e) = launcher.delete(id, None).await {
                 tracing::debug!(session = %id, error = %e, "deleting the session pod failed");
             }
             auth.forget_pod(id);
