@@ -19,6 +19,7 @@ use serde_json::{Map, Value};
 
 use super::kinds::{COLLECTOR_DEPLOY_LANES, KIND_DEPLOY_LANE};
 use super::sync::{finding, ForgeDirectory};
+use crate::adapters::http_client;
 use crate::config::{DeployLane, VogtConfig};
 use crate::core::Project;
 
@@ -47,7 +48,7 @@ impl VersionFetch for HttpVersionFetch {
         if !(url.starts_with("https://") || url.starts_with("http://")) {
             return Err("version_url must be http(s)".to_owned());
         }
-        let agent: ureq::Agent = ureq::Agent::config_builder()
+        let agent: ureq::Agent = http_client::builder()
             .timeout_global(Some(VERSION_TIMEOUT))
             .http_status_as_error(false)
             .build()

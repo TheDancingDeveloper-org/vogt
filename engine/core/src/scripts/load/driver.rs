@@ -23,6 +23,7 @@ use super::{
     DeployedPlan, LatencyRecorder, SoakPlan, SoakRecorder, SoakReportInput, DEPLOYED_NOTE,
     SOAK_NOTE,
 };
+use crate::adapters::http_client;
 use crate::application::context::{build_context, Built};
 use crate::config::{SqliteSynchronous, VogtConfig};
 use crate::core::{ActorKind, Principal};
@@ -516,7 +517,7 @@ fn drive_deployed(
     plan: &DeployedPlan,
     refs: &[String],
 ) -> (SoakRecorder, f64) {
-    let agent: ureq::Agent = ureq::Agent::config_builder()
+    let agent: ureq::Agent = http_client::builder()
         .timeout_global(Some(Duration::from_secs(30)))
         .max_idle_connections_per_host(plan.concurrency as usize)
         .build()
@@ -631,7 +632,7 @@ mod tests {
         let dir = scratch("refused");
         let driver = Driver::open(&dir.join("instance")).unwrap();
         let server = Server::start(&driver).unwrap();
-        let agent = ureq::Agent::new_with_defaults();
+        let agent: ureq::Agent = http_client::builder().build().into();
         let err =
             request_for(&agent, &server.base_url, "Bearer nope", "work.list", 0, &[]).unwrap_err();
         drop(server);
