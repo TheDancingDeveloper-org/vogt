@@ -80,8 +80,11 @@ use uuid::Uuid;
 
 use crate::app::AppState;
 use crate::auth;
-use std::path::{Path as FsPath, PathBuf};
-use std::{collections::HashMap, net::SocketAddr};
+use std::io::Write;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Component, Path as FsPath, PathBuf};
+use std::{collections::HashMap, fs::OpenOptions, net::SocketAddr};
 
 use crate::config::Config;
 use crate::error::ApiError;
@@ -128,6 +131,8 @@ const HELPER_TIMEOUT: Duration = Duration::from_secs(30);
 /// How much of the helper's stderr a refusal repeats. Enough to name the
 /// secret and the cause, not enough to carry a value by accident.
 const STDERR_EXCERPT: usize = 300;
+const MAX_IN_MEMORY_TRANSCRIPT: usize = 4 * 1024 * 1024;
+const MAX_BUNDLE_REQUEST_BYTES: usize = 16 * 1024 * 1024;
 
 /// What a manifest line says about when its secret is resolved.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -321,6 +326,7 @@ pub struct SecretBroker {
     /// Session id → the person-approved credential grants it holds (WI-973).
     session_grants: DashMap<Uuid, Vec<HeldGrant>>,
     bundle: DashMap<(String, String), Vec<u8>>,
+    bundle_versions: DashMap<(String, String), u64>,
     account_dirs: HashMap<String, PathBuf>,
 }
 
@@ -415,6 +421,7 @@ impl SecretBroker {
             grant_projects: Vec::new(),
             session_grants: DashMap::new(),
             bundle: DashMap::new(),
+            bundle_versions: DashMap::new(),
             account_dirs: HashMap::new(),
         }
     }
@@ -755,22 +762,48 @@ impl SecretBroker {
         name: &str,
         kind: BundleFileKind,
         bytes: &[u8],
+        version: Option<u64>,
     ) -> Result<(), BundleRefusal> {
-        if bytes.len() > MAX_BUNDLE_FILE_BYTES {
+        if bytes.len() > MAX_BUNDLE_REQUEST_BYTES {
             return Err(BundleRefusal::TooLarge);
         }
-        let key = (account.to_string(), name.to_string());
+        let root = self.account_dirs.get(account).map(FsPath::new);
         match kind {
             BundleFileKind::Credentials | BundleFileKind::Config => {
-                self.bundle.insert(key, bytes.to_vec());
-                if let Some(root) = self.account_dirs.get(account) {
-                    let filename = match kind {
-                        BundleFileKind::Credentials => ".credentials.json",
-                        BundleFileKind::Config => ".claude.json",
-                        BundleFileKind::Transcript => unreachable!(),
-                    };
+                let filename = match kind {
+                    BundleFileKind::Credentials => ".credentials.json",
+                    BundleFileKind::Config => ".claude.json",
+                    BundleFileKind::Transcript => unreachable!(),
+                };
+                if kind == BundleFileKind::Credentials {
+                    if let Some(root) = root {
+                        if let Ok(old) = std::fs::read(root.join(filename)) {
+                            if oauth_expiry(bytes) <= oauth_expiry(&old) {
+                                return Err(BundleRefusal::OlderCredentials);
+                            }
+                        }
+                    }
+                }
+                if kind == BundleFileKind::Config {
+                    if let Some(version) = version {
+                        let key = (account.to_string(), name.to_string());
+                        if self
+                            .bundle_versions
+                            .get(&key)
+                            .is_some_and(|old| version <= *old)
+                        {
+                            return Err(BundleRefusal::OlderConfig);
+                        }
+                    }
+                }
+                if let Some(root) = root {
                     atomic_bundle_write(root, FsPath::new(filename), bytes)
                         .map_err(|_| BundleRefusal::Storage)?;
+                }
+                self.put_bundle((account.to_string(), name.to_string()), bytes.to_vec());
+                if let Some(version) = version {
+                    self.bundle_versions
+                        .insert((account.to_string(), name.to_string()), version);
                 }
             }
             BundleFileKind::Transcript => {
@@ -779,26 +812,46 @@ impl SecretBroker {
                 {
                     return Err(BundleRefusal::ConversationScope);
                 }
-                let mut current = self.bundle.entry(key).or_default();
+                let key = (account.to_string(), name.to_string());
+                let current = if let Some(root) = root {
+                    match std::fs::read(root.join(name)) {
+                        Ok(bytes) => bytes,
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+                        Err(_) => return Err(BundleRefusal::Storage),
+                    }
+                } else {
+                    self.bundle.get(&key).map(|v| v.clone()).unwrap_or_default()
+                };
                 if current.as_slice() != bytes {
-                    if bytes.starts_with(current.as_slice()) {
-                        let offset = current.len();
-                        current.extend_from_slice(&bytes[offset..]);
-                        if let Some(root) = self.account_dirs.get(account) {
-                            atomic_bundle_write(root, FsPath::new(name), bytes)
-                                .map_err(|_| BundleRefusal::Storage)?;
-                        }
-                    } else {
+                    if !bytes.starts_with(&current) {
                         return Err(BundleRefusal::TranscriptRewrite);
                     }
+                    if let Some(root) = root {
+                        atomic_bundle_write(root, FsPath::new(name), bytes)
+                            .map_err(|_| BundleRefusal::Storage)?;
+                    }
+                    let keep_from = bytes.len().saturating_sub(MAX_IN_MEMORY_TRANSCRIPT);
+                    self.put_bundle(key, bytes[keep_from..].to_vec());
                 }
             }
         }
         Ok(())
     }
+
+    fn put_bundle(&self, key: (String, String), bytes: Vec<u8>) {
+        const MAX_BUNDLE_ENTRIES: usize = 256;
+        if self.bundle.len() >= MAX_BUNDLE_ENTRIES && !self.bundle.contains_key(&key) {
+            if let Some(entry) = self.bundle.iter().next() {
+                let old = entry.key().clone();
+                drop(entry);
+                self.bundle.remove(&old);
+            }
+        }
+        self.bundle.insert(key, bytes);
+    }
 }
 
-const MAX_BUNDLE_FILE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_BUNDLE_FILE_BYTES: usize = MAX_BUNDLE_REQUEST_BYTES;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "kebab-case")]
@@ -815,6 +868,8 @@ pub struct BundleFileRequest {
     pub path: String,
     pub kind: BundleFileKind,
     pub bytes: String,
+    #[serde(default)]
+    pub version: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -823,26 +878,118 @@ pub enum BundleRefusal {
     ConversationScope,
     TranscriptRewrite,
     Storage,
+    OlderCredentials,
+    OlderConfig,
 }
 
 fn atomic_bundle_write(root: &FsPath, relative: &FsPath, bytes: &[u8]) -> std::io::Result<()> {
     if relative.is_absolute()
         || relative
             .components()
-            .any(|c| !matches!(c, std::path::Component::Normal(_)))
+            .any(|c| !matches!(c, Component::Normal(_)))
     {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "invalid bundle path",
         ));
     }
-    let target = root.join(relative);
-    if let Some(parent) = target.parent() {
-        std::fs::create_dir_all(parent)?;
+    let root = std::fs::canonicalize(root)?;
+    #[cfg(unix)]
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))?;
+    let mut parent = root.clone();
+    let mut components = relative.components().peekable();
+    let filename = loop {
+        let Some(component) = components.next() else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "empty bundle path",
+            ));
+        };
+        let name = match component {
+            Component::Normal(name) => name,
+            _ => unreachable!(),
+        };
+        if components.peek().is_none() {
+            break name.to_owned();
+        }
+        parent.push(name);
+        match std::fs::symlink_metadata(&parent) {
+            Ok(meta) if meta.file_type().is_symlink() || !meta.is_dir() => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "bundle path escapes root",
+                ))
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::create_dir(&parent)?;
+                #[cfg(unix)]
+                std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700))?;
+            }
+            Err(e) => return Err(e),
+        }
+    };
+    let root_check = std::fs::canonicalize(&parent)?;
+    if !root_check.starts_with(&root) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "bundle path escapes root",
+        ));
     }
-    let tmp = target.with_extension("vogt-tmp");
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(tmp, target)
+    let target = parent.join(&filename);
+    if let Ok(meta) = std::fs::symlink_metadata(&target) {
+        if meta.file_type().is_symlink() || !meta.is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "bundle target is not a regular file",
+            ));
+        }
+    }
+    let mut tmp;
+    let mut temp_name;
+    for attempt in 0..100 {
+        temp_name = format!(
+            ".{}.vogt-tmp-{}-{}",
+            filename.to_string_lossy(),
+            std::process::id(),
+            attempt
+        );
+        tmp = parent.join(&temp_name);
+        match OpenOptions::new().write(true).create_new(true).open(&tmp) {
+            Ok(mut file) => {
+                #[cfg(unix)]
+                file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+                file.write_all(bytes)?;
+                file.sync_all()?;
+                std::fs::rename(&tmp, &target)?;
+                let dir = OpenOptions::new().read(true).open(&parent)?;
+                dir.sync_all()?;
+                return Ok(());
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "unable to allocate temporary bundle file",
+    ))
+}
+
+fn oauth_expiry(bytes: &[u8]) -> u64 {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return 0;
+    };
+    value
+        .pointer("/claudeAiOauth/expiresAt")
+        .and_then(|v| v.as_u64())
+        .or_else(|| {
+            value
+                .pointer("/claudeAiOauth/expiresAt")
+                .and_then(|v| v.as_str())
+                .and_then(|v| v.parse().ok())
+        })
+        .unwrap_or(0)
 }
 
 /// Store a file from the Claude account bundle. The request carries base64 so
@@ -923,8 +1070,14 @@ pub async fn store_bundle_file(
         );
     }
     let length = bytes.len();
-    let result =
-        broker.store_bundle_file(account, conversation, &payload.path, payload.kind, &bytes);
+    let result = broker.store_bundle_file(
+        account,
+        conversation,
+        &payload.path,
+        payload.kind,
+        &bytes,
+        payload.version,
+    );
     if let Err(error) = result {
         let reason = match error {
             BundleRefusal::TooLarge => "bundle-file exceeds the size cap",
@@ -933,11 +1086,17 @@ pub async fn store_bundle_file(
             }
             BundleRefusal::TranscriptRewrite => "bundle-file transcript is not append-only",
             BundleRefusal::Storage => "bundle-file could not be persisted",
+            BundleRefusal::OlderCredentials => {
+                "bundle-file credentials are not newer than the stored credentials"
+            }
+            BundleRefusal::OlderConfig => {
+                "bundle-file config version is not newer than the stored config"
+            }
         };
         return refusal(StatusCode::FORBIDDEN, reason);
     }
     tracing::info!(target: "vogt::audit", session_id = %session_id, account = %account,
-        path = %payload.path, bytes = length, "bundle file stored");
+        file = %payload.path, bytes = length, "bundle file replaced");
     Json(json!({"ok": true, "bytes": length})).into_response()
 }
 
@@ -1537,6 +1696,94 @@ mod tests {
         assert_eq!(
             broker_with("", "[::]:8910").loopback_url(),
             "http://[::1]:8910"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bundle_writes_are_private_and_newer_credentials_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut dirs = HashMap::new();
+        dirs.insert("acct".to_string(), dir.path().to_path_buf());
+        let broker = broker_with("", "127.0.0.1:1").with_account_dirs(dirs);
+        let newer = br#"{"claudeAiOauth":{"expiresAt":20}}"#;
+        let older = br#"{"claudeAiOauth":{"expiresAt":10}}"#;
+        broker
+            .store_bundle_file(
+                "acct",
+                "conv",
+                ".credentials.json",
+                BundleFileKind::Credentials,
+                newer,
+                None,
+            )
+            .unwrap();
+        let mode = std::fs::metadata(dir.path().join(".credentials.json"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+        assert!(matches!(
+            broker.store_bundle_file(
+                "acct",
+                "conv",
+                ".credentials.json",
+                BundleFileKind::Credentials,
+                older,
+                None,
+            ),
+            Err(BundleRefusal::OlderCredentials)
+        ));
+    }
+
+    #[test]
+    fn transcript_is_append_only_and_bounded_in_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut dirs = HashMap::new();
+        dirs.insert("acct".to_string(), dir.path().to_path_buf());
+        let broker = broker_with("", "127.0.0.1:1").with_account_dirs(dirs);
+        let path = "projects/work/conv.jsonl";
+        broker
+            .store_bundle_file(
+                "acct",
+                "conv",
+                path,
+                BundleFileKind::Transcript,
+                b"one\n",
+                None,
+            )
+            .unwrap();
+        assert!(matches!(
+            broker.store_bundle_file(
+                "acct",
+                "conv",
+                path,
+                BundleFileKind::Transcript,
+                b"nope",
+                None
+            ),
+            Err(BundleRefusal::TranscriptRewrite)
+        ));
+        let mut huge = b"one\n".to_vec();
+        huge.resize(MAX_IN_MEMORY_TRANSCRIPT + 64, b'x');
+        broker
+            .store_bundle_file(
+                "acct",
+                "conv",
+                path,
+                BundleFileKind::Transcript,
+                &huge,
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            broker
+                .bundle
+                .get(&("acct".into(), path.into()))
+                .unwrap()
+                .len(),
+            MAX_IN_MEMORY_TRANSCRIPT
         );
     }
 }
