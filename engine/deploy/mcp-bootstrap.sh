@@ -1175,4 +1175,4 @@ install_readonly_servers
 # Everything an operator wants to see is still shown: an interactive shell
 # prints stderr too. The only reader that notices the difference is the one
 # that must.
-printf 'mcp-bootstrap: Vogt MCP client registrations written; endpoint was not probed — run `vogt-agent-auth check` for that\n' >&2
+printf "mcp-bootstrap: Vogt MCP client registrations written; endpoint was not probed — run \`vogt-agent-auth check\` for that\\n" >&2
