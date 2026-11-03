@@ -17065,6 +17065,9 @@ mod pod_stream {
             "VOGT_CLI",
         ] {
             assert!(spec_env.contains_key(name), "pod spec.env lacks {name}");
+            if name == "VOGT_BOOTSTRAP_TOKEN" {
+                continue;
+            }
             assert!(
                 body["env"][name].as_str().is_some_and(|v| !v.is_empty()),
                 "bootstrap env lacks {name}"
@@ -17074,9 +17077,145 @@ mod pod_stream {
         assert_eq!(spec_env["VOGT_SESSION_ID"], id.to_string());
         assert_eq!(body["env"]["VOGT_SESSION_ID"], id.to_string());
         assert_eq!(spec_env["VOGT_BOOTSTRAP_TOKEN"], token);
-        assert_eq!(body["env"]["VOGT_BOOTSTRAP_TOKEN"], token);
+        assert!(body["env"].get("VOGT_BOOTSTRAP_TOKEN").is_none());
+        assert!(!body.to_string().contains(&token));
         assert_eq!(body["env"]["VOGT_GRAFT_REPO"], "vogt");
         assert_eq!(body["env"]["VOGT_GRAFT_LINE"], "rust-2");
+    }
+
+    /// Runs the real `deploy/session-entrypoint.sh` against the real bootstrap
+    /// route. The CLI agent and `graft` are fakes that record what they get.
+    #[tokio::test]
+    async fn real_entrypoint_bootstraps_against_the_real_route() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut h = harness(false).await;
+        let id = h.start().await;
+        let (_, token) = h.created.recv().await.unwrap();
+        let token = String::from_utf8_lossy(&token).into_owned();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let script = |name: &str, body: &str| {
+            let path = bin.join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        let graft_log = tmp.path().join("graft.args");
+        let agent_log = tmp.path().join("agent.env");
+        script(
+            "graft",
+            &format!(
+                "printf '%s\\n' \"$*\" >>{g}\nwhile [ \"$1\" != clone ]; do shift; done\nmkdir -p \"$3\"",
+                g = graft_log.display()
+            ),
+        );
+        std::os::unix::fs::symlink(bin.join("graft"), bin.join("g")).unwrap();
+        script(
+            "vogt-session-agent",
+            &format!(
+                "printf 'argc=%s\\n' \"$#\" >{a}\nenv >>{a}\necho agent-ran",
+                a = agent_log.display()
+            ),
+        );
+        let work = tmp.path().join("work");
+        let token_file = tmp.path().join("run").join("session-token");
+        let run = |tmp_dir: std::path::PathBuf| {
+            let mut cmd = std::process::Command::new("sh");
+            cmd.arg(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../deploy/session-entrypoint.sh"
+            ))
+            .env_clear()
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .env("HOME", tmp.path())
+            .env("TMPDIR", tmp_dir)
+            .env("CLAUDE_CONFIG_DIR", tmp.path().join("claude"))
+            .env("VOGT_ENGINE_URL", &h.base)
+            .env("VOGT_SESSION_ID", id.to_string())
+            .env("VOGT_BOOTSTRAP_TOKEN", &token)
+            .env("VOGT_GRAFT_REPO", "vogt")
+            .env("VOGT_GRAFT_LINE", "rust-2")
+            .env("VOGT_CLI", "claude")
+            .env("VOGT_WORK_DIR", &work)
+            .env("VOGT_SESSION_TOKEN_FILE", &token_file);
+            tokio::task::spawn_blocking(move || cmd.output().unwrap())
+        };
+        let tmp_a = tmp.path().join("tmp-a");
+        std::fs::create_dir(&tmp_a).unwrap();
+        let out = run(tmp_a).await.unwrap();
+        let all = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(out.status.success(), "entrypoint failed: {all}");
+        assert!(all.contains("agent-ran"), "agent was not exec'd: {all}");
+
+        // The session token is on disk, owner-only, and nowhere else.
+        let mode = std::fs::metadata(&token_file).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        let session_token = std::fs::read_to_string(&token_file).unwrap();
+        assert!(!session_token.trim().is_empty());
+        assert!(!all.contains(&token) && !all.contains(session_token.trim()));
+
+        // The agent got its contract in env, no secrets, and no arguments.
+        let env = std::fs::read_to_string(&agent_log).unwrap();
+        assert!(env.starts_with("argc=0\n"), "agent args: {env}");
+        assert!(!env.contains(&token), "bootstrap token reached the agent");
+        assert!(!env.contains(session_token.trim()), "session token in env");
+        assert!(!env.contains("VOGT_BOOTSTRAP_TOKEN"));
+        for want in [
+            format!("VOGT_SESSION_ID={id}"),
+            "VOGT_GRAFT_REPO=vogt".into(),
+            "VOGT_GRAFT_LINE=rust-2".into(),
+            "VOGT_CLI=claude".into(),
+            format!("VOGT_SESSION_TOKEN_FILE={}", token_file.display()),
+            format!("VOGT_SESSION_CWD={}", work.display()),
+        ] {
+            assert!(env.lines().any(|l| l == want), "agent env lacks {want}");
+        }
+        assert!(work.join(".vogt/brief.md").exists());
+
+        // `graft` ran once, with the minted token file, on the requested line.
+        let graft = std::fs::read_to_string(&graft_log).unwrap();
+        assert_eq!(
+            graft.trim(),
+            format!(
+                "--token-file {} clone vogt {} --line rust-2",
+                token_file.display(),
+                work.display()
+            )
+        );
+        assert!(!graft.contains(&token));
+
+        // The bootstrap was consumed: replaying it is refused.
+        let tmp_b = tmp.path().join("tmp-b");
+        std::fs::create_dir(&tmp_b).unwrap();
+        let again = run(tmp_b).await.unwrap();
+        assert!(!again.status.success());
+        let err = String::from_utf8_lossy(&again.stderr);
+        assert!(err.contains("bootstrap failed"), "{err}");
+        assert!(!err.contains(&token));
+    }
+
+    #[tokio::test]
+    async fn bootstrap_without_a_json_body_says_what_it_needs() {
+        let mut h = harness(false).await;
+        let id = h.start().await;
+        let (_, token) = h.created.recv().await.unwrap();
+        let res = reqwest::Client::new()
+            .post(format!("{}/api/agent-auth/bootstrap", h.base))
+            .bearer_auth(String::from_utf8_lossy(&token))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let body = res.text().await.unwrap();
+        assert!(body.contains("JSON body"), "{body}");
+        assert!(body.contains("session_id"), "{body}");
+        // A rejected body does not burn the one-shot token.
+        assert_eq!(h.bootstrap(id, &token).await.status(), StatusCode::OK);
     }
 
     #[tokio::test]
