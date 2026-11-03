@@ -1,3 +1,4 @@
+pub mod account_pool;
 pub mod activity;
 pub mod agent_cli;
 pub mod agent_clis;

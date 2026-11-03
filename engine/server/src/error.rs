@@ -34,6 +34,8 @@ pub enum ApiError {
     /// The host is too short of disk to take on more work (WI-1810).
     #[error("insufficient storage: {0}")]
     InsufficientStorage(String),
+    #[error("account at capacity: {0}")]
+    AtCapacity(String),
 }
 
 impl ApiError {
@@ -43,6 +45,7 @@ impl ApiError {
             ApiError::BadRequest(_) => StatusCode::BAD_REQUEST,
             ApiError::Unauthorized => StatusCode::UNAUTHORIZED,
             ApiError::Conflict(_) => StatusCode::CONFLICT,
+            ApiError::AtCapacity(_) => StatusCode::TOO_MANY_REQUESTS,
             ApiError::Forbidden(_) => StatusCode::FORBIDDEN,
             ApiError::TooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             ApiError::Config(_) | ApiError::Internal(_) | ApiError::Pty(_) | ApiError::Io(_) => {

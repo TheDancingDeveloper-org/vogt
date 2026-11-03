@@ -73,6 +73,8 @@ pub struct SessionTemplate {
     pub cwd: Option<String>,
     pub env: Vec<(String, String)>,
     #[serde(default)]
+    pub account: Option<String>,
+    #[serde(default)]
     pub default_name: Option<String>,
     #[serde(default)]
     pub match_repo_names: Vec<String>,
@@ -102,6 +104,7 @@ impl SessionTemplate {
                 match_repo_names: vec![],
                 match_path_prefixes: vec![],
                 tags: vec!["shell".to_string()],
+                account: None,
                 backend: default_session_backend(),
             },
             SessionTemplate {
@@ -114,6 +117,7 @@ impl SessionTemplate {
                 match_repo_names: vec![],
                 match_path_prefixes: vec![],
                 tags: vec!["node".to_string(), "web".to_string()],
+                account: None,
                 backend: default_session_backend(),
             },
             SessionTemplate {
@@ -126,6 +130,7 @@ impl SessionTemplate {
                 match_repo_names: vec![],
                 match_path_prefixes: vec![],
                 tags: vec!["rust".to_string()],
+                account: None,
                 backend: default_session_backend(),
             },
             // Agent CLIs, wrapped in the credential broker explicitly.
@@ -147,6 +152,7 @@ impl SessionTemplate {
                 match_repo_names: vec![],
                 match_path_prefixes: vec![],
                 tags: vec!["agent".to_string(), "claude".to_string()],
+                account: None,
                 backend: default_session_backend(),
             },
             SessionTemplate {
@@ -164,6 +170,7 @@ impl SessionTemplate {
                 match_repo_names: vec![],
                 match_path_prefixes: vec![],
                 tags: vec!["agent".to_string(), "codex".to_string()],
+                account: None,
                 backend: default_session_backend(),
             },
             SessionTemplate {
@@ -182,6 +189,7 @@ impl SessionTemplate {
                 match_repo_names: vec![],
                 match_path_prefixes: vec![],
                 tags: vec!["agent".to_string(), "opencode".to_string()],
+                account: None,
                 backend: default_session_backend(),
             },
             // Klaudia (WI-950): a Go coding agent with its own goal loop
@@ -201,6 +209,7 @@ impl SessionTemplate {
                 match_repo_names: vec![],
                 match_path_prefixes: vec![],
                 tags: vec!["agent".to_string(), "klaudia".to_string()],
+                account: None,
                 backend: default_session_backend(),
             },
             SessionTemplate {
@@ -213,6 +222,7 @@ impl SessionTemplate {
                 match_repo_names: vec![],
                 match_path_prefixes: vec![],
                 tags: vec!["python".to_string()],
+                account: None,
                 backend: default_session_backend(),
             },
         ]
