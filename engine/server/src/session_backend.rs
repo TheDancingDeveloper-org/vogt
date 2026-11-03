@@ -23,8 +23,15 @@ pub trait SessionBackend: Send + Sync {
 pub struct LocalBackend {
     writer: parking_lot::Mutex<Box<dyn Write + Send>>,
     master: parking_lot::Mutex<Box<dyn MasterPty + Send>>,
-    child: parking_lot::Mutex<Option<Box<dyn Child + Send>>>,
+    child: parking_lot::Mutex<ChildState>,
     pid: Option<u32>,
+}
+
+struct ChildState {
+    child: Option<Box<dyn Child + Send>>,
+    /// Set when the child has been handed to `wait`.  Once that happens the
+    /// pid may be reaped and reused, so it must never be signalled again.
+    reaped: bool,
 }
 
 impl LocalBackend {
@@ -37,7 +44,10 @@ impl LocalBackend {
         Self {
             writer: parking_lot::Mutex::new(writer),
             master: parking_lot::Mutex::new(master),
-            child: parking_lot::Mutex::new(Some(child)),
+            child: parking_lot::Mutex::new(ChildState {
+                child: Some(child),
+                reaped: false,
+            }),
             pid,
         }
     }
@@ -67,6 +77,13 @@ impl SessionBackend for LocalBackend {
     }
 
     fn signal_stop(&self) -> Result<()> {
+        // Serialise this check with `wait` taking the child.  In particular,
+        // do not kill a pid after wait has reaped it: the OS is free to have
+        // assigned that pid to an unrelated process by then.
+        let mut child_state = self.child.lock();
+        if child_state.reaped || child_state.child.is_none() {
+            return Ok(());
+        }
         #[cfg(unix)]
         if let Some(pid) = self.pid {
             // Preserve portable-pty's kill semantics, including ignoring an
@@ -82,7 +99,7 @@ impl SessionBackend for LocalBackend {
             }
             return Ok(());
         }
-        if let Some(child) = self.child.lock().as_mut() {
+        if let Some(child) = child_state.child.as_mut() {
             child
                 .kill()
                 .map_err(|e| ApiError::Pty(format!("kill: {e}")))?;
@@ -99,9 +116,12 @@ impl SessionBackend for LocalBackend {
     }
 
     fn wait(&self) -> std::io::Result<ExitStatus> {
-        let mut child = self.child.lock().take().ok_or_else(|| {
+        let mut child_state = self.child.lock();
+        let mut child = child_state.child.take().ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::NotFound, "child already waited")
         })?;
+        child_state.reaped = true;
+        drop(child_state);
         child.wait()
     }
 }
