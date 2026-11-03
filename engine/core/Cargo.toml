@@ -63,6 +63,9 @@ rustls-native-certs = "0.8"
 openssl-probe = "0.2"
 portable-pty = "0.9"
 
+[dev-dependencies]
+rcgen = "0.13"
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 hmac = "0.13"
