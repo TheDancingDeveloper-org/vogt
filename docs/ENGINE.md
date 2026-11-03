@@ -4527,3 +4527,17 @@ Operator-local notes about a particular deployment belong in the git-ignored
 The core product's own optional integrations — GitHub collection, MCP, remote
 MCP, and the session engine itself — are in
 [`CUSTOMISATION.md`](CUSTOMISATION.md), which points here for the engine's.
+
+#### Session pod boot
+
+The `vogt-session-base` image starts `vogt-session-entrypoint` as its
+non-root user. The entrypoint requires broker and graft token **file** paths;
+it never accepts either token as a command argument. It fetches the assigned
+Claude account bundle from the broker into `CLAUDE_CONFIG_DIR` (directories
+0700, files 0600), fetches each name in `AGENT_AUTH_GRANTED` through the
+manifest-constrained broker, and exports those values only to the session.
+It then runs `g clone "$VOGT_SESSION_REPO" "$VOGT_SESSION_WORKDIR" --line
+"$VOGT_SESSION_LINE"`, writes the brief and guide into
+`VOGT_SESSION_ADD_DIR`, and execs `vogt-session-agent`. Each failure names only
+the boot step and never includes a token or response body. The entrypoint
+emits `vogt_session_boot_seconds` to stderr for pod log metric collection.
