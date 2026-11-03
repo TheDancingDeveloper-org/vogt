@@ -217,17 +217,14 @@ jobs:
       - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
         if: steps.probe.outputs.exists != 'true'
         with:
-          # `engine/Dockerfile.pod.dockerignore` empties the context: this
-          # build has no COPY from it.
-          context: .
+          context: engine
           file: engine/Dockerfile.pod
           push: true
           tags: ${{ steps.tag.outputs.ref }}
-          build-args: |
-            INSTALL_FLUTTER=${{ matrix.variant == 'full' || matrix.variant == 'workbench' }}
-          # `workbench` is its own stage. `lean` and `full` build the default
-          # stage, so neither inherits the workbench ENV or layers.
-          target: ${{ matrix.variant == 'workbench' && 'workbench' || 'toolchain' }}
+          # The Dockerfile exposes additive base, rust, and mobile stages.
+          # Keep the public workflow vocabulary (lean/full/workbench) as a
+          # deployment concern while selecting the actual stage here.
+          target: ${{ matrix.variant == 'lean' && 'rust' || 'mobile' }}
           # Layer cache on the operator's LAN registry, keyed per
           # variant so `lean` and `full` do not evict each other. Not GHCR:
           # see the header — this cache stays beside the runners.
