@@ -12,6 +12,7 @@ pub mod forgejo;
 pub mod git;
 pub mod github;
 pub mod http;
+pub(crate) mod http_client;
 pub mod mcp;
 pub mod peer;
 pub mod text;
