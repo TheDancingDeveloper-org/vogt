@@ -177,8 +177,7 @@ pub struct Config {
     pub session_id: String,
     pub engine_url: String,
     pub token: String,
-    pub broker_token: String,
-    pub command: String,
+    pub cli: String,
     pub cwd: Option<String>,
     pub cols: u16,
     pub rows: u16,
@@ -194,9 +193,11 @@ impl Config {
         Ok(Self {
             session_id: get("VOGT_SESSION_ID")?,
             engine_url: get("VOGT_ENGINE_URL")?,
-            token: get("VOGT_AGENT_TOKEN")?,
-            broker_token: get("VOGT_ENGINE_BROKER_TOKEN")?,
-            command: get("VOGT_SESSION_COMMAND")?,
+            token: std::fs::read_to_string(get("VOGT_SESSION_TOKEN_FILE")?)
+                .map_err(|_| AgentError::MissingEnv("VOGT_SESSION_TOKEN_FILE"))?
+                .trim()
+                .to_owned(),
+            cli: get("VOGT_CLI")?,
             cwd: std::env::var("VOGT_SESSION_CWD").ok(),
             cols: std::env::var("VOGT_PTY_COLS")
                 .ok()
@@ -226,7 +227,7 @@ impl Config {
         };
         url.set_scheme(scheme)
             .map_err(|_| url::ParseError::RelativeUrlWithoutBase)?;
-        let path = format!("/api/sessions/{}/agent", self.session_id);
+        let path = format!("/api/agent-auth/sessions/{}/agent", self.session_id);
         url.set_path(&path);
         Ok(url.to_string())
     }
@@ -319,7 +320,7 @@ async fn flush_bundle(
         let body = serde_json::json!({"account": account, "conversation_id": conversation, "path": file.path.strip_prefix(root).unwrap_or(&file.path).to_string_lossy(), "kind": kind, "bytes": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &file.bytes)});
         if client
             .post(&url)
-            .bearer_auth(&config.broker_token)
+            .bearer_auth(&config.token)
             .json(&body)
             .send()
             .await
@@ -370,9 +371,14 @@ pub fn spawn_pty(config: &Config) -> Result<PtyIo, AgentError> {
             pixel_height: 0,
         })
         .map_err(|e| AgentError::Pty(e.to_string()))?;
+    let command_line = match config.cli.as_str() {
+        "claude" => "claude --add-dir \"$VOGT_SESSION_CWD\"",
+        "codex" => "codex --add-dir \"$VOGT_SESSION_CWD\"",
+        _ => return Err(AgentError::Pty("VOGT_CLI must be claude or codex".into())),
+    };
     let mut command = CommandBuilder::new("/bin/sh");
     command.arg("-lc");
-    command.arg(&config.command);
+    command.arg(command_line);
     if let Some(cwd) = &config.cwd {
         command.cwd(cwd);
     }
@@ -479,6 +485,12 @@ pub async fn run(config: Config) -> Result<(), AgentError> {
                     }
                     _ = tokio::time::sleep(BUNDLE_DEBOUNCE) => {
                         flush_bundle(&config, &tls, &mut bundle_seen).await;
+                        if let Some(c) = child.as_mut() {
+                            if let Ok(Some(status)) = c.try_wait() {
+                                send_frame(&mut sink, &Frame::Exited { status: Some(status.exit_code() as i32) }).await?;
+                                return Ok(());
+                            }
+                        }
                         send_frame(&mut sink, &Frame::Heartbeat { cursor }).await?;
                     }
                 }
@@ -488,18 +500,9 @@ pub async fn run(config: Config) -> Result<(), AgentError> {
             tokio::time::sleep(backoff).await;
             backoff = (backoff * 2).min(Duration::from_secs(10));
         }
-        if let Some(c) = child.as_mut() {
-            if let Ok(Some(status)) = c.try_wait() {
-                let code = status.exit_code() as i32;
-                let mut req = config.ws_url()?.into_client_request()?;
-                authorize(&mut req, &config.token)?;
-                if let Ok((socket, _)) = connect_websocket(req, tls.clone()).await {
-                    let (mut sink, _) = socket.split();
-                    let _ = send_frame(&mut sink, &Frame::Exited { status: Some(code) }).await;
-                }
-                return Ok(());
-            }
-        }
+        // A disconnected stream is retried. If the child exited meanwhile,
+        // the reconnect sends Hello/Resume and then Exited on that same
+        // authenticated socket from the timer branch above.
     }
 }
 
