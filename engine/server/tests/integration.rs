@@ -376,6 +376,7 @@ fn fake_agent_template() -> SessionTemplate {
         match_repo_names: vec![],
         match_path_prefixes: vec![],
         tags: vec!["agent".to_string(), "test".to_string()],
+        account: None,
         backend: "local".to_string(),
     }
 }
@@ -10585,6 +10586,7 @@ fn conversation_sandbox() -> (tempfile::TempDir, Config, std::path::PathBuf) {
         match_repo_names: vec![],
         match_path_prefixes: vec![],
         tags: vec!["claude".to_string()],
+        account: None,
         backend: "local".to_string(),
     });
     (tmp, cfg, stub)
@@ -11147,6 +11149,7 @@ async fn a_claude_session_starts_with_its_directory_trusted_and_its_brief_readab
         settings_file: None,
         opencode_config: None,
         accounts: Vec::new(),
+        account_concurrency_cap: 8,
         codex_policy: Ok(None),
     };
     let state_dir = cfg.state_dir.clone();
@@ -11221,6 +11224,7 @@ async fn a_named_claude_account_runs_the_session_in_its_own_config_dir() {
         default_dir: Some(default_home.clone()),
         settings_file: None,
         opencode_config: None,
+        account_concurrency_cap: 8,
         accounts: vogt_engine_server::claude_config::parse_accounts(Some(&format!(
             "acct2={}",
             acct2.display()

@@ -1785,6 +1785,18 @@ checks decide what it can finish on its own (WI-926; the design is
 
 #### Claude accounts
 
+The engine assigns each Claude session one sticky account at launch. Configure
+the names and bundle directories with `ENGINE_AGENT_CLAUDE_ACCOUNTS` and the
+per-account live-session limit with `ENGINE_AGENT_CLAUDE_ACCOUNT_CAP` (default
+8). When no account is requested, the engine reserves the least-loaded
+configured account; a template may pin one with `account`. A start that would
+exceed every cap is refused with HTTP 429 and the per-account counts. The
+assignment is retained in the session record and survives hibernate/wake; a
+running session is never moved to another account. Bundle files are served by
+the authenticated session broker and are scoped to the assigned account and
+conversation. Credentials are never configuration values; they remain in the
+engine-held bundle and broker audit records contain names and byte lengths only.
+
 One deployment can run Claude Code under more than one subscription login. An
 account is a Claude Code config directory (`CLAUDE_CONFIG_DIR`) holding that
 login's credentials, `.claude.json` and transcripts. The operator names them:
