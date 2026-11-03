@@ -105,6 +105,30 @@ impl PodLink {
         Ok(*next)
     }
 
+    /// The agent trimmed `lost` bytes from `offset` before the engine had them:
+    /// write a marker in their place and continue after them. Returns the new
+    /// cursor, or the hole that is still open when the loss starts beyond the
+    /// engine's stream. A marker for bytes the engine already holds changes
+    /// nothing; one that overlaps them only counts the bytes it really lost.
+    pub fn ingest_gap(&self, offset: u64, lost: u64) -> Result<u64, OutputGap> {
+        let mut next = self.next_offset.lock().expect("pod link lock poisoned");
+        if offset > *next {
+            return Err(OutputGap {
+                expected: *next,
+                got: offset,
+            });
+        }
+        let end = offset.saturating_add(lost);
+        if end > *next {
+            let missing = end - *next;
+            if let Some(out) = self.out.lock().expect("pod link lock poisoned").as_ref() {
+                let _ = out.send(format!("\r\n[{missing} bytes lost]\r\n").into_bytes());
+            }
+            *next = end;
+        }
+        Ok(*next)
+    }
+
     /// Record the exit and end the output stream, so the reader thread sees
     /// EOF and the exit waiter returns.
     pub fn finish(&self, code: i32) {
@@ -515,6 +539,17 @@ async fn relay(mut socket: axum::extract::ws::WebSocket, state: Arc<AppState>, i
                                     code: "output_gap".into(),
                                     message: format!("expected offset {}, got {}", gap.expected, gap.got),
                                 }).await;
+                                // Say where the stream ends, so the agent can
+                                // resend from there or mark what it cannot.
+                                if !send_frame(&mut socket, &Frame::Resync { offset: gap.expected }).await { break; }
+                            }
+                        },
+                        Frame::Gap { offset, lost } => match link.ingest_gap(offset, lost) {
+                            Ok(next) => {
+                                if !send_frame(&mut socket, &Frame::Ack { offset: next }).await { break; }
+                            }
+                            Err(gap) => {
+                                if !send_frame(&mut socket, &Frame::Resync { offset: gap.expected }).await { break; }
                             }
                         },
                         Frame::Heartbeat { .. } => {
@@ -639,6 +674,40 @@ mod tests {
         auth.detach(id, &old).await;
         auth.send(id, Frame::Ack { offset: 3 }).unwrap();
         assert_eq!(new_rx.recv().await, Some(Frame::Ack { offset: 3 }));
+    }
+
+    #[test]
+    fn a_gap_marker_records_the_loss_and_continues_after_it() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let link = PodLink::new(tx);
+        assert_eq!(link.ingest(0, b"abcd"), Ok(4));
+        // Bytes 4..10 are gone; the stream picks up at 10.
+        assert_eq!(link.ingest_gap(4, 6), Ok(10));
+        assert_eq!(link.ingest(10, b"ef"), Ok(12));
+        // A marker for bytes already held changes nothing, and one that
+        // overlaps them counts only what was really lost.
+        assert_eq!(link.ingest_gap(4, 6), Ok(12));
+        assert_eq!(link.ingest_gap(10, 4), Ok(14));
+        // A loss starting past the stream leaves a hole still.
+        assert_eq!(
+            link.ingest_gap(20, 1),
+            Err(OutputGap {
+                expected: 14,
+                got: 20
+            })
+        );
+        link.finish(0);
+        let mut reader = PodReader {
+            rx,
+            pending: Vec::new(),
+            at: 0,
+        };
+        let mut all = Vec::new();
+        reader.read_to_end(&mut all).unwrap();
+        assert_eq!(
+            String::from_utf8(all).unwrap(),
+            "abcd\r\n[6 bytes lost]\r\nef\r\n[2 bytes lost]\r\n"
+        );
     }
 
     #[test]
