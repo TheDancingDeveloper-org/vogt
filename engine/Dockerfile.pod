@@ -93,8 +93,8 @@ RUN if ! getent group vogt >/dev/null; then groupadd vogt; fi \
     && if ! id -u vogt >/dev/null 2>&1; then useradd --gid vogt --create-home --shell /bin/bash vogt; fi \
     && install -d -o vogt -g vogt /home/vogt/Working /home/vogt/.config /home/vogt/.cache
 
-# These are intentionally small runtime hooks. WI-3163 supplies the real
-# session entrypoint; this placeholder makes the image safe to smoke-test.
+# Runtime hooks. The entrypoint fetches all session-specific state from the
+# authenticated broker; no account or service credential is baked here.
 COPY --chmod=0755 deploy/agent-auth.sh /usr/local/bin/vogt-agent-auth
 COPY --chmod=0755 deploy/claude-session-hook.sh /usr/local/bin/vogt-claude-session-hook
 COPY --chmod=0755 deploy/policy-hook.sh /usr/local/bin/vogt-policy-hook
