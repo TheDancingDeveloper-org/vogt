@@ -109,6 +109,7 @@ fn boot_core() -> Core {
 
 fn base_config() -> Config {
     Config {
+        pod_backends_enabled: false,
         bind: "127.0.0.1:0".parse().unwrap(),
         token: Some(SECRET.to_string()),
         token_mutating_request_limit_per_minute: 600,

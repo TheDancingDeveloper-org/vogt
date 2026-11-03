@@ -546,6 +546,7 @@ async fn get(base: &str, path: &str, token: &str) -> (StatusCode, String) {
 /// field the engine reads, none of them the point of these tests.
 fn base_config() -> Config {
     Config {
+        pod_backends_enabled: false,
         bind: "127.0.0.1:0".parse().unwrap(),
         token: Some(BREAK_GLASS.to_string()),
         token_mutating_request_limit_per_minute: 600,
