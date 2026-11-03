@@ -520,6 +520,10 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
     let broker_routes = Router::new()
         .route(secret_broker::FETCH_ROUTE, post(secret_broker::fetch))
         .route(secret_broker::STORE_ROUTE, post(secret_broker::store))
+        .route(
+            secret_broker::BUNDLE_STORE_ROUTE,
+            post(secret_broker::store_bundle_file),
+        )
         // The launch wrapper's report of its own stages (WI-927): the same
         // caller and the same per-session token as the broker.
         .route(crate::launch::REPORT_ROUTE, post(crate::launch::report))
