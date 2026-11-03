@@ -29,8 +29,8 @@ pub struct LocalBackend {
 
 struct ChildState {
     child: Option<Box<dyn Child + Send>>,
-    /// Set when the child has been handed to `wait`.  Once that happens the
-    /// pid may be reaped and reused, so it must never be signalled again.
+    /// Set after `wait` returns and the child has been reaped.  The pid may
+    /// then be reused, so it must never be signalled again.
     reaped: bool,
 }
 
@@ -81,7 +81,7 @@ impl SessionBackend for LocalBackend {
         // do not kill a pid after wait has reaped it: the OS is free to have
         // assigned that pid to an unrelated process by then.
         let mut child_state = self.child.lock();
-        if child_state.reaped || child_state.child.is_none() {
+        if child_state.reaped {
             return Ok(());
         }
         #[cfg(unix)]
@@ -116,13 +116,18 @@ impl SessionBackend for LocalBackend {
     }
 
     fn wait(&self) -> std::io::Result<ExitStatus> {
-        let mut child_state = self.child.lock();
-        let mut child = child_state.child.take().ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::NotFound, "child already waited")
-        })?;
-        child_state.reaped = true;
-        drop(child_state);
-        child.wait()
+        let mut child = {
+            let mut child_state = self.child.lock();
+            child_state.child.take().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotFound, "child already waited")
+            })?
+        };
+        let result = child.wait();
+        // Do not mark the child reaped until wait has actually returned.  The
+        // wait can block for an arbitrarily long-lived session, and
+        // signal_stop must remain able to kill that child during the wait.
+        self.child.lock().reaped = true;
+        result
     }
 }
 
@@ -139,4 +144,42 @@ pub fn local(
         .take_writer()
         .map_err(|e| ApiError::Pty(format!("take_writer: {e}")))?;
     Ok((LocalBackend::new(master, writer, child), reader))
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::{local, SessionBackend};
+    use portable_pty::{CommandBuilder, PtySize};
+    use std::{sync::Arc, time::Duration};
+
+    #[test]
+    fn signal_stop_terminates_a_child_while_wait_is_blocked() {
+        let pair = portable_pty::native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let mut command = CommandBuilder::new("/bin/sleep");
+        command.arg("300");
+        let child = pair.slave.spawn_command(command).unwrap();
+        let (backend, _reader) = local(pair.master, child).unwrap();
+        let backend: Arc<dyn SessionBackend> = Arc::new(backend);
+        let (status_tx, status_rx) = std::sync::mpsc::channel();
+        let waiter = Arc::clone(&backend);
+        std::thread::spawn(move || status_tx.send(waiter.wait()).unwrap());
+
+        // The production exit waiter takes the Child and blocks in wait before
+        // a stop request arrives. signal_stop must still reach that live pid.
+        std::thread::sleep(Duration::from_millis(50));
+        backend.signal_stop().unwrap();
+        let status = status_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("SIGKILL did not unblock the child wait")
+            .unwrap();
+
+        assert_eq!(status.signal(), Some("Killed"));
+    }
 }
