@@ -2,7 +2,8 @@
 # Layered session images. The default target is base; rust and mobile are
 # additive targets selected by the project image mapping.
 
-ARG UBUNTU_VERSION=24.04
+ARG UBUNTU_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-base/ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852
+ARG RUST_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-base/rust:1.94-slim@sha256:cf09adf8c3ebaba10779e5c23ff7fe4df4cccdab8a91f199b0c142c53fef3e1a
 ARG NODE_VERSION=22.14.0
 ARG PNPM_VERSION=10.12.4
 ARG UV_VERSION=0.7.12
@@ -16,18 +17,22 @@ ARG FLUTTER_VERSION=3.35.3
 ARG ANDROID_CMDLINE_TOOLS_VERSION=13114758
 ARG ANDROID_PLATFORM_TOOLS_VERSION=35.0.2
 ARG CHROMIUM_VERSION=1:134.0.6998.88-1~deb12u1
+ARG NODE_X64_SHA256=69b09dba5c8dcb05c4e4273a4340db1005abeafe3927efda2bc5b249e80437ec
+ARG NODE_ARM64_SHA256=08bfbf538bad0e8cbb0269f0173cca28d705874a67a22f60b57d99dc99e30050
+ARG UV_X64_SHA256=735891fb553d0be129f3aa39dc8e9c4c49aaa76ec17f7dfb6a732e79a714873a
+ARG UV_ARM64_SHA256=23233d2e950ed8187858350da5c6803b14cbbeaef780382093bb2f2bc4ba1200
+ARG GRAFT_X64_SHA256=46c64a82bbc8f218b584860662a73f69c4baeeb49a926fd7e8a36c19c1c580fa
+ARG GRAFT_ARM64_SHA256=63253bad6117aab2c65cc86db7125fc4f66c325b1d7a7d16f9ca006a4942d427
+ARG FLUTTER_SHA256=791550652e29a9588815c0e3aac7cf7cd1d1d5d6a1f1631d46cb146e8a2e1a1d
+ARG ANDROID_CMDLINE_TOOLS_SHA256=7ec965280a073311c339e571cd5de778b9975026cfcbe79f2b1cdcb1e15317ee
+ARG RUSTUP_SHA256=d890e2fef6fa991b19cde2e608199bc1dca4e37f41f884edf8849ff693048de6
 
-FROM rust:1.94-slim AS session-agent-build
+FROM ${RUST_IMAGE} AS session-agent-build
 WORKDIR /src
-COPY Cargo.toml Cargo.lock ./
-COPY contract/Cargo.toml contract/Cargo.toml
-COPY core/Cargo.toml core/Cargo.toml
-COPY server/Cargo.toml server/Cargo.toml
-COPY session-agent/Cargo.toml session-agent/Cargo.toml
-COPY session-agent session-agent
+COPY . .
 RUN cargo build --locked --release -p vogt-session-agent
 
-FROM ubuntu:${UBUNTU_VERSION} AS base
+FROM ${UBUNTU_IMAGE} AS base
 ARG NODE_VERSION
 ARG PNPM_VERSION
 ARG UV_VERSION
@@ -36,6 +41,12 @@ ARG CLAUDE_CODE_VERSION
 ARG CODEX_VERSION
 ARG OPENCODE_VERSION
 ARG TARGETARCH
+ARG NODE_X64_SHA256
+ARG NODE_ARM64_SHA256
+ARG UV_X64_SHA256
+ARG UV_ARM64_SHA256
+ARG GRAFT_X64_SHA256
+ARG GRAFT_ARM64_SHA256
 
 LABEL org.opencontainers.image.title="vogt-session-base" \
       org.opencontainers.image.description="Base image for Vogt coding sessions" \
@@ -59,24 +70,27 @@ RUN apt-get update \
 
 # Node is installed from the official, versioned tarball rather than a moving
 # distribution channel. pnpm and uv are exact tool pins.
-RUN arch="$(dpkg --print-architecture)" \
-    && case "$arch" in amd64) node_arch=x64 ;; arm64) node_arch=arm64 ;; *) echo "unsupported architecture: $arch" >&2; exit 1 ;; esac \
+RUN case "$TARGETARCH" in amd64) node_arch=x64; node_sha="$NODE_X64_SHA256"; uv_arch=x86_64; uv_sha="$UV_X64_SHA256" ;; arm64) node_arch=arm64; node_sha="$NODE_ARM64_SHA256"; uv_arch=aarch64; uv_sha="$UV_ARM64_SHA256" ;; *) echo "unsupported architecture: $TARGETARCH" >&2; exit 1 ;; esac \
     && curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${node_arch}.tar.xz" -o /tmp/node.tar.xz \
+    && echo "${node_sha}  /tmp/node.tar.xz" | sha256sum -c - \
     && mkdir -p /opt/node \
     && tar -xJf /tmp/node.tar.xz --strip-components=1 -C /opt/node \
     && ln -s /opt/node/bin/node /usr/local/bin/node \
     && ln -s /opt/node/bin/npm /usr/local/bin/npm \
     && ln -s /opt/node/bin/npx /usr/local/bin/npx \
     && npm install --global "pnpm@${PNPM_VERSION}" \
-    && curl -fsSL "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-x86_64-unknown-linux-gnu.tar.gz" -o /tmp/uv.tar.gz \
+    && curl -fsSL "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-${uv_arch}-unknown-linux-gnu.tar.gz" -o /tmp/uv.tar.gz \
+    && echo "${uv_sha}  /tmp/uv.tar.gz" | sha256sum -c - \
     && tar -xzf /tmp/uv.tar.gz -C /tmp \
-    && install -m 0755 /tmp/uv-x86_64-unknown-linux-gnu/uv /usr/local/bin/uv \
-    && install -m 0755 /tmp/uv-x86_64-unknown-linux-gnu/uvx /usr/local/bin/uvx \
+    && install -m 0755 "/tmp/uv-${uv_arch}-unknown-linux-gnu/uv" /usr/local/bin/uv \
+    && install -m 0755 "/tmp/uv-${uv_arch}-unknown-linux-gnu/uvx" /usr/local/bin/uvx \
     && find /tmp -maxdepth 1 -type f \( -name 'node.tar.xz' -o -name 'uv.tar.gz' \) -delete
 
 # Graft is pinned by release, not fetched from a mutable branch. The image
 # remains usable without a graft token; authentication is supplied at runtime.
-RUN curl -fsSL "https://github.com/TheDancingDeveloper-org/graft/releases/download/v${GRAFT_VERSION}/graft-x86_64-unknown-linux-musl.tar.gz" -o /tmp/graft.tar.gz \
+RUN case "$TARGETARCH" in amd64) graft_arch=x86_64; graft_sha="$GRAFT_X64_SHA256" ;; arm64) graft_arch=aarch64; graft_sha="$GRAFT_ARM64_SHA256" ;; *) echo "unsupported architecture: $TARGETARCH" >&2; exit 1 ;; esac \
+    && curl -fsSL "https://github.com/TheDancingDeveloper-org/graft/releases/download/v${GRAFT_VERSION}/graft-${graft_arch}-unknown-linux-musl.tar.gz" -o /tmp/graft.tar.gz \
+    && echo "${graft_sha}  /tmp/graft.tar.gz" | sha256sum -c - \
     && tar -xzf /tmp/graft.tar.gz -C /usr/local/bin --strip-components=1 \
     && chmod 0755 /usr/local/bin/graft \
     && ln -s /usr/local/bin/graft /usr/local/bin/g \
@@ -109,13 +123,17 @@ FROM base AS rust
 ARG RUST_VERSION
 ARG RUST_TARGETS
 ARG TARGETARCH
+ARG RUSTUP_SHA256
 LABEL org.opencontainers.image.title="vogt-session-rust"
 ENV RUSTUP_HOME=/opt/rust/rustup \
     CARGO_HOME=/opt/rust/cargo \
     SCCACHE_DIR=/var/cache/sccache
 USER root
 RUN install -d -o vogt -g vogt /opt/rust /var/cache/sccache \
-    && su - vogt -c "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain ${RUST_VERSION} --profile minimal" \
+    && curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs -o /tmp/rustup.sh \
+    && echo "${RUSTUP_SHA256}  /tmp/rustup.sh" | sha256sum -c - \
+    && chown vogt:vogt /tmp/rustup.sh \
+    && su - vogt -c "sh /tmp/rustup.sh -y --default-toolchain ${RUST_VERSION} --profile minimal" \
     && su - vogt -c "rustup target add $(printf '%s' '${RUST_TARGETS}' | tr ',' ' ')" \
     && apt-get update \
     && apt-get install -y --no-install-recommends clang lld cmake protobuf-compiler \
@@ -132,6 +150,8 @@ ARG FLUTTER_VERSION
 ARG ANDROID_CMDLINE_TOOLS_VERSION
 ARG ANDROID_PLATFORM_TOOLS_VERSION
 ARG CHROMIUM_VERSION
+ARG FLUTTER_SHA256
+ARG ANDROID_CMDLINE_TOOLS_SHA256
 LABEL org.opencontainers.image.title="vogt-session-mobile"
 USER root
 ENV ANDROID_HOME=/opt/android-sdk ANDROID_SDK_ROOT=/opt/android-sdk FLUTTER_ROOT=/opt/flutter
@@ -139,10 +159,12 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends chromium=${CHROMIUM_VERSION} xwayland libgl1-mesa-dri \
     && find /var/lib/apt/lists -type f -delete \
     && curl -fsSL "https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_${FLUTTER_VERSION}-stable.tar.xz" -o /tmp/flutter.tar.xz \
+    && echo "${FLUTTER_SHA256}  /tmp/flutter.tar.xz" | sha256sum -c - \
     && tar -xJf /tmp/flutter.tar.xz -C /opt \
     && chown -R vogt:vogt /opt/flutter \
     && install -d -o vogt -g vogt /opt/android-sdk/cmdline-tools \
     && curl -fsSL "https://dl.google.com/android/repository/commandlinetools-linux-${ANDROID_CMDLINE_TOOLS_VERSION}_latest.zip" -o /tmp/android.zip \
+    && echo "${ANDROID_CMDLINE_TOOLS_SHA256}  /tmp/android.zip" | sha256sum -c - \
     && unzip -q /tmp/android.zip -d /opt/android-sdk/cmdline-tools \
     && mv /opt/android-sdk/cmdline-tools/cmdline-tools /opt/android-sdk/cmdline-tools/latest \
     && yes | /opt/android-sdk/cmdline-tools/latest/bin/sdkmanager --licenses >/dev/null \
