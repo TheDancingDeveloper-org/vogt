@@ -334,8 +334,40 @@ pub async fn bootstrap(
         .config
         .agent_auth_public_url
         .clone()
-        .unwrap_or_default();
-    axum::Json(BootstrapResponse{session_token,bundle:serde_json::json!({"repo":req.graft_repo,"line":req.graft_line}),env:serde_json::json!({"VOGT_ENGINE_URL":engine,"VOGT_SESSION_ID":id.to_string(),"VOGT_CLI":req.cli,"VOGT_EXTRA_CA_FILE":req.extra_ca_file}),brief:state.sessions.summary_of(id).map(|s|s.name).unwrap_or_default()}).into_response()
+        .unwrap_or_else(|| crate::pod_backend::PodConfig::default().engine_endpoint);
+    // The same contract fields the pod's spec.env carries (pod_backend::pod_env),
+    // as strings, so the agent can take either source.
+    let mut env = serde_json::Map::new();
+    for (name, value) in [
+        ("VOGT_ENGINE_URL", engine),
+        ("VOGT_SESSION_ID", id.to_string()),
+        (
+            "VOGT_BOOTSTRAP_TOKEN",
+            String::from_utf8_lossy(token).into_owned(),
+        ),
+        ("VOGT_GRAFT_REPO", req.graft_repo.clone()),
+        ("VOGT_GRAFT_LINE", req.graft_line.clone()),
+        ("VOGT_CLI", req.cli.clone()),
+    ] {
+        env.insert(name.into(), serde_json::Value::String(value));
+    }
+    if let Some(path) = req.extra_ca_file.as_ref() {
+        env.insert(
+            "VOGT_EXTRA_CA_FILE".into(),
+            serde_json::Value::String(path.clone()),
+        );
+    }
+    axum::Json(BootstrapResponse {
+        session_token,
+        bundle: serde_json::json!({"repo": req.graft_repo, "line": req.graft_line}),
+        env: serde_json::Value::Object(env),
+        brief: state
+            .sessions
+            .summary_of(id)
+            .map(|s| s.name)
+            .unwrap_or_default(),
+    })
+    .into_response()
 }
 pub async fn stream(
     ws: WebSocketUpgrade,
