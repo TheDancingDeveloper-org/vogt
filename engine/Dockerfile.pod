@@ -55,6 +55,13 @@ LABEL org.opencontainers.image.title="vogt-session-base" \
 ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
     HOME=/home/vogt \
+    NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/caddy-local-root.crt \
+    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+    XDG_CACHE_HOME=/cache/xdg \
+    NPM_CONFIG_CACHE=/cache/npm \
+    PNPM_HOME=/cache/pnpm \
+    PIP_CACHE_DIR=/cache/pip \
+    UV_CACHE_DIR=/cache/uv \
     UV_TOOL_BIN_DIR=/usr/local/bin \
     NPM_CONFIG_PREFIX=/usr/local \
     PATH=/usr/local/bin:/usr/local/sbin:/home/vogt/.local/bin:/opt/rust/cargo/bin:/opt/flutter/bin:/opt/android-sdk/platform-tools:/opt/android-sdk/cmdline-tools/latest/bin:$PATH
@@ -67,6 +74,11 @@ RUN apt-get update \
        pkg-config libssl-dev python3 python3-pip python3-venv python3-dev \
        openssh-client sudo unzip zip xz-utils zstd \
     && find /var/lib/apt/lists -type f -delete
+
+# Session pods reach estate services through Caddy's internal PKI. This public
+# root augments, rather than replaces, the system trust store.
+COPY deploy/pod/ca/caddy-local-root.crt /usr/local/share/ca-certificates/caddy-local-root.crt
+RUN update-ca-certificates
 
 # Node is installed from the official, versioned tarball rather than a moving
 # distribution channel. pnpm and uv are exact tool pins.
@@ -103,9 +115,9 @@ RUN npm install --global \
       "@openai/codex@${CODEX_VERSION}" \
       "opencode-ai@${OPENCODE_VERSION}"
 
-RUN if ! getent group vogt >/dev/null; then groupadd vogt; fi \
-    && if ! id -u vogt >/dev/null 2>&1; then useradd --gid vogt --create-home --shell /bin/bash vogt; fi \
-    && install -d -o vogt -g vogt /home/vogt/Working /home/vogt/.config /home/vogt/.cache
+RUN if ! getent group vogt >/dev/null; then groupadd --gid 1000 vogt; fi \
+    && if ! id -u vogt >/dev/null 2>&1; then useradd --uid 1000 --gid vogt --create-home --shell /bin/bash vogt; fi \
+    && install -d -o vogt -g vogt /home/vogt/Working /home/vogt/.config /cache/xdg /cache/npm /cache/pnpm /cache/pip /cache/uv
 
 # Runtime hooks. The entrypoint fetches all session-specific state from the
 # authenticated broker; no account or service credential is baked here.
@@ -126,20 +138,20 @@ ARG TARGETARCH
 ARG RUSTUP_SHA256
 LABEL org.opencontainers.image.title="vogt-session-rust"
 ENV RUSTUP_HOME=/opt/rust/rustup \
-    CARGO_HOME=/opt/rust/cargo \
+    CARGO_HOME=/cache/cargo \
     SCCACHE_DIR=/var/cache/sccache
 USER root
-RUN install -d -o vogt -g vogt /opt/rust /var/cache/sccache \
+RUN install -d -o vogt -g vogt /opt/rust /opt/rust/cargo /opt/rust/rustup /cache/cargo /var/cache/sccache \
     && curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs -o /tmp/rustup.sh \
     && echo "${RUSTUP_SHA256}  /tmp/rustup.sh" | sha256sum -c - \
     && chown vogt:vogt /tmp/rustup.sh \
-    && su - vogt -c "sh /tmp/rustup.sh -y --default-toolchain ${RUST_VERSION} --profile minimal" \
-    && su - vogt -c "rustup target add $(printf '%s' '${RUST_TARGETS}' | tr ',' ' ')" \
+    && su - vogt -c "CARGO_HOME=/opt/rust/cargo sh /tmp/rustup.sh -y --default-toolchain ${RUST_VERSION} --profile minimal" \
+    && su - vogt -c "CARGO_HOME=/opt/rust/cargo rustup target add $(printf '%s' '${RUST_TARGETS}' | tr ',' ' ')" \
     && apt-get update \
     && apt-get install -y --no-install-recommends clang lld cmake protobuf-compiler \
     && find /var/lib/apt/lists -type f -delete \
-    && su - vogt -c "cargo install --locked cargo-nextest --version 0.9.102" \
-    && su - vogt -c "rustup component add rust-analyzer"
+    && su - vogt -c "CARGO_HOME=/opt/rust/cargo cargo install --locked cargo-nextest --version 0.9.102" \
+    && su - vogt -c "CARGO_HOME=/opt/rust/cargo rustup component add rust-analyzer"
 # This config is a placeholder for a runtime-provided sccache client. No cache
 # credentials or cache contents are baked into the image.
 RUN printf '%s\n' '[build]' '# rustc-wrapper = "/usr/local/bin/sccache"' > /etc/cargo-config.toml
