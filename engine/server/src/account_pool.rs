@@ -1,6 +1,9 @@
 //! Sticky Claude account assignment and concurrency accounting.
 use std::collections::BTreeMap;
-use std::sync::Mutex;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AtCapacity {
@@ -56,6 +59,39 @@ impl AccountPool {
         *count += 1;
         Ok(Some(selected.to_string()))
     }
+
+    /// Reserve a slot whose lifetime is tied to the returned value.  This is
+    /// the only reservation API used by session startup: dropping it releases
+    /// the slot, including when a later validation or spawn fails.
+    pub fn lease(self: &Arc<Self>, pinned: Option<&str>) -> Result<AccountLease, AtCapacity> {
+        let account = self.reserve(pinned)?;
+        Ok(AccountLease {
+            pool: Arc::clone(self),
+            account,
+            released: AtomicBool::new(false),
+        })
+    }
+
+    /// Rebuild reservations for sessions which were live when the engine was
+    /// restarted.  Unlike `reserve`, this preserves the recorded assignment.
+    pub fn restore(&self, account: Option<&str>) {
+        let Some(account) = account else { return };
+        if let Ok(mut counts) = self.counts.lock() {
+            if let Some(count) = counts.get_mut(account) {
+                *count += 1;
+            }
+        }
+    }
+
+    pub fn restored_lease(self: &Arc<Self>, account: Option<&str>) -> Option<AccountLease> {
+        let account = account?.to_string();
+        let counts = self.counts.lock().ok()?;
+        counts.contains_key(&account).then(|| AccountLease {
+            pool: Arc::clone(self),
+            account: Some(account),
+            released: AtomicBool::new(false),
+        })
+    }
     pub fn release(&self, account: Option<&str>) {
         if let Some(account) = account {
             if let Ok(mut counts) = self.counts.lock() {
@@ -68,6 +104,30 @@ impl AccountPool {
     #[cfg(test)]
     pub fn counts(&self) -> BTreeMap<String, usize> {
         self.counts.lock().unwrap().clone()
+    }
+}
+
+#[derive(Debug)]
+pub struct AccountLease {
+    pool: Arc<AccountPool>,
+    account: Option<String>,
+    released: AtomicBool,
+}
+
+impl AccountLease {
+    pub fn account(&self) -> Option<&str> {
+        self.account.as_deref()
+    }
+    pub fn release(&self) {
+        if !self.released.swap(true, Ordering::AcqRel) {
+            self.pool.release(self.account.as_deref());
+        }
+    }
+}
+
+impl Drop for AccountLease {
+    fn drop(&mut self) {
+        self.release();
     }
 }
 
@@ -88,5 +148,14 @@ mod tests {
         let pool = AccountPool::new(["a".into(), "b".into()], 1);
         assert_eq!(pool.reserve(Some("a")).unwrap(), Some("a".into()));
         assert!(pool.reserve(Some("a")).is_err());
+    }
+
+    #[test]
+    fn lease_releases_once() {
+        let pool = Arc::new(AccountPool::new(["a".into()], 1));
+        let lease = pool.lease(None).unwrap();
+        lease.release();
+        lease.release();
+        assert_eq!(pool.counts()["a"], 0);
     }
 }
