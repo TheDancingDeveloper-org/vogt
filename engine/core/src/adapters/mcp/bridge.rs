@@ -21,6 +21,7 @@ use std::collections::HashMap;
 use serde_json::{json, Value};
 
 use super::framing::SUPPORTED_PROTOCOL_VERSIONS;
+use crate::adapters::http_client;
 
 const URL_ENV: &str = "VOGT_URL";
 const TOKEN_FILE_ENV: &str = "VOGT_TOKEN_FILE";
@@ -363,7 +364,7 @@ impl BridgeTransport for UreqTransport {
         } else {
             DEFAULT_TIMEOUT
         };
-        let agent: ureq::Agent = ureq::Agent::config_builder()
+        let agent: ureq::Agent = http_client::builder()
             .timeout_global(Some(timeout))
             .http_status_as_error(false)
             .build()
