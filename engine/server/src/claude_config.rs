@@ -52,6 +52,8 @@ pub struct Onboarding {
     /// (`ENGINE_AGENT_CLAUDE_ACCOUNTS`), each a config directory holding its
     /// own login. See [`parse_accounts`].
     pub accounts: Vec<ClaudeAccount>,
+    /// Maximum number of live Claude sessions assigned to one account.
+    pub account_concurrency_cap: usize,
     /// The Codex half (WI-1143 / WI-1146): the managed requirements file Codex
     /// reads from `/etc/codex/requirements.toml`, or a deployment's own path.
     /// Unlike the opencode policy, a named file that is missing or unreadable
@@ -451,6 +453,7 @@ impl Default for Onboarding {
             settings_file: None,
             opencode_config: None,
             accounts: Vec::new(),
+            account_concurrency_cap: 8,
             // A hand-built config has no policy. A named missing file is the
             // error; "not configured" is not.
             codex_policy: Ok(None),
@@ -482,6 +485,11 @@ impl Onboarding {
                     .ok()
                     .as_deref(),
             ),
+            account_concurrency_cap: std::env::var("ENGINE_AGENT_CLAUDE_ACCOUNT_CAP")
+                .ok()
+                .and_then(|v| v.trim().parse().ok())
+                .filter(|v| *v > 0)
+                .unwrap_or(8),
             codex_policy: codex_policy_from(
                 std::env::var("ENGINE_AGENT_CODEX_POLICY").ok().as_deref(),
             ),
@@ -1022,6 +1030,7 @@ mod tests {
             settings_file: None,
             opencode_config: None,
             accounts: Vec::new(),
+            account_concurrency_cap: 8,
             codex_policy: Ok(None),
         };
         let env = vec![("CLAUDE_CONFIG_DIR".to_string(), "/cfg".to_string())];
