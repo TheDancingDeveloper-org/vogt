@@ -12,6 +12,8 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 _SPEC = importlib.util.spec_from_file_location(
     "parity", Path(__file__).resolve().parents[1] / "scripts" / "parity.py"
 )
@@ -28,6 +30,28 @@ def _version_answer(version: str) -> dict[str, object]:
         "http.version",
     )
     return normalised
+
+
+def test_child_environment_supports_hooks_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VOGT_TEST_CLOCK_START", "inherited-value")
+    monkeypatch.setenv("VOGT_PARITY_HOOKS", "off")
+
+    env = parity._child_env()
+
+    assert "VOGT_TEST_CLOCK_START" not in env
+    assert "VOGT_TEST_IDS" not in env
+    assert "VOGT_PARITY_HOOKS" not in env
+
+
+def test_child_environment_defaults_to_deterministic_hooks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("VOGT_PARITY_HOOKS", raising=False)
+
+    env = parity._child_env()
+
+    assert env["VOGT_TEST_CLOCK_START"] == parity.CLOCK_START
+    assert env["VOGT_TEST_IDS"] == "sequential"
 
 
 def test_the_release_version_is_substituted() -> None:

@@ -237,3 +237,30 @@ would be a parity bug; there are none at either size.
 
 </details>
 
+
+## Core parity harness hooks
+
+`scripts/parity.py` scrubs every inherited `VOGT_*` variable before launching
+an implementation. By default it then enables the deterministic parity hooks:
+`VOGT_TEST_CLOCK_START` pins the clock and `VOGT_TEST_IDS=sequential` makes
+identifiers repeatable. This is the **hooks-on** run used for committed goldens:
+
+```sh
+uv run python scripts/parity.py check --impl rust --golden "$golden"
+```
+
+The port-conformance checklist also requires a hooks-off run. Set
+`VOGT_PARITY_HOOKS=off`; the harness still scrubs inherited `VOGT_*` values but
+does not add either deterministic hook, allowing the implementation's normal
+runtime defaults to be exercised:
+
+```sh
+VOGT_PARITY_HOOKS=off uv run python scripts/parity.py check \
+  --impl rust --golden "$golden"
+```
+
+Hooks-off output is not a golden-recording mode: runtime timestamps and IDs may
+vary, so a failure against a deterministic golden is expected unless the
+selected operation is independent of those values. CI runs it as a
+non-blocking conformance probe; the hooks-on check remains the authoritative
+committed-golden check.
