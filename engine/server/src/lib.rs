@@ -2,6 +2,7 @@ pub mod account_pool;
 pub mod activity;
 pub mod agent_cli;
 pub mod agent_clis;
+pub mod agent_stream;
 pub mod agent_tasks;
 pub mod api;
 pub mod app;

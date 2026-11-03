@@ -12,7 +12,7 @@ use tower_http::{compression::CompressionLayer, cors::CorsLayer, trace::TraceLay
 use crate::gui as gui_handlers;
 use crate::push_api;
 use crate::{
-    agent_clis,
+    agent_clis, agent_stream,
     agent_tasks::{self, AgentTaskRegistry},
     api, assets,
     assistant::AssistantRuntime,
@@ -59,6 +59,7 @@ pub const MACHINE_NAMESPACES: [&str; 2] = ["/api", "/mcp"];
 const JSON_WRITE_BODY_LIMIT: usize = 16 * 1024 * 1024;
 
 pub struct AppState {
+    pub agent_auth: Arc<agent_stream::AgentAuth>,
     pub config: Arc<Config>,
     pub auth: Arc<auth::AuthRuntime>,
     pub sessions: Arc<SessionRegistry>,
@@ -235,6 +236,7 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
 
     let agent_clis_paths = cfg.agent_clis.clone();
     let state = Arc::new(AppState {
+        agent_auth: agent_stream::global(),
         config: cfg,
         auth: Arc::new(auth::AuthRuntime::default()),
         sessions,
@@ -517,6 +519,14 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
     // rate-limits, checks the manifest and audits — the read side in
     // `secret_broker::fetch`, the write side (manifest-`writable` only) in
     // `secret_broker::store`. The engine bearer does not open either.
+    let agent_routes = Router::new()
+        .route("/api/agent-auth/bootstrap", post(agent_stream::bootstrap))
+        .route(
+            "/api/agent-auth/sessions/{id}/agent",
+            get(agent_stream::stream),
+        )
+        .with_state(Arc::clone(&state));
+
     let broker_routes = Router::new()
         .route(secret_broker::FETCH_ROUTE, post(secret_broker::fetch))
         .route(secret_broker::STORE_ROUTE, post(secret_broker::store))
@@ -582,6 +592,7 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         .merge(public)
         .merge(api_routes)
         .merge(vogt_open_routes)
+        .merge(agent_routes)
         .merge(broker_routes)
         .merge(ws_routes)
         .merge(api_fallback)
