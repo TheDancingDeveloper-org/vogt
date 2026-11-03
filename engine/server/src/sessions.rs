@@ -481,6 +481,14 @@ impl SessionRegistry {
                 "account is applied to Claude Code only; the command is not `claude`".into(),
             ));
         }
+        // Validate a named account before taking its slot: an unknown name is
+        // the caller's mistake (400), not a full pool (429).
+        if let (Some(name), Creating::Fresh(_)) = (account.as_deref(), &creating) {
+            self.cfg
+                .agent_onboarding
+                .account_dir(name)
+                .map_err(ApiError::BadRequest)?;
+        }
         let account_lease = if is_claude {
             let should_reserve =
                 matches!(creating, Creating::Fresh(_)) || matches!(creating, Creating::Wake(_));
