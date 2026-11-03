@@ -15,6 +15,7 @@ use std::{
 use futures_util::{SinkExt, StreamExt};
 use portable_pty::{CommandBuilder, PtySize};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::sync::{mpsc, Mutex};
 use tokio_tungstenite::{
@@ -23,7 +24,7 @@ use tokio_tungstenite::{
 };
 
 pub const DEFAULT_BUFFER_BYTES: usize = 1024 * 1024;
-pub const BUNDLE_DEBOUNCE: Duration = Duration::from_millis(250);
+pub const BUNDLE_DEBOUNCE: Duration = Duration::from_secs(1);
 
 /// The only files a Claude account bundle may receive from a pod.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -225,7 +226,7 @@ impl Config {
     }
 }
 
-async fn flush_bundle(config: &Config, seen: &mut std::collections::HashMap<PathBuf, u64>) {
+async fn flush_bundle(config: &Config, seen: &mut std::collections::HashMap<PathBuf, [u8; 32]>) {
     let (Some(root), Some(account), Some(conversation)) = (
         config.claude_config_dir.as_deref(),
         config.account.as_deref(),
@@ -233,14 +234,15 @@ async fn flush_bundle(config: &Config, seen: &mut std::collections::HashMap<Path
     ) else {
         return;
     };
-    let client = reqwest::Client::new();
+    // The broker token is a credential and must only ever go to the engine.
+    // In particular, do not let ambient HTTP(S)_PROXY redirect this request.
+    let Ok(client) = reqwest::Client::builder().no_proxy().build() else {
+        return;
+    };
     let mut url = config.engine_url.clone();
     url.push_str("/api/agent-auth/store/bundle/bundle-file");
     for file in bundle_files(root, conversation) {
-        let Ok(meta) = std::fs::metadata(&file.path) else {
-            continue;
-        };
-        let marker = meta.len();
+        let marker = bundle_marker(&file.bytes);
         if seen.get(&file.path).copied() == Some(marker) {
             continue;
         }
@@ -261,6 +263,10 @@ async fn flush_bundle(config: &Config, seen: &mut std::collections::HashMap<Path
             seen.insert(file.path, marker);
         }
     }
+}
+
+fn bundle_marker(bytes: &[u8]) -> [u8; 32] {
+    Sha256::digest(bytes).into()
 }
 
 pub fn authorize(request: &mut http::Request<()>, token: &str) -> Result<(), AgentError> {
@@ -331,63 +337,108 @@ pub async fn run(config: Config) -> Result<(), AgentError> {
     let mut acked = 0u64;
     let mut backoff = Duration::from_millis(100);
     loop {
-        let mut req = config.ws_url()?.into_client_request()?;
-        authorize(&mut req, &config.token)?;
-        match connect_async(req).await {
-            Ok((socket, _)) => {
-                backoff = Duration::from_millis(100);
-                let (mut sink, mut stream) = socket.split();
-                sink.send(Message::Text(
-                    serde_json::to_string(&Frame::Hello {
-                        session_id: config.session_id.clone(),
-                    })?
-                    .into(),
-                ))
-                .await?;
-                sink.send(Message::Text(
-                    serde_json::to_string(&Frame::Resume { cursor: acked })?.into(),
-                ))
-                .await?;
-                if let Some(bytes) = replay.replay(acked) {
-                    if !bytes.is_empty() {
-                        sink.send(Message::Text(
-                            serde_json::to_string(&Frame::Output {
-                                offset: acked,
-                                data: bytes,
-                            })?
-                            .into(),
-                        ))
-                        .await?;
-                    }
+        // Request construction is a configuration error, not a transient socket
+        // failure.  Return through the cleanup below rather than orphaning PTY.
+        let mut req = match config
+            .ws_url()
+            .and_then(|url| url.into_client_request().map_err(AgentError::WebSocket))
+        {
+            Ok(req) => req,
+            Err(error) => {
+                if let Some(c) = child.as_mut() {
+                    let _ = c.kill();
                 }
-                loop {
-                    tokio::select! {
-                        Some(data) = output_rx.recv() => { replay.append(&data); let frame = Frame::Output { offset: cursor, data: data.clone() }; cursor += data.len() as u64; sink.send(Message::Text(serde_json::to_string(&frame)?.into())).await?; }
-                        Some(message) = stream.next() => match message? { Message::Text(text) => match serde_json::from_str::<Frame>(&text)? { Frame::Input { data } => { writer.lock().await.write_all(&data).map_err(|e| AgentError::Pty(e.to_string()))?; }, Frame::Resize { .. } => {}, Frame::Signal { signal } if signal == "kill" => { if let Some(c) = child.as_mut() { c.kill().map_err(|e| AgentError::Pty(e.to_string()))?; } }, Frame::Ack { offset } => { if offset <= cursor { replay.ack(offset); acked = acked.max(offset); } }, Frame::Heartbeat { .. } => {}, _ => {} }, Message::Ping(data) => { sink.send(Message::Pong(data)).await?; }, Message::Close(_) => break, _ => {} },
-                        _ = tokio::time::sleep(BUNDLE_DEBOUNCE) => { flush_bundle(&config, &mut bundle_seen).await; sink.send(Message::Text(serde_json::to_string(&Frame::Heartbeat { cursor })?.into())).await?; }
+                return Err(error);
+            }
+        };
+        if let Err(error) = authorize(&mut req, &config.token) {
+            if let Some(c) = child.as_mut() {
+                let _ = c.kill();
+            }
+            return Err(error);
+        }
+        let connection: Result<(), AgentError> = async {
+            let (socket, _) = connect_async(req).await?;
+            backoff = Duration::from_millis(100);
+            let (mut sink, mut stream) = socket.split();
+            send_frame(&mut sink, &Frame::Hello { session_id: config.session_id.clone() }).await?;
+            send_frame(&mut sink, &Frame::Resume { cursor: acked }).await?;
+            if let Some(bytes) = replay.replay(acked) {
+                if !bytes.is_empty() {
+                    send_frame(&mut sink, &Frame::Output { offset: acked, data: bytes }).await?;
+                }
+            }
+            loop {
+                tokio::select! {
+                    Some(data) = output_rx.recv() => {
+                        replay.append(&data);
+                        let frame = Frame::Output { offset: cursor, data };
+                        cursor += frame_data_len(&frame);
+                        send_frame(&mut sink, &frame).await?;
+                    }
+                    Some(message) = stream.next() => {
+                        match message? {
+                            Message::Text(text) => {
+                                let frame = serde_json::from_str::<Frame>(&text)?;
+                                match frame {
+                                    Frame::Input { data } => writer.lock().await.write_all(&data).map_err(|e| AgentError::Pty(e.to_string()))?,
+                                    Frame::Resize { .. } => {},
+                                    Frame::Signal { signal } if signal == "kill" => {
+                                        if let Some(c) = child.as_mut() { c.kill().map_err(|e| AgentError::Pty(e.to_string()))?; }
+                                    },
+                                    Frame::Ack { offset } if offset <= cursor => { replay.ack(offset); acked = acked.max(offset); },
+                                    Frame::Heartbeat { .. } => {},
+                                    _ => {},
+                                }
+                            }
+                            Message::Ping(data) => { sink.send(Message::Pong(data)).await?; }
+                            Message::Close(_) => return Ok(()),
+                            _ => {},
+                        }
+                    }
+                    _ = tokio::time::sleep(BUNDLE_DEBOUNCE) => {
+                        flush_bundle(&config, &mut bundle_seen).await;
+                        send_frame(&mut sink, &Frame::Heartbeat { cursor }).await?;
                     }
                 }
             }
-            Err(_) => {
-                tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(Duration::from_secs(10));
-            }
+        }.await;
+        if connection.is_err() {
+            tokio::time::sleep(backoff).await;
+            backoff = (backoff * 2).min(Duration::from_secs(10));
         }
         if let Some(c) = child.as_mut() {
             if let Ok(Some(status)) = c.try_wait() {
                 let code = status.exit_code() as i32;
-                if let Ok((socket, _)) = connect_async(config.ws_url()?).await {
+                let mut req = config.ws_url()?.into_client_request()?;
+                authorize(&mut req, &config.token)?;
+                if let Ok((socket, _)) = connect_async(req).await {
                     let (mut sink, _) = socket.split();
-                    let _ = sink
-                        .send(Message::Text(
-                            serde_json::to_string(&Frame::Exited { status: Some(code) })?.into(),
-                        ))
-                        .await;
+                    let _ = send_frame(&mut sink, &Frame::Exited { status: Some(code) }).await;
                 }
                 return Ok(());
             }
         }
     }
+}
+
+fn frame_data_len(frame: &Frame) -> u64 {
+    match frame {
+        Frame::Output { data, .. } => data.len() as u64,
+        _ => 0,
+    }
+}
+
+async fn send_frame<S>(sink: &mut S, frame: &Frame) -> Result<(), AgentError>
+where
+    S: futures_util::Sink<Message> + Unpin,
+    S::Error: Into<tokio_tungstenite::tungstenite::Error>,
+{
+    let text = serde_json::to_string(frame)?;
+    sink.send(Message::Text(text.into()))
+        .await
+        .map_err(Into::into)?;
+    Ok(())
 }
 
 #[cfg(test)]
