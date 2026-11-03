@@ -363,36 +363,32 @@ impl BridgeTransport for UreqTransport {
         } else {
             DEFAULT_TIMEOUT
         };
-        let agent = ureq::AgentBuilder::new().timeout(timeout).build();
-        let mut request = if body.is_empty() {
-            agent.get(url)
-        } else {
-            agent.post(url)
-        };
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_global(Some(timeout))
+            .http_status_as_error(false)
+            .build()
+            .into();
+        let mut request = ureq::http::Request::builder()
+            .method(if body.is_empty() { "GET" } else { "POST" })
+            .uri(url);
         for (name, value) in headers {
-            request = request.set(name, value);
+            request = request.header(*name, value);
         }
-        let response = if body.is_empty() {
-            request.call()
-        } else {
-            request.send_bytes(body)
-        };
-        match response {
-            Ok(response) => read_response(response),
-            Err(ureq::Error::Status(status, response)) => {
-                read_response(response).map(|(_, bytes)| (status, bytes))
-            }
-            Err(error) => Err(error.to_string()),
-        }
+        let request = request.body(body).map_err(|error| error.to_string())?;
+        agent
+            .run(request)
+            .map_err(|error| error.to_string())
+            .and_then(read_response)
     }
 }
 
-fn read_response(response: ureq::Response) -> Result<(u16, Vec<u8>), String> {
-    let status = response.status();
+fn read_response(response: ureq::http::Response<ureq::Body>) -> Result<(u16, Vec<u8>), String> {
+    let status = response.status().as_u16();
     let mut bytes = Vec::new();
     use std::io::Read;
     response
-        .into_reader()
+        .into_body()
+        .as_reader()
         .take(8 * 1024 * 1024)
         .read_to_end(&mut bytes)
         .map_err(|error| error.to_string())?;
