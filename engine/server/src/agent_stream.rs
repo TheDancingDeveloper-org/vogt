@@ -333,8 +333,22 @@ fn bearer(h: &HeaderMap) -> Option<&[u8]> {
 pub async fn bootstrap(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    axum::Json(req): axum::Json<BootstrapRequest>,
+    req: Result<axum::Json<BootstrapRequest>, axum::extract::rejection::JsonRejection>,
 ) -> impl IntoResponse {
+    let axum::Json(req) = match req {
+        Ok(req) => req,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "bootstrap needs a JSON body {{session_id, graft_repo, graft_line, cli}} \
+                     with Content-Type: application/json: {}",
+                    e.body_text()
+                ),
+            )
+                .into_response()
+        }
+    };
     let Ok(id) = Uuid::parse_str(req.session_id.trim()) else {
         return (StatusCode::BAD_REQUEST, "invalid session_id").into_response();
     };
@@ -358,10 +372,6 @@ pub async fn bootstrap(
     for (name, value) in [
         ("VOGT_ENGINE_URL", engine),
         ("VOGT_SESSION_ID", id.to_string()),
-        (
-            "VOGT_BOOTSTRAP_TOKEN",
-            String::from_utf8_lossy(token).into_owned(),
-        ),
         ("VOGT_GRAFT_REPO", req.graft_repo.clone()),
         ("VOGT_GRAFT_LINE", req.graft_line.clone()),
         ("VOGT_CLI", req.cli.clone()),
@@ -376,7 +386,10 @@ pub async fn bootstrap(
     }
     axum::Json(BootstrapResponse {
         session_token,
-        bundle: serde_json::json!({"repo": req.graft_repo, "line": req.graft_line}),
+        // Account bundle files (path -> base64) belong to the broker store; the
+        // entrypoint writes every entry as a file, so a placeholder would be
+        // written as a credential.
+        bundle: serde_json::json!({}),
         env: serde_json::Value::Object(env),
         brief: state
             .sessions
