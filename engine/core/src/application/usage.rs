@@ -13,6 +13,7 @@ use serde_json::{json, Map, Value};
 
 use super::context::{AppContext, Built};
 use super::services::now_of;
+use crate::adapters::http_client;
 use crate::config::{UsageAccount, UsageKey};
 use crate::core::usage_board::{self, AccountReading};
 use crate::core::{Clock, IdFactory, Moment};
@@ -28,7 +29,7 @@ pub type KeyInfoFetch = fn(&str, &str) -> Result<(u16, Vec<u8>), String>;
 
 fn live_key_info(url: &str, key: &str) -> Result<(u16, Vec<u8>), String> {
     let endpoint = format!("{}/key/info", url.trim_end_matches('/'));
-    let agent: ureq::Agent = ureq::Agent::config_builder()
+    let agent: ureq::Agent = http_client::builder()
         .timeout_global(Some(KEY_INFO_TIMEOUT))
         .http_status_as_error(false)
         .build()
