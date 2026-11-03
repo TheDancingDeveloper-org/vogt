@@ -6,6 +6,7 @@
 
 use std::{
     collections::VecDeque,
+    fs::File,
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::Arc,
@@ -19,8 +20,9 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::sync::{mpsc, Mutex};
 use tokio_tungstenite::{
-    connect_async,
+    connect_async_tls_with_config,
     tungstenite::{client::IntoClientRequest, http::HeaderValue, Message},
+    Connector,
 };
 
 pub const DEFAULT_BUFFER_BYTES: usize = 1024 * 1024;
@@ -164,6 +166,10 @@ pub enum AgentError {
     WebSocket(#[from] tokio_tungstenite::tungstenite::Error),
     #[error("protocol error: {0}")]
     Protocol(#[from] serde_json::Error),
+    #[error("TLS configuration error: {0}")]
+    TlsConfig(String),
+    #[error("HTTP client error: {0}")]
+    HttpClient(#[from] reqwest::Error),
 }
 
 #[derive(Debug, Clone)]
@@ -226,7 +232,66 @@ impl Config {
     }
 }
 
-async fn flush_bundle(config: &Config, seen: &mut std::collections::HashMap<PathBuf, [u8; 32]>) {
+fn tls_config() -> Result<Arc<rustls::ClientConfig>, AgentError> {
+    let native = rustls_native_certs::load_native_certs();
+    let mut roots = rustls::RootCertStore::empty();
+    let (added, ignored) = roots.add_parsable_certificates(native.certs);
+    if !native.errors.is_empty() {
+        tracing::warn!(errors = ?native.errors, "some native root certificates could not be loaded");
+    }
+    tracing::debug!(added, ignored, "loaded native root certificates");
+
+    if let Some(path) = std::env::var_os("VOGT_EXTRA_CA_FILE") {
+        let file = File::open(&path).map_err(|error| {
+            AgentError::TlsConfig(format!(
+                "cannot read VOGT_EXTRA_CA_FILE {}: {error}",
+                Path::new(&path).display()
+            ))
+        })?;
+        let mut reader = std::io::BufReader::new(file);
+        let certs = rustls_pemfile::certs(&mut reader)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| {
+                AgentError::TlsConfig(format!("invalid VOGT_EXTRA_CA_FILE: {error}"))
+            })?;
+        if certs.is_empty() {
+            return Err(AgentError::TlsConfig(
+                "VOGT_EXTRA_CA_FILE contains no certificates".into(),
+            ));
+        }
+        let (extra_added, extra_ignored) = roots.add_parsable_certificates(certs);
+        if extra_added == 0 {
+            return Err(AgentError::TlsConfig(
+                "VOGT_EXTRA_CA_FILE contains no usable certificates".into(),
+            ));
+        }
+        tracing::debug!(extra_added, extra_ignored, "loaded extra root certificates");
+    }
+
+    Ok(Arc::new(
+        rustls::ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .map_err(|error| AgentError::TlsConfig(error.to_string()))?
+        .with_root_certificates(roots)
+        .with_no_client_auth(),
+    ))
+}
+
+fn http_client(tls: Arc<rustls::ClientConfig>) -> Result<reqwest::Client, AgentError> {
+    reqwest::Client::builder()
+        .no_proxy()
+        .use_preconfigured_tls((*tls).clone())
+        .build()
+        .map_err(AgentError::HttpClient)
+}
+
+async fn flush_bundle(
+    config: &Config,
+    tls: &Arc<rustls::ClientConfig>,
+    seen: &mut std::collections::HashMap<PathBuf, [u8; 32]>,
+) {
     let (Some(root), Some(account), Some(conversation)) = (
         config.claude_config_dir.as_deref(),
         config.account.as_deref(),
@@ -236,7 +301,7 @@ async fn flush_bundle(config: &Config, seen: &mut std::collections::HashMap<Path
     };
     // The broker token is a credential and must only ever go to the engine.
     // In particular, do not let ambient HTTP(S)_PROXY redirect this request.
-    let Ok(client) = reqwest::Client::builder().no_proxy().build() else {
+    let Ok(client) = http_client(tls.clone()) else {
         return;
     };
     let mut url = config.engine_url.clone();
@@ -263,6 +328,21 @@ async fn flush_bundle(config: &Config, seen: &mut std::collections::HashMap<Path
             seen.insert(file.path, marker);
         }
     }
+}
+
+async fn connect_websocket(
+    request: http::Request<()>,
+    tls: Arc<rustls::ClientConfig>,
+) -> Result<
+    (
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        tokio_tungstenite::tungstenite::handshake::client::Response,
+    ),
+    tokio_tungstenite::tungstenite::Error,
+> {
+    connect_async_tls_with_config(request, None, false, Some(Connector::Rustls(tls))).await
 }
 
 fn bundle_marker(bytes: &[u8]) -> [u8; 32] {
@@ -312,8 +392,9 @@ pub fn spawn_pty(config: &Config) -> Result<PtyIo, AgentError> {
 }
 
 pub async fn run(config: Config) -> Result<(), AgentError> {
+    let tls = tls_config()?;
     let mut bundle_seen = std::collections::HashMap::new();
-    flush_bundle(&config, &mut bundle_seen).await;
+    flush_bundle(&config, &tls, &mut bundle_seen).await;
     let (reader, writer, child) = spawn_pty(&config)?;
     let writer = Arc::new(Mutex::new(writer));
     let (output_tx, mut output_rx) = mpsc::channel::<Vec<u8>>(32);
@@ -358,7 +439,7 @@ pub async fn run(config: Config) -> Result<(), AgentError> {
             return Err(error);
         }
         let connection: Result<(), AgentError> = async {
-            let (socket, _) = connect_async(req).await?;
+            let (socket, _) = connect_websocket(req, tls.clone()).await?;
             backoff = Duration::from_millis(100);
             let (mut sink, mut stream) = socket.split();
             send_frame(&mut sink, &Frame::Hello { session_id: config.session_id.clone() }).await?;
@@ -397,7 +478,7 @@ pub async fn run(config: Config) -> Result<(), AgentError> {
                         }
                     }
                     _ = tokio::time::sleep(BUNDLE_DEBOUNCE) => {
-                        flush_bundle(&config, &mut bundle_seen).await;
+                        flush_bundle(&config, &tls, &mut bundle_seen).await;
                         send_frame(&mut sink, &Frame::Heartbeat { cursor }).await?;
                     }
                 }
@@ -412,7 +493,7 @@ pub async fn run(config: Config) -> Result<(), AgentError> {
                 let code = status.exit_code() as i32;
                 let mut req = config.ws_url()?.into_client_request()?;
                 authorize(&mut req, &config.token)?;
-                if let Ok((socket, _)) = connect_async(req).await {
+                if let Ok((socket, _)) = connect_websocket(req, tls.clone()).await {
                     let (mut sink, _) = socket.split();
                     let _ = send_frame(&mut sink, &Frame::Exited { status: Some(code) }).await;
                 }
@@ -444,6 +525,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     #[test]
     fn replay_round_trip() {
         let mut b = ReplayBuffer::new(64);
@@ -494,5 +576,51 @@ mod tests {
         assert_eq!(req.headers()["authorization"], "Bearer session-secret");
         assert!(encoded.contains("\"type\":\"exited\""));
         assert!(encoded.contains("\"status\":7"));
+    }
+
+    #[tokio::test]
+    async fn extra_ca_file_trusts_a_local_tls_server() {
+        let certified = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let ca_path = temp.path().join("test-ca.pem");
+        std::fs::write(&ca_path, certified.cert.pem()).unwrap();
+        std::env::set_var("VOGT_EXTRA_CA_FILE", &ca_path);
+
+        let server_config = rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(
+            vec![certified.cert.der().clone()],
+            rustls::pki_types::PrivateKeyDer::Pkcs8(certified.key_pair.serialize_der().into()),
+        )
+        .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut stream = tokio_rustls::TlsAcceptor::from(Arc::new(server_config))
+                .accept(stream)
+                .await
+                .unwrap();
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request).await.unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok")
+                .await
+                .unwrap();
+        });
+
+        let response = http_client(tls_config().unwrap())
+            .unwrap()
+            .get(format!("https://localhost:{}/", address.port()))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.text().await.unwrap(), "ok");
+        server.await.unwrap();
+        std::env::remove_var("VOGT_EXTRA_CA_FILE");
     }
 }
