@@ -28,17 +28,18 @@ pub type KeyInfoFetch = fn(&str, &str) -> Result<(u16, Vec<u8>), String>;
 
 fn live_key_info(url: &str, key: &str) -> Result<(u16, Vec<u8>), String> {
     let endpoint = format!("{}/key/info", url.trim_end_matches('/'));
-    let agent = ureq::AgentBuilder::new().timeout(KEY_INFO_TIMEOUT).build();
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(KEY_INFO_TIMEOUT))
+        .http_status_as_error(false)
+        .build()
+        .into();
     let response = agent
         .get(&endpoint)
-        .set("Authorization", &format!("Bearer {key}"))
-        .set("Accept", "application/json")
+        .header("Authorization", &format!("Bearer {key}"))
+        .header("Accept", "application/json")
         .call();
-    match response {
-        Ok(response) => read_body(response.status(), response.into_reader()),
-        Err(ureq::Error::Status(status, response)) => read_body(status, response.into_reader()),
-        Err(other) => Err(other.to_string()),
-    }
+    let response = response.map_err(|error| error.to_string())?;
+    read_body(response.status().as_u16(), response.into_body().as_reader())
 }
 
 fn read_body(status: u16, mut reader: impl Read) -> Result<(u16, Vec<u8>), String> {

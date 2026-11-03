@@ -264,7 +264,11 @@ struct Api {
 
 impl Api {
     fn new(repo: String, token: String) -> Self {
-        let agent = ureq::AgentBuilder::new().timeout(TIMEOUT).build();
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_global(Some(TIMEOUT))
+            .http_status_as_error(false)
+            .build()
+            .into();
         Self { repo, token, agent }
     }
 
@@ -279,27 +283,25 @@ impl Api {
         payload: Option<&Value>,
     ) -> Result<(u16, Value), String> {
         let built = build_request(method, path, payload)?;
-        let mut req = self
-            .agent
-            .request(built.method.as_str(), &built.url)
-            .set("Accept", "application/vnd.github+json")
-            .set("X-GitHub-Api-Version", "2022-11-28")
-            .set("User-Agent", USER_AGENT)
-            .set("Authorization", &format!("Bearer {}", self.token));
-        let response = if let Some(body) = &built.body {
-            req = req.set("Content-Type", "application/json");
-            req.send_string(body)
+        let req = ureq::http::Request::builder()
+            .method(built.method.as_str())
+            .uri(&built.url)
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .header("User-Agent", USER_AGENT)
+            .header("Authorization", &format!("Bearer {}", self.token));
+        let request = if let Some(body) = &built.body {
+            req.header("Content-Type", "application/json")
+                .body(body.as_bytes())
         } else {
-            req.call()
-        };
-        match response {
-            Ok(resp) => read_response(resp.status(), resp.into_reader()),
-            Err(ureq::Error::Status(code, resp)) => read_response(code, resp.into_reader()),
-            Err(err) => Err(format!(
-                "{} {path} could not reach GitHub: {err}",
-                method.as_str()
-            )),
+            req.body(&[][..])
         }
+        .map_err(|err| err.to_string())?;
+        let response = self
+            .agent
+            .run(request)
+            .map_err(|err| format!("{} {path} could not reach GitHub: {err}", method.as_str()))?;
+        read_response(response.status().as_u16(), response.into_body().as_reader())
     }
 
     fn get(&self, path: &str, params: &[(&str, String)]) -> Result<Option<Value>, String> {
