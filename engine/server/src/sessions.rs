@@ -90,6 +90,7 @@ pub struct SessionRegistry {
     /// lifetime: issued as the session is created, revoked as it is
     /// forgotten.
     secret_broker: Arc<SecretBroker>,
+    account_pool: Arc<crate::account_pool::AccountPool>,
     /// Every session's hibernation record, live or hibernated, mirrored from
     /// `state_dir/sessions` (see `hibernation`). A session is hibernated when
     /// its record says so and it has no live entry in `sessions`.
@@ -161,6 +162,10 @@ impl SessionRegistry {
                 .with_grant_projects(cfg.agent_grant_projects.clone())
                 .with_account_dirs(account_dirs),
         );
+        let account_pool = Arc::new(crate::account_pool::AccountPool::new(
+            cfg.agent_onboarding.accounts.iter().map(|a| a.name.clone()),
+            cfg.agent_onboarding.account_concurrency_cap,
+        ));
         let records = Arc::new(DashMap::new());
         recover_records(&cfg.state_dir, history.as_deref(), &records);
         Self {
@@ -169,6 +174,7 @@ impl SessionRegistry {
             history,
             sessions: DashMap::new(),
             secret_broker,
+            account_pool,
             records,
             transitions: DashMap::new(),
             shutting_down: Arc::new(AtomicBool::new(false)),
@@ -320,6 +326,9 @@ impl SessionRegistry {
                 .filter(|t| !t.is_empty())
             {
                 let template = self.resolve_template(name)?;
+                if spec.account.is_none() {
+                    spec.account = template.account.clone();
+                }
                 spec.command = template.command.clone();
                 if template.backend != "local" {
                     return Err(ApiError::BadRequest(format!(
@@ -354,6 +363,27 @@ impl SessionRegistry {
             .map(str::trim)
             .filter(|a| !a.is_empty())
             .map(str::to_string);
+        let is_claude = base_command
+            .as_deref()
+            .and_then(agent_cli::agent_name)
+            .as_deref()
+            == Some("claude");
+        if account.is_some() && !is_claude {
+            return Err(ApiError::BadRequest(
+                "account is applied to Claude Code only; the command is not `claude`".into(),
+            ));
+        }
+        let account = if is_claude && matches!(creating, Creating::Fresh(_)) {
+            self.account_pool
+                .reserve(account.as_deref())
+                .map_err(|full| {
+                    ApiError::AtCapacity(format!("cap {}; counts {:?}", full.cap, full.counts))
+                })?
+        } else if is_claude {
+            account
+        } else {
+            None
+        };
         if let (Some(name), Creating::Fresh(_)) = (account.as_deref(), &creating) {
             if base_command
                 .as_deref()
@@ -1196,10 +1226,12 @@ impl SessionRegistry {
         let minted = Arc::clone(&self.minted);
         let core = Arc::clone(&self.core);
         let broker = Arc::clone(&self.secret_broker);
+        let account_pool = Arc::clone(&self.account_pool);
         Box::new(move |session: &Session| {
             // An approved grant is for a running session; whatever stopped it,
             // the grant goes with the process (WI-973).
             broker.drop_grants(session.id);
+            account_pool.release(session.account().as_deref());
             if session.is_hibernating() || shutting_down.load(Ordering::Acquire) {
                 return;
             }
@@ -2811,6 +2843,7 @@ mod tests {
                 match_repo_names: vec![],
                 match_path_prefixes: vec![],
                 tags: vec!["claude".into()],
+                account: None,
                 backend: "local".to_string(),
             },
             SessionTemplate {
@@ -2828,6 +2861,7 @@ mod tests {
                 match_repo_names: vec![],
                 match_path_prefixes: vec![],
                 tags: vec!["agent".into(), "claude".into()],
+                account: None,
                 backend: "local".to_string(),
             },
         ];
