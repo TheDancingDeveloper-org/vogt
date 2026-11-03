@@ -5,8 +5,9 @@ use crate::{
     session_backend::SessionBackend,
 };
 use k8s_openapi::api::core::v1::{
-    Capabilities, Container, EnvVar, Pod, PodSecurityContext, PodSpec, ResourceRequirements,
-    SeccompProfile, SecurityContext,
+    Capabilities, ConfigMapEnvSource, ConfigMapVolumeSource, Container, EnvFromSource, EnvVar,
+    PersistentVolumeClaimVolumeSource, Pod, PodSecurityContext, PodSpec, ResourceRequirements,
+    SeccompProfile, SecretEnvSource, SecurityContext, Volume, VolumeMount,
 };
 use kube::config::{KubeConfigOptions, Kubeconfig};
 use kube::{
@@ -29,6 +30,16 @@ pub struct PodConfig {
         BTreeMap<String, k8s_openapi::apimachinery::pkg::api::resource::Quantity>,
     pub resource_limits: BTreeMap<String, k8s_openapi::apimachinery::pkg::api::resource::Quantity>,
     pub node_selector: BTreeMap<String, String>,
+    /// The cache claim and node are deployment policy rather than pod logic.
+    pub cache_pvc: String,
+    pub cache_node: String,
+    pub cache_env_config_map: String,
+    pub cache_secret: String,
+    pub kache_config_map: String,
+    pub graft_repo: String,
+    pub graft_line: String,
+    pub cli: String,
+    pub extra_ca_file: Option<String>,
     pub priority_class: Option<String>,
     pub service_account: String,
 }
@@ -49,6 +60,10 @@ impl Default for PodConfig {
                     "memory".into(),
                     k8s_openapi::apimachinery::pkg::api::resource::Quantity("256Mi".into()),
                 ),
+                (
+                    "ephemeral-storage".into(),
+                    k8s_openapi::apimachinery::pkg::api::resource::Quantity("10Gi".into()),
+                ),
             ]),
             resource_limits: BTreeMap::from([
                 (
@@ -59,8 +74,21 @@ impl Default for PodConfig {
                     "memory".into(),
                     k8s_openapi::apimachinery::pkg::api::resource::Quantity("1Gi".into()),
                 ),
+                (
+                    "ephemeral-storage".into(),
+                    k8s_openapi::apimachinery::pkg::api::resource::Quantity("40Gi".into()),
+                ),
             ]),
             node_selector: BTreeMap::new(),
+            cache_pvc: "session-cache-winrarhost1".into(),
+            cache_node: "winrarhost1".into(),
+            cache_env_config_map: "session-cache-env".into(),
+            cache_secret: "kache-s3".into(),
+            kache_config_map: "kache-config".into(),
+            graft_repo: "vogt".into(),
+            graft_line: "rust-2".into(),
+            cli: "codex".into(),
+            extra_ca_file: None,
             priority_class: Some("vogt-session".into()),
             service_account: "vogt-session".into(),
         }
@@ -85,6 +113,55 @@ impl PodConfig {
 }
 pub fn pod_name(id: Uuid) -> String {
     format!("vogt-session-{}", id.simple())
+}
+
+fn pod_env(cfg: &PodConfig, id: Uuid, bootstrap_token: &[u8]) -> Vec<EnvVar> {
+    let mut env = vec![
+        EnvVar {
+            name: "VOGT_ENGINE_URL".into(),
+            value: Some(cfg.engine_endpoint.clone()),
+            ..Default::default()
+        },
+        EnvVar {
+            name: "VOGT_SESSION_ID".into(),
+            value: Some(id.to_string()),
+            ..Default::default()
+        },
+        EnvVar {
+            name: "VOGT_BOOTSTRAP_TOKEN".into(),
+            value: Some(String::from_utf8_lossy(bootstrap_token).into_owned()),
+            ..Default::default()
+        },
+        EnvVar {
+            name: "VOGT_GRAFT_REPO".into(),
+            value: Some(cfg.graft_repo.clone()),
+            ..Default::default()
+        },
+        EnvVar {
+            name: "VOGT_GRAFT_LINE".into(),
+            value: Some(cfg.graft_line.clone()),
+            ..Default::default()
+        },
+        EnvVar {
+            name: "VOGT_CLI".into(),
+            value: Some(cfg.cli.clone()),
+            ..Default::default()
+        },
+    ];
+    if let Some(path) = &cfg.extra_ca_file {
+        env.push(EnvVar {
+            name: "VOGT_EXTRA_CA_FILE".into(),
+            value: Some(path.clone()),
+            ..Default::default()
+        });
+    }
+    // Compatibility with the scaffold entrypoint contract.
+    env.push(EnvVar {
+        name: "VOGT_AGENT_BOOTSTRAP_TOKEN".into(),
+        value: Some(String::from_utf8_lossy(bootstrap_token).into_owned()),
+        ..Default::default()
+    });
+    env
 }
 /// Convert Kubernetes state into the engine's terminal vocabulary. A missing
 /// phase is deliberately pending: the API may return a pod before the
@@ -159,26 +236,7 @@ pub fn pod_template(
         .iter()
         .find_map(|(k, v)| (k == "VOGT_SESSION_IMAGE").then_some(v.as_str()))
         .unwrap_or(&cfg.default_image);
-    let env = vec![
-        EnvVar {
-            name: "VOGT_SESSION_ID".into(),
-            value: Some(id.to_string()),
-            value_from: None,
-        },
-        EnvVar {
-            name: "VOGT_ENGINE_URL".into(),
-            value: Some(cfg.engine_endpoint.clone()),
-            value_from: None,
-        },
-        // This is a short-lived bootstrap credential. The pod entrypoint
-        // exchanges it with the broker and unsets it before starting work;
-        // the engine has no permission to create or read Kubernetes Secrets.
-        EnvVar {
-            name: "VOGT_AGENT_BOOTSTRAP_TOKEN".into(),
-            value: Some(String::from_utf8_lossy(bootstrap_token).into_owned()),
-            ..Default::default()
-        },
-    ];
+    let env = pod_env(cfg, id, bootstrap_token);
     Pod {
         metadata: ObjectMeta {
             name: Some(pod_name(id)),
@@ -192,6 +250,34 @@ pub fn pod_template(
                 image: Some(image.into()),
                 command: (!command.is_empty()).then(|| command.to_vec()),
                 env: Some(env),
+                env_from: Some(vec![
+                    EnvFromSource {
+                        config_map_ref: Some(ConfigMapEnvSource {
+                            name: cfg.cache_env_config_map.clone(),
+                            optional: Some(false),
+                        }),
+                        ..Default::default()
+                    },
+                    EnvFromSource {
+                        secret_ref: Some(SecretEnvSource {
+                            name: cfg.cache_secret.clone(),
+                            optional: Some(false),
+                        }),
+                        ..Default::default()
+                    },
+                ]),
+                volume_mounts: Some(vec![
+                    VolumeMount {
+                        name: "session-cache".into(),
+                        mount_path: "/cache".into(),
+                        ..Default::default()
+                    },
+                    VolumeMount {
+                        name: cfg.kache_config_map.clone(),
+                        mount_path: "/etc/kache".into(),
+                        ..Default::default()
+                    },
+                ]),
                 resources: Some(ResourceRequirements {
                     requests: (!cfg.resource_requests.is_empty())
                         .then(|| cfg.resource_requests.clone()),
@@ -212,6 +298,9 @@ pub fn pod_template(
             automount_service_account_token: Some(false),
             security_context: Some(PodSecurityContext {
                 run_as_non_root: Some(true),
+                run_as_user: Some(1000),
+                run_as_group: Some(1000),
+                fs_group: Some(1000),
                 seccomp_profile: Some(SeccompProfile {
                     type_: "RuntimeDefault".into(),
                     ..Default::default()
@@ -219,6 +308,25 @@ pub fn pod_template(
                 ..Default::default()
             }),
             node_selector: (!cfg.node_selector.is_empty()).then(|| cfg.node_selector.clone()),
+            node_name: Some(cfg.cache_node.clone()),
+            volumes: Some(vec![
+                Volume {
+                    name: "session-cache".into(),
+                    persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
+                        claim_name: cfg.cache_pvc.clone(),
+                        read_only: Some(false),
+                    }),
+                    ..Default::default()
+                },
+                Volume {
+                    name: "kache-config".into(),
+                    config_map: Some(ConfigMapVolumeSource {
+                        name: cfg.kache_config_map.clone(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            ]),
             priority_class_name: cfg.priority_class.clone(),
             restart_policy: Some("Never".into()),
             ..Default::default()
@@ -257,18 +365,17 @@ impl PodBackendFactory {
             .and_then(|spec| spec.containers.first_mut())
             .and_then(|container| container.env.as_mut())
             .ok_or_else(|| ApiError::BadRequest("session pod has no agent container".into()))?;
-        if let Some(variable) = env
-            .iter_mut()
-            .find(|variable| variable.name == "VOGT_AGENT_BOOTSTRAP_TOKEN")
-        {
-            variable.value = Some(String::from_utf8_lossy(token).into_owned());
-            variable.value_from = None;
-        } else {
-            env.push(EnvVar {
-                name: "VOGT_AGENT_BOOTSTRAP_TOKEN".into(),
-                value: Some(String::from_utf8_lossy(token).into_owned()),
-                ..Default::default()
-            });
+        for name in ["VOGT_BOOTSTRAP_TOKEN", "VOGT_AGENT_BOOTSTRAP_TOKEN"] {
+            if let Some(variable) = env.iter_mut().find(|variable| variable.name == name) {
+                variable.value = Some(String::from_utf8_lossy(token).into_owned());
+                variable.value_from = None;
+            } else {
+                env.push(EnvVar {
+                    name: name.into(),
+                    value: Some(String::from_utf8_lossy(token).into_owned()),
+                    ..Default::default()
+                });
+            }
         }
         let _ = id;
         self.create(pod).await
@@ -450,6 +557,15 @@ mod tests {
             Some(true)
         );
         assert_eq!(
+            spec.security_context.as_ref().unwrap().run_as_user,
+            Some(1000)
+        );
+        assert_eq!(
+            spec.security_context.as_ref().unwrap().run_as_group,
+            Some(1000)
+        );
+        assert_eq!(spec.security_context.as_ref().unwrap().fs_group, Some(1000));
+        assert_eq!(
             spec.security_context
                 .as_ref()
                 .unwrap()
@@ -485,6 +601,68 @@ mod tests {
                 .unwrap(),
             &["ALL"]
         );
-        assert!(spec.volumes.is_none());
+        let env = container.env.as_ref().unwrap();
+        for name in [
+            "VOGT_ENGINE_URL",
+            "VOGT_SESSION_ID",
+            "VOGT_BOOTSTRAP_TOKEN",
+            "VOGT_GRAFT_REPO",
+            "VOGT_GRAFT_LINE",
+            "VOGT_CLI",
+        ] {
+            assert!(
+                env.iter().any(|variable| variable.name == name),
+                "missing {name}"
+            );
+        }
+        let resources = container.resources.as_ref().unwrap();
+        assert_eq!(
+            resources.requests.as_ref().unwrap()["ephemeral-storage"].0,
+            "10Gi"
+        );
+        assert_eq!(
+            resources.limits.as_ref().unwrap()["ephemeral-storage"].0,
+            "40Gi"
+        );
+        assert_eq!(spec.node_name.as_deref(), Some("winrarhost1"));
+        let mounts = container.volume_mounts.as_ref().unwrap();
+        assert_eq!(mounts[0].mount_path, "/cache");
+        assert!(mounts[0].sub_path.is_none());
+        assert_eq!(mounts[1].mount_path, "/etc/kache");
+        let volumes = spec.volumes.as_ref().unwrap();
+        assert_eq!(
+            volumes[0]
+                .persistent_volume_claim
+                .as_ref()
+                .unwrap()
+                .claim_name,
+            "session-cache-winrarhost1"
+        );
+        assert_eq!(volumes[1].config_map.as_ref().unwrap().name, "kache-config");
+    }
+
+    #[test]
+    fn pod_env_includes_optional_ca_contract() {
+        let cfg = PodConfig {
+            extra_ca_file: Some("/etc/ssl/custom.pem".into()),
+            ..Default::default()
+        };
+        let env = pod_env(&cfg, Uuid::nil(), b"token");
+        assert_eq!(
+            env.iter()
+                .find(|v| v.name == "VOGT_BOOTSTRAP_TOKEN")
+                .unwrap()
+                .value
+                .as_deref(),
+            Some("token")
+        );
+        assert_eq!(
+            env.iter()
+                .find(|v| v.name == "VOGT_EXTRA_CA_FILE")
+                .unwrap()
+                .value
+                .as_deref(),
+            Some("/etc/ssl/custom.pem")
+        );
     }
 }
