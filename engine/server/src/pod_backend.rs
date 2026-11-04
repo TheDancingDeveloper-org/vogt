@@ -38,6 +38,15 @@ pub struct PodConfig {
     pub kache_config_map: String,
     pub graft_repo: String,
     pub graft_line: String,
+    /// Graft server the entrypoint clones from, passed to the pod as
+    /// `GRAFT_ENDPOINT`. It must be reachable from the session namespace.
+    #[serde(default)]
+    pub graft_endpoint: Option<String>,
+    /// File (a mounted secret) holding the graft token scoped to the session's
+    /// repo and line. The engine reads it at bootstrap and hands it to the
+    /// entrypoint; the value is never in config or the pod spec.
+    #[serde(default)]
+    pub graft_token_file: Option<String>,
     pub cli: String,
     pub extra_ca_file: Option<String>,
     pub priority_class: Option<String>,
@@ -151,6 +160,8 @@ impl Default for PodConfig {
             graft_repo: "vogt".into(),
             graft_line: "rust-2".into(),
             cli: "codex".into(),
+            graft_endpoint: None,
+            graft_token_file: None,
             extra_ca_file: None,
             priority_class: Some("vogt-session".into()),
             service_account: "vogt-session".into(),
@@ -212,6 +223,8 @@ impl PodConfig {
         set_or_empty("ENGINE_POD_KACHE_CONFIG_MAP", &mut cfg.kache_config_map);
         optional("ENGINE_POD_PRIORITY_CLASS", &mut cfg.priority_class);
         optional("ENGINE_POD_IMAGE_PULL_SECRET", &mut cfg.image_pull_secret);
+        optional("ENGINE_POD_GRAFT_ENDPOINT", &mut cfg.graft_endpoint);
+        optional("ENGINE_POD_GRAFT_TOKEN_FILE", &mut cfg.graft_token_file);
         optional("ENGINE_POD_EXTRA_CA_FILE", &mut cfg.extra_ca_file);
         if let Some(v) = text("ENGINE_POD_RESOURCE_REQUESTS") {
             cfg.resource_requests = parse_resources("ENGINE_POD_RESOURCE_REQUESTS", &v)?;
@@ -331,6 +344,13 @@ fn pod_env(cfg: &PodConfig, id: Uuid, bootstrap_token: &[u8]) -> Vec<EnvVar> {
             ..Default::default()
         },
     ];
+    if let Some(endpoint) = &cfg.graft_endpoint {
+        env.push(EnvVar {
+            name: "GRAFT_ENDPOINT".into(),
+            value: Some(endpoint.clone()),
+            ..Default::default()
+        });
+    }
     if let Some(path) = &cfg.extra_ca_file {
         env.push(EnvVar {
             name: "VOGT_EXTRA_CA_FILE".into(),
@@ -953,6 +973,22 @@ mod tests {
             "session-cache-winrarhost1"
         );
         assert_eq!(volumes[1].config_map.as_ref().unwrap().name, "kache-config");
+    }
+
+    #[test]
+    fn pod_env_passes_the_graft_endpoint_only_when_configured() {
+        let find = |cfg: &PodConfig| {
+            pod_env(cfg, Uuid::nil(), b"token")
+                .into_iter()
+                .find(|v| v.name == "GRAFT_ENDPOINT")
+                .and_then(|v| v.value)
+        };
+        assert_eq!(find(&PodConfig::default()), None);
+        let cfg = PodConfig {
+            graft_endpoint: Some("http://graft.example:17888".into()),
+            ..Default::default()
+        };
+        assert_eq!(find(&cfg).as_deref(), Some("http://graft.example:17888"));
     }
 
     #[test]
