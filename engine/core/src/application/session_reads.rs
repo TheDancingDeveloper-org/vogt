@@ -32,7 +32,13 @@ pub(crate) fn last_reply(ctx: &Built, params: Value) -> Result<Value, VogtError>
         )
     })?;
     let n = params.get("n").and_then(Value::as_u64).unwrap_or(1) as usize;
-    crate::with_ctx!(ctx, |ctx| last_reply_in(ctx, id, n))
+    let since = text(params.get("since"));
+    let body = crate::with_ctx!(ctx, |ctx| last_reply_in(ctx, id, n))?;
+    Ok(crate::application::unchanged::stamp(
+        body,
+        since,
+        &["id", "engine_session_id"],
+    ))
 }
 
 fn last_reply_in<C: Clock, I: IdFactory>(

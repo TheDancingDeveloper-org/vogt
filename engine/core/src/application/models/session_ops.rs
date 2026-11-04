@@ -659,6 +659,10 @@ pub struct SessionLastReplyParams {
     #[serde(default = "default_session_last_reply_params_n")]
     #[schemars(range(min = 1, max = 20))]
     pub n: i64,
+    /// The `cursor` of an earlier read. When the replies have not changed since, the answer is `{unchanged: true, cursor}` with no messages.
+    #[serde(default)]
+    #[schemars(schema_with = "optional_string")]
+    pub since: Option<String>,
 }
 /// The last assistant messages of the agent conversation a session runs.
 ///
@@ -696,6 +700,13 @@ pub struct SessionLastReplyResult {
     #[serde(default)]
     #[schemars(schema_with = "optional_string")]
     pub detail: Option<String>,
+    /// True when `since` still matches: nothing else is in the answer.
+    #[serde(default)]
+    pub unchanged: bool,
+    /// Pass as `since` on the next read.
+    #[serde(default)]
+    #[schemars(schema_with = "optional_string")]
+    pub cursor: Option<String>,
 }
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -788,6 +799,10 @@ pub struct SessionDigestParams {
     #[serde(default)]
     #[schemars(schema_with = "optional_session_digest_params_context_window")]
     pub context_window: Option<i64>,
+    /// The `cursor` of an earlier read. When the digest has not changed since, the answer is `{unchanged: true, cursor}` with no body.
+    #[serde(default)]
+    #[schemars(schema_with = "optional_string")]
+    pub since: Option<String>,
 }
 /// What an overseer reads instead of screen, last reply and git log (C3).
 ///
@@ -845,6 +860,13 @@ pub struct SessionDigestResult {
     #[serde(default)]
     #[schemars(schema_with = "optional_date_time")]
     pub updated_at: Option<String>,
+    /// True when `since` still matches: nothing else is in the answer.
+    #[serde(default)]
+    pub unchanged: bool,
+    /// Pass as `since` on the next read.
+    #[serde(default)]
+    #[schemars(schema_with = "optional_string")]
+    pub cursor: Option<String>,
 }
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -924,7 +946,7 @@ pub struct SessionWaitAnyParams {
     /// Ignore deltas at or before this seq, so a replayed page is not waited on twice. Omit to accept the next match. `now` skips everything already published and waits only for a change that lands after this call starts; the result's `next_cursor` is that head when nothing new arrives.
     #[serde(default)]
     pub cursor: SessionWaitAnyParamsCursor,
-    /// Seconds to wait at most (1-600). Answers `timeout` then.
+    /// Seconds to wait at most (1-600, default 300). Answers `timeout` then. An oversight session's value is raised to 60 so a short wait cannot become a poll loop.
     #[serde(default = "default_session_wait_any_params_timeout_s")]
     #[schemars(range(min = 1, max = 600))]
     pub timeout_s: i64,
@@ -939,6 +961,9 @@ pub struct SessionWaitAnyResult {
     pub change: Option<SessionChange>,
     /// The seq to pass as `cursor` on the next wait.
     pub next_cursor: i64,
+    /// The changed session's digest, so a sweep need not follow up with session.digest. Null on a timeout.
+    #[serde(default)]
+    pub digest: Option<SessionDigestResult>,
 }
 /// An agent's own report that it cannot go on without a person.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -1284,7 +1309,7 @@ fn default_session_changes_params_limit() -> i64 {
 }
 
 fn default_session_wait_any_params_timeout_s() -> i64 {
-    120
+    300
 }
 
 fn default_agent_activity_search_params_limit() -> i64 {
