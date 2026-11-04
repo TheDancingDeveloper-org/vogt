@@ -4545,6 +4545,24 @@ byte length — never value. `writable` widens blast radius only to the entries 
 operator pre-authorised, and every overwrite is in the audit log. The same
 honest caveat applies.
 
+**Bundle write-back (WI-3160).** A pod's agent pushes its account bundle to
+`POST /api/agent-auth/store/{var}/bundle-file` with the same broker token. The
+route is limited to the session's own account and conversation, is
+rate-limited per session (120 a minute), and refuses a body over the bound
+(one MiB of payload as base64, plus envelope) from its `Content-Length`
+before reading it. Credentials are whole-file, newer-only, and a write is
+accepted only if it parses and holds a non-empty access token and refresh token
+and an `expiresAt` no further ahead than
+`ENGINE_AGENT_CREDENTIAL_MAX_LIFETIME_SECS` (default nine hours); without that
+ceiling one session could set a far-future expiry and refuse every genuine
+refresh on the account. `.claude.json` writes must carry a `version` (the
+file's mtime in ms, no more than ten minutes ahead of the engine's clock) that
+is newer than the last accepted one, which is persisted beside the file
+(`.claude.json.version`) so the check survives a restart. Transcripts are
+append-only deltas at an expected offset. Every refusal is audited on
+`vogt::audit` by session id, account, file and reason, and an accepted write by
+name and byte length. Never a value.
+
 **Approved actions (WI-2331, design only).** A proposed extension of the
 grant pattern from credentials to engine-executed, person-approved
 infrastructure actions (`vogt-agent-auth request`). Nothing is implemented;

@@ -653,7 +653,7 @@ pub fn accept_project(path: &Path, cwd: &str) -> std::io::Result<bool> {
     std::fs::create_dir_all(parent)?;
     let tmp = parent.join(format!(".claude.json.vogt-{}", uuid::Uuid::new_v4()));
     let result = (|| {
-        std::fs::write(&tmp, &body)?;
+        write_private(&tmp, &body)?;
         if let Ok(meta) = std::fs::metadata(path) {
             std::fs::set_permissions(&tmp, meta.permissions())?;
         }
@@ -663,6 +663,22 @@ pub fn accept_project(path: &Path, cwd: &str) -> std::io::Result<bool> {
         let _ = std::fs::remove_file(&tmp);
     }
     result.map(|()| true)
+}
+
+/// Create `path` readable by its owner alone from the first byte, so the
+/// temporary copy of a config that can hold credentials is never briefly
+/// world-readable. The caller copies the target's own mode over it before the
+/// rename. Refuses a path that already exists.
+fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
+    file.write_all(bytes)
 }
 
 /// Codex's config file: `$CODEX_HOME/config.toml` when the session sets it,
@@ -733,7 +749,7 @@ pub fn accept_codex_project(path: &Path, cwd: &str) -> std::io::Result<bool> {
     };
     let tmp = parent.join(format!(".config.toml.vogt-{}", uuid::Uuid::new_v4()));
     let result = (|| {
-        std::fs::write(&tmp, new.as_bytes())?;
+        write_private(&tmp, new.as_bytes())?;
         if let Ok(meta) = std::fs::metadata(path) {
             std::fs::set_permissions(&tmp, meta.permissions())?;
         }
@@ -1772,5 +1788,38 @@ mod driven_policy_tests {
                 None
             );
         }
+    }
+
+    #[test]
+    fn a_new_claude_json_is_created_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".claude.json");
+        assert!(crate::claude_config::accept_project(&path, "/w/a").unwrap());
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn a_new_codex_config_is_created_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        assert!(crate::claude_config::accept_codex_project(&path, "/w/repo").unwrap());
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn the_temp_copy_is_private_before_any_byte_is_written() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tmp");
+        crate::claude_config::write_private(&path, b"secret").unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(crate::claude_config::write_private(&path, b"again").is_err());
     }
 }

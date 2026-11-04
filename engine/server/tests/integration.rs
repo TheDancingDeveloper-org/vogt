@@ -7767,6 +7767,60 @@ async fn a_session_is_handed_the_token_the_broker_honours() {
 }
 
 #[tokio::test]
+async fn bundle_route_refuses_an_oversize_body_unread_and_rate_limits_a_session() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = broker_config(&tmp, "RW proj rw ondemand,writable\n");
+    let (base, state, _h) = boot_with_state(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let id = create_session_id(&client, &base, "bundle-limits").await;
+    let session: uuid::Uuid = id.parse().unwrap();
+    let token = state.sessions.secret_broker().issue(session);
+    let plain = reqwest::Client::new();
+    let url = format!("{base}/api/agent-auth/store/RW/bundle-file");
+
+    // No token: nothing is counted or read.
+    let r = plain.post(&url).body("x").send().await.unwrap();
+    assert_eq!(r.status(), 401);
+
+    // Past the 1 MiB payload bound (as base64 plus envelope): 413, whether the
+    // length is declared up front or only found out while reading.
+    let r = plain
+        .post(&url)
+        .bearer_auth(&token)
+        .body(vec![b'x'; 2 * 1024 * 1024])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 413);
+
+    // Everything above counted. The window is 120 a minute for the session.
+    let mut limited = None;
+    for n in 0..130 {
+        let r = plain
+            .post(&url)
+            .bearer_auth(&token)
+            .body("not json")
+            .send()
+            .await
+            .unwrap();
+        if r.status() == 429 {
+            limited = Some(n);
+            assert!(r.headers().contains_key("retry-after"));
+            break;
+        }
+        assert_eq!(r.status(), 400);
+    }
+    assert_eq!(
+        limited,
+        Some(119),
+        "120 requests fit the window, the next is refused"
+    );
+}
+
+#[tokio::test]
 async fn secret_store_writes_a_writable_secret_on_stdin_only() {
     let tmp = tempfile::tempdir().unwrap();
     let cfg = broker_config(
