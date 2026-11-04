@@ -93,6 +93,14 @@ ListMode = Literal["summary", "full"]
 #: state (design C1); `full` is the SessionSummary a GUI already renders.
 SessionViewMode = Literal["digest", "full"]
 
+#: How much a write returns over MCP (WI-1525).
+WriteResultMode = Literal["compact", "full"]
+
+WRITE_RESULT_MODE_DESCRIPTION = (
+    "`compact` (default) returns a few fields: enough to confirm the write "
+    "without re-reading the whole record. `full` returns the complete result."
+)
+
 #: Session states a digest listing keeps unless the caller names others.
 #: Hibernated, stopped and exited stay in `counts` but not in the rows.
 DIGEST_LIVE_STATES: frozenset[str] = frozenset(
@@ -1587,6 +1595,9 @@ class CreateWorkParams(Params):
         ),
     )
     reason: Reason
+    mode: WriteResultMode = Field(
+        default="compact", description=WRITE_RESULT_MODE_DESCRIPTION
+    )
 
 
 class WorkItemBranchView(Result):
@@ -2072,6 +2083,9 @@ class UpdateWorkParams(Params):
     add_labels: list[str] | None = None
     remove_labels: list[str] | None = None
     reason: Reason
+    mode: WriteResultMode = Field(
+        default="compact", description=WRITE_RESULT_MODE_DESCRIPTION
+    )
 
 
 class TransitionWorkParams(Params):
@@ -2093,6 +2107,9 @@ class TransitionWorkParams(Params):
             "Only the workflow's own edges are taken and finished states are "
             "never passed through, so no review step is skipped."
         ),
+    )
+    mode: WriteResultMode = Field(
+        default="compact", description=WRITE_RESULT_MODE_DESCRIPTION
     )
 
     @model_validator(mode="before")
@@ -2160,6 +2177,9 @@ class CommentParams(Params):
         ),
     )
     reason: Reason
+    mode: WriteResultMode = Field(
+        default="compact", description=WRITE_RESULT_MODE_DESCRIPTION
+    )
 
     @model_validator(mode="after")
     def _handoff_matches_kind(self) -> CommentParams:
@@ -4565,6 +4585,9 @@ class StartSessionParams(Params):
             "as an override. Recorded on the session."
         ),
     )
+    mode: WriteResultMode = Field(
+        default="compact", description=WRITE_RESULT_MODE_DESCRIPTION
+    )
 
 
 #: The two id forms every session operation accepts. A session Vogt started
@@ -4659,6 +4682,28 @@ class SweepSessionsParams(Params):
         description=(
             "A running session that has printed nothing for this long is "
             "reported `stalled`."
+        ),
+    )
+    exclude_roles: list[str] = Field(
+        default=["operator"],
+        description=(
+            "Leave out sessions with these roles. Default hides `operator` "
+            "sessions, so an oversight sweep does not list the person's own "
+            "terminals; pass an empty list to keep every role."
+        ),
+    )
+    supervised_by: str | None = Field(
+        default=None,
+        description=(
+            "Keep only sessions started by this session (ses_… or the engine UUID)."
+        ),
+    )
+    since: datetime | None = Field(
+        default=None,
+        description=(
+            "Keep only sessions whose output, blocked report or done mark "
+            "changed after this time (an RFC 3339 timestamp, e.g. the previous "
+            "sweep's `swept_at`). Counts then cover the kept rows."
         ),
     )
 
@@ -4906,6 +4951,9 @@ class HibernateSessionParams(Params):
         default=None, description=COLD_WAKE_OPT_OUT_DESCRIPTION
     )
     reason: Reason = Field(description="Why this write is being made (audited).")
+    mode: WriteResultMode = Field(
+        default="compact", description=WRITE_RESULT_MODE_DESCRIPTION
+    )
 
     _wake_on_text = field_validator("wake_on", mode="before")(_watch_trigger_text)
 
@@ -4921,6 +4969,9 @@ class WakeSessionParams(Params):
         ),
     )
     reason: Reason = Field(description="Why this write is being made (audited).")
+    mode: WriteResultMode = Field(
+        default="compact", description=WRITE_RESULT_MODE_DESCRIPTION
+    )
 
 
 class KeepSessionAwakeParams(Params):
@@ -5029,6 +5080,9 @@ class BindSessionWorkParams(Params):
         ),
     )
     reason: Reason = Field(description="Why this write is being made (audited).")
+    mode: WriteResultMode = Field(
+        default="compact", description=WRITE_RESULT_MODE_DESCRIPTION
+    )
 
 
 class BindSessionWorkResult(Result):

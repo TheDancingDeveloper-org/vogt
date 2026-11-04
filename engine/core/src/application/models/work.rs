@@ -8,22 +8,22 @@ use serde::{Deserialize, Serialize};
 
 use super::entities::{Freshness, Project};
 use super::views::{
-    AdoptParamsKind, AdoptParamsPriority, AdoptResultInferredKind, AdoptResultInferredPriority,
-    BacklogParamsKindsItem, BacklogParamsMode, BacklogParamsPrioritiesItem,
-    BacklogParamsTrustStatesItem, BacklogResultLinkState, BoardCellParams, BoardCellResult,
-    BoardListParamsKindsItem, BoardListParamsLaneMode, BoardListParamsPrioritiesItem,
-    BoardListResultLinkState, BugsParamsPrioritiesItem, CiSummary, Comment, CommentParamsKind,
-    ContractExemptionView, CoverageEntry, CreateInitiativeParamsState, CreateWorkParamsEffort,
-    CreateWorkParamsKind, CreateWorkParamsPriority, CriterionView, DepRef, DependencySummary,
-    DepsResultStatus, DriftProposal, DriftResolveParamsResolution, EngineDiskStatus,
-    GetWorkParamsCommentOrder, GetWorkParamsMode, HandoffFields, Initiative,
+    default_write_result_mode, AdoptParamsKind, AdoptParamsPriority, AdoptResultInferredKind,
+    AdoptResultInferredPriority, BacklogParamsKindsItem, BacklogParamsMode,
+    BacklogParamsPrioritiesItem, BacklogParamsTrustStatesItem, BacklogResultLinkState,
+    BoardCellParams, BoardCellResult, BoardListParamsKindsItem, BoardListParamsLaneMode,
+    BoardListParamsPrioritiesItem, BoardListResultLinkState, BugsParamsPrioritiesItem, CiSummary,
+    Comment, CommentParamsKind, ContractExemptionView, CoverageEntry, CreateInitiativeParamsState,
+    CreateWorkParamsEffort, CreateWorkParamsKind, CreateWorkParamsPriority, CriterionView, DepRef,
+    DependencySummary, DepsResultStatus, DriftProposal, DriftResolveParamsResolution,
+    EngineDiskStatus, GetWorkParamsCommentOrder, GetWorkParamsMode, HandoffFields, Initiative,
     InitiativeTrackingIssue, ListInitiativesParamsMode, ListWorkParamsKindsItem,
     ListWorkParamsMode, ListWorkParamsPrioritiesItem, MirroredSource, Observation,
     ProjectBriefParamsMode, PublishInitiativeResultState, RankedItem, RecommendationView,
     RelateWorkParamsKind, SessionSummary, SweepReportView, UnrelateWorkParamsKind,
     UpdateInitiativeParamsState, UpdateWorkParamsEffort, UpdateWorkParamsPriority, WorkItem,
     WorkItemBranchView, WorkItemGitStory, WorkItemRow, WorkListResultItems,
-    WorkListResultLinkState, WorkListResultMode,
+    WorkListResultLinkState, WorkListResultMode, WriteResultMode,
 };
 use super::{date_time, optional_date_time, optional_string};
 
@@ -112,6 +112,9 @@ pub struct CreateWorkParams {
     pub local_only: bool,
     #[schemars(length(min = 1))]
     pub reason: String,
+    /// `compact` (default) returns a few fields: enough to confirm the write without re-reading the whole record. `full` returns the complete result.
+    #[serde(default = "default_write_result_mode")]
+    pub mode: WriteResultMode,
 }
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -406,6 +409,9 @@ pub struct UpdateWorkParams {
     pub remove_labels: Option<Vec<String>>,
     #[schemars(length(min = 1))]
     pub reason: String,
+    /// `compact` (default) returns a few fields: enough to confirm the write without re-reading the whole record. `full` returns the complete result.
+    #[serde(default = "default_write_result_mode")]
+    pub mode: WriteResultMode,
 }
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -420,6 +426,9 @@ pub struct TransitionWorkParams {
     /// Walk the shortest path of valid edges to `to_state`, one audited transition per hop (e.g. open -> in_progress -> review -> done). Only the workflow's own edges are taken and finished states are never passed through, so no review step is skipped.
     #[serde(default)]
     pub walk: bool,
+    /// `compact` (default) returns a few fields: enough to confirm the write without re-reading the whole record. `full` returns the complete result.
+    #[serde(default = "default_write_result_mode")]
+    pub mode: WriteResultMode,
 }
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -469,6 +478,9 @@ pub struct CommentParams {
     pub handoff: Option<HandoffFields>,
     #[schemars(length(min = 1))]
     pub reason: String,
+    /// `compact` (default) returns a few fields: enough to confirm the write without re-reading the whole record. `full` returns the complete result.
+    #[serde(default = "default_write_result_mode")]
+    pub mode: WriteResultMode,
 }
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]

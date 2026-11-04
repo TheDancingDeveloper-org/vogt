@@ -6258,7 +6258,8 @@
     "assignee": null,
     "labels": null,
     "local_only": false,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -6421,7 +6422,8 @@
     "assignee": null,
     "labels": null,
     "local_only": false,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -6578,7 +6580,8 @@
     "assignee": null,
     "labels": null,
     "local_only": false,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -6691,7 +6694,8 @@
     "assignee": null,
     "labels": null,
     "local_only": false,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -6740,7 +6744,8 @@
     "assignee": null,
     "labels": null,
     "local_only": false,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -6812,7 +6817,8 @@
     "assignee": null,
     "labels": null,
     "local_only": false,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -6861,7 +6867,8 @@
     "assignee": null,
     "labels": null,
     "local_only": false,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -7002,7 +7009,8 @@
     "assignee": null,
     "labels": null,
     "local_only": false,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -7028,7 +7036,8 @@
     "assignee": null,
     "labels": null,
     "local_only": false,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -7169,7 +7178,8 @@
     "assignee": null,
     "labels": null,
     "local_only": false,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -7195,7 +7205,8 @@
     "assignee": null,
     "labels": null,
     "local_only": false,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -7267,7 +7278,8 @@
     "assignee": null,
     "labels": null,
     "local_only": false,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -7293,7 +7305,8 @@
     "assignee": null,
     "labels": null,
     "local_only": false,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -7319,7 +7332,8 @@
     "assignee": null,
     "labels": null,
     "local_only": false,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -7391,7 +7405,8 @@
     "assignee": null,
     "labels": null,
     "local_only": false,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -7417,7 +7432,8 @@
     "assignee": null,
     "labels": null,
     "local_only": false,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -7443,7 +7459,8 @@
     "assignee": "x",
     "labels": null,
     "local_only": false,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -7515,7 +7532,8 @@
     "assignee": "é😀",
     "labels": null,
     "local_only": false,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -7541,7 +7559,8 @@
     "assignee": null,
     "labels": null,
     "local_only": false,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -7567,7 +7586,8 @@
     "assignee": null,
     "labels": [],
     "local_only": false,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -7690,7 +7710,8 @@
     "assignee": null,
     "labels": null,
     "local_only": true,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -7716,7 +7737,8 @@
     "assignee": null,
     "labels": null,
     "local_only": true,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -7742,7 +7764,8 @@
     "assignee": null,
     "labels": null,
     "local_only": false,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -7791,7 +7814,8 @@
     "assignee": null,
     "labels": null,
     "local_only": true,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -7817,7 +7841,8 @@
     "assignee": null,
     "labels": null,
     "local_only": true,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -7866,7 +7891,8 @@
     "assignee": null,
     "labels": null,
     "local_only": true,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -7913,7 +7939,8 @@
     "assignee": null,
     "labels": null,
     "local_only": false,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -8026,8 +8053,174 @@
     "assignee": null,
     "labels": null,
     "local_only": false,
-    "reason": "é😀"
+    "reason": "é😀",
+    "mode": "compact"
    }
+  }
+ },
+ {
+  "op": "work.create",
+  "tag": "mode:null",
+  "params": {
+   "kind": "feature",
+   "title": "x",
+   "reason": "x",
+   "mode": null
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for work.create:\n1 validation error for CreateWorkParams\nmode\n  Input should be 'compact' or 'full' [type=literal_error, input_value=None, input_type=NoneType]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"kind\": \"feature\", \"title\": \"x\", \"reason\": \"x\", \"mode\": null}",
+   "errors": [
+    {
+     "loc": [
+      "mode"
+     ],
+     "type": "literal_error"
+    }
+   ]
+  }
+ },
+ {
+  "op": "work.create",
+  "tag": "mode:valid",
+  "params": {
+   "kind": "feature",
+   "title": "x",
+   "reason": "x",
+   "mode": "compact"
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "kind": "feature",
+    "title": "x",
+    "body": "",
+    "priority": "p2",
+    "effort": null,
+    "project": null,
+    "initiative": null,
+    "assignee": null,
+    "labels": null,
+    "local_only": false,
+    "reason": "x",
+    "mode": "compact"
+   }
+  }
+ },
+ {
+  "op": "work.create",
+  "tag": "mode:enum-bad",
+  "params": {
+   "kind": "feature",
+   "title": "x",
+   "reason": "x",
+   "mode": "zzz-bad"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for work.create:\n1 validation error for CreateWorkParams\nmode\n  Input should be 'compact' or 'full' [type=literal_error, input_value='zzz-bad', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"kind\": \"feature\", \"title\": \"x\", \"reason\": \"x\", \"mode\": \"zzz-bad\"}",
+   "errors": [
+    {
+     "loc": [
+      "mode"
+     ],
+     "type": "literal_error"
+    }
+   ]
+  }
+ },
+ {
+  "op": "work.create",
+  "tag": "mode:enum-case",
+  "params": {
+   "kind": "feature",
+   "title": "x",
+   "reason": "x",
+   "mode": "COMPACT"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for work.create:\n1 validation error for CreateWorkParams\nmode\n  Input should be 'compact' or 'full' [type=literal_error, input_value='COMPACT', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"kind\": \"feature\", \"title\": \"x\", \"reason\": \"x\", \"mode\": \"COMPACT\"}",
+   "errors": [
+    {
+     "loc": [
+      "mode"
+     ],
+     "type": "literal_error"
+    }
+   ]
+  }
+ },
+ {
+  "op": "work.create",
+  "tag": "mode:int",
+  "params": {
+   "kind": "feature",
+   "title": "x",
+   "reason": "x",
+   "mode": 5
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for work.create:\n1 validation error for CreateWorkParams\nmode\n  Input should be 'compact' or 'full' [type=literal_error, input_value=5, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"kind\": \"feature\", \"title\": \"x\", \"reason\": \"x\", \"mode\": 5}",
+   "errors": [
+    {
+     "loc": [
+      "mode"
+     ],
+     "type": "literal_error"
+    }
+   ]
+  }
+ },
+ {
+  "op": "work.create",
+  "tag": "mode:bool",
+  "params": {
+   "kind": "feature",
+   "title": "x",
+   "reason": "x",
+   "mode": true
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for work.create:\n1 validation error for CreateWorkParams\nmode\n  Input should be 'compact' or 'full' [type=literal_error, input_value=True, input_type=bool]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"kind\": \"feature\", \"title\": \"x\", \"reason\": \"x\", \"mode\": true}",
+   "errors": [
+    {
+     "loc": [
+      "mode"
+     ],
+     "type": "literal_error"
+    }
+   ]
+  }
+ },
+ {
+  "op": "work.create",
+  "tag": "mode:unicode",
+  "params": {
+   "kind": "feature",
+   "title": "x",
+   "reason": "x",
+   "mode": "é😀"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for work.create:\n1 validation error for CreateWorkParams\nmode\n  Input should be 'compact' or 'full' [type=literal_error, input_value='é😀', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"kind\": \"feature\", \"title\": \"x\", \"reason\": \"x\", \"mode\": \"é😀\"}",
+   "errors": [
+    {
+     "loc": [
+      "mode"
+     ],
+     "type": "literal_error"
+    }
+   ]
   }
  },
  {
@@ -12913,7 +13106,8 @@
     "clear_initiative": false,
     "add_labels": null,
     "remove_labels": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -13047,7 +13241,8 @@
     "clear_initiative": false,
     "add_labels": null,
     "remove_labels": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -13116,7 +13311,8 @@
     "clear_initiative": false,
     "add_labels": null,
     "remove_labels": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -13144,7 +13340,8 @@
     "clear_initiative": false,
     "add_labels": null,
     "remove_labels": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -13172,7 +13369,8 @@
     "clear_initiative": false,
     "add_labels": null,
     "remove_labels": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -13288,7 +13486,8 @@
     "clear_initiative": false,
     "add_labels": null,
     "remove_labels": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -13316,7 +13515,8 @@
     "clear_initiative": false,
     "add_labels": null,
     "remove_labels": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -13344,7 +13544,8 @@
     "clear_initiative": false,
     "add_labels": null,
     "remove_labels": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -13416,7 +13617,8 @@
     "clear_initiative": false,
     "add_labels": null,
     "remove_labels": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -13444,7 +13646,8 @@
     "clear_initiative": false,
     "add_labels": null,
     "remove_labels": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -13472,7 +13675,8 @@
     "clear_initiative": false,
     "add_labels": null,
     "remove_labels": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -13610,7 +13814,8 @@
     "clear_initiative": false,
     "add_labels": null,
     "remove_labels": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -13638,7 +13843,8 @@
     "clear_initiative": false,
     "add_labels": null,
     "remove_labels": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -13776,7 +13982,8 @@
     "clear_initiative": false,
     "add_labels": null,
     "remove_labels": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -13804,7 +14011,8 @@
     "clear_initiative": false,
     "add_labels": null,
     "remove_labels": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -13876,7 +14084,8 @@
     "clear_initiative": false,
     "add_labels": null,
     "remove_labels": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -13904,7 +14113,8 @@
     "clear_initiative": false,
     "add_labels": null,
     "remove_labels": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -13932,7 +14142,8 @@
     "clear_initiative": false,
     "add_labels": null,
     "remove_labels": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -14004,7 +14215,8 @@
     "clear_initiative": false,
     "add_labels": null,
     "remove_labels": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -14032,7 +14244,8 @@
     "clear_initiative": false,
     "add_labels": null,
     "remove_labels": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -14060,7 +14273,8 @@
     "clear_initiative": false,
     "add_labels": null,
     "remove_labels": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -14132,7 +14346,8 @@
     "clear_initiative": false,
     "add_labels": null,
     "remove_labels": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -14182,7 +14397,8 @@
     "clear_initiative": false,
     "add_labels": null,
     "remove_labels": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -14210,7 +14426,8 @@
     "clear_initiative": false,
     "add_labels": null,
     "remove_labels": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -14238,7 +14455,8 @@
     "clear_initiative": false,
     "add_labels": null,
     "remove_labels": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -14288,7 +14506,8 @@
     "clear_initiative": false,
     "add_labels": null,
     "remove_labels": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -14316,7 +14535,8 @@
     "clear_initiative": false,
     "add_labels": null,
     "remove_labels": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -14366,7 +14586,8 @@
     "clear_initiative": false,
     "add_labels": null,
     "remove_labels": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -14416,7 +14637,8 @@
     "clear_initiative": false,
     "add_labels": null,
     "remove_labels": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -14444,7 +14666,8 @@
     "clear_initiative": false,
     "add_labels": null,
     "remove_labels": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -14472,7 +14695,8 @@
     "clear_initiative": false,
     "add_labels": null,
     "remove_labels": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -14522,7 +14746,8 @@
     "clear_initiative": false,
     "add_labels": null,
     "remove_labels": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -14550,7 +14775,8 @@
     "clear_initiative": false,
     "add_labels": null,
     "remove_labels": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -14600,7 +14826,8 @@
     "clear_initiative": false,
     "add_labels": null,
     "remove_labels": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -14650,7 +14877,8 @@
     "clear_initiative": true,
     "add_labels": null,
     "remove_labels": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -14678,7 +14906,8 @@
     "clear_initiative": true,
     "add_labels": null,
     "remove_labels": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -14706,7 +14935,8 @@
     "clear_initiative": false,
     "add_labels": null,
     "remove_labels": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -14756,7 +14986,8 @@
     "clear_initiative": true,
     "add_labels": null,
     "remove_labels": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -14784,7 +15015,8 @@
     "clear_initiative": true,
     "add_labels": null,
     "remove_labels": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -14834,7 +15066,8 @@
     "clear_initiative": true,
     "add_labels": null,
     "remove_labels": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -14862,7 +15095,8 @@
     "clear_initiative": false,
     "add_labels": null,
     "remove_labels": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -14890,7 +15124,8 @@
     "clear_initiative": false,
     "add_labels": [],
     "remove_labels": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -14989,7 +15224,8 @@
     "clear_initiative": false,
     "add_labels": null,
     "remove_labels": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -15017,7 +15253,8 @@
     "clear_initiative": false,
     "add_labels": null,
     "remove_labels": [],
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -15136,7 +15373,8 @@
     "clear_initiative": false,
     "add_labels": null,
     "remove_labels": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -15247,8 +15485,170 @@
     "clear_initiative": false,
     "add_labels": null,
     "remove_labels": null,
-    "reason": "é😀"
+    "reason": "é😀",
+    "mode": "compact"
    }
+  }
+ },
+ {
+  "op": "work.update",
+  "tag": "mode:null",
+  "params": {
+   "ref": "x",
+   "reason": "x",
+   "mode": null
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for work.update:\n1 validation error for UpdateWorkParams\nmode\n  Input should be 'compact' or 'full' [type=literal_error, input_value=None, input_type=NoneType]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"ref\": \"x\", \"reason\": \"x\", \"mode\": null}",
+   "errors": [
+    {
+     "loc": [
+      "mode"
+     ],
+     "type": "literal_error"
+    }
+   ]
+  }
+ },
+ {
+  "op": "work.update",
+  "tag": "mode:valid",
+  "params": {
+   "ref": "x",
+   "reason": "x",
+   "mode": "compact"
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "ref": "x",
+    "title": null,
+    "body": null,
+    "priority": null,
+    "effort": null,
+    "project": null,
+    "initiative": null,
+    "assignee": null,
+    "clear_effort": false,
+    "clear_assignee": false,
+    "clear_initiative": false,
+    "add_labels": null,
+    "remove_labels": null,
+    "reason": "x",
+    "mode": "compact"
+   }
+  }
+ },
+ {
+  "op": "work.update",
+  "tag": "mode:enum-bad",
+  "params": {
+   "ref": "x",
+   "reason": "x",
+   "mode": "zzz-bad"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for work.update:\n1 validation error for UpdateWorkParams\nmode\n  Input should be 'compact' or 'full' [type=literal_error, input_value='zzz-bad', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"ref\": \"x\", \"reason\": \"x\", \"mode\": \"zzz-bad\"}",
+   "errors": [
+    {
+     "loc": [
+      "mode"
+     ],
+     "type": "literal_error"
+    }
+   ]
+  }
+ },
+ {
+  "op": "work.update",
+  "tag": "mode:enum-case",
+  "params": {
+   "ref": "x",
+   "reason": "x",
+   "mode": "COMPACT"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for work.update:\n1 validation error for UpdateWorkParams\nmode\n  Input should be 'compact' or 'full' [type=literal_error, input_value='COMPACT', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"ref\": \"x\", \"reason\": \"x\", \"mode\": \"COMPACT\"}",
+   "errors": [
+    {
+     "loc": [
+      "mode"
+     ],
+     "type": "literal_error"
+    }
+   ]
+  }
+ },
+ {
+  "op": "work.update",
+  "tag": "mode:int",
+  "params": {
+   "ref": "x",
+   "reason": "x",
+   "mode": 5
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for work.update:\n1 validation error for UpdateWorkParams\nmode\n  Input should be 'compact' or 'full' [type=literal_error, input_value=5, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"ref\": \"x\", \"reason\": \"x\", \"mode\": 5}",
+   "errors": [
+    {
+     "loc": [
+      "mode"
+     ],
+     "type": "literal_error"
+    }
+   ]
+  }
+ },
+ {
+  "op": "work.update",
+  "tag": "mode:bool",
+  "params": {
+   "ref": "x",
+   "reason": "x",
+   "mode": true
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for work.update:\n1 validation error for UpdateWorkParams\nmode\n  Input should be 'compact' or 'full' [type=literal_error, input_value=True, input_type=bool]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"ref\": \"x\", \"reason\": \"x\", \"mode\": true}",
+   "errors": [
+    {
+     "loc": [
+      "mode"
+     ],
+     "type": "literal_error"
+    }
+   ]
+  }
+ },
+ {
+  "op": "work.update",
+  "tag": "mode:unicode",
+  "params": {
+   "ref": "x",
+   "reason": "x",
+   "mode": "é😀"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for work.update:\n1 validation error for UpdateWorkParams\nmode\n  Input should be 'compact' or 'full' [type=literal_error, input_value='é😀', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"ref\": \"x\", \"reason\": \"x\", \"mode\": \"é😀\"}",
+   "errors": [
+    {
+     "loc": [
+      "mode"
+     ],
+     "type": "literal_error"
+    }
+   ]
   }
  },
  {
@@ -15289,7 +15689,8 @@
     "ref": "x",
     "to_state": "x",
     "reason": "x",
-    "walk": false
+    "walk": false,
+    "mode": "compact"
    }
   }
  },
@@ -15445,7 +15846,8 @@
     "ref": "x",
     "to_state": "x",
     "reason": "x",
-    "walk": false
+    "walk": false,
+    "mode": "compact"
    }
   }
  },
@@ -15507,7 +15909,8 @@
     "ref": "é😀",
     "to_state": "x",
     "reason": "x",
-    "walk": false
+    "walk": false,
+    "mode": "compact"
    }
   }
  },
@@ -15547,7 +15950,8 @@
     "ref": "x",
     "to_state": "x",
     "reason": "x",
-    "walk": false
+    "walk": false,
+    "mode": "compact"
    }
   }
  },
@@ -15609,7 +16013,8 @@
     "ref": "x",
     "to_state": "é😀",
     "reason": "x",
-    "walk": false
+    "walk": false,
+    "mode": "compact"
    }
   }
  },
@@ -15649,7 +16054,8 @@
     "ref": "x",
     "to_state": "x",
     "reason": "x",
-    "walk": false
+    "walk": false,
+    "mode": "compact"
    }
   }
  },
@@ -15755,7 +16161,8 @@
     "ref": "x",
     "to_state": "x",
     "reason": "é😀",
-    "walk": false
+    "walk": false,
+    "mode": "compact"
    }
   }
  },
@@ -15797,7 +16204,8 @@
     "ref": "x",
     "to_state": "x",
     "reason": "x",
-    "walk": true
+    "walk": true,
+    "mode": "compact"
    }
   }
  },
@@ -15816,7 +16224,8 @@
     "ref": "x",
     "to_state": "x",
     "reason": "x",
-    "walk": true
+    "walk": true,
+    "mode": "compact"
    }
   }
  },
@@ -15835,7 +16244,8 @@
     "ref": "x",
     "to_state": "x",
     "reason": "x",
-    "walk": false
+    "walk": false,
+    "mode": "compact"
    }
   }
  },
@@ -15877,7 +16287,8 @@
     "ref": "x",
     "to_state": "x",
     "reason": "x",
-    "walk": true
+    "walk": true,
+    "mode": "compact"
    }
   }
  },
@@ -15896,7 +16307,8 @@
     "ref": "x",
     "to_state": "x",
     "reason": "x",
-    "walk": true
+    "walk": true,
+    "mode": "compact"
    }
   }
  },
@@ -15938,8 +16350,167 @@
     "ref": "x",
     "to_state": "x",
     "reason": "x",
-    "walk": true
+    "walk": true,
+    "mode": "compact"
    }
+  }
+ },
+ {
+  "op": "work.transition",
+  "tag": "mode:null",
+  "params": {
+   "ref": "x",
+   "to_state": "x",
+   "reason": "x",
+   "mode": null
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for work.transition:\n1 validation error for TransitionWorkParams\nmode\n  Input should be 'compact' or 'full' [type=literal_error, input_value=None, input_type=NoneType]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"ref\": \"x\", \"to_state\": \"x\", \"reason\": \"x\", \"mode\": null}",
+   "errors": [
+    {
+     "loc": [
+      "mode"
+     ],
+     "type": "literal_error"
+    }
+   ]
+  }
+ },
+ {
+  "op": "work.transition",
+  "tag": "mode:valid",
+  "params": {
+   "ref": "x",
+   "to_state": "x",
+   "reason": "x",
+   "mode": "compact"
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "ref": "x",
+    "to_state": "x",
+    "reason": "x",
+    "walk": false,
+    "mode": "compact"
+   }
+  }
+ },
+ {
+  "op": "work.transition",
+  "tag": "mode:enum-bad",
+  "params": {
+   "ref": "x",
+   "to_state": "x",
+   "reason": "x",
+   "mode": "zzz-bad"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for work.transition:\n1 validation error for TransitionWorkParams\nmode\n  Input should be 'compact' or 'full' [type=literal_error, input_value='zzz-bad', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"ref\": \"x\", \"to_state\": \"x\", \"reason\": \"x\", \"mode\": \"zzz-bad\"}",
+   "errors": [
+    {
+     "loc": [
+      "mode"
+     ],
+     "type": "literal_error"
+    }
+   ]
+  }
+ },
+ {
+  "op": "work.transition",
+  "tag": "mode:enum-case",
+  "params": {
+   "ref": "x",
+   "to_state": "x",
+   "reason": "x",
+   "mode": "COMPACT"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for work.transition:\n1 validation error for TransitionWorkParams\nmode\n  Input should be 'compact' or 'full' [type=literal_error, input_value='COMPACT', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"ref\": \"x\", \"to_state\": \"x\", \"reason\": \"x\", \"mode\": \"COMPACT\"}",
+   "errors": [
+    {
+     "loc": [
+      "mode"
+     ],
+     "type": "literal_error"
+    }
+   ]
+  }
+ },
+ {
+  "op": "work.transition",
+  "tag": "mode:int",
+  "params": {
+   "ref": "x",
+   "to_state": "x",
+   "reason": "x",
+   "mode": 5
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for work.transition:\n1 validation error for TransitionWorkParams\nmode\n  Input should be 'compact' or 'full' [type=literal_error, input_value=5, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"ref\": \"x\", \"to_state\": \"x\", \"reason\": \"x\", \"mode\": 5}",
+   "errors": [
+    {
+     "loc": [
+      "mode"
+     ],
+     "type": "literal_error"
+    }
+   ]
+  }
+ },
+ {
+  "op": "work.transition",
+  "tag": "mode:bool",
+  "params": {
+   "ref": "x",
+   "to_state": "x",
+   "reason": "x",
+   "mode": true
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for work.transition:\n1 validation error for TransitionWorkParams\nmode\n  Input should be 'compact' or 'full' [type=literal_error, input_value=True, input_type=bool]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"ref\": \"x\", \"to_state\": \"x\", \"reason\": \"x\", \"mode\": true}",
+   "errors": [
+    {
+     "loc": [
+      "mode"
+     ],
+     "type": "literal_error"
+    }
+   ]
+  }
+ },
+ {
+  "op": "work.transition",
+  "tag": "mode:unicode",
+  "params": {
+   "ref": "x",
+   "to_state": "x",
+   "reason": "x",
+   "mode": "é😀"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for work.transition:\n1 validation error for TransitionWorkParams\nmode\n  Input should be 'compact' or 'full' [type=literal_error, input_value='é😀', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"ref\": \"x\", \"to_state\": \"x\", \"reason\": \"x\", \"mode\": \"é😀\"}",
+   "errors": [
+    {
+     "loc": [
+      "mode"
+     ],
+     "type": "literal_error"
+    }
+   ]
   }
  },
  {
@@ -17872,7 +18443,8 @@
     "body": "x",
     "kind": "note",
     "handoff": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -18029,7 +18601,8 @@
     "body": "x",
     "kind": "note",
     "handoff": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -18092,7 +18665,8 @@
     "body": "x",
     "kind": "note",
     "handoff": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -18133,7 +18707,8 @@
     "body": "x",
     "kind": "note",
     "handoff": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -18240,7 +18815,8 @@
     "body": "é😀",
     "kind": "note",
     "handoff": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -18283,7 +18859,8 @@
     "body": "x",
     "kind": "note",
     "handoff": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -18418,7 +18995,8 @@
     "body": "x",
     "kind": "note",
     "handoff": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -18550,7 +19128,8 @@
     "body": "x",
     "kind": "note",
     "handoff": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -18657,8 +19236,168 @@
     "body": "x",
     "kind": "note",
     "handoff": null,
-    "reason": "é😀"
+    "reason": "é😀",
+    "mode": "compact"
    }
+  }
+ },
+ {
+  "op": "work.comment",
+  "tag": "mode:null",
+  "params": {
+   "ref": "x",
+   "body": "x",
+   "reason": "x",
+   "mode": null
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for work.comment:\n1 validation error for CommentParams\nmode\n  Input should be 'compact' or 'full' [type=literal_error, input_value=None, input_type=NoneType]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"ref\": \"x\", \"body\": \"x\", \"reason\": \"x\", \"mode\": null}",
+   "errors": [
+    {
+     "loc": [
+      "mode"
+     ],
+     "type": "literal_error"
+    }
+   ]
+  }
+ },
+ {
+  "op": "work.comment",
+  "tag": "mode:valid",
+  "params": {
+   "ref": "x",
+   "body": "x",
+   "reason": "x",
+   "mode": "compact"
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "ref": "x",
+    "body": "x",
+    "kind": "note",
+    "handoff": null,
+    "reason": "x",
+    "mode": "compact"
+   }
+  }
+ },
+ {
+  "op": "work.comment",
+  "tag": "mode:enum-bad",
+  "params": {
+   "ref": "x",
+   "body": "x",
+   "reason": "x",
+   "mode": "zzz-bad"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for work.comment:\n1 validation error for CommentParams\nmode\n  Input should be 'compact' or 'full' [type=literal_error, input_value='zzz-bad', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"ref\": \"x\", \"body\": \"x\", \"reason\": \"x\", \"mode\": \"zzz-bad\"}",
+   "errors": [
+    {
+     "loc": [
+      "mode"
+     ],
+     "type": "literal_error"
+    }
+   ]
+  }
+ },
+ {
+  "op": "work.comment",
+  "tag": "mode:enum-case",
+  "params": {
+   "ref": "x",
+   "body": "x",
+   "reason": "x",
+   "mode": "COMPACT"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for work.comment:\n1 validation error for CommentParams\nmode\n  Input should be 'compact' or 'full' [type=literal_error, input_value='COMPACT', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"ref\": \"x\", \"body\": \"x\", \"reason\": \"x\", \"mode\": \"COMPACT\"}",
+   "errors": [
+    {
+     "loc": [
+      "mode"
+     ],
+     "type": "literal_error"
+    }
+   ]
+  }
+ },
+ {
+  "op": "work.comment",
+  "tag": "mode:int",
+  "params": {
+   "ref": "x",
+   "body": "x",
+   "reason": "x",
+   "mode": 5
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for work.comment:\n1 validation error for CommentParams\nmode\n  Input should be 'compact' or 'full' [type=literal_error, input_value=5, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"ref\": \"x\", \"body\": \"x\", \"reason\": \"x\", \"mode\": 5}",
+   "errors": [
+    {
+     "loc": [
+      "mode"
+     ],
+     "type": "literal_error"
+    }
+   ]
+  }
+ },
+ {
+  "op": "work.comment",
+  "tag": "mode:bool",
+  "params": {
+   "ref": "x",
+   "body": "x",
+   "reason": "x",
+   "mode": true
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for work.comment:\n1 validation error for CommentParams\nmode\n  Input should be 'compact' or 'full' [type=literal_error, input_value=True, input_type=bool]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"ref\": \"x\", \"body\": \"x\", \"reason\": \"x\", \"mode\": true}",
+   "errors": [
+    {
+     "loc": [
+      "mode"
+     ],
+     "type": "literal_error"
+    }
+   ]
+  }
+ },
+ {
+  "op": "work.comment",
+  "tag": "mode:unicode",
+  "params": {
+   "ref": "x",
+   "body": "x",
+   "reason": "x",
+   "mode": "é😀"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for work.comment:\n1 validation error for CommentParams\nmode\n  Input should be 'compact' or 'full' [type=literal_error, input_value='é😀', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"ref\": \"x\", \"body\": \"x\", \"reason\": \"x\", \"mode\": \"é😀\"}",
+   "errors": [
+    {
+     "loc": [
+      "mode"
+     ],
+     "type": "literal_error"
+    }
+   ]
   }
  },
  {
@@ -36680,7 +37419,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -36775,7 +37515,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -36813,7 +37554,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -36893,7 +37635,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -36931,7 +37674,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -36969,7 +37713,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -37049,7 +37794,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -37087,7 +37833,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -37125,7 +37872,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -37205,7 +37953,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -37243,7 +37992,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -37281,7 +38031,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -37361,7 +38112,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -37420,7 +38172,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -37547,7 +38300,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -37674,7 +38428,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -37801,7 +38556,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -37907,7 +38663,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -37945,7 +38702,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -37983,7 +38741,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -38021,7 +38780,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -38080,7 +38840,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -38118,7 +38879,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -38177,7 +38939,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -38236,7 +38999,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -38379,7 +39143,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -38417,7 +39182,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -38539,7 +39305,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -38577,7 +39344,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -38699,7 +39467,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -38737,7 +39506,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -38817,7 +39587,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -38855,7 +39626,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -38893,7 +39665,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -38973,7 +39746,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -39011,7 +39785,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -39049,7 +39824,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -39129,7 +39905,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -39167,7 +39944,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -39205,7 +39983,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -39243,7 +40022,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -39281,7 +40061,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -39340,7 +40121,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -39378,7 +40160,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -39437,7 +40220,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -39496,7 +40280,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -39639,7 +40424,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -39677,7 +40463,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -39757,7 +40544,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -39795,7 +40583,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -39833,7 +40622,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -39913,7 +40703,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -39951,7 +40742,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -39994,7 +40786,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -40082,7 +40875,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -40120,7 +40914,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -40158,7 +40953,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -40196,7 +40992,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -40234,7 +41031,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -40293,7 +41091,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -40331,7 +41130,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -40390,7 +41190,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -40428,7 +41229,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -40466,7 +41268,8 @@
     "cwd": "x",
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -40546,7 +41349,8 @@
     "cwd": "é😀",
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -40605,7 +41409,8 @@
     "cwd": null,
     "cold_wake_opt_out": true,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -40643,7 +41448,8 @@
     "cwd": null,
     "cold_wake_opt_out": true,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -40681,7 +41487,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -40740,7 +41547,8 @@
     "cwd": null,
     "cold_wake_opt_out": true,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -40778,7 +41586,8 @@
     "cwd": null,
     "cold_wake_opt_out": true,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -40837,7 +41646,8 @@
     "cwd": null,
     "cold_wake_opt_out": true,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -40894,7 +41704,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -41011,7 +41822,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "é😀",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -41049,7 +41861,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": null
+    "purpose": null,
+    "mode": "compact"
    }
   }
  },
@@ -41087,7 +41900,8 @@
     "cwd": null,
     "cold_wake_opt_out": false,
     "reason": "x",
-    "purpose": "implement"
+    "purpose": "implement",
+    "mode": "compact"
    }
   }
  },
@@ -41190,6 +42004,171 @@
     {
      "loc": [
       "purpose"
+     ],
+     "type": "literal_error"
+    }
+   ]
+  }
+ },
+ {
+  "op": "session.start",
+  "tag": "mode:null",
+  "params": {
+   "reason": "x",
+   "mode": null
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for session.start:\n1 validation error for StartSessionParams\nmode\n  Input should be 'compact' or 'full' [type=literal_error, input_value=None, input_type=NoneType]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"reason\": \"x\", \"mode\": null}",
+   "errors": [
+    {
+     "loc": [
+      "mode"
+     ],
+     "type": "literal_error"
+    }
+   ]
+  }
+ },
+ {
+  "op": "session.start",
+  "tag": "mode:valid",
+  "params": {
+   "reason": "x",
+   "mode": "compact"
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "work_item": null,
+    "project": null,
+    "template": null,
+    "task": null,
+    "files": [],
+    "symbols": [],
+    "done": [],
+    "gates": [],
+    "repo_map": null,
+    "permission_mode": "default",
+    "account": null,
+    "resume": null,
+    "name": null,
+    "model": null,
+    "effort": null,
+    "autopilot": null,
+    "role": "worker",
+    "from_handoff": null,
+    "review_of": null,
+    "budget": null,
+    "worktree": null,
+    "cwd": null,
+    "cold_wake_opt_out": false,
+    "reason": "x",
+    "purpose": null,
+    "mode": "compact"
+   }
+  }
+ },
+ {
+  "op": "session.start",
+  "tag": "mode:enum-bad",
+  "params": {
+   "reason": "x",
+   "mode": "zzz-bad"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for session.start:\n1 validation error for StartSessionParams\nmode\n  Input should be 'compact' or 'full' [type=literal_error, input_value='zzz-bad', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"reason\": \"x\", \"mode\": \"zzz-bad\"}",
+   "errors": [
+    {
+     "loc": [
+      "mode"
+     ],
+     "type": "literal_error"
+    }
+   ]
+  }
+ },
+ {
+  "op": "session.start",
+  "tag": "mode:enum-case",
+  "params": {
+   "reason": "x",
+   "mode": "COMPACT"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for session.start:\n1 validation error for StartSessionParams\nmode\n  Input should be 'compact' or 'full' [type=literal_error, input_value='COMPACT', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"reason\": \"x\", \"mode\": \"COMPACT\"}",
+   "errors": [
+    {
+     "loc": [
+      "mode"
+     ],
+     "type": "literal_error"
+    }
+   ]
+  }
+ },
+ {
+  "op": "session.start",
+  "tag": "mode:int",
+  "params": {
+   "reason": "x",
+   "mode": 5
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for session.start:\n1 validation error for StartSessionParams\nmode\n  Input should be 'compact' or 'full' [type=literal_error, input_value=5, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"reason\": \"x\", \"mode\": 5}",
+   "errors": [
+    {
+     "loc": [
+      "mode"
+     ],
+     "type": "literal_error"
+    }
+   ]
+  }
+ },
+ {
+  "op": "session.start",
+  "tag": "mode:bool",
+  "params": {
+   "reason": "x",
+   "mode": true
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for session.start:\n1 validation error for StartSessionParams\nmode\n  Input should be 'compact' or 'full' [type=literal_error, input_value=True, input_type=bool]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"reason\": \"x\", \"mode\": true}",
+   "errors": [
+    {
+     "loc": [
+      "mode"
+     ],
+     "type": "literal_error"
+    }
+   ]
+  }
+ },
+ {
+  "op": "session.start",
+  "tag": "mode:unicode",
+  "params": {
+   "reason": "x",
+   "mode": "é😀"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for session.start:\n1 validation error for StartSessionParams\nmode\n  Input should be 'compact' or 'full' [type=literal_error, input_value='é😀', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"reason\": \"x\", \"mode\": \"é😀\"}",
+   "errors": [
+    {
+     "loc": [
+      "mode"
      ],
      "type": "literal_error"
     }
@@ -45200,7 +46179,12 @@
     "attention": null,
     "limit": 50,
     "screen_lines": 0,
-    "stall_after_minutes": 10
+    "stall_after_minutes": 10,
+    "exclude_roles": [
+     "operator"
+    ],
+    "supervised_by": null,
+    "since": null
    }
   }
  },
@@ -45218,7 +46202,12 @@
     "attention": null,
     "limit": 50,
     "screen_lines": 0,
-    "stall_after_minutes": 10
+    "stall_after_minutes": 10,
+    "exclude_roles": [
+     "operator"
+    ],
+    "supervised_by": null,
+    "since": null
    }
   }
  },
@@ -45258,7 +46247,12 @@
     "attention": null,
     "limit": 50,
     "screen_lines": 0,
-    "stall_after_minutes": 10
+    "stall_after_minutes": 10,
+    "exclude_roles": [
+     "operator"
+    ],
+    "supervised_by": null,
+    "since": null
    }
   }
  },
@@ -45278,7 +46272,12 @@
     "attention": null,
     "limit": 50,
     "screen_lines": 0,
-    "stall_after_minutes": 10
+    "stall_after_minutes": 10,
+    "exclude_roles": [
+     "operator"
+    ],
+    "supervised_by": null,
+    "since": null
    }
   }
  },
@@ -45338,7 +46337,12 @@
     "attention": null,
     "limit": 50,
     "screen_lines": 0,
-    "stall_after_minutes": 10
+    "stall_after_minutes": 10,
+    "exclude_roles": [
+     "operator"
+    ],
+    "supervised_by": null,
+    "since": null
    }
   }
  },
@@ -45378,7 +46382,12 @@
     "attention": null,
     "limit": 50,
     "screen_lines": 0,
-    "stall_after_minutes": 10
+    "stall_after_minutes": 10,
+    "exclude_roles": [
+     "operator"
+    ],
+    "supervised_by": null,
+    "since": null
    }
   }
  },
@@ -45518,7 +46527,12 @@
     "attention": null,
     "limit": 50,
     "screen_lines": 0,
-    "stall_after_minutes": 10
+    "stall_after_minutes": 10,
+    "exclude_roles": [
+     "operator"
+    ],
+    "supervised_by": null,
+    "since": null
    }
   }
  },
@@ -45603,7 +46617,12 @@
     "attention": null,
     "limit": 50,
     "screen_lines": 0,
-    "stall_after_minutes": 10
+    "stall_after_minutes": 10,
+    "exclude_roles": [
+     "operator"
+    ],
+    "supervised_by": null,
+    "since": null
    }
   }
  },
@@ -45623,7 +46642,12 @@
     "attention": null,
     "limit": 50,
     "screen_lines": 0,
-    "stall_after_minutes": 10
+    "stall_after_minutes": 10,
+    "exclude_roles": [
+     "operator"
+    ],
+    "supervised_by": null,
+    "since": null
    }
   }
  },
@@ -45708,7 +46732,12 @@
     "attention": null,
     "limit": 50,
     "screen_lines": 0,
-    "stall_after_minutes": 10
+    "stall_after_minutes": 10,
+    "exclude_roles": [
+     "operator"
+    ],
+    "supervised_by": null,
+    "since": null
    }
   }
  },
@@ -45728,7 +46757,12 @@
     "attention": [],
     "limit": 50,
     "screen_lines": 0,
-    "stall_after_minutes": 10
+    "stall_after_minutes": 10,
+    "exclude_roles": [
+     "operator"
+    ],
+    "supervised_by": null,
+    "since": null
    }
   }
  },
@@ -45833,7 +46867,12 @@
     "attention": null,
     "limit": 1,
     "screen_lines": 0,
-    "stall_after_minutes": 10
+    "stall_after_minutes": 10,
+    "exclude_roles": [
+     "operator"
+    ],
+    "supervised_by": null,
+    "since": null
    }
   }
  },
@@ -45853,7 +46892,12 @@
     "attention": null,
     "limit": 5,
     "screen_lines": 0,
-    "stall_after_minutes": 10
+    "stall_after_minutes": 10,
+    "exclude_roles": [
+     "operator"
+    ],
+    "supervised_by": null,
+    "since": null
    }
   }
  },
@@ -45873,7 +46917,12 @@
     "attention": null,
     "limit": 5,
     "screen_lines": 0,
-    "stall_after_minutes": 10
+    "stall_after_minutes": 10,
+    "exclude_roles": [
+     "operator"
+    ],
+    "supervised_by": null,
+    "since": null
    }
   }
  },
@@ -45913,7 +46962,12 @@
     "attention": null,
     "limit": 1,
     "screen_lines": 0,
-    "stall_after_minutes": 10
+    "stall_after_minutes": 10,
+    "exclude_roles": [
+     "operator"
+    ],
+    "supervised_by": null,
+    "since": null
    }
   }
  },
@@ -45953,7 +47007,12 @@
     "attention": null,
     "limit": 5,
     "screen_lines": 0,
-    "stall_after_minutes": 10
+    "stall_after_minutes": 10,
+    "exclude_roles": [
+     "operator"
+    ],
+    "supervised_by": null,
+    "since": null
    }
   }
  },
@@ -46013,7 +47072,12 @@
     "attention": null,
     "limit": 1,
     "screen_lines": 0,
-    "stall_after_minutes": 10
+    "stall_after_minutes": 10,
+    "exclude_roles": [
+     "operator"
+    ],
+    "supervised_by": null,
+    "since": null
    }
   }
  },
@@ -46053,7 +47117,12 @@
     "attention": null,
     "limit": 500,
     "screen_lines": 0,
-    "stall_after_minutes": 10
+    "stall_after_minutes": 10,
+    "exclude_roles": [
+     "operator"
+    ],
+    "supervised_by": null,
+    "since": null
    }
   }
  },
@@ -46093,7 +47162,12 @@
     "attention": null,
     "limit": 50,
     "screen_lines": 1,
-    "stall_after_minutes": 10
+    "stall_after_minutes": 10,
+    "exclude_roles": [
+     "operator"
+    ],
+    "supervised_by": null,
+    "since": null
    }
   }
  },
@@ -46113,7 +47187,12 @@
     "attention": null,
     "limit": 50,
     "screen_lines": 5,
-    "stall_after_minutes": 10
+    "stall_after_minutes": 10,
+    "exclude_roles": [
+     "operator"
+    ],
+    "supervised_by": null,
+    "since": null
    }
   }
  },
@@ -46133,7 +47212,12 @@
     "attention": null,
     "limit": 50,
     "screen_lines": 5,
-    "stall_after_minutes": 10
+    "stall_after_minutes": 10,
+    "exclude_roles": [
+     "operator"
+    ],
+    "supervised_by": null,
+    "since": null
    }
   }
  },
@@ -46173,7 +47257,12 @@
     "attention": null,
     "limit": 50,
     "screen_lines": 1,
-    "stall_after_minutes": 10
+    "stall_after_minutes": 10,
+    "exclude_roles": [
+     "operator"
+    ],
+    "supervised_by": null,
+    "since": null
    }
   }
  },
@@ -46213,7 +47302,12 @@
     "attention": null,
     "limit": 50,
     "screen_lines": 5,
-    "stall_after_minutes": 10
+    "stall_after_minutes": 10,
+    "exclude_roles": [
+     "operator"
+    ],
+    "supervised_by": null,
+    "since": null
    }
   }
  },
@@ -46273,7 +47367,12 @@
     "attention": null,
     "limit": 50,
     "screen_lines": 0,
-    "stall_after_minutes": 10
+    "stall_after_minutes": 10,
+    "exclude_roles": [
+     "operator"
+    ],
+    "supervised_by": null,
+    "since": null
    }
   }
  },
@@ -46313,7 +47412,12 @@
     "attention": null,
     "limit": 50,
     "screen_lines": 40,
-    "stall_after_minutes": 10
+    "stall_after_minutes": 10,
+    "exclude_roles": [
+     "operator"
+    ],
+    "supervised_by": null,
+    "since": null
    }
   }
  },
@@ -46353,7 +47457,12 @@
     "attention": null,
     "limit": 50,
     "screen_lines": 0,
-    "stall_after_minutes": 1
+    "stall_after_minutes": 1,
+    "exclude_roles": [
+     "operator"
+    ],
+    "supervised_by": null,
+    "since": null
    }
   }
  },
@@ -46373,7 +47482,12 @@
     "attention": null,
     "limit": 50,
     "screen_lines": 0,
-    "stall_after_minutes": 5
+    "stall_after_minutes": 5,
+    "exclude_roles": [
+     "operator"
+    ],
+    "supervised_by": null,
+    "since": null
    }
   }
  },
@@ -46393,7 +47507,12 @@
     "attention": null,
     "limit": 50,
     "screen_lines": 0,
-    "stall_after_minutes": 5
+    "stall_after_minutes": 5,
+    "exclude_roles": [
+     "operator"
+    ],
+    "supervised_by": null,
+    "since": null
    }
   }
  },
@@ -46433,7 +47552,12 @@
     "attention": null,
     "limit": 50,
     "screen_lines": 0,
-    "stall_after_minutes": 1
+    "stall_after_minutes": 1,
+    "exclude_roles": [
+     "operator"
+    ],
+    "supervised_by": null,
+    "since": null
    }
   }
  },
@@ -46473,7 +47597,12 @@
     "attention": null,
     "limit": 50,
     "screen_lines": 0,
-    "stall_after_minutes": 5
+    "stall_after_minutes": 5,
+    "exclude_roles": [
+     "operator"
+    ],
+    "supervised_by": null,
+    "since": null
    }
   }
  },
@@ -46533,7 +47662,12 @@
     "attention": null,
     "limit": 50,
     "screen_lines": 0,
-    "stall_after_minutes": 1
+    "stall_after_minutes": 1,
+    "exclude_roles": [
+     "operator"
+    ],
+    "supervised_by": null,
+    "since": null
    }
   }
  },
@@ -46573,8 +47707,346 @@
     "attention": null,
     "limit": 50,
     "screen_lines": 0,
-    "stall_after_minutes": 1440
+    "stall_after_minutes": 1440,
+    "exclude_roles": [
+     "operator"
+    ],
+    "supervised_by": null,
+    "since": null
    }
+  }
+ },
+ {
+  "op": "session.sweep",
+  "tag": "exclude_roles:null",
+  "params": {
+   "exclude_roles": null
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for session.sweep:\n1 validation error for SweepSessionsParams\nexclude_roles\n  Input should be a valid list [type=list_type, input_value=None, input_type=NoneType]\n    For further information visit https://errors.pydantic.dev/2.13/v/list_type",
+   "sent": "{\"exclude_roles\": null}",
+   "errors": [
+    {
+     "loc": [
+      "exclude_roles"
+     ],
+     "type": "list_type"
+    }
+   ]
+  }
+ },
+ {
+  "op": "session.sweep",
+  "tag": "exclude_roles:valid",
+  "params": {
+   "exclude_roles": []
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "project": null,
+    "mode": "digest",
+    "fields": [],
+    "states": null,
+    "attention": null,
+    "limit": 50,
+    "screen_lines": 0,
+    "stall_after_minutes": 10,
+    "exclude_roles": [],
+    "supervised_by": null,
+    "since": null
+   }
+  }
+ },
+ {
+  "op": "session.sweep",
+  "tag": "exclude_roles:notlist",
+  "params": {
+   "exclude_roles": "a,b"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for session.sweep:\n1 validation error for SweepSessionsParams\nexclude_roles\n  Input should be a valid list [type=list_type, input_value='a,b', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/list_type",
+   "sent": "{\"exclude_roles\": \"a,b\"}",
+   "errors": [
+    {
+     "loc": [
+      "exclude_roles"
+     ],
+     "type": "list_type"
+    }
+   ]
+  }
+ },
+ {
+  "op": "session.sweep",
+  "tag": "exclude_roles:dict",
+  "params": {
+   "exclude_roles": {
+    "a": 1
+   }
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for session.sweep:\n1 validation error for SweepSessionsParams\nexclude_roles\n  Input should be a valid list [type=list_type, input_value={'a': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/list_type",
+   "sent": "{\"exclude_roles\": {\"a\": 1}}",
+   "errors": [
+    {
+     "loc": [
+      "exclude_roles"
+     ],
+     "type": "list_type"
+    }
+   ]
+  }
+ },
+ {
+  "op": "session.sweep",
+  "tag": "exclude_roles:item-int",
+  "params": {
+   "exclude_roles": [
+    5
+   ]
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for session.sweep:\n1 validation error for SweepSessionsParams\nexclude_roles.0\n  Input should be a valid string [type=string_type, input_value=5, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.13/v/string_type",
+   "sent": "{\"exclude_roles\": [5]}",
+   "errors": [
+    {
+     "loc": [
+      "exclude_roles",
+      0
+     ],
+     "type": "string_type"
+    }
+   ]
+  }
+ },
+ {
+  "op": "session.sweep",
+  "tag": "supervised_by:null",
+  "params": {
+   "supervised_by": null
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "project": null,
+    "mode": "digest",
+    "fields": [],
+    "states": null,
+    "attention": null,
+    "limit": 50,
+    "screen_lines": 0,
+    "stall_after_minutes": 10,
+    "exclude_roles": [
+     "operator"
+    ],
+    "supervised_by": null,
+    "since": null
+   }
+  }
+ },
+ {
+  "op": "session.sweep",
+  "tag": "supervised_by:valid",
+  "params": {
+   "supervised_by": "x"
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "project": null,
+    "mode": "digest",
+    "fields": [],
+    "states": null,
+    "attention": null,
+    "limit": 50,
+    "screen_lines": 0,
+    "stall_after_minutes": 10,
+    "exclude_roles": [
+     "operator"
+    ],
+    "supervised_by": "x",
+    "since": null
+   }
+  }
+ },
+ {
+  "op": "session.sweep",
+  "tag": "supervised_by:int",
+  "params": {
+   "supervised_by": 5
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for session.sweep:\n1 validation error for SweepSessionsParams\nsupervised_by\n  Input should be a valid string [type=string_type, input_value=5, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.13/v/string_type",
+   "sent": "{\"supervised_by\": 5}",
+   "errors": [
+    {
+     "loc": [
+      "supervised_by"
+     ],
+     "type": "string_type"
+    }
+   ]
+  }
+ },
+ {
+  "op": "session.sweep",
+  "tag": "supervised_by:bool",
+  "params": {
+   "supervised_by": true
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for session.sweep:\n1 validation error for SweepSessionsParams\nsupervised_by\n  Input should be a valid string [type=string_type, input_value=True, input_type=bool]\n    For further information visit https://errors.pydantic.dev/2.13/v/string_type",
+   "sent": "{\"supervised_by\": true}",
+   "errors": [
+    {
+     "loc": [
+      "supervised_by"
+     ],
+     "type": "string_type"
+    }
+   ]
+  }
+ },
+ {
+  "op": "session.sweep",
+  "tag": "supervised_by:unicode",
+  "params": {
+   "supervised_by": "é😀"
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "project": null,
+    "mode": "digest",
+    "fields": [],
+    "states": null,
+    "attention": null,
+    "limit": 50,
+    "screen_lines": 0,
+    "stall_after_minutes": 10,
+    "exclude_roles": [
+     "operator"
+    ],
+    "supervised_by": "é😀",
+    "since": null
+   }
+  }
+ },
+ {
+  "op": "session.sweep",
+  "tag": "since:null",
+  "params": {
+   "since": null
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "project": null,
+    "mode": "digest",
+    "fields": [],
+    "states": null,
+    "attention": null,
+    "limit": 50,
+    "screen_lines": 0,
+    "stall_after_minutes": 10,
+    "exclude_roles": [
+     "operator"
+    ],
+    "supervised_by": null,
+    "since": null
+   }
+  }
+ },
+ {
+  "op": "session.sweep",
+  "tag": "since:valid",
+  "params": {
+   "since": "x"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for session.sweep:\n1 validation error for SweepSessionsParams\nsince\n  Input should be a valid datetime or date, input is too short [type=datetime_from_date_parsing, input_value='x', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/datetime_from_date_parsing",
+   "sent": "{\"since\": \"x\"}",
+   "errors": [
+    {
+     "loc": [
+      "since"
+     ],
+     "type": "datetime_from_date_parsing"
+    }
+   ]
+  }
+ },
+ {
+  "op": "session.sweep",
+  "tag": "since:int",
+  "params": {
+   "since": 5
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "project": null,
+    "mode": "digest",
+    "fields": [],
+    "states": null,
+    "attention": null,
+    "limit": 50,
+    "screen_lines": 0,
+    "stall_after_minutes": 10,
+    "exclude_roles": [
+     "operator"
+    ],
+    "supervised_by": null,
+    "since": "1970-01-01T00:00:05Z"
+   }
+  }
+ },
+ {
+  "op": "session.sweep",
+  "tag": "since:bool",
+  "params": {
+   "since": true
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for session.sweep:\n1 validation error for SweepSessionsParams\nsince\n  Input should be a valid datetime [type=datetime_type, input_value=True, input_type=bool]\n    For further information visit https://errors.pydantic.dev/2.13/v/datetime_type",
+   "sent": "{\"since\": true}",
+   "errors": [
+    {
+     "loc": [
+      "since"
+     ],
+     "type": "datetime_type"
+    }
+   ]
+  }
+ },
+ {
+  "op": "session.sweep",
+  "tag": "since:unicode",
+  "params": {
+   "since": "é😀"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for session.sweep:\n1 validation error for SweepSessionsParams\nsince\n  Input should be a valid datetime or date, input is too short [type=datetime_from_date_parsing, input_value='é😀', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/datetime_from_date_parsing",
+   "sent": "{\"since\": \"é😀\"}",
+   "errors": [
+    {
+     "loc": [
+      "since"
+     ],
+     "type": "datetime_from_date_parsing"
+    }
+   ]
   }
  },
  {
@@ -46593,7 +48065,8 @@
     "wake_on": null,
     "wake_on_ttl_seconds": 86400,
     "cold_wake_opt_out": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -46720,7 +48193,8 @@
     "wake_on": null,
     "wake_on_ttl_seconds": 86400,
     "cold_wake_opt_out": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -46782,7 +48256,8 @@
     "wake_on": null,
     "wake_on_ttl_seconds": 86400,
     "cold_wake_opt_out": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -46825,7 +48300,8 @@
     "wake_on": null,
     "wake_on_ttl_seconds": 86400,
     "cold_wake_opt_out": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -46846,7 +48322,8 @@
     "wake_on": null,
     "wake_on_ttl_seconds": 86400,
     "cold_wake_opt_out": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -46867,7 +48344,8 @@
     "wake_on": null,
     "wake_on_ttl_seconds": 86400,
     "cold_wake_opt_out": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -46910,7 +48388,8 @@
     "wake_on": null,
     "wake_on_ttl_seconds": 86400,
     "cold_wake_opt_out": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -46931,7 +48410,8 @@
     "wake_on": null,
     "wake_on_ttl_seconds": 86400,
     "cold_wake_opt_out": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -46974,7 +48454,8 @@
     "wake_on": null,
     "wake_on_ttl_seconds": 86400,
     "cold_wake_opt_out": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -46995,7 +48476,8 @@
     "wake_on": null,
     "wake_on_ttl_seconds": 86400,
     "cold_wake_opt_out": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -47016,7 +48498,8 @@
     "wake_on": null,
     "wake_on_ttl_seconds": 86400,
     "cold_wake_opt_out": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -47081,7 +48564,8 @@
     "wake_on": null,
     "wake_on_ttl_seconds": 86400,
     "cold_wake_opt_out": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -47102,7 +48586,8 @@
     "wake_on": null,
     "wake_on_ttl_seconds": 86400,
     "cold_wake_opt_out": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -47246,7 +48731,8 @@
     "wake_on": null,
     "wake_on_ttl_seconds": 60,
     "cold_wake_opt_out": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -47443,7 +48929,8 @@
     "wake_on": null,
     "wake_on_ttl_seconds": 60,
     "cold_wake_opt_out": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -47486,7 +48973,8 @@
     "wake_on": null,
     "wake_on_ttl_seconds": 1209600,
     "cold_wake_opt_out": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -47507,7 +48995,8 @@
     "wake_on": null,
     "wake_on_ttl_seconds": 86400,
     "cold_wake_opt_out": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -47528,7 +49017,8 @@
     "wake_on": null,
     "wake_on_ttl_seconds": 86400,
     "cold_wake_opt_out": true,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -47549,7 +49039,8 @@
     "wake_on": null,
     "wake_on_ttl_seconds": 86400,
     "cold_wake_opt_out": true,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -47570,7 +49061,8 @@
     "wake_on": null,
     "wake_on_ttl_seconds": 86400,
     "cold_wake_opt_out": false,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -47613,7 +49105,8 @@
     "wake_on": null,
     "wake_on_ttl_seconds": 86400,
     "cold_wake_opt_out": true,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -47634,7 +49127,8 @@
     "wake_on": null,
     "wake_on_ttl_seconds": 86400,
     "cold_wake_opt_out": true,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -47677,7 +49171,8 @@
     "wake_on": null,
     "wake_on_ttl_seconds": 86400,
     "cold_wake_opt_out": true,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -47718,7 +49213,8 @@
     "wake_on": null,
     "wake_on_ttl_seconds": 86400,
     "cold_wake_opt_out": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -47822,8 +49318,163 @@
     "wake_on": null,
     "wake_on_ttl_seconds": 86400,
     "cold_wake_opt_out": null,
-    "reason": "é😀"
+    "reason": "é😀",
+    "mode": "compact"
    }
+  }
+ },
+ {
+  "op": "session.hibernate",
+  "tag": "mode:null",
+  "params": {
+   "id": "x",
+   "reason": "x",
+   "mode": null
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for session.hibernate:\n1 validation error for HibernateSessionParams\nmode\n  Input should be 'compact' or 'full' [type=literal_error, input_value=None, input_type=NoneType]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"id\": \"x\", \"reason\": \"x\", \"mode\": null}",
+   "errors": [
+    {
+     "loc": [
+      "mode"
+     ],
+     "type": "literal_error"
+    }
+   ]
+  }
+ },
+ {
+  "op": "session.hibernate",
+  "tag": "mode:valid",
+  "params": {
+   "id": "x",
+   "reason": "x",
+   "mode": "compact"
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "id": "x",
+    "allow_shell": false,
+    "superseded_by": null,
+    "wake_on": null,
+    "wake_on_ttl_seconds": 86400,
+    "cold_wake_opt_out": null,
+    "reason": "x",
+    "mode": "compact"
+   }
+  }
+ },
+ {
+  "op": "session.hibernate",
+  "tag": "mode:enum-bad",
+  "params": {
+   "id": "x",
+   "reason": "x",
+   "mode": "zzz-bad"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for session.hibernate:\n1 validation error for HibernateSessionParams\nmode\n  Input should be 'compact' or 'full' [type=literal_error, input_value='zzz-bad', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"id\": \"x\", \"reason\": \"x\", \"mode\": \"zzz-bad\"}",
+   "errors": [
+    {
+     "loc": [
+      "mode"
+     ],
+     "type": "literal_error"
+    }
+   ]
+  }
+ },
+ {
+  "op": "session.hibernate",
+  "tag": "mode:enum-case",
+  "params": {
+   "id": "x",
+   "reason": "x",
+   "mode": "COMPACT"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for session.hibernate:\n1 validation error for HibernateSessionParams\nmode\n  Input should be 'compact' or 'full' [type=literal_error, input_value='COMPACT', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"id\": \"x\", \"reason\": \"x\", \"mode\": \"COMPACT\"}",
+   "errors": [
+    {
+     "loc": [
+      "mode"
+     ],
+     "type": "literal_error"
+    }
+   ]
+  }
+ },
+ {
+  "op": "session.hibernate",
+  "tag": "mode:int",
+  "params": {
+   "id": "x",
+   "reason": "x",
+   "mode": 5
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for session.hibernate:\n1 validation error for HibernateSessionParams\nmode\n  Input should be 'compact' or 'full' [type=literal_error, input_value=5, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"id\": \"x\", \"reason\": \"x\", \"mode\": 5}",
+   "errors": [
+    {
+     "loc": [
+      "mode"
+     ],
+     "type": "literal_error"
+    }
+   ]
+  }
+ },
+ {
+  "op": "session.hibernate",
+  "tag": "mode:bool",
+  "params": {
+   "id": "x",
+   "reason": "x",
+   "mode": true
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for session.hibernate:\n1 validation error for HibernateSessionParams\nmode\n  Input should be 'compact' or 'full' [type=literal_error, input_value=True, input_type=bool]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"id\": \"x\", \"reason\": \"x\", \"mode\": true}",
+   "errors": [
+    {
+     "loc": [
+      "mode"
+     ],
+     "type": "literal_error"
+    }
+   ]
+  }
+ },
+ {
+  "op": "session.hibernate",
+  "tag": "mode:unicode",
+  "params": {
+   "id": "x",
+   "reason": "x",
+   "mode": "é😀"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for session.hibernate:\n1 validation error for HibernateSessionParams\nmode\n  Input should be 'compact' or 'full' [type=literal_error, input_value='é😀', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"id\": \"x\", \"reason\": \"x\", \"mode\": \"é😀\"}",
+   "errors": [
+    {
+     "loc": [
+      "mode"
+     ],
+     "type": "literal_error"
+    }
+   ]
   }
  },
  {
@@ -47862,7 +49513,8 @@
    "dump": {
     "id": "x",
     "force": false,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -47985,7 +49637,8 @@
    "dump": {
     "id": "x",
     "force": false,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -48043,7 +49696,8 @@
    "dump": {
     "id": "é😀",
     "force": false,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -48082,7 +49736,8 @@
    "dump": {
     "id": "x",
     "force": true,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -48099,7 +49754,8 @@
    "dump": {
     "id": "x",
     "force": true,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -48116,7 +49772,8 @@
    "dump": {
     "id": "x",
     "force": false,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -48155,7 +49812,8 @@
    "dump": {
     "id": "x",
     "force": true,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -48172,7 +49830,8 @@
    "dump": {
     "id": "x",
     "force": true,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -48211,7 +49870,8 @@
    "dump": {
     "id": "x",
     "force": true,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -48248,7 +49908,8 @@
    "dump": {
     "id": "x",
     "force": false,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -48348,8 +50009,159 @@
    "dump": {
     "id": "x",
     "force": false,
-    "reason": "é😀"
+    "reason": "é😀",
+    "mode": "compact"
    }
+  }
+ },
+ {
+  "op": "session.wake",
+  "tag": "mode:null",
+  "params": {
+   "id": "x",
+   "reason": "x",
+   "mode": null
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for session.wake:\n1 validation error for WakeSessionParams\nmode\n  Input should be 'compact' or 'full' [type=literal_error, input_value=None, input_type=NoneType]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"id\": \"x\", \"reason\": \"x\", \"mode\": null}",
+   "errors": [
+    {
+     "loc": [
+      "mode"
+     ],
+     "type": "literal_error"
+    }
+   ]
+  }
+ },
+ {
+  "op": "session.wake",
+  "tag": "mode:valid",
+  "params": {
+   "id": "x",
+   "reason": "x",
+   "mode": "compact"
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "id": "x",
+    "force": false,
+    "reason": "x",
+    "mode": "compact"
+   }
+  }
+ },
+ {
+  "op": "session.wake",
+  "tag": "mode:enum-bad",
+  "params": {
+   "id": "x",
+   "reason": "x",
+   "mode": "zzz-bad"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for session.wake:\n1 validation error for WakeSessionParams\nmode\n  Input should be 'compact' or 'full' [type=literal_error, input_value='zzz-bad', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"id\": \"x\", \"reason\": \"x\", \"mode\": \"zzz-bad\"}",
+   "errors": [
+    {
+     "loc": [
+      "mode"
+     ],
+     "type": "literal_error"
+    }
+   ]
+  }
+ },
+ {
+  "op": "session.wake",
+  "tag": "mode:enum-case",
+  "params": {
+   "id": "x",
+   "reason": "x",
+   "mode": "COMPACT"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for session.wake:\n1 validation error for WakeSessionParams\nmode\n  Input should be 'compact' or 'full' [type=literal_error, input_value='COMPACT', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"id\": \"x\", \"reason\": \"x\", \"mode\": \"COMPACT\"}",
+   "errors": [
+    {
+     "loc": [
+      "mode"
+     ],
+     "type": "literal_error"
+    }
+   ]
+  }
+ },
+ {
+  "op": "session.wake",
+  "tag": "mode:int",
+  "params": {
+   "id": "x",
+   "reason": "x",
+   "mode": 5
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for session.wake:\n1 validation error for WakeSessionParams\nmode\n  Input should be 'compact' or 'full' [type=literal_error, input_value=5, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"id\": \"x\", \"reason\": \"x\", \"mode\": 5}",
+   "errors": [
+    {
+     "loc": [
+      "mode"
+     ],
+     "type": "literal_error"
+    }
+   ]
+  }
+ },
+ {
+  "op": "session.wake",
+  "tag": "mode:bool",
+  "params": {
+   "id": "x",
+   "reason": "x",
+   "mode": true
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for session.wake:\n1 validation error for WakeSessionParams\nmode\n  Input should be 'compact' or 'full' [type=literal_error, input_value=True, input_type=bool]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"id\": \"x\", \"reason\": \"x\", \"mode\": true}",
+   "errors": [
+    {
+     "loc": [
+      "mode"
+     ],
+     "type": "literal_error"
+    }
+   ]
+  }
+ },
+ {
+  "op": "session.wake",
+  "tag": "mode:unicode",
+  "params": {
+   "id": "x",
+   "reason": "x",
+   "mode": "é😀"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for session.wake:\n1 validation error for WakeSessionParams\nmode\n  Input should be 'compact' or 'full' [type=literal_error, input_value='é😀', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"id\": \"x\", \"reason\": \"x\", \"mode\": \"é😀\"}",
+   "errors": [
+    {
+     "loc": [
+      "mode"
+     ],
+     "type": "literal_error"
+    }
+   ]
   }
  },
  {
@@ -51394,7 +53206,8 @@
    "dump": {
     "id": null,
     "work_item": "x",
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -51497,7 +53310,8 @@
    "dump": {
     "id": null,
     "work_item": "x",
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -51514,7 +53328,8 @@
    "dump": {
     "id": "x",
     "work_item": "x",
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -51575,7 +53390,8 @@
    "dump": {
     "id": "é😀",
     "work_item": "x",
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -51591,7 +53407,8 @@
    "dump": {
     "id": null,
     "work_item": null,
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -51607,7 +53424,8 @@
    "dump": {
     "id": null,
     "work_item": "x",
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -51665,7 +53483,8 @@
    "dump": {
     "id": null,
     "work_item": "é😀",
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -51702,7 +53521,8 @@
    "dump": {
     "id": null,
     "work_item": "x",
-    "reason": "x"
+    "reason": "x",
+    "mode": "compact"
    }
   }
  },
@@ -51802,8 +53622,159 @@
    "dump": {
     "id": null,
     "work_item": "x",
-    "reason": "é😀"
+    "reason": "é😀",
+    "mode": "compact"
    }
+  }
+ },
+ {
+  "op": "session.bind_work",
+  "tag": "mode:null",
+  "params": {
+   "work_item": "x",
+   "reason": "x",
+   "mode": null
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for session.bind_work:\n1 validation error for BindSessionWorkParams\nmode\n  Input should be 'compact' or 'full' [type=literal_error, input_value=None, input_type=NoneType]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"work_item\": \"x\", \"reason\": \"x\", \"mode\": null}",
+   "errors": [
+    {
+     "loc": [
+      "mode"
+     ],
+     "type": "literal_error"
+    }
+   ]
+  }
+ },
+ {
+  "op": "session.bind_work",
+  "tag": "mode:valid",
+  "params": {
+   "work_item": "x",
+   "reason": "x",
+   "mode": "compact"
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "id": null,
+    "work_item": "x",
+    "reason": "x",
+    "mode": "compact"
+   }
+  }
+ },
+ {
+  "op": "session.bind_work",
+  "tag": "mode:enum-bad",
+  "params": {
+   "work_item": "x",
+   "reason": "x",
+   "mode": "zzz-bad"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for session.bind_work:\n1 validation error for BindSessionWorkParams\nmode\n  Input should be 'compact' or 'full' [type=literal_error, input_value='zzz-bad', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"work_item\": \"x\", \"reason\": \"x\", \"mode\": \"zzz-bad\"}",
+   "errors": [
+    {
+     "loc": [
+      "mode"
+     ],
+     "type": "literal_error"
+    }
+   ]
+  }
+ },
+ {
+  "op": "session.bind_work",
+  "tag": "mode:enum-case",
+  "params": {
+   "work_item": "x",
+   "reason": "x",
+   "mode": "COMPACT"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for session.bind_work:\n1 validation error for BindSessionWorkParams\nmode\n  Input should be 'compact' or 'full' [type=literal_error, input_value='COMPACT', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"work_item\": \"x\", \"reason\": \"x\", \"mode\": \"COMPACT\"}",
+   "errors": [
+    {
+     "loc": [
+      "mode"
+     ],
+     "type": "literal_error"
+    }
+   ]
+  }
+ },
+ {
+  "op": "session.bind_work",
+  "tag": "mode:int",
+  "params": {
+   "work_item": "x",
+   "reason": "x",
+   "mode": 5
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for session.bind_work:\n1 validation error for BindSessionWorkParams\nmode\n  Input should be 'compact' or 'full' [type=literal_error, input_value=5, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"work_item\": \"x\", \"reason\": \"x\", \"mode\": 5}",
+   "errors": [
+    {
+     "loc": [
+      "mode"
+     ],
+     "type": "literal_error"
+    }
+   ]
+  }
+ },
+ {
+  "op": "session.bind_work",
+  "tag": "mode:bool",
+  "params": {
+   "work_item": "x",
+   "reason": "x",
+   "mode": true
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for session.bind_work:\n1 validation error for BindSessionWorkParams\nmode\n  Input should be 'compact' or 'full' [type=literal_error, input_value=True, input_type=bool]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"work_item\": \"x\", \"reason\": \"x\", \"mode\": true}",
+   "errors": [
+    {
+     "loc": [
+      "mode"
+     ],
+     "type": "literal_error"
+    }
+   ]
+  }
+ },
+ {
+  "op": "session.bind_work",
+  "tag": "mode:unicode",
+  "params": {
+   "work_item": "x",
+   "reason": "x",
+   "mode": "é😀"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for session.bind_work:\n1 validation error for BindSessionWorkParams\nmode\n  Input should be 'compact' or 'full' [type=literal_error, input_value='é😀', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"work_item\": \"x\", \"reason\": \"x\", \"mode\": \"é😀\"}",
+   "errors": [
+    {
+     "loc": [
+      "mode"
+     ],
+     "type": "literal_error"
+    }
+   ]
   }
  },
  {

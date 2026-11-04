@@ -896,6 +896,39 @@ mod tests {
             }),
         );
         assert_eq!(response["result"]["isError"], false, "{response}");
+        // A write answers in a few fields over MCP (WI-1525).
+        let lean = &response["result"]["structuredContent"];
+        assert!(
+            lean["ref"]
+                .as_str()
+                .is_some_and(|reference| reference.starts_with("WI-")),
+            "{response}"
+        );
+        assert_eq!(lean["title"], "Filed over HTTP", "{response}");
+        assert!(lean.get("item").is_none() && lean.get("comments").is_none());
+        assert!(
+            response["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .len()
+                < 300
+        );
+    }
+
+    #[test]
+    fn mode_full_returns_the_whole_record_over_http() {
+        let served = test_harness::serve(false);
+        let admin = test_harness::admin_secret(served.addr);
+        let writer = test_harness::mint_token(served.addr, &admin, "agent:writer", "work.write");
+        let response = rpc(
+            served.addr,
+            &writer,
+            "tools/call",
+            serde_json::json!({
+                "name": "work_create",
+                "arguments": {"kind": "bug", "title": "Filed in full", "reason": "test", "mode": "full"},
+            }),
+        );
         assert!(
             response["result"]["structuredContent"]["item"]["ref"]
                 .as_str()
