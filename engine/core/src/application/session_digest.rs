@@ -31,10 +31,19 @@ pub(crate) fn digest_op(ctx: &Built, params: Value) -> Result<Value, VogtError> 
         .get("context_window")
         .and_then(Value::as_i64)
         .filter(|window| *window > 0);
-    crate::with_ctx!(ctx, |ctx| digest_in(ctx, &id, window))
+    let since = params
+        .get("since")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let body = crate::with_ctx!(ctx, |ctx| digest_in(ctx, &id, window))?;
+    Ok(crate::application::unchanged::stamp(
+        body,
+        since.as_deref(),
+        &["id"],
+    ))
 }
 
-fn digest_in<C: Clock, I: IdFactory>(
+pub(crate) fn digest_in<C: Clock, I: IdFactory>(
     ctx: &AppContext<C, I>,
     id: &str,
     window: Option<i64>,
@@ -233,6 +242,32 @@ mod tests {
         assert_eq!(result["updated_at"], "2026-10-05T00:02:00Z");
         assert!(result["blocked"].is_null());
         assert!(result["last_reply_excerpt"].is_null());
+    }
+
+    #[test]
+    fn a_digest_read_with_its_own_cursor_is_unchanged() {
+        let built = built("digest-since", Vec::new(), Some(engine_row(row(json!({})))));
+        let first = run(&built, "session.digest", json!({"id": ENGINE_ID})).unwrap();
+        assert_eq!(first["unchanged"], false);
+        let cursor = first["cursor"].as_str().unwrap().to_string();
+        let again = run(
+            &built,
+            "session.digest",
+            json!({"id": ENGINE_ID, "since": cursor}),
+        )
+        .unwrap();
+        assert_eq!(
+            again,
+            json!({"id": ENGINE_ID, "unchanged": true, "cursor": cursor})
+        );
+        let stale = run(
+            &built,
+            "session.digest",
+            json!({"id": ENGINE_ID, "since": "0000000000000000"}),
+        )
+        .unwrap();
+        assert_eq!(stale["unchanged"], false);
+        assert_eq!(stale["activity"], "idle");
     }
 
     #[test]

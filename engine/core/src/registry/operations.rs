@@ -716,7 +716,7 @@ pub fn build_operations() -> Vec<Operation> {
         ),
         Operation::new(
             "session.last_reply",
-            "Read the last N replies of a session's agent (Claude Code or Codex) from its own transcript \u{2014} whole, current and redacted, unlike the screen. Says how the conversation was found (`basis`). Takes either id.",
+            "Read the last N replies of a session's agent (Claude Code or Codex) from its own transcript \u{2014} whole, current and redacted, unlike the screen. Says how the conversation was found (`basis`). Every answer carries a `cursor`; pass it back as `since` and an unchanged answer is `{unchanged: true, cursor}` with no messages. Takes either id.",
             Scope::Read,
             false,
             HttpRoute::new(HttpMethod::Get, "/sessions/last-reply"),
@@ -732,7 +732,7 @@ pub fn build_operations() -> Vec<Operation> {
         ),
         Operation::new(
             "session.digest",
-            "Read one session's digest from the engine row: activity, the blocked report, a last-reply excerpt the row already carries (at most 120 characters), and the economics the engine already computed (turns, context, compactions). Numbers are null when the row has none \u{2014} this does not meter a transcript. Pass context_window to get context_pct. Takes either id.",
+            "Read one session's digest from the engine row: activity, the blocked report, a last-reply excerpt the row already carries (at most 120 characters), and the economics the engine already computed (turns, context, compactions). Numbers are null when the row has none \u{2014} this does not meter a transcript. Pass context_window to get context_pct. Every answer carries a `cursor`; pass it back as `since` and an unchanged digest is `{unchanged: true, cursor}` with no body. Takes either id.",
             Scope::Read,
             false,
             HttpRoute::new(HttpMethod::Get, "/sessions/digest"),
@@ -756,7 +756,7 @@ pub fn build_operations() -> Vec<Operation> {
         ),
         Operation::new(
             "session.wait_any",
-            "Wait for any of the named sessions instead of polling them: blocks (up to timeout_s, max 600) until one publishes a kind in `until` (default: ready, blocked, approval, exited, errored). Returns the delta, or `timeout`. Pass `cursor` (the previous `next_cursor`) so a replayed page is not waited on twice. `cursor=now` skips events already published and waits only for one that lands after the call starts; a timeout then returns that head as `next_cursor`. `ids` empty waits on every session.",
+            "Wait for any of the named sessions instead of polling them: blocks (up to timeout_s, default 300, max 600; an oversight session's wait is at least 60 so it cannot become a poll loop) until one publishes a kind in `until` (default: ready, blocked, approval, exited, errored). Returns the delta with that session's digest, or `timeout`. Pass `cursor` (the previous `next_cursor`) so a replayed page is not waited on twice. `cursor=now` skips events already published and waits only for one that lands after the call starts; a timeout then returns that head as `next_cursor`. `ids` empty waits on every session.",
             Scope::Read,
             false,
             HttpRoute::new(HttpMethod::Get, "/sessions/wait-any"),

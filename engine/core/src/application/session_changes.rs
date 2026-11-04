@@ -21,6 +21,11 @@ use crate::storage::interface::{DeclaredStore, ReadView};
 
 const NO_CHANGES_ROUTE: &str = "the session engine does not support changes yet (it has no \
      GET /api/sessions/changes route); upgrade the engine, or poll session.sweep";
+/// An oversight caller's shortest wait. Below this a wait is a poll loop, and
+/// each poll is a full-context turn.
+const OVERSIGHT_MIN_WAIT_S: u64 = 60;
+/// The wait when the caller names none.
+const DEFAULT_WAIT_S: u64 = 300;
 const NO_WAIT_ANY_ROUTE: &str = "the session engine does not support wait-any yet (it has no \
      GET /api/sessions/wait-any route); upgrade the engine, or poll session.sweep";
 
@@ -87,7 +92,12 @@ fn session_wait_any<C: Clock, I: IdFactory>(
     let timeout_s = params
         .get("timeout_s")
         .and_then(Value::as_u64)
-        .unwrap_or(120);
+        .unwrap_or(DEFAULT_WAIT_S);
+    let timeout_s = if caller_is_oversight(ctx) {
+        timeout_s.max(OVERSIGHT_MIN_WAIT_S)
+    } else {
+        timeout_s
+    };
     let waited = match engine.wait_any(
         ids.as_deref(),
         (!kinds.is_empty()).then_some(kinds.as_slice()),
@@ -104,11 +114,33 @@ fn session_wait_any<C: Clock, I: IdFactory>(
         Some(one) => session_labels(ctx, &[one.session.as_str()])?,
         None => HashMap::new(),
     };
+    // The changed session's digest rides along, so a sweep does not follow up
+    // with session.digest. A session the engine no longer has is simply bare.
+    let digest = match &waited.change {
+        Some(one) => {
+            let label = labels.get(&one.session).unwrap_or(&one.session);
+            crate::application::session_digest::digest_in(ctx, label, None).ok()
+        }
+        None => None,
+    };
     Ok(json!({
         "outcome": waited.outcome,
         "change": waited.change.as_ref().map(|one| change(one, &labels)),
         "next_cursor": waited.next_cursor,
+        "digest": digest,
     }))
+}
+
+/// Whether the caller is an oversight-role session. Anyone the engine cannot
+/// place (a person, a token with no session) is not.
+fn caller_is_oversight<C: Clock, I: IdFactory>(ctx: &AppContext<C, I>) -> bool {
+    let Ok(Some(own)) = crate::application::grants::own_engine_session(ctx) else {
+        return false;
+    };
+    let Some(engine) = ctx.engine.as_ref() else {
+        return false;
+    };
+    matches!(engine.get_session(&own), Ok(Some(row)) if row.role == "oversight")
 }
 
 /// Named sessions resolved to engine ids; `None` means every session.
@@ -204,6 +236,11 @@ mod tests {
     const UNLINKED: &str = "9f0c0000-0000-4000-8000-000000000002";
 
     fn built(name: &str, engine: EngineClient) -> Built {
+        let ada = Principal::new("local:ada", ActorKind::Human, "Ada").unwrap();
+        built_as(name, engine, ada)
+    }
+
+    fn built_as(name: &str, engine: EngineClient, principal: Principal) -> Built {
         let dir = std::env::temp_dir().join(format!("vogt-changes-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
@@ -216,7 +253,7 @@ mod tests {
         };
         let built = build_context(
             config,
-            Some(Principal::new("local:ada", ActorKind::Human, "Ada").unwrap()),
+            Some(principal),
             Some(StepClock::new(Moment::from_unix(1_700_000_000, 0))),
             None,
             None,
@@ -429,5 +466,81 @@ mod tests {
         let error = run(&built, "session.wait_any", json!({"cursor": "yesterday"})).unwrap_err();
         assert!(error.to_string().contains("cursor"));
         assert!(seen.lock().unwrap().is_empty());
+    }
+
+    /// An engine that answers `session` for its own row and `wait` for the
+    /// wait route, recording each query.
+    fn caller_engine(role: &'static str) -> (Arc<Mutex<Vec<String>>>, EngineClient) {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let record = Arc::clone(&seen);
+        let client = EngineClient::new(
+            "http://engine.test",
+            None,
+            Some(Arc::new(move |url, _, _, _| {
+                record.lock().unwrap().push(url.to_string());
+                if url.contains("/wait-any") {
+                    let body = r#"{"outcome":"timeout","change":null,"next_cursor":3}"#;
+                    return (200, body.as_bytes().to_vec());
+                }
+                let row = json!({
+                    "id": "eng-over", "name": "overseer", "activity": "idle",
+                    "cwd": "/work", "alive": true, "role": role,
+                    "created_at": "2026-10-05T00:00:00Z",
+                });
+                (200, row.to_string().into_bytes())
+            })),
+        );
+        (seen, client)
+    }
+
+    fn wait_query(seen: &Arc<Mutex<Vec<String>>>) -> String {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .find(|url| url.contains("/wait-any"))
+            .cloned()
+            .expect("a wait-any call")
+    }
+
+    #[test]
+    fn wait_any_defaults_to_a_long_wait() {
+        let (seen, client) = engine(
+            200,
+            r#"{"outcome":"timeout","change":null,"next_cursor":3}"#,
+        );
+        let built = built("longdefault", client);
+        run(&built, "session.wait_any", json!({})).unwrap();
+        assert_eq!(
+            seen.lock().unwrap()[0],
+            "http://engine.test/api/sessions/wait-any?timeout_s=300"
+        );
+    }
+
+    #[test]
+    fn an_oversight_callers_short_wait_is_raised_to_the_floor() {
+        let who = Principal::new("agent:engine:eng-over", ActorKind::Agent, "overseer").unwrap();
+        let (seen, client) = caller_engine("oversight");
+        let built = built_as("floor", client, who);
+        run(&built, "session.wait_any", json!({"timeout_s": 2})).unwrap();
+        assert!(wait_query(&seen).contains("timeout_s=60"), "{seen:?}");
+        // A longer ask is left alone.
+        let (seen, client) = caller_engine("oversight");
+        let who = Principal::new("agent:engine:eng-over", ActorKind::Agent, "overseer").unwrap();
+        let built = built_as("floor-long", client, who);
+        run(&built, "session.wait_any", json!({"timeout_s": 200})).unwrap();
+        assert!(wait_query(&seen).contains("timeout_s=200"));
+    }
+
+    #[test]
+    fn a_worker_or_a_person_keeps_a_short_wait() {
+        let who = Principal::new("agent:engine:eng-over", ActorKind::Agent, "worker").unwrap();
+        let (seen, client) = caller_engine("worker");
+        let worker = built_as("floor-worker", client, who);
+        run(&worker, "session.wait_any", json!({"timeout_s": 2})).unwrap();
+        assert!(wait_query(&seen).contains("timeout_s=2"));
+        let (seen, client) = caller_engine("oversight");
+        let person = built("floor-person", client);
+        run(&person, "session.wait_any", json!({"timeout_s": 2})).unwrap();
+        assert!(wait_query(&seen).contains("timeout_s=2"));
     }
 }
