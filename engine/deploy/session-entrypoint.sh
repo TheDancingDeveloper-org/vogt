@@ -62,10 +62,19 @@ while IFS="$(printf '\t')" read -r name value; do
   case "$name" in VOGT_BOOTSTRAP_TOKEN|VOGT_AGENT_BOOTSTRAP_TOKEN) continue ;; esac
   export "$name=$value"
 done <"$tmp_dir/env.tsv"
+step=graft-token; say graft-token
+# The graft credential (scoped to this repo and line) arrives as .graft_token
+# and is kept in a 0600 file; without one the session token is tried.
+graft_token_file=$token_file
+if [ -n "$(jq -r '.graft_token // empty' "$response")" ]; then
+  graft_token_file="${VOGT_GRAFT_TOKEN_FILE:-$(dirname "$token_file")/graft-token}"
+  jq -j '.graft_token' "$response" >"$graft_token_file"; chmod 600 "$graft_token_file"
+  export VOGT_GRAFT_TOKEN_FILE="$graft_token_file"
+fi
 step=clone; say clone
 work_dir=${VOGT_WORK_DIR:-/work}
 mkdir -p "$work_dir"
-if ! graft --token-file "$token_file" clone "$VOGT_GRAFT_REPO" "$work_dir" --line "$VOGT_GRAFT_LINE" >/dev/null 2>"$tmp_dir/graft.err"; then
+if ! graft --token-file "$graft_token_file" clone "$VOGT_GRAFT_REPO" "$work_dir" --line "$VOGT_GRAFT_LINE" >/dev/null 2>"$tmp_dir/graft.err"; then
   # graft's stderr names the endpoint and the refusal, never the token file's content.
   fail "g clone $VOGT_GRAFT_REPO --line $VOGT_GRAFT_LINE into $work_dir failed (GRAFT_ENDPOINT=${GRAFT_ENDPOINT:-unset}): $(tail -n3 "$tmp_dir/graft.err" | tr '\n' ' ' | cut -c1-400)"
 fi
