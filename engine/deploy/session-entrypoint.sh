@@ -73,6 +73,45 @@ while IFS="$(printf '\t')" read -r name value; do
   case "$name" in VOGT_BOOTSTRAP_TOKEN|VOGT_BOOTSTRAP_TOKEN_FILE|VOGT_AGENT_BOOTSTRAP_TOKEN) continue ;; esac
   export "$name=$value"
 done <"$tmp_dir/env.tsv"
+step=claude-config; say claude-config
+# A Claude session gets what a host-launched one does (WI-3243): the engine's
+# MCP endpoints as a --mcp-config file, and the conversation and policy hooks
+# in the account's settings. The file names the bearer by reference to
+# VOGT_HTTP_TOKEN, so it holds no credential. The session agent adds the
+# --settings and --mcp-config flags when it starts claude.
+if [ "$VOGT_CLI" = claude ]; then
+  mcp_file="$(dirname "$token_file")/mcp.json"
+  if jq -e '.mcp_config | type == "object"' "$response" >/dev/null 2>&1; then
+    jq '.mcp_config' "$response" >"$mcp_file"; chmod 600 "$mcp_file"; export VOGT_CLAUDE_MCP_CONFIG="$mcp_file"
+  else
+    printf 'session-entrypoint: the bootstrap response carries no mcp_config\n' >&2
+  fi
+  # Claude Code trusts its own bundle, not the system store; the engine may
+  # sit behind a local CA.
+  if [ -n "${VOGT_EXTRA_CA_FILE:-}" ] && [ -z "${NODE_EXTRA_CA_CERTS:-}" ]; then
+    NODE_EXTRA_CA_CERTS=$VOGT_EXTRA_CA_FILE; export NODE_EXTRA_CA_CERTS
+  fi
+  # Best effort, as in the merged image's entrypoint: a hook that cannot be
+  # installed must not stop the session from starting.
+  if command -v vogt-claude-session-hook >/dev/null 2>&1; then
+    vogt-claude-session-hook install || printf 'session-entrypoint: could not add the conversation hook; continuing\n' >&2
+  fi
+  if command -v vogt-policy-hook >/dev/null 2>&1; then
+    vogt-policy-hook install-policy || printf 'session-entrypoint: could not add the policy hook; continuing\n' >&2
+  fi
+  # What of the posture is actually in place, named so the pod smoke can
+  # assert it from the pod's log: the policy file the session agent will pass
+  # to --settings, the MCP file, and each hook in the account's settings.
+  posture=""
+  settings_file=${VOGT_CLAUDE_SETTINGS_FILE:-/usr/local/share/vogt/driven-session-settings.json}
+  if [ "$settings_file" != off ] && [ -r "$settings_file" ]; then posture="$posture settings"
+  elif [ "$settings_file" != off ]; then printf 'session-entrypoint: policy file %s is not readable\n' "$settings_file" >&2; fi
+  [ -n "${VOGT_CLAUDE_MCP_CONFIG:-}" ] && jq -e '.mcpServers | type == "object"' "$VOGT_CLAUDE_MCP_CONFIG" >/dev/null 2>&1 && posture="$posture mcp-config"
+  hooked() { hook_path=$(command -v "$1" 2>/dev/null) && grep -qF "$hook_path" "$CLAUDE_CONFIG_DIR/settings.json" 2>/dev/null; }
+  hooked vogt-policy-hook && posture="$posture policy-hook"
+  hooked vogt-claude-session-hook && posture="$posture session-hook"
+  printf 'session-entrypoint: claude posture:%s\n' "$posture" >&2
+fi
 step=graft-token; say graft-token
 # The graft credential (scoped to this repo and line) arrives as .graft_token
 # and is kept in a 0600 file; without one the session token is tried.

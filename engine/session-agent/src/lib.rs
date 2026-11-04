@@ -309,6 +309,61 @@ pub struct Config {
     /// Resume the conversation from the transcript the engine seeded into the
     /// bundle instead of starting it (a pod woken from hibernation).
     pub resume: bool,
+    /// The files Claude Code is started with, as the engine starts one on a
+    /// host (WI-3243).
+    pub claude: ClaudeLaunch,
+}
+
+/// Where the image installs the default driven-session policy; the same path
+/// as the merged image, so the engine's documentation of it holds for pods.
+pub const IMAGE_SETTINGS_FILE: &str = "/usr/local/share/vogt/driven-session-settings.json";
+
+/// The `--settings` and `--mcp-config` files of a Claude Code launch.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ClaudeLaunch {
+    /// The driven-session policy, passed as `--settings=<file>`.
+    pub settings: Option<PathBuf>,
+    /// The engine's MCP endpoints, passed as `--strict-mcp-config
+    /// --mcp-config=<file>` so only these servers apply, not the account's
+    /// own set. The session entrypoint writes it from the bootstrap response.
+    pub mcp_config: Option<PathBuf>,
+}
+
+impl ClaudeLaunch {
+    /// Read from the environment: `VOGT_CLAUDE_SETTINGS_FILE` names a
+    /// deployment's own policy; unset or empty means the image's, when it is
+    /// there; `off` turns it off. This is the engine's
+    /// `ENGINE_AGENT_CLAUDE_SETTINGS` rule, applied inside the pod.
+    /// `VOGT_CLAUDE_MCP_CONFIG` is the file the entrypoint wrote, if any.
+    pub fn from_env() -> Self {
+        Self::resolve(
+            std::env::var("VOGT_CLAUDE_SETTINGS_FILE").ok().as_deref(),
+            Path::new(IMAGE_SETTINGS_FILE),
+            std::env::var_os("VOGT_CLAUDE_MCP_CONFIG"),
+        )
+    }
+
+    fn resolve(
+        settings: Option<&str>,
+        image: &Path,
+        mcp_config: Option<std::ffi::OsString>,
+    ) -> Self {
+        let settings = match settings.map(str::trim) {
+            Some("off") => None,
+            Some(path) if !path.is_empty() => Some(PathBuf::from(path)),
+            _ => Some(image.to_path_buf()).filter(|p| p.is_file()),
+        };
+        Self {
+            settings,
+            mcp_config: mcp_config.filter(|p| !p.is_empty()).map(PathBuf::from),
+        }
+    }
+}
+
+/// `value` as one shell word, so a path from the environment cannot add
+/// words or run anything on the line `command_line` builds.
+fn sh_quote(value: &Path) -> String {
+    format!("'{}'", value.to_string_lossy().replace('\'', "'\\''"))
 }
 
 /// The argv in `VOGT_SESSION_COMMAND` (a JSON array of strings), if any.
@@ -349,6 +404,7 @@ impl Config {
                 .ok()
                 .filter(|v| !v.is_empty()),
             resume: std::env::var("VOGT_SESSION_RESUME").is_ok_and(|v| v == "1"),
+            claude: ClaudeLaunch::from_env(),
         })
     }
     pub fn ws_url(&self) -> Result<String, AgentError> {
@@ -659,20 +715,38 @@ pub fn resize_pty(master: &PtyMaster, cols: u16, rows: u16) -> Result<(), AgentE
 /// The shell line that starts the CLI. A Claude conversation is pinned to the
 /// engine's conversation id (`--session-id`), or resumed from the transcript
 /// the engine seeded (`--resume`), so the transcript this agent writes back is
-/// the one a later wake resumes.
+/// the one a later wake resumes. Claude Code also gets the driven-session
+/// policy and the engine's MCP set when the pod has them (WI-3243), so a pod
+/// session has the permission posture a host session has.
 pub fn command_line(config: &Config) -> Result<String, AgentError> {
     let conversation = config.conversation_id.as_deref().filter(|id| {
         id.chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
     });
     match config.cli.as_str() {
-        "claude" => Ok(match (conversation, config.resume) {
-            (Some(id), true) => format!("claude --resume {id} --add-dir \"$VOGT_SESSION_CWD\""),
-            (Some(id), false) => {
-                format!("claude --session-id {id} --add-dir \"$VOGT_SESSION_CWD\"")
+        "claude" => {
+            // The host launcher's order (`agent_cli::launch`): the
+            // conversation, the driven-session policy, the MCP set, then
+            // `--add-dir`. The `=` forms keep the variadic flags from taking
+            // the next word.
+            let mut line = String::from("claude");
+            match (conversation, config.resume) {
+                (Some(id), true) => line.push_str(&format!(" --resume {id}")),
+                (Some(id), false) => line.push_str(&format!(" --session-id {id}")),
+                (None, _) => {}
             }
-            (None, _) => "claude --add-dir \"$VOGT_SESSION_CWD\"".into(),
-        }),
+            if let Some(file) = &config.claude.settings {
+                line.push_str(&format!(" --settings={}", sh_quote(file)));
+            }
+            if let Some(file) = &config.claude.mcp_config {
+                line.push_str(&format!(
+                    " --strict-mcp-config --mcp-config={}",
+                    sh_quote(file)
+                ));
+            }
+            line.push_str(" --add-dir \"$VOGT_SESSION_CWD\"");
+            Ok(line)
+        }
         "codex" => Ok("codex --add-dir \"$VOGT_SESSION_CWD\"".into()),
         _ => Err(AgentError::Pty("VOGT_CLI must be claude or codex".into())),
     }
@@ -919,6 +993,7 @@ mod tests {
             account: None,
             conversation_id: None,
             resume: false,
+            claude: ClaudeLaunch::default(),
         };
         let (_reader, _writer, mut child, master) = spawn_pty(&config).unwrap();
         let size = master.get_size().unwrap();
@@ -945,6 +1020,7 @@ mod tests {
             account: None,
             conversation_id: Some("abc-123".into()),
             resume: false,
+            claude: ClaudeLaunch::default(),
         };
         assert!(command_line(&config)
             .unwrap()
@@ -959,6 +1035,129 @@ mod tests {
             command_line(&config).unwrap(),
             "claude --add-dir \"$VOGT_SESSION_CWD\""
         );
+    }
+
+    /// The argv `claude` sees when the shell runs `line`, one word per line.
+    fn argv_of(line: &str) -> Vec<String> {
+        let out = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(format!("claude() {{ printf '%s\\n' \"$@\"; }}; {line}"))
+            .env("VOGT_SESSION_CWD", "/work")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        String::from_utf8(out.stdout)
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[test]
+    fn claude_argv_carries_the_policy_and_the_mcp_config() {
+        let config = Config {
+            session_id: "s".into(),
+            engine_url: "http://127.0.0.1:1".into(),
+            token: "t".into(),
+            cli: "claude".into(),
+            command: None,
+            cwd: None,
+            cols: 80,
+            rows: 24,
+            buffer_bytes: 1024,
+            claude_config_dir: None,
+            account: None,
+            conversation_id: Some("abc-123".into()),
+            resume: false,
+            claude: ClaudeLaunch {
+                settings: Some(IMAGE_SETTINGS_FILE.into()),
+                mcp_config: Some("/run/vogt/mcp.json".into()),
+            },
+        };
+        // The host launcher's flags, in its order.
+        assert_eq!(
+            argv_of(&command_line(&config).unwrap()),
+            [
+                "--session-id",
+                "abc-123",
+                "--settings=/usr/local/share/vogt/driven-session-settings.json",
+                "--strict-mcp-config",
+                "--mcp-config=/run/vogt/mcp.json",
+                "--add-dir",
+                "/work",
+            ]
+        );
+        let resumed = Config {
+            resume: true,
+            ..config
+        };
+        let argv = argv_of(&command_line(&resumed).unwrap());
+        assert_eq!(&argv[..2], ["--resume", "abc-123"]);
+        assert!(argv.contains(&"--strict-mcp-config".to_string()));
+    }
+
+    #[test]
+    fn a_path_with_shell_syntax_stays_one_word() {
+        let config = Config {
+            session_id: "s".into(),
+            engine_url: "http://127.0.0.1:1".into(),
+            token: "t".into(),
+            cli: "claude".into(),
+            command: None,
+            cwd: None,
+            cols: 80,
+            rows: 24,
+            buffer_bytes: 1024,
+            claude_config_dir: None,
+            account: None,
+            conversation_id: None,
+            resume: false,
+            claude: ClaudeLaunch {
+                settings: Some("/a b/it's; touch /tmp/x.json".into()),
+                mcp_config: None,
+            },
+        };
+        assert_eq!(
+            argv_of(&command_line(&config).unwrap()),
+            [
+                "--settings=/a b/it's; touch /tmp/x.json",
+                "--add-dir",
+                "/work"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_settings_file_follows_the_engines_rule() {
+        let image = tempfile::NamedTempFile::new().unwrap();
+        let absent = Path::new("/no/such/policy.json");
+        let launch = |settings: Option<&str>, image: &Path, mcp: Option<&str>| {
+            ClaudeLaunch::resolve(settings, image, mcp.map(Into::into))
+        };
+        // Unset or empty: the image's, when it is there.
+        assert_eq!(
+            launch(None, image.path(), None).settings.as_deref(),
+            Some(image.path())
+        );
+        assert_eq!(
+            launch(Some(" "), image.path(), None).settings.as_deref(),
+            Some(image.path())
+        );
+        assert_eq!(launch(None, absent, None).settings, None);
+        // A named file is used as named, `off` turns the policy off.
+        assert_eq!(
+            launch(Some("/etc/p.json"), image.path(), None)
+                .settings
+                .as_deref(),
+            Some(Path::new("/etc/p.json"))
+        );
+        assert_eq!(launch(Some("off"), image.path(), None).settings, None);
+        // The MCP file is whatever the entrypoint named; empty is none.
+        assert_eq!(
+            launch(None, absent, Some("/run/vogt/mcp.json")).mcp_config,
+            Some("/run/vogt/mcp.json".into())
+        );
+        assert_eq!(launch(None, absent, Some("")).mcp_config, None);
     }
 
     #[test]
@@ -1000,6 +1199,7 @@ mod tests {
             account: None,
             conversation_id: None,
             resume: false,
+            claude: ClaudeLaunch::default(),
         };
         let (mut reader, _writer, mut child, _master) = spawn_pty(&config).unwrap();
         let mut out = String::new();

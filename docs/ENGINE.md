@@ -1218,13 +1218,14 @@ of the policy — commit identity, the test recipe, free-text rules — is
 guidance the brief carries and nothing enforces. A project with nothing to
 refuse sends no policy, so its session spec is unchanged.
 
-The pod entrypoint installs `vogt-policy-hook`
+The merged image's entrypoint installs `vogt-policy-hook`
 (`engine/deploy/policy-hook.sh`) as a `PreToolUse` hook for `Bash` into Claude
 Code's user settings and, as a marked block, into `~/.klaudia/config.toml`.
-`ENGINE_AGENT_POLICY_HOOK=0` skips both. Before a shell command runs, the hook
-asks `POST /api/agent-auth/policy-check` with the session's broker token,
-which names the session, so a session is only ever checked against its own
-policy. A command with no `git` or `gh` word is allowed without a request.
+`ENGINE_AGENT_POLICY_HOOK=0` skips both. A session pod's entrypoint installs
+it for a Claude session too (below). Before a shell command runs, the hook
+asks `POST /api/agent-auth/policy-check` with the session's broker token (a
+pod session, which has none, presents its stream credential), which names the
+session, so a session is only ever checked against its own policy. A command with no `git` or `gh` word is allowed without a request.
 
 What is refused, and only for an agent session that carries a policy:
 
@@ -1567,7 +1568,8 @@ checks decide what it can finish on its own (WI-926; the design is
   default mode. On a pod that has accepted auto mode, that is **auto**: a
   classifier judges each action against built-in rules, and a block is a
   denial, with no dialog. Every engine-launched Claude session also gets the
-  deployment's **driven-session policy** with `--settings=<file>`. This is an
+  deployment's **driven-session policy** with `--settings=<file>`; a session
+  in a pod gets it too, from the pod image's copy (see *Session pod boot*). This is an
   `autoMode` section whose `environment` and `allow` lists start with
   `"$defaults"`, so they add to Claude Code's rules and replace none. The
   image ships `/usr/local/share/vogt/driven-session-settings.json`:
@@ -4693,6 +4695,31 @@ the minted token in `<state_dir>/pod-graft-tokens/<session>` (`0600`, directory
 attempt, so a pod an engine restart adopts is still revoked when it ends. A
 session hibernated or removed with no pod running has nothing left to revoke.
 
+**Claude Code's posture in a pod (WI-3243).** A pod Claude session is
+started with the same posture as a host one. The image ships the
+driven-session policy, root-owned, at
+`/usr/local/share/vogt/driven-session-settings.json`, and `vogt-session-agent`
+runs `claude --session-id <id> --settings=<file> --strict-mcp-config
+--mcp-config=<file> --add-dir "$VOGT_SESSION_CWD"` (`--resume` for a wake), the
+host launcher's flags in its order. `VOGT_CLAUDE_SETTINGS_FILE` in the pod
+names another policy file and `off` turns the policy off, like
+`ENGINE_AGENT_CLAUDE_SETTINGS`; a pod built from an image without the file
+starts without `--settings`. The MCP file comes from the bootstrap response
+(`mcp_config`): the Vogt MCP endpoint (`<ENGINE_POD_ENGINE_ENDPOINT>/mcp`) and,
+when `ENGINE_CADASTRE_MCP_URL` is set, Cadastre, as streamable-HTTP servers. The
+Vogt entry's `Authorization` header is `Bearer ${VOGT_HTTP_TOKEN}`, so the file
+holds no credential. The engine mints the session's own core credential
+(`agent:engine:<id>`, as for a host agent session, revoked when the session
+ends) and returns it as `VOGT_HTTP_TOKEN` in the bootstrap `env`, with
+`VOGT_ENGINE_SESSION_ID`. When the core is absent or refuses, the file is empty
+of servers and `--strict-mcp-config` keeps the account's own MCP set out. The
+entrypoint writes the file `0600` beside the session token, installs the
+conversation and policy hooks into `$CLAUDE_CONFIG_DIR/settings.json` and, when
+`VOGT_EXTRA_CA_FILE` is set, gives Claude Code the same CA as
+`NODE_EXTRA_CA_CERTS`. Codex gets none of this. The pod does not run the CLI
+under `vogt-agent-auth run`: a pod holds no Infisical identity, and its
+credentials arrive in the bootstrap response.
+
 A requested session argv is passed as `VOGT_SESSION_COMMAND`, a JSON array of
 strings. `vogt-session-agent` runs it in the PTY instead of the agent CLI; the
 container command stays the entrypoint.
@@ -4720,20 +4747,28 @@ bootstrap refusal quotes the engine's one-line reason only). In order:
    refused.
 5. `brokered-env` — the response's `env` map is exported to the session,
    except the bootstrap token names.
-6. `graft-token` — a returned `graft_token` (the one minted for this pod) is written `0600` beside the
+6. `claude-config` — for `VOGT_CLI=claude` only: the response's `mcp_config` is
+   written `0600` beside the session token (`mcp.json`) and named to the
+   session agent as `VOGT_CLAUDE_MCP_CONFIG`; `NODE_EXTRA_CA_CERTS` is set from
+   `VOGT_EXTRA_CA_FILE`; the conversation and policy hooks are installed into
+   `$CLAUDE_CONFIG_DIR/settings.json` (best effort). It then prints
+   `session-entrypoint: claude posture: <parts>`, naming which of `settings`,
+   `mcp-config`, `policy-hook` and `session-hook` are in place. The pod smoke's
+   boot marker requires all four.
+7. `graft-token` — a returned `graft_token` (the one minted for this pod) is written `0600` beside the
    session token (`VOGT_GRAFT_TOKEN_FILE`, default `graft-token` in the same
    directory) and exported as a path only.
-7. `clone` — `graft --token-file <file> clone ...` into `VOGT_WORK_DIR`
+8. `clone` — `graft --token-file <file> clone ...` into `VOGT_WORK_DIR`
    (default `/work`). A failure names the endpoint and graft's last stderr
    lines.
-8. `brief` — the brief is written to `<workdir>/.vogt/brief.md`
+9. `brief` — the brief is written to `<workdir>/.vogt/brief.md`
    (`VOGT_ADD_DIR`), and `VOGT_SESSION_CWD` and `VOGT_SESSION_BRIEF_FILE` are
    exported.
-9. `handoff` — the entrypoint prints `session-entrypoint: boot completed in
+10. `handoff` — the entrypoint prints `session-entrypoint: boot completed in
    <n>s` and the metric line `vogt_session_boot_seconds <n>` (for pod log
    collection), removes its scratch directory and execs `vogt-session-agent`.
 
 `engine/deploy/tests/session-entrypoint.sh` is the contract test: fake curl,
-graft and agent, covering the markers, the token files, the retry, and the
-`VOGT_SESSION_COMMAND` passthrough. `pod_stream::real_entrypoint_*` in
+graft and agent, covering the markers, the token files, the retry, the
+`VOGT_SESSION_COMMAND` passthrough and the Claude config. `pod_stream::real_entrypoint_*` in
 `engine/server/tests/integration.rs` runs the same script against a real engine.
