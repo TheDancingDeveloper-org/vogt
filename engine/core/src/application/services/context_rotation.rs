@@ -12,7 +12,8 @@
 //!    reviews. The ask is repeated after `REASK_AFTER` up to `MAX_ASKS` times.
 //! 2. Once the file exists and is not empty, start a fresh session of the same
 //!    role in the same project, seeded with the file, then hibernate the old
-//!    one. The rotation is an audited `session.context_rotated` event.
+//!    one (a failed hibernate is retried alone, never with a second replacement).
+//!    The rotation is an audited `session.context_rotated` event.
 //!
 //! Idempotent: a hibernated session is not a candidate, and an unanswered ask
 //! waits for its marker to age. The old session is not woken by this module,
@@ -21,7 +22,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use serde_json::json;
+use serde_json::{json, Value};
 
 use super::sessions::dispatch_preferences;
 use super::sessions::{hibernate, start_session, HibernateParams, StartSessionParams};
@@ -38,6 +39,7 @@ pub const REASON: &str =
 const DIR_NAME: &str = "context-rotation";
 const REASK_AFTER: Duration = Duration::from_secs(15 * 60);
 const MAX_ASKS: u32 = 3;
+const HIBERNATE_RETRY_AFTER: Duration = Duration::from_secs(5 * 60);
 const ROTATE_OP: &str = "session.context_rotate";
 
 /// What one pass did, by engine session id.
@@ -63,6 +65,10 @@ fn handoff_path(dir: &Path, engine_id: &str) -> PathBuf {
 
 fn marker_path(dir: &Path, engine_id: &str) -> PathBuf {
     dir.join(format!("{}.asked", safe_name(engine_id)))
+}
+
+fn rotating_path(dir: &Path, engine_id: &str) -> PathBuf {
+    dir.join(format!("{}.rotating", safe_name(engine_id)))
 }
 
 /// An engine id is a UUID or `eng-…`; anything else cannot climb out of `dir`.
@@ -115,8 +121,22 @@ fn marker_state(marker: &Path) -> (u32, bool) {
     (count, aged)
 }
 
+/// Writes the audited rotation event for `(old engine id, outcome)`.
+pub(super) type Audit<C, I> = fn(&AppContext<C, I>, &str, &Value) -> Result<(), VogtError>;
+
 /// Ask and rotate every live session over its role's context budget.
 pub fn rotate_over_budget<C, I>(ctx: &AppContext<C, I>) -> Result<RotationOutcome, VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    rotate_with(ctx, record_rotation)
+}
+
+pub(super) fn rotate_with<C, I>(
+    ctx: &AppContext<C, I>,
+    audit: Audit<C, I>,
+) -> Result<RotationOutcome, VogtError>
 where
     C: Clock + 'static,
     I: IdFactory + 'static,
@@ -175,87 +195,181 @@ where
             }
             continue;
         }
-        let link = ctx.declared.read()?.session_by_engine_id(&row.id)?;
-        let Some(link) = link else {
-            tracing::warn!(
-                "context rotation: {} has no linked project to restart in",
-                row.id
-            );
-            continue;
-        };
-        let slug = ctx
-            .declared
-            .read()?
-            .project_by_id(&link.project_id)?
-            .map(|project| project.slug);
-        let Some(slug) = slug else { continue };
-        let params = StartSessionParams {
-            project: Some(slug),
-            work_item: None,
-            name: (!row.name.is_empty()).then(|| row.name.clone()),
-            template: link.template.clone(),
-            task: Some(seed_task(&row.id, &path)),
-            reason: REASON.to_string(),
-            model: link.model.clone(),
-            effort: link.effort.clone(),
-            resume: None,
-            permission_mode: "default".to_string(),
-            autopilot: None,
-            role: row.role.clone(),
-            purpose: link.purpose.clone(),
-            review_of: None,
-            from_handoff: None,
-            budget: None,
-            worktree: None,
-            repo_map: None,
-            explicit_null: Vec::new(),
-        };
-        let started = match start_session(ctx, &params) {
-            Ok(started) => started,
+        match rotate_one(ctx, row, &dir, &path, tokens, budget, audit) {
+            Ok(Some(new_id)) => done.rotated.push((row.id.clone(), new_id)),
+            Ok(None) => {}
+            // One session's failure never ends the pass for the others.
             Err(error) => {
-                tracing::warn!(
-                    "context rotation of {} refused: {}",
-                    row.id,
-                    error.message()
-                );
-                continue;
+                tracing::warn!("context rotation of {} failed: {}", row.id, error.message())
             }
-        };
-        let new_id = started.session.engine_session_id.clone();
-        let outcome = json!({
-            "from": row.id,
-            "to": new_id,
-            "role": row.role,
-            "context_tokens": tokens,
-            "budget_tokens": budget,
-            "handoff_file": path.display().to_string(),
-        });
-        let mut writing = write_of(ctx);
-        audited_action(
-            &mut writing,
-            ROTATE_OP,
-            REASON,
-            "session",
-            &row.id,
-            &outcome,
-            "session.context_rotated",
-            Some(&outcome),
-        )?;
-        if let Err(error) = hibernate(
-            ctx,
-            &HibernateParams {
-                id: row.id.clone(),
-                reason: format!("rotated to {new_id}: {REASON}"),
-                allow_shell: false,
-            },
-        ) {
+        }
+    }
+    Ok(done)
+}
+
+/// Start the replacement, hibernate the old session, then record the event.
+/// `Ok(None)` means nothing was rotated this pass (not an error).
+///
+/// The replacement's id is persisted before the old session is hibernated, so
+/// a hibernate that fails is retried on its own after `HIBERNATE_RETRY_AFTER`
+/// and never starts a second replacement. The audit comes last: its failure
+/// is logged and cannot orphan the replacement.
+fn rotate_one<C, I>(
+    ctx: &AppContext<C, I>,
+    row: &EngineSession,
+    dir: &Path,
+    path: &Path,
+    tokens: i64,
+    budget: i64,
+    audit: Audit<C, I>,
+) -> Result<Option<String>, VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let pending = rotating_path(dir, &row.id);
+    let new_id = match std::fs::read_to_string(&pending) {
+        Ok(text) if !text.trim().is_empty() => {
+            let aged = std::fs::metadata(&pending)
+                .and_then(|meta| meta.modified())
+                .ok()
+                .and_then(|at| SystemTime::now().duration_since(at).ok())
+                .is_some_and(|age| age >= HIBERNATE_RETRY_AFTER);
+            if !aged {
+                return Ok(None);
+            }
+            text.trim().to_string()
+        }
+        _ => {
+            let Some(new_id) = start_replacement(ctx, row, path)? else {
+                return Ok(None);
+            };
+            if let Err(error) = std::fs::write(&pending, &new_id) {
+                tracing::warn!(
+                    "context rotation: cannot record replacement {new_id} of {}: {error}",
+                    row.id
+                );
+            }
+            new_id
+        }
+    };
+    if let Err(error) = hibernate(
+        ctx,
+        &HibernateParams {
+            id: row.id.clone(),
+            reason: format!("rotated to {new_id}: {REASON}"),
+            allow_shell: false,
+        },
+    ) {
+        // Not rotated: keep the hand-off and the replacement id, back off.
+        let _ = std::fs::write(&pending, &new_id);
+        tracing::warn!(
+            "context rotation: hibernating {} failed, retrying later: {}",
+            row.id,
+            error.message()
+        );
+        return Ok(None);
+    }
+    let outcome = json!({
+        "from": row.id,
+        "to": new_id,
+        "role": row.role,
+        "context_tokens": tokens,
+        "budget_tokens": budget,
+        "handoff_file": path.display().to_string(),
+    });
+    if let Err(error) = audit(ctx, &row.id, &outcome) {
+        tracing::warn!(
+            "context rotation: audit of {} -> {new_id} failed: {}",
+            row.id,
+            error.message()
+        );
+    }
+    Ok(Some(new_id))
+}
+
+fn start_replacement<C, I>(
+    ctx: &AppContext<C, I>,
+    row: &EngineSession,
+    path: &Path,
+) -> Result<Option<String>, VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let link = ctx.declared.read()?.session_by_engine_id(&row.id)?;
+    let Some(link) = link else {
+        tracing::warn!(
+            "context rotation: {} has no linked project to restart in",
+            row.id
+        );
+        return Ok(None);
+    };
+    let slug = ctx
+        .declared
+        .read()?
+        .project_by_id(&link.project_id)?
+        .map(|project| project.slug);
+    let Some(slug) = slug else { return Ok(None) };
+    let params = StartSessionParams {
+        project: Some(slug),
+        work_item: None,
+        name: (!row.name.is_empty()).then(|| row.name.clone()),
+        template: link.template.clone(),
+        task: Some(seed_task(&row.id, path)),
+        reason: REASON.to_string(),
+        model: link.model.clone(),
+        effort: link.effort.clone(),
+        resume: None,
+        permission_mode: row
+            .permission_mode
+            .clone()
+            .filter(|mode| !mode.is_empty())
+            .unwrap_or_else(|| "default".to_string()),
+        autopilot: Some(row.autopilot),
+        role: row.role.clone(),
+        purpose: link.purpose.clone(),
+        review_of: None,
+        from_handoff: None,
+        budget: row
+            .budget
+            .clone()
+            .and_then(|map| serde_json::from_value(Value::Object(map)).ok()),
+        worktree: None,
+        repo_map: None,
+        explicit_null: Vec::new(),
+    };
+    match start_session(ctx, &params) {
+        Ok(started) => Ok(Some(started.session.engine_session_id.clone())),
+        Err(error) => {
             tracing::warn!(
-                "context rotation: hibernating {} failed: {}",
+                "context rotation of {} refused: {}",
                 row.id,
                 error.message()
             );
+            Ok(None)
         }
-        done.rotated.push((row.id.clone(), new_id));
     }
-    Ok(done)
+}
+
+fn record_rotation<C, I>(
+    ctx: &AppContext<C, I>,
+    old_id: &str,
+    outcome: &Value,
+) -> Result<(), VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let mut writing = write_of(ctx);
+    audited_action(
+        &mut writing,
+        ROTATE_OP,
+        REASON,
+        "session",
+        old_id,
+        outcome,
+        "session.context_rotated",
+        Some(outcome),
+    )
 }
