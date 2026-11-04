@@ -53,6 +53,8 @@ LABEL org.opencontainers.image.title="vogt-session-base" \
       org.opencontainers.image.description="Base image for Vogt coding sessions" \
       org.opencontainers.image.source="https://github.com/TheDancingDeveloper-org/vogt"
 
+# /cache is a per-pod emptyDir at runtime, never shared storage (WI-3242): a
+# cache that two sessions can write lets one poison the other.
 ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
     HOME=/home/vogt \

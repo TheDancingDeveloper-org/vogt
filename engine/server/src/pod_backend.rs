@@ -5,10 +5,10 @@ use crate::{
     session_backend::SessionBackend,
 };
 use k8s_openapi::api::core::v1::{
-    Capabilities, ConfigMapEnvSource, ConfigMapVolumeSource, Container, EnvFromSource, EnvVar,
-    PersistentVolumeClaimVolumeSource, Pod, PodSecurityContext, PodSpec, ResourceRequirements,
-    SeccompProfile, Secret, SecretEnvSource, SecretVolumeSource, SecurityContext, Volume,
-    VolumeMount,
+    Capabilities, ConfigMapEnvSource, ConfigMapVolumeSource, Container, EmptyDirVolumeSource,
+    EnvFromSource, EnvVar, PersistentVolumeClaimVolumeSource, Pod, PodSecurityContext, PodSpec,
+    ResourceRequirements, SeccompProfile, Secret, SecretEnvSource, SecretVolumeSource,
+    SecurityContext, Volume, VolumeMount,
 };
 use k8s_openapi::{apimachinery::pkg::apis::meta::v1::OwnerReference, ByteString};
 use kube::config::{KubeConfigOptions, Kubeconfig};
@@ -341,6 +341,89 @@ pub fn bootstrap_secret_name(id: Uuid) -> String {
     format!("{}-{}-bootstrap", pod_name(id), &nonce[..8])
 }
 const BOOTSTRAP_VOLUME: &str = "bootstrap";
+
+/// Where a session's own tool caches live: a per-pod `emptyDir`, so nothing a
+/// session writes there can reach another session (WI-3242). `CARGO_HOME`
+/// (config.toml, bin, credentials), npm, pnpm, pip, uv and XDG caches all sit
+/// under it; a package cache that any session can write is code execution in
+/// the next session that installs from it.
+const PRIVATE_CACHE_VOLUME: &str = "session-cache";
+const PRIVATE_CACHE_DIR: &str = "/cache";
+/// The shared per-node claim, read-only. Sessions can read a seed an operator
+/// put there but can never write it; nothing in the image reads it by default.
+const SHARED_CACHE_VOLUME: &str = "session-cache-seed";
+const SHARED_CACHE_DIR: &str = "/cache-ro";
+/// Cache locations pinned in the container env. A container `env` entry beats
+/// `envFrom`, so the cache ConfigMap cannot point a tool back at shared
+/// storage. Every path is under [`PRIVATE_CACHE_DIR`].
+const PRIVATE_CACHE_ENV: &[(&str, &str)] = &[
+    ("CARGO_HOME", "/cache/cargo"),
+    ("XDG_CACHE_HOME", "/cache/xdg"),
+    ("NPM_CONFIG_CACHE", "/cache/npm"),
+    ("npm_config_cache", "/cache/npm"),
+    ("npm_config_store_dir", "/cache/pnpm-store"),
+    ("PNPM_HOME", "/cache/pnpm"),
+    ("PIP_CACHE_DIR", "/cache/pip"),
+    ("UV_CACHE_DIR", "/cache/uv"),
+];
+
+/// Volumes in `pod` that a session can write and another session's pod can
+/// also mount: any claim, host path, NFS or CSI source without both the
+/// volume and the mount marked read-only. `emptyDir`, Secret, ConfigMap,
+/// projected and downward-API volumes are per pod (or read-only by
+/// construction) and never count. The engine refuses to create a pod that has
+/// one, so a later change to the template cannot reopen WI-3242.
+pub fn shared_writable_volumes(pod: &Pod) -> Vec<String> {
+    let Some(spec) = pod.spec.as_ref() else {
+        return Vec::new();
+    };
+    let volumes = spec.volumes.as_deref().unwrap_or_default();
+    let mut flagged = Vec::new();
+    for volume in volumes {
+        let (shared, volume_read_only) = if let Some(pvc) = &volume.persistent_volume_claim {
+            (true, pvc.read_only == Some(true))
+        } else if volume.host_path.is_some()
+            || volume.nfs.is_some()
+            || volume.csi.is_some()
+            || volume.cephfs.is_some()
+            || volume.glusterfs.is_some()
+            || volume.iscsi.is_some()
+            || volume.fc.is_some()
+            || volume.rbd.is_some()
+            || volume.flex_volume.is_some()
+        {
+            // These have no per-volume read-only switch we can rely on across
+            // sources, so only the mount can make them read-only.
+            (true, true)
+        } else if volume.empty_dir.is_some()
+            || volume.secret.is_some()
+            || volume.config_map.is_some()
+            || volume.projected.is_some()
+            || volume.downward_api.is_some()
+            || volume.ephemeral.is_some()
+        {
+            (false, true)
+        } else {
+            // A source this check does not know is treated as shared.
+            (true, false)
+        };
+        if !shared {
+            continue;
+        }
+        let writable = spec
+            .containers
+            .iter()
+            .chain(spec.init_containers.iter().flatten())
+            .flat_map(|c| c.volume_mounts.iter().flatten())
+            .any(|m| m.name == volume.name && m.read_only != Some(true))
+            || !volume_read_only;
+        if writable {
+            flagged.push(volume.name.clone());
+        }
+    }
+    flagged
+}
+
 /// The Secret name a pod's bootstrap volume refers to.
 fn bootstrap_secret_name_in(pod: &Pod) -> Option<String> {
     pod.spec
@@ -559,6 +642,11 @@ pub fn pod_template(
         .find_map(|(k, v)| (k == "VOGT_SESSION_IMAGE").then_some(v.as_str()))
         .unwrap_or(&cfg.default_image);
     let mut env = pod_env(cfg, id);
+    env.extend(PRIVATE_CACHE_ENV.iter().map(|(name, value)| EnvVar {
+        name: (*name).into(),
+        value: Some((*value).into()),
+        ..Default::default()
+    }));
     // The requested argv runs in the PTY (the session agent reads it); the
     // container command stays the image entrypoint.
     if !command.is_empty() {
@@ -590,17 +678,31 @@ pub fn pod_template(
     }
     let mut mounts = Vec::new();
     let mut volumes = Vec::new();
+    // The tool caches are private to the pod: an emptyDir that goes with it.
+    // The shared per-node claim is mounted read-only beside it, never at the
+    // path a tool writes to (WI-3242).
+    mounts.push(VolumeMount {
+        name: PRIVATE_CACHE_VOLUME.into(),
+        mount_path: PRIVATE_CACHE_DIR.into(),
+        ..Default::default()
+    });
+    volumes.push(Volume {
+        name: PRIVATE_CACHE_VOLUME.into(),
+        empty_dir: Some(EmptyDirVolumeSource::default()),
+        ..Default::default()
+    });
     if !cfg.cache_pvc.is_empty() {
         mounts.push(VolumeMount {
-            name: "session-cache".into(),
-            mount_path: "/cache".into(),
+            name: SHARED_CACHE_VOLUME.into(),
+            mount_path: SHARED_CACHE_DIR.into(),
+            read_only: Some(true),
             ..Default::default()
         });
         volumes.push(Volume {
-            name: "session-cache".into(),
+            name: SHARED_CACHE_VOLUME.into(),
             persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
                 claim_name: cfg.cache_pvc.clone(),
-                read_only: Some(false),
+                read_only: Some(true),
             }),
             ..Default::default()
         });
@@ -609,6 +711,7 @@ pub fn pod_template(
         mounts.push(VolumeMount {
             name: "kache-config".into(),
             mount_path: "/etc/kache".into(),
+            read_only: Some(true),
             ..Default::default()
         });
         volumes.push(Volume {
@@ -709,6 +812,13 @@ impl PodBackendFactory {
         })
     }
     pub async fn create(&self, pod: Pod) -> Result<Pod> {
+        let shared = shared_writable_volumes(&pod);
+        if !shared.is_empty() {
+            return Err(ApiError::Internal(format!(
+                "refusing to create a session pod with a shared writable volume: {}",
+                shared.join(", ")
+            )));
+        }
         Api::namespaced(self.client.clone(), &self.cfg.namespace)
             .create(&PostParams::default(), &pod)
             .await
@@ -1094,19 +1204,22 @@ mod tests {
         );
         assert_eq!(spec.node_name.as_deref(), Some("winrarhost1"));
         let mounts = container.volume_mounts.as_ref().unwrap();
+        // /cache is a private emptyDir; the shared claim is read-only beside it.
+        assert_eq!(mounts[0].name, "session-cache");
         assert_eq!(mounts[0].mount_path, "/cache");
         assert!(mounts[0].sub_path.is_none());
-        assert_eq!(mounts[1].mount_path, "/etc/kache");
+        assert_ne!(mounts[0].read_only, Some(true));
+        assert_eq!(mounts[1].name, "session-cache-seed");
+        assert_eq!(mounts[1].mount_path, "/cache-ro");
+        assert_eq!(mounts[1].read_only, Some(true));
+        assert_eq!(mounts[2].mount_path, "/etc/kache");
         let volumes = spec.volumes.as_ref().unwrap();
-        assert_eq!(
-            volumes[0]
-                .persistent_volume_claim
-                .as_ref()
-                .unwrap()
-                .claim_name,
-            "session-cache-winrarhost1"
-        );
-        assert_eq!(volumes[1].config_map.as_ref().unwrap().name, "kache-config");
+        assert!(volumes[0].empty_dir.is_some());
+        assert!(volumes[0].persistent_volume_claim.is_none());
+        let seed = volumes[1].persistent_volume_claim.as_ref().unwrap();
+        assert_eq!(seed.claim_name, "session-cache-winrarhost1");
+        assert_eq!(seed.read_only, Some(true));
+        assert_eq!(volumes[2].config_map.as_ref().unwrap().name, "kache-config");
         // The bootstrap Secret is mounted read-only, mode 0400, and required.
         let mount = mounts.last().unwrap();
         assert_eq!(mount.name, "bootstrap");
@@ -1153,6 +1266,148 @@ mod tests {
                 .as_deref(),
             Some("/etc/ssl/custom.pem")
         );
+    }
+
+    fn cache_env(pod: &Pod) -> BTreeMap<String, String> {
+        pod.spec.as_ref().unwrap().containers[0]
+            .env
+            .as_ref()
+            .unwrap()
+            .iter()
+            .filter_map(|v| Some((v.name.clone(), v.value.clone()?)))
+            .collect()
+    }
+
+    #[test]
+    fn tool_caches_are_pinned_inside_the_private_cache() {
+        let pod = pod_template_for(&PodConfig::default());
+        let env = cache_env(&pod);
+        for name in [
+            "CARGO_HOME",
+            "XDG_CACHE_HOME",
+            "NPM_CONFIG_CACHE",
+            "npm_config_cache",
+            "npm_config_store_dir",
+            "PNPM_HOME",
+            "PIP_CACHE_DIR",
+            "UV_CACHE_DIR",
+        ] {
+            let value = env.get(name).unwrap_or_else(|| panic!("{name} not pinned"));
+            assert!(
+                value.starts_with("/cache/"),
+                "{name}={value} is outside the private cache"
+            );
+            assert!(
+                !value.starts_with(SHARED_CACHE_DIR),
+                "{name}={value} is on the shared claim"
+            );
+        }
+        // The container env is what wins over the cache ConfigMap's envFrom.
+        assert!(pod.spec.unwrap().containers[0]
+            .env_from
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(
+                |e| e.config_map_ref.as_ref().map(|c| c.name.as_str()) == Some("session-cache-env")
+            ));
+    }
+
+    #[test]
+    fn two_sessions_share_no_writable_volume() {
+        let cfg = PodConfig::default();
+        let a = pod_for(&cfg, Uuid::from_u128(1));
+        let b = pod_for(&cfg, Uuid::from_u128(2));
+        assert!(shared_writable_volumes(&a).is_empty());
+        assert!(shared_writable_volumes(&b).is_empty());
+        // A writable mount is a per-pod emptyDir, an RW claim never.
+        let writable = |pod: &Pod| -> Vec<(String, String)> {
+            let spec = pod.spec.as_ref().unwrap();
+            let volumes = spec.volumes.as_ref().unwrap();
+            spec.containers[0]
+                .volume_mounts
+                .as_ref()
+                .unwrap()
+                .iter()
+                .filter(|m| m.read_only != Some(true))
+                .map(|m| {
+                    let v = volumes.iter().find(|v| v.name == m.name).unwrap();
+                    assert!(
+                        v.empty_dir.is_some() || v.secret.is_some(),
+                        "{} is writable and not private",
+                        m.name
+                    );
+                    (m.mount_path.clone(), m.name.clone())
+                })
+                .collect()
+        };
+        let writable_a = writable(&a);
+        assert!(writable_a.iter().any(|(path, _)| path == "/cache"));
+        assert_eq!(writable_a, writable(&b));
+        // Nothing the pods mount read-write is the same claim.
+        let claims = |pod: &Pod| -> Vec<String> {
+            pod.spec
+                .as_ref()
+                .unwrap()
+                .volumes
+                .as_ref()
+                .unwrap()
+                .iter()
+                .filter_map(|v| v.persistent_volume_claim.as_ref())
+                .filter(|c| c.read_only != Some(true))
+                .map(|c| c.claim_name.clone())
+                .collect()
+        };
+        assert!(claims(&a).is_empty() && claims(&b).is_empty());
+    }
+
+    #[test]
+    fn a_shared_writable_volume_is_refused() {
+        let mut pod = pod_template_for(&PodConfig::default());
+        assert!(shared_writable_volumes(&pod).is_empty());
+        // The old shape: the claim mounted read-write at /cache.
+        {
+            let spec = pod.spec.as_mut().unwrap();
+            for v in spec.volumes.as_mut().unwrap() {
+                if v.name == SHARED_CACHE_VOLUME {
+                    v.persistent_volume_claim.as_mut().unwrap().read_only = Some(false);
+                }
+            }
+        }
+        assert_eq!(shared_writable_volumes(&pod), vec![SHARED_CACHE_VOLUME]);
+        // Read-only on the volume but writable on the mount is also refused.
+        let mut pod = pod_template_for(&PodConfig::default());
+        for m in pod.spec.as_mut().unwrap().containers[0]
+            .volume_mounts
+            .as_mut()
+            .unwrap()
+        {
+            if m.name == SHARED_CACHE_VOLUME {
+                m.read_only = None;
+            }
+        }
+        assert_eq!(shared_writable_volumes(&pod), vec![SHARED_CACHE_VOLUME]);
+        // A host path is shared however it is mounted, unless the mount is read-only.
+        let mut pod = pod_template_for(&PodConfig::default());
+        let spec = pod.spec.as_mut().unwrap();
+        spec.volumes.as_mut().unwrap().push(Volume {
+            name: "host".into(),
+            host_path: Some(k8s_openapi::api::core::v1::HostPathVolumeSource {
+                path: "/var/cache".into(),
+                type_: None,
+            }),
+            ..Default::default()
+        });
+        spec.containers[0]
+            .volume_mounts
+            .as_mut()
+            .unwrap()
+            .push(VolumeMount {
+                name: "host".into(),
+                mount_path: "/host".into(),
+                ..Default::default()
+            });
+        assert_eq!(shared_writable_volumes(&pod), vec!["host"]);
     }
 
     /// A mocked kube API: serves one pod (list and delete) and records every
@@ -1386,6 +1641,29 @@ mod tests {
         let mut pod = pod_template_for(cfg);
         pod.metadata.name = Some(pod_name(id));
         pod
+    }
+
+    #[tokio::test]
+    async fn a_pod_with_a_shared_writable_volume_is_never_sent_to_the_cluster() {
+        let id = Uuid::new_v4();
+        let cfg = PodConfig::default();
+        let (client, seen) = mock_create::client(vec![]);
+        let factory = PodBackendFactory {
+            cfg: Arc::new(cfg.clone()),
+            client,
+        };
+        let mut pod = pod_for(&cfg, id);
+        for v in pod.spec.as_mut().unwrap().volumes.as_mut().unwrap() {
+            if let Some(pvc) = v.persistent_volume_claim.as_mut() {
+                pvc.read_only = Some(false);
+            }
+        }
+        let err = factory
+            .create_resources(id, b"t", pod)
+            .await
+            .expect_err("a shared writable claim must be refused");
+        assert!(err.to_string().contains("shared writable volume"), "{err}");
+        assert!(seen.lock().unwrap().is_empty(), "the cluster was called");
     }
 
     #[tokio::test]
@@ -1712,14 +1990,16 @@ mod tests {
         )
         .unwrap();
         let spec = pod_template_for(&cfg).spec.unwrap();
-        // Only the bootstrap Secret volume is left.
+        // The private cache and the bootstrap Secret are left: no shared claim.
         let volumes = spec.volumes.unwrap();
-        assert_eq!(volumes.len(), 1);
-        assert_eq!(volumes[0].name, "bootstrap");
+        assert_eq!(volumes.len(), 2);
+        assert_eq!(volumes[0].name, "session-cache");
+        assert!(volumes[0].empty_dir.is_some());
+        assert_eq!(volumes[1].name, "bootstrap");
         assert!(spec.node_name.is_none());
         let c = &spec.containers[0];
         assert!(c.env_from.as_ref().unwrap().is_empty());
-        assert_eq!(c.volume_mounts.as_ref().unwrap().len(), 1);
+        assert_eq!(c.volume_mounts.as_ref().unwrap().len(), 2);
         assert_eq!(spec.image_pull_secrets.unwrap()[0].name, "pull");
     }
 }
