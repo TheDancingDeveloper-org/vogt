@@ -34,6 +34,7 @@ pinned by the `application/resolve.rs` tests in the Rust core (WI-1058).
 | test_agent_activity.py | ported | `collectors/agent_activity.rs` |
 | test_agent_auth_degraded.py | unported | Degraded secrets-manager launch (`AGENT_AUTH_UNAVAILABLE`) is Python/shell session start, not yet in the Rust core. Deferred to WI-2588.
 | test_agent_auth_launch.py | retired | `engine/deploy/agent-auth.sh` launch timing. Shell, not the core crate. |
+| test_agent_auth_remote.py | retired | `engine/deploy/agent-auth.sh` remote broker transport (token file, extra CA, TLS kept on). Shell helper, not the core crate. |
 | test_agent_cli_boot_contract.py | retired | `engine/deploy/agent-cli-install.sh` and `verify-agent-clis.sh`. Engine image boot, not the core. |
 | test_agent_clis.py | ported | Agent-CLI report service. The engine owns the mechanism; the core passes the report through. |
 | test_agent_ergonomics.py | ported | Registry aliases, the workflow walk, and summary mode in `registry.rs` and the work services. |
