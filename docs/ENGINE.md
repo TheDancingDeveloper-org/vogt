@@ -1918,6 +1918,42 @@ engine id (WI-912; the design is `docs/design/session-hibernation.md`).
   listed (WI-962). A shell whose agent reported its conversation (see
   [A conversation reported from inside the session](#a-conversation-reported-from-inside-the-session))
   is resumable and comes back like any agent session.
+- **Pod sessions (WI-3158, WI-3205).** A session whose template has a pod
+  backend hibernates and wakes under the same rules and events; the `409`
+  refusals and the `hibernated` attach frame are unchanged. What differs is
+  where the state lives:
+  - *Hibernate* sends the agent a `flush` frame, and the agent writes its
+    account bundle (login, global config and the conversation's transcript)
+    back through the broker's bundle-file path. The engine waits for the
+    agent's `flushed` reply (20 s), then writes the usual record and 256 KiB
+    snapshot, stops the agent and waits for the pod to be deleted. An agent
+    that is attached but reports failure or stays silent makes the
+    hibernation a `409` (a wake would resume a conversation missing its
+    newest turns); an agent that is not attached hibernates with the
+    transcript as last written back (the agent writes back every second).
+  - *Wake* creates a new pod from the recorded template on the same account
+    (the record keeps the account name, so the lease is sticky). The bootstrap
+    response carries the engine-held bundle, including the transcript, and
+    `VOGT_SESSION_RESUME=1`, `VOGT_SESSION_ACCOUNT` and
+    `VOGT_SESSION_CONVERSATION_ID`; the agent starts `claude --resume <id>`
+    (a fresh pod starts `claude --session-id <id>`), and the entrypoint runs
+    `g clone` as for any pod.
+  - **Unlanded workspace changes are lost by design.** The pod's workspace is
+    deleted with it; only graft-landed work, the transcript and the account
+    config survive a hibernation.
+  - *Engine restart.* On SIGTERM pod sessions are not hibernated: their pods
+    keep running. The stream credential each pod holds is kept in
+    `state_dir/pod-tokens/<id>` (mode 0600; the hibernation record never holds
+    a secret). At boot the engine lists the session pods, and for each one
+    whose record was left running it rebuilds the session over a stream link
+    whose cursor is the length of the session's output log, so the agent's
+    resume replays exactly the output the engine missed. An agent that is
+    ahead of the log (output acknowledged but not yet logged when the engine
+    died) is skipped forward rather than refused. If no agent dials in within
+    `reconnect_timeout` (120 s) the pod is marked lost: it is deleted and the
+    session stays hibernated as `recovered`, wakeable from the engine-held
+    transcript. A pod with no kept credential is not adopted; the reconciler
+    deletes it as an orphan.
 - **`keep_awake`** pins a session. The pin is kept in its record and shown
   on its summary. A pinned session is never hibernated by policy, and if the
   engine finds it hibernated at boot (after a shutdown or a crash), it wakes

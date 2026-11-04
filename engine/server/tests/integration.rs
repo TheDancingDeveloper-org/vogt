@@ -16828,6 +16828,7 @@ mod pod_stream {
     use tokio_tungstenite::{
         tungstenite::client::IntoClientRequest, MaybeTlsStream, WebSocketStream,
     };
+    use vogt_engine_contract::ActivityState;
     use vogt_engine_server::pod_backend::{LaunchFuture, PodLauncher};
     use vogt_session_agent::Frame;
 
@@ -17718,5 +17719,401 @@ mod pod_stream {
         .await
         .expect("the ended session's pod is deleted");
         assert!(h.launcher.deleted.lock().unwrap().contains(&orphan));
+    }
+
+    // ---- Hibernation, wake and restart re-adoption (WI-3158, WI-3205) ------
+
+    /// A harness whose template runs Claude on a named account, so the session
+    /// has a conversation to resume and an account bundle the engine holds.
+    async fn claude_harness() -> (Harness, std::path::PathBuf) {
+        let accounts = tempfile::tempdir().unwrap().keep();
+        let mut cfg = test_config();
+        cfg.pod_backends_enabled = true;
+        let mut onboarding = vogt_engine_server::claude_config::Onboarding::default();
+        for name in ["acct", "other"] {
+            let dir = accounts.join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            onboarding
+                .accounts
+                .push(vogt_engine_server::claude_config::ClaudeAccount {
+                    name: name.into(),
+                    dir,
+                });
+        }
+        onboarding.account_concurrency_cap = 8;
+        cfg.agent_onboarding = onboarding;
+        cfg.session_templates = vec![SessionTemplate {
+            name: "pod".into(),
+            description: "pod-backed claude".into(),
+            command: Some(vec!["claude".into()]),
+            cwd: None,
+            env: Vec::new(),
+            account: Some("acct".into()),
+            default_name: None,
+            match_repo_names: Vec::new(),
+            match_path_prefixes: Vec::new(),
+            tags: Vec::new(),
+            backend: "pod".into(),
+        }];
+        let (base, state, guard) = boot_with_state(cfg).await;
+        let (tx, created) = tokio::sync::mpsc::unbounded_channel();
+        let launcher = Arc::new(FakeLauncher {
+            created: tx,
+            deleted: Mutex::new(Vec::new()),
+            pods: Mutex::new(Vec::new()),
+            listed: Mutex::new(Vec::new()),
+            fail: false,
+        });
+        state.sessions.set_pod_launcher(launcher.clone());
+        let client = reqwest::Client::builder()
+            .default_headers(auth())
+            .build()
+            .unwrap();
+        (
+            Harness {
+                base,
+                state,
+                client,
+                launcher,
+                created,
+                _guard: guard,
+            },
+            accounts,
+        )
+    }
+
+    fn transcript_path(conversation: &str) -> String {
+        format!("projects/-work/{conversation}.jsonl")
+    }
+
+    async fn conversation_of(h: &Harness, id: Uuid) -> String {
+        h.state
+            .sessions
+            .summary_of(id)
+            .and_then(|s| s.conversation)
+            .expect("a claude pod session has a conversation")
+            .id
+    }
+
+    /// Plays the agent through a hibernation: stores the newer transcript when
+    /// asked to flush, confirms, then reports the child's exit when told to
+    /// stop.
+    async fn agent_hibernates(
+        h: &Harness,
+        agent: &mut Agent,
+        account: &str,
+        conversation: &str,
+        offset: u64,
+        newer: &[u8],
+    ) {
+        loop {
+            match take(agent).await {
+                Frame::Flush => {
+                    h.state
+                        .sessions
+                        .secret_broker()
+                        .append_transcript(
+                            account,
+                            conversation,
+                            &transcript_path(conversation),
+                            offset,
+                            newer,
+                        )
+                        .expect("write-back accepted");
+                    put(agent, Frame::Flushed { ok: true }).await;
+                }
+                Frame::Signal { signal } if signal == "kill" => {
+                    put(agent, Frame::Exited { status: Some(0) }).await;
+                    return;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn hibernate_flushes_the_transcript_deletes_the_pod_and_wake_resumes_it_on_the_same_account(
+    ) {
+        let (mut h, _accounts) = claude_harness().await;
+        let id = h.start().await;
+        let conversation = conversation_of(&h, id).await;
+        let token = h.session_token(id).await;
+        let mut agent = h.dial(id, &token, 0).await;
+        assert_eq!(take(&mut agent).await, Frame::Ack { offset: 0 });
+        let broker = h.state.sessions.secret_broker();
+        broker
+            .append_transcript(
+                "acct",
+                &conversation,
+                &transcript_path(&conversation),
+                0,
+                b"turn one\n",
+            )
+            .unwrap();
+
+        let hibernate = tokio::spawn({
+            let client = h.client.clone();
+            let url = format!("{}/api/sessions/{id}/hibernate", h.base);
+            async move { client.post(url).json(&json!({})).send().await.unwrap() }
+        });
+        agent_hibernates(&h, &mut agent, "acct", &conversation, 9, b"turn two\n").await;
+        let res = hibernate.await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "{:?}", res.text().await);
+        assert!(
+            h.launcher.deleted.lock().unwrap().contains(&id),
+            "the pod is deleted"
+        );
+        assert!(h.state.sessions.is_hibernated(id));
+        assert_eq!(
+            h.detail(id).await.summary.activity,
+            ActivityState::Hibernated
+        );
+
+        // Wake: a new pod on the same account, whose bootstrap carries the
+        // newest transcript and tells the agent to resume it.
+        let woken = h
+            .client
+            .post(format!("{}/api/sessions/{id}/wake", h.base))
+            .json(&json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(woken.status(), StatusCode::OK);
+        let (created_id, bootstrap) = h.created.recv().await.expect("a new pod is created");
+        assert_eq!(created_id, id);
+        let pod = h.launcher.pods.lock().unwrap().pop().expect("pod");
+        assert_eq!(
+            pod.metadata.labels.as_ref().unwrap().get("vogt.account"),
+            Some(&"acct".to_string()),
+            "the wake keeps the account"
+        );
+        let body: Value = h.bootstrap(id, &bootstrap).await.json().await.unwrap();
+        let seeded = body["bundle"][transcript_path(&conversation)]
+            .as_str()
+            .expect("the transcript is seeded into the new pod");
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(seeded)
+                .unwrap(),
+            b"turn one\nturn two\n"
+        );
+        assert_eq!(body["env"]["VOGT_SESSION_RESUME"], "1");
+        assert_eq!(body["env"]["VOGT_SESSION_ACCOUNT"], "acct");
+        assert_eq!(body["env"]["VOGT_SESSION_CONVERSATION_ID"], conversation);
+        let summary = h.state.sessions.summary_of(id).unwrap();
+        assert_eq!(summary.account.as_deref(), Some("acct"));
+        assert_ne!(summary.activity, ActivityState::Hibernated);
+    }
+
+    #[tokio::test]
+    async fn hibernate_is_refused_when_an_attached_agent_cannot_write_back() {
+        let (mut h, _accounts) = claude_harness().await;
+        let id = h.start().await;
+        let token = h.session_token(id).await;
+        let mut agent = h.dial(id, &token, 0).await;
+        assert_eq!(take(&mut agent).await, Frame::Ack { offset: 0 });
+        let hibernate = tokio::spawn({
+            let client = h.client.clone();
+            let url = format!("{}/api/sessions/{id}/hibernate", h.base);
+            async move { client.post(url).json(&json!({})).send().await.unwrap() }
+        });
+        // The agent hears the flush and cannot store the transcript: the engine
+        // refuses rather than delete a pod holding unsaved turns.
+        assert_eq!(take(&mut agent).await, Frame::Flush);
+        put(&mut agent, Frame::Flushed { ok: false }).await;
+        let res = hibernate.await.unwrap();
+        assert_eq!(res.status(), StatusCode::CONFLICT);
+        assert!(h.launcher.deleted.lock().unwrap().is_empty());
+        assert!(!h.state.sessions.is_hibernated(id));
+        // Stop the session so its reader ends with the test.
+        h.state.sessions.get(id).unwrap().kill().unwrap();
+        put(&mut agent, Frame::Exited { status: Some(0) }).await;
+        ended(&h.state.sessions, id).await;
+    }
+
+    /// An engine that restarted: a registry over the same state directory
+    /// and history whose process memory holds nothing of the old one.
+    fn restarted(
+        h: &Harness,
+        launcher: Arc<FakeLauncher>,
+    ) -> Arc<vogt_engine_server::SessionRegistry> {
+        let registry = Arc::new(vogt_engine_server::SessionRegistry::new(
+            Arc::clone(&h.state.config),
+            vogt_engine_server::events::EventBus::new(64),
+            h.state.history.clone(),
+        ));
+        registry.set_pod_launcher(launcher);
+        registry
+    }
+
+    /// Wait for the registry's session to have ended, so its reader thread is
+    /// gone before the test's runtime is dropped.
+    async fn ended(registry: &vogt_engine_server::SessionRegistry, id: Uuid) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while registry.get(id).is_ok_and(|s| s.is_alive()) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the session ends");
+    }
+
+    fn running_pod(id: Uuid) -> k8s_openapi::api::core::v1::Pod {
+        running_pod_of(id, vogt_engine_server::pod_backend::DEFAULT_ENGINE_ID)
+    }
+
+    fn running_pod_of(id: Uuid, engine: &str) -> k8s_openapi::api::core::v1::Pod {
+        let mut pod = k8s_openapi::api::core::v1::Pod::default();
+        pod.metadata.labels = Some(std::collections::BTreeMap::from([
+            ("vogt.session".to_string(), id.to_string()),
+            ("vogt.engine".to_string(), engine.to_string()),
+        ]));
+        pod.status = Some(k8s_openapi::api::core::v1::PodStatus {
+            phase: Some("Running".into()),
+            ..Default::default()
+        });
+        pod
+    }
+
+    async fn log_len(h: &Harness, id: Uuid, at_least: u64) {
+        let path = h.state.history.as_ref().unwrap().log_path(id);
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while std::fs::metadata(&path).map_or(0, |m| m.len()) < at_least {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the output reaches the log");
+    }
+
+    fn fake_launcher(listed: Vec<k8s_openapi::api::core::v1::Pod>) -> Arc<FakeLauncher> {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        Arc::new(FakeLauncher {
+            created: tx,
+            deleted: Mutex::new(Vec::new()),
+            pods: Mutex::new(Vec::new()),
+            listed: Mutex::new(listed),
+            fail: false,
+        })
+    }
+
+    #[tokio::test]
+    async fn a_restarted_engine_adopts_the_running_pod_and_replays_exactly() {
+        let (mut h, _accounts) = claude_harness().await;
+        let id = h.start().await;
+        let token = h.session_token(id).await;
+        let mut agent = h.dial(id, &token, 0).await;
+        assert_eq!(take(&mut agent).await, Frame::Ack { offset: 0 });
+        put(
+            &mut agent,
+            Frame::Output {
+                offset: 0,
+                data: b"hello world".to_vec(),
+            },
+        )
+        .await;
+        assert_eq!(take(&mut agent).await, Frame::Ack { offset: 11 });
+        log_len(&h, id, 11).await;
+
+        // The engine dies. Its streams and credentials go with its memory; the
+        // pod and the agent inside it do not.
+        let old_link = h.state.agent_auth.pod(id).unwrap();
+        h.state.agent_auth.forget_pod(id);
+        drop(agent);
+        let launcher = fake_launcher(vec![running_pod(id)]);
+        let registry = restarted(&h, launcher.clone());
+        let adopted = registry.readopt_pods(Duration::from_secs(60)).await;
+        // The dead process's session ends with it.
+        old_link.finish(137);
+        assert_eq!(adopted, vec![id]);
+        assert!(!registry.is_hibernated(id), "adopted, no longer recovered");
+        assert!(
+            launcher.deleted.lock().unwrap().is_empty(),
+            "the pod is kept"
+        );
+
+        // The agent redials with the credential it already holds, claims the
+        // output it last had acknowledged, and replays an overlap plus new
+        // bytes. Nothing is dropped or doubled.
+        let mut agent = h.dial(id, &token, 6).await;
+        assert_eq!(take(&mut agent).await, Frame::Ack { offset: 11 });
+        put(
+            &mut agent,
+            Frame::Output {
+                offset: 6,
+                data: b"worldXYZ!!".to_vec(),
+            },
+        )
+        .await;
+        assert_eq!(take(&mut agent).await, Frame::Ack { offset: 16 });
+        let (bytes, _) = registry.get(id).unwrap().snapshot();
+        assert_eq!(String::from_utf8_lossy(&bytes), "XYZ!!");
+        put(&mut agent, Frame::Exited { status: Some(0) }).await;
+        ended(&registry, id).await;
+    }
+
+    #[tokio::test]
+    async fn an_adopted_pod_whose_agent_never_returns_is_marked_lost() {
+        let (mut h, _accounts) = claude_harness().await;
+        let id = h.start().await;
+        let token = h.session_token(id).await;
+        let mut agent = h.dial(id, &token, 0).await;
+        assert_eq!(take(&mut agent).await, Frame::Ack { offset: 0 });
+        let old_link = h.state.agent_auth.pod(id).unwrap();
+        h.state.agent_auth.forget_pod(id);
+        drop(agent);
+        let launcher = fake_launcher(vec![running_pod(id)]);
+        let registry = restarted(&h, launcher.clone());
+        let adopted = registry.readopt_pods(Duration::from_millis(300)).await;
+        old_link.finish(137);
+        assert_eq!(adopted, vec![id]);
+        tokio::time::timeout(Duration::from_secs(15), async {
+            while !(registry.is_hibernated(id) && launcher.deleted.lock().unwrap().contains(&id)) {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("a pod that never reconnects is deleted and its session left hibernated");
+        let summary = registry.summary_of(id).unwrap();
+        assert_eq!(summary.activity, ActivityState::Hibernated);
+    }
+
+    #[tokio::test]
+    async fn another_engines_pod_is_not_adopted() {
+        let (mut h, _accounts) = claude_harness().await;
+        let id = h.start().await;
+        let _ = h.session_token(id).await;
+        let old_link = h.state.agent_auth.pod(id).unwrap();
+        h.state.agent_auth.forget_pod(id);
+        let registry = restarted(&h, fake_launcher(vec![running_pod_of(id, "someone-else")]));
+        old_link.finish(137);
+        assert!(registry
+            .readopt_pods(Duration::from_secs(60))
+            .await
+            .is_empty());
+        assert!(registry.is_hibernated(id));
+    }
+
+    #[tokio::test]
+    async fn a_pod_without_a_kept_credential_is_not_adopted() {
+        let (mut h, _accounts) = claude_harness().await;
+        let id = h.start().await;
+        let _ = h.session_token(id).await;
+        let old_link = h.state.agent_auth.pod(id).unwrap();
+        h.state.agent_auth.forget_pod(id);
+        let _ = std::fs::remove_file(
+            h.state
+                .config
+                .state_dir
+                .join("pod-tokens")
+                .join(id.to_string()),
+        );
+        let registry = restarted(&h, fake_launcher(vec![running_pod(id)]));
+        old_link.finish(137);
+        assert!(registry
+            .readopt_pods(Duration::from_secs(60))
+            .await
+            .is_empty());
+        assert!(registry.is_hibernated(id));
     }
 }

@@ -175,6 +175,13 @@ pub enum Frame {
         offset: u64,
         lost: u64,
     },
+    /// Engine to agent: write the account bundle back now and say when done.
+    Flush,
+    /// Agent to engine: the write-back finished. `ok` is false when the
+    /// conversation transcript could not be stored.
+    Flushed {
+        ok: bool,
+    },
 }
 
 /// A bounded absolute-offset replay buffer. `next_offset` is the offset after
@@ -288,6 +295,9 @@ pub struct Config {
     pub claude_config_dir: Option<PathBuf>,
     pub account: Option<String>,
     pub conversation_id: Option<String>,
+    /// Resume the conversation from the transcript the engine seeded into the
+    /// bundle instead of starting it (a pod woken from hibernation).
+    pub resume: bool,
 }
 
 /// The argv in `VOGT_SESSION_COMMAND` (a JSON array of strings), if any.
@@ -324,7 +334,10 @@ impl Config {
                 .unwrap_or(DEFAULT_BUFFER_BYTES),
             claude_config_dir: std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from),
             account: std::env::var("VOGT_SESSION_ACCOUNT").ok(),
-            conversation_id: std::env::var("VOGT_SESSION_CONVERSATION_ID").ok(),
+            conversation_id: std::env::var("VOGT_SESSION_CONVERSATION_ID")
+                .ok()
+                .filter(|v| !v.is_empty()),
+            resume: std::env::var("VOGT_SESSION_RESUME").is_ok_and(|v| v == "1"),
         })
     }
     pub fn ws_url(&self) -> Result<String, AgentError> {
@@ -399,24 +412,30 @@ fn http_client(tls: Arc<rustls::ClientConfig>) -> Result<reqwest::Client, AgentE
         .map_err(AgentError::HttpClient)
 }
 
+/// Write the bundle files that changed back to the engine. Returns false when
+/// the conversation transcript could not be stored, so a caller that must not
+/// lose it (hibernation) can tell. A file the engine refuses with a status
+/// (credentials no newer than the stored ones, say) is final and not retried;
+/// a transport failure is retried on the next flush.
 async fn flush_bundle(
     config: &Config,
     tls: &Arc<rustls::ClientConfig>,
     seen: &mut std::collections::HashMap<PathBuf, [u8; 32]>,
     offsets: &mut std::collections::HashMap<PathBuf, u64>,
-) {
+) -> bool {
     let (Some(root), Some(account), Some(conversation)) = (
         config.claude_config_dir.as_deref(),
         config.account.as_deref(),
         config.conversation_id.as_deref(),
     ) else {
-        return;
+        return true;
     };
     // The broker token is a credential and must only ever go to the engine.
     // In particular, do not let ambient HTTP(S)_PROXY redirect this request.
     let Ok(client) = http_client(tls.clone()) else {
-        return;
+        return false;
     };
+    let mut transcript_ok = true;
     let mut url = config.engine_url.clone();
     url.push_str("/api/agent-auth/store/bundle/bundle-file");
     for file in bundle_files(root) {
@@ -430,18 +449,22 @@ async fn flush_bundle(
             BundleFileKind::Transcript => continue,
         };
         let body = serde_json::json!({"account": account, "conversation_id": conversation, "path": file.path.strip_prefix(root).unwrap_or(&file.path).to_string_lossy(), "kind": kind, "bytes": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &file.bytes)});
-        if client
+        match client
             .post(&url)
             .bearer_auth(&config.token)
             .json(&body)
             .send()
             .await
-            .is_ok_and(|reply| reply.status().is_success())
         {
-            seen.insert(file.path, marker);
+            Ok(_) => {
+                seen.insert(file.path, marker);
+            }
+            Err(_) => {}
         }
     }
     if let Some(path) = transcript_path(root, conversation) {
+        // Caught up when the delta is empty; any send failure leaves it behind.
+        let mut caught_up = false;
         let relative = path
             .strip_prefix(root)
             .unwrap_or(&path)
@@ -451,6 +474,7 @@ async fn flush_bundle(
         let mut resyncs = 0;
         while let Ok(delta) = read_delta(&path, offset) {
             if delta.is_empty() {
+                caught_up = true;
                 break;
             }
             let body = serde_json::json!({"account": account, "conversation_id": conversation, "path": relative, "kind": "transcript", "offset": offset, "bytes": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &delta)});
@@ -478,8 +502,11 @@ async fn flush_bundle(
             }
             offsets.insert(path.clone(), offset);
         }
-        offsets.insert(path, offset);
+        offsets.insert(path.clone(), offset);
+        // A transcript that cannot be read yet (no turn written) has nothing to lose.
+        transcript_ok = caught_up || !path.exists();
     }
+    transcript_ok
 }
 
 async fn connect_websocket(
@@ -607,6 +634,28 @@ pub fn resize_pty(master: &PtyMaster, cols: u16, rows: u16) -> Result<(), AgentE
         .map_err(|e| AgentError::Pty(e.to_string()))
 }
 
+/// The shell line that starts the CLI. A Claude conversation is pinned to the
+/// engine's conversation id (`--session-id`), or resumed from the transcript
+/// the engine seeded (`--resume`), so the transcript this agent writes back is
+/// the one a later wake resumes.
+pub fn command_line(config: &Config) -> Result<String, AgentError> {
+    let conversation = config.conversation_id.as_deref().filter(|id| {
+        id.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    });
+    match config.cli.as_str() {
+        "claude" => Ok(match (conversation, config.resume) {
+            (Some(id), true) => format!("claude --resume {id} --add-dir \"$VOGT_SESSION_CWD\""),
+            (Some(id), false) => {
+                format!("claude --session-id {id} --add-dir \"$VOGT_SESSION_CWD\"")
+            }
+            (None, _) => "claude --add-dir \"$VOGT_SESSION_CWD\"".into(),
+        }),
+        "codex" => Ok("codex --add-dir \"$VOGT_SESSION_CWD\"".into()),
+        _ => Err(AgentError::Pty("VOGT_CLI must be claude or codex".into())),
+    }
+}
+
 pub fn spawn_pty(config: &Config) -> Result<PtyIo, AgentError> {
     let system = portable_pty::native_pty_system();
     let pair = system
@@ -624,11 +673,7 @@ pub fn spawn_pty(config: &Config) -> Result<PtyIo, AgentError> {
             command
         }
         None => {
-            let command_line = match config.cli.as_str() {
-                "claude" => "claude --add-dir \"$VOGT_SESSION_CWD\"",
-                "codex" => "codex --add-dir \"$VOGT_SESSION_CWD\"",
-                _ => return Err(AgentError::Pty("VOGT_CLI must be claude or codex".into())),
-            };
+            let command_line = command_line(config)?;
             let mut command = CommandBuilder::new("/bin/sh");
             command.arg("-lc");
             command.arg(command_line);
@@ -658,7 +703,7 @@ pub async fn run(config: Config) -> Result<(), AgentError> {
     let tls = tls_config()?;
     let mut bundle_seen = std::collections::HashMap::new();
     let mut transcript_offsets = std::collections::HashMap::new();
-    flush_bundle(&config, &tls, &mut bundle_seen, &mut transcript_offsets).await;
+    let _ = flush_bundle(&config, &tls, &mut bundle_seen, &mut transcript_offsets).await;
     tracing::info!(
         cli = %config.cli,
         program = config.command.as_ref().map(|argv| argv[0].as_str()).unwrap_or("-"),
@@ -759,6 +804,10 @@ pub async fn run(config: Config) -> Result<(), AgentError> {
                                         }
                                     },
                                     Frame::Heartbeat { .. } => {},
+                                    Frame::Flush => {
+                                        let ok = flush_bundle(&config, &tls, &mut bundle_seen, &mut transcript_offsets).await;
+                                        send_frame(&mut sink, &Frame::Flushed { ok }).await?;
+                                    },
                                     _ => {},
                                 }
                             }
@@ -768,7 +817,7 @@ pub async fn run(config: Config) -> Result<(), AgentError> {
                         }
                     }
                     _ = tokio::time::sleep(BUNDLE_DEBOUNCE) => {
-                        flush_bundle(&config, &tls, &mut bundle_seen, &mut transcript_offsets).await;
+                        let _ = flush_bundle(&config, &tls, &mut bundle_seen, &mut transcript_offsets).await;
                         if let Some(c) = child.as_mut() {
                             if let Ok(Some(status)) = c.try_wait() {
                                 tracing::info!(exit_code = status.exit_code(), "session-agent: the CLI exited");
@@ -847,6 +896,7 @@ mod tests {
             claude_config_dir: None,
             account: None,
             conversation_id: None,
+            resume: false,
         };
         let (_reader, _writer, mut child, master) = spawn_pty(&config).unwrap();
         let size = master.get_size().unwrap();
@@ -855,6 +905,51 @@ mod tests {
         let size = master.get_size().unwrap();
         assert_eq!((size.cols, size.rows), (132, 43));
         let _ = child.kill();
+    }
+
+    #[test]
+    fn claude_is_pinned_to_or_resumes_the_engine_conversation() {
+        let mut config = Config {
+            session_id: "s".into(),
+            engine_url: "http://127.0.0.1:1".into(),
+            token: "t".into(),
+            cli: "claude".into(),
+            command: None,
+            cwd: None,
+            cols: 80,
+            rows: 24,
+            buffer_bytes: 1024,
+            claude_config_dir: None,
+            account: None,
+            conversation_id: Some("abc-123".into()),
+            resume: false,
+        };
+        assert!(command_line(&config)
+            .unwrap()
+            .starts_with("claude --session-id abc-123 "));
+        config.resume = true;
+        assert!(command_line(&config)
+            .unwrap()
+            .starts_with("claude --resume abc-123 "));
+        // An id that is not plain is never put on a shell line.
+        config.conversation_id = Some("x; rm -rf /".into());
+        assert_eq!(
+            command_line(&config).unwrap(),
+            "claude --add-dir \"$VOGT_SESSION_CWD\""
+        );
+    }
+
+    #[test]
+    fn flush_frames_are_stable_json() {
+        assert_eq!(
+            serde_json::to_string(&Frame::Flush).unwrap(),
+            "{\"type\":\"flush\"}"
+        );
+        let f = Frame::Flushed { ok: true };
+        assert_eq!(
+            serde_json::from_str::<Frame>(&serde_json::to_string(&f).unwrap()).unwrap(),
+            f
+        );
     }
 
     #[test]
@@ -882,6 +977,7 @@ mod tests {
             claude_config_dir: None,
             account: None,
             conversation_id: None,
+            resume: false,
         };
         let (mut reader, _writer, mut child, _master) = spawn_pty(&config).unwrap();
         let mut out = String::new();
