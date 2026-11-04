@@ -161,6 +161,7 @@ pub const CREDENTIAL_MAX_LIFETIME_ENV: &str = "ENGINE_AGENT_CREDENTIAL_MAX_LIFET
 /// ceiling can hold off every genuine refresh for as long as it keeps writing
 /// (each rewrite beats an honest refresh for up to ceiling minus lifetime); the
 /// cap bounds that to a few windows of that gap instead of the session's life.
+/// The count is kept in memory, not persisted: restarting the engine resets it.
 const CREDENTIAL_WRITES_PER_WINDOW: usize = 3;
 const CREDENTIAL_WRITE_WINDOW: Duration = Duration::from_secs(8 * 60 * 60);
 /// How far ahead of the engine's clock a `.claude.json` version (the file's
@@ -373,7 +374,9 @@ pub struct SecretBroker {
     /// How far ahead a written-back credential's `expiresAt` may be.
     credential_max_lifetime: Duration,
     /// Session id → when its accepted credential write-backs landed, within
-    /// `CREDENTIAL_WRITE_WINDOW`.
+    /// `CREDENTIAL_WRITE_WINDOW`. In memory only: an engine restart empties
+    /// it, so the allowance starts afresh (a restart grants a session at most
+    /// one extra window of writes).
     credential_writes: DashMap<Uuid, Vec<Instant>>,
 }
 

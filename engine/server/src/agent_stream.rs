@@ -353,7 +353,13 @@ impl AgentAuth {
             },
         );
     }
-    async fn consume(&self, id: Uuid, candidate: &[u8]) -> bool {
+    /// Withdraw a bootstrap credential no pod will present, because the pod
+    /// could not be created. It would expire on its own after
+    /// `BOOTSTRAP_TTL`; this closes that window.
+    pub async fn withdraw(&self, id: Uuid) {
+        self.pending.lock().await.remove(&id);
+    }
+    pub(crate) async fn consume(&self, id: Uuid, candidate: &[u8]) -> bool {
         let mut p = self.pending.lock().await;
         let Some(entry) = p.get(&id) else {
             return false;

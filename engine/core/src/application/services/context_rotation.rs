@@ -35,7 +35,7 @@ use std::time::{Duration, SystemTime};
 use serde_json::{json, Value};
 
 use super::sessions::dispatch_preferences;
-use super::sessions::{hibernate, start_session, HibernateParams, StartSessionParams};
+use super::sessions::{hibernate, start_session_tracked, HibernateParams, StartSessionParams};
 use crate::adapters::engine::EngineSession;
 use crate::application::context::{write_of, AppContext};
 use crate::application::dispatch as dispatch_profiles;
@@ -318,12 +318,30 @@ where
                 let _ = std::fs::remove_file(&pending);
                 return Ok(None);
             }
-            let started = start_replacement(ctx, row, &archive);
-            let Some(new_id) = started.as_ref().ok().and_then(|id| id.clone()) else {
+            let new_id = match start_replacement(ctx, row, &archive) {
+                Ok(Replacement::Started(id)) => id,
+                // The engine may be running a replacement Vogt has no id for.
+                // Keep the empty claim: a later pass never starts a second.
+                Ok(Replacement::Unknown) => {
+                    tracing::warn!(
+                        "context rotation: starting the replacement of {} failed after the \
+                         engine accepted it; keeping the claim ({}), not starting another",
+                        row.id,
+                        pending.display()
+                    );
+                    return Ok(None);
+                }
                 // Nothing was started: release the claim for a later pass.
-                let _ = std::fs::remove_file(&pending);
-                let _ = std::fs::remove_file(&archive);
-                return started.map(|_| None);
+                Ok(Replacement::NotStarted) => {
+                    let _ = std::fs::remove_file(&pending);
+                    let _ = std::fs::remove_file(&archive);
+                    return Ok(None);
+                }
+                Err(error) => {
+                    let _ = std::fs::remove_file(&pending);
+                    let _ = std::fs::remove_file(&archive);
+                    return Err(error);
+                }
             };
             if let Err(error) = std::fs::write(&pending, &new_id) {
                 tracing::warn!(
@@ -384,11 +402,21 @@ where
     Ok(Some(new_id))
 }
 
+/// How starting a replacement ended.
+enum Replacement {
+    Started(String),
+    /// Refused before the engine accepted anything.
+    NotStarted,
+    /// The engine accepted a session but the start then failed: it may be
+    /// running, so no second one may be started.
+    Unknown,
+}
+
 fn start_replacement<C, I>(
     ctx: &AppContext<C, I>,
     row: &EngineSession,
     path: &Path,
-) -> Result<Option<String>, VogtError>
+) -> Result<Replacement, VogtError>
 where
     C: Clock + 'static,
     I: IdFactory + 'static,
@@ -399,14 +427,16 @@ where
             "context rotation: {} has no linked project to restart in",
             row.id
         );
-        return Ok(None);
+        return Ok(Replacement::NotStarted);
     };
     let slug = ctx
         .declared
         .read()?
         .project_by_id(&link.project_id)?
         .map(|project| project.slug);
-    let Some(slug) = slug else { return Ok(None) };
+    let Some(slug) = slug else {
+        return Ok(Replacement::NotStarted);
+    };
     let params = StartSessionParams {
         project: Some(slug),
         work_item: None,
@@ -435,15 +465,26 @@ where
         repo_map: None,
         explicit_null: Vec::new(),
     };
-    match start_session(ctx, &params) {
-        Ok(started) => Ok(Some(started.session.engine_session_id.clone())),
+    let mut engine_started = false;
+    match start_session_tracked(ctx, &params, &mut engine_started) {
+        Ok(started) => Ok(Replacement::Started(
+            started.session.engine_session_id.clone(),
+        )),
+        Err(error) if engine_started => {
+            tracing::warn!(
+                "context rotation of {}: the replacement may be running: {}",
+                row.id,
+                error.message()
+            );
+            Ok(Replacement::Unknown)
+        }
         Err(error) => {
             tracing::warn!(
                 "context rotation of {} refused: {}",
                 row.id,
                 error.message()
             );
-            Ok(None)
+            Ok(Replacement::NotStarted)
         }
     }
 }
