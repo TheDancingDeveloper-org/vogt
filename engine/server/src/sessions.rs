@@ -114,6 +114,9 @@ pub struct SessionRegistry {
     /// Creates and removes pods for pod-backed templates. Unset until the
     /// first pod session (or a test) needs it.
     pod_launcher: parking_lot::Mutex<Option<Arc<dyn crate::pod_backend::PodLauncher>>>,
+    /// Mints each pod session's graft token. Built from
+    /// `ENGINE_GRAFT_MINT_TOKEN_FILE` on first use; tests install a fake.
+    graft_minter: parking_lot::Mutex<Option<Arc<dyn crate::graft_mint::GraftMinter>>>,
     /// Stream halves rebuilt for pods an engine restart is adopting, taken by
     /// `spawn_pod_session` when the session over them is built.
     adopting: parking_lot::Mutex<
@@ -212,6 +215,7 @@ impl SessionRegistry {
             minted: Arc::new(DashMap::new()),
             account_leases,
             pod_launcher: parking_lot::Mutex::new(None),
+            graft_minter: parking_lot::Mutex::new(None),
             adopting: parking_lot::Mutex::new(std::collections::HashMap::new()),
         }
     }
@@ -219,6 +223,34 @@ impl SessionRegistry {
     /// Replace the pod launcher (tests run the agent in-process).
     pub fn set_pod_launcher(&self, launcher: Arc<dyn crate::pod_backend::PodLauncher>) {
         *self.pod_launcher.lock() = Some(launcher);
+    }
+
+    /// Replace the graft minter (tests mint without a graft server).
+    pub fn set_graft_minter(&self, minter: Arc<dyn crate::graft_mint::GraftMinter>) {
+        *self.graft_minter.lock() = Some(minter);
+    }
+
+    /// The minter for pod sessions: an installed one, else a gRPC client when
+    /// `ENGINE_GRAFT_MINT_TOKEN_FILE` is set, else `None` (the pod then gets
+    /// the shared `ENGINE_POD_GRAFT_TOKEN_FILE` token, if any).
+    fn graft_minter(
+        &self,
+        cfg: &crate::pod_backend::PodConfig,
+    ) -> Result<Option<Arc<dyn crate::graft_mint::GraftMinter>>> {
+        let mut slot = self.graft_minter.lock();
+        if let Some(minter) = slot.as_ref() {
+            return Ok(Some(Arc::clone(minter)));
+        }
+        let Some(file) = cfg.graft_mint_token_file.as_deref() else {
+            return Ok(None);
+        };
+        let endpoint = cfg.graft_endpoint.as_deref().ok_or_else(|| {
+            ApiError::Config("ENGINE_GRAFT_MINT_TOKEN_FILE needs ENGINE_POD_GRAFT_ENDPOINT".into())
+        })?;
+        let minter: Arc<dyn crate::graft_mint::GraftMinter> =
+            Arc::new(crate::graft_mint::GrpcGraftMinter::new(endpoint, file));
+        *slot = Some(Arc::clone(&minter));
+        Ok(Some(minter))
     }
 
     /// Start the loop that settles the cluster's session pods against this
@@ -273,6 +305,7 @@ impl SessionRegistry {
         let auth = crate::agent_stream::global();
         let pod_config = self.pod_config()?;
         let launcher = self.pod_launcher()?;
+        let minter = self.graft_minter(&pod_config)?;
         let (link, reader, adopting) = match self.adopting.lock().remove(&id) {
             Some((link, reader)) => (link, reader, true),
             None => {
@@ -330,11 +363,48 @@ impl SessionRegistry {
                 spec.command.as_deref().unwrap_or_default(),
             )
         });
+        let grant = pod
+            .is_some()
+            .then(|| {
+                crate::graft_mint::SessionGrant::new(
+                    id,
+                    &pod_config.graft_repo,
+                    &pod_config.graft_line,
+                    spec.work_item.as_deref(),
+                    spec.budget.as_ref(),
+                )
+            })
+            .transpose();
+        let fallback_token_file = pod_config.graft_token_file.is_some();
         tokio::spawn(async move {
             let auth = crate::agent_stream::global();
             if let Some(pod) = pod {
                 auth.issue(id, &token).await;
-                if let Err(e) = launcher.create(id, &token, pod).await {
+                // The pod's own graft token, minted before the pod exists so a
+                // failure leaves nothing to clean up but the bootstrap token.
+                let created = async {
+                    match (&minter, grant?) {
+                        (Some(minter), Some(grant)) => {
+                            let minted = minter.mint(&grant).await?;
+                            auth.stash_graft_token(id, minted).await;
+                            tracing::info!(
+                                session = %id,
+                                scopes = grant.scopes().len(),
+                                ttl_s = grant.ttl_s,
+                                "minted the session's graft token"
+                            );
+                        }
+                        _ if fallback_token_file => tracing::warn!(
+                            session = %id,
+                            "no ENGINE_GRAFT_MINT_TOKEN_FILE: this pod gets the shared \
+                             ENGINE_POD_GRAFT_TOKEN_FILE graft token instead of one of its own"
+                        ),
+                        _ => {}
+                    }
+                    launcher.create(id, &token, pod).await
+                }
+                .await;
+                if let Err(e) = created {
                     tracing::warn!(session = %id, error = %e, "creating the session pod failed");
                     auth.withdraw(id).await;
                     let note = format!("\r\nsession pod could not be created: {e}\r\n");
@@ -345,6 +415,13 @@ impl SessionRegistry {
             link.exited().await;
             if let Err(e) = launcher.delete(id, None).await {
                 tracing::debug!(session = %id, error = %e, "deleting the session pod failed");
+            }
+            // The hook for revoke-on-stop (WI-3235); a no-op until graft has
+            // a revoke RPC, so the token lives until its TTL.
+            if let Some(minter) = &minter {
+                if let Err(e) = minter.revoke(id).await {
+                    tracing::debug!(session = %id, error = %e, "revoking the session's graft token failed");
+                }
             }
             remove_pod_token(&state_dir, id);
             auth.forget_pod_if(id, &link);

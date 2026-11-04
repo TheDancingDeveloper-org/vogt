@@ -49,6 +49,13 @@ pub struct PodConfig {
     /// entrypoint; the value is never in config or the pod spec.
     #[serde(default)]
     pub graft_token_file: Option<String>,
+    /// File (a mounted secret) holding the engine's graft *mint* token
+    /// (`ENGINE_GRAFT_MINT_TOKEN_FILE`): a service-kind token that lets the
+    /// engine call `AdminService.MintToken` at pod create for a token of the
+    /// session's own. Never given to a pod. When set it replaces
+    /// `graft_token_file`, which is only the fallback (WI-3229).
+    #[serde(default)]
+    pub graft_mint_token_file: Option<String>,
     pub cli: String,
     pub extra_ca_file: Option<String>,
     pub priority_class: Option<String>,
@@ -171,6 +178,7 @@ impl Default for PodConfig {
             cli: "codex".into(),
             graft_endpoint: None,
             graft_token_file: None,
+            graft_mint_token_file: None,
             extra_ca_file: None,
             priority_class: Some("vogt-session".into()),
             service_account: "vogt-session".into(),
@@ -235,6 +243,10 @@ impl PodConfig {
         optional("ENGINE_POD_IMAGE_PULL_SECRET", &mut cfg.image_pull_secret);
         optional("ENGINE_POD_GRAFT_ENDPOINT", &mut cfg.graft_endpoint);
         optional("ENGINE_POD_GRAFT_TOKEN_FILE", &mut cfg.graft_token_file);
+        optional(
+            "ENGINE_GRAFT_MINT_TOKEN_FILE",
+            &mut cfg.graft_mint_token_file,
+        );
         optional("ENGINE_POD_EXTRA_CA_FILE", &mut cfg.extra_ca_file);
         if let Some(v) = text("ENGINE_POD_RESOURCE_REQUESTS") {
             cfg.resource_requests = parse_resources("ENGINE_POD_RESOURCE_REQUESTS", &v)?;
