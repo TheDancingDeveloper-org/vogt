@@ -449,17 +449,15 @@ async fn flush_bundle(
             BundleFileKind::Transcript => continue,
         };
         let body = serde_json::json!({"account": account, "conversation_id": conversation, "path": file.path.strip_prefix(root).unwrap_or(&file.path).to_string_lossy(), "kind": kind, "bytes": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &file.bytes)});
-        match client
+        if client
             .post(&url)
             .bearer_auth(&config.token)
             .json(&body)
             .send()
             .await
+            .is_ok()
         {
-            Ok(_) => {
-                seen.insert(file.path, marker);
-            }
-            Err(_) => {}
+            seen.insert(file.path, marker);
         }
     }
     if let Some(path) = transcript_path(root, conversation) {
