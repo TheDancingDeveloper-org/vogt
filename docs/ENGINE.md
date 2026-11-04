@@ -4679,9 +4679,17 @@ bootstrap request, returned as `graft_token`, written `0600` by the entrypoint.
 It is never a pod env value, an argument, a Secret or a log field. If the mint
 fails (graft unreachable, mint token refused or unreadable) the pod is not
 created, the bootstrap credential is withdrawn and the session ends with the
-error. Graft has no revoke RPC yet (WI-3235), so expiry is the only end of a
-token's life; `GraftMinter::revoke`, called when the session's pod is torn down,
-is the hook for revoke-on-stop and does nothing today.
+error. When the session's pod is torn down (stop, kill, exit, remove, hibernate, or a
+pod that could not be created) the engine calls graft's `AdminService.RevokeToken`
+with its mint credential for that token (WI-3235), after the teardown is marked
+complete: graft then refuses the token for writes from that moment. A revoke
+that fails (graft down, token already expired, mint token refused) is logged
+at `warn` and audited (`target=vogt::audit`, naming the session, never a token)
+and never holds up or fails the stop; the TTL is the backstop. The engine keeps
+the minted token in `<state_dir>/pod-graft-tokens/<session>` (`0600`, directory
+`0700`, like the pod stream tokens in `pod-tokens/`) from mint until the revoke
+attempt, so a pod an engine restart adopts is still revoked when it ends. A
+session hibernated or removed with no pod running has nothing left to revoke.
 
 A requested session argv is passed as `VOGT_SESSION_COMMAND`, a JSON array of
 strings. `vogt-session-agent` runs it in the PTY instead of the agent CLI; the

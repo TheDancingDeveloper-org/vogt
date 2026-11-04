@@ -378,6 +378,7 @@ impl SessionRegistry {
         let fallback_token_file = pod_config.graft_token_file.is_some();
         tokio::spawn(async move {
             let auth = crate::agent_stream::global();
+            let mut revocable: Option<crate::graft_mint::GraftToken> = None;
             if let Some(pod) = pod {
                 auth.issue(id, &token).await;
                 // The pod's own graft token, minted before the pod exists so a
@@ -386,7 +387,13 @@ impl SessionRegistry {
                     match (&minter, grant?) {
                         (Some(minter), Some(grant)) => {
                             let minted = minter.mint(&grant).await?;
-                            auth.stash_graft_token(id, minted).await;
+                            // Kept so the pod's teardown can revoke it, even
+                            // after an engine restart adopted the pod.
+                            if let Err(e) = keep_graft_token(&state_dir, id, &minted) {
+                                tracing::warn!(session = %id, error = %e, "could not keep the session's graft token; it will not be revoked at stop, only expire");
+                            }
+                            auth.stash_graft_token(id, minted.clone()).await;
+                            revocable = Some(minted);
                             tracing::info!(
                                 session = %id,
                                 scopes = grant.scopes().len(),
@@ -416,16 +423,26 @@ impl SessionRegistry {
             if let Err(e) = launcher.delete(id, None).await {
                 tracing::debug!(session = %id, error = %e, "deleting the session pod failed");
             }
-            // The hook for revoke-on-stop (WI-3235); a no-op until graft has
-            // a revoke RPC, so the token lives until its TTL.
-            if let Some(minter) = &minter {
-                if let Err(e) = minter.revoke(id).await {
-                    tracing::debug!(session = %id, error = %e, "revoking the session's graft token failed");
-                }
-            }
             remove_pod_token(&state_dir, id);
             auth.forget_pod_if(id, &link);
             link.mark_torn_down();
+            // Revoke-on-stop (WI-3235). After the teardown is marked, so a slow
+            // or failing graft never holds up a stop; the TTL is the backstop.
+            // A pod an engine restart adopted has its token in the state dir.
+            let held = revocable.or_else(|| read_graft_token(&state_dir, id));
+            remove_graft_token(&state_dir, id);
+            if let (Some(minter), Some(held)) = (&minter, held) {
+                match minter.revoke(id, &held).await {
+                    Ok(()) => tracing::info!(
+                        target: "vogt::audit", session_id = %id,
+                        "revoked the session's graft token"
+                    ),
+                    Err(e) => tracing::warn!(
+                        target: "vogt::audit", session_id = %id, error = %e,
+                        "could not revoke the session's graft token; it expires on its own"
+                    ),
+                }
+            }
         });
         Ok(spawned)
     }
@@ -3183,6 +3200,47 @@ fn pod_token_dir(state_dir: &std::path::Path) -> std::path::PathBuf {
     state_dir.join("pod-tokens")
 }
 
+/// A session's minted graft token, kept (mode 0600, beside the pod stream
+/// tokens, never in the hibernation record) from mint until its pod is torn
+/// down, so the revoke survives an engine restart.
+fn graft_token_dir(state_dir: &std::path::Path) -> std::path::PathBuf {
+    state_dir.join("pod-graft-tokens")
+}
+
+fn keep_graft_token(
+    state_dir: &std::path::Path,
+    id: Uuid,
+    token: &crate::graft_mint::GraftToken,
+) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let dir = graft_token_dir(state_dir);
+    std::fs::create_dir_all(&dir)?;
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(dir.join(id.to_string()))?;
+    file.write_all(token.expose().as_bytes())
+}
+
+fn read_graft_token(
+    state_dir: &std::path::Path,
+    id: Uuid,
+) -> Option<crate::graft_mint::GraftToken> {
+    std::fs::read_to_string(graft_token_dir(state_dir).join(id.to_string()))
+        .ok()
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .map(crate::graft_mint::GraftToken::new)
+}
+
+fn remove_graft_token(state_dir: &std::path::Path, id: Uuid) {
+    let _ = std::fs::remove_file(graft_token_dir(state_dir).join(id.to_string()));
+}
+
 fn read_pod_token(state_dir: &std::path::Path, id: Uuid) -> Option<String> {
     std::fs::read_to_string(pod_token_dir(state_dir).join(id.to_string()))
         .ok()
@@ -3296,6 +3354,39 @@ fn wake_settings_file<'a>(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_kept_graft_token_is_private_readable_and_removable() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let id = uuid::Uuid::new_v4();
+        assert!(super::read_graft_token(dir.path(), id).is_none());
+        super::keep_graft_token(
+            dir.path(),
+            id,
+            &crate::graft_mint::GraftToken::new("kept-token"),
+        )
+        .unwrap();
+        let file = super::graft_token_dir(dir.path()).join(id.to_string());
+        assert_eq!(
+            std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::metadata(super::graft_token_dir(dir.path()))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(
+            super::read_graft_token(dir.path(), id).unwrap().expose(),
+            "kept-token"
+        );
+        super::remove_graft_token(dir.path(), id);
+        assert!(super::read_graft_token(dir.path(), id).is_none());
+    }
+
     use super::normalize_session_name;
 
     #[test]
