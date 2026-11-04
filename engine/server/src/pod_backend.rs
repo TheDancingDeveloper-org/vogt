@@ -7,8 +7,10 @@ use crate::{
 use k8s_openapi::api::core::v1::{
     Capabilities, ConfigMapEnvSource, ConfigMapVolumeSource, Container, EnvFromSource, EnvVar,
     PersistentVolumeClaimVolumeSource, Pod, PodSecurityContext, PodSpec, ResourceRequirements,
-    SeccompProfile, SecretEnvSource, SecurityContext, Volume, VolumeMount,
+    SeccompProfile, Secret, SecretEnvSource, SecretVolumeSource, SecurityContext, Volume,
+    VolumeMount,
 };
+use k8s_openapi::{apimachinery::pkg::apis::meta::v1::OwnerReference, ByteString};
 use kube::config::{KubeConfigOptions, Kubeconfig};
 use kube::{
     api::{Api, DeleteParams, ListParams, ObjectMeta, PostParams, Preconditions},
@@ -318,8 +320,73 @@ fn parse_resources(
 pub fn pod_name(id: Uuid) -> String {
     format!("vogt-session-{}", id.simple())
 }
+/// The Secret that carries one pod's single-use bootstrap credential. The
+/// name has a random part, fresh for every pod the engine creates, so it can
+/// never collide with a Secret an earlier pod of the session left behind and
+/// the engine never has to delete a Secret (its Role grants `create` only).
+pub fn bootstrap_secret_name(id: Uuid) -> String {
+    let nonce = Uuid::new_v4().simple().to_string();
+    format!("{}-{}-bootstrap", pod_name(id), &nonce[..8])
+}
+const BOOTSTRAP_VOLUME: &str = "bootstrap";
+/// The Secret name a pod's bootstrap volume refers to.
+fn bootstrap_secret_name_in(pod: &Pod) -> Option<String> {
+    pod.spec
+        .as_ref()?
+        .volumes
+        .as_ref()?
+        .iter()
+        .find(|v| v.name == BOOTSTRAP_VOLUME)?
+        .secret
+        .as_ref()?
+        .secret_name
+        .clone()
+}
+/// Directory the bootstrap Secret is mounted at, and the file inside it.
+const BOOTSTRAP_MOUNT_DIR: &str = "/run/vogt-bootstrap";
+const BOOTSTRAP_TOKEN_KEY: &str = "token";
+const BOOTSTRAP_TOKEN_PATH: &str = "/run/vogt-bootstrap/token";
 
-fn pod_env(cfg: &PodConfig, id: Uuid, bootstrap_token: &[u8]) -> Vec<EnvVar> {
+/// The Secret holding a pod's bootstrap credential. `owner` is the pod as the
+/// API server returned it (it has a uid); the owner reference makes the
+/// garbage collector delete the Secret when the pod goes. It is immutable and
+/// carries the session and engine labels so an orphan can be found.
+pub fn bootstrap_secret(
+    cfg: &PodConfig,
+    id: Uuid,
+    name: &str,
+    token: &[u8],
+    owner: &Pod,
+) -> Secret {
+    Secret {
+        metadata: ObjectMeta {
+            name: Some(name.to_string()),
+            namespace: Some(cfg.namespace.clone()),
+            labels: Some(BTreeMap::from([
+                ("vogt.session".into(), id.to_string()),
+                ("vogt.kind".into(), "bootstrap".into()),
+                (ENGINE_LABEL.into(), cfg.engine_id.clone()),
+            ])),
+            owner_references: Some(vec![OwnerReference {
+                api_version: "v1".into(),
+                kind: "Pod".into(),
+                name: owner.metadata.name.clone().unwrap_or_else(|| pod_name(id)),
+                uid: owner.metadata.uid.clone().unwrap_or_default(),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        },
+        type_: Some("Opaque".into()),
+        immutable: Some(true),
+        data: Some(BTreeMap::from([(
+            BOOTSTRAP_TOKEN_KEY.to_string(),
+            ByteString(token.to_vec()),
+        )])),
+        ..Default::default()
+    }
+}
+
+fn pod_env(cfg: &PodConfig, id: Uuid) -> Vec<EnvVar> {
     let mut env = vec![
         EnvVar {
             name: "VOGT_ENGINE_URL".into(),
@@ -331,9 +398,10 @@ fn pod_env(cfg: &PodConfig, id: Uuid, bootstrap_token: &[u8]) -> Vec<EnvVar> {
             value: Some(id.to_string()),
             ..Default::default()
         },
+        // The path only: the credential itself is in the per-session Secret.
         EnvVar {
-            name: "VOGT_BOOTSTRAP_TOKEN".into(),
-            value: Some(String::from_utf8_lossy(bootstrap_token).into_owned()),
+            name: "VOGT_BOOTSTRAP_TOKEN_FILE".into(),
+            value: Some(BOOTSTRAP_TOKEN_PATH.into()),
             ..Default::default()
         },
         EnvVar {
@@ -366,12 +434,6 @@ fn pod_env(cfg: &PodConfig, id: Uuid, bootstrap_token: &[u8]) -> Vec<EnvVar> {
             ..Default::default()
         });
     }
-    // Compatibility with the scaffold entrypoint contract.
-    env.push(EnvVar {
-        name: "VOGT_AGENT_BOOTSTRAP_TOKEN".into(),
-        value: Some(String::from_utf8_lossy(bootstrap_token).into_owned()),
-        ..Default::default()
-    });
     env
 }
 /// Convert Kubernetes state into the engine's terminal vocabulary. A missing
@@ -469,7 +531,6 @@ pub fn pod_template(
     kind: &str,
     account: Option<&str>,
     command: &[String],
-    bootstrap_token: &[u8],
 ) -> Pod {
     let mut labels = BTreeMap::from([
         ("vogt.session".into(), id.to_string()),
@@ -485,7 +546,7 @@ pub fn pod_template(
         .iter()
         .find_map(|(k, v)| (k == "VOGT_SESSION_IMAGE").then_some(v.as_str()))
         .unwrap_or(&cfg.default_image);
-    let mut env = pod_env(cfg, id, bootstrap_token);
+    let mut env = pod_env(cfg, id);
     // The requested argv runs in the PTY (the session agent reads it); the
     // container command stays the image entrypoint.
     if !command.is_empty() {
@@ -547,6 +608,25 @@ pub fn pod_template(
             ..Default::default()
         });
     }
+    // The bootstrap credential is a file, never a pod-spec value. The Secret
+    // it names is created right after the pod (it needs the pod's uid to be
+    // owned by it); the kubelet holds the container until the volume resolves.
+    mounts.push(VolumeMount {
+        name: BOOTSTRAP_VOLUME.into(),
+        mount_path: BOOTSTRAP_MOUNT_DIR.into(),
+        read_only: Some(true),
+        ..Default::default()
+    });
+    volumes.push(Volume {
+        name: BOOTSTRAP_VOLUME.into(),
+        secret: Some(SecretVolumeSource {
+            secret_name: Some(bootstrap_secret_name(id)),
+            default_mode: Some(0o400),
+            optional: Some(false),
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
     Pod {
         metadata: ObjectMeta {
             name: Some(pod_name(id)),
@@ -623,31 +703,27 @@ impl PodBackendFactory {
             .map_err(|e| ApiError::Internal(format!("creating session pod: {e}")))
     }
 
-    pub async fn create_resources(&self, id: Uuid, token: &[u8], mut pod: Pod) -> Result<Pod> {
-        // The token is embedded only in the pod's bootstrap environment. No
-        // Secret API call is possible with the engine Role. Keep this helper
-        // defensive so callers cannot accidentally create an uncredentialed
-        // pod even when they built the template separately.
-        let env = pod
-            .spec
-            .as_mut()
-            .and_then(|spec| spec.containers.first_mut())
-            .and_then(|container| container.env.as_mut())
-            .ok_or_else(|| ApiError::BadRequest("session pod has no agent container".into()))?;
-        for name in ["VOGT_BOOTSTRAP_TOKEN", "VOGT_AGENT_BOOTSTRAP_TOKEN"] {
-            if let Some(variable) = env.iter_mut().find(|variable| variable.name == name) {
-                variable.value = Some(String::from_utf8_lossy(token).into_owned());
-                variable.value_from = None;
-            } else {
-                env.push(EnvVar {
-                    name: name.into(),
-                    value: Some(String::from_utf8_lossy(token).into_owned()),
-                    ..Default::default()
-                });
-            }
-        }
+    /// Create the session's pod, then the Secret that carries its bootstrap
+    /// credential, owned by that pod so the cluster deletes it with the pod.
+    /// The pod spec holds only the Secret's (unique) name; the pod waits in
+    /// `ContainerCreating` until the Secret exists. If the Secret cannot be
+    /// made the pod is removed, so none is left that can never boot. The
+    /// engine never deletes a Secret: the garbage collector does.
+    pub async fn create_resources(&self, id: Uuid, token: &[u8], pod: Pod) -> Result<Pod> {
+        let name = bootstrap_secret_name_in(&pod).ok_or_else(|| {
+            ApiError::BadRequest("session pod has no bootstrap secret volume".into())
+        })?;
         crate::agent_stream::global().issue(id, token).await;
-        self.create(pod).await
+        let created = self.create(pod).await?;
+        let secret = bootstrap_secret(&self.cfg, id, &name, token, &created);
+        let api = Api::<Secret>::namespaced(self.client.clone(), &self.cfg.namespace);
+        if let Err(e) = api.create(&PostParams::default(), &secret).await {
+            let _ = self.delete(id, created.metadata.uid.clone()).await;
+            return Err(ApiError::Internal(format!(
+                "creating bootstrap secret: {e}"
+            )));
+        }
+        Ok(created)
     }
 
     /// Delete the session's pod. With `uid` the API server refuses (409) when
@@ -867,7 +943,7 @@ mod tests {
     }
 
     #[test]
-    fn pod_spec_has_session_identity_and_bootstrap_token_and_security_defaults() {
+    fn pod_spec_has_session_identity_and_bootstrap_file_and_security_defaults() {
         let cfg = PodConfig {
             engine_endpoint: "http://192.168.1.75:18197".into(),
             ..Default::default()
@@ -894,7 +970,6 @@ mod tests {
             "agent",
             Some("acct"),
             &["bash".into()],
-            b"bootstrap",
         );
         let labels = pod.metadata.labels.unwrap();
         assert_eq!(labels.get("vogt.session"), Some(&id.to_string()));
@@ -935,15 +1010,18 @@ mod tests {
             .find(|v| v.name == "VOGT_SESSION_COMMAND")
             .unwrap();
         assert_eq!(argv.value.as_deref(), Some(r#"["bash"]"#));
-        let token = container
+        // No credential in the spec: only the path of the mounted file.
+        let token_file = container
             .env
             .as_ref()
             .unwrap()
             .iter()
-            .find(|v| v.name == "VOGT_AGENT_BOOTSTRAP_TOKEN")
+            .find(|v| v.name == "VOGT_BOOTSTRAP_TOKEN_FILE")
             .unwrap();
-        assert_eq!(token.value.as_deref(), Some("bootstrap"));
-        assert!(token.value_from.is_none());
+        assert_eq!(
+            token_file.value.as_deref(),
+            Some("/run/vogt-bootstrap/token")
+        );
         let security = container.security_context.as_ref().unwrap();
         assert_eq!(security.allow_privilege_escalation, Some(false));
         assert_eq!(
@@ -960,7 +1038,7 @@ mod tests {
         for name in [
             "VOGT_ENGINE_URL",
             "VOGT_SESSION_ID",
-            "VOGT_BOOTSTRAP_TOKEN",
+            "VOGT_BOOTSTRAP_TOKEN_FILE",
             "VOGT_GRAFT_REPO",
             "VOGT_GRAFT_LINE",
             "VOGT_CLI",
@@ -970,6 +1048,13 @@ mod tests {
                 "missing {name}"
             );
         }
+        assert!(
+            !env.iter().any(
+                |v| v.name.contains("BOOTSTRAP_TOKEN") && v.name != "VOGT_BOOTSTRAP_TOKEN_FILE"
+            ),
+            "a bootstrap credential is in the pod env"
+        );
+        assert!(env.iter().all(|v| v.value_from.is_none()));
         let resources = container.resources.as_ref().unwrap();
         assert_eq!(
             resources.requests.as_ref().unwrap()["ephemeral-storage"].0,
@@ -994,12 +1079,25 @@ mod tests {
             "session-cache-winrarhost1"
         );
         assert_eq!(volumes[1].config_map.as_ref().unwrap().name, "kache-config");
+        // The bootstrap Secret is mounted read-only, mode 0400, and required.
+        let mount = mounts.last().unwrap();
+        assert_eq!(mount.name, "bootstrap");
+        assert_eq!(mount.mount_path, "/run/vogt-bootstrap");
+        assert_eq!(mount.read_only, Some(true));
+        let secret = volumes.last().unwrap().secret.as_ref().unwrap();
+        let name = secret.secret_name.as_deref().unwrap();
+        assert!(
+            name.starts_with(&format!("{}-", pod_name(id))) && name.ends_with("-bootstrap"),
+            "{name}"
+        );
+        assert_eq!(secret.default_mode, Some(0o400));
+        assert_eq!(secret.optional, Some(false));
     }
 
     #[test]
     fn pod_env_passes_the_graft_endpoint_only_when_configured() {
         let find = |cfg: &PodConfig| {
-            pod_env(cfg, Uuid::nil(), b"token")
+            pod_env(cfg, Uuid::nil())
                 .into_iter()
                 .find(|v| v.name == "GRAFT_ENDPOINT")
                 .and_then(|v| v.value)
@@ -1018,15 +1116,7 @@ mod tests {
             extra_ca_file: Some("/etc/ssl/custom.pem".into()),
             ..Default::default()
         };
-        let env = pod_env(&cfg, Uuid::nil(), b"token");
-        assert_eq!(
-            env.iter()
-                .find(|v| v.name == "VOGT_BOOTSTRAP_TOKEN")
-                .unwrap()
-                .value
-                .as_deref(),
-            Some("token")
-        );
+        let env = pod_env(&cfg, Uuid::nil());
         assert_eq!(
             env.iter()
                 .find(|v| v.name == "VOGT_EXTRA_CA_FILE")
@@ -1136,16 +1226,7 @@ mod tests {
             backend: "pod".into(),
             account: None,
         };
-        let pod = pod_template(
-            &cfg,
-            &template,
-            Uuid::nil(),
-            "demo",
-            "session",
-            None,
-            &[],
-            b"t",
-        );
+        let pod = pod_template(&cfg, &template, Uuid::nil(), "demo", "session", None, &[]);
         assert_eq!(
             pod.metadata.labels.as_ref().unwrap().get(ENGINE_LABEL),
             Some(&"vogt-dev".to_string())
@@ -1213,6 +1294,215 @@ mod tests {
         assert!(store.lock().unwrap().is_empty());
     }
 
+    /// A mocked kube API for creation: pods get a uid; the Secret endpoint
+    /// answers as `secret_status` says (201, 409 first-time, 403, ...).
+    /// Records (method, path, body).
+    mod mock_create {
+        use super::*;
+        use std::sync::Mutex;
+
+        pub type Seen = Arc<Mutex<Vec<(String, String, String)>>>;
+
+        /// `secret_posts` lists the status for each successive Secret POST.
+        pub fn client(secret_posts: Vec<u16>) -> (Client, Seen) {
+            let seen: Seen = Arc::default();
+            let log = seen.clone();
+            let queue = Arc::new(Mutex::new(secret_posts.into_iter()));
+            let service = tower::service_fn(move |req: hyper::Request<kube::client::Body>| {
+                let (log, queue) = (log.clone(), queue.clone());
+                async move {
+                    let (parts, body) = req.into_parts();
+                    let body =
+                        String::from_utf8_lossy(&body.collect_bytes().await.unwrap()).into_owned();
+                    let path = parts.uri.path().to_string();
+                    log.lock().unwrap().push((
+                        parts.method.to_string(),
+                        path.clone(),
+                        body.clone(),
+                    ));
+                    let json = |status: u16, value: serde_json::Value| {
+                        Ok::<_, std::convert::Infallible>(
+                            hyper::Response::builder()
+                                .status(status)
+                                .header("content-type", "application/json")
+                                .body(kube::client::Body::from(value.to_string().into_bytes()))
+                                .unwrap(),
+                        )
+                    };
+                    let failure = |code: u16| serde_json::json!({"kind":"Status","apiVersion":"v1","status":"Failure","reason":"x","code":code,"message":"no"});
+                    if parts.method == hyper::Method::POST && path.ends_with("/pods") {
+                        let mut pod: serde_json::Value = serde_json::from_str(&body).unwrap();
+                        pod["metadata"]["uid"] = "uid-pod".into();
+                        return json(201, pod);
+                    }
+                    if parts.method == hyper::Method::POST && path.ends_with("/secrets") {
+                        let status = queue.lock().unwrap().next().unwrap_or(201);
+                        return if status == 201 {
+                            json(201, serde_json::from_str(&body).unwrap())
+                        } else {
+                            json(status, failure(status))
+                        };
+                    }
+                    // Deletes (pod or secret).
+                    json(
+                        200,
+                        serde_json::json!({"kind":"Status","apiVersion":"v1","status":"Success"}),
+                    )
+                }
+            });
+            (Client::new(service, "vogt-sessions"), seen)
+        }
+    }
+
+    fn pod_for(cfg: &PodConfig, id: Uuid) -> Pod {
+        let mut pod = pod_template_for(cfg);
+        pod.metadata.name = Some(pod_name(id));
+        pod
+    }
+
+    #[tokio::test]
+    async fn the_bootstrap_secret_is_created_owned_by_the_pod_and_the_spec_has_no_token() {
+        let id = Uuid::new_v4();
+        let cfg = PodConfig {
+            engine_id: "vogt-dev".into(),
+            ..Default::default()
+        };
+        let (client, seen) = mock_create::client(vec![]);
+        let factory = PodBackendFactory {
+            cfg: Arc::new(cfg.clone()),
+            client,
+        };
+        factory
+            .create_resources(id, b"s3cret-bootstrap", pod_for(&cfg, id))
+            .await
+            .unwrap();
+        let seen = seen.lock().unwrap();
+        let kinds: Vec<_> = seen
+            .iter()
+            .map(|(m, p, _)| (m.as_str(), p.as_str()))
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                ("POST", "/api/v1/namespaces/vogt-sessions/pods"),
+                ("POST", "/api/v1/namespaces/vogt-sessions/secrets"),
+            ],
+            "the pod first (the Secret needs its uid), then the Secret"
+        );
+        // The pod body carries the Secret's name and no token anywhere.
+        assert!(
+            !seen[0].2.contains("s3cret-bootstrap"),
+            "token in the pod spec: {}",
+            seen[0].2
+        );
+        let secret: Secret = serde_json::from_str(&seen[1].2).unwrap();
+        // The Secret is the one the pod's volume names.
+        let pod: Pod = serde_json::from_str(&seen[0].2).unwrap();
+        assert_eq!(
+            secret.metadata.name,
+            bootstrap_secret_name_in(&pod),
+            "the Secret is not the one the pod mounts"
+        );
+        let owner = &secret.metadata.owner_references.as_ref().unwrap()[0];
+        assert_eq!(
+            (owner.kind.as_str(), owner.name.as_str(), owner.uid.as_str()),
+            ("Pod", pod_name(id).as_str(), "uid-pod")
+        );
+        let labels = secret.metadata.labels.as_ref().unwrap();
+        assert_eq!(labels["vogt.session"], id.to_string());
+        assert_eq!(labels[ENGINE_LABEL], "vogt-dev");
+        assert_eq!(
+            secret.data.as_ref().unwrap()["token"].0,
+            b"s3cret-bootstrap"
+        );
+        assert_eq!(secret.immutable, Some(true));
+    }
+
+    #[tokio::test]
+    async fn a_pod_whose_secret_cannot_be_created_is_removed() {
+        let id = Uuid::new_v4();
+        let cfg = PodConfig::default();
+        let (client, seen) = mock_create::client(vec![403]);
+        let factory = PodBackendFactory {
+            cfg: Arc::new(cfg.clone()),
+            client,
+        };
+        assert!(factory
+            .create_resources(id, b"t", pod_for(&cfg, id))
+            .await
+            .is_err());
+        let seen = seen.lock().unwrap();
+        let last = seen.last().unwrap();
+        assert_eq!(last.0, "DELETE");
+        assert!(
+            last.1.ends_with(&format!("/pods/{}", pod_name(id))),
+            "{}",
+            last.1
+        );
+        assert!(
+            last.2.contains("\"uid\":\"uid-pod\""),
+            "uid precondition: {}",
+            last.2
+        );
+    }
+
+    #[tokio::test]
+    async fn each_pod_gets_its_own_secret_name_and_the_engine_never_deletes_a_secret() {
+        let id = Uuid::new_v4();
+        let cfg = PodConfig::default();
+        let (client, seen) = mock_create::client(vec![]);
+        let factory = PodBackendFactory {
+            cfg: Arc::new(cfg.clone()),
+            client,
+        };
+        // Two pods of the same session, as after a wake: the earlier pod's
+        // Secret may still be waiting for the garbage collector.
+        let (first, second) = (pod_for(&cfg, id), pod_for(&cfg, id));
+        assert_ne!(
+            bootstrap_secret_name_in(&first),
+            bootstrap_secret_name_in(&second)
+        );
+        factory.create_resources(id, b"t", first).await.unwrap();
+        factory.create_resources(id, b"t", second).await.unwrap();
+        let seen = seen.lock().unwrap();
+        assert!(
+            seen.iter().all(|(m, _, _)| m == "POST"),
+            "a request other than create: {seen:?}"
+        );
+        let names: Vec<String> = seen
+            .iter()
+            .filter(|(_, p, _)| p.ends_with("/secrets"))
+            .map(|(_, _, b)| {
+                serde_json::from_str::<Secret>(b)
+                    .unwrap()
+                    .metadata
+                    .name
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(names.len(), 2);
+        assert_ne!(names[0], names[1]);
+    }
+
+    #[tokio::test]
+    async fn a_failed_secret_create_deletes_only_the_pod() {
+        let id = Uuid::new_v4();
+        let cfg = PodConfig::default();
+        let (client, seen) = mock_create::client(vec![409]);
+        let factory = PodBackendFactory {
+            cfg: Arc::new(cfg.clone()),
+            client,
+        };
+        assert!(factory
+            .create_resources(id, b"t", pod_for(&cfg, id))
+            .await
+            .is_err());
+        let seen = seen.lock().unwrap();
+        let deletes: Vec<_> = seen.iter().filter(|(m, _, _)| m == "DELETE").collect();
+        assert_eq!(deletes.len(), 1);
+        assert!(deletes[0].1.contains("/pods/"), "{}", deletes[0].1);
+    }
+
     fn lookup(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
         let map: BTreeMap<String, String> = pairs
             .iter()
@@ -1235,16 +1525,7 @@ mod tests {
             backend: "pod".into(),
             account: None,
         };
-        pod_template(
-            cfg,
-            &template,
-            Uuid::nil(),
-            "vogt",
-            "session",
-            None,
-            &[],
-            b"t",
-        )
+        pod_template(cfg, &template, Uuid::nil(), "vogt", "session", None, &[])
     }
 
     #[test]
@@ -1382,11 +1663,14 @@ mod tests {
         )
         .unwrap();
         let spec = pod_template_for(&cfg).spec.unwrap();
-        assert!(spec.volumes.unwrap().is_empty());
+        // Only the bootstrap Secret volume is left.
+        let volumes = spec.volumes.unwrap();
+        assert_eq!(volumes.len(), 1);
+        assert_eq!(volumes[0].name, "bootstrap");
         assert!(spec.node_name.is_none());
         let c = &spec.containers[0];
         assert!(c.env_from.as_ref().unwrap().is_empty());
-        assert!(c.volume_mounts.as_ref().unwrap().is_empty());
+        assert_eq!(c.volume_mounts.as_ref().unwrap().len(), 1);
         assert_eq!(spec.image_pull_secrets.unwrap()[0].name, "pull");
     }
 }

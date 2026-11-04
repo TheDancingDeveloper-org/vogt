@@ -56,8 +56,10 @@ run_case() {
   mkdir -p "$dir/tmp"
   make_bin "$dir"
   printf %s "$BOOT" >"$dir/boot"; printf %s "$SESSION" >"$dir/session"
+  # The engine mounts the credential from a Secret; the pod env has the path.
+  [ -e "$dir/bootstrap-token" ] || printf %s "$BOOT" >"$dir/bootstrap-token"
   env -i PATH="$dir/bin:/usr/bin:/bin" HOME="$dir/home" TMPDIR="$dir/tmp" CASE_DIR="$dir" \
-    VOGT_ENGINE_URL=http://engine VOGT_SESSION_ID=s1 VOGT_BOOTSTRAP_TOKEN="$BOOT" \
+    VOGT_ENGINE_URL=http://engine VOGT_SESSION_ID=s1 VOGT_BOOTSTRAP_TOKEN_FILE="$dir/bootstrap-token" \
     VOGT_GRAFT_REPO=vogt VOGT_GRAFT_LINE=rust-2 VOGT_CLI=claude \
     VOGT_WORK_DIR="$dir/work" VOGT_SESSION_TOKEN_FILE="$dir/run/session-token" \
     CLAUDE_CONFIG_DIR="$dir/claude" "$@" "$entry"
@@ -101,8 +103,15 @@ if run_case "$tmp/retry-exhausted" REFUSE_FIRST=99 VOGT_BOOTSTRAP_RETRY_MS=0 >"$
 grep -q 'bootstrap failed.*curl exit 7' "$tmp/retry-exhausted.out" || fail "exhausted retry error"
 [[ $(<"$tmp/retry-exhausted/attempts") == 1 ]] || fail "retry budget 0 should try once"
 
-if run_case "$tmp/missing" VOGT_BOOTSTRAP_TOKEN= >"$tmp/missing.out" 2>&1; then fail "missing token succeeded"; fi
-grep -q 'validate failed.*VOGT_BOOTSTRAP_TOKEN' "$tmp/missing.out" || fail "missing token error"
+if run_case "$tmp/missing" VOGT_BOOTSTRAP_TOKEN_FILE= >"$tmp/missing.out" 2>&1; then fail "missing token succeeded"; fi
+grep -q 'validate failed.*VOGT_BOOTSTRAP_TOKEN_FILE' "$tmp/missing.out" || fail "missing token error"
+# A token file that is absent or empty is refused before any request is made.
+if run_case "$tmp/nofile" VOGT_BOOTSTRAP_TOKEN_FILE="$tmp/nofile/none" >"$tmp/nofile.out" 2>&1; then fail "absent token file succeeded"; fi
+grep -q 'bootstrap failed.*not readable' "$tmp/nofile.out" || fail "absent token file error"
+[ ! -e "$tmp/nofile/auth.cfg" ] || fail "request made without a token"
+mkdir -p "$tmp/emptyfile"; : >"$tmp/emptyfile/bootstrap-token"
+if run_case "$tmp/emptyfile" >"$tmp/emptyfile.out" 2>&1; then fail "empty token file succeeded"; fi
+grep -q 'bootstrap failed.*is empty' "$tmp/emptyfile.out" || fail "empty token file error"
 if run_case "$tmp/unauthorized" BOOT_MODE=401 >"$tmp/401.out" 2>&1; then fail "401 succeeded"; fi
 grep -q 'bootstrap failed.*refused' "$tmp/401.out" || fail "401 error"
 if run_case "$tmp/clone-failure" CLONE_FAIL=1 >"$tmp/clone.out" 2>&1; then fail "clone failure succeeded"; fi

@@ -4637,8 +4637,20 @@ MCP, and the session engine itself — are in
 
 The engine creates one pod per session from the `vogt-session-base` image,
 whose command is `deploy/session-entrypoint.sh`. The pod spec carries no
-token other than the single-use bootstrap credential, in
-`VOGT_BOOTSTRAP_TOKEN`. It also sets `VOGT_ENGINE_URL`, `VOGT_SESSION_ID`,
+token at all. The single-use bootstrap credential lives in a per-session
+Secret, `vogt-session-<id>-<random8>-bootstrap` (key `token`, immutable,
+labelled with the session and engine; the random part is fresh for every pod), which the pod mounts read-only at
+`/run/vogt-bootstrap` with mode `0400`; the spec's `VOGT_BOOTSTRAP_TOKEN_FILE`
+holds only the file's path. The engine creates the pod first and then the
+Secret, with an `ownerReference` to the pod, so the cluster deletes the Secret
+when the pod goes; the pod waits in `ContainerCreating` until the Secret
+exists. If the Secret cannot be created the pod is deleted and the session
+ends with the error. The name is unique per pod, so it never collides with a
+Secret an earlier pod of the session has not yet had collected, and the
+engine never deletes a Secret. Its Role in the sessions namespace therefore
+needs only `create` on `secrets` (no `get`, `list`, `watch`, `update` or
+`delete`). The pod spec also sets
+`VOGT_ENGINE_URL`, `VOGT_SESSION_ID`,
 `VOGT_GRAFT_REPO`, `VOGT_GRAFT_LINE`, `VOGT_CLI` (`claude` or `codex`) and,
 when configured, `GRAFT_ENDPOINT` and `VOGT_EXTRA_CA_FILE`.
 
@@ -4660,10 +4672,13 @@ as it starts; a failure prints `session-entrypoint: <step> failed: <reason>`
 and exits non-zero. A reason never contains a token or a response body (the
 bootstrap refusal quotes the engine's one-line reason only). In order:
 
-1. `validate` — required variables are present and `VOGT_CLI` is valid.
+1. `validate` — required variables (including `VOGT_BOOTSTRAP_TOKEN_FILE`) are present and `VOGT_CLI` is valid.
 2. `bootstrap` — `POST /api/agent-auth/bootstrap` with the bearer in a `0600`
-   curl config file, never on a command line; `VOGT_BOOTSTRAP_TOKEN` is then
-   unset. A new pod's IP reaches the engine's allow-set one to three seconds
+   curl config file, never on a command line; the token is read from
+   `VOGT_BOOTSTRAP_TOKEN_FILE` (a missing, unreadable or empty file is
+   refused before any request), and the variable and the in-memory copy are
+   then unset. The mounted file stays for the life of the pod, but the
+   credential is single-use and already spent. A new pod's IP reaches the engine's allow-set one to three seconds
    after start, so a refused or timed-out connection (curl exits 6, 7, 28, 35,
    52, 55, 56) is retried with backoff (250 ms doubling to a 2 s cap) for up to
    `VOGT_BOOTSTRAP_RETRY_MS` (default 15000). An HTTP error such as 401 is
