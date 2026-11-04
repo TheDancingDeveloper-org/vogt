@@ -329,6 +329,17 @@ fn parse_resources(
     }
     Ok(out)
 }
+/// Grace the engine gives a session pod it deletes. The agent has exited by
+/// then, so this only bounds how long the pod lingers in `Terminating`, during
+/// which its name cannot be reused by a wake.
+const POD_DELETE_GRACE_SECONDS: u32 = 5;
+/// How long [`teardown_pod`] waits for a deleted pod to leave the cluster. Under
+/// the 30 s a hibernate waits for the teardown, so a slow API is reported by
+/// the teardown, not by the hibernate giving up first.
+pub const POD_GONE_TIMEOUT: Duration = Duration::from_secs(20);
+/// How often [`teardown_pod`] asks whether the pod is gone yet.
+pub const POD_GONE_POLL: Duration = Duration::from_millis(250);
+
 pub fn pod_name(id: Uuid) -> String {
     format!("vogt-session-{}", id.simple())
 }
@@ -866,20 +877,42 @@ impl PodBackendFactory {
 
     /// Delete the session's pod. With `uid` the API server refuses (409) when
     /// the pod now under that name is a different one, so a decision made
-    /// about an earlier pod cannot remove its replacement.
+    /// about an earlier pod cannot remove its replacement. The grace period is
+    /// short (`POD_DELETE_GRACE_SECONDS`): the agent has already exited by the
+    /// time the engine deletes, and the pod must leave `Terminating` quickly
+    /// enough for a wake to create its replacement under the same name. A pod
+    /// that is already gone is not an error.
     pub async fn delete(&self, id: Uuid, uid: Option<String>) -> Result<()> {
         let params = DeleteParams {
+            grace_period_seconds: Some(POD_DELETE_GRACE_SECONDS),
             preconditions: uid.map(|uid| Preconditions {
                 uid: Some(uid),
                 resource_version: None,
             }),
             ..Default::default()
         };
-        Api::<Pod>::namespaced(self.client.clone(), &self.cfg.namespace)
+        match Api::<Pod>::namespaced(self.client.clone(), &self.cfg.namespace)
             .delete(&pod_name(id), &params)
             .await
-            .map_err(|e| ApiError::Internal(format!("deleting session pod: {e}")))?;
-        Ok(())
+        {
+            Ok(_) => Ok(()),
+            Err(kube::Error::Api(status)) if status.code == 404 => Ok(()),
+            Err(e) => Err(ApiError::Internal(format!("deleting session pod: {e}"))),
+        }
+    }
+
+    /// Whether the pod that carried `uid` has left the cluster: nothing is
+    /// under the session's pod name, or what is there has a different uid (a
+    /// replacement). Without a uid, only an empty name counts.
+    pub async fn pod_gone(&self, id: Uuid, uid: Option<&str>) -> Result<bool> {
+        let found = Api::<Pod>::namespaced(self.client.clone(), &self.cfg.namespace)
+            .get_opt(&pod_name(id))
+            .await
+            .map_err(|e| ApiError::Internal(format!("reading session pod: {e}")))?;
+        Ok(match found {
+            None => true,
+            Some(pod) => uid.is_some_and(|uid| pod.metadata.uid.as_deref() != Some(uid)),
+        })
     }
     pub async fn reconcile(&self) -> Result<Vec<Pod>> {
         let pods = Api::<Pod>::namespaced(self.client.clone(), &self.cfg.namespace)
@@ -921,12 +954,18 @@ pub fn validate_resume_cursor(cursor: u64, next_offset: u64) -> Result<u64> {
 /// implementation is [`PodBackendFactory`]; tests substitute a fake that runs
 /// the agent in-process.
 pub trait PodLauncher: Send + Sync {
-    /// Create the pod. `token` is the one-shot bootstrap credential already
-    /// registered with the stream; implementations only deliver it to the pod.
-    fn create<'a>(&'a self, id: Uuid, token: &'a [u8], pod: Pod) -> LaunchFuture<'a>;
-    /// Delete the session's pod; `uid` (from the listed pod) makes the delete
-    /// apply only to that exact pod.
+    /// Create the pod and return its uid. `token` is the one-shot bootstrap
+    /// credential already registered with the stream; implementations only
+    /// deliver it to the pod. The uid is what a later [`Self::delete`] and
+    /// [`Self::gone`] name, so they apply to this pod and never its successor.
+    fn create<'a>(&'a self, id: Uuid, token: &'a [u8], pod: Pod) -> CreateFuture<'a>;
+    /// Delete the session's pod; `uid` (from the created or listed pod) makes
+    /// the delete apply only to that exact pod.
     fn delete(&self, id: Uuid, uid: Option<String>) -> LaunchFuture<'_>;
+    /// Whether the pod carrying `uid` is gone from the cluster (absent, or
+    /// replaced by a pod with another uid). A deleted pod lingers in
+    /// `Terminating` until then and its name cannot be reused.
+    fn gone(&self, id: Uuid, uid: Option<String>) -> GoneFuture<'_>;
     /// Every pod in the sessions namespace that carries a session label and
     /// this engine's `vogt.engine` label.
     fn list(&self) -> ListFuture<'_>;
@@ -935,17 +974,69 @@ pub type ListFuture<'a> =
     std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<Pod>>> + Send + 'a>>;
 pub type LaunchFuture<'a> =
     std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>>;
+pub type CreateFuture<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<Option<String>>> + Send + 'a>>;
+pub type GoneFuture<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool>> + Send + 'a>>;
 
 impl PodLauncher for PodBackendFactory {
-    fn create<'a>(&'a self, id: Uuid, token: &'a [u8], pod: Pod) -> LaunchFuture<'a> {
-        Box::pin(async move { self.create_resources(id, token, pod).await.map(|_| ()) })
+    fn create<'a>(&'a self, id: Uuid, token: &'a [u8], pod: Pod) -> CreateFuture<'a> {
+        Box::pin(async move {
+            self.create_resources(id, token, pod)
+                .await
+                .map(|created| created.metadata.uid)
+        })
     }
     fn delete(&self, id: Uuid, uid: Option<String>) -> LaunchFuture<'_> {
         Box::pin(PodBackendFactory::delete(self, id, uid))
     }
+    fn gone(&self, id: Uuid, uid: Option<String>) -> GoneFuture<'_> {
+        Box::pin(async move { self.pod_gone(id, uid.as_deref()).await })
+    }
     fn list(&self) -> ListFuture<'_> {
         Box::pin(self.reconcile())
     }
+}
+
+/// Delete the session pod that carries `uid` and wait, up to `limit`, until it
+/// has left the cluster, so a wake that follows can create its replacement
+/// under the same name. Returns whether the pod is confirmed gone.
+///
+/// The delete always carries the uid: a late teardown (a slow API, a retry
+/// after a reconnect) must never remove the pod of a later incarnation. With
+/// no uid there is nothing safe to name and the pod is left to the reconciler.
+pub async fn teardown_pod(
+    launcher: &dyn PodLauncher,
+    id: Uuid,
+    uid: Option<String>,
+    limit: Duration,
+    poll: Duration,
+) -> bool {
+    let Some(uid) = uid else {
+        tracing::debug!(session = %id, "no pod uid is known for the session; not deleting by name");
+        return true;
+    };
+    if let Err(e) = launcher.delete(id, Some(uid.clone())).await {
+        tracing::debug!(session = %id, error = %e, "deleting the session pod failed");
+        return false;
+    }
+    let wait = async {
+        loop {
+            match launcher.gone(id, Some(uid.clone())).await {
+                Ok(true) => return,
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::debug!(session = %id, error = %e, "reading the deleted session pod failed")
+                }
+            }
+            tokio::time::sleep(poll).await;
+        }
+    };
+    let gone = tokio::time::timeout(limit, wait).await.is_ok();
+    if !gone {
+        tracing::warn!(session = %id, "the deleted session pod is still terminating");
+    }
+    gone
 }
 
 /// The production launcher: connects to the cluster on first use, so an
@@ -972,11 +1063,14 @@ impl KubeLauncher {
     }
 }
 impl PodLauncher for KubeLauncher {
-    fn create<'a>(&'a self, id: Uuid, token: &'a [u8], pod: Pod) -> LaunchFuture<'a> {
+    fn create<'a>(&'a self, id: Uuid, token: &'a [u8], pod: Pod) -> CreateFuture<'a> {
         Box::pin(async move { PodLauncher::create(self.factory().await?, id, token, pod).await })
     }
     fn delete(&self, id: Uuid, uid: Option<String>) -> LaunchFuture<'_> {
         Box::pin(async move { PodLauncher::delete(self.factory().await?, id, uid).await })
+    }
+    fn gone(&self, id: Uuid, uid: Option<String>) -> GoneFuture<'_> {
+        Box::pin(async move { PodLauncher::gone(self.factory().await?, id, uid).await })
     }
     fn list(&self) -> ListFuture<'_> {
         Box::pin(async move { PodLauncher::list(self.factory().await?).await })
@@ -1442,6 +1536,22 @@ mod tests {
                                 .unwrap(),
                         )
                     };
+                    if parts.method == hyper::Method::GET && parts.uri.path().contains("/pods/") {
+                        let name = parts.uri.path().rsplit('/').next().unwrap();
+                        let found = state
+                            .lock()
+                            .unwrap()
+                            .iter()
+                            .find(|p| p.metadata.name.as_deref() == Some(name))
+                            .cloned();
+                        return match found {
+                            Some(pod) => json(200, serde_json::to_value(pod).unwrap()),
+                            None => json(
+                                404,
+                                serde_json::json!({"kind":"Status","apiVersion":"v1","status":"Failure","reason":"NotFound","code":404,"message":"not found"}),
+                            ),
+                        };
+                    }
                     if parts.method == hyper::Method::GET {
                         let items = state.lock().unwrap().clone();
                         return json(
@@ -1575,6 +1685,129 @@ mod tests {
         // With the uid of the pod that is there, the delete goes through.
         factory.delete(id, Some("uid-new".into())).await.unwrap();
         assert!(store.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_pod_delete_has_a_short_grace_and_a_missing_pod_is_not_an_error() {
+        let id = Uuid::new_v4();
+        let (client, seen, store) = mock_kube::client(vec![named(id, DEFAULT_ENGINE_ID, "uid-1")]);
+        let factory = PodBackendFactory {
+            cfg: Arc::new(PodConfig::default()),
+            client,
+        };
+        factory.delete(id, Some("uid-1".into())).await.unwrap();
+        assert!(store.lock().unwrap().is_empty());
+        let sent = seen.lock().unwrap()[0].2.clone();
+        assert!(
+            sent.contains(&format!(
+                "\"gracePeriodSeconds\":{POD_DELETE_GRACE_SECONDS}"
+            )),
+            "a delete without a grace period leaves the pod Terminating for 30 s: {sent}"
+        );
+        // Deleting what is already gone succeeds.
+        factory.delete(id, Some("uid-1".into())).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_pod_is_gone_when_absent_or_replaced_by_another_uid() {
+        let id = Uuid::new_v4();
+        let (client, _, store) = mock_kube::client(vec![named(id, DEFAULT_ENGINE_ID, "uid-new")]);
+        let factory = PodBackendFactory {
+            cfg: Arc::new(PodConfig::default()),
+            client,
+        };
+        assert!(!factory.pod_gone(id, Some("uid-new")).await.unwrap());
+        assert!(!factory.pod_gone(id, None).await.unwrap());
+        assert!(factory.pod_gone(id, Some("uid-old")).await.unwrap());
+        store.lock().unwrap().clear();
+        assert!(factory.pod_gone(id, Some("uid-new")).await.unwrap());
+        assert!(factory.pod_gone(id, None).await.unwrap());
+    }
+
+    /// A launcher that records deletes and reports the pod gone after
+    /// `polls_until_gone` questions (or never, with `None`).
+    struct Lingering {
+        deletes: std::sync::Mutex<Vec<(Uuid, Option<String>)>>,
+        asked: std::sync::atomic::AtomicUsize,
+        polls_until_gone: Option<usize>,
+    }
+    impl PodLauncher for Lingering {
+        fn create<'a>(&'a self, _: Uuid, _: &'a [u8], _: Pod) -> CreateFuture<'a> {
+            Box::pin(async { Ok(None) })
+        }
+        fn delete(&self, id: Uuid, uid: Option<String>) -> LaunchFuture<'_> {
+            Box::pin(async move {
+                self.deletes.lock().unwrap().push((id, uid));
+                Ok(())
+            })
+        }
+        fn gone(&self, _: Uuid, _: Option<String>) -> GoneFuture<'_> {
+            Box::pin(async move {
+                let asked = self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                Ok(self.polls_until_gone.is_some_and(|n| asked >= n))
+            })
+        }
+        fn list(&self) -> ListFuture<'_> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+    }
+    fn lingering(polls_until_gone: Option<usize>) -> Lingering {
+        Lingering {
+            deletes: Default::default(),
+            asked: Default::default(),
+            polls_until_gone,
+        }
+    }
+
+    #[tokio::test]
+    async fn teardown_deletes_by_uid_and_waits_until_the_pod_is_gone() {
+        let id = Uuid::new_v4();
+        let launcher = lingering(Some(3));
+        let gone = teardown_pod(
+            &launcher,
+            id,
+            Some("uid-1".into()),
+            Duration::from_secs(5),
+            Duration::from_millis(5),
+        )
+        .await;
+        assert!(gone);
+        assert_eq!(
+            *launcher.deletes.lock().unwrap(),
+            vec![(id, Some("uid-1".to_string()))]
+        );
+        assert_eq!(launcher.asked.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn teardown_is_bounded_when_the_pod_never_goes() {
+        let launcher = lingering(None);
+        let started = std::time::Instant::now();
+        let gone = teardown_pod(
+            &launcher,
+            Uuid::new_v4(),
+            Some("uid-1".into()),
+            Duration::from_millis(100),
+            Duration::from_millis(10),
+        )
+        .await;
+        assert!(!gone);
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[tokio::test]
+    async fn teardown_never_deletes_a_pod_by_name_alone() {
+        let launcher = lingering(Some(1));
+        let gone = teardown_pod(
+            &launcher,
+            Uuid::new_v4(),
+            None,
+            Duration::from_secs(1),
+            Duration::from_millis(5),
+        )
+        .await;
+        assert!(gone);
+        assert!(launcher.deletes.lock().unwrap().is_empty());
     }
 
     /// A mocked kube API for creation: pods get a uid; the Secret endpoint
