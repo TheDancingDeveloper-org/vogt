@@ -952,6 +952,22 @@ where
     C: Clock + 'static,
     I: IdFactory + 'static,
 {
+    start_session_tracked(ctx, params, &mut false)
+}
+
+/// `start_session`, reporting through `engine_started` whether the engine
+/// accepted the session. An `Err` with `engine_started` set is an unknown
+/// outcome: the session may be running (a failed record is followed by a
+/// best-effort kill), so a caller that must not start twice cannot retry.
+pub(super) fn start_session_tracked<C, I>(
+    ctx: &AppContext<C, I>,
+    params: &StartSessionParams,
+    engine_started: &mut bool,
+) -> Result<SessionResult, VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
     let reason = writes::validate_reason(&params.reason)?;
     if params.permission_mode == "bypass" && ctx.principal.kind == ActorKind::Agent {
         return Err(VogtError::BypassRefused(format!(
@@ -1010,6 +1026,7 @@ where
             return Err(error);
         }
     };
+    *engine_started = true;
     let engine_spawn_ms = spawn_started.elapsed().as_millis() as i64;
     tracing::info!(
         target: "vogt.sessions",

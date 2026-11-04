@@ -386,3 +386,34 @@ fn a_claim_with_no_replacement_id_is_never_answered_with_a_second_replacement() 
     assert!(claim.exists(), "an operator clears the claim, not a pass");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn a_replacement_that_failed_after_the_engine_took_it_is_never_started_twice() {
+    let (built, script, dir) = ready(400_000);
+    // Vogt cannot record a new session: the engine has accepted the start,
+    // but `start_session` returns an error (and only tries to kill it).
+    let db = rusqlite::Connection::open(dir.join(crate::config::DECLARED_DB_NAME)).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER refuse_sessions BEFORE INSERT ON coding_sessions \
+         BEGIN SELECT RAISE(ABORT, 'record refused'); END;",
+    )
+    .unwrap();
+    drop(db);
+
+    for _ in 0..3 {
+        let pass = rotate_over_budget(ctx(&built)).unwrap();
+        assert!(pass.rotated.is_empty(), "{pass:?}");
+    }
+    assert_eq!(
+        creates(&script),
+        2,
+        "one replacement attempt, never a second"
+    );
+    assert_eq!(script.posts("/hibernate"), 0);
+    let claim = dir.join("context-rotation").join("eng-old.rotating");
+    assert!(
+        claim.exists(),
+        "the claim stays until an operator clears it"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}

@@ -713,12 +713,28 @@ impl PodBackendFactory {
         let name = bootstrap_secret_name_in(&pod).ok_or_else(|| {
             ApiError::BadRequest("session pod has no bootstrap secret volume".into())
         })?;
-        crate::agent_stream::global().issue(id, token).await;
-        let created = self.create(pod).await?;
+        let auth = crate::agent_stream::global();
+        auth.issue(id, token).await;
+        let created = match self.create(pod).await {
+            Ok(created) => created,
+            Err(e) => {
+                auth.withdraw(id).await;
+                return Err(e);
+            }
+        };
         let secret = bootstrap_secret(&self.cfg, id, &name, token, &created);
         let api = Api::<Secret>::namespaced(self.client.clone(), &self.cfg.namespace);
         if let Err(e) = api.create(&PostParams::default(), &secret).await {
-            let _ = self.delete(id, created.metadata.uid.clone()).await;
+            // No pod will ever present the bootstrap credential.
+            auth.withdraw(id).await;
+            if let Err(delete_error) = self.delete(id, created.metadata.uid.clone()).await {
+                tracing::warn!(
+                    session = %id,
+                    error = %delete_error,
+                    "removing the pod after its bootstrap secret failed also failed; \
+                     it may be left behind"
+                );
+            }
             return Err(ApiError::Internal(format!(
                 "creating bootstrap secret: {e}"
             )));
@@ -1443,6 +1459,27 @@ mod tests {
             last.2.contains("\"uid\":\"uid-pod\""),
             "uid precondition: {}",
             last.2
+        );
+    }
+
+    #[tokio::test]
+    async fn a_bootstrap_token_whose_pod_was_not_made_is_withdrawn() {
+        let id = Uuid::new_v4();
+        let cfg = PodConfig::default();
+        let (client, _seen) = mock_create::client(vec![403]);
+        let factory = PodBackendFactory {
+            cfg: Arc::new(cfg.clone()),
+            client,
+        };
+        assert!(factory
+            .create_resources(id, b"unused-token", pod_for(&cfg, id))
+            .await
+            .is_err());
+        assert!(
+            !crate::agent_stream::global()
+                .consume(id, b"unused-token")
+                .await,
+            "the token outlived the failed pod create"
         );
     }
 

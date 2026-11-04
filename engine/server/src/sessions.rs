@@ -336,6 +336,7 @@ impl SessionRegistry {
                 auth.issue(id, &token).await;
                 if let Err(e) = launcher.create(id, &token, pod).await {
                     tracing::warn!(session = %id, error = %e, "creating the session pod failed");
+                    auth.withdraw(id).await;
                     let note = format!("\r\nsession pod could not be created: {e}\r\n");
                     let _ = link.ingest(link.next_offset(), note.as_bytes());
                     link.finish(1);
