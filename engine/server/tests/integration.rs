@@ -16241,6 +16241,59 @@ async fn a_klaudia_autopilot_session_hibernates_at_its_turn_budget() {
     assert_eq!(transcript.lines().count(), turns);
 }
 
+/// WI-1522: an overseer over its context limit is never hibernated for it.
+/// Klaudia has no compact command the engine types, so it gets the change and
+/// nothing typed; the same limit on a worker hibernates (the test above).
+#[tokio::test]
+async fn an_overseer_over_its_context_limit_is_not_hibernated() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let stub = fake_klaudia_tui(dir);
+    let (base, _h) = boot_with_config(budget_sandbox(dir)).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let created: Value = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({
+            "name": "overseer on a context budget",
+            "command": [stub.to_string_lossy()],
+            "autopilot": true,
+            "role": "oversight",
+            "budget": { "context_tokens": 1 },
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+    assert_eq!(created["role"], "oversight", "{created}");
+    let conversation = created["conversation"]["id"].as_str().unwrap();
+    std::fs::write(
+        dir.join("transcript_at"),
+        dir.join(format!(".klaudia/sessions/k/{conversation}.jsonl"))
+            .display()
+            .to_string(),
+    )
+    .unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while turns_run(dir) < 3 {
+        assert!(tokio::time::Instant::now() < deadline, "no turns ran");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    // Several watcher ticks past the limit.
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    let row = session_row(&client, &base, &id).await;
+    assert!(
+        row.get("hibernation").is_none_or(|h| h.is_null()),
+        "an overseer was hibernated for context: {row}"
+    );
+    assert!(row["economics"]["context_tokens"].as_i64().unwrap_or(0) > 1);
+}
+
 /// WI-1281, again: a blocked report must not keep a session past its budget.
 ///
 /// The report is the agent's own word that it is waiting on a person, and the

@@ -2009,7 +2009,9 @@ waiting for it to be (`GET /wait?until=ready`) only ever timed out.
 A session may carry a `budget` (`SessionSpec`; vogt-core sets one by default
 for an agent template given a task and the worker role: 120 turns and 90
 minutes per turn, no context limit, and no whole-session clock unless the
-project's `agent_policy.session_wall_clock_minutes` names one). An explicit
+project's `agent_policy.session_wall_clock_minutes` names one; and, for the
+oversight role, a context limit of `ENGINE_OVERSIGHT_CONTEXT_TOKENS` (default
+200000) with no turn or clock limit, WI-1522). An explicit
 budget object is used exactly as given; an explicit empty object sets no
 limits and declines that default. Zero is not a limit. The budget is kept on the summary
 and in the hibernation record, so a wake brings the same limits back
@@ -2079,6 +2081,17 @@ budget-hibernated session therefore brings it back without its hard limit:
 the watcher will not hibernate it again. Boot wake never does this on its
 own — a session hibernated with trigger `budget` is left hibernated, pinned
 or not.
+
+An oversight session is never hibernated for its context limit (WI-1522). At
+the soft line, once per climb and only at the prompt, the watcher types the
+agent's compact command and publishes a `budget` change at level `compact`:
+for Claude, `/compact Keep: open workers and their items, pending operator
+decisions, follow-ups, merge gates`. An agent with no compact command the
+engine types (Codex, WI-1575; Klaudia until its command is confirmed) gets
+the change at level `soft` and nothing typed. The latch re-arms when the
+economics show context under half the limit. A turn or clock limit on an
+overseer still hibernates it. `dispatch.context_budget` rotation (WI-3132) is
+separate and opt-in.
 
 Auto-split is not implemented. The overseer that reads the `budget` change
 starts the successor itself with `session_start(from_handoff=WI-n)`.

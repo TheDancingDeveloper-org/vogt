@@ -487,6 +487,17 @@ fn is_claude_model(model: &str) -> bool {
     matches!(model, "opus" | "sonnet" | "haiku" | "fable") || model.starts_with("claude-")
 }
 
+/// Default overseer context ceiling (`ENGINE_OVERSIGHT_CONTEXT_TOKENS`).
+const DEFAULT_OVERSIGHT_CONTEXT_TOKENS: i64 = 200_000;
+
+fn oversight_context_tokens() -> i64 {
+    std::env::var("ENGINE_OVERSIGHT_CONTEXT_TOKENS")
+        .ok()
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(DEFAULT_OVERSIGHT_CONTEXT_TOKENS)
+}
+
 fn effective_budget(
     params: &StartSessionParams,
     policy: &crate::core::AgentPolicy,
@@ -498,6 +509,16 @@ fn effective_budget(
         .task
         .as_deref()
         .is_some_and(|task| !task.trim().is_empty());
+    // An overseer re-reads its whole history each sweep: bound its context so
+    // the engine compacts it (WI-1522). No turn or clock limit.
+    if params.template.is_some() && has_task && params.role == "oversight" {
+        return Some(SessionBudget {
+            turns: None,
+            context_tokens: Some(oversight_context_tokens()),
+            wall_clock_minutes: None,
+            session_wall_clock_minutes: None,
+        });
+    }
     if params.template.is_some() && has_task && params.role == "worker" {
         return Some(SessionBudget {
             turns: Some(120),
@@ -5200,5 +5221,34 @@ mod tests {
     fn a_sweep_since_the_future_returns_no_rows() {
         let result = sweep_with("sweep-since", json!({"since": "2999-01-01T00:00:00Z"}));
         assert!(result["rows"].as_array().unwrap().is_empty(), "{result}");
+    }
+
+    /// WI-1522: an overseer's task start carries a context ceiling and no turn
+    /// or clock limit; an explicit budget, even an empty one, wins.
+    #[test]
+    fn an_overseer_start_defaults_to_a_context_ceiling() {
+        use super::super::sessions_test::start_params;
+        use super::effective_budget;
+        use super::SessionBudget;
+        use crate::core::AgentPolicy;
+        let policy = AgentPolicy::default();
+        let mut params = start_params(Some("vogt"), Some("sweep"), "test");
+        params.template = Some("claude".to_string());
+        params.role = "oversight".to_string();
+        let budget = effective_budget(&params, &policy).unwrap();
+        assert_eq!(budget.context_tokens, Some(200_000));
+        assert_eq!((budget.turns, budget.wall_clock_minutes), (None, None));
+        assert_eq!(budget.session_wall_clock_minutes, None);
+        params.budget = Some(SessionBudget::default());
+        assert_eq!(
+            effective_budget(&params, &policy),
+            Some(SessionBudget::default())
+        );
+        params.budget = None;
+        params.role = "worker".to_string();
+        assert_eq!(
+            effective_budget(&params, &policy).unwrap().context_tokens,
+            None
+        );
     }
 }

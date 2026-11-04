@@ -43,6 +43,14 @@
 //!   without hibernating loses the stretches since the last hibernation. It is
 //!   unset unless a session's or project's budget names it.
 //!
+//! An oversight session is the exception on the context dimension (WI-1522):
+//! it is never hibernated for context. At the soft line, once per climb and
+//! only at the prompt, the watcher types the agent's compact command with a
+//! focus line and publishes a `budget` change at level `compact`; the latch
+//! re-arms when the context is back under half the limit. An agent with no
+//! compact command (Codex, WI-1575) gets the change and nothing typed. A turn
+//! or clock limit on an overseer still hibernates it.
+//!
 //! Auto-split is not implemented. The overseer that reads the `budget` change
 //! starts the successor itself with `session_start(from_handoff=…)`.
 
@@ -409,6 +417,39 @@ fn account_running(session: &Session, now: OffsetDateTime) -> Option<OffsetDateT
     since
 }
 
+/// The focus an overseer's compaction keeps (WI-1522).
+pub const COMPACT_FOCUS: &str = "Keep: open workers and their items, pending operator decisions, \
+follow-ups, merge gates";
+
+/// The command that compacts an agent's own context, or `None` for an agent
+/// that has none to type. Codex must never be typed `/compact` (WI-1575): it
+/// would reach the model as a prompt. Klaudia's command is not confirmed, so it
+/// is not typed either.
+pub fn compact_command(agent: &str) -> Option<String> {
+    match agent {
+        "claude" => Some(format!("/compact {COMPACT_FOCUS}")),
+        _ => None,
+    }
+}
+
+/// Whether an oversight session's context limit is the thing in play: its
+/// context is never a reason to hibernate it (WI-1522).
+fn compacts_instead(oversight: bool, level: Level, dimension: Option<Dimension>) -> bool {
+    oversight && level != Level::None && dimension == Some(Dimension::Context)
+}
+
+/// Whether the context has dropped below half the limit, which re-arms the
+/// compaction for the next climb.
+fn context_rearmed(budget: &SessionBudget, economics: Option<&SessionEconomics>) -> bool {
+    let Some(limit) = budget.context_tokens.filter(|l| *l > 0) else {
+        return false;
+    };
+    let used = economics
+        .map(|e| e.context_tokens.max(0) as u64)
+        .unwrap_or(0);
+    used.saturating_mul(2) < limit
+}
+
 /// What one refused hard limit publishes. The notice has its own latch, so a
 /// soft warning already sent does not suppress it, and a wall-clock hard that
 /// fired before any soft does not suppress the soft that follows. `hard_done`
@@ -457,6 +498,60 @@ fn note_refusal(session: &Session, bus: &EventBus, refusal: &str) {
     );
 }
 
+/// Compact an overseer whose context crossed its limit, once per climb, at
+/// the prompt. Never hibernates it. An agent with no compact command gets the
+/// change but nothing typed.
+async fn compact(session: &Arc<Session>, bus: &EventBus, r: &Reading<'_>, settle: Duration) {
+    if session.budget_soft_sent() {
+        session.set_budget_hold(false);
+        return;
+    }
+    let ready = at_prompt(session, settle).await;
+    session.set_budget_hold(!ready);
+    if !ready {
+        return;
+    }
+    let (_, n, limit) = describe(
+        Dimension::Context,
+        r.budget,
+        r.economics,
+        r.running_since,
+        r.session_running,
+        r.now,
+    );
+    let command = session.agent().and_then(|agent| compact_command(&agent));
+    session.set_budget_soft_sent(true);
+    let (level, summary) = match &command {
+        Some(_) => ("compact", format!("context {n} of {limit}: compacting")),
+        None => (
+            "soft",
+            format!("context {n} of {limit}: over budget, agent has no compact command"),
+        ),
+    };
+    bus.publish(vogt_engine_contract::ServerEvent::SessionBudget {
+        id: session.id,
+        level: level.to_string(),
+        summary: summary.clone(),
+    });
+    if let Some(command) = command {
+        if let Err(e) = type_line(session, &command).await {
+            tracing::warn!(
+                session = %session.id,
+                error = %e,
+                event = "session.budget",
+                "could not type the compact command"
+            );
+            return;
+        }
+    }
+    tracing::info!(
+        session = %session.id,
+        level = level,
+        event = "budget.compact",
+        "{summary}"
+    );
+}
+
 /// Look at every live session once.
 pub async fn run_once(
     registry: &SessionRegistry,
@@ -494,6 +589,16 @@ pub async fn run_once(
             now,
             policy.soft_pct,
         );
+        let oversight = session.role() == vogt_engine_contract::SessionRole::Oversight;
+        // An overseer's compaction runs once per climb; it re-arms when the
+        // economics show the context back under half the limit.
+        if oversight && session.budget_soft_sent() && context_rearmed(&budget, economics.as_ref()) {
+            session.set_budget_soft_sent(false);
+        }
+        if compacts_instead(oversight, level, dimension) {
+            compact(&session, bus, &reading, settle).await;
+            continue;
+        }
         if level == Level::None {
             session.set_budget_hold(false);
             continue;
@@ -898,5 +1003,48 @@ mod tests {
             }
             other => panic!("expected a hard stop, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn an_overseers_context_limit_compacts_and_never_hibernates() {
+        let at = now();
+        let b = budget(None, Some(200_000), None);
+        for (used, level) in [(160_000, Level::Soft), (200_000, Level::Hard)] {
+            let (l, d) = assess_with(&b, Some(&economics(1, used)), None, NONE, at, 80);
+            assert_eq!(l, level);
+            assert!(compacts_instead(true, l, d));
+            // A worker keeps the old behaviour; a turn limit still stops.
+            assert!(!compacts_instead(false, l, d));
+        }
+        let (l, d) = assess_with(
+            &budget(Some(10), None, None),
+            Some(&economics(10, 0)),
+            None,
+            NONE,
+            at,
+            80,
+        );
+        assert!(!compacts_instead(true, l, d));
+    }
+
+    #[test]
+    fn only_claude_is_typed_a_compact_command_with_the_focus() {
+        let line = compact_command("claude").unwrap();
+        assert!(line.starts_with("/compact Keep: open workers and their items"));
+        assert!(line.contains("merge gates"));
+        for agent in ["codex", "opencode", "klaudia", "bash"] {
+            assert_eq!(compact_command(agent), None, "{agent}");
+        }
+    }
+
+    #[test]
+    fn compaction_re_arms_below_half_the_limit() {
+        let b = budget(None, Some(200_000), None);
+        assert!(!context_rearmed(&b, Some(&economics(1, 100_000))));
+        assert!(context_rearmed(&b, Some(&economics(1, 99_999))));
+        assert!(!context_rearmed(
+            &budget(None, None, None),
+            Some(&economics(1, 0))
+        ));
     }
 }
