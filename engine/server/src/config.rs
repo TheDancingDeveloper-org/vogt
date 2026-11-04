@@ -107,6 +107,21 @@ impl SessionTemplate {
                 account: None,
                 backend: default_session_backend(),
             },
+            // Runs in a pod; refused unless pod backends are enabled. No
+            // command, so the image's entrypoint boots the CLI.
+            SessionTemplate {
+                name: "Pod".to_string(),
+                description: "Session in a Kubernetes pod".to_string(),
+                command: None,
+                cwd: None,
+                env: vec![],
+                default_name: Some("pod-{timestamp}".to_string()),
+                match_repo_names: vec![],
+                match_path_prefixes: vec![],
+                tags: vec!["pod".to_string()],
+                account: None,
+                backend: "pod".to_string(),
+            },
             SessionTemplate {
                 name: "Node Dev".to_string(),
                 description: "Node.js development environment".to_string(),
