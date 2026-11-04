@@ -11,7 +11,10 @@ use std::sync::OnceLock;
 use std::{
     collections::HashMap,
     io::Read,
-    sync::{atomic::AtomicBool, atomic::Ordering, Arc, Condvar},
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc, Condvar,
+    },
     time::{Duration, Instant},
 };
 use subtle::ConstantTimeEq;
@@ -37,6 +40,17 @@ pub struct AgentAuth {
     pods: std::sync::Mutex<HashMap<Uuid, Arc<PodLink>>>,
 }
 
+/// How a requested write-back ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlushOutcome {
+    /// The agent stored the transcript.
+    Done,
+    /// No agent is attached, so there is nothing newer to pull.
+    NotAttached,
+    /// The agent is attached but did not confirm in time, or could not store.
+    Failed,
+}
+
 /// The engine's half of one pod session's agent stream. It outlives any one
 /// WebSocket: the agent may drop and redial, and this keeps the byte cursor
 /// (so a replay is deduplicated exactly), the output channel the session's
@@ -51,6 +65,21 @@ pub struct PodLink {
     exit_notify: Notify,
     stop_requested: AtomicBool,
     created: Instant,
+    /// Write-backs the agent has confirmed (`Flushed { ok: true }`).
+    flushes: AtomicU64,
+    /// Write-backs the agent reported it could not complete.
+    flush_failures: AtomicU64,
+    flush_notify: Notify,
+    /// The pod is gone and the stream forgotten; hibernation waits for it so
+    /// a wake never races the old pod's teardown.
+    torn_down: AtomicBool,
+    torn_notify: Notify,
+    /// An agent has completed its hello on this link.
+    connected: AtomicBool,
+    /// The link was rebuilt after an engine restart rather than registered by
+    /// a launch: its cursor came from the output log, and until an agent
+    /// dials in the pod's fate is unknown.
+    adopted: AtomicBool,
 }
 
 /// Output the agent sent that does not continue the stream.
@@ -70,6 +99,54 @@ impl PodLink {
             exit_notify: Notify::new(),
             stop_requested: AtomicBool::new(false),
             created: Instant::now(),
+            flushes: AtomicU64::new(0),
+            flush_failures: AtomicU64::new(0),
+            flush_notify: Notify::new(),
+            torn_down: AtomicBool::new(false),
+            torn_notify: Notify::new(),
+            connected: AtomicBool::new(false),
+            adopted: AtomicBool::new(false),
+        }
+    }
+
+    /// The pod behind this link has been deleted and the stream forgotten.
+    pub fn mark_torn_down(&self) {
+        self.torn_down.store(true, Ordering::Release);
+        self.torn_notify.notify_waiters();
+    }
+
+    /// Resolve once [`Self::mark_torn_down`] ran, or after `limit`. Returns
+    /// whether the teardown finished.
+    pub async fn torn_down(&self, limit: Duration) -> bool {
+        let wait = async {
+            loop {
+                let notified = self.torn_notify.notified();
+                if self.torn_down.load(Ordering::Acquire) {
+                    return;
+                }
+                notified.await;
+            }
+        };
+        tokio::time::timeout(limit, wait).await.is_ok()
+    }
+
+    /// An agent has dialled in on this link at least once.
+    pub fn has_connected(&self) -> bool {
+        self.connected.load(Ordering::Acquire)
+    }
+
+    /// Rebuilt after an engine restart (see `AgentAuth::adopt_pod`).
+    pub fn is_adopted(&self) -> bool {
+        self.adopted.load(Ordering::Acquire)
+    }
+
+    /// Move the cursor forward over output the engine acknowledged before a
+    /// crash but never logged. Only an adopted link does this, and only
+    /// forward: the bytes are gone, and refusing the agent would strand it.
+    fn skip_to(&self, cursor: u64) {
+        let mut next = self.next_offset.lock().expect("pod link lock poisoned");
+        if cursor > *next {
+            *next = cursor;
         }
     }
 
@@ -330,6 +407,64 @@ impl AgentAuth {
         )
     }
 
+    /// Rebuild the engine's half of a pod session's stream after the engine
+    /// restarted. `cursor` is how much output the engine already holds, so the
+    /// agent's resume replays exactly the rest; `session_token` is the
+    /// credential the pod already holds. The link counts as unconnected until
+    /// an agent dials in.
+    pub async fn adopt_pod(
+        &self,
+        id: Uuid,
+        cursor: u64,
+        session_token: String,
+    ) -> (Arc<PodLink>, PodReader) {
+        let (link, reader) = self.register_pod(id);
+        *link.next_offset.lock().expect("pod link lock poisoned") = cursor;
+        link.adopted.store(true, Ordering::Release);
+        self.sessions.lock().await.insert(
+            id,
+            SessionCredential {
+                token: session_token.into_bytes(),
+            },
+        );
+        (link, reader)
+    }
+
+    /// Ask the agent to write its bundle back and wait for it to say so.
+    pub async fn request_flush(&self, id: Uuid, limit: Duration) -> FlushOutcome {
+        let Some(link) = self.pod(id) else {
+            return FlushOutcome::NotAttached;
+        };
+        let before = link.flushes.load(Ordering::Acquire);
+        let failed_before = link.flush_failures.load(Ordering::Acquire);
+        if self.send(id, Frame::Flush).is_err() {
+            return FlushOutcome::NotAttached;
+        }
+        let wait = async {
+            loop {
+                let notified = link.flush_notify.notified();
+                if link.flushes.load(Ordering::Acquire) > before {
+                    return FlushOutcome::Done;
+                }
+                if link.flush_failures.load(Ordering::Acquire) > failed_before {
+                    return FlushOutcome::Failed;
+                }
+                notified.await;
+            }
+        };
+        tokio::time::timeout(limit, wait)
+            .await
+            .unwrap_or(FlushOutcome::Failed)
+    }
+
+    /// Forget the stream, unless a newer registration has replaced `link`.
+    pub fn forget_pod_if(&self, id: Uuid, link: &Arc<PodLink>) {
+        let current = self.pod(id);
+        if current.is_some_and(|c| Arc::ptr_eq(&c, link)) {
+            self.forget_pod(id);
+        }
+    }
+
     pub fn pod(&self, id: Uuid) -> Option<Arc<PodLink>> {
         self.pods
             .lock()
@@ -384,7 +519,7 @@ impl AgentAuth {
             .get(&id)
             .is_some_and(|c| bool::from(c.token.as_slice().ct_eq(candidate)))
     }
-    async fn session_token(&self, id: Uuid) -> Option<String> {
+    pub async fn session_token(&self, id: Uuid) -> Option<String> {
         self.sessions
             .lock()
             .await
@@ -444,13 +579,57 @@ pub async fn bootstrap(
                 .into_response()
         }
     };
-    let env = bootstrap_env(cfg.engine_endpoint, cfg.graft_endpoint, id, &req);
+    let mut env = bootstrap_env(cfg.engine_endpoint, cfg.graft_endpoint, id, &req);
+    // A pod resumes from the account bundle the engine holds: the login, the
+    // global config and, for a woken session, its conversation's transcript.
+    let summary = state.sessions.summary_of(id);
+    let account = summary.as_ref().and_then(|s| s.account.clone());
+    let conversation = summary
+        .as_ref()
+        .and_then(|s| s.conversation.as_ref())
+        .map(|c| c.id.clone());
+    let mut bundle = serde_json::Map::new();
+    let mut resume = false;
+    if let (Some(account), Some(conversation)) = (account.as_deref(), conversation.as_deref()) {
+        for (path, bytes) in state
+            .sessions
+            .secret_broker()
+            .bundle_snapshot(account, conversation)
+        {
+            resume |= path.ends_with(&format!("/{conversation}.jsonl"));
+            bundle.insert(
+                path,
+                serde_json::Value::String(base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    bytes,
+                )),
+            );
+        }
+    }
+    if let Some(account) = account {
+        env.insert(
+            "VOGT_SESSION_ACCOUNT".into(),
+            serde_json::Value::String(account),
+        );
+    }
+    if let Some(conversation) = conversation {
+        env.insert(
+            "VOGT_SESSION_CONVERSATION_ID".into(),
+            serde_json::Value::String(conversation),
+        );
+    }
+    if resume {
+        env.insert(
+            "VOGT_SESSION_RESUME".into(),
+            serde_json::Value::String("1".into()),
+        );
+    }
+    // The pod's stream credential outlives this process only if it is kept:
+    // a restarted engine adopts the pod by reading it back.
+    state.sessions.keep_pod_token(id, &session_token);
     axum::Json(BootstrapResponse {
         session_token,
-        // Account bundle files (path -> base64) belong to the broker store; the
-        // entrypoint writes every entry as a file, so a placeholder would be
-        // written as a credential.
-        bundle: serde_json::json!({}),
+        bundle: serde_json::Value::Object(bundle),
         env: serde_json::Value::Object(env),
         graft_token,
         brief: state
@@ -499,6 +678,7 @@ async fn relay(mut socket: axum::extract::ws::WebSocket, state: Arc<AppState>, i
         let _ = socket.close().await;
         return;
     }
+    link.connected.store(true, Ordering::Release);
     let (tx, mut commands) = mpsc::unbounded_channel();
     state.agent_auth.attach(id, tx.clone()).await;
     // A stop asked for while no agent was attached is delivered on arrival.
@@ -519,7 +699,14 @@ async fn relay(mut socket: axum::extract::ws::WebSocket, state: Arc<AppState>, i
                             // The agent resumes from what it believes the
                             // engine holds; a cursor past the engine's own
                             // would mean bytes the engine never saw.
-                            let next = link.next_offset();
+                            let mut next = link.next_offset();
+                            if link.is_adopted() && cursor > next {
+                                // The engine acknowledged these bytes, then
+                                // died before its log held them.
+                                tracing::warn!(session = %id, cursor, next, "adopted pod's agent is ahead of the engine's log; skipping the missing output");
+                                link.skip_to(cursor);
+                                next = link.next_offset();
+                            }
                             if crate::pod_backend::validate_resume_cursor(cursor, next).is_err() {
                                 let _ = send_frame(&mut socket, &Frame::Error {
                                     code: "resume_beyond_stream".into(),
@@ -552,6 +739,11 @@ async fn relay(mut socket: axum::extract::ws::WebSocket, state: Arc<AppState>, i
                                 if !send_frame(&mut socket, &Frame::Resync { offset: gap.expected }).await { break; }
                             }
                         },
+                        Frame::Flushed { ok } => {
+                            let counter = if ok { &link.flushes } else { &link.flush_failures };
+                            counter.fetch_add(1, Ordering::AcqRel);
+                            link.flush_notify.notify_waiters();
+                        }
                         Frame::Heartbeat { .. } => {
                             let next = link.next_offset();
                             if !send_frame(&mut socket, &Frame::Ack { offset: next }).await { break; }
