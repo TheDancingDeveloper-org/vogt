@@ -477,7 +477,16 @@ pub fn pod_template(
         .iter()
         .find_map(|(k, v)| (k == "VOGT_SESSION_IMAGE").then_some(v.as_str()))
         .unwrap_or(&cfg.default_image);
-    let env = pod_env(cfg, id, bootstrap_token);
+    let mut env = pod_env(cfg, id, bootstrap_token);
+    // The requested argv runs in the PTY (the session agent reads it); the
+    // container command stays the image entrypoint.
+    if !command.is_empty() {
+        env.push(EnvVar {
+            name: "VOGT_SESSION_COMMAND".into(),
+            value: Some(serde_json::to_string(command).expect("argv serialises")),
+            ..Default::default()
+        });
+    }
     // Each cache object is optional: an empty name leaves it out.
     let mut env_from = Vec::new();
     if !cfg.cache_env_config_map.is_empty() {
@@ -541,7 +550,6 @@ pub fn pod_template(
             containers: vec![Container {
                 name: "session-agent".into(),
                 image: Some(image.into()),
-                command: (!command.is_empty()).then(|| command.to_vec()),
                 env: Some(env),
                 env_from: Some(env_from),
                 volume_mounts: Some(mounts),
@@ -910,10 +918,15 @@ mod tests {
             "RuntimeDefault"
         );
         let container = &pod.spec.as_ref().unwrap().containers[0];
-        assert_eq!(
-            container.command.as_deref(),
-            Some(["bash".to_string()].as_slice())
-        );
+        assert!(container.command.is_none());
+        let argv = container
+            .env
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|v| v.name == "VOGT_SESSION_COMMAND")
+            .unwrap();
+        assert_eq!(argv.value.as_deref(), Some(r#"["bash"]"#));
         let token = container
             .env
             .as_ref()
