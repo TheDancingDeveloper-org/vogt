@@ -13,6 +13,12 @@ need() { eval "value=\${$1:-}"; [ -n "$value" ] || fail "required environment va
 need VOGT_ENGINE_URL; need VOGT_SESSION_ID; need VOGT_BOOTSTRAP_TOKEN_FILE
 need VOGT_GRAFT_REPO; need VOGT_GRAFT_LINE; need VOGT_CLI
 case "$VOGT_CLI" in claude|codex) ;; *) fail 'VOGT_CLI must be claude or codex' ;; esac
+# /cache is a per-pod emptyDir (WI-3242), so the directories the image creates
+# there are shadowed by it. Recreate the tool caches best-effort; each tool
+# would create its own anyway.
+for dir in "${XDG_CACHE_HOME:-}" "${NPM_CONFIG_CACHE:-}" "${PNPM_HOME:-}" "${PIP_CACHE_DIR:-}" "${UV_CACHE_DIR:-}" "${CARGO_HOME:-}"; do
+  case "$dir" in /cache/*) mkdir -p "$dir" 2>/dev/null || true ;; esac
+done
 step=bootstrap; say bootstrap
 auth="$tmp_dir/auth"; response="$tmp_dir/response"; request="$tmp_dir/request.json"
 umask 077
