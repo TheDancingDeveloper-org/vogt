@@ -9,7 +9,8 @@ ignore = [
     # decrypts with RSA; it parses an unencrypted PKCS#1 or PKCS#8 key.
     "RUSTSEC-2023-0071",
     # RUSTSEC-2025-0134: rustls-pemfile is unmaintained, with no successor, and
-    # arrives through rustls-native-certs and axum-server.
+    # arrives through rustls-native-certs and axum-server. No fixed release
+    # exists; ignored here and in rust-core.yml's cargo audit (WI-3229, 2026-11-04).
     "RUSTSEC-2025-0134",
     # RUSTSEC-2026-0387: crypto-bigint 0.5.5 timing variability. jsonwebtoken
     # and web-push pin elliptic-curve 0.13, which pins crypto-bigint 0.5.
@@ -17,7 +18,8 @@ ignore = [
     "RUSTSEC-2026-0387",
     # RUSTSEC-2024-0449: unsafe-libyaml is unmaintained and has no published
     # fixed release. It is pulled by kube 0.98 through deprecated serde_yaml;
-    # replacing kube or its transitive YAML stack is outside this CI fix.
+    # replacing kube or its transitive YAML stack is outside this CI fix. Ignored here and in
+    # rust-core.yml's cargo audit (WI-3229, 2026-11-04).
     "RUSTSEC-2024-0449",
 ]
 

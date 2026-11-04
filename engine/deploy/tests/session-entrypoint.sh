@@ -27,14 +27,20 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$body" ] && cp "$body" "$CASE_DIR/request.json"
 [ -n "$cfg" ] && cp "$cfg" "$CASE_DIR/auth.cfg"
+if [ -n "${REFUSE_FIRST:-}" ]; then
+  n=$(cat "$CASE_DIR/attempts" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" >"$CASE_DIR/attempts"
+  [ "$n" -gt "$REFUSE_FIRST" ] || { echo "connection refused" >&2; exit 7; }
+fi
 [ "${BOOT_MODE:-ok}" != 401 ] || { echo unauthorized >&2; exit 22; }
-printf '{"session_token":"%s","bundle":{"sub/.credentials.json":"%s"},"env":{"VOGT_SESSION_ID":"s1","VOGT_BOOTSTRAP_TOKEN":"%s","EXTRA":"yes"},"brief":"hello brief"}' \
-  "$(cat "$CASE_DIR/session")" "$(printf bundle | base64)" "$(cat "$CASE_DIR/boot")"
+graft=""; [ -z "${GRAFT_TOKEN:-}" ] || graft=$(printf ',"graft_token":"%s"' "$GRAFT_TOKEN")
+printf '{"session_token":"%s"%s,"bundle":{"sub/.credentials.json":"%s"},"env":{"VOGT_SESSION_ID":"s1","VOGT_BOOTSTRAP_TOKEN":"%s","EXTRA":"yes"},"brief":"hello brief"}' \
+  "$(cat "$CASE_DIR/session")" "$graft" "$(printf bundle | base64)" "$(cat "$CASE_DIR/boot")"
 SH
   cat >"$dir/bin/graft" <<'SH'
 #!/bin/sh
 [ "${CLONE_FAIL:-0}" = 0 ] || exit 9
 printf '%s\n' "$*" >"$CASE_DIR/graft.args"
+if [ "$1" = --token-file ]; then cp "$2" "$CASE_DIR/graft.token"; fi
 while [ "$1" != clone ]; do shift; done
 mkdir -p "$3"
 SH
@@ -57,7 +63,7 @@ run_case() {
     CLAUDE_CONFIG_DIR="$dir/claude" "$@" "$entry"
 }
 
-out=$(run_case "$tmp/happy" 2>&1) || fail "happy path: $out"
+out=$(run_case "$tmp/happy" VOGT_SESSION_COMMAND='["sleep","1"]' GRAFT_TOKEN=graft-secret-value 2>&1) || fail "happy path: $out"
 grep -q "agent:$tmp/happy/work:hello brief" <<<"$out" || fail "agent did not receive bootstrap state"
 jq -e '.session_id=="s1" and .graft_repo=="vogt" and .graft_line=="rust-2" and .cli=="claude"' \
   "$tmp/happy/request.json" >/dev/null || fail "bootstrap request body"
@@ -68,7 +74,32 @@ grep -q "clone vogt $tmp/happy/work --line rust-2" "$tmp/happy/graft.args" || fa
 ! grep -q "$BOOT" "$tmp/happy/agent.env" || fail "bootstrap token reached the agent"
 ! grep -q "VOGT_BOOTSTRAP_TOKEN" "$tmp/happy/agent.env" || fail "bootstrap name re-exported"
 grep -q '^EXTRA=yes$' "$tmp/happy/agent.env" || fail "brokered env not exported"
-! grep -Eq "$BOOT|$SESSION" <<<"$out" || fail "secret in output"
+! grep -Eq "$BOOT|$SESSION|graft-secret-value" <<<"$out" || fail "secret in output"
+for step in bootstrap session-token account-bundle brokered-env graft-token clone brief handoff; do
+  grep -q "^session-entrypoint: step $step$" <<<"$out" || fail "step marker $step"
+done
+grep -Eq '^vogt_session_boot_seconds [0-9]+$' <<<"$out" || fail "boot seconds metric"
+# A graft token in the bootstrap response is kept in its own 0600 file beside
+# the session token and is what graft clones with.
+[[ $(<"$tmp/happy/run/graft-token") == graft-secret-value ]] || fail "graft token content"
+[[ $(stat -c %a "$tmp/happy/run/graft-token") == 600 ]] || fail "graft token mode"
+[[ $(<"$tmp/happy/graft.token") == graft-secret-value ]] || fail "clone did not use the graft token"
+grep -q "^VOGT_GRAFT_TOKEN_FILE=$tmp/happy/run/graft-token$" "$tmp/happy/agent.env" || fail "graft token file not exported"
+! grep -v '^GRAFT_TOKEN=' "$tmp/happy/agent.env" | grep -q 'graft-secret-value' || fail "graft token value reached the agent env"
+# The requested argv passes through to the session agent untouched.
+grep -q '^VOGT_SESSION_COMMAND=\["sleep","1"\]$' "$tmp/happy/agent.env" || fail "VOGT_SESSION_COMMAND not passed through"
+
+# Without a graft token the session token is what graft clones with.
+run_case "$tmp/no-graft-token" >/dev/null 2>&1 || fail "no-graft-token path"
+[[ $(<"$tmp/no-graft-token/graft.token") == "$SESSION" ]] || fail "clone should fall back to the session token"
+
+# A pod's IP reaches the engine's allow-set a moment after start: refused
+# connections (curl exit 7) are retried, a 4xx is final.
+run_case "$tmp/retry" REFUSE_FIRST=2 VOGT_BOOTSTRAP_RETRY_MS=5000 >/dev/null 2>&1 || fail "bootstrap retry"
+[[ $(<"$tmp/retry/attempts") == 3 ]] || fail "expected 3 bootstrap attempts"
+if run_case "$tmp/retry-exhausted" REFUSE_FIRST=99 VOGT_BOOTSTRAP_RETRY_MS=0 >"$tmp/retry-exhausted.out" 2>&1; then fail "exhausted retry succeeded"; fi
+grep -q 'bootstrap failed.*curl exit 7' "$tmp/retry-exhausted.out" || fail "exhausted retry error"
+[[ $(<"$tmp/retry-exhausted/attempts") == 1 ]] || fail "retry budget 0 should try once"
 
 if run_case "$tmp/missing" VOGT_BOOTSTRAP_TOKEN= >"$tmp/missing.out" 2>&1; then fail "missing token succeeded"; fi
 grep -q 'validate failed.*VOGT_BOOTSTRAP_TOKEN' "$tmp/missing.out" || fail "missing token error"

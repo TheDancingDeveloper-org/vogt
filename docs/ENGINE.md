@@ -4617,14 +4617,60 @@ MCP, and the session engine itself — are in
 
 #### Session pod boot
 
-The `vogt-session-base` image starts `vogt-session-entrypoint` as its
-non-root user. The entrypoint requires broker and graft token **file** paths;
-it never accepts either token as a command argument. It fetches the assigned
-Claude account bundle from the broker into `CLAUDE_CONFIG_DIR` (directories
-0700, files 0600), fetches each name in `AGENT_AUTH_GRANTED` through the
-manifest-constrained broker, and exports those values only to the session.
-It then runs `g clone "$VOGT_SESSION_REPO" "$VOGT_SESSION_WORKDIR" --line
-"$VOGT_SESSION_LINE"`, writes the brief and guide into
-`VOGT_SESSION_ADD_DIR`, and execs `vogt-session-agent`. Each failure names only
-the boot step and never includes a token or response body. The entrypoint
-emits `vogt_session_boot_seconds` to stderr for pod log metric collection.
+The engine creates one pod per session from the `vogt-session-base` image,
+whose command is `deploy/session-entrypoint.sh`. The pod spec carries no
+token other than the single-use bootstrap credential, in
+`VOGT_BOOTSTRAP_TOKEN`. It also sets `VOGT_ENGINE_URL`, `VOGT_SESSION_ID`,
+`VOGT_GRAFT_REPO`, `VOGT_GRAFT_LINE`, `VOGT_CLI` (`claude` or `codex`) and,
+when configured, `GRAFT_ENDPOINT` and `VOGT_EXTRA_CA_FILE`.
+
+**Engine configuration** (`pod_backend.rs`):
+
+| Variable | Effect |
+| --- | --- |
+| `ENGINE_POD_GRAFT_REPO` | graft repository the session clones, passed as `VOGT_GRAFT_REPO` |
+| `ENGINE_POD_GRAFT_LINE` | line it clones, passed as `VOGT_GRAFT_LINE` (default `rust-2`); the entrypoint runs `g clone <repo> <workdir> --line <line>`, so the working copy starts on that line |
+| `ENGINE_POD_GRAFT_ENDPOINT` | graft server URL, passed to the pod as `GRAFT_ENDPOINT`; it must be reachable from the session namespace |
+| `ENGINE_POD_GRAFT_TOKEN_FILE` | file (a mounted secret) holding a graft token scoped to the repo and line. The engine reads it when it answers the bootstrap request and returns it as `graft_token`; the value is never in config or the pod spec. Unset, the entrypoint clones with the session token |
+
+A requested session argv is passed as `VOGT_SESSION_COMMAND`, a JSON array of
+strings. `vogt-session-agent` runs it in the PTY instead of the agent CLI; the
+container command stays the entrypoint.
+
+**Boot steps.** Each step prints `session-entrypoint: step <name>` to stderr
+as it starts; a failure prints `session-entrypoint: <step> failed: <reason>`
+and exits non-zero. A reason never contains a token or a response body (the
+bootstrap refusal quotes the engine's one-line reason only). In order:
+
+1. `validate` — required variables are present and `VOGT_CLI` is valid.
+2. `bootstrap` — `POST /api/agent-auth/bootstrap` with the bearer in a `0600`
+   curl config file, never on a command line; `VOGT_BOOTSTRAP_TOKEN` is then
+   unset. A new pod's IP reaches the engine's allow-set one to three seconds
+   after start, so a refused or timed-out connection (curl exits 6, 7, 28, 35,
+   52, 55, 56) is retried with backoff (250 ms doubling to a 2 s cap) for up to
+   `VOGT_BOOTSTRAP_RETRY_MS` (default 15000). An HTTP error such as 401 is
+   final and is not retried.
+3. `session-token` — the session token is written `0600` to
+   `VOGT_SESSION_TOKEN_FILE` (default `/run/vogt/session-token`).
+4. `account-bundle` — the assigned account bundle is written into
+   `CLAUDE_CONFIG_DIR` (directories `0700`, files `0600`); unsafe paths are
+   refused.
+5. `brokered-env` — the response's `env` map is exported to the session,
+   except the bootstrap token names.
+6. `graft-token` — a returned `graft_token` is written `0600` beside the
+   session token (`VOGT_GRAFT_TOKEN_FILE`, default `graft-token` in the same
+   directory) and exported as a path only.
+7. `clone` — `graft --token-file <file> clone ...` into `VOGT_WORK_DIR`
+   (default `/work`). A failure names the endpoint and graft's last stderr
+   lines.
+8. `brief` — the brief is written to `<workdir>/.vogt/brief.md`
+   (`VOGT_ADD_DIR`), and `VOGT_SESSION_CWD` and `VOGT_SESSION_BRIEF_FILE` are
+   exported.
+9. `handoff` — the entrypoint prints `session-entrypoint: boot completed in
+   <n>s` and the metric line `vogt_session_boot_seconds <n>` (for pod log
+   collection), removes its scratch directory and execs `vogt-session-agent`.
+
+`engine/deploy/tests/session-entrypoint.sh` is the contract test: fake curl,
+graft and agent, covering the markers, the token files, the retry, and the
+`VOGT_SESSION_COMMAND` passthrough. `pod_stream::real_entrypoint_*` in
+`engine/server/tests/integration.rs` runs the same script against a real engine.
