@@ -23,7 +23,23 @@ jq -n --arg session_id "$VOGT_SESSION_ID" --arg graft_repo "$VOGT_GRAFT_REPO" \
    + (if $extra_ca_file == "" then {} else {extra_ca_file: $extra_ca_file} end)' >"$request"
 unset VOGT_BOOTSTRAP_TOKEN
 url="${VOGT_ENGINE_URL%/}/api/agent-auth/bootstrap"
-if ! curl --silent --show-error --fail-with-body --config "$auth" -X POST -H "Content-Type: application/json" --data-binary "@$request" "$url" >"$response" 2>/dev/null; then fail 'bootstrap request was refused or unavailable'; fi
+# A new pod's IP reaches the engine's allow-set 1-3 s after start; until then
+# the connection is refused (curl exit 7) or times out (28). Retry those with
+# backoff (250 ms doubling, 2 s cap, 15 s total); an HTTP error (4xx) is final.
+backoff_ms=250; waited_ms=0; max_wait_ms=${VOGT_BOOTSTRAP_RETRY_MS:-15000}
+while :; do
+  rc=0
+  curl --silent --show-error --fail-with-body --connect-timeout 5 --max-time 20 --config "$auth" -X POST -H "Content-Type: application/json" --data-binary "@$request" "$url" >"$response" 2>"$tmp_dir/curl.err" || rc=$?
+  [ "$rc" -eq 0 ] && break
+  case "$rc" in 6|7|28|35|52|55|56) [ "$waited_ms" -lt "$max_wait_ms" ] || break ;; *) break ;; esac
+  sleep "$(awk -v ms="$backoff_ms" 'BEGIN { printf "%.3f", ms / 1000 }')"
+  waited_ms=$((waited_ms + backoff_ms)); backoff_ms=$((backoff_ms * 2)); [ "$backoff_ms" -le 2000 ] || backoff_ms=2000
+done
+if [ "$rc" -ne 0 ]; then
+  # curl's error names the URL and the failure, never the bearer (that is in
+  # the config file); the body is the engine's one-line reason.
+  fail "bootstrap request was refused or unavailable (curl exit $rc, waited ${waited_ms} ms): $(tail -n1 "$tmp_dir/curl.err" | cut -c1-200) $(head -c 200 "$response" | tr '\n' ' ')"
+fi
 jq -e '(.session_token|type)=="string" and (.session_token|length)>0' "$response" >/dev/null 2>&1 || fail 'bootstrap response is invalid'
 step=session-token
 token_file="${VOGT_SESSION_TOKEN_FILE:-/run/vogt/session-token}"
