@@ -24,6 +24,7 @@ struct Script {
     created: Mutex<Vec<String>>,
     hibernated: Mutex<bool>,
     fail_hibernate: Mutex<bool>,
+    activity: Mutex<String>,
     context: i64,
 }
 
@@ -44,6 +45,7 @@ fn opened(context: i64) -> (Built, Arc<Script>, PathBuf) {
         created: Mutex::new(Vec::new()),
         hibernated: Mutex::new(false),
         fail_hibernate: Mutex::new(false),
+        activity: Mutex::new("idle".to_string()),
         context,
     });
     let seen = Arc::clone(&script);
@@ -57,6 +59,7 @@ fn opened(context: i64) -> (Built, Arc<Script>, PathBuf) {
             let path = url.split('?').next().unwrap_or(url);
             if method == "GET" && path.ends_with("/api/sessions") {
                 let old_down = *seen.hibernated.lock().unwrap();
+                let activity = seen.activity.lock().unwrap().clone();
                 let created = seen.created.lock().unwrap().clone();
                 let rows: Vec<Value> = created
                     .iter()
@@ -66,7 +69,7 @@ fn opened(context: i64) -> (Built, Arc<Script>, PathBuf) {
                             "id": id,
                             "name": id,
                             "role": "oversight",
-                            "activity": if old && old_down { "hibernated" } else { "idle" },
+                            "activity": if old && old_down { "hibernated" } else { &activity },
                             "alive": !(old && old_down),
                             "cwd": "/work/tree",
                             "economics": {"context_tokens": if old { seen.context } else { 10 }},
@@ -260,6 +263,26 @@ fn ready(context: i64) -> (Built, Arc<Script>, PathBuf) {
     std::fs::create_dir_all(&folder).unwrap();
     std::fs::write(folder.join("eng-old.md"), "fleet: eng-1\n").unwrap();
     (built, script, dir)
+}
+
+#[test]
+fn a_written_handoff_does_not_rotate_a_session_still_in_a_turn() {
+    let (built, script, dir) = ready(400_000);
+    *script.activity.lock().unwrap() = "running".to_string();
+
+    let pass = rotate_over_budget(ctx(&built)).unwrap();
+    assert!(pass.rotated.is_empty());
+    assert_eq!(creates(&script), 1);
+    assert_eq!(script.posts("/hibernate"), 0);
+
+    *script.activity.lock().unwrap() = "idle".to_string();
+    let resumed = rotate_over_budget(ctx(&built)).unwrap();
+    assert_eq!(
+        resumed.rotated,
+        vec![("eng-old".to_string(), "eng-new".to_string())]
+    );
+    assert_eq!(script.posts("/hibernate"), 1);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
