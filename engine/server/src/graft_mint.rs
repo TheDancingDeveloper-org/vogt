@@ -15,11 +15,13 @@
 //! a 0600 file. It is never an env value, an argument or a log field, and its
 //! `Debug` is redacted.
 //!
-//! Lifetime: graft has no revoke RPC yet (WI-3235), so the TTL is the only
-//! expiry: the session's whole-session clock budget plus [`TTL_SLACK_S`],
-//! capped at graft's 12 h `max_token_ttl_s`. A woken session gets a new pod and
-//! so a new token. [`GraftMinter::revoke`] is the hook for revoke-on-stop once
-//! graft grows the RPC; today it does nothing.
+//! Lifetime: the TTL is the session's whole-session clock budget plus
+//! [`TTL_SLACK_S`], capped at graft's 12 h `max_token_ttl_s`. It is the
+//! backstop: when the session's pod is torn down (stop, kill, exit or remove)
+//! the engine calls graft's `AdminService.RevokeToken` with its mint credential
+//! (WI-3235), which refuses the token from then on. A revoke that fails is
+//! logged and audited and never holds up the stop. A woken session gets a new
+//! pod and so a new token.
 
 use std::{future::Future, path::PathBuf, pin::Pin, time::Duration};
 
@@ -41,6 +43,7 @@ pub const MAX_TTL_S: u64 = 12 * 3600;
 pub const TTL_SLACK_S: u64 = 30 * 60;
 
 const MINT_PATH: &str = "/graft.v1.AdminService/MintToken";
+const REVOKE_PATH: &str = "/graft.v1.AdminService/RevokeToken";
 /// The graft protocol version this client speaks (`graft-protocol` header).
 const PROTOCOL_VERSION: &str = "0.1";
 const MINT_TIMEOUT: Duration = Duration::from_secs(15);
@@ -68,6 +71,18 @@ struct TokenReply {
     #[prost(string, tag = "1")]
     token: String,
 }
+
+/// `graft.v1.RevokeTokenRequest`. Private for the same reason as
+/// [`TokenReply`]: the derived `Debug` would print the token.
+#[derive(Clone, PartialEq, prost::Message)]
+struct RevokeTokenRequest {
+    #[prost(string, tag = "1")]
+    token: String,
+}
+
+/// `graft.v1.Empty`.
+#[derive(Clone, PartialEq, prost::Message)]
+struct Empty {}
 
 /// A minted graft token. `Debug` and `Display` are redacted; the value leaves
 /// only through [`GraftToken::expose`], into the bootstrap response.
@@ -187,16 +202,13 @@ pub type RevokeFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>
 pub trait GraftMinter: Send + Sync {
     fn mint<'a>(&'a self, grant: &'a SessionGrant) -> MintFuture<'a>;
 
-    /// Revoke the token minted for `session`, when its pod is gone. The hook
-    /// for WI-3235: graft has no revoke RPC, so the default does nothing and a
-    /// token lives until its TTL. When the RPC exists, an implementation keeps
-    /// the token's id from `mint` and calls it here.
-    fn revoke(&self, _session: Uuid) -> RevokeFuture<'_> {
-        Box::pin(async { Ok(()) })
-    }
+    /// Revoke `token`, minted for `session`, now that its pod is gone: graft
+    /// refuses it for writes from then on. Failure is the caller's to log; the
+    /// token still expires on its own.
+    fn revoke<'a>(&'a self, session: Uuid, token: &'a GraftToken) -> RevokeFuture<'a>;
 }
 
-/// The `AdminService.MintToken` client.
+/// The `AdminService` client for `MintToken` and `RevokeToken`.
 pub struct GrpcGraftMinter {
     endpoint: String,
     token_file: PathBuf,
@@ -250,10 +262,17 @@ impl GrpcGraftMinter {
         Ok(token.to_owned())
     }
 
-    async fn call(&self, grant: &SessionGrant) -> Result<GraftToken> {
+    /// One authenticated unary call to graft, mapped onto engine errors. The
+    /// mint token goes in the `authorization` metadata, marked sensitive; no
+    /// error carries a token.
+    async fn unary<Req, Resp>(&self, path: &'static str, message: Req) -> Result<Resp>
+    where
+        Req: prost::Message + 'static,
+        Resp: prost::Message + Default + 'static,
+    {
         let mint_token = self.read_mint_token().await?;
         let channel = self.channel().await?;
-        let mut request = tonic::Request::new(grant.request());
+        let mut request = tonic::Request::new(message);
         let md = request.metadata_mut();
         md.insert(
             "graft-protocol",
@@ -267,41 +286,59 @@ impl GrpcGraftMinter {
 
         let mut grpc = tonic::client::Grpc::new(channel);
         grpc.ready().await.map_err(|_| unreachable_graft())?;
-        let reply = grpc
-            .unary::<_, TokenReply, _>(
-                request,
-                PathAndQuery::from_static(MINT_PATH),
-                tonic_prost::ProstCodec::<MintTokenRequest, TokenReply>::default(),
-            )
-            .await
-            .map_err(|status| match status.code() {
-                Code::Unauthenticated | Code::PermissionDenied => ApiError::Forbidden(format!(
-                    "graft refused the engine's mint token ({:?})",
+        grpc.unary::<_, Resp, _>(
+            request,
+            PathAndQuery::from_static(path),
+            tonic_prost::ProstCodec::<Req, Resp>::default(),
+        )
+        .await
+        .map(tonic::Response::into_inner)
+        .map_err(|status| match status.code() {
+            Code::Unauthenticated | Code::PermissionDenied => ApiError::Forbidden(format!(
+                "graft refused the engine's mint token ({:?})",
+                status.code()
+            )),
+            Code::InvalidArgument | Code::OutOfRange | Code::ResourceExhausted => {
+                ApiError::BadGateway(format!(
+                    "graft refused the session token request ({:?})",
                     status.code()
-                )),
-                Code::InvalidArgument | Code::OutOfRange | Code::ResourceExhausted => {
-                    ApiError::BadGateway(format!(
-                        "graft refused the session token request ({:?})",
-                        status.code()
-                    ))
-                }
-                _ => unreachable_graft(),
-            })?
-            .into_inner();
+                ))
+            }
+            _ => unreachable_graft(),
+        })
+    }
+
+    async fn call(&self, grant: &SessionGrant) -> Result<GraftToken> {
+        let reply: TokenReply = self.unary(MINT_PATH, grant.request()).await?;
         if reply.token.is_empty() {
             return Err(ApiError::BadGateway("graft minted an empty token".into()));
         }
         Ok(GraftToken(reply.token))
     }
+
+    async fn revoke_call(&self, token: &GraftToken) -> Result<()> {
+        let _: Empty = self
+            .unary(
+                REVOKE_PATH,
+                RevokeTokenRequest {
+                    token: token.expose().to_owned(),
+                },
+            )
+            .await?;
+        Ok(())
+    }
 }
 
 fn unreachable_graft() -> ApiError {
-    ApiError::BadGateway("graft could not be reached to mint a session token".into())
+    ApiError::BadGateway("graft could not be reached".into())
 }
 
 impl GraftMinter for GrpcGraftMinter {
     fn mint<'a>(&'a self, grant: &'a SessionGrant) -> MintFuture<'a> {
         Box::pin(self.call(grant))
+    }
+    fn revoke<'a>(&'a self, _session: Uuid, token: &'a GraftToken) -> RevokeFuture<'a> {
+        Box::pin(self.revoke_call(token))
     }
 }
 
@@ -558,11 +595,5 @@ mod tests {
             empty.mint(&grant).await.unwrap_err(),
             ApiError::Config(_)
         ));
-    }
-
-    #[tokio::test]
-    async fn the_revoke_hook_is_a_no_op_until_graft_has_the_rpc() {
-        let minter = GrpcGraftMinter::new("http://127.0.0.1:1", "/nonexistent");
-        minter.revoke(session()).await.unwrap();
     }
 }

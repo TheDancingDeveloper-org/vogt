@@ -17705,12 +17705,286 @@ mod pod_stream {
                     .map_err(|e| ApiError::BadGateway(e.into()))
             })
         }
-        fn revoke(&self, session: Uuid) -> RevokeFuture<'_> {
+        fn revoke<'a>(&'a self, session: Uuid, _token: &'a GraftToken) -> RevokeFuture<'a> {
             Box::pin(async move {
                 self.revoked.lock().unwrap().push(session);
                 Ok(())
             })
         }
+    }
+
+    // ---- a fake graft AdminService (MintToken + RevokeToken) over real gRPC
+
+    #[derive(Clone, PartialEq, prost::Message)]
+    struct MintReq {
+        #[prost(string, tag = "1")]
+        subject: String,
+        #[prost(string, repeated, tag = "2")]
+        scopes: Vec<String>,
+        #[prost(uint64, tag = "3")]
+        ttl_s: u64,
+        #[prost(string, optional, tag = "4")]
+        session: Option<String>,
+        #[prost(string, optional, tag = "5")]
+        work_item: Option<String>,
+    }
+    #[derive(Clone, PartialEq, prost::Message)]
+    struct TokenMsg {
+        #[prost(string, tag = "1")]
+        token: String,
+    }
+    #[derive(Clone, PartialEq, prost::Message)]
+    struct RevokeReq {
+        #[prost(string, tag = "1")]
+        token: String,
+    }
+    #[derive(Clone, PartialEq, prost::Message)]
+    struct EmptyMsg {}
+
+    #[derive(Default)]
+    struct GraftState {
+        /// Refuse every revoke with this code.
+        revoke_fails: Option<tonic::Code>,
+        minted: Vec<(Option<String>, MintReq)>,
+        /// (bearer the call carried, token asked to be revoked)
+        revokes: Vec<(Option<String>, String)>,
+        revoked: std::collections::HashSet<String>,
+    }
+
+    #[derive(Clone, Default)]
+    struct FakeGraft(Arc<Mutex<GraftState>>);
+
+    impl tonic::server::NamedService for FakeGraft {
+        const NAME: &'static str = "graft.v1.AdminService";
+    }
+    struct MintCall(FakeGraft, Option<String>);
+    impl tonic::server::UnaryService<MintReq> for MintCall {
+        type Response = TokenMsg;
+        type Future =
+            std::future::Ready<std::result::Result<tonic::Response<TokenMsg>, tonic::Status>>;
+        fn call(&mut self, req: tonic::Request<MintReq>) -> Self::Future {
+            let mut g = self.0 .0.lock().unwrap();
+            let token = format!("fake-minted-{}", g.minted.len() + 1);
+            g.minted.push((self.1.clone(), req.into_inner()));
+            std::future::ready(Ok(tonic::Response::new(TokenMsg { token })))
+        }
+    }
+    struct RevokeCall(FakeGraft, Option<String>);
+    impl tonic::server::UnaryService<RevokeReq> for RevokeCall {
+        type Response = EmptyMsg;
+        type Future =
+            std::future::Ready<std::result::Result<tonic::Response<EmptyMsg>, tonic::Status>>;
+        fn call(&mut self, req: tonic::Request<RevokeReq>) -> Self::Future {
+            let mut g = self.0 .0.lock().unwrap();
+            let token = req.into_inner().token;
+            g.revokes.push((self.1.clone(), token.clone()));
+            std::future::ready(match g.revoke_fails {
+                Some(code) => Err(tonic::Status::new(code, "revoke refused")),
+                None => {
+                    g.revoked.insert(token);
+                    Ok(tonic::Response::new(EmptyMsg {}))
+                }
+            })
+        }
+    }
+    impl<B> tower::Service<tonic::codegen::http::Request<B>> for FakeGraft
+    where
+        B: tonic::codegen::Body + Send + 'static,
+        B::Error: Into<tonic::codegen::StdError> + Send + 'static,
+    {
+        type Response = tonic::codegen::http::Response<tonic::body::Body>;
+        type Error = std::convert::Infallible;
+        type Future = std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = std::result::Result<Self::Response, Self::Error>>
+                    + Send,
+            >,
+        >;
+        fn poll_ready(
+            &mut self,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::result::Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+        fn call(&mut self, req: tonic::codegen::http::Request<B>) -> Self::Future {
+            let this = self.clone();
+            let bearer = req
+                .headers()
+                .get("authorization")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned);
+            let path = req.uri().path().to_owned();
+            Box::pin(async move {
+                Ok(match path.as_str() {
+                    "/graft.v1.AdminService/MintToken" => {
+                        tonic::server::Grpc::new(
+                            tonic_prost::ProstCodec::<TokenMsg, MintReq>::default(),
+                        )
+                        .unary(MintCall(this, bearer), req)
+                        .await
+                    }
+                    "/graft.v1.AdminService/RevokeToken" => {
+                        tonic::server::Grpc::new(
+                            tonic_prost::ProstCodec::<EmptyMsg, RevokeReq>::default(),
+                        )
+                        .unary(RevokeCall(this, bearer), req)
+                        .await
+                    }
+                    _ => tonic::Status::unimplemented("not faked").into_http(),
+                })
+            })
+        }
+    }
+
+    /// Serve `graft` on a loopback port; returns its URL.
+    async fn serve_graft(graft: FakeGraft) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(graft)
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                .await
+                .unwrap();
+        });
+        format!("http://{addr}")
+    }
+
+    /// The real gRPC minter, pointed at a fake graft, with a mint token file.
+    async fn real_minter(graft: FakeGraft) -> (Arc<dyn GraftMinter>, tempfile::TempDir) {
+        let url = serve_graft(graft).await;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("graft-mint-token");
+        std::fs::write(&file, "engine-mint-credential\n").unwrap();
+        (
+            Arc::new(vogt_engine_server::graft_mint::GrpcGraftMinter::new(
+                url, file,
+            )),
+            dir,
+        )
+    }
+
+    async fn kill_and_wait_exit(h: &Harness, id: Uuid) {
+        let kill = h
+            .client
+            .post(format!("{}/api/sessions/{id}/kill", h.base))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(kill.status(), StatusCode::OK);
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while h.detail(id).await.summary.exit_code != Some(137) {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("the session ends");
+    }
+
+    async fn until<F: Fn() -> bool>(what: &str, f: F) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !f() {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {what}"));
+    }
+
+    #[tokio::test]
+    async fn stopping_a_session_revokes_its_graft_token_at_graft() {
+        let graft = FakeGraft::default();
+        let (minter, _dir) = real_minter(graft.clone()).await;
+        let mut h = harness(false).await;
+        h.state.sessions.set_graft_minter(minter);
+        let id = h.start().await;
+        let (_, boot) = h.created.recv().await.unwrap();
+        let body: Value = h.bootstrap(id, &boot).await.json().await.unwrap();
+        let token = body["graft_token"].as_str().unwrap().to_string();
+        assert_eq!(token, "fake-minted-1");
+        // Minted with the engine's mint credential, for this session.
+        {
+            let g = graft.0.lock().unwrap();
+            assert_eq!(
+                g.minted[0].0.as_deref(),
+                Some("Bearer engine-mint-credential")
+            );
+            assert_eq!(
+                g.minted[0].1.session.as_deref(),
+                Some(id.to_string().as_str())
+            );
+            assert!(
+                g.revokes.is_empty(),
+                "nothing is revoked while the session runs"
+            );
+        }
+
+        kill_and_wait_exit(&h, id).await;
+        until("the revoke", || !graft.0.lock().unwrap().revokes.is_empty()).await;
+        let g = graft.0.lock().unwrap();
+        assert_eq!(g.revokes.len(), 1);
+        // The engine revoked the minted token with its mint credential.
+        assert_eq!(
+            g.revokes[0].0.as_deref(),
+            Some("Bearer engine-mint-credential")
+        );
+        assert_eq!(g.revokes[0].1, token);
+        assert!(g.revoked.contains(&token), "graft now refuses the token");
+    }
+
+    #[tokio::test]
+    async fn a_failed_revoke_is_audited_and_the_stop_still_completes() {
+        const SECRET: &str = "fake-minted-1";
+        let logs = LogCapture::default();
+        let _logging = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_writer(logs.clone())
+                .with_ansi(false)
+                .with_max_level(tracing::Level::TRACE)
+                .finish(),
+        );
+        let graft = FakeGraft::default();
+        graft.0.lock().unwrap().revoke_fails = Some(tonic::Code::Internal);
+        let (minter, _dir) = real_minter(graft.clone()).await;
+        let mut h = harness(false).await;
+        h.state.sessions.set_graft_minter(minter);
+        let id = h.start().await;
+        let _ = h.created.recv().await.unwrap();
+
+        // The stop completes: the session exits and its pod is deleted.
+        kill_and_wait_exit(&h, id).await;
+        until("the pod delete", || {
+            h.launcher.deleted.lock().unwrap().contains(&id)
+        })
+        .await;
+        until("the revoke attempt", || {
+            !graft.0.lock().unwrap().revokes.is_empty()
+        })
+        .await;
+        until("the audit line", || {
+            String::from_utf8_lossy(&logs.0.lock().unwrap()).contains("could not revoke")
+        })
+        .await;
+        let logged = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+        assert!(logged.contains("vogt::audit"), "{logged}");
+        assert!(logged.contains(&id.to_string()), "{logged}");
+        assert!(!logged.contains(SECRET), "graft token in the logs");
+        assert!(
+            !logged.contains("engine-mint-credential"),
+            "mint token in the logs"
+        );
+        assert!(graft.0.lock().unwrap().revoked.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_pod_create_that_fails_after_the_mint_still_revokes_the_token() {
+        let graft = FakeGraft::default();
+        let (minter, _dir) = real_minter(graft.clone()).await;
+        let h = harness(true).await;
+        h.state.sessions.set_graft_minter(minter);
+        let _id = h.start().await;
+        until("the revoke", || !graft.0.lock().unwrap().revokes.is_empty()).await;
+        assert_eq!(graft.0.lock().unwrap().revokes[0].1, "fake-minted-1");
     }
 
     #[derive(Clone, Default)]
