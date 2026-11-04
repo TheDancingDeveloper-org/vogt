@@ -292,6 +292,20 @@ impl SessionRegistry {
         crate::pod_backend::PodConfig::from_env(self.cfg.agent_auth_public_url.clone())
     }
 
+    /// The MCP endpoints a pod-backed session is given: `engine_endpoint` is
+    /// where a pod reaches this engine, which also serves `/mcp`.
+    pub fn pod_mcp_endpoints(
+        &self,
+        engine_endpoint: &str,
+    ) -> crate::session_endpoints::SessionEndpoints {
+        crate::session_endpoints::for_backend(
+            "pod",
+            self.cfg.bind,
+            Some(engine_endpoint),
+            self.cfg.cadastre_mcp_url.as_deref(),
+        )
+    }
+
     /// Start a session whose process runs in a pod: register the engine's half
     /// of the agent stream, build the session over it, then create the pod in
     /// the background. The agent dials in; until then the session is running
@@ -688,6 +702,20 @@ impl SessionRegistry {
         if env.is_some_and(|e| e.iter().any(|(k, _)| k == "VOGT_HTTP_TOKEN")) {
             return None;
         }
+        let token = self.mint_agent_token(&agent, id).await?;
+        Some(vec![
+            ("VOGT_HTTP_TOKEN".to_string(), token),
+            ("VOGT_SESSION_ID".to_string(), id.to_string()),
+        ])
+    }
+
+    /// Mint (or, superseding the last, re-mint) the core credential of agent
+    /// session `id`, bound to `agent:engine:<id>`, and remember it so the exit
+    /// hook revokes it. `None` when there is no core or the core refused
+    /// (logged; the session then runs as before). A pod-backed Claude session's
+    /// bootstrap calls this too (WI-3243), so its Vogt MCP server sees the same
+    /// per-session identity a host agent session has.
+    pub async fn mint_agent_token(&self, agent: &str, id: Uuid) -> Option<String> {
         let core = self.core.get()?;
         let answer = core
             .post_json_answer(
@@ -713,10 +741,7 @@ impl SessionRegistry {
                     actor = %format!("agent:engine:{id}"),
                     "agent session given its own credential"
                 );
-                Some(vec![
-                    ("VOGT_HTTP_TOKEN".to_string(), token.to_string()),
-                    ("VOGT_SESSION_ID".to_string(), id.to_string()),
-                ])
+                Some(token.to_string())
             }
             None => {
                 tracing::warn!(

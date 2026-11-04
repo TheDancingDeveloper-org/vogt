@@ -138,6 +138,12 @@ COPY --chmod=0755 deploy/agent-auth.sh /usr/local/bin/vogt-agent-auth
 COPY --chmod=0755 deploy/claude-session-hook.sh /usr/local/bin/vogt-claude-session-hook
 COPY --chmod=0755 deploy/policy-hook.sh /usr/local/bin/vogt-policy-hook
 COPY --chmod=0755 deploy/session-entrypoint.sh /usr/local/bin/vogt-session-entrypoint
+# The driven-session permission policy (WI-926, WI-3243): the session agent
+# starts Claude Code with --settings pointing here, as the merged image's
+# engine does for a host session. Root-owned and read-only to the session user.
+# No --chmod: BuildKit applies it to the directories this creates too, and a
+# 0644 /usr/local/share/vogt cannot be entered by the session user (WI-3243).
+COPY --chown=root:root deploy/driven-session-settings.json /usr/local/share/vogt/driven-session-settings.json
 COPY --from=session-agent-build /src/target/release/vogt-session-agent /usr/local/bin/vogt-session-agent
 
 WORKDIR /home/vogt/Working

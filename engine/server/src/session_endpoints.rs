@@ -40,6 +40,37 @@ pub fn for_backend(
     }
 }
 
+/// The header the pod's Vogt MCP entry sends. Claude Code expands
+/// `${VOGT_HTTP_TOKEN}` from the session's environment when it reads the
+/// file, so the credential is never written to disk.
+const VOGT_AUTHORIZATION: &str = "Bearer ${VOGT_HTTP_TOKEN}";
+
+/// The `--mcp-config` file a pod-backed Claude Code session is started with
+/// (WI-3243): `endpoints.mcp` as streamable-HTTP servers, the Vogt one
+/// carrying the session's bearer by environment reference. With
+/// `has_credential` false the Vogt entry is left out: without a token it could
+/// only answer 401, and the file is still passed with `--strict-mcp-config`
+/// so the account's own MCP set does not apply in its place.
+pub fn claude_mcp_config(endpoints: &SessionEndpoints, has_credential: bool) -> Value {
+    let mut servers = serde_json::Map::new();
+    if let Some(entries) = endpoints.mcp.as_object() {
+        for (name, entry) in entries {
+            if name == "vogt" && !has_credential {
+                continue;
+            }
+            let Some(url) = entry.get("url").and_then(Value::as_str) else {
+                continue;
+            };
+            let mut server = json!({"type": "http", "url": url});
+            if name == "vogt" {
+                server["headers"] = json!({"Authorization": VOGT_AUTHORIZATION});
+            }
+            servers.insert(name.clone(), server);
+        }
+    }
+    json!({"mcpServers": Value::Object(servers)})
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -92,6 +123,42 @@ mod tests {
         assert_eq!(
             actual.mcp["cadastre"]["url"],
             "https://cadastre.example.test/mcp"
+        );
+    }
+
+    #[test]
+    fn claude_config_sends_the_session_bearer_by_reference() {
+        let endpoints = for_backend(
+            "pod",
+            "127.0.0.1:8910".parse().unwrap(),
+            Some("https://192.168.1.75:18197"),
+            Some("https://cadastre.example.test"),
+        );
+        let config = claude_mcp_config(&endpoints, true);
+        assert_eq!(
+            config,
+            json!({"mcpServers": {
+                "vogt": {
+                    "type": "http",
+                    "url": "https://192.168.1.75:18197/mcp",
+                    "headers": {"Authorization": "Bearer ${VOGT_HTTP_TOKEN}"}
+                },
+                "cadastre": {"type": "http", "url": "https://cadastre.example.test/mcp"}
+            }})
+        );
+    }
+
+    #[test]
+    fn claude_config_without_a_credential_leaves_vogt_out() {
+        let endpoints = for_backend(
+            "pod",
+            "127.0.0.1:8910".parse().unwrap(),
+            Some("https://192.168.1.75:18197"),
+            None,
+        );
+        assert_eq!(
+            claude_mcp_config(&endpoints, false),
+            json!({"mcpServers": {}})
         );
     }
 }

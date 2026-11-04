@@ -17016,7 +17016,17 @@ mod pod_stream {
     /// `templates` replaces the harness's own `pod` template, e.g. with the
     /// stock set a real engine boots with.
     async fn harness_with(fail: bool, templates: Option<Vec<SessionTemplate>>) -> Harness {
+        harness_cfg(fail, templates, |_| {}).await
+    }
+
+    /// [`harness_with`], with `tweak` applied to the engine's config first.
+    async fn harness_cfg(
+        fail: bool,
+        templates: Option<Vec<SessionTemplate>>,
+        tweak: impl FnOnce(&mut vogt_engine_server::config::Config),
+    ) -> Harness {
         let mut cfg = test_config();
+        tweak(&mut cfg);
         cfg.pod_backends_enabled = true;
         cfg.session_templates = templates.unwrap_or_else(|| {
             vec![SessionTemplate {
@@ -17067,6 +17077,10 @@ mod pod_stream {
         }
 
         async fn bootstrap(&self, id: Uuid, bearer: &[u8]) -> reqwest::Response {
+            self.bootstrap_as(id, bearer, "codex").await
+        }
+
+        async fn bootstrap_as(&self, id: Uuid, bearer: &[u8], cli: &str) -> reqwest::Response {
             // The route sits outside the engine's own gate: the caller is the
             // pod, which holds only the one-shot token.
             reqwest::Client::new()
@@ -17076,7 +17090,7 @@ mod pod_stream {
                     "session_id": id.to_string(),
                     "graft_repo": "vogt",
                     "graft_line": "rust-2",
-                    "cli": "codex",
+                    "cli": cli,
                 }))
                 .send()
                 .await
@@ -17223,6 +17237,142 @@ mod pod_stream {
         assert!(!body.to_string().contains(&token));
         assert_eq!(body["env"]["VOGT_GRAFT_REPO"], "vogt");
         assert_eq!(body["env"]["VOGT_GRAFT_LINE"], "rust-2");
+    }
+
+    /// A vogt-core stand-in that mints `minted-for-<id>` at
+    /// `POST /api/sessions/token`.
+    async fn mock_core() -> String {
+        use axum::{routing::post, Router};
+        async fn token(axum::Json(body): axum::Json<Value>) -> axum::Json<Value> {
+            let id = body["engine_session_id"].as_str().unwrap_or_default();
+            axum::Json(json!({
+                "engine_session_id": id,
+                "actor": format!("agent:engine:{id}"),
+                "token": if body["revoke"] == json!(true) { Value::Null } else { json!(format!("minted-for-{id}")) },
+                "revoked": 0,
+            }))
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(
+                listener,
+                Router::new().route("/api/sessions/token", post(token)),
+            )
+            .await;
+        });
+        format!("http://{addr}")
+    }
+
+    /// WI-3243: a Claude pod is bootstrapped with the engine's MCP config and
+    /// its own core credential, as a host agent session is; the credential is
+    /// in the env, never in the config file. Another CLI gets neither.
+    #[tokio::test]
+    async fn a_claude_bootstrap_carries_the_mcp_config_and_the_sessions_credential() {
+        let core = mock_core().await;
+        let mut h = harness_cfg(false, None, |cfg| {
+            cfg.vogt_core_url = Some(core);
+            cfg.vogt_core_token = Some("stack-secret".into());
+        })
+        .await;
+        let endpoint = h.state.sessions.pod_config().unwrap().engine_endpoint;
+
+        let id = h.start().await;
+        let (_, token) = h.created.recv().await.unwrap();
+        let body: Value = h
+            .bootstrap_as(id, &token, "claude")
+            .await
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(body["env"]["VOGT_HTTP_TOKEN"], format!("minted-for-{id}"));
+        assert_eq!(body["env"]["VOGT_ENGINE_SESSION_ID"], id.to_string());
+        assert_eq!(
+            body["mcp_config"],
+            json!({"mcpServers": {"vogt": {
+                "type": "http",
+                "url": format!("{endpoint}/mcp"),
+                "headers": {"Authorization": "Bearer ${VOGT_HTTP_TOKEN}"},
+            }}})
+        );
+        assert!(!body["mcp_config"].to_string().contains("minted-for"));
+
+        let other = h.start().await;
+        let (_, token) = h.created.recv().await.unwrap();
+        let body: Value = h
+            .bootstrap_as(other, &token, "codex")
+            .await
+            .json()
+            .await
+            .unwrap();
+        assert!(body.get("mcp_config").is_none(), "{body}");
+        assert!(body["env"].get("VOGT_HTTP_TOKEN").is_none(), "{body}");
+    }
+
+    /// Without a core to mint from, a Claude pod still gets a config, with no
+    /// servers, so `--strict-mcp-config` keeps the account's own set out.
+    #[tokio::test]
+    async fn a_claude_bootstrap_with_no_core_gets_an_empty_mcp_config() {
+        let mut h = harness(false).await;
+        let id = h.start().await;
+        let (_, token) = h.created.recv().await.unwrap();
+        let body: Value = h
+            .bootstrap_as(id, &token, "claude")
+            .await
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(body["mcp_config"], json!({"mcpServers": {}}));
+        assert!(body["env"].get("VOGT_HTTP_TOKEN").is_none(), "{body}");
+    }
+
+    /// WI-3243: a pod session has no broker token; its policy hook presents
+    /// the stream credential it was bootstrapped with, and is checked against
+    /// its own policy. Nothing else opens the route.
+    #[tokio::test]
+    async fn a_pod_sessions_policy_hook_authenticates_with_its_stream_credential() {
+        let mut h = harness(false).await;
+        let created: Value = h
+            .client
+            .post(format!("{}/api/sessions", h.base))
+            .json(&json!({
+                "name": "policed",
+                "template": "pod",
+                "policy": {"merge_deploys_prod": true},
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let id: Uuid = created["id"].as_str().unwrap().parse().unwrap();
+        let stream_token = h.session_token(id).await;
+
+        let check = |bearer: String, command: &'static str| {
+            let url = format!("{}/api/agent-auth/policy-check", h.base);
+            async move {
+                reqwest::Client::new()
+                    .post(url)
+                    .bearer_auth(bearer)
+                    .json(&json!({"tool_name": "Bash", "tool_input": {"command": command}}))
+                    .send()
+                    .await
+                    .unwrap()
+            }
+        };
+        let denied = check(stream_token.clone(), "gh pr merge 5").await;
+        assert_eq!(denied.status(), StatusCode::OK);
+        assert_eq!(denied.json::<Value>().await.unwrap()["decision"], "deny");
+        let allowed = check(stream_token.clone(), "ls").await;
+        assert_eq!(allowed.json::<Value>().await.unwrap()["decision"], "allow");
+        // A made-up credential and a near miss are refused.
+        for bearer in ["not-a-token".to_string(), format!("{stream_token}x")] {
+            assert_eq!(
+                check(bearer, "gh pr merge 5").await.status(),
+                StatusCode::UNAUTHORIZED
+            );
+        }
     }
 
     /// Runs the real `deploy/session-entrypoint.sh` against the real bootstrap

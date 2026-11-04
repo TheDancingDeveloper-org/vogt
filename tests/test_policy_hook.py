@@ -35,6 +35,7 @@ class _Broker:
         self.status = status
         self.body = body
         self.requests: list[bytes] = []
+        self.authorizations: list[str] = []
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
@@ -46,6 +47,7 @@ class _Broker:
             def do_POST(self) -> None:
                 length = int(self.headers.get("Content-Length", "0"))
                 broker.requests.append(self.rfile.read(length))
+                broker.authorizations.append(self.headers.get("Authorization", ""))
                 self.send_response(broker.status)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(broker.body)))
@@ -201,6 +203,47 @@ def test_no_broker_credential_allows(tmp_path: Path) -> None:
     )
     assert result.returncode == 0
     assert result.stderr == ""
+
+
+def test_a_pod_session_asks_with_its_stream_credential(tmp_path: Path) -> None:
+    """A pod holds no broker token; the credential file names the session (WI-3243)."""
+    broker = _Broker(200, b'{"decision":"deny","reason":"no merges"}')
+    try:
+        token_file = tmp_path / "session-token"
+        token_file.write_text("pod-stream-token\n")
+        env = {
+            "VOGT_ENGINE_URL": broker.url,
+            "VOGT_SESSION_TOKEN_FILE": str(token_file),
+        }
+        denied = run(
+            tmp_path,
+            '{"tool_name":"Bash","tool_input":{"command":"gh pr merge 1"}}',
+            env,
+        )
+        assert denied.returncode == 2
+        assert "no merges" in denied.stderr
+        assert broker.authorizations == ["Bearer pod-stream-token"]
+
+        # A broker token, where there is one, still wins over the file.
+        broker.authorizations.clear()
+        other = _Broker(200, b'{"decision":"allow"}')
+        try:
+            allowed = run(
+                tmp_path,
+                '{"tool_name":"Bash","tool_input":{"command":"git status"}}',
+                {
+                    **env,
+                    "VOGT_ENGINE_BROKER_URL": other.url,
+                    "VOGT_ENGINE_BROKER_TOKEN": "broker-token",
+                },
+            )
+            assert allowed.returncode == 0, allowed.stderr
+            assert other.authorizations == ["Bearer broker-token"]
+            assert broker.authorizations == []
+        finally:
+            other.close()
+    finally:
+        broker.close()
 
 
 def test_install_policy_is_idempotent(tmp_path: Path) -> None:

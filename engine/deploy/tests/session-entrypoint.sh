@@ -33,6 +33,7 @@ if [ -n "${REFUSE_FIRST:-}" ]; then
 fi
 [ "${BOOT_MODE:-ok}" != 401 ] || { echo unauthorized >&2; exit 22; }
 graft=""; [ -z "${GRAFT_TOKEN:-}" ] || graft=$(printf ',"graft_token":"%s"' "$GRAFT_TOKEN")
+[ -z "${MCP_CONFIG:-}" ] || graft="$graft,\"mcp_config\":$MCP_CONFIG"
 printf '{"session_token":"%s"%s,"bundle":{"sub/.credentials.json":"%s"},"env":{"VOGT_SESSION_ID":"s1","VOGT_BOOTSTRAP_TOKEN":"%s","EXTRA":"yes"},"brief":"hello brief"}' \
   "$(cat "$CASE_DIR/session")" "$graft" "$(printf bundle | base64)" "$(cat "$CASE_DIR/boot")"
 SH
@@ -49,6 +50,11 @@ SH
 env >"$CASE_DIR/agent.env"
 printf 'agent:%s:%s\n' "$VOGT_SESSION_CWD" "$(cat "$VOGT_SESSION_BRIEF_FILE")"
 SH
+  # The two hook scripts the image installs: record how the entrypoint ran them.
+  for hook in vogt-claude-session-hook vogt-policy-hook; do
+    # shellcheck disable=SC2016 # the stub's own $-expressions stay literal
+    printf '#!/bin/sh\nprintf "%%s\\n" "$*" >>"$CASE_DIR/%s.calls"\nprintf "%%s\\n" "$0" >>"$CLAUDE_CONFIG_DIR/settings.json"\n' "$hook" >"$dir/bin/$hook"
+  done
   chmod +x "$dir/bin/"*
 }
 run_case() {
@@ -65,7 +71,9 @@ run_case() {
     CLAUDE_CONFIG_DIR="$dir/claude" "$@" "$entry"
 }
 
-out=$(run_case "$tmp/happy" VOGT_SESSION_COMMAND='["sleep","1"]' GRAFT_TOKEN=graft-secret-value 2>&1) || fail "happy path: $out"
+# shellcheck disable=SC2016 # ${VOGT_HTTP_TOKEN} is Claude Code's to expand
+MCP='{"mcpServers":{"vogt":{"type":"http","url":"https://e/mcp","headers":{"Authorization":"Bearer ${VOGT_HTTP_TOKEN}"}}}}'
+out=$(run_case "$tmp/happy" VOGT_SESSION_COMMAND='["sleep","1"]' GRAFT_TOKEN=graft-secret-value MCP_CONFIG="$MCP" VOGT_EXTRA_CA_FILE=/etc/ca.pem VOGT_CLAUDE_SETTINGS_FILE=off 2>&1) || fail "happy path: $out"
 grep -q "agent:$tmp/happy/work:hello brief" <<<"$out" || fail "agent did not receive bootstrap state"
 jq -e '.session_id=="s1" and .graft_repo=="vogt" and .graft_line=="rust-2" and .cli=="claude"' \
   "$tmp/happy/request.json" >/dev/null || fail "bootstrap request body"
@@ -77,7 +85,7 @@ grep -q "clone vogt $tmp/happy/work --line rust-2" "$tmp/happy/graft.args" || fa
 ! grep -q "VOGT_BOOTSTRAP_TOKEN" "$tmp/happy/agent.env" || fail "bootstrap name re-exported"
 grep -q '^EXTRA=yes$' "$tmp/happy/agent.env" || fail "brokered env not exported"
 ! grep -Eq "$BOOT|$SESSION|graft-secret-value" <<<"$out" || fail "secret in output"
-for step in bootstrap session-token account-bundle brokered-env graft-token clone brief handoff; do
+for step in bootstrap session-token account-bundle brokered-env claude-config graft-token clone brief handoff; do
   grep -q "^session-entrypoint: step $step$" <<<"$out" || fail "step marker $step"
 done
 grep -Eq '^vogt_session_boot_seconds [0-9]+$' <<<"$out" || fail "boot seconds metric"
@@ -88,11 +96,35 @@ grep -Eq '^vogt_session_boot_seconds [0-9]+$' <<<"$out" || fail "boot seconds me
 [[ $(<"$tmp/happy/graft.token") == graft-secret-value ]] || fail "clone did not use the graft token"
 grep -q "^VOGT_GRAFT_TOKEN_FILE=$tmp/happy/run/graft-token$" "$tmp/happy/agent.env" || fail "graft token file not exported"
 ! grep -v '^GRAFT_TOKEN=' "$tmp/happy/agent.env" | grep -q 'graft-secret-value' || fail "graft token value reached the agent env"
+# A Claude session's MCP config lands in its own 0600 file beside the session
+# token and is named to the session agent; both hooks are installed once.
+[[ $(stat -c %a "$tmp/happy/run/mcp.json") == 600 ]] || fail "mcp config mode"
+jq -e '.mcpServers.vogt.headers.Authorization=="Bearer ${VOGT_HTTP_TOKEN}"' "$tmp/happy/run/mcp.json" >/dev/null || fail "mcp config content"
+grep -q "^VOGT_CLAUDE_MCP_CONFIG=$tmp/happy/run/mcp.json$" "$tmp/happy/agent.env" || fail "mcp config path not exported"
+grep -q '^NODE_EXTRA_CA_CERTS=/etc/ca.pem$' "$tmp/happy/agent.env" || fail "extra CA not given to Claude Code"
+[[ $(<"$tmp/happy/vogt-claude-session-hook.calls") == install ]] || fail "conversation hook not installed"
+[[ $(<"$tmp/happy/vogt-policy-hook.calls") == install-policy ]] || fail "policy hook not installed"
+# The boot log says which parts of the posture are in place; the pod smoke
+# asserts on this line. "settings" is the policy file the agent will pass to
+# --settings, so it is there only when that file can be read.
+grep -q '^session-entrypoint: claude posture: mcp-config policy-hook session-hook$' <<<"$out" || fail "posture line: $(grep 'claude posture' <<<"$out")"
 # The requested argv passes through to the session agent untouched.
 grep -q '^VOGT_SESSION_COMMAND=\["sleep","1"\]$' "$tmp/happy/agent.env" || fail "VOGT_SESSION_COMMAND not passed through"
 
-# Without a graft token the session token is what graft clones with.
+# Without a graft token the session token is what graft clones with. An
+# engine that sends no MCP config leaves the session agent nothing to pass.
 run_case "$tmp/no-graft-token" >/dev/null 2>&1 || fail "no-graft-token path"
+[ ! -e "$tmp/no-graft-token/run/mcp.json" ] || fail "mcp config written without one in the response"
+! grep -q '^VOGT_CLAUDE_MCP_CONFIG=' "$tmp/no-graft-token/agent.env" || fail "mcp config exported without one"
+posture=$(run_case "$tmp/posture" VOGT_CLAUDE_SETTINGS_FILE="$tmp/policy.json" MCP_CONFIG="$MCP" 2>&1 | grep 'claude posture') || true
+[[ $posture == 'session-entrypoint: claude posture: mcp-config policy-hook session-hook' ]] || fail "unreadable policy counted: $posture"
+echo '{}' >"$tmp/policy.json"
+posture=$(run_case "$tmp/posture2" VOGT_CLAUDE_SETTINGS_FILE="$tmp/policy.json" MCP_CONFIG="$MCP" 2>&1 | grep 'claude posture') || true
+[[ $posture == 'session-entrypoint: claude posture: settings mcp-config policy-hook session-hook' ]] || fail "readable policy not counted: $posture"
+# Codex gets neither Claude's hooks nor its MCP file.
+run_case "$tmp/codex" VOGT_CLI=codex MCP_CONFIG="$MCP" >/dev/null 2>&1 || fail "codex path"
+[ ! -e "$tmp/codex/vogt-policy-hook.calls" ] || fail "claude hooks installed for codex"
+[ ! -e "$tmp/codex/run/mcp.json" ] || fail "mcp config written for codex"
 [[ $(<"$tmp/no-graft-token/graft.token") == "$SESSION" ]] || fail "clone should fall back to the session token"
 
 # A pod's IP reaches the engine's allow-set a moment after start: refused
