@@ -60,6 +60,17 @@ pub fn bundle_files(root: &Path) -> Vec<BundleFile> {
     files
 }
 
+/// A file's modification time in milliseconds since the epoch: the version a
+/// `.claude.json` write carries.
+fn file_version(path: &Path) -> Option<u64> {
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    let millis = modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_millis();
+    u64::try_from(millis).ok().filter(|v| *v > 0)
+}
+
 /// The session's own transcript under `<root>/projects`, found without
 /// following symlinks. It is sent as append-only deltas, never read whole.
 pub fn transcript_path(root: &Path, conversation: &str) -> Option<PathBuf> {
@@ -448,16 +459,29 @@ async fn flush_bundle(
             BundleFileKind::Config => "config",
             BundleFileKind::Transcript => continue,
         };
-        let body = serde_json::json!({"account": account, "conversation_id": conversation, "path": file.path.strip_prefix(root).unwrap_or(&file.path).to_string_lossy(), "kind": kind, "bytes": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &file.bytes)});
-        if client
+        let mut body = serde_json::json!({"account": account, "conversation_id": conversation, "path": file.path.strip_prefix(root).unwrap_or(&file.path).to_string_lossy(), "kind": kind, "bytes": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &file.bytes)});
+        if file.kind == BundleFileKind::Config {
+            // The engine orders `.claude.json` writes by this and refuses one
+            // without it: the file's own modification time, in milliseconds.
+            match file_version(&file.path) {
+                Some(version) => body["version"] = serde_json::json!(version),
+                None => continue,
+            }
+        }
+        // A reply the engine will give again for the same bytes is final. A
+        // rate limit or a server fault is not: the file is tried again on the
+        // next flush.
+        if let Ok(reply) = client
             .post(&url)
             .bearer_auth(&config.token)
             .json(&body)
             .send()
             .await
-            .is_ok()
         {
-            seen.insert(file.path, marker);
+            let status = reply.status();
+            if !(status.as_u16() == 429 || status.is_server_error()) {
+                seen.insert(file.path, marker);
+            }
         }
     }
     if let Some(path) = transcript_path(root, conversation) {
@@ -1087,6 +1111,20 @@ mod tests {
         std::fs::write(dir.path().join("projects/work/conv.jsonl"), b"x").unwrap();
         assert!(transcript_path(dir.path(), "conv").is_some());
         assert!(transcript_path(dir.path(), "../conv").is_none());
+    }
+
+    #[test]
+    fn a_config_version_is_the_files_mtime_in_milliseconds() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".claude.json");
+        assert_eq!(file_version(&path), None);
+        std::fs::write(&path, b"{}").unwrap();
+        let version = file_version(&path).unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        assert!(version > 1_500_000_000_000 && version <= now + 1000);
     }
 
     #[test]

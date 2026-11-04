@@ -133,7 +133,33 @@ const HELPER_TIMEOUT: Duration = Duration::from_secs(30);
 const STDERR_EXCERPT: usize = 300;
 const MAX_IN_MEMORY_TRANSCRIPT: usize = 4 * 1024 * 1024;
 /// A whole credentials or config file; these are small and replaced whole.
-const MAX_BUNDLE_REQUEST_BYTES: usize = 16 * 1024 * 1024;
+const MAX_BUNDLE_REQUEST_BYTES: usize = 1024 * 1024;
+/// The largest file the engine hands a new pod when it seeds the bundle; a
+/// transcript can grow well past one request, so this is wider than the write
+/// cap.
+const MAX_BUNDLE_SNAPSHOT_FILE_BYTES: usize = 16 * 1024 * 1024;
+/// The most the bundle route buffers: a full 1 MiB payload as base64, plus
+/// room for the JSON envelope. Checked against `Content-Length` before any of
+/// the body is read, and enforced again while it is read.
+const MAX_BUNDLE_BODY_BYTES: usize = MAX_BUNDLE_REQUEST_BYTES.div_ceil(3) * 4 + 8 * 1024;
+/// Per-session ceiling on bundle writes. The agent debounces to one flush a
+/// second and sends a transcript in chunks, so sixty to a hundred and twenty
+/// a minute is a busy session; past that the audit log should show a runaway.
+const BUNDLE_LIMIT_PER_MINUTE: u32 = 120;
+/// The access-token lifetime Claude issues today (eight hours), the default
+/// ceiling for a written-back credential's `expiresAt` is that plus slack.
+const DEFAULT_CREDENTIAL_MAX_LIFETIME: Duration = Duration::from_secs(9 * 60 * 60);
+/// `ENGINE_AGENT_CREDENTIAL_MAX_LIFETIME_SECS`: how far ahead of now a
+/// written-back credential's `expiresAt` may be. A credentials file claiming
+/// a later expiry is refused, so one session cannot pin the shared file with
+/// an expiry no genuine refresh can beat.
+pub const CREDENTIAL_MAX_LIFETIME_ENV: &str = "ENGINE_AGENT_CREDENTIAL_MAX_LIFETIME_SECS";
+/// How far ahead of the engine's clock a `.claude.json` version (the file's
+/// mtime in milliseconds) may be, for pod clock skew.
+const CONFIG_VERSION_SKEW_MS: u64 = 10 * 60 * 1000;
+/// Where the last accepted `.claude.json` version is kept, beside the file, so
+/// the version check survives an engine restart.
+const CONFIG_VERSION_FILE: &str = ".claude.json.version";
 /// One transcript delta. The transcript itself is unbounded: the agent sends
 /// it in chunks no larger than this, each at the offset the engine expects.
 pub const MAX_TRANSCRIPT_DELTA_BYTES: usize = 1024 * 1024;
@@ -335,6 +361,8 @@ pub struct SecretBroker {
     /// Serialises compare-and-replace operations for one account bundle. The
     /// credentials expiry check and its write must be one critical section.
     account_locks: DashMap<String, Arc<Mutex<()>>>,
+    /// How far ahead a written-back credential's `expiresAt` may be.
+    credential_max_lifetime: Duration,
 }
 
 /// The longest a grant may live.
@@ -431,7 +459,14 @@ impl SecretBroker {
             bundle_versions: DashMap::new(),
             account_dirs: HashMap::new(),
             account_locks: DashMap::new(),
+            credential_max_lifetime: credential_max_lifetime_from_env(),
         }
+    }
+
+    /// Override the ceiling on a written-back credential's expiry.
+    pub fn with_credential_max_lifetime(mut self, lifetime: Duration) -> Self {
+        self.credential_max_lifetime = lifetime;
+        self
     }
 
     pub fn with_account_dirs(mut self, dirs: HashMap<String, PathBuf>) -> Self {
@@ -793,36 +828,72 @@ impl SecretBroker {
                     BundleFileKind::Config => ".claude.json",
                     BundleFileKind::Transcript => return Err(BundleRefusal::TranscriptNeedsOffset),
                 };
+                let now_ms = now_millis();
                 if kind == BundleFileKind::Credentials {
+                    let max_ms = self.credential_max_lifetime.as_millis() as u64;
+                    let expiry = validate_credentials(bytes, now_ms, max_ms)
+                        .map_err(BundleRefusal::Credentials)?;
                     if let Ok(old) = std::fs::read(root.join(filename)) {
-                        if oauth_expiry(bytes) <= oauth_expiry(&old) {
+                        // A stored file whose expiry is past the ceiling (put
+                        // there before the ceiling existed) must not outrank a
+                        // genuine refresh for ever.
+                        let stored = oauth_expiry(&old);
+                        let stored = if stored > now_ms.saturating_add(max_ms) {
+                            0
+                        } else {
+                            stored
+                        };
+                        if expiry <= stored {
                             return Err(BundleRefusal::OlderCredentials);
                         }
                     }
                 }
+                let key = (account.to_string(), name.to_string());
                 if kind == BundleFileKind::Config {
-                    if let Some(version) = version {
-                        let key = (account.to_string(), name.to_string());
-                        if self
-                            .bundle_versions
-                            .get(&key)
-                            .is_some_and(|old| version <= *old)
-                        {
-                            return Err(BundleRefusal::OlderConfig);
-                        }
+                    let Some(version) = version else {
+                        return Err(BundleRefusal::ConfigNeedsVersion);
+                    };
+                    if version > now_ms.saturating_add(CONFIG_VERSION_SKEW_MS) {
+                        return Err(BundleRefusal::ConfigVersionAhead);
+                    }
+                    if version <= self.stored_config_version(root, &key) {
+                        return Err(BundleRefusal::OlderConfig);
                     }
                 }
                 atomic_bundle_write(root, FsPath::new(filename), bytes)
                     .map_err(|_| BundleRefusal::Storage)?;
-                self.put_bundle((account.to_string(), name.to_string()), bytes.to_vec());
-                if let Some(version) = version {
-                    self.bundle_versions
-                        .insert((account.to_string(), name.to_string()), version);
+                self.put_bundle(key.clone(), bytes.to_vec());
+                if let Some(version) = version.filter(|_| kind == BundleFileKind::Config) {
+                    // The file is in place; a failure to record its version
+                    // costs only the restart-proof half of the check.
+                    let _ = atomic_bundle_write(
+                        root,
+                        FsPath::new(CONFIG_VERSION_FILE),
+                        version.to_string().as_bytes(),
+                    );
+                    self.bundle_versions.insert(key, version);
                 }
             }
             BundleFileKind::Transcript => return Err(BundleRefusal::TranscriptNeedsOffset),
         }
         Ok(())
+    }
+
+    /// The last `.claude.json` version accepted for the account: the
+    /// in-memory value, else the one persisted beside the file, else 0.
+    fn stored_config_version(&self, root: &FsPath, key: &(String, String)) -> u64 {
+        if let Some(version) = self.bundle_versions.get(key) {
+            return *version;
+        }
+        let path = root.join(CONFIG_VERSION_FILE);
+        let version = std::fs::symlink_metadata(&path)
+            .ok()
+            .filter(|meta| meta.file_type().is_file() && meta.len() <= 32)
+            .and_then(|_| std::fs::read_to_string(&path).ok())
+            .and_then(|text| text.trim().parse().ok())
+            .unwrap_or(0);
+        self.bundle_versions.insert(key.clone(), version);
+        version
     }
 
     /// The files a pod for `account` is seeded with: the account's login and
@@ -844,7 +915,7 @@ impl SecretBroker {
         };
         let read = |path: &FsPath| {
             let meta = std::fs::symlink_metadata(path).ok()?;
-            (meta.file_type().is_file() && meta.len() as usize <= MAX_BUNDLE_FILE_BYTES)
+            (meta.file_type().is_file() && meta.len() as usize <= MAX_BUNDLE_SNAPSHOT_FILE_BYTES)
                 .then(|| std::fs::read(path).ok())
                 .flatten()
         };
@@ -994,8 +1065,6 @@ impl SecretBroker {
     }
 }
 
-const MAX_BUNDLE_FILE_BYTES: usize = MAX_BUNDLE_REQUEST_BYTES;
-
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "kebab-case")]
 pub enum BundleFileKind {
@@ -1030,6 +1099,111 @@ pub enum BundleRefusal {
     Storage,
     OlderCredentials,
     OlderConfig,
+    /// A credentials file that is not a usable login; says which check failed.
+    Credentials(CredentialRejection),
+    /// A `.claude.json` write carried no version.
+    ConfigNeedsVersion,
+    /// A `.claude.json` version further ahead of now than clock skew explains.
+    ConfigVersionAhead,
+}
+
+/// Why a credentials write-back is not a usable login. A category only: the
+/// file's values are never named.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CredentialRejection {
+    NotJson,
+    MissingAccessToken,
+    MissingRefreshToken,
+    MissingExpiry,
+    /// `expiresAt` is further ahead than a real token's lifetime allows.
+    ExpiryTooFar,
+}
+
+impl CredentialRejection {
+    fn reason(self) -> &'static str {
+        match self {
+            CredentialRejection::NotJson => "credentials are not valid JSON",
+            CredentialRejection::MissingAccessToken => "credentials hold no access token",
+            CredentialRejection::MissingRefreshToken => "credentials hold no refresh token",
+            CredentialRejection::MissingExpiry => "credentials hold no expiry",
+            CredentialRejection::ExpiryTooFar => {
+                "credentials expiry is beyond the token lifetime ceiling"
+            }
+        }
+    }
+}
+
+impl BundleRefusal {
+    /// The refusal in words, safe to log and to return: no value from the
+    /// request is ever in it.
+    fn reason(&self) -> &'static str {
+        match self {
+            BundleRefusal::TooLarge => "bundle-file exceeds the size cap",
+            BundleRefusal::ConversationScope => {
+                "bundle-file transcript is outside the session conversation"
+            }
+            BundleRefusal::Resync { .. } => "bundle-file transcript offset is stale",
+            BundleRefusal::TranscriptNeedsOffset => "bundle-file transcript needs an offset",
+            BundleRefusal::Storage => "bundle-file could not be persisted",
+            BundleRefusal::OlderCredentials => {
+                "bundle-file credentials are not newer than the stored credentials"
+            }
+            BundleRefusal::OlderConfig => {
+                "bundle-file config version is not newer than the stored config"
+            }
+            BundleRefusal::Credentials(why) => why.reason(),
+            BundleRefusal::ConfigNeedsVersion => "bundle-file config needs a version",
+            BundleRefusal::ConfigVersionAhead => {
+                "bundle-file config version is ahead of the engine clock"
+            }
+        }
+    }
+}
+
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
+}
+
+fn credential_max_lifetime_from_env() -> Duration {
+    std::env::var(CREDENTIAL_MAX_LIFETIME_ENV)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .map_or(DEFAULT_CREDENTIAL_MAX_LIFETIME, Duration::from_secs)
+}
+
+/// Accept a credentials file only if it is a login a pod could use: it parses,
+/// holds a non-empty access token and refresh token, and its `expiresAt` (ms
+/// since the epoch) is no further ahead than `max_ms`. Returns the expiry.
+fn validate_credentials(
+    bytes: &[u8],
+    now_ms: u64,
+    max_ms: u64,
+) -> Result<u64, CredentialRejection> {
+    let value: serde_json::Value =
+        serde_json::from_slice(bytes).map_err(|_| CredentialRejection::NotJson)?;
+    let present = |pointer: &str| {
+        value
+            .pointer(pointer)
+            .and_then(|v| v.as_str())
+            .is_some_and(|v| !v.trim().is_empty())
+    };
+    if !present("/claudeAiOauth/accessToken") {
+        return Err(CredentialRejection::MissingAccessToken);
+    }
+    if !present("/claudeAiOauth/refreshToken") {
+        return Err(CredentialRejection::MissingRefreshToken);
+    }
+    let expiry = oauth_expiry(bytes);
+    if expiry == 0 {
+        return Err(CredentialRejection::MissingExpiry);
+    }
+    if expiry > now_ms.saturating_add(max_ms) {
+        return Err(CredentialRejection::ExpiryTooFar);
+    }
+    Ok(expiry)
 }
 
 fn atomic_bundle_write(root: &FsPath, relative: &FsPath, bytes: &[u8]) -> std::io::Result<()> {
@@ -1241,15 +1415,42 @@ pub async fn store_bundle_file(
     else {
         return ApiError::Unauthorized.into_response();
     };
-    let payload: BundleFileRequest =
-        match axum::body::to_bytes(request.into_body(), MAX_BUNDLE_FILE_BYTES * 2)
-            .await
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-        {
-            Some(value) => value,
-            None => return refusal(StatusCode::BAD_REQUEST, "invalid bundle-file request"),
-        };
+    if let Some(retry_after) = state.auth.check_mutation_rate_limit(
+        &format!("secret-broker-bundle:{session_id}"),
+        BUNDLE_LIMIT_PER_MINUTE,
+    ) {
+        tracing::warn!(target: "vogt::audit", session_id = %session_id,
+            retry_after_ms = retry_after.as_millis() as u64,
+            "bundle-file rate limit exceeded");
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            [(
+                header::RETRY_AFTER,
+                retry_after.as_secs().max(1).to_string(),
+            )],
+            Json(json!({"error": "bundle-file rate limit exceeded"})),
+        )
+            .into_response();
+    }
+    // The size is judged before the body is read: a declared length over the
+    // bound is refused unread, and a body with no declared length is cut off
+    // at the bound while it is buffered.
+    let declared = request
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<usize>().ok());
+    if declared.is_some_and(|n| n > MAX_BUNDLE_BODY_BYTES) {
+        return refuse_bundle(session_id, "", "", BundleRefusal::TooLarge);
+    }
+    let body = match axum::body::to_bytes(request.into_body(), MAX_BUNDLE_BODY_BYTES).await {
+        Ok(body) => body,
+        Err(_) => return refuse_bundle(session_id, "", "", BundleRefusal::TooLarge),
+    };
+    let payload: BundleFileRequest = match serde_json::from_slice(&body) {
+        Ok(value) => value,
+        Err(_) => return refusal(StatusCode::BAD_REQUEST, "invalid bundle-file request"),
+    };
     let Some(summary) = state.sessions.summary_of(session_id) else {
         return ApiError::Unauthorized.into_response();
     };
@@ -1297,9 +1498,11 @@ pub async fn store_bundle_file(
     let length = bytes.len();
     if payload.kind == BundleFileKind::Transcript {
         let Some(offset) = payload.offset else {
-            return refusal(
-                StatusCode::BAD_REQUEST,
-                "bundle-file transcript needs an offset",
+            return refuse_bundle(
+                session_id,
+                account,
+                &payload.path,
+                BundleRefusal::TranscriptNeedsOffset,
             );
         };
         return match broker.append_transcript(account, conversation, &payload.path, offset, &bytes)
@@ -1314,7 +1517,7 @@ pub async fn store_bundle_file(
                 Json(json!({"ok": false, "resync": true, "offset": offset})),
             )
                 .into_response(),
-            Err(error) => bundle_refusal(error),
+            Err(error) => refuse_bundle(session_id, account, &payload.path, error),
         };
     }
     let result = broker.store_bundle_file(
@@ -1325,32 +1528,25 @@ pub async fn store_bundle_file(
         payload.version,
     );
     if let Err(error) = result {
-        return bundle_refusal(error);
+        return refuse_bundle(session_id, account, &payload.path, error);
     }
     tracing::info!(target: "vogt::audit", session_id = %session_id, account = %account,
         file = %payload.path, bytes = length, "bundle file replaced");
     Json(json!({"ok": true, "bytes": length})).into_response()
 }
 
-fn bundle_refusal(error: BundleRefusal) -> Response {
-    {
-        let reason = match error {
-            BundleRefusal::TooLarge => "bundle-file exceeds the size cap",
-            BundleRefusal::ConversationScope => {
-                "bundle-file transcript is outside the session conversation"
-            }
-            BundleRefusal::Resync { .. } => "bundle-file transcript offset is stale",
-            BundleRefusal::TranscriptNeedsOffset => "bundle-file transcript needs an offset",
-            BundleRefusal::Storage => "bundle-file could not be persisted",
-            BundleRefusal::OlderCredentials => {
-                "bundle-file credentials are not newer than the stored credentials"
-            }
-            BundleRefusal::OlderConfig => {
-                "bundle-file config version is not newer than the stored config"
-            }
-        };
-        refusal(StatusCode::FORBIDDEN, reason)
-    }
+/// Audit a refused bundle write by session, account and reason, then answer
+/// it. The reason is a fixed phrase; nothing from the request body is logged.
+fn refuse_bundle(session_id: Uuid, account: &str, file: &str, error: BundleRefusal) -> Response {
+    let reason = error.reason();
+    tracing::warn!(target: "vogt::audit", session_id = %session_id, account = %account,
+        file = %file, reason, "bundle file refused");
+    let status = match error {
+        BundleRefusal::TooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+        BundleRefusal::Storage => StatusCode::INTERNAL_SERVER_ERROR,
+        _ => StatusCode::FORBIDDEN,
+    };
+    refusal(status, reason)
 }
 
 fn digest(token: &str) -> [u8; 32] {
@@ -1952,6 +2148,284 @@ mod tests {
         );
     }
 
+    /// A credentials file as Claude writes it, with `expiry` in ms.
+    fn credentials(expiry: u64) -> Vec<u8> {
+        format!(
+            r#"{{"claudeAiOauth":{{"accessToken":"SECRET-ACCESS","refreshToken":"SECRET-REFRESH","expiresAt":{expiry}}}}}"#
+        )
+        .into_bytes()
+    }
+
+    /// An expiry `hours` from now, in ms.
+    fn in_hours(hours: u64) -> u64 {
+        now_millis() + hours * 60 * 60 * 1000
+    }
+
+    fn credential_broker(dir: &FsPath) -> SecretBroker {
+        let mut dirs = HashMap::new();
+        dirs.insert("acct".to_string(), dir.to_path_buf());
+        broker_with("", "127.0.0.1:1").with_account_dirs(dirs)
+    }
+
+    fn store_credentials(broker: &SecretBroker, bytes: &[u8]) -> Result<(), BundleRefusal> {
+        broker.store_bundle_file(
+            "acct",
+            ".credentials.json",
+            BundleFileKind::Credentials,
+            bytes,
+            None,
+        )
+    }
+
+    #[test]
+    fn a_maximum_expiry_cannot_pin_the_shared_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let broker = credential_broker(dir.path());
+        store_credentials(&broker, &credentials(in_hours(1))).unwrap();
+        for poison in [u64::MAX, 253_402_300_799_000, in_hours(24 * 30)] {
+            assert!(
+                matches!(
+                    store_credentials(&broker, &credentials(poison)),
+                    Err(BundleRefusal::Credentials(
+                        CredentialRejection::ExpiryTooFar
+                    ))
+                ),
+                "{poison} must be refused"
+            );
+        }
+        // The poisoned writes changed nothing, so a genuine refresh still lands.
+        let genuine = credentials(in_hours(2));
+        store_credentials(&broker, &genuine).unwrap();
+        assert_eq!(
+            std::fs::read(dir.path().join(".credentials.json")).unwrap(),
+            genuine
+        );
+    }
+
+    #[test]
+    fn a_stored_expiry_past_the_ceiling_does_not_outrank_a_genuine_refresh() {
+        let dir = tempfile::tempdir().unwrap();
+        // What an engine without the ceiling would have accepted.
+        std::fs::write(
+            dir.path().join(".credentials.json"),
+            credentials(u64::MAX / 2),
+        )
+        .unwrap();
+        let broker = credential_broker(dir.path());
+        let genuine = credentials(in_hours(1));
+        store_credentials(&broker, &genuine).unwrap();
+        assert_eq!(
+            std::fs::read(dir.path().join(".credentials.json")).unwrap(),
+            genuine
+        );
+    }
+
+    #[test]
+    fn the_expiry_ceiling_is_configurable() {
+        let dir = tempfile::tempdir().unwrap();
+        let broker =
+            credential_broker(dir.path()).with_credential_max_lifetime(Duration::from_secs(3600));
+        assert!(matches!(
+            store_credentials(&broker, &credentials(in_hours(2))),
+            Err(BundleRefusal::Credentials(
+                CredentialRejection::ExpiryTooFar
+            ))
+        ));
+        store_credentials(&broker, &credentials(now_millis() + 30 * 60 * 1000)).unwrap();
+    }
+
+    #[test]
+    fn credentials_without_both_tokens_and_an_expiry_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let broker = credential_broker(dir.path());
+        let expiry = in_hours(1);
+        let cases: [(String, CredentialRejection); 8] = [
+            ("not json".into(), CredentialRejection::NotJson),
+            ("{}".into(), CredentialRejection::MissingAccessToken),
+            (
+                format!(r#"{{"claudeAiOauth":{{"refreshToken":"r","expiresAt":{expiry}}}}}"#),
+                CredentialRejection::MissingAccessToken,
+            ),
+            (
+                format!(
+                    r#"{{"claudeAiOauth":{{"accessToken":"","refreshToken":"r","expiresAt":{expiry}}}}}"#
+                ),
+                CredentialRejection::MissingAccessToken,
+            ),
+            (
+                format!(r#"{{"claudeAiOauth":{{"accessToken":"a","expiresAt":{expiry}}}}}"#),
+                CredentialRejection::MissingRefreshToken,
+            ),
+            (
+                format!(
+                    r#"{{"claudeAiOauth":{{"accessToken":"a","refreshToken":"  ","expiresAt":{expiry}}}}}"#
+                ),
+                CredentialRejection::MissingRefreshToken,
+            ),
+            (
+                r#"{"claudeAiOauth":{"accessToken":"a","refreshToken":"r"}}"#.into(),
+                CredentialRejection::MissingExpiry,
+            ),
+            (
+                r#"{"claudeAiOauth":{"accessToken":"a","refreshToken":"r","expiresAt":0}}"#.into(),
+                CredentialRejection::MissingExpiry,
+            ),
+        ];
+        for (body, why) in cases {
+            assert!(
+                matches!(
+                    store_credentials(&broker, body.as_bytes()),
+                    Err(BundleRefusal::Credentials(got)) if got == why
+                ),
+                "{body} should be refused as {why:?}"
+            );
+        }
+        assert!(!dir.path().join(".credentials.json").exists());
+    }
+
+    #[test]
+    fn a_genuine_newer_refresh_replaces_the_stored_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let broker = credential_broker(dir.path());
+        store_credentials(&broker, &credentials(in_hours(1))).unwrap();
+        let refreshed = credentials(in_hours(8));
+        store_credentials(&broker, &refreshed).unwrap();
+        assert_eq!(
+            std::fs::read(dir.path().join(".credentials.json")).unwrap(),
+            refreshed
+        );
+    }
+
+    /// Collects what the audit log writes, so a test can read it back.
+    #[derive(Clone, Default)]
+    struct AuditCapture(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for AuditCapture {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for AuditCapture {
+        type Writer = AuditCapture;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    fn audited(f: impl FnOnce()) -> String {
+        let capture = AuditCapture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(capture.clone())
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, f);
+        let bytes = capture.0.lock().unwrap().clone();
+        String::from_utf8(bytes).unwrap()
+    }
+
+    #[test]
+    fn every_credential_refusal_is_audited_by_session_account_and_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let broker = credential_broker(dir.path());
+        store_credentials(&broker, &credentials(in_hours(2))).unwrap();
+        let session = Uuid::new_v4();
+        let refused = [
+            (credentials(u64::MAX), "beyond the token lifetime ceiling"),
+            (
+                br#"{"claudeAiOauth":{"accessToken":"SECRET-ACCESS","expiresAt":1}}"#.to_vec(),
+                "no refresh token",
+            ),
+            (
+                br#"{"claudeAiOauth":{"refreshToken":"SECRET-REFRESH","expiresAt":1}}"#.to_vec(),
+                "no access token",
+            ),
+            (b"SECRET-ACCESS".to_vec(), "not valid JSON"),
+            (credentials(in_hours(1)), "not newer than the stored"),
+        ];
+        for (body, reason) in refused {
+            let log = audited(|| {
+                let error = store_credentials(&broker, &body).unwrap_err();
+                let response = refuse_bundle(session, "acct", ".credentials.json", error);
+                assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            });
+            assert!(log.contains(&session.to_string()), "session in: {log}");
+            assert!(log.contains("acct"), "account in: {log}");
+            assert!(log.contains(reason), "{reason:?} in: {log}");
+            assert!(log.contains("vogt::audit"), "audit target in: {log}");
+            assert!(!log.contains("SECRET-"), "no value in: {log}");
+        }
+    }
+
+    #[test]
+    fn a_config_write_needs_a_version_and_an_honest_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let broker = credential_broker(dir.path());
+        let write = |broker: &SecretBroker, version: Option<u64>| {
+            broker.store_bundle_file(
+                "acct",
+                ".claude.json",
+                BundleFileKind::Config,
+                b"{}",
+                version,
+            )
+        };
+        assert!(matches!(
+            write(&broker, None),
+            Err(BundleRefusal::ConfigNeedsVersion)
+        ));
+        assert!(matches!(
+            write(&broker, Some(now_millis() + 60 * 60 * 1000)),
+            Err(BundleRefusal::ConfigVersionAhead)
+        ));
+        assert!(!dir.path().join(".claude.json").exists());
+        write(&broker, Some(now_millis() - 5000)).unwrap();
+        assert!(matches!(
+            write(&broker, Some(now_millis() - 6000)),
+            Err(BundleRefusal::OlderConfig)
+        ));
+        write(&broker, Some(now_millis() - 4000)).unwrap();
+    }
+
+    #[test]
+    fn the_config_version_survives_an_engine_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let version = now_millis() - 1000;
+        let write = |broker: &SecretBroker, version: u64| {
+            broker.store_bundle_file(
+                "acct",
+                ".claude.json",
+                BundleFileKind::Config,
+                b"{}",
+                Some(version),
+            )
+        };
+        write(&credential_broker(dir.path()), version).unwrap();
+        // A new broker has no memory of the write: only the disk remembers.
+        let restarted = credential_broker(dir.path());
+        assert!(matches!(
+            write(&restarted, version - 1),
+            Err(BundleRefusal::OlderConfig)
+        ));
+        assert!(matches!(
+            write(&restarted, version),
+            Err(BundleRefusal::OlderConfig)
+        ));
+        write(&restarted, version + 1).unwrap();
+    }
+
+    #[test]
+    fn the_bundle_body_bound_fits_a_full_delta_and_no_more() {
+        let full = MAX_TRANSCRIPT_DELTA_BYTES.div_ceil(3) * 4;
+        assert!(MAX_BUNDLE_BODY_BYTES > full);
+        assert!(MAX_BUNDLE_BODY_BYTES < full + 64 * 1024);
+        assert_eq!(MAX_BUNDLE_REQUEST_BYTES, MAX_TRANSCRIPT_DELTA_BYTES);
+    }
+
     #[cfg(unix)]
     #[test]
     fn bundle_writes_are_private_and_newer_credentials_only() {
@@ -1959,8 +2433,8 @@ mod tests {
         let mut dirs = HashMap::new();
         dirs.insert("acct".to_string(), dir.path().to_path_buf());
         let broker = broker_with("", "127.0.0.1:1").with_account_dirs(dirs);
-        let newer = br#"{"claudeAiOauth":{"expiresAt":20}}"#;
-        let older = br#"{"claudeAiOauth":{"expiresAt":10}}"#;
+        let newer = &credentials(in_hours(2));
+        let older = &credentials(in_hours(1));
         broker
             .store_bundle_file(
                 "acct",
@@ -2002,7 +2476,7 @@ mod tests {
                 "acct",
                 ".credentials.json",
                 BundleFileKind::Credentials,
-                br#"{"claudeAiOauth":{"expiresAt":10}}"#,
+                &credentials(in_hours(1)),
                 None,
             )
             .unwrap();
@@ -2022,17 +2496,18 @@ mod tests {
         let broker = Arc::new(broker_with("", "127.0.0.1:1").with_account_dirs(dirs));
         let barrier = Arc::new(std::sync::Barrier::new(3));
         let mut threads = Vec::new();
-        for expiry in [10, 20] {
+        let (soon, later) = (in_hours(1), in_hours(2));
+        for expiry in [soon, later] {
             let broker = Arc::clone(&broker);
             let barrier = Arc::clone(&barrier);
             threads.push(std::thread::spawn(move || {
-                let bytes = format!(r#"{{"claudeAiOauth":{{"expiresAt":{expiry}}}}}"#);
+                let bytes = credentials(expiry);
                 barrier.wait();
                 broker.store_bundle_file(
                     "acct",
                     ".credentials.json",
                     BundleFileKind::Credentials,
-                    bytes.as_bytes(),
+                    &bytes,
                     None,
                 )
             }));
@@ -2045,7 +2520,7 @@ mod tests {
 
         assert!(outcomes.iter().any(Result::is_ok));
         let stored = std::fs::read(dir.path().join(".credentials.json")).unwrap();
-        assert_eq!(oauth_expiry(&stored), 20);
+        assert_eq!(oauth_expiry(&stored), later);
     }
 
     fn transcript_broker(dir: &FsPath) -> SecretBroker {
@@ -2189,7 +2664,7 @@ mod tests {
                 "acct",
                 ".credentials.json",
                 BundleFileKind::Credentials,
-                br#"{"claudeAiOauth":{"expiresAt":1}}"#,
+                &credentials(in_hours(1)),
                 None,
             )
             .unwrap();
