@@ -475,3 +475,44 @@ def test_a_bypass_lost_on_resume_is_said_on_the_sweep_and_the_list(
     }
     assert "posture lost on resume" in reasons[lost]
     assert "posture lost on resume" not in reasons[kept]
+
+
+def test_exclude_roles_supervised_by_and_since_narrow_the_table(
+    wired: AppContext, engine: Engine
+) -> None:
+    worker, worker_engine = _start(wired)
+    _boss, boss_engine = _start(wired)
+    _mine, mine_engine = _start(wired)
+    engine.rows[boss_engine]["role"] = "oversight"
+    engine.rows[mine_engine]["last_output_at"] = "2026-11-01T00:00:00Z"
+
+    everyone = sweep_sessions(wired, SweepSessionsParams(mode="full", exclude_roles=[]))
+    assert everyone.counts["total"] == 3
+    # `operator` is the default and no engine role carries it yet.
+    assert sweep_sessions(wired, SweepSessionsParams()).counts["total"] == 3
+
+    hidden = sweep_sessions(
+        wired, SweepSessionsParams(mode="full", exclude_roles=["oversight"])
+    )
+    assert hidden.counts["total"] == 2
+    assert boss_engine not in {
+        row.session.engine_session_id for row in hidden.rows if row.session
+    }
+
+    recent = sweep_sessions(
+        wired,
+        SweepSessionsParams(
+            mode="full", since="2026-10-20T00:00:00Z", exclude_roles=[]
+        ),
+    )
+    assert [row.session.engine_session_id for row in recent.rows if row.session] == [
+        mine_engine
+    ]
+    assert recent.counts["total"] == 1
+
+    # Nothing in this fixture was started by another session.
+    none = sweep_sessions(
+        wired, SweepSessionsParams(mode="full", supervised_by=worker, exclude_roles=[])
+    )
+    assert none.rows == []
+    assert worker_engine

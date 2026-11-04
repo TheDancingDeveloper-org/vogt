@@ -209,6 +209,10 @@ where
         project: optional_string(&params, "project")?,
         screen_lines: optional_i64(&params, "screen_lines", 8)?,
         stall_after_minutes: optional_i64(&params, "stall_after_minutes", 10)?,
+        exclude_roles: optional_string_list(&params, "exclude_roles")?
+            .unwrap_or_else(|| vec!["operator".to_string()]),
+        supervised_by: optional_string(&params, "supervised_by")?,
+        since: optional_string(&params, "since")?,
     };
     Ok(serde_json::to_value(sweep_sessions(ctx, &parsed)?).expect("a session result serialises"))
 }
@@ -571,6 +575,12 @@ pub struct SweepSessionsParams {
     pub project: Option<String>,
     pub screen_lines: i64,
     pub stall_after_minutes: i64,
+    /// Roles left out of the sweep (WI-1525).
+    pub exclude_roles: Vec<String>,
+    /// Keep only sessions this session started.
+    pub supervised_by: Option<String>,
+    /// Keep only sessions that changed after this instant.
+    pub since: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -821,6 +831,8 @@ pub struct SessionSweepRow {
     pub attention: String,
     pub attention_reason: String,
     pub session: SessionSummary,
+    /// Empty when the sweep asked for no screen lines: left out, not `[]`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub screen_tail: Vec<String>,
     pub ready: Option<bool>,
 }
@@ -1845,6 +1857,7 @@ where
             session: summary,
         });
     }
+    narrow_sweep(ctx, params, &mut rows)?;
     rows.sort_by(|left, right| {
         decisions::Attention::order_of(&left.attention)
             .cmp(&decisions::Attention::order_of(&right.attention))
@@ -1874,6 +1887,57 @@ where
         swept_at,
         engine: None,
     })
+}
+
+/// Apply `exclude_roles`, `supervised_by` and `since` (WI-1525). Counts are
+/// taken from what is left, so a sweep that hides the person's own terminals
+/// does not report them as sessions needing attention.
+fn narrow_sweep<C, I>(
+    ctx: &AppContext<C, I>,
+    params: &SweepSessionsParams,
+    rows: &mut Vec<SessionSweepRow>,
+) -> Result<(), VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    if !params.exclude_roles.is_empty() {
+        rows.retain(|row| {
+            !row.session
+                .role
+                .as_deref()
+                .is_some_and(|role| params.exclude_roles.iter().any(|wanted| wanted == role))
+        });
+    }
+    if let Some(supervisor) = params.supervised_by.as_deref() {
+        let supervisor = resolve_target(ctx, supervisor)?.engine_session_id;
+        rows.retain(|row| row.session.started_by_session.as_deref() == Some(supervisor.as_str()));
+    }
+    if let Some(since) = params.since.as_deref() {
+        let since = crate::core::from_iso(since).map_err(|_| {
+            VogtError::InvalidRequest(format!(
+                "since must be an ISO-8601 time, got {}",
+                crate::core::py_repr(since)
+            ))
+        })?;
+        let after = |text: Option<&str>| {
+            text.and_then(|text| crate::core::from_iso(text).ok())
+                .is_some_and(|moment| moment > since)
+        };
+        rows.retain(|row| {
+            let session = &row.session;
+            after(session.last_output_at.as_deref())
+                || after(session.done_at.as_deref())
+                || after(session.turn_started_at.as_deref())
+                || after(
+                    session
+                        .blocked
+                        .as_ref()
+                        .and_then(|blocked| blocked.since.as_deref()),
+                )
+        });
+    }
+    Ok(())
 }
 
 /// The tail of a session's own raw output log.
@@ -5088,5 +5152,53 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(error, VogtError::InvalidRequest(_)), "{error:?}");
+    }
+
+    /// Sweep payload from the engine: two terminals, one of them a person's
+    /// own.
+    fn sweep_payload() -> Vec<u8> {
+        // The engine knows two roles; the person's own terminal is `oversight`
+        // here only so the test has a role to exclude.
+        br#"[
+          {"summary":{"id":"w-1","alive":true,"activity":"idle","role":"worker"},"screen_tail":[],"ready":true},
+          {"summary":{"id":"o-1","alive":true,"activity":"idle","role":"oversight"},"screen_tail":[],"ready":true}
+        ]"#
+        .to_vec()
+    }
+
+    fn sweep_with(name: &str, params: serde_json::Value) -> serde_json::Value {
+        let (dir, built, _seen) = context(name, person(), None, |_| {}, vec![sweep_payload()]);
+        let result = super::sweep_sessions_op(&built, params).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+        result
+    }
+
+    #[test]
+    fn a_sweep_hides_excluded_roles_and_empty_screen_tails() {
+        let result = sweep_with("sweep-default", json!({"exclude_roles": ["oversight"]}));
+        let rows = result["rows"].as_array().unwrap();
+        let ids: Vec<&str> = rows
+            .iter()
+            .map(|row| row["session"]["engine_session_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["w-1"], "{result}");
+        assert!(rows[0].get("screen_tail").is_none(), "{}", rows[0]);
+        assert_eq!(result["counts"]["total"], 1);
+    }
+
+    #[test]
+    fn a_sweep_hides_operator_sessions_by_default_and_none_when_told_to_keep_all() {
+        // `operator` is the default; no engine role carries it yet, so the
+        // default hides nothing today and both sessions stay.
+        let result = sweep_with("sweep-operator", json!({}));
+        assert_eq!(result["rows"].as_array().unwrap().len(), 2, "{result}");
+        let result = sweep_with("sweep-all", json!({"exclude_roles": []}));
+        assert_eq!(result["rows"].as_array().unwrap().len(), 2, "{result}");
+    }
+
+    #[test]
+    fn a_sweep_since_the_future_returns_no_rows() {
+        let result = sweep_with("sweep-since", json!({"since": "2999-01-01T00:00:00Z"}));
+        assert!(result["rows"].as_array().unwrap().is_empty(), "{result}");
     }
 }

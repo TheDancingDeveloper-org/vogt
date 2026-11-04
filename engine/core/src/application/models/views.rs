@@ -3143,6 +3143,21 @@ pub enum SessionInputResultKeysItem {
     Backspace,
 }
 
+/// How much a write returns (WI-1525): `compact` confirms the write in a few
+/// fields, `full` is the complete record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[schemars(inline)]
+pub enum WriteResultMode {
+    #[serde(rename = "compact")]
+    Compact,
+    #[serde(rename = "full")]
+    Full,
+}
+
+pub fn default_write_result_mode() -> WriteResultMode {
+    WriteResultMode::Compact
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
 #[schemars(inline)]
 pub enum SweepSessionsParamsMode {

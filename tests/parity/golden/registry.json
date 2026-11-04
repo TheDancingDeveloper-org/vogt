@@ -6874,6 +6874,16 @@
             "minLength": 1,
             "title": "Reason",
             "type": "string"
+          },
+          "mode": {
+            "default": "compact",
+            "description": "`compact` (default) returns a few fields: enough to confirm the write without re-reading the whole record. `full` returns the complete result.",
+            "enum": [
+              "compact",
+              "full"
+            ],
+            "title": "Mode",
+            "type": "string"
           }
         },
         "required": [
@@ -12736,6 +12746,16 @@
             "minLength": 1,
             "title": "Reason",
             "type": "string"
+          },
+          "mode": {
+            "default": "compact",
+            "description": "`compact` (default) returns a few fields: enough to confirm the write without re-reading the whole record. `full` returns the complete result.",
+            "enum": [
+              "compact",
+              "full"
+            ],
+            "title": "Mode",
+            "type": "string"
           }
         },
         "required": [
@@ -14951,6 +14971,16 @@
             "description": "Walk the shortest path of valid edges to `to_state`, one audited transition per hop (e.g. open -> in_progress -> review -> done). Only the workflow's own edges are taken and finished states are never passed through, so no review step is skipped.",
             "title": "Walk",
             "type": "boolean"
+          },
+          "mode": {
+            "default": "compact",
+            "description": "`compact` (default) returns a few fields: enough to confirm the write without re-reading the whole record. `full` returns the complete result.",
+            "enum": [
+              "compact",
+              "full"
+            ],
+            "title": "Mode",
+            "type": "string"
           }
         },
         "required": [
@@ -23937,6 +23967,16 @@
             "minLength": 1,
             "title": "Reason",
             "type": "string"
+          },
+          "mode": {
+            "default": "compact",
+            "description": "`compact` (default) returns a few fields: enough to confirm the write without re-reading the whole record. `full` returns the complete result.",
+            "enum": [
+              "compact",
+              "full"
+            ],
+            "title": "Mode",
+            "type": "string"
           }
         },
         "required": [
@@ -31174,6 +31214,16 @@
             "default": null,
             "description": "What the session is for (WI-1323, design §2.4): implement, implement-careful, review, mechanical, investigate or design. The deployment's dispatch profile for it fills template, model, effort, budget, worktree, repo_map and autopilot wherever this start leaves them unset; a value given here wins and is audited as an override. Recorded on the session.",
             "title": "Purpose"
+          },
+          "mode": {
+            "default": "compact",
+            "description": "`compact` (default) returns a few fields: enough to confirm the write without re-reading the whole record. `full` returns the complete result.",
+            "enum": [
+              "compact",
+              "full"
+            ],
+            "title": "Mode",
+            "type": "string"
           }
         },
         "required": [
@@ -36214,6 +36264,44 @@
             "minimum": 1,
             "title": "Stall After Minutes",
             "type": "integer"
+          },
+          "exclude_roles": {
+            "default": [
+              "operator"
+            ],
+            "description": "Leave out sessions with these roles. Default hides `operator` sessions, so an oversight sweep does not list the person's own terminals; pass an empty list to keep every role.",
+            "items": {
+              "type": "string"
+            },
+            "title": "Exclude Roles",
+            "type": "array"
+          },
+          "supervised_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Keep only sessions started by this session (ses_… or the engine UUID).",
+            "title": "Supervised By"
+          },
+          "since": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Keep only sessions whose output, blocked report or done mark changed after this time (an RFC 3339 timestamp, e.g. the previous sweep's `swept_at`). Counts then cover the kept rows.",
+            "title": "Since"
           }
         },
         "title": "SweepSessionsParams",
@@ -38161,6 +38249,16 @@
             "minLength": 1,
             "title": "Reason",
             "type": "string"
+          },
+          "mode": {
+            "default": "compact",
+            "description": "`compact` (default) returns a few fields: enough to confirm the write without re-reading the whole record. `full` returns the complete result.",
+            "enum": [
+              "compact",
+              "full"
+            ],
+            "title": "Mode",
+            "type": "string"
           }
         },
         "required": [
@@ -39642,6 +39740,16 @@
             "description": "Why this write is being made (audited).",
             "minLength": 1,
             "title": "Reason",
+            "type": "string"
+          },
+          "mode": {
+            "default": "compact",
+            "description": "`compact` (default) returns a few fields: enough to confirm the write without re-reading the whole record. `full` returns the complete result.",
+            "enum": [
+              "compact",
+              "full"
+            ],
+            "title": "Mode",
             "type": "string"
           }
         },
@@ -47190,6 +47298,16 @@
             "description": "Why this write is being made (audited).",
             "minLength": 1,
             "title": "Reason",
+            "type": "string"
+          },
+          "mode": {
+            "default": "compact",
+            "description": "`compact` (default) returns a few fields: enough to confirm the write without re-reading the whole record. `full` returns the complete result.",
+            "enum": [
+              "compact",
+              "full"
+            ],
+            "title": "Mode",
             "type": "string"
           }
         },
