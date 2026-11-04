@@ -496,7 +496,9 @@ pub async fn run(config: Config) -> Result<(), AgentError> {
     let tls = tls_config()?;
     let mut bundle_seen = std::collections::HashMap::new();
     flush_bundle(&config, &tls, &mut bundle_seen).await;
+    tracing::info!(cli = %config.cli, cwd = ?config.cwd, "session-agent: starting the PTY");
     let (reader, writer, child, master) = spawn_pty(&config)?;
+    tracing::info!("session-agent: PTY spawned");
     let writer = Arc::new(Mutex::new(writer));
     let (output_tx, mut output_rx) = mpsc::channel::<Vec<u8>>(32);
     std::thread::spawn(move || {
@@ -518,6 +520,7 @@ pub async fn run(config: Config) -> Result<(), AgentError> {
     let mut cursor = 0u64;
     let mut acked = 0u64;
     let mut backoff = Duration::from_millis(100);
+    let mut first_output_logged = false;
     loop {
         // Request construction is a configuration error, not a transient socket
         // failure.  Return through the cleanup below rather than orphaning PTY.
@@ -540,7 +543,9 @@ pub async fn run(config: Config) -> Result<(), AgentError> {
             return Err(error);
         }
         let connection: Result<(), AgentError> = async {
+            tracing::info!(path = %req.uri().path(), "session-agent: connecting to the engine");
             let (socket, _) = connect_with_retry(&req, tls.clone(), CONNECT_TOTAL).await?;
+            tracing::info!("session-agent: connected to the engine");
             backoff = Duration::from_millis(100);
             let (mut sink, mut stream) = socket.split();
             send_frame(&mut sink, &Frame::Hello { session_id: config.session_id.clone() }).await?;
@@ -553,6 +558,10 @@ pub async fn run(config: Config) -> Result<(), AgentError> {
             loop {
                 tokio::select! {
                     Some(data) = output_rx.recv() => {
+                        if !first_output_logged {
+                            first_output_logged = true;
+                            tracing::info!(bytes = data.len(), "session-agent: first PTY output, sending to the engine");
+                        }
                         replay.append(&data);
                         let frame = Frame::Output { offset: cursor, data };
                         cursor += frame_data_len(&frame);
@@ -582,6 +591,7 @@ pub async fn run(config: Config) -> Result<(), AgentError> {
                         flush_bundle(&config, &tls, &mut bundle_seen).await;
                         if let Some(c) = child.as_mut() {
                             if let Ok(Some(status)) = c.try_wait() {
+                                tracing::info!(exit_code = status.exit_code(), "session-agent: the CLI exited");
                                 send_frame(&mut sink, &Frame::Exited { status: Some(status.exit_code() as i32) }).await?;
                                 return Ok(());
                             }
@@ -591,7 +601,8 @@ pub async fn run(config: Config) -> Result<(), AgentError> {
                 }
             }
         }.await;
-        if connection.is_err() {
+        if let Err(error) = &connection {
+            tracing::warn!(%error, retry_in_ms = backoff.as_millis() as u64, "session-agent: engine stream ended");
             tokio::time::sleep(backoff).await;
             backoff = (backoff * 2).min(Duration::from_secs(10));
         }
