@@ -41,7 +41,7 @@ pub(crate) fn last_reply(ctx: &Built, params: Value) -> Result<Value, VogtError>
     ))
 }
 
-fn last_reply_in<C: Clock, I: IdFactory>(
+pub(crate) fn last_reply_in<C: Clock, I: IdFactory>(
     ctx: &AppContext<C, I>,
     id: &str,
     n: usize,

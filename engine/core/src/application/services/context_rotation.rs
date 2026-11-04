@@ -360,6 +360,7 @@ where
             id: row.id.clone(),
             reason: format!("rotated to {new_id}: {REASON}"),
             allow_shell: false,
+            cold_wake_opt_out: None,
         },
     ) {
         // Not rotated: keep the hand-off and the replacement id, back off.
@@ -463,6 +464,7 @@ where
             .and_then(|map| serde_json::from_value(Value::Object(map)).ok()),
         worktree: None,
         repo_map: None,
+        cold_wake_opt_out: false,
         explicit_null: Vec::new(),
     };
     let mut engine_started = false;

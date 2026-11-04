@@ -197,12 +197,15 @@ fn change(one: &EngineChange, labels: &HashMap<String, String>) -> Value {
 /// The engine's RFC3339 string as pydantic renders a datetime, or `None` when
 /// it does not parse (Python's `_parse_engine_timestamp`).
 fn engine_timestamp(value: &str) -> Option<String> {
+    engine_moment(value).map(|moment| moment.to_json())
+}
+
+/// The engine's RFC3339 string as a moment, or `None` when it does not parse.
+pub(crate) fn engine_moment(value: &str) -> Option<crate::core::Moment> {
     if value.is_empty() {
         return None;
     }
-    crate::core::from_iso(&value.replace('Z', "+00:00"))
-        .ok()
-        .map(|moment| moment.to_json())
+    crate::core::from_iso(&value.replace('Z', "+00:00")).ok()
 }
 
 fn strings(value: Option<&Value>) -> Vec<String> {

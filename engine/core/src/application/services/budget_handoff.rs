@@ -258,6 +258,7 @@ fn restart_params(
         budget: (limits != SessionBudget::default()).then_some(limits),
         worktree: None,
         repo_map: None,
+        cold_wake_opt_out: false,
         explicit_null: Vec::new(),
     })
 }

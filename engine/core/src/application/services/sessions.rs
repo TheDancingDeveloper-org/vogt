@@ -37,6 +37,7 @@ use crate::application::resolve;
 use crate::application::session_commit;
 use crate::application::writes::{self, audited_action, audited_write, WriteOutcome};
 use crate::auth::{self, TOKEN_ENTROPY_BYTES};
+use crate::core::cold_wake;
 use crate::core::{py_repr, Actor, ActorKind, CodingSession, Moment, Token, TokenKind, WorkItem};
 use crate::core::{Clock, IdFactory};
 use crate::decisions;
@@ -159,6 +160,7 @@ where
             },
             worktree: optional_bool(&params, "worktree")?,
             repo_map: optional_bool(&params, "repo_map")?,
+            cold_wake_opt_out: optional_bool(&params, "cold_wake_opt_out")?.unwrap_or(false),
             explicit_null: PROFILE_FIELDS
                 .into_iter()
                 .filter(|field| matches!(params.get(*field), Some(Value::Null)))
@@ -281,6 +283,7 @@ where
     let parsed = WakeParams {
         id: require_session_id(&params)?,
         reason: require_string(&params, "reason")?,
+        force: optional_bool(&params, "force")?.unwrap_or(false),
     };
     Ok(serde_json::to_value(wake(ctx, &parsed)?).expect("a session result serialises"))
 }
@@ -335,6 +338,7 @@ where
         id: require_session_id(&params)?,
         reason: require_string(&params, "reason")?,
         allow_shell: optional_bool(&params, "allow_shell")?.unwrap_or(false),
+        cold_wake_opt_out: optional_bool(&params, "cold_wake_opt_out")?,
     };
     Ok(serde_json::to_value(hibernate(ctx, &parsed)?).expect("a session result serialises"))
 }
@@ -432,6 +436,8 @@ pub struct StartSessionParams {
     pub worktree: Option<bool>,
     /// Draw a repo map into the brief. Unset, the profile decides.
     pub repo_map: Option<bool>,
+    /// Never compact this session on a cold wake (WI-2037).
+    pub cold_wake_opt_out: bool,
     /// Profile fields the caller sent as an explicit null. Python counts these
     /// in `model_fields_set`: they are overrides, and the profile leaves them.
     pub explicit_null: Vec<&'static str>,
@@ -643,6 +649,9 @@ pub struct WaitParams {
 pub struct WakeParams {
     pub id: String,
     pub reason: String,
+    /// Wake even though the session was superseded, or another live session
+    /// holds the same work item in the same directory.
+    pub force: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -673,6 +682,8 @@ pub struct HibernateParams {
     pub id: String,
     pub reason: String,
     pub allow_shell: bool,
+    /// Change the session's cold-wake opt-out (WI-2037); unset keeps it.
+    pub cold_wake_opt_out: Option<bool>,
 }
 
 // -- result models, field order matching application/models.py ---------------
@@ -1057,6 +1068,7 @@ where
     // Read after the ranking tick: `why` consumes one, and every timestamp on
     // this path — actor, token, session, overlay — shares the next one.
     let now = now(&writing);
+    let cold_wake_opt_out = params.cold_wake_opt_out;
     let stored = {
         let actor_ref = actor_ref.clone();
         let scopes = scopes.clone();
@@ -1133,6 +1145,9 @@ where
                 txn.insert_actor(&actor)?;
                 txn.insert_token(&token, &token_hash)?;
                 txn.insert_session(&recorded)?;
+                if cold_wake_opt_out {
+                    txn.set_session_cold_wake_opt_out(&session_id, true)?;
+                }
                 let payload = audited_payload(&recorded);
                 // The declared half of the branch binding: a session opened for a
                 // work item records the branch it will use. The summary's branch
@@ -2138,6 +2153,7 @@ where
             engine,
             &found,
             &format!("woken to deliver input: {reason}"),
+            false,
         )?;
         woke = true;
         let waited = engine.wait_session(
@@ -2498,8 +2514,37 @@ where
 {
     let reason = writes::validate_reason(&params.reason)?;
     let engine = engine_of(ctx)?;
+    if params.force && !may_force_wake(ctx, engine)? {
+        return Err(VogtError::RoleRefused(
+            "only a person or an oversight session may force a wake".to_string(),
+        ));
+    }
     let found = resolve_target(ctx, &params.id)?;
-    wake_resolved(ctx, engine, &found, &reason)
+    let result = wake_resolved(ctx, engine, &found, &reason, params.force)?;
+    // Woken on purpose: whoever woke it is acting on it, so the report it slept
+    // with no longer stands (WI-1834). A session that is still blocked reports
+    // again.
+    let current = engine.get_session(&found.engine_session_id).ok().flatten();
+    if current
+        .and_then(|current| clear_block_on(ctx, engine, &found, "wake", &reason, &current))
+        .is_some()
+    {
+        return wake_resolved(ctx, engine, &found, &reason, params.force);
+    }
+    Ok(result)
+}
+
+/// `force` overrides the handoff guard, so only a person, or a session the
+/// engine has marked `oversight`, may use it.
+fn may_force_wake<C, I>(ctx: &AppContext<C, I>, engine: &EngineClient) -> Result<bool, VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    if answers_as_person(ctx)? {
+        return Ok(true);
+    }
+    Ok(relayed_overseer(ctx, engine, false)?.is_some())
 }
 
 /// Keep a session awake, or let it hibernate again.
@@ -2747,6 +2792,7 @@ where
         "linked": found.session.is_some(),
         "allow_shell": params.allow_shell,
         "resumable": resumable,
+        "cold_wake_opt_out": params.cold_wake_opt_out,
     });
     let Some(session) = found.session.clone() else {
         let mut writing = write_of(ctx);
@@ -2769,6 +2815,7 @@ where
     let session_id = session.id.clone();
     let why = reason.clone();
     let recorded = outcome.clone();
+    let opt_out = params.cold_wake_opt_out;
     let revoked_at = now(&writing);
     audited_write(
         &mut writing,
@@ -2782,6 +2829,11 @@ where
             for token in txn.tokens_for_actor(&actor_id, false)? {
                 if txn.revoke_token(&token.id, &format!("hibernated: {why}"), revoked_at)? {
                     revoked += 1;
+                }
+            }
+            if let Some(opt_out) = opt_out {
+                if opt_out != txn.session_cold_wake_opt_out(&current.id)? {
+                    txn.set_session_cold_wake_opt_out(&current.id, opt_out)?;
                 }
             }
             let mut summary = recorded.clone();
@@ -4009,6 +4061,141 @@ fn wake_resolved<C, I>(
     engine: &EngineClient,
     target: &Target,
     reason: &str,
+    force: bool,
+) -> Result<SessionResult, VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    match wake_inner(ctx, engine, target, reason, force) {
+        Err(VogtError::Conflict(message)) => {
+            Err(VogtError::Conflict(in_session_terms(ctx, &message)))
+        }
+        other => other,
+    }
+}
+
+/// Say a refused wake in ses_… terms when the successor is a linked session.
+/// An unlinked successor stays a uuid, and so does any other refusal.
+fn in_session_terms<C, I>(ctx: &AppContext<C, I>, message: &str) -> String
+where
+    C: Clock,
+    I: IdFactory,
+{
+    static SUCCESSOR: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let pattern = SUCCESSOR.get_or_init(|| {
+        regex::Regex::new(r"session [0-9a-fA-F-]{36} was superseded by (?P<uuid>[0-9a-fA-F-]{36})")
+            .expect("the successor pattern compiles")
+    });
+    let Some(uuid) = pattern
+        .captures(message)
+        .and_then(|found| found.name("uuid"))
+        .map(|found| found.as_str().to_string())
+    else {
+        return message.to_string();
+    };
+    let named = ctx
+        .declared
+        .read()
+        .ok()
+        .and_then(|view| view.session_by_engine_id(&uuid).ok().flatten())
+        .map(|row| row.id);
+    match named {
+        Some(named) if named != uuid => message.replacen(&uuid, &named, 1),
+        _ => message.to_string(),
+    }
+}
+
+/// Whether this wake compacts (WI-2037), and the summary it starts from. The
+/// clock is read once here, as Python's `_cold_wake` reads it, whether or not
+/// the feature is on. A summary that cannot be read falls back to a plain
+/// resume: compaction is a saving, never a gate.
+fn cold_wake_of<C, I>(
+    ctx: &AppContext<C, I>,
+    current: &EngineSession,
+    session: Option<&CodingSession>,
+) -> Result<(cold_wake::Decision, Option<String>), VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let config = &ctx.config;
+    let tokens = current
+        .economics
+        .as_ref()
+        .and_then(|economics| economics.get("context_tokens"))
+        .and_then(Value::as_i64)
+        .filter(|tokens| *tokens > 0);
+    let opted_out = match session {
+        Some(session) => ctx
+            .declared
+            .read()?
+            .session_cold_wake_opt_out(&session.id)?,
+        None => false,
+    };
+    let hibernated_at = current.hibernation.as_ref().and_then(|hibernation| {
+        crate::application::session_changes::engine_moment(&hibernation.at)
+    });
+    let moment = now(&write_of(ctx));
+    let decision = cold_wake::decide(&cold_wake::Inputs {
+        enabled: config.cold_wake_compaction,
+        opted_out,
+        agent: current.conversation_agent.as_deref(),
+        model: session.and_then(|session| session.model.as_deref()),
+        hibernated_at,
+        now: moment,
+        context_tokens: tokens,
+        ttl_seconds: &config.cold_wake_ttl_seconds,
+        threshold_tokens: config.cold_wake_threshold_tokens,
+    });
+    if !decision.compact() {
+        return Ok((decision, None));
+    }
+    let reply = crate::application::session_reads::last_reply_in(ctx, &current.id, 1)
+        .ok()
+        .and_then(|body| {
+            body.get("messages")
+                .and_then(Value::as_array)
+                .and_then(|messages| messages.last().cloned())
+        })
+        .and_then(|message| {
+            message
+                .get("text")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
+    let (work_item, handoff) = match session.and_then(|session| session.work_item_id.as_deref()) {
+        Some(item_id) => {
+            let view = ctx.declared.read()?;
+            let item = view.work_item_by_id(item_id)?;
+            let comments = view.comments_for(item_id, 20, true)?;
+            (
+                item,
+                comments
+                    .into_iter()
+                    .find(|comment| comment.kind == "handoff"),
+            )
+        }
+        None => (None, None),
+    };
+    let summary = cold_wake::render_summary(&cold_wake::SummaryInputs {
+        session_id: session.map_or(current.id.as_str(), |session| session.id.as_str()),
+        work_item: work_item.as_ref().map(|item| item.reference.as_str()),
+        work_item_title: work_item.as_ref().map(|item| item.title.as_str()),
+        reason: session.map(|session| session.reason.as_str()),
+        last_reply: reply.as_deref(),
+        handoff: handoff.as_ref(),
+        decision: &decision,
+    });
+    Ok((decision, Some(summary)))
+}
+
+fn wake_inner<C, I>(
+    ctx: &AppContext<C, I>,
+    engine: &EngineClient,
+    target: &Target,
+    reason: &str,
+    force: bool,
 ) -> Result<SessionResult, VogtError>
 where
     C: Clock + 'static,
@@ -4032,13 +4219,19 @@ where
         };
         return Ok(SessionResult { session: summary });
     }
+    let (decision, fresh_prompt) = cold_wake_of(ctx, &current, session.as_ref())?;
     let Some(session) = session else {
         let woken = engine
-            .wake_session(engine_id, None, false)?
+            .wake_session(engine_id, None, force, fresh_prompt.as_deref())?
             .ok_or_else(|| {
                 VogtError::NotFound(format!("the engine has no session {}", py_repr(engine_id)))
             })?;
-        let detail = json!({"engine_session_id": engine_id, "linked": false});
+        let detail = json!({
+            "engine_session_id": engine_id,
+            "linked": false,
+            "forced": force,
+            "cold_wake": decision.audit(),
+        });
         let mut writing = write_of(ctx);
         audited_action(
             &mut writing,
@@ -4064,11 +4257,12 @@ where
     let (secret, token_hash) = minted_token()?;
     let env = session_env(ctx, &session.id, &secret, None);
     let woken = engine
-        .wake_session(engine_id, Some(&env), false)?
+        .wake_session(engine_id, Some(&env), force, fresh_prompt.as_deref())?
         .ok_or_else(|| {
             VogtError::NotFound(format!("the engine has no session {}", py_repr(engine_id)))
         })?;
     let conversation_id = current.conversation_id.clone();
+    let cold_audit = decision.audit();
     let engine_session_id = engine_id.clone();
     let session_id = session.id.clone();
     let why = reason.to_string();
@@ -4118,6 +4312,8 @@ where
                 "engine_session_id": engine_session_id,
                 "conversation_id": conversation_id,
                 "tokens_revoked": revoked,
+                "forced": force,
+                "cold_wake": cold_audit,
             }),
         ))
     })?;
@@ -5033,6 +5229,7 @@ mod tests {
                     id: "ses_1".to_string(),
                     reason: "freeing memory".to_string(),
                     allow_shell: false,
+                    cold_wake_opt_out: None,
                 },
             )
             .unwrap();
@@ -5067,6 +5264,7 @@ mod tests {
                 &WakeParams {
                     id: "ses_1".to_string(),
                     reason: "back to work".to_string(),
+                    force: false,
                 },
             )
             .unwrap();
@@ -5090,6 +5288,100 @@ mod tests {
             .unwrap();
         assert!(wake_call.2.contains("VOGT_HTTP_TOKEN"), "{}", wake_call.2);
         assert!(wake_call.2.contains("VOGT_SESSION_ID"), "{}", wake_call.2);
+    }
+
+    /// A hibernated session that has sat past its cache lifetime holding a
+    /// large context, as the engine reports it.
+    fn cold_and_large(id: &str) -> Vec<u8> {
+        format!(
+            r#"{{"id":"{id}","alive":false,"activity":"hibernated","role":"worker","conversation":{{"id":"conv-1","agent":"claude"}},"hibernation":{{"at":"2023-11-14T00:00:00Z","trigger":"idle","resumable":true}},"economics":{{"context_tokens":180000}}}}"#
+        )
+        .into_bytes()
+    }
+
+    fn wake_body(seen: &Mutex<Vec<(String, String, String)>>) -> String {
+        let calls = seen.lock().unwrap().clone();
+        calls
+            .iter()
+            .find(|(_, path, _)| path.ends_with("/wake"))
+            .map(|call| call.2.clone())
+            .expect("a wake reached the engine")
+    }
+
+    fn wake_it(built: &crate::application::context::Built) {
+        with_ctx!(built, |ctx| {
+            wake(
+                ctx,
+                &WakeParams {
+                    id: "ses_1".to_string(),
+                    reason: "back to work".to_string(),
+                    force: false,
+                },
+            )
+            .unwrap();
+        });
+    }
+
+    #[test]
+    fn a_cold_wake_past_the_threshold_starts_from_a_summary() {
+        let (_dir, built, seen) = context(
+            "cold-wake",
+            person(),
+            None,
+            |config| config.cold_wake_compaction = true,
+            (0..6).map(|_| cold_and_large("eng-1")).collect(),
+        );
+        record_session(&built, "ses_1", "eng-1");
+        wake_it(&built);
+        let body = wake_body(&seen);
+        assert!(body.contains("fresh_prompt"), "{body}");
+        assert!(
+            body.contains("Resumed from a summary (cold wake)"),
+            "{body}"
+        );
+    }
+
+    #[test]
+    fn a_wake_resumes_the_transcript_when_compaction_is_off() {
+        let (_dir, built, seen) = context(
+            "cold-wake-off",
+            person(),
+            None,
+            |_| {},
+            (0..6).map(|_| cold_and_large("eng-1")).collect(),
+        );
+        record_session(&built, "ses_1", "eng-1");
+        wake_it(&built);
+        assert!(!wake_body(&seen).contains("fresh_prompt"));
+    }
+
+    #[test]
+    fn an_opted_out_session_resumes_even_when_compaction_is_on() {
+        let (_dir, built, seen) = context(
+            "cold-wake-opt-out",
+            person(),
+            None,
+            |config| config.cold_wake_compaction = true,
+            (0..6).map(|_| cold_and_large("eng-1")).collect(),
+        );
+        record_session(&built, "ses_1", "eng-1");
+        with_ctx!(&built, |ctx| {
+            let mut write = write_of(ctx);
+            audited_write(&mut write, "session.hibernate", "test", |txn, _actor| {
+                txn.set_session_cold_wake_opt_out("ses_1", true)?;
+                Ok(WriteOutcome::new(
+                    (),
+                    "session",
+                    "ses_1",
+                    json!({}),
+                    "session.hibernated",
+                    json!({}),
+                ))
+            })
+            .unwrap();
+        });
+        wake_it(&built);
+        assert!(!wake_body(&seen).contains("fresh_prompt"));
     }
 
     #[test]
@@ -5119,6 +5411,7 @@ mod tests {
                 &WakeParams {
                     id: "ses_1".to_string(),
                     reason: "no".to_string(),
+                    force: false,
                 },
             )
             .unwrap_err();
