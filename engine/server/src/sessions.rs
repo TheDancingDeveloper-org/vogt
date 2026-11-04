@@ -284,6 +284,12 @@ impl SessionRegistry {
         }
         let spawned = spawned?;
         let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple()).into_bytes();
+        tracing::info!(
+            session = %id,
+            template = %template.name,
+            program = spec.command.as_deref().and_then(|argv| argv.first()).map_or("-", String::as_str),
+            "starting a session pod"
+        );
         let pod = crate::pod_backend::pod_template(
             &pod_config,
             template,

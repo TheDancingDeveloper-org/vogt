@@ -17259,6 +17259,108 @@ mod pod_stream {
     }
 
     #[tokio::test]
+    async fn the_requested_command_reaches_the_pod_env() {
+        let mut h = harness(false).await;
+        let created: Value = h
+            .client
+            .post(format!("{}/api/sessions", h.base))
+            .json(&json!({
+                "name": "pod-shell",
+                "template": "pod",
+                "command": ["bash", "-l"]
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(created["id"].is_string(), "{created}");
+        h.created.recv().await.expect("a pod is created");
+        let pod = h.launcher.pods.lock().unwrap().pop().expect("pod created");
+        let container = &pod.spec.unwrap().containers[0];
+        assert!(container.command.is_none());
+        let raw = container
+            .env
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|v| v.name == "VOGT_SESSION_COMMAND")
+            .and_then(|v| v.value.clone())
+            .expect("VOGT_SESSION_COMMAND is set");
+        assert_eq!(
+            vogt_session_agent::parse_command(Some(&raw)),
+            Some(vec!["bash".to_string(), "-l".to_string()])
+        );
+    }
+
+    #[tokio::test]
+    async fn output_before_attach_is_replayed_to_a_later_attach() {
+        let mut h = harness(false).await;
+        let id = h.start().await;
+        let token = h.session_token(id).await;
+        let mut agent = h.dial(id, &token, 0).await;
+        assert_eq!(take(&mut agent).await, Frame::Ack { offset: 0 });
+        put(
+            &mut agent,
+            Frame::Output {
+                offset: 0,
+                data: b"early bytes".to_vec(),
+            },
+        )
+        .await;
+        assert_eq!(take(&mut agent).await, Frame::Ack { offset: 11 });
+        // Only now does a viewer attach: it must still be sent the bytes, and
+        // bytes the agent sends afterwards fan out to it live.
+        let mut viewer = ws_attach_with_token(&h.base, &id.to_string(), TEST_TOKEN).await;
+        let mut seen = Vec::new();
+        attach_collect(&mut viewer, &mut seen, "early bytes").await;
+        put(
+            &mut agent,
+            Frame::Output {
+                offset: 11,
+                data: b" and live".to_vec(),
+            },
+        )
+        .await;
+        attach_collect(&mut viewer, &mut seen, "and live").await;
+        // End the session so the pod's background task finishes.
+        put(&mut agent, Frame::Exited { status: Some(0) }).await;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !h.launcher.deleted.lock().unwrap().contains(&id) {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("the pod is deleted after exit");
+    }
+
+    /// Read attach frames (binary output and text alike) until `needle` has
+    /// appeared in what the viewer was sent.
+    async fn attach_collect(
+        ws: &mut tokio_tungstenite::WebSocketStream<MaybeTlsStream<TcpStream>>,
+        seen: &mut Vec<u8>,
+        needle: &str,
+    ) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !String::from_utf8_lossy(seen).contains(needle) {
+                match ws.next().await.expect("attach stays open").expect("frame") {
+                    Message::Binary(b) => seen.extend_from_slice(&b),
+                    Message::Text(t) => seen.extend_from_slice(t.as_bytes()),
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "the viewer never saw {needle:?}; got {:?}",
+                String::from_utf8_lossy(seen)
+            )
+        });
+    }
+
+    #[tokio::test]
     async fn output_input_resize_and_stop_round_trip() {
         let mut h = harness(false).await;
         let id = h.start().await;
