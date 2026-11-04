@@ -759,7 +759,7 @@ class _StandInHandler(BaseHTTPRequestHandler):
                 200,
                 {
                     "outcome": "ready",
-                    "matched": "ready",
+                    "matched": True,
                     "waited_ms": 0,
                     "screen": {"id": parts[2], "lines": []},
                 },

@@ -63857,7 +63857,8 @@
    "ok": true,
    "dump": {
     "id": "x",
-    "n": 1
+    "n": 1,
+    "since": null
    }
   }
  },
@@ -63948,7 +63949,8 @@
    "ok": true,
    "dump": {
     "id": "x",
-    "n": 1
+    "n": 1,
+    "since": null
    }
   }
  },
@@ -64002,7 +64004,8 @@
    "ok": true,
    "dump": {
     "id": "é😀",
-    "n": 1
+    "n": 1,
+    "since": null
    }
   }
  },
@@ -64038,7 +64041,8 @@
    "ok": true,
    "dump": {
     "id": "x",
-    "n": 1
+    "n": 1,
+    "since": null
    }
   }
  },
@@ -64053,7 +64057,8 @@
    "ok": true,
    "dump": {
     "id": "x",
-    "n": 5
+    "n": 5,
+    "since": null
    }
   }
  },
@@ -64068,7 +64073,8 @@
    "ok": true,
    "dump": {
     "id": "x",
-    "n": 5
+    "n": 5,
+    "since": null
    }
   }
  },
@@ -64104,7 +64110,8 @@
    "ok": true,
    "dump": {
     "id": "x",
-    "n": 1
+    "n": 1,
+    "since": null
    }
   }
  },
@@ -64140,7 +64147,8 @@
    "ok": true,
    "dump": {
     "id": "x",
-    "n": 5
+    "n": 5,
+    "since": null
    }
   }
  },
@@ -64197,7 +64205,8 @@
    "ok": true,
    "dump": {
     "id": "x",
-    "n": 1
+    "n": 1,
+    "since": null
    }
   }
  },
@@ -64233,7 +64242,98 @@
    "ok": true,
    "dump": {
     "id": "x",
-    "n": 20
+    "n": 20,
+    "since": null
+   }
+  }
+ },
+ {
+  "op": "session.last_reply",
+  "tag": "since:null",
+  "params": {
+   "id": "x",
+   "since": null
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "id": "x",
+    "n": 1,
+    "since": null
+   }
+  }
+ },
+ {
+  "op": "session.last_reply",
+  "tag": "since:valid",
+  "params": {
+   "id": "x",
+   "since": "x"
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "id": "x",
+    "n": 1,
+    "since": "x"
+   }
+  }
+ },
+ {
+  "op": "session.last_reply",
+  "tag": "since:int",
+  "params": {
+   "id": "x",
+   "since": 5
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for session.last_reply:\n1 validation error for SessionLastReplyParams\nsince\n  Input should be a valid string [type=string_type, input_value=5, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.13/v/string_type",
+   "sent": "{\"id\": \"x\", \"since\": 5}",
+   "errors": [
+    {
+     "loc": [
+      "since"
+     ],
+     "type": "string_type"
+    }
+   ]
+  }
+ },
+ {
+  "op": "session.last_reply",
+  "tag": "since:bool",
+  "params": {
+   "id": "x",
+   "since": true
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for session.last_reply:\n1 validation error for SessionLastReplyParams\nsince\n  Input should be a valid string [type=string_type, input_value=True, input_type=bool]\n    For further information visit https://errors.pydantic.dev/2.13/v/string_type",
+   "sent": "{\"id\": \"x\", \"since\": true}",
+   "errors": [
+    {
+     "loc": [
+      "since"
+     ],
+     "type": "string_type"
+    }
+   ]
+  }
+ },
+ {
+  "op": "session.last_reply",
+  "tag": "since:unicode",
+  "params": {
+   "id": "x",
+   "since": "é😀"
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "id": "x",
+    "n": 1,
+    "since": "é😀"
    }
   }
  },
@@ -64403,7 +64503,8 @@
    "ok": true,
    "dump": {
     "id": "x",
-    "context_window": null
+    "context_window": null,
+    "since": null
    }
   }
  },
@@ -64494,7 +64595,8 @@
    "ok": true,
    "dump": {
     "id": "x",
-    "context_window": null
+    "context_window": null,
+    "since": null
    }
   }
  },
@@ -64548,7 +64650,8 @@
    "ok": true,
    "dump": {
     "id": "é😀",
-    "context_window": null
+    "context_window": null,
+    "since": null
    }
   }
  },
@@ -64563,7 +64666,8 @@
    "ok": true,
    "dump": {
     "id": "x",
-    "context_window": null
+    "context_window": null,
+    "since": null
    }
   }
  },
@@ -64578,7 +64682,8 @@
    "ok": true,
    "dump": {
     "id": "x",
-    "context_window": 1
+    "context_window": 1,
+    "since": null
    }
   }
  },
@@ -64593,7 +64698,8 @@
    "ok": true,
    "dump": {
     "id": "x",
-    "context_window": 5
+    "context_window": 5,
+    "since": null
    }
   }
  },
@@ -64608,7 +64714,8 @@
    "ok": true,
    "dump": {
     "id": "x",
-    "context_window": 5
+    "context_window": 5,
+    "since": null
    }
   }
  },
@@ -64644,7 +64751,8 @@
    "ok": true,
    "dump": {
     "id": "x",
-    "context_window": 1
+    "context_window": 1,
+    "since": null
    }
   }
  },
@@ -64680,7 +64788,8 @@
    "ok": true,
    "dump": {
     "id": "x",
-    "context_window": 5
+    "context_window": 5,
+    "since": null
    }
   }
  },
@@ -64695,7 +64804,8 @@
    "ok": true,
    "dump": {
     "id": "x",
-    "context_window": 1000000000000000000000000000000
+    "context_window": 1000000000000000000000000000000,
+    "since": null
    }
   }
  },
@@ -64718,6 +64828,96 @@
      "type": "greater_than"
     }
    ]
+  }
+ },
+ {
+  "op": "session.digest",
+  "tag": "since:null",
+  "params": {
+   "id": "x",
+   "since": null
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "id": "x",
+    "context_window": null,
+    "since": null
+   }
+  }
+ },
+ {
+  "op": "session.digest",
+  "tag": "since:valid",
+  "params": {
+   "id": "x",
+   "since": "x"
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "id": "x",
+    "context_window": null,
+    "since": "x"
+   }
+  }
+ },
+ {
+  "op": "session.digest",
+  "tag": "since:int",
+  "params": {
+   "id": "x",
+   "since": 5
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for session.digest:\n1 validation error for SessionDigestParams\nsince\n  Input should be a valid string [type=string_type, input_value=5, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.13/v/string_type",
+   "sent": "{\"id\": \"x\", \"since\": 5}",
+   "errors": [
+    {
+     "loc": [
+      "since"
+     ],
+     "type": "string_type"
+    }
+   ]
+  }
+ },
+ {
+  "op": "session.digest",
+  "tag": "since:bool",
+  "params": {
+   "id": "x",
+   "since": true
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for session.digest:\n1 validation error for SessionDigestParams\nsince\n  Input should be a valid string [type=string_type, input_value=True, input_type=bool]\n    For further information visit https://errors.pydantic.dev/2.13/v/string_type",
+   "sent": "{\"id\": \"x\", \"since\": true}",
+   "errors": [
+    {
+     "loc": [
+      "since"
+     ],
+     "type": "string_type"
+    }
+   ]
+  }
+ },
+ {
+  "op": "session.digest",
+  "tag": "since:unicode",
+  "params": {
+   "id": "x",
+   "since": "é😀"
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "id": "x",
+    "context_window": null,
+    "since": "é😀"
+   }
   }
  },
  {

@@ -268,6 +268,7 @@ where
         id: require_session_id(&params)?,
         until: optional_string(&params, "until")?.unwrap_or_else(|| "ready".to_string()),
         timeout_s: optional_i64(&params, "timeout_s", 120)?,
+        screen: optional_bool(&params, "screen")?.unwrap_or(false),
     };
     Ok(serde_json::to_value(wait(ctx, &parsed)?).expect("a session result serialises"))
 }
@@ -633,6 +634,9 @@ pub struct WaitParams {
     pub id: String,
     pub until: String,
     pub timeout_s: i64,
+    /// True restores the full screen; false returns the digest row plus an
+    /// 8-line screen tail.
+    pub screen: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -776,6 +780,7 @@ pub struct SessionSummary {
     pub stopped_by: Option<String>,
     pub stop_reason: Option<String>,
     pub permission_mode: Option<String>,
+    pub posture_lost_on_resume: bool,
     pub running: Option<SessionRuntime>,
     pub resources: Option<SessionResources>,
     pub conversation_id: Option<String>,
@@ -801,7 +806,7 @@ pub struct SessionResult {
 
 /// One digest row. Field order matches `views::SessionDigest` / Python
 /// `SessionDigest`. Local so the service does not name a private model module.
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub(crate) struct SessionDigestRow {
     id: String,
     name: Option<String>,
@@ -867,6 +872,9 @@ pub struct SessionSweepResult {
 }
 
 /// What `log_tail` says when no session engine is configured at all.
+/// Screen lines a wait keeps when it was not asked for the whole screen.
+const WAIT_TAIL_LINES: usize = 8;
+
 const NO_ENGINE: &str = "no session engine is configured (VOGT_ENGINE_URL is unset)";
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -925,7 +933,9 @@ pub struct SessionWaitResult {
     pub outcome: String,
     pub matched: bool,
     pub waited_ms: i64,
-    pub screen: SessionScreenResult,
+    pub screen: Option<SessionScreenResult>,
+    pub digest: Option<SessionDigestRow>,
+    pub screen_tail: Vec<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -939,6 +949,7 @@ pub struct SessionInputResult {
     pub delivery: String,
     pub delivery_evidence: String,
     pub woke: bool,
+    pub digest: Option<SessionDigestRow>,
 }
 
 // -- the operations -----------------------------------------------------------
@@ -2209,6 +2220,7 @@ where
         "session.input",
         Some(&detail),
     )?;
+    let digest = input_digest(ctx, engine, &found, submitted, &reason);
     Ok(SessionInputResult {
         id: params.id.clone(),
         engine_session_id: engine_id,
@@ -2219,6 +2231,7 @@ where
         delivery: verdict.delivery.as_str().to_string(),
         delivery_evidence: verdict.evidence,
         woke,
+        digest,
     })
 }
 
@@ -2277,13 +2290,24 @@ where
                     "the session engine reported a hibernated session with no screen".to_string(),
                 ));
             };
+            let shown = screen_result(&params.id, &engine_id, &screen);
             return Ok(SessionWaitResult {
                 id: params.id.clone(),
                 engine_session_id: engine_id.clone(),
                 outcome: "hibernated".to_string(),
                 matched: false,
                 waited_ms: 0,
-                screen: screen_result(&params.id, &engine_id, &screen),
+                screen: params.screen.then(|| shown.clone()),
+                digest: if params.screen {
+                    None
+                } else {
+                    wait_digest(ctx, &params.id, &engine_id)
+                },
+                screen_tail: if params.screen {
+                    Vec::new()
+                } else {
+                    tail_of(&shown)
+                },
             });
         }
         other => other?,
@@ -2303,14 +2327,166 @@ where
             ))
         }
     })?;
+    let shown = screen_result(&params.id, &engine_id, &waited.screen);
     Ok(SessionWaitResult {
         id: params.id.clone(),
         engine_session_id: engine_id.clone(),
         outcome: waited.outcome,
         matched: waited.matched,
         waited_ms: waited.waited_ms,
-        screen: screen_result(&params.id, &engine_id, &waited.screen),
+        screen: params.screen.then(|| shown.clone()),
+        digest: if params.screen {
+            None
+        } else {
+            wait_digest(ctx, &params.id, &engine_id)
+        },
+        screen_tail: if params.screen {
+            Vec::new()
+        } else {
+            tail_of(&shown)
+        },
     })
+}
+
+/// The last non-blank screen lines, for a wait that did not ask for the
+/// whole screen.
+fn tail_of(screen: &SessionScreenResult) -> Vec<String> {
+    let kept: Vec<&String> = screen
+        .lines
+        .iter()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    kept[kept.len().saturating_sub(WAIT_TAIL_LINES)..]
+        .iter()
+        .map(|line| (*line).clone())
+        .collect()
+}
+
+/// The digest of a session as an input or wait leaves it: no attention and no
+/// ready flag, which only a sweep computes.
+fn plain_digest(summary: &SessionSummary) -> SessionDigestRow {
+    let mut row = digest_of(summary, String::new(), None);
+    row.attention = None;
+    row.ready = None;
+    row
+}
+
+fn digest_of_target<C, I>(
+    ctx: &AppContext<C, I>,
+    found: &Target,
+    live: Option<&EngineSession>,
+) -> Option<SessionDigestRow>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    match (&found.session, live) {
+        (Some(session), live) => summarize(ctx, session, live).ok(),
+        (None, Some(live)) => ctx
+            .declared
+            .read()
+            .ok()
+            .and_then(|view| unlinked_summary(&view, live).ok()),
+        (None, None) => None,
+    }
+    .map(|summary| plain_digest(&summary))
+}
+
+fn wait_digest<C, I>(
+    ctx: &AppContext<C, I>,
+    named: &str,
+    engine_id: &str,
+) -> Option<SessionDigestRow>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let engine = engine_of(ctx).ok()?;
+    let live = engine.get_session(engine_id).ok().flatten()?;
+    let found = resolve_target(ctx, named).ok()?;
+    digest_of_target(ctx, &found, Some(&live))
+}
+
+/// The digest of the session just typed into, when it can be read. A submitted
+/// input also clears the session's blocked report (WI-1834): a new instruction
+/// answers what it was blocked on, or supersedes it.
+fn input_digest<C, I>(
+    ctx: &AppContext<C, I>,
+    engine: &EngineClient,
+    found: &Target,
+    submitted: bool,
+    reason: &str,
+) -> Option<SessionDigestRow>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let mut live = engine.get_session(&found.engine_session_id).ok().flatten();
+    if submitted {
+        if let Some(current) = live.take() {
+            live = Some(
+                clear_block_on(ctx, engine, found, "input", reason, &current).unwrap_or(current),
+            );
+        }
+    }
+    digest_of_target(ctx, found, live.as_ref())
+}
+
+/// Clear `found`'s blocked report because someone acted on the session. The
+/// report it replaces stays in the audit as an unblock naming the cause and
+/// what it said. A session acting on itself clears nothing, and a report that
+/// cannot be read or cleared is left for the sweep's staleness rule. The
+/// session as cleared when one was.
+fn clear_block_on<C, I>(
+    ctx: &AppContext<C, I>,
+    engine: &EngineClient,
+    found: &Target,
+    cause: &str,
+    reason: &str,
+    current: &EngineSession,
+) -> Option<EngineSession>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let engine_id = &found.engine_session_id;
+    let caller = ctx.principal.identity_ref.as_str();
+    if caller == format!("agent:session:{engine_id}")
+        || found
+            .session
+            .as_ref()
+            .is_some_and(|session| caller == format!("agent:session:{}", session.id))
+    {
+        return None;
+    }
+    let was = current.blocked.as_ref()?;
+    let cleared = engine.set_blocked(engine_id, false, None, &[]).ok()??;
+    let entity = found
+        .session
+        .as_ref()
+        .map_or_else(|| engine_id.clone(), |session| session.id.clone());
+    let mut writing = write_of(ctx);
+    audited_action(
+        &mut writing,
+        "session.report_unblocked",
+        &format!("cleared by {cause}: {reason}"),
+        "session",
+        &entity,
+        &json!({
+            "engine_session_id": engine_id,
+            "linked": found.session.is_some(),
+            "blocker": Value::Null,
+            "items": [],
+            "cleared_by": cause,
+            "was_blocker": was.reason,
+            "was_items": was.items,
+            "was_since": was.since,
+        }),
+        "session.unblocked",
+        None,
+    )
+    .ok()?;
+    Some(cleared)
 }
 
 /// Wake a hibernated session. A live session is returned as it is — waking is
@@ -3273,6 +3449,7 @@ where
         stopped_by: None,
         stop_reason: None,
         permission_mode: None,
+        posture_lost_on_resume: false,
         running: None,
         resources: None,
         conversation_id: None,
@@ -3308,6 +3485,7 @@ fn apply_live(summary: &mut SessionSummary, live: &EngineSession) {
     summary.conversation_id = live.conversation_id.clone();
     summary.resources = live.resources.as_ref().map(resources_of);
     summary.permission_mode = live.permission_mode.clone();
+    summary.posture_lost_on_resume = live.posture_lost_on_resume;
     summary.stopped_by = live.stopped_by.clone();
     summary.stop_reason = live.stop_reason.clone();
 }
@@ -3529,6 +3707,7 @@ fn unlinked_summary(
         stopped_by: None,
         stop_reason: None,
         permission_mode: None,
+        posture_lost_on_resume: false,
         running: None,
         resources: None,
         conversation_id: None,
@@ -4170,19 +4349,25 @@ where
     let renamed = engine.rename_session(&found.engine_session_id, name)?;
     if !renamed {
         return Err(VogtError::NotFound(format!(
-            "no session {}",
+            "the engine has no session {}",
             py_repr(&params.id)
         )));
     }
     let mut writing = write_of(ctx);
     let engine_id = found.engine_session_id.clone();
     let named = name.to_string();
+    // A linked session is audited under Vogt's id; an unlinked one under the
+    // engine's.
+    let entity = found
+        .session
+        .as_ref()
+        .map_or_else(|| engine_id.clone(), |session| session.id.clone());
     audited_action(
         &mut writing,
         SESSION_RENAME,
         &reason,
         "session",
-        &engine_id,
+        &entity,
         &json!({"name": named, "linked": found.session.is_some()}),
         "session.renamed",
         Some(&json!({"engine_session_id": engine_id})),
@@ -4190,7 +4375,9 @@ where
     // The rename itself only says whether the engine had the session.
     let current = engine
         .get_session(&found.engine_session_id)?
-        .ok_or_else(|| VogtError::NotFound(format!("no session {}", py_repr(&params.id))))?;
+        .ok_or_else(|| {
+            VogtError::NotFound(format!("the engine has no session {}", py_repr(&params.id)))
+        })?;
     let summary = match &found.session {
         Some(session) => summarize(ctx, session, Some(&current))?,
         None => unlinked_summary(&ctx.declared.read()?, &current)?,

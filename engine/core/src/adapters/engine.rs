@@ -1248,6 +1248,7 @@ pub struct EngineSession {
     pub resources: Option<EngineResources>,
     pub template: Option<String>,
     pub permission_mode: Option<String>,
+    pub posture_lost_on_resume: bool,
     pub stopped_by: Option<String>,
     pub stop_reason: Option<String>,
     /// The named Claude Code account the session runs under, when one was.
@@ -1309,6 +1310,7 @@ impl EngineSession {
             resources: EngineResources::from_payload(get("resources")),
             template: optional_str(get("template")),
             permission_mode: optional_str(get("permission_mode")),
+            posture_lost_on_resume: get("posture_lost_on_resume") == Some(&Value::Bool(true)),
             stopped_by: optional_str(stop.and_then(|stop| stop.get("by"))),
             stop_reason: optional_str(stop.and_then(|stop| stop.get("reason"))),
             account: optional_str(get("account")),

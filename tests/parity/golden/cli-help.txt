@@ -418,7 +418,7 @@ usage: vogt work create [-h] --kind {feature,bug,chore,question} --title TITLE
                         [--effort {xs,s,m,l,xl}] [--project PROJECT]
                         [--initiative INITIATIVE] [--assignee ASSIGNEE]
                         [--labels LABELS] [--local-only | --no-local-only]
-                        --reason REASON
+                        --reason REASON [--mode {compact,full}]
 
 options:
   -h, --help            show this help message and exit
@@ -444,6 +444,10 @@ options:
                         Default off: the refusal stays the default so nothing
                         is created locally by surprise.
   --reason REASON
+  --mode {compact,full}
+                        `compact` (default) returns a few fields: enough to
+                        confirm the write without re-reading the whole record.
+                        `full` returns the complete result.
 
 $ vogt work get --help
 [exit 0]
@@ -519,6 +523,7 @@ usage: vogt work update [-h] --ref REF [--title TITLE] [--body BODY]
                         [--clear-initiative | --no-clear-initiative]
                         [--add-labels ADD_LABELS]
                         [--remove-labels REMOVE_LABELS] --reason REASON
+                        [--mode {compact,full}]
 
 options:
   -h, --help            show this help message and exit
@@ -537,24 +542,33 @@ options:
   --add-labels ADD_LABELS
   --remove-labels REMOVE_LABELS
   --reason REASON
+  --mode {compact,full}
+                        `compact` (default) returns a few fields: enough to
+                        confirm the write without re-reading the whole record.
+                        `full` returns the complete result.
 
 $ vogt work transition --help
 [exit 0]
 usage: vogt work transition [-h] --ref REF --to-state TO_STATE --reason REASON
-                            [--walk | --no-walk]
+                            [--walk | --no-walk] [--mode {compact,full}]
 
 options:
-  -h, --help           show this help message and exit
-  --ref REF            Work item reference, e.g. WI-7. Alias: `id`.
-  --to-state TO_STATE  Target state, e.g. in_progress. Aliases: `to`, `state`.
-  --reason REASON      Why the item is moving (audited, required on every
-                       write). With `walk`, each hop records this reason
-                       annotated with the hop.
-  --walk, --no-walk    Walk the shortest path of valid edges to `to_state`,
-                       one audited transition per hop (e.g. open ->
-                       in_progress -> review -> done). Only the workflow's own
-                       edges are taken and finished states are never passed
-                       through, so no review step is skipped.
+  -h, --help            show this help message and exit
+  --ref REF             Work item reference, e.g. WI-7. Alias: `id`.
+  --to-state TO_STATE   Target state, e.g. in_progress. Aliases: `to`,
+                        `state`.
+  --reason REASON       Why the item is moving (audited, required on every
+                        write). With `walk`, each hop records this reason
+                        annotated with the hop.
+  --walk, --no-walk     Walk the shortest path of valid edges to `to_state`,
+                        one audited transition per hop (e.g. open ->
+                        in_progress -> review -> done). Only the workflow's
+                        own edges are taken and finished states are never
+                        passed through, so no review step is skipped.
+  --mode {compact,full}
+                        `compact` (default) returns a few fields: enough to
+                        confirm the write without re-reading the whole record.
+                        `full` returns the complete result.
 
 $ vogt work relate --help
 [exit 0]
@@ -604,6 +618,7 @@ $ vogt work comment --help
 [exit 0]
 usage: vogt work comment [-h] --ref REF --body BODY [--kind {note,handoff}]
                          [--handoff HANDOFF] --reason REASON
+                         [--mode {compact,full}]
 
 options:
   -h, --help            show this help message and exit
@@ -618,6 +633,10 @@ options:
                         blockers, session. Required when kind is `handoff`,
                         refused on a note.
   --reason REASON
+  --mode {compact,full}
+                        `compact` (default) returns a few fields: enough to
+                        confirm the write without re-reading the whole record.
+                        `full` returns the complete result.
 
 $ vogt work adopt --help
 [exit 0]
@@ -1306,7 +1325,9 @@ positional arguments:
     last-reply     Read the last N replies of a session's agent (Claude Code
                    or Codex) from its own transcript — whole, current and
                    redacted, unlike the screen. Says how the conversation was
-                   found (`basis`). Takes either id.
+                   found (`basis`). Every answer carries a `cursor`; pass it
+                   back as `since` and an unchanged answer is `{unchanged:
+                   true, cursor}` with no messages. Takes either id.
     economics      Read what a session's agent transcript cost: turns, context
                    tokens (measured for Claude Code, estimated otherwise),
                    peak context, compactions, tool-result bytes, repeated
@@ -1318,7 +1339,9 @@ positional arguments:
                    engine already computed (turns, context, compactions).
                    Numbers are null when the row has none — this does not
                    meter a transcript. Pass context_window to get context_pct.
-                   Takes either id.
+                   Every answer carries a `cursor`; pass it back as `since`
+                   and an unchanged digest is `{unchanged: true, cursor}` with
+                   no body. Takes either id.
     wait           Wait for a session instead of polling it: blocks (up to
                    timeout_s, max 600) until it is ready for input — or needs
                    a person (awaiting-approval, blocked) or exits — or, with
@@ -1333,11 +1356,13 @@ positional arguments:
                    form); empty reads every session. One page instead of re-
                    sweeping.
     wait-any       Wait for any of the named sessions instead of polling them:
-                   blocks (up to timeout_s, max 600) until one publishes a
-                   kind in `until` (default: ready, blocked, approval, exited,
-                   errored). Returns the delta, or `timeout`. Pass `cursor`
-                   (the previous `next_cursor`) so a replayed page is not
-                   waited on twice. `cursor=now` skips events already
+                   blocks (up to timeout_s, default 300, max 600; an oversight
+                   session's wait is at least 60 so it cannot become a poll
+                   loop) until one publishes a kind in `until` (default:
+                   ready, blocked, approval, exited, errored). Returns the
+                   delta with that session's digest, or `timeout`. Pass
+                   `cursor` (the previous `next_cursor`) so a replayed page is
+                   not waited on twice. `cursor=now` skips events already
                    published and waits only for one that lands after the call
                    starts; a timeout then returns that head as `next_cursor`.
                    `ids` empty waits on every session.
@@ -1385,6 +1410,7 @@ usage: vogt session start [-h] [--work-item WORK_ITEM] [--project PROJECT]
                           [--cold-wake-opt-out | --no-cold-wake-opt-out]
                           --reason REASON
                           [--purpose {implement,implement-careful,review,mechanical,investigate,design}]
+                          [--mode {compact,full}]
 
 options:
   -h, --help            show this help message and exit
@@ -1561,6 +1587,10 @@ options:
                         worktree, repo_map and autopilot wherever this start
                         leaves them unset; a value given here wins and is
                         audited as an override. Recorded on the session.
+  --mode {compact,full}
+                        `compact` (default) returns a few fields: enough to
+                        confirm the write without re-reading the whole record.
+                        `full` returns the complete result.
 
 $ vogt session list --help
 [exit 0]
@@ -1666,6 +1696,8 @@ usage: vogt session sweep [-h] [--project PROJECT] [--mode {digest,full}]
                           [--attention ATTENTION] [--limit LIMIT]
                           [--screen-lines SCREEN_LINES]
                           [--stall-after-minutes STALL_AFTER_MINUTES]
+                          [--exclude-roles EXCLUDE_ROLES]
+                          [--supervised-by SUPERVISED_BY] [--since SINCE]
 
 options:
   -h, --help            show this help message and exit
@@ -1688,6 +1720,18 @@ options:
   --stall-after-minutes STALL_AFTER_MINUTES
                         A running session that has printed nothing for this
                         long is reported `stalled`.
+  --exclude-roles EXCLUDE_ROLES
+                        Leave out sessions with these roles. Default hides
+                        `operator` sessions, so an oversight sweep does not
+                        list the person's own terminals; pass an empty list to
+                        keep every role.
+  --supervised-by SUPERVISED_BY
+                        Keep only sessions started by this session (ses_… or
+                        the engine UUID).
+  --since SINCE         Keep only sessions whose output, blocked report or
+                        done mark changed after this time (an RFC 3339
+                        timestamp, e.g. the previous sweep's `swept_at`).
+                        Counts then cover the kept rows.
 
 $ vogt session hibernate --help
 [exit 0]
@@ -1696,7 +1740,7 @@ usage: vogt session hibernate [-h] --id ID [--allow-shell | --no-allow-shell]
                               [--wake-on WAKE_ON]
                               [--wake-on-ttl-seconds WAKE_ON_TTL_SECONDS]
                               [--cold-wake-opt-out | --no-cold-wake-opt-out]
-                              --reason REASON
+                              --reason REASON [--mode {compact,full}]
 
 options:
   -h, --help            show this help message and exit
@@ -1726,21 +1770,30 @@ options:
                         cache has expired. Unset keeps the session's current
                         choice (a new session follows the deployment).
   --reason REASON       Why this write is being made (audited).
+  --mode {compact,full}
+                        `compact` (default) returns a few fields: enough to
+                        confirm the write without re-reading the whole record.
+                        `full` returns the complete result.
 
 $ vogt session wake --help
 [exit 0]
 usage: vogt session wake [-h] --id ID [--force | --no-force] --reason REASON
+                         [--mode {compact,full}]
 
 options:
-  -h, --help           show this help message and exit
-  --id ID              Session id, in either form: Vogt's `ses_…` id or the
-                       engine's session UUID (`engine_session_id` in
-                       session.list; the only id an unlinked session has).
-  --force, --no-force  Wake even though the session was superseded, or another
-                       live session holds the same work item in the same
-                       directory. Off by default, and session.input never sets
-                       it.
-  --reason REASON      Why this write is being made (audited).
+  -h, --help            show this help message and exit
+  --id ID               Session id, in either form: Vogt's `ses_…` id or the
+                        engine's session UUID (`engine_session_id` in
+                        session.list; the only id an unlinked session has).
+  --force, --no-force   Wake even though the session was superseded, or
+                        another live session holds the same work item in the
+                        same directory. Off by default, and session.input
+                        never sets it.
+  --reason REASON       Why this write is being made (audited).
+  --mode {compact,full}
+                        `compact` (default) returns a few fields: enough to
+                        confirm the write without re-reading the whole record.
+                        `full` returns the complete result.
 
 $ vogt session keep-awake --help
 [exit 0]
@@ -1830,7 +1883,7 @@ options:
 $ vogt session bind --help
 [exit 0]
 usage: vogt session bind [-h] [--id ID] [--work-item WORK_ITEM]
-                         --reason REASON
+                         --reason REASON [--mode {compact,full}]
 
 options:
   -h, --help            show this help message and exit
@@ -1844,6 +1897,10 @@ options:
                         native ref or an upstream subject key); null unbinds
                         it. Rebinding from one item to another is one call.
   --reason REASON       Why this write is being made (audited).
+  --mode {compact,full}
+                        `compact` (default) returns a few fields: enough to
+                        confirm the write without re-reading the whole record.
+                        `full` returns the complete result.
 
 $ vogt session grant-request --help
 [exit 0]
@@ -1947,14 +2004,17 @@ options:
 
 $ vogt session last-reply --help
 [exit 0]
-usage: vogt session last-reply [-h] --id ID [--n N]
+usage: vogt session last-reply [-h] --id ID [--n N] [--since SINCE]
 
 options:
-  -h, --help  show this help message and exit
-  --id ID     Session id, in either form: Vogt's `ses_…` id or the engine's
-              session UUID (`engine_session_id` in session.list; the only id
-              an unlinked session has).
-  --n N       How many of the last replies (1-20).
+  -h, --help     show this help message and exit
+  --id ID        Session id, in either form: Vogt's `ses_…` id or the engine's
+                 session UUID (`engine_session_id` in session.list; the only
+                 id an unlinked session has).
+  --n N          How many of the last replies (1-20).
+  --since SINCE  The `cursor` of an earlier read. When the replies have not
+                 changed since, the answer is `{unchanged: true, cursor}` with
+                 no messages.
 
 $ vogt session economics --help
 [exit 0]
@@ -1969,6 +2029,7 @@ options:
 $ vogt session digest --help
 [exit 0]
 usage: vogt session digest [-h] --id ID [--context-window CONTEXT_WINDOW]
+                           [--since SINCE]
 
 options:
   -h, --help            show this help message and exit
@@ -1980,6 +2041,9 @@ options:
                         `context_pct` is `context_tokens` over this window;
                         omitted, the percentage is null. There is no model
                         table.
+  --since SINCE         The `cursor` of an earlier read. When the digest has
+                        not changed since, the answer is `{unchanged: true,
+                        cursor}` with no body.
 
 $ vogt session wait --help
 [exit 0]
@@ -2038,8 +2102,9 @@ options:
                         starts; the result's `next_cursor` is that head when
                         nothing new arrives.
   --timeout-s TIMEOUT_S
-                        Seconds to wait at most (1-600). Answers `timeout`
-                        then.
+                        Seconds to wait at most (1-600, default 300). Answers
+                        `timeout` then. An oversight session's value is raised
+                        to 60 so a short wait cannot become a poll loop.
 
 $ vogt session blocked --help
 [exit 0]

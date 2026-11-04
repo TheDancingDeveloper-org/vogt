@@ -170,3 +170,21 @@ def test_an_unknown_session_is_not_found(instance: AppContext) -> None:
     ctx = _wired(instance, _row())
     with pytest.raises(NotFound):
         digest(ctx, SessionDigestParams(id="ses_nope"))
+
+
+def test_digest_since_its_own_cursor_is_unchanged(instance: AppContext) -> None:
+    ctx = _wired(instance, _row())
+    first = digest(ctx, SessionDigestParams(id=ENGINE_ID))
+    assert first.unchanged is False
+    assert first.cursor is not None
+    assert len(first.cursor) == 16
+    again = digest(ctx, SessionDigestParams(id=ENGINE_ID, since=first.cursor))
+    assert again.model_dump(exclude_none=True, exclude_defaults=True) == {
+        "id": ENGINE_ID,
+        "unchanged": True,
+        "cursor": first.cursor,
+    }
+    stale = digest(ctx, SessionDigestParams(id=ENGINE_ID, since="0000000000000000"))
+    assert stale.unchanged is False
+    assert stale.activity == "idle"
+    assert stale.cursor == first.cursor

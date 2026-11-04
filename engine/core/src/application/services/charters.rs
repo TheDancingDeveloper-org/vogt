@@ -112,7 +112,7 @@ fn view_of(
         "version": row.version,
         "body": row.body,
         "author": author,
-        "created_at": crate::core::to_iso(row.created_at),
+        "created_at": row.created_at.to_json(),
         "reason": row.reason,
     }))
 }
