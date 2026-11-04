@@ -1976,59 +1976,27 @@
   },
   {
     "body": {
-      "branches": [],
-      "comments": [],
-      "item": {
-        "body": "",
-        "created_at": "2026-01-02T03:04:39Z",
-        "id": "wrk_0001",
-        "kind": "chore",
-        "labels": [],
-        "origin": "created",
-        "priority": "p2",
-        "ref": "WI-1",
-        "relations": [],
-        "state": "open",
-        "title": "parity item",
-        "trust_state": "unverified",
-        "updated_at": "2026-01-02T03:04:39Z"
-      },
-      "live_sessions": [],
-      "sessions": [],
-      "walked": []
+      "ref": "WI-1",
+      "state": "open",
+      "title": "parity item",
+      "updated_at": "2026-01-02T03:04:39Z"
     },
     "is_error": false,
     "operation": "work.create"
   },
   {
     "body": {
-      "branches": [],
-      "comments": [],
-      "item": {
-        "body": "",
-        "created_at": "2026-01-02T03:04:39Z",
-        "id": "wrk_0001",
-        "kind": "chore",
-        "labels": [],
-        "origin": "created",
-        "priority": "p1",
-        "ref": "WI-1",
-        "relations": [],
-        "state": "open",
-        "title": "parity item renamed",
-        "trust_state": "unverified",
-        "updated_at": "2026-01-02T03:04:41Z"
-      },
-      "live_sessions": [],
-      "sessions": [],
-      "walked": []
+      "ref": "WI-1",
+      "state": "open",
+      "title": "parity item renamed",
+      "updated_at": "2026-01-02T03:04:41Z"
     },
     "is_error": false,
     "operation": "work.update"
   },
   {
     "body": {
-      "text": "invalid_params: labels: Input should be a valid list. work_create takes required: kind, title, reason; optional: body, priority, effort, project, initiative, assignee, labels, local_only"
+      "text": "invalid_params: labels: Input should be a valid list. work_create takes required: kind, title, reason; optional: body, priority, effort, project, initiative, assignee, labels, local_only, mode"
     },
     "error_code": "invalid_params",
     "is_error": true,
@@ -2095,42 +2063,20 @@
   },
   {
     "body": {
-      "comment": {
-        "actor_display_name": "parity",
-        "actor_id": "act_0001",
-        "body": "parity note",
-        "created_at": "2026-01-02T03:04:46Z",
-        "id": "cmt_0001",
-        "kind": "note",
-        "work_item_id": "wrk_0001"
-      },
-      "write_back": "skipped"
+      "comment_id": "cmt_0001",
+      "created_at": "2026-01-02T03:04:46Z",
+      "kind": "note",
+      "ref": "WI-1"
     },
     "is_error": false,
     "operation": "work.comment"
   },
   {
     "body": {
-      "branches": [],
-      "comments": [],
-      "item": {
-        "body": "",
-        "created_at": "2026-01-02T03:04:39Z",
-        "id": "wrk_0001",
-        "kind": "chore",
-        "labels": [],
-        "origin": "created",
-        "priority": "p1",
-        "ref": "WI-1",
-        "relations": [],
-        "state": "in_progress",
-        "title": "parity item renamed",
-        "trust_state": "unverified",
-        "updated_at": "2026-01-02T03:04:49Z"
-      },
-      "live_sessions": [],
-      "sessions": [],
-      "walked": []
+      "ref": "WI-1",
+      "state": "in_progress",
+      "title": "parity item renamed",
+      "updated_at": "2026-01-02T03:04:49Z"
     },
     "is_error": false,
     "operation": "work.transition"
@@ -3181,29 +3127,15 @@
   },
   {
     "body": {
-      "digest": {
-        "activity": "idle",
-        "id": "ses_0001",
-        "name": "parity"
-      },
       "session": {
         "activity": "idle",
-        "actor": "agent:session:ses_0001",
         "alive": true,
-        "autopilot": false,
-        "autopilot_nudges": 0,
         "cwd": "<root>/proj",
         "engine_session_id": "eng-parity-1",
         "id": "ses_0001",
-        "keep_awake": false,
         "linked": true,
         "name": "parity",
-        "posture_lost_on_resume": false,
-        "project": "parity",
-        "reason": "parity",
-        "role": "worker",
-        "started_at": "2026-01-02T03:04:05Z",
-        "started_by_kind": "person"
+        "project": "parity"
       }
     },
     "is_error": false,
@@ -3296,29 +3228,15 @@
   },
   {
     "body": {
-      "digest": {
-        "activity": "hibernated",
-        "id": "ses_0001",
-        "name": "parity"
-      },
       "session": {
         "activity": "hibernated",
-        "actor": "agent:session:ses_0001",
         "alive": false,
-        "autopilot": false,
-        "autopilot_nudges": 0,
         "cwd": "<root>/proj",
         "engine_session_id": "eng-parity-1",
         "id": "ses_0001",
-        "keep_awake": false,
         "linked": true,
         "name": "parity",
-        "posture_lost_on_resume": false,
-        "project": "parity",
-        "reason": "parity",
-        "role": "worker",
-        "started_at": "2026-01-02T03:04:05Z",
-        "started_by_kind": "person"
+        "project": "parity"
       }
     },
     "is_error": false,
@@ -3376,29 +3294,15 @@
   },
   {
     "body": {
-      "digest": {
-        "activity": "idle",
-        "id": "ses_0001",
-        "name": "parity"
-      },
       "session": {
         "activity": "idle",
-        "actor": "agent:session:ses_0001",
         "alive": true,
-        "autopilot": false,
-        "autopilot_nudges": 0,
         "cwd": "<root>/proj",
         "engine_session_id": "eng-parity-1",
         "id": "ses_0001",
-        "keep_awake": true,
         "linked": true,
         "name": "parity",
-        "posture_lost_on_resume": false,
-        "project": "parity",
-        "reason": "parity",
-        "role": "worker",
-        "started_at": "2026-01-02T03:04:05Z",
-        "started_by_kind": "person"
+        "project": "parity"
       }
     },
     "is_error": false,
@@ -10300,6 +10204,16 @@
                 "title": "Local Only",
                 "type": "boolean"
               },
+              "mode": {
+                "default": "compact",
+                "description": "`compact` (default) returns a few fields: enough to confirm the write without re-reading the whole record. `full` returns the complete result.",
+                "enum": [
+                  "compact",
+                  "full"
+                ],
+                "title": "Mode",
+                "type": "string"
+              },
               "priority": {
                 "default": "p2",
                 "enum": [
@@ -15852,6 +15766,16 @@
                 "description": "Initiative slug.",
                 "title": "Initiative"
               },
+              "mode": {
+                "default": "compact",
+                "description": "`compact` (default) returns a few fields: enough to confirm the write without re-reading the whole record. `full` returns the complete result.",
+                "enum": [
+                  "compact",
+                  "full"
+                ],
+                "title": "Mode",
+                "type": "string"
+              },
               "priority": {
                 "anyOf": [
                   {
@@ -17997,6 +17921,16 @@
           "params_schema": {
             "additionalProperties": false,
             "properties": {
+              "mode": {
+                "default": "compact",
+                "description": "`compact` (default) returns a few fields: enough to confirm the write without re-reading the whole record. `full` returns the complete result.",
+                "enum": [
+                  "compact",
+                  "full"
+                ],
+                "title": "Mode",
+                "type": "string"
+              },
               "reason": {
                 "description": "Why the item is moving (audited, required on every write). With `walk`, each hop records this reason annotated with the hop.",
                 "minLength": 1,
@@ -26538,6 +26472,16 @@
                 "title": "Kind",
                 "type": "string"
               },
+              "mode": {
+                "default": "compact",
+                "description": "`compact` (default) returns a few fields: enough to confirm the write without re-reading the whole record. `full` returns the complete result.",
+                "enum": [
+                  "compact",
+                  "full"
+                ],
+                "title": "Mode",
+                "type": "string"
+              },
               "reason": {
                 "minLength": 1,
                 "title": "Reason",
@@ -33296,6 +33240,16 @@
                 "title": "Gates",
                 "type": "array"
               },
+              "mode": {
+                "default": "compact",
+                "description": "`compact` (default) returns a few fields: enough to confirm the write without re-reading the whole record. `full` returns the complete result.",
+                "enum": [
+                  "compact",
+                  "full"
+                ],
+                "title": "Mode",
+                "type": "string"
+              },
               "model": {
                 "anyOf": [
                   {
@@ -38148,6 +38102,17 @@
                 "description": "Keep only these attention classes. `needs_you` means approval, blocked and waiting.",
                 "title": "Attention"
               },
+              "exclude_roles": {
+                "default": [
+                  "operator"
+                ],
+                "description": "Leave out sessions with these roles. Default hides `operator` sessions, so an oversight sweep does not list the person's own terminals; pass an empty list to keep every role.",
+                "items": {
+                  "type": "string"
+                },
+                "title": "Exclude Roles",
+                "type": "array"
+              },
               "fields": {
                 "default": [],
                 "description": "Extra SessionSummary attribute names copied onto each digest row.",
@@ -38195,6 +38160,19 @@
                 "title": "Screen Lines",
                 "type": "integer"
               },
+              "since": {
+                "anyOf": [
+                  {
+                    "format": "date-time",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Keep only sessions whose output, blocked report or done mark changed after this time (an RFC 3339 timestamp, e.g. the previous sweep's `swept_at`). Counts then cover the kept rows.",
+                "title": "Since"
+              },
               "stall_after_minutes": {
                 "default": 10,
                 "description": "A running session that has printed nothing for this long is reported `stalled`.",
@@ -38217,6 +38195,18 @@
                 ],
                 "description": "Keep only these activities (or attention classes). Default excludes hibernated, stopped and exited; pass an empty list for every state.",
                 "title": "States"
+              },
+              "supervised_by": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Keep only sessions started by this session (ses_\u2026 or the engine UUID).",
+                "title": "Supervised By"
               }
             },
             "title": "SweepSessionsParams",
@@ -40015,6 +40005,16 @@
                 "title": "Id",
                 "type": "string"
               },
+              "mode": {
+                "default": "compact",
+                "description": "`compact` (default) returns a few fields: enough to confirm the write without re-reading the whole record. `full` returns the complete result.",
+                "enum": [
+                  "compact",
+                  "full"
+                ],
+                "title": "Mode",
+                "type": "string"
+              },
               "reason": {
                 "description": "Why this write is being made (audited).",
                 "minLength": 1,
@@ -41438,6 +41438,16 @@
               "id": {
                 "description": "Session id, in either form: Vogt's `ses_\u2026` id or the engine's session UUID (`engine_session_id` in session.list; the only id an unlinked session has).",
                 "title": "Id",
+                "type": "string"
+              },
+              "mode": {
+                "default": "compact",
+                "description": "`compact` (default) returns a few fields: enough to confirm the write without re-reading the whole record. `full` returns the complete result.",
+                "enum": [
+                  "compact",
+                  "full"
+                ],
+                "title": "Mode",
                 "type": "string"
               },
               "reason": {
@@ -48530,6 +48540,16 @@
                 ],
                 "description": "Session id, in either form: Vogt's `ses_\u2026` id or the engine's session UUID (`engine_session_id` in session.list; the only id an unlinked session has). Omit it from inside a session Vogt started to bind that session itself.",
                 "title": "Id"
+              },
+              "mode": {
+                "default": "compact",
+                "description": "`compact` (default) returns a few fields: enough to confirm the write without re-reading the whole record. `full` returns the complete result.",
+                "enum": [
+                  "compact",
+                  "full"
+                ],
+                "title": "Mode",
+                "type": "string"
               },
               "reason": {
                 "description": "Why this write is being made (audited).",

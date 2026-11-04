@@ -11176,6 +11176,16 @@
                 "title": "Local Only",
                 "type": "boolean"
               },
+              "mode": {
+                "default": "compact",
+                "description": "`compact` (default) returns a few fields: enough to confirm the write without re-reading the whole record. `full` returns the complete result.",
+                "enum": [
+                  "compact",
+                  "full"
+                ],
+                "title": "Mode",
+                "type": "string"
+              },
               "priority": {
                 "default": "p2",
                 "enum": [
@@ -17004,6 +17014,16 @@
                 "description": "Initiative slug.",
                 "title": "Initiative"
               },
+              "mode": {
+                "default": "compact",
+                "description": "`compact` (default) returns a few fields: enough to confirm the write without re-reading the whole record. `full` returns the complete result.",
+                "enum": [
+                  "compact",
+                  "full"
+                ],
+                "title": "Mode",
+                "type": "string"
+              },
               "priority": {
                 "anyOf": [
                   {
@@ -19266,6 +19286,16 @@
           "params_schema": {
             "additionalProperties": false,
             "properties": {
+              "mode": {
+                "default": "compact",
+                "description": "`compact` (default) returns a few fields: enough to confirm the write without re-reading the whole record. `full` returns the complete result.",
+                "enum": [
+                  "compact",
+                  "full"
+                ],
+                "title": "Mode",
+                "type": "string"
+              },
               "reason": {
                 "description": "Why the item is moving (audited, required on every write). With `walk`, each hop records this reason annotated with the hop.",
                 "minLength": 1,
@@ -28265,6 +28295,16 @@
                 "title": "Kind",
                 "type": "string"
               },
+              "mode": {
+                "default": "compact",
+                "description": "`compact` (default) returns a few fields: enough to confirm the write without re-reading the whole record. `full` returns the complete result.",
+                "enum": [
+                  "compact",
+                  "full"
+                ],
+                "title": "Mode",
+                "type": "string"
+              },
               "reason": {
                 "minLength": 1,
                 "title": "Reason",
@@ -35260,6 +35300,16 @@
                 "title": "Gates",
                 "type": "array"
               },
+              "mode": {
+                "default": "compact",
+                "description": "`compact` (default) returns a few fields: enough to confirm the write without re-reading the whole record. `full` returns the complete result.",
+                "enum": [
+                  "compact",
+                  "full"
+                ],
+                "title": "Mode",
+                "type": "string"
+              },
               "model": {
                 "anyOf": [
                   {
@@ -40415,6 +40465,17 @@
                 "description": "Keep only these attention classes. `needs_you` means approval, blocked and waiting.",
                 "title": "Attention"
               },
+              "exclude_roles": {
+                "default": [
+                  "operator"
+                ],
+                "description": "Leave out sessions with these roles. Default hides `operator` sessions, so an oversight sweep does not list the person's own terminals; pass an empty list to keep every role.",
+                "items": {
+                  "type": "string"
+                },
+                "title": "Exclude Roles",
+                "type": "array"
+              },
               "fields": {
                 "default": [],
                 "description": "Extra SessionSummary attribute names copied onto each digest row.",
@@ -40463,6 +40524,20 @@
                 "title": "Screen Lines",
                 "type": "integer"
               },
+              "since": {
+                "anyOf": [
+                  {
+                    "format": "date-time",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Keep only sessions whose output, blocked report or done mark changed after this time (an RFC 3339 timestamp, e.g. the previous sweep's `swept_at`). Counts then cover the kept rows.",
+                "title": "Since"
+              },
               "stall_after_minutes": {
                 "default": 10,
                 "description": "A running session that has printed nothing for this long is reported `stalled`.",
@@ -40486,6 +40561,19 @@
                 "default": null,
                 "description": "Keep only these activities (or attention classes). Default excludes hibernated, stopped and exited; pass an empty list for every state.",
                 "title": "States"
+              },
+              "supervised_by": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Keep only sessions started by this session (ses_\u2026 or the engine UUID).",
+                "title": "Supervised By"
               }
             },
             "title": "SweepSessionsParams",
@@ -42395,6 +42483,16 @@
                 "title": "Id",
                 "type": "string"
               },
+              "mode": {
+                "default": "compact",
+                "description": "`compact` (default) returns a few fields: enough to confirm the write without re-reading the whole record. `full` returns the complete result.",
+                "enum": [
+                  "compact",
+                  "full"
+                ],
+                "title": "Mode",
+                "type": "string"
+              },
               "reason": {
                 "description": "Why this write is being made (audited).",
                 "minLength": 1,
@@ -43908,6 +44006,16 @@
               "id": {
                 "description": "Session id, in either form: Vogt's `ses_\u2026` id or the engine's session UUID (`engine_session_id` in session.list; the only id an unlinked session has).",
                 "title": "Id",
+                "type": "string"
+              },
+              "mode": {
+                "default": "compact",
+                "description": "`compact` (default) returns a few fields: enough to confirm the write without re-reading the whole record. `full` returns the complete result.",
+                "enum": [
+                  "compact",
+                  "full"
+                ],
+                "title": "Mode",
                 "type": "string"
               },
               "reason": {
@@ -51445,6 +51553,16 @@
                 "default": null,
                 "description": "Session id, in either form: Vogt's `ses_\u2026` id or the engine's session UUID (`engine_session_id` in session.list; the only id an unlinked session has). Omit it from inside a session Vogt started to bind that session itself.",
                 "title": "Id"
+              },
+              "mode": {
+                "default": "compact",
+                "description": "`compact` (default) returns a few fields: enough to confirm the write without re-reading the whole record. `full` returns the complete result.",
+                "enum": [
+                  "compact",
+                  "full"
+                ],
+                "title": "Mode",
+                "type": "string"
               },
               "reason": {
                 "description": "Why this write is being made (audited).",
