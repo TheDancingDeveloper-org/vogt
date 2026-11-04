@@ -114,6 +114,17 @@ pub struct SessionRegistry {
     /// Creates and removes pods for pod-backed templates. Unset until the
     /// first pod session (or a test) needs it.
     pod_launcher: parking_lot::Mutex<Option<Arc<dyn crate::pod_backend::PodLauncher>>>,
+    /// Stream halves rebuilt for pods an engine restart is adopting, taken by
+    /// `spawn_pod_session` when the session over them is built.
+    adopting: parking_lot::Mutex<
+        std::collections::HashMap<
+            Uuid,
+            (
+                Arc<crate::agent_stream::PodLink>,
+                crate::agent_stream::PodReader,
+            ),
+        >,
+    >,
 }
 
 const MAX_SESSION_NAME_BYTES: usize = 256;
@@ -149,6 +160,12 @@ enum Scratch {
 }
 
 /// What `SessionRegistry::create_inner` is doing.
+/// How long hibernating a pod session waits for its agent to write the
+/// transcript back.
+const POD_FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+/// How long it waits for the pod to be deleted after the agent exits.
+const POD_TEARDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 enum Creating {
     Fresh(Origin),
     /// Starting a hibernated session again under its own id.
@@ -195,6 +212,7 @@ impl SessionRegistry {
             minted: Arc::new(DashMap::new()),
             account_leases,
             pod_launcher: parking_lot::Mutex::new(None),
+            adopting: parking_lot::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -255,7 +273,13 @@ impl SessionRegistry {
         let auth = crate::agent_stream::global();
         let pod_config = self.pod_config()?;
         let launcher = self.pod_launcher()?;
-        let (link, reader) = auth.register_pod(id);
+        let (link, reader, adopting) = match self.adopting.lock().remove(&id) {
+            Some((link, reader)) => (link, reader, true),
+            None => {
+                let (link, reader) = auth.register_pod(id);
+                (link, reader, false)
+            }
+        };
         let backend = Arc::new(crate::pod_backend::PodBackend::new(
             id,
             Arc::clone(&link),
@@ -284,39 +308,203 @@ impl SessionRegistry {
         }
         let spawned = spawned?;
         let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple()).into_bytes();
+        let state_dir = self.cfg.state_dir.clone();
         tracing::info!(
             session = %id,
             template = %template.name,
+            adopting,
             program = spec.command.as_deref().and_then(|argv| argv.first()).map_or("-", String::as_str),
             "starting a session pod"
         );
-        let pod = crate::pod_backend::pod_template(
-            &pod_config,
-            template,
-            id,
-            &pod_config.graft_repo,
-            "session",
-            spec.account.as_deref(),
-            spec.command.as_deref().unwrap_or_default(),
-            &token,
-        );
+        // An engine restart is re-adopting a pod that is already running: no
+        // pod is created and no bootstrap credential issued, the pod keeps
+        // the stream credential it already holds.
+        let pod = (!adopting).then(|| {
+            crate::pod_backend::pod_template(
+                &pod_config,
+                template,
+                id,
+                &pod_config.graft_repo,
+                "session",
+                spec.account.as_deref(),
+                spec.command.as_deref().unwrap_or_default(),
+                &token,
+            )
+        });
         tokio::spawn(async move {
             let auth = crate::agent_stream::global();
-            auth.issue(id, &token).await;
-            if let Err(e) = launcher.create(id, &token, pod).await {
-                tracing::warn!(session = %id, error = %e, "creating the session pod failed");
-                let note = format!("\r\nsession pod could not be created: {e}\r\n");
-                let _ = link.ingest(link.next_offset(), note.as_bytes());
-                link.finish(1);
-            } else {
-                link.exited().await;
+            if let Some(pod) = pod {
+                auth.issue(id, &token).await;
+                if let Err(e) = launcher.create(id, &token, pod).await {
+                    tracing::warn!(session = %id, error = %e, "creating the session pod failed");
+                    let note = format!("\r\nsession pod could not be created: {e}\r\n");
+                    let _ = link.ingest(link.next_offset(), note.as_bytes());
+                    link.finish(1);
+                }
             }
+            link.exited().await;
             if let Err(e) = launcher.delete(id, None).await {
                 tracing::debug!(session = %id, error = %e, "deleting the session pod failed");
             }
-            auth.forget_pod(id);
+            remove_pod_token(&state_dir, id);
+            auth.forget_pod_if(id, &link);
+            link.mark_torn_down();
         });
         Ok(spawned)
+    }
+
+    /// Keep the stream credential a pod was given, so an engine that restarts
+    /// can adopt the running pod instead of losing it. Mode 0600, outside the
+    /// hibernation record, which never holds a secret.
+    pub fn keep_pod_token(&self, id: Uuid, token: &str) {
+        let dir = pod_token_dir(&self.cfg.state_dir);
+        let write = || -> std::io::Result<()> {
+            use std::io::Write;
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            std::fs::create_dir_all(&dir)?;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(dir.join(id.to_string()))?;
+            file.write_all(token.as_bytes())
+        };
+        if let Err(e) = write() {
+            tracing::warn!(session = %id, error = %e, "could not keep the pod's stream credential; the pod cannot be adopted after a restart");
+        }
+    }
+
+    /// After an engine restart: take back the session pods still running.
+    /// Boot turned every record that had a process into a hibernated
+    /// `recovered` session; for each whose pod survived, rebuild the live
+    /// session over a stream link whose cursor is the output the log already
+    /// holds, so the agent's resume replays exactly what the engine missed.
+    /// An agent that does not dial in within `reconnect_timeout` is given up
+    /// as lost: the pod is deleted and the session stays hibernated, to be
+    /// woken from the engine-held transcript. Returns the adopted ids.
+    pub async fn readopt_pods(
+        self: &Arc<Self>,
+        reconnect_timeout: std::time::Duration,
+    ) -> Vec<Uuid> {
+        if !self.cfg.pod_backends_enabled {
+            return Vec::new();
+        }
+        let listed = match self.pod_launcher() {
+            Ok(launcher) => launcher.list().await,
+            Err(e) => Err(e),
+        };
+        let pods = match listed {
+            Ok(pods) => pods,
+            Err(e) => {
+                tracing::warn!(error = %e, "could not list session pods to adopt after the restart");
+                return Vec::new();
+            }
+        };
+        let cfg = match self.pod_config() {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                tracing::warn!(error = %e, "session pod configuration is unusable; not adopting pods");
+                return Vec::new();
+            }
+        };
+        let mut adopted = Vec::new();
+        for pod in &pods {
+            // Only this engine's pods: another deployment's share the namespace.
+            if !crate::pod_backend::pod_is_ours(pod, &cfg) {
+                continue;
+            }
+            let Some(id) = crate::pod_backend::session_id_from_pod(pod) else {
+                continue;
+            };
+            if pod.metadata.deletion_timestamp.is_some()
+                || !matches!(crate::pod_backend::pod_phase(pod), "running" | "pending")
+            {
+                continue;
+            }
+            let Some(record) = self.records.get(&id).map(|r| r.clone()) else {
+                continue;
+            };
+            let recovered = record
+                .hibernation
+                .as_ref()
+                .is_some_and(|h| h.trigger == HibernateTrigger::Recovered);
+            let Some(token) = read_pod_token(&self.cfg.state_dir, id).filter(|_| recovered) else {
+                continue;
+            };
+            let cursor = self
+                .history
+                .as_ref()
+                .and_then(|h| std::fs::metadata(h.log_path(id)).ok())
+                .map_or(0, |m| m.len());
+            match self.adopt_one(record, cursor, token).await {
+                Ok(link) => {
+                    tracing::info!(session = %id, cursor, "adopted a running session pod after the restart");
+                    adopted.push(id);
+                    let registry = Arc::clone(self);
+                    tokio::spawn(async move {
+                        tokio::time::sleep(reconnect_timeout).await;
+                        if link.has_connected() || link.is_finished() {
+                            return;
+                        }
+                        tracing::warn!(session = %id, "an adopted pod's agent did not reconnect; marking it lost");
+                        if let Err(e) = registry
+                            .hibernate(
+                                id,
+                                Some(
+                                    "the session's pod did not reconnect after the engine restarted"
+                                        .into(),
+                                ),
+                                HibernateTrigger::Recovered,
+                                true,
+                                None,
+                            )
+                            .await
+                        {
+                            tracing::warn!(session = %id, error = %e, "could not mark an unreachable adopted pod lost");
+                        }
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!(session = %id, error = %e, "could not adopt a session pod");
+                }
+            }
+        }
+        adopted
+    }
+
+    async fn adopt_one(
+        &self,
+        record: Record,
+        cursor: u64,
+        token: String,
+    ) -> Result<Arc<crate::agent_stream::PodLink>> {
+        let id = record.id;
+        let auth = crate::agent_stream::global();
+        // The link is built here, ahead of the session, so the credential and
+        // the cursor are in place before any agent can dial in.
+        let (link, reader) = auth.adopt_pod(id, cursor, token).await;
+        self.adopting.lock().insert(id, (Arc::clone(&link), reader));
+        let (command, template) = self.wake_launch(&record);
+        let spec = self.wake_spec(
+            &record,
+            record.env.clone(),
+            command,
+            template,
+            None,
+            None,
+            None,
+        );
+        let created = self.create_inner(spec, Creating::Wake(Box::new(record)), None);
+        self.adopting.lock().remove(&id);
+        match created {
+            Ok(_) => Ok(link),
+            Err(e) => {
+                auth.forget_pod_if(id, &link);
+                Err(e)
+            }
+        }
     }
 
     pub fn secret_broker(&self) -> &Arc<SecretBroker> {
@@ -1608,6 +1796,31 @@ impl SessionRegistry {
             .map(|r| r.clone())
             .ok_or(ApiError::NotFound)?;
 
+        // A pod session's transcript and config live in the pod, which is about
+        // to be deleted. Pull them into the engine-held account bundle first;
+        // an agent that is attached but cannot confirm is a refusal, because
+        // a wake would resume a conversation missing its newest turns.
+        let pod_link = crate::agent_stream::global().pod(id);
+        if pod_link.is_some() {
+            use crate::agent_stream::FlushOutcome;
+            match crate::agent_stream::global()
+                .request_flush(id, POD_FLUSH_TIMEOUT)
+                .await
+            {
+                FlushOutcome::Done => {}
+                FlushOutcome::NotAttached => {
+                    tracing::warn!(session = %id, "hibernating a pod session whose agent is not attached; its transcript is as last written back");
+                }
+                FlushOutcome::Failed => {
+                    return Err(ApiError::Conflict(
+                        "the session's pod did not confirm writing its transcript back; \
+                         hibernating now would lose the newest turns. Try again, or kill it"
+                            .into(),
+                    ));
+                }
+            }
+        }
+
         // The screen and the record are written before anything is stopped:
         // a failure here leaves the session running and says so.
         let (screen, rows, cols) = session.screen_source(hibernation::SCREEN_BYTES);
@@ -1700,6 +1913,13 @@ impl SessionRegistry {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        // The pod is deleted by the task that watches the stream. A wake right
+        // after must not meet the old pod, or that task forgetting its stream.
+        if let Some(link) = pod_link {
+            if !link.torn_down(POD_TEARDOWN_TIMEOUT).await {
+                tracing::warn!(session = %id, "the hibernated session's pod was not confirmed deleted in time");
+            }
         }
         self.sessions.remove(&id);
         self.secret_broker.revoke(id);
@@ -1877,7 +2097,44 @@ impl SessionRegistry {
             env.retain(|(k, _)| k != "VOGT_SESSION_ID");
             env.extend(identity);
         }
-        let spec = SessionSpec {
+        let spec = self.wake_spec(
+            &record,
+            env,
+            command,
+            template,
+            fresh.clone(),
+            req.cols,
+            req.rows,
+        );
+        let session = self.create_inner(spec, Creating::Wake(Box::new(record)), None)?;
+        self.bus.publish(ServerEvent::SessionWoken { id });
+        if fresh.is_some() {
+            tracing::info!(
+                target: "vogt::audit",
+                event = "session.wake.compacted",
+                session = %id,
+                conversation = ?session.conversation().map(|c| c.id),
+                "session woken into a fresh conversation from a summary"
+            );
+        } else {
+            tracing::info!(session = %id, "session woken");
+        }
+        Ok(session)
+    }
+
+    /// The spec a wake (or a pod adoption) starts `record` with.
+    #[allow(clippy::too_many_arguments)]
+    fn wake_spec(
+        &self,
+        record: &Record,
+        env: Vec<(String, String)>,
+        command: Option<Vec<String>>,
+        template: Option<String>,
+        fresh: Option<String>,
+        cols: Option<u16>,
+        rows: Option<u16>,
+    ) -> SessionSpec {
+        SessionSpec {
             name: record.name.clone(),
             command,
             template,
@@ -1907,27 +2164,13 @@ impl SessionRegistry {
             } else {
                 record.conversation.as_ref().map(|c| c.id.clone())
             },
-            cols: req.cols.or(record.cols),
-            rows: req.rows.or(record.rows),
+            cols: cols.or(record.cols),
+            rows: rows.or(record.rows),
             scrollback_bytes: None,
             companion: None,
             charter: None,
             budget: record.budget.clone(),
-        };
-        let session = self.create_inner(spec, Creating::Wake(Box::new(record)), None)?;
-        self.bus.publish(ServerEvent::SessionWoken { id });
-        if fresh.is_some() {
-            tracing::info!(
-                target: "vogt::audit",
-                event = "session.wake.compacted",
-                session = %id,
-                conversation = ?session.conversation().map(|c| c.id),
-                "session woken into a fresh conversation from a summary"
-            );
-        } else {
-            tracing::info!(session = %id, "session woken");
         }
-        Ok(session)
     }
 
     /// What a wake starts for `record`: its own command and template, unless
@@ -2280,6 +2523,12 @@ impl SessionRegistry {
             .live_sessions()
             .into_iter()
             .filter_map(|s| {
+                // A pod session's pod outlives the engine and is adopted
+                // again at the next boot (WI-3205); hibernating it would
+                // delete the pod.
+                if crate::agent_stream::global().pod(s.id).is_some() {
+                    return None;
+                }
                 let allow_shell = s.role() == SessionRole::Oversight;
                 self.hibernate_refusal(&s, allow_shell)
                     .is_none()
@@ -2851,6 +3100,21 @@ fn recover_records(
         }
         records.insert(id, record);
     }
+}
+
+fn pod_token_dir(state_dir: &std::path::Path) -> std::path::PathBuf {
+    state_dir.join("pod-tokens")
+}
+
+fn read_pod_token(state_dir: &std::path::Path, id: Uuid) -> Option<String> {
+    std::fs::read_to_string(pod_token_dir(state_dir).join(id.to_string()))
+        .ok()
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+}
+
+fn remove_pod_token(state_dir: &std::path::Path, id: Uuid) {
+    let _ = std::fs::remove_file(pod_token_dir(state_dir).join(id.to_string()));
 }
 
 /// The last `SCREEN_BYTES` of a session's raw output log.

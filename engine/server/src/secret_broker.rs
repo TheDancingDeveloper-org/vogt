@@ -825,6 +825,62 @@ impl SecretBroker {
         Ok(())
     }
 
+    /// The files a pod for `account` is seeded with: the account's login and
+    /// global config, plus the transcript of `conversation` when the engine
+    /// holds one (a woken session resumes from it). Paths are relative to the
+    /// account directory. Nothing is followed through a symlink, and a file
+    /// over the bundle size cap is left out rather than truncated.
+    pub fn bundle_snapshot(&self, account: &str, conversation: &str) -> Vec<(String, Vec<u8>)> {
+        let Some(root) = self.account_dirs.get(account).map(FsPath::new) else {
+            return Vec::new();
+        };
+        let account_lock = self
+            .account_locks
+            .entry(account.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone();
+        let Ok(_guard) = account_lock.lock() else {
+            return Vec::new();
+        };
+        let read = |path: &FsPath| {
+            let meta = std::fs::symlink_metadata(path).ok()?;
+            (meta.file_type().is_file() && meta.len() as usize <= MAX_BUNDLE_FILE_BYTES)
+                .then(|| std::fs::read(path).ok())
+                .flatten()
+        };
+        let mut files = Vec::new();
+        for name in [".credentials.json", ".claude.json"] {
+            if let Some(bytes) = read(&root.join(name)) {
+                files.push((name.to_string(), bytes));
+            }
+        }
+        if conversation.is_empty() || conversation.contains(['/', '\\']) {
+            return files;
+        }
+        let wanted = format!("{conversation}.jsonl");
+        let mut dirs = vec![root.join("projects")];
+        while let Some(dir) = dirs.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let Ok(kind) = entry.file_type() else {
+                    continue;
+                };
+                if kind.is_dir() {
+                    dirs.push(entry.path());
+                } else if kind.is_file() && entry.file_name() == wanted.as_str() {
+                    if let (Some(bytes), Ok(relative)) =
+                        (read(&entry.path()), entry.path().strip_prefix(root))
+                    {
+                        files.push((relative.to_string_lossy().into_owned(), bytes));
+                    }
+                }
+            }
+        }
+        files
+    }
+
     /// Append a transcript delta at `offset`. The engine appends only when
     /// `offset` is the file's current length; `Ok` carries the new length.
     /// A delta that is already on disk at `offset` (a retry, or a concurrent

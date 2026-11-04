@@ -61,6 +61,10 @@ pub struct PodConfig {
     /// session is ended.
     #[serde(default = "default_pending_timeout")]
     pub pending_timeout: Duration,
+    /// How long an adopted pod's agent has to dial in again after an engine
+    /// restart before the pod is given up as lost.
+    #[serde(default = "default_reconnect_timeout")]
+    pub reconnect_timeout: Duration,
     /// Names this engine deployment. Every pod it creates carries it as the
     /// `vogt.engine` label, and the reconciler lists and deletes only pods
     /// that carry its own, so engines sharing a namespace (dev and prod, or an
@@ -68,6 +72,9 @@ pub struct PodConfig {
     /// stable for a deployment and distinct between deployments.
     #[serde(default = "default_engine_id")]
     pub engine_id: String,
+}
+fn default_reconnect_timeout() -> Duration {
+    Duration::from_secs(120)
 }
 /// The label that marks which engine deployment owns a session pod.
 pub const ENGINE_LABEL: &str = "vogt.engine";
@@ -168,6 +175,7 @@ impl Default for PodConfig {
             image_pull_secret: None,
             reconcile_interval: default_reconcile_interval(),
             pending_timeout: default_pending_timeout(),
+            reconnect_timeout: default_reconnect_timeout(),
             engine_id: default_engine_id(),
         }
     }
