@@ -10,6 +10,9 @@ inbound connection and never talks to the cluster API.
   `VOGT_SESSION_COMMAND` are required.
 - `VOGT_SESSION_CWD`, `VOGT_PTY_COLS`, `VOGT_PTY_ROWS`, and
   `VOGT_AGENT_BUFFER_BYTES` are optional. The replay buffer defaults to 1 MiB.
+- For `claude`, `VOGT_CLAUDE_SETTINGS_FILE` (a policy file, `off`, or unset for
+  the image's `driven-session-settings.json`) becomes `--settings=<file>`, and
+  `VOGT_CLAUDE_MCP_CONFIG` becomes `--strict-mcp-config --mcp-config=<file>`.
 
 The token is sent only as an HTTP Bearer authorization header and is never
 logged. The engine URL's `http(s)` scheme is converted to `ws(s)` and the

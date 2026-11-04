@@ -20,7 +20,8 @@
 # that cannot be read is a refusal, not a pass.
 #
 # Credential: the session's own broker token (`VOGT_ENGINE_BROKER_TOKEN`),
-# which names the session by itself. It goes in a header read from a file
+# which names the session by itself; a pod session, which has none, presents
+# its stream credential from `VOGT_SESSION_TOKEN_FILE`. It goes in a header read from a file
 # descriptor, never in argv, where every process in the pod could read it.
 set -u
 
@@ -114,6 +115,12 @@ printf '%s' "$input" | grep -Eq '(^|[^[:alnum:]_])(git|gh)([^[:alnum:]_]|$)' || 
 
 url="${VOGT_ENGINE_BROKER_URL:-}"
 token="${VOGT_ENGINE_BROKER_TOKEN:-}"
+# A pod session has no broker token. Its stream credential, a 0600 file the
+# entrypoint wrote, names the session to the same route (WI-3243).
+if [[ -z "$token" && -z "$url" && -r "${VOGT_SESSION_TOKEN_FILE:-}" ]]; then
+    token="$(head -c 4096 "$VOGT_SESSION_TOKEN_FILE" 2>/dev/null | tr -d '[:space:]')"
+    url="${VOGT_ENGINE_URL:-}"
+fi
 if [[ -z "$url" || -z "$token" ]]; then
     exit 0
 fi

@@ -401,7 +401,8 @@ struct PolicyCheckInput {
 /// agent is about to run breaks the project's policy (WI-1243). Authenticated
 /// like [`report_own_conversation`]: the session's own broker token, which
 /// names the session, so a session is only ever checked against its own
-/// policy. A session with no policy, or a tool that is not a shell, is
+/// policy. A pod session has no broker token and presents its stream
+/// credential instead, which names it just as well (WI-3243). A session with no policy, or a tool that is not a shell, is
 /// allowed; the hook only asks about `Bash`.
 pub async fn policy_check(
     State(state): State<Arc<AppState>>,
@@ -414,14 +415,24 @@ pub async fn policy_check(
         .get::<crate::observability::RequestId>()
         .map(|id| id.0.clone())
         .unwrap_or_default();
-    let session = request
+    let presented = request
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .map(str::trim)
         .filter(|v| !v.is_empty())
-        .and_then(|token| state.sessions.secret_broker().authenticate(token));
+        .map(str::to_owned);
+    // A pod session holds no broker token (its secrets do not come from the
+    // broker); its hook presents the stream credential it was bootstrapped
+    // with, which names the session just as well (WI-3243).
+    let session = match presented.as_deref() {
+        Some(token) => match state.sessions.secret_broker().authenticate(token) {
+            Some(id) => Some(id),
+            None => state.agent_auth.session_for_token(token.as_bytes()).await,
+        },
+        None => None,
+    };
     let Some(id) = session else {
         crate::auth::record_auth_failure(
             &axum::http::Method::POST,
