@@ -210,11 +210,10 @@ where
         };
         let path = handoff_path(&dir, &row.id);
         let written = std::fs::metadata(&path).is_ok_and(|meta| meta.len() > 0);
+        if row.activity != "idle" {
+            continue;
+        }
         if !written {
-            // Never interrupt a turn in progress.
-            if row.activity != "idle" {
-                continue;
-            }
             let marker = marker_path(&dir, &row.id);
             let (asks, aged) = marker_state(&marker);
             if asks >= MAX_ASKS || !aged {
