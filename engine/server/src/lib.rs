@@ -40,6 +40,7 @@ pub mod hibernation;
 pub mod history;
 pub mod history_api;
 pub mod launch;
+pub mod mcp_set;
 pub mod metrics;
 pub mod observability;
 pub mod opencode;
