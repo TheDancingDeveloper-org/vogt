@@ -28,6 +28,7 @@ from pydantic import ValidationError
 
 from vogt import __version__
 from vogt.adapters.mcp.surface import McpSurface
+from vogt.application.lean import compact
 from vogt.errors import VogtError
 
 #: A JSON-RPC id is a string, a number, or absent. Typing it precisely keeps
@@ -205,7 +206,9 @@ class StdioServer:
             return _result(
                 message_id, _tool_error("error", f"internal error (ref {ref})")
             )
-        return _result(message_id, tool_success(payload))
+        # The tool name is the operation name with its first dot an underscore.
+        lean = compact(name.replace("_", ".", 1), arguments, payload)
+        return _result(message_id, tool_success(lean))
 
 
 def _result(message_id: MessageId, result: dict[str, Any]) -> dict[str, Any]:

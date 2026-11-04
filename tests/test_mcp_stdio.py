@@ -101,6 +101,35 @@ def test_tools_list_matches_the_registry(instance: AppContext) -> None:
     assert "mcp_stdio" not in tools, "the transport does not offer itself as a tool"
 
 
+def test_mode_full_returns_the_whole_record_over_stdio(instance: AppContext) -> None:
+    responses, _ = _session(
+        instance,
+        _request(
+            1,
+            "tools/call",
+            name="work_create",
+            arguments={
+                "kind": "bug",
+                "title": "Raised in full",
+                "reason": "an agent filed this",
+                "mode": "full",
+            },
+        ),
+        _request(
+            2,
+            "tools/call",
+            name="work_comment",
+            arguments={"ref": "WI-1", "body": "a note", "reason": "noting it"},
+        ),
+    )
+    assert responses[0]["result"]["structuredContent"]["item"]["ref"] == "WI-1"
+    comment = responses[1]["result"]["structuredContent"]
+    assert comment["ref"] == "WI-1"
+    assert comment["comment_id"]
+    assert "write_back" not in comment
+    assert len(json.dumps(comment)) <= 300
+
+
 def test_a_tool_call_round_trips(instance: AppContext) -> None:
     responses, _ = _session(
         instance,
@@ -118,7 +147,10 @@ def test_a_tool_call_round_trips(instance: AppContext) -> None:
     )
     created = responses[0]["result"]
     assert created["isError"] is False
-    assert created["structuredContent"]["item"]["ref"] == "WI-1"
+    # A write answers in a few fields over MCP (WI-1525).
+    assert created["structuredContent"]["ref"] == "WI-1"
+    assert "item" not in created["structuredContent"]
+    assert len(json.dumps(created["structuredContent"])) <= 300
 
     listed = responses[1]["result"]["structuredContent"]
     assert listed["items"][0]["title"] == "Raised over stdio"

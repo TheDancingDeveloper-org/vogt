@@ -336,7 +336,14 @@ impl<'a, G: ToolGrant> Dispatcher<'a, G> {
             .filter(|value| !json_falsy(value))
             .cloned()
             .unwrap_or(serde_json::Value::Null);
-        let body = match operation.run(self.context, arguments) {
+        // Writes answer in a few fields over MCP, where a tool result stays in
+        // the caller's context (WI-1525). REST keeps the full record the GUI
+        // renders; `mode: "full"` asks for it here too.
+        let asked = arguments.clone();
+        let body = match operation
+            .run(self.context, arguments)
+            .map(|value| crate::application::lean::apply(operation.name, &asked, value))
+        {
             Ok(value) => json!({
                 "content": [{"type": "text", "text": compact_text(&value)}],
                 "structuredContent": value,

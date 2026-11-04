@@ -29,6 +29,7 @@ from vogt.adapters.mcp.stdio import (
 )
 from vogt.adapters.mcp.surface import McpSurface
 from vogt.application.context import AppContext, with_claimed_engine_session
+from vogt.application.lean import compact
 from vogt.application.services.auth import (
     Authenticated,
     Forbidden,
@@ -192,10 +193,13 @@ def _call(
         logger("mcp").exception("mcp tool %r failed (ref=%s)", operation.name, ref)
         return _result(message_id, _tool_error("error", f"internal error (ref {ref})"))
 
-    # The wire text is the compact summary; structuredContent stays the full
-    # dump so CLI, REST and MCP still agree (parity reads structuredContent
-    # via McpSurface, and a null field is part of the result).
-    body: dict[str, Any] = payload.model_dump(mode="json")
+    # The wire text is the compact summary; structuredContent is the result
+    # as the tool returns it. A write answers in a few fields unless it asked
+    # for `mode=full` (WI-1525); the parity surface (McpSurface.call_tool)
+    # still returns the full dump, so CLI, REST and MCP agree there.
+    body: dict[str, Any] = compact(
+        operation.name, arguments, payload.model_dump(mode="json")
+    )
     return _result(message_id, tool_success(body))
 
 

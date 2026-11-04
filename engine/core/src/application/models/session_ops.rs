@@ -7,16 +7,16 @@ use schemars::{json_schema, JsonSchema, Schema, SchemaGenerator};
 use serde::{Deserialize, Serialize};
 
 use super::views::{
-    AgentActivityEvent, AgentActivitySessionSummary, AgentCliRow, BindSessionWorkResultEngineLabel,
-    DecideGrantParamsDecision, DecisionOptionModel, DecisionView, HistoryListParamsMode,
-    HistoryOutputMatch, HistorySessionRow, ListDecisionsParamsState, ListGrantsParamsState,
-    ListSessionsParamsMode, ListSessionsParamsOrder, RequestGrantParamsKind,
+    default_write_result_mode, AgentActivityEvent, AgentActivitySessionSummary, AgentCliRow,
+    BindSessionWorkResultEngineLabel, DecideGrantParamsDecision, DecisionOptionModel, DecisionView,
+    HistoryListParamsMode, HistoryOutputMatch, HistorySessionRow, ListDecisionsParamsState,
+    ListGrantsParamsState, ListSessionsParamsMode, ListSessionsParamsOrder, RequestGrantParamsKind,
     RequestGrantParamsUses, SessionApprovalOption, SessionBlocked, SessionBudgetParams,
     SessionChange, SessionDigest, SessionGrantView, SessionInputParamsKeysItem,
     SessionInputResultKeysItem, SessionReply, SessionScreenResult, SessionSummary, SessionSweepRow,
     SessionWaitAnyParamsCursor, SessionWaitParamsUntil, SetSessionRoleParamsRole,
     StartSessionParamsPermissionMode, StartSessionParamsPurpose, StartSessionParamsRole,
-    SweepSessionsParamsMode,
+    SweepSessionsParamsMode, WriteResultMode,
 };
 use super::{date_time, optional_date_time, optional_string};
 
@@ -124,6 +124,9 @@ pub struct StartSessionParams {
     /// What the session is for (WI-1323, design §2.4): implement, implement-careful, review, mechanical, investigate or design. The deployment's dispatch profile for it fills template, model, effort, budget, worktree, repo_map and autopilot wherever this start leaves them unset; a value given here wins and is audited as an override. Recorded on the session.
     #[serde(default)]
     pub purpose: Option<StartSessionParamsPurpose>,
+    /// `compact` (default) returns a few fields: enough to confirm the write without re-reading the whole record. `full` returns the complete result.
+    #[serde(default = "default_write_result_mode")]
+    pub mode: WriteResultMode,
 }
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -317,6 +320,21 @@ pub struct SweepSessionsParams {
     #[serde(default = "default_sweep_sessions_params_stall_after_minutes")]
     #[schemars(range(min = 1, max = 1440))]
     pub stall_after_minutes: i64,
+    /// Leave out sessions with these roles. Default hides `operator` sessions, so an oversight sweep does not list the person's own terminals; pass an empty list to keep every role.
+    #[serde(default = "default_sweep_sessions_params_exclude_roles")]
+    #[schemars(extend("x-keep-default" = true))]
+    pub exclude_roles: Vec<String>,
+    /// Keep only sessions started by this session (ses_… or the engine UUID).
+    #[serde(default)]
+    #[schemars(schema_with = "optional_string")]
+    pub supervised_by: Option<String>,
+    /// Keep only sessions whose output, blocked report or done mark changed after this time (an RFC 3339 timestamp, e.g. the previous sweep's `swept_at`). Counts then cover the kept rows.
+    #[serde(default)]
+    #[schemars(schema_with = "optional_date_time")]
+    pub since: Option<String>,
+}
+fn default_sweep_sessions_params_exclude_roles() -> Vec<String> {
+    vec!["operator".to_string()]
 }
 /// Every live and hibernated session at once, most urgent first.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -357,6 +375,9 @@ pub struct HibernateSessionParams {
     /// Why this write is being made (audited).
     #[schemars(length(min = 1))]
     pub reason: String,
+    /// `compact` (default) returns a few fields: enough to confirm the write without re-reading the whole record. `full` returns the complete result.
+    #[serde(default = "default_write_result_mode")]
+    pub mode: WriteResultMode,
 }
 fn default_hibernate_wake_on_ttl() -> i64 {
     86_400
@@ -372,6 +393,9 @@ pub struct WakeSessionParams {
     /// Why this write is being made (audited).
     #[schemars(length(min = 1))]
     pub reason: String,
+    /// `compact` (default) returns a few fields: enough to confirm the write without re-reading the whole record. `full` returns the complete result.
+    #[serde(default = "default_write_result_mode")]
+    pub mode: WriteResultMode,
 }
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -430,6 +454,9 @@ pub struct BindSessionWorkParams {
     /// Why this write is being made (audited).
     #[schemars(length(min = 1))]
     pub reason: String,
+    /// `compact` (default) returns a few fields: enough to confirm the write without re-reading the whole record. `full` returns the complete result.
+    #[serde(default = "default_write_result_mode")]
+    pub mode: WriteResultMode,
 }
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]

@@ -917,6 +917,7 @@ def sweep_sessions(ctx: AppContext, params: SweepSessionsParams) -> SessionSweep
                 claim_check=claim_check,
             )
         )
+    rows = _narrowed(ctx, params, rows)
     rows.sort(
         key=lambda row: (
             oversight.ORDER.get(row.attention, 99),  # type: ignore[call-overload]
@@ -965,6 +966,48 @@ def sweep_sessions(ctx: AppContext, params: SweepSessionsParams) -> SessionSweep
             )
         rows = kept[: params.limit]
     return SessionSweepResult(rows=rows, counts=counts, swept_at=now, engine=None)
+
+
+def _narrowed(
+    ctx: AppContext, params: SweepSessionsParams, rows: list[SessionSweepRow]
+) -> list[SessionSweepRow]:
+    """Apply `exclude_roles`, `supervised_by` and `since` (WI-1525).
+
+    Counts are taken from what is left, so a sweep that hides a person's own
+    terminals does not report them as sessions needing attention.
+    """
+    if params.exclude_roles:
+        excluded = set(params.exclude_roles)
+        rows = [
+            row
+            for row in rows
+            if row.session is None or row.session.role not in excluded
+        ]
+    if params.supervised_by is not None:
+        with ctx.declared.read() as view:
+            starter = _starter_engine_id(view, params.supervised_by)
+        rows = [
+            row
+            for row in rows
+            if row.session is not None and row.session.started_by_session == starter
+        ]
+    since = params.since
+    if since is not None:
+
+        def changed(row: SessionSweepRow) -> bool:
+            summary = row.session
+            if summary is None:
+                return True
+            stamps = (
+                summary.last_output_at,
+                summary.done_at,
+                summary.turn_started_at,
+                None if summary.blocked is None else summary.blocked.since,
+            )
+            return any(at is not None and at > since for at in stamps)
+
+        rows = [row for row in rows if changed(row)]
+    return rows
 
 
 def _block_is_stale(summary: SessionSummary) -> bool:
