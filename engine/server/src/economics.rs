@@ -16,6 +16,16 @@ const CHARS_PER_TOKEN: i64 = 4;
 const READ_TOOLS: [&str; 3] = ["Read", "read_file", "cat"];
 const PATH_KEYS: [&str; 3] = ["file_path", "path", "filePath"];
 
+/// Compactions in a row, each with fewer than [`PROGRESS_TOOL_CALLS`] tool
+/// calls since the one before, that mark a compaction loop (WI-2832, WI-2043).
+/// A loop compacts, makes one call, and compacts again; real work makes many
+/// calls between compactions.
+pub(crate) const COMPACTION_LOOP_STREAK: i64 = 6;
+
+/// Tool calls between two compactions that count as the session getting on
+/// with its work, which ends a streak.
+const PROGRESS_TOOL_CALLS: i64 = 3;
+
 /// Accumulates the economics of one transcript, one JSONL line at a time.
 pub struct Meter {
     /// `claude` records usage; anything else is estimated from transcript size.
@@ -23,6 +33,9 @@ pub struct Meter {
     turn_ids: HashMap<String, ()>,
     unkeyed_turns: i64,
     compactions: i64,
+    /// Compactions in a row with little work between them.
+    compaction_streak: i64,
+    tool_calls_since_compaction: i64,
     context: i64,
     peak: i64,
     /// Output tokens per turn. Claude repeats one turn's usage on each of its
@@ -43,6 +56,8 @@ impl Meter {
             turn_ids: HashMap::new(),
             unkeyed_turns: 0,
             compactions: 0,
+            compaction_streak: 0,
+            tool_calls_since_compaction: 0,
             context: 0,
             peak: 0,
             output_by_turn: HashMap::new(),
@@ -72,6 +87,12 @@ impl Meter {
 
         if is_compaction(entry) {
             self.compactions += 1;
+            if self.tool_calls_since_compaction < PROGRESS_TOOL_CALLS {
+                self.compaction_streak += 1;
+            } else {
+                self.compaction_streak = 1;
+            }
+            self.tool_calls_since_compaction = 0;
             // The compacted history is no longer in the window.
             self.live_chars = 0;
         }
@@ -121,7 +142,17 @@ impl Meter {
             self.peak = self.peak.max(self.context);
         }
 
+        if is_tool_call(entry) {
+            self.tool_calls_since_compaction += 1;
+        }
+
         count_tools(entry, &mut self.tools, &mut self.reads, &self.tool_names);
+    }
+
+    /// The length of the current compaction loop once it is long enough to
+    /// act on, else `None`.
+    pub(crate) fn compaction_loop(&self) -> Option<i64> {
+        (self.compaction_streak >= COMPACTION_LOOP_STREAK).then_some(self.compaction_streak)
     }
 
     pub fn snapshot(&self) -> SessionEconomics {
@@ -167,12 +198,40 @@ fn is_compaction(entry: &serde_json::Map<String, Value>) -> bool {
     if entry.get("subtype").and_then(Value::as_str) == Some("compact_boundary") {
         return true;
     }
+    // Codex writes a top-level `compacted` line after each compaction.
+    if entry.get("type").and_then(Value::as_str) == Some("compacted") {
+        return true;
+    }
     entry
         .get("message")
         .and_then(Value::as_object)
         .and_then(|message| message.get("isCompactSummary"))
         .and_then(Value::as_bool)
         == Some(true)
+}
+
+/// Whether the entry is the agent calling a tool: a Codex `*_call` response
+/// item (not its output), or a Claude `tool_use` block.
+fn is_tool_call(entry: &serde_json::Map<String, Value>) -> bool {
+    if let Some(kind) = entry
+        .get("payload")
+        .and_then(Value::as_object)
+        .and_then(|payload| payload.get("type"))
+        .and_then(Value::as_str)
+    {
+        return entry.get("type").and_then(Value::as_str) == Some("response_item")
+            && kind.ends_with("_call");
+    }
+    entry
+        .get("message")
+        .and_then(Value::as_object)
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_array)
+        .is_some_and(|blocks| {
+            blocks
+                .iter()
+                .any(|block| block.get("type").and_then(Value::as_str) == Some("tool_use"))
+        })
 }
 
 /// `(context_tokens, output_tokens)` from an assistant entry.
@@ -441,6 +500,9 @@ pub(crate) struct Tail {
     /// The snapshot JSON last written. An unchanged snapshot is not written
     /// again, and does not restart the timer.
     persisted_json: Option<String>,
+    /// A compaction loop has been reported for this transcript, so it is not
+    /// reported again every tick.
+    loop_reported: bool,
 }
 
 impl Tail {
@@ -453,6 +515,7 @@ impl Tail {
             meter: Meter::new(agent),
             persisted: None,
             persisted_json: None,
+            loop_reported: false,
         }
     }
 }
@@ -674,6 +737,12 @@ pub fn spawn_economics_tailer(state: Arc<AppState>, home: PathBuf, tick: Duratio
                     tail.persisted = now;
                     tail.persisted_json = json.clone();
                 }
+                if !tail.loop_reported {
+                    if let Some(streak) = tail.meter.compaction_loop() {
+                        tail.loop_reported = true;
+                        report_compaction_loop(&session, &state.bus, streak);
+                    }
+                }
                 session.store_economics_tail(tail, snapshot.clone());
                 // The hibernation record is what a later removal counts, so it
                 // has to carry the snapshot the session ends with.
@@ -688,6 +757,35 @@ pub fn spawn_economics_tailer(state: Arc<AppState>, home: PathBuf, tick: Duratio
             }
         }
     });
+}
+
+/// Mark a session blocked when it is compacting over and over without doing
+/// work, so the operator is told instead of the session burning tokens. An
+/// existing report from the agent is left alone.
+fn report_compaction_loop(
+    session: &crate::pty::Session,
+    bus: &crate::events::EventBus,
+    streak: i64,
+) {
+    if session.blocked().is_some() {
+        return;
+    }
+    let report = vogt_engine_contract::BlockedReport {
+        reason: format!(
+            "Compaction loop: {streak} auto-compactions in a row with almost no work between \
+             them. The context after compaction is still over the agent's auto-compact limit."
+        ),
+        items: vec![
+            "Stop the session, then restart it with fewer MCP servers (the worker set) or a higher auto-compact limit."
+                .to_string(),
+        ],
+        since: time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_default(),
+    };
+    if let Err(e) = session.set_blocked(Some(report), bus) {
+        tracing::warn!(session = %session.id, error = %e, "failed to report a compaction loop");
+    }
 }
 
 async fn persist_snapshot(state: &AppState, id: uuid::Uuid, json: String) {
@@ -913,6 +1011,33 @@ mod tests {
             meter.feed_line(line);
         }
         meter.snapshot()
+    }
+
+    /// WI-2832: Codex writes a `compacted` line; one compaction, one call,
+    /// compaction again is a loop; real work between compactions is not.
+    #[test]
+    fn codex_compaction_loop_is_detected_and_work_ends_the_streak() {
+        let compacted = r#"{"type":"compacted","payload":{"message":""}}"#;
+        let call = r#"{"type":"response_item","payload":{"type":"function_call","name":"shell"}}"#;
+        let output = r#"{"type":"response_item","payload":{"type":"function_call_output"}}"#;
+
+        let mut thrash = Meter::new("codex");
+        for _ in 0..COMPACTION_LOOP_STREAK {
+            thrash.feed_line(compacted);
+            thrash.feed_line(call);
+            thrash.feed_line(output);
+        }
+        assert_eq!(thrash.snapshot().compactions, COMPACTION_LOOP_STREAK);
+        assert_eq!(thrash.compaction_loop(), Some(COMPACTION_LOOP_STREAK));
+
+        let mut working = Meter::new("codex");
+        for _ in 0..COMPACTION_LOOP_STREAK * 2 {
+            working.feed_line(compacted);
+            for _ in 0..PROGRESS_TOOL_CALLS {
+                working.feed_line(call);
+            }
+        }
+        assert_eq!(working.compaction_loop(), None);
     }
 
     /// Python: test_claude_usage_is_the_latest_turn_and_peak_is_the_largest
