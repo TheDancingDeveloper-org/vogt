@@ -2936,6 +2936,7 @@ where
         dispatch_profiles::ESCALATE_KEY,
         dispatch_profiles::REVIEW_BY_OVERSIGHT_KEY,
         dispatch_profiles::BUDGET_RESTARTS_KEY,
+        dispatch_profiles::CONTEXT_BUDGET_KEY,
     ] {
         if let Some(row) = view.latest_human_preference(key)? {
             if row
