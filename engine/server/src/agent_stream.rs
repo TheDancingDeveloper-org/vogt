@@ -32,9 +32,17 @@ struct Pending {
 struct SessionCredential {
     token: Vec<u8>,
 }
+#[derive(Debug, Clone)]
+struct PendingGraft {
+    token: crate::graft_mint::GraftToken,
+    expires: Instant,
+}
 #[derive(Debug, Default)]
 pub struct AgentAuth {
     pending: Mutex<HashMap<Uuid, Pending>>,
+    /// Per-session graft tokens minted at pod create, held until the pod's
+    /// bootstrap request takes them (or the pod is withdrawn or forgotten).
+    graft_tokens: Mutex<HashMap<Uuid, PendingGraft>>,
     sessions: Mutex<HashMap<Uuid, SessionCredential>>,
     links: std::sync::Mutex<HashMap<Uuid, mpsc::UnboundedSender<Frame>>>,
     pods: std::sync::Mutex<HashMap<Uuid, Arc<PodLink>>>,
@@ -339,6 +347,23 @@ async fn read_graft_token(path: Option<&str>) -> std::io::Result<Option<String>>
     let token = text.trim();
     Ok((!token.is_empty()).then(|| token.to_owned()))
 }
+
+/// The graft token a pod's bootstrap response carries: the one minted for it at
+/// create, else (no mint token configured) the shared one from
+/// `ENGINE_POD_GRAFT_TOKEN_FILE`. With a mint token configured the shared token
+/// is never handed out, even if a mint went missing: the pod then clones with
+/// its session token and fails loudly, rather than quietly widening its access.
+async fn resolve_graft_token(
+    minted: Option<crate::graft_mint::GraftToken>,
+    mint_configured: bool,
+    shared_file: Option<&str>,
+) -> std::io::Result<Option<String>> {
+    match minted {
+        Some(minted) => Ok(Some(minted.expose().to_owned())),
+        None if mint_configured => Ok(None),
+        None => read_graft_token(shared_file).await,
+    }
+}
 pub fn global() -> Arc<AgentAuth> {
     Arc::clone(AUTH.get_or_init(|| Arc::new(AgentAuth::default())))
 }
@@ -358,6 +383,32 @@ impl AgentAuth {
     /// `BOOTSTRAP_TTL`; this closes that window.
     pub async fn withdraw(&self, id: Uuid) {
         self.pending.lock().await.remove(&id);
+        self.graft_tokens.lock().await.remove(&id);
+    }
+    /// Whether a bootstrap credential is held for `id`: issued, and neither
+    /// consumed nor withdrawn.
+    pub async fn bootstrap_pending(&self, id: Uuid) -> bool {
+        self.pending.lock().await.contains_key(&id)
+    }
+    /// Hold the graft token minted for `id`'s pod until its bootstrap request
+    /// takes it. It lives as long as the bootstrap credential does; a pod that
+    /// never boots leaves nothing behind past `BOOTSTRAP_TTL`.
+    pub async fn stash_graft_token(&self, id: Uuid, token: crate::graft_mint::GraftToken) {
+        let now = Instant::now();
+        let mut held = self.graft_tokens.lock().await;
+        held.retain(|_, g| g.expires > now);
+        held.insert(
+            id,
+            PendingGraft {
+                token,
+                expires: now + BOOTSTRAP_TTL,
+            },
+        );
+    }
+    /// Take (once) the graft token minted for `id`, if one is held and fresh.
+    pub(crate) async fn take_graft_token(&self, id: Uuid) -> Option<crate::graft_mint::GraftToken> {
+        let g = self.graft_tokens.lock().await.remove(&id)?;
+        (g.expires > Instant::now()).then_some(g.token)
     }
     pub(crate) async fn consume(&self, id: Uuid, candidate: &[u8]) -> bool {
         let mut p = self.pending.lock().await;
@@ -501,6 +552,9 @@ impl AgentAuth {
         if let Ok(mut sessions) = self.sessions.try_lock() {
             sessions.remove(&id);
         }
+        if let Ok(mut held) = self.graft_tokens.try_lock() {
+            held.remove(&id);
+        }
     }
     pub fn send(&self, id: Uuid, frame: Frame) -> std::io::Result<()> {
         let result = self
@@ -575,7 +629,13 @@ pub async fn bootstrap(
         Ok(cfg) => cfg,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
-    let graft_token = match read_graft_token(cfg.graft_token_file.as_deref()).await {
+    let graft_token = match resolve_graft_token(
+        state.agent_auth.take_graft_token(id).await,
+        cfg.graft_mint_token_file.is_some(),
+        cfg.graft_token_file.as_deref(),
+    )
+    .await
+    {
         Ok(token) => token,
         Err(_) => {
             return (
@@ -795,6 +855,60 @@ mod tests {
         assert_eq!(env["GRAFT_LINE"], "rust-2");
         assert_eq!(env["VOGT_GRAFT_LINE"], "rust-2");
         assert!(!bootstrap_env("e".into(), None, Uuid::nil(), &req).contains_key("GRAFT_ENDPOINT"));
+    }
+
+    #[tokio::test]
+    async fn the_minted_token_wins_and_the_shared_one_is_only_a_fallback() {
+        use crate::graft_mint::GraftToken;
+        let dir = tempfile::tempdir().unwrap();
+        let shared = dir.path().join("shared");
+        std::fs::write(&shared, "shared-token\n").unwrap();
+        let shared = shared.to_str();
+        let minted = || Some(GraftToken::new("minted-token"));
+        // A minted token is used whatever else is configured.
+        for mint_configured in [true, false] {
+            assert_eq!(
+                resolve_graft_token(minted(), mint_configured, shared)
+                    .await
+                    .unwrap()
+                    .as_deref(),
+                Some("minted-token")
+            );
+        }
+        // No mint token configured: the shared token is the fallback.
+        assert_eq!(
+            resolve_graft_token(None, false, shared)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("shared-token")
+        );
+        assert_eq!(resolve_graft_token(None, false, None).await.unwrap(), None);
+        // A mint token is configured but nothing was minted for this pod: the
+        // shared token is not handed out in its place.
+        assert_eq!(resolve_graft_token(None, true, shared).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn a_minted_graft_token_is_taken_once_and_withdrawn_with_the_bootstrap_token() {
+        use crate::graft_mint::GraftToken;
+        let auth = AgentAuth::default();
+        let id = Uuid::new_v4();
+        auth.issue(id, b"boot").await;
+        auth.stash_graft_token(id, GraftToken::new("g1")).await;
+        assert!(auth.bootstrap_pending(id).await);
+        assert_eq!(auth.take_graft_token(id).await.unwrap().expose(), "g1");
+        assert!(auth.take_graft_token(id).await.is_none(), "taken once");
+
+        auth.stash_graft_token(id, GraftToken::new("g2")).await;
+        auth.withdraw(id).await;
+        assert!(!auth.bootstrap_pending(id).await);
+        assert!(auth.take_graft_token(id).await.is_none());
+
+        // Forgetting a pod drops a token that was never collected.
+        auth.stash_graft_token(id, GraftToken::new("g3")).await;
+        auth.forget_pod(id);
+        assert!(auth.take_graft_token(id).await.is_none());
     }
 
     #[tokio::test]
