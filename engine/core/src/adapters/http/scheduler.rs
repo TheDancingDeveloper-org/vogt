@@ -34,7 +34,7 @@ use serde_json::json;
 
 use crate::application::collect::sweep_built;
 use crate::application::context::build_context;
-use crate::application::services::budget_handoff;
+use crate::application::services::{budget_handoff, context_rotation};
 use crate::config::VogtConfig;
 use crate::core::{ActorKind, Principal};
 use crate::errors::VogtError;
@@ -105,7 +105,8 @@ pub fn serve_tick(config: VogtConfig) -> Tick {
             || sweep_built(&built, &json!({ "reason": SCHEDULED_REASON })).map(drop),
             || {
                 with_ctx!(&built, |ctx| {
-                    budget_handoff::settle_budget_stops(ctx).map(drop)
+                    budget_handoff::settle_budget_stops(ctx).map(drop)?;
+                    context_rotation::rotate_over_budget(ctx).map(drop)
                 })
             },
         )

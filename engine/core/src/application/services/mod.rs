@@ -17,6 +17,7 @@ pub mod bootstrap;
 pub mod budget_handoff;
 pub mod chats;
 pub mod connect;
+pub mod context_rotation;
 pub mod engine_status;
 pub mod forge_accounts;
 pub mod forge_import;
@@ -155,5 +156,7 @@ mod sessions_test;
 
 #[cfg(test)]
 mod budget_handoff_test;
+#[cfg(test)]
+mod context_rotation_test;
 #[cfg(test)]
 mod handoff_test;

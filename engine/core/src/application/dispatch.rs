@@ -15,7 +15,7 @@
 
 use std::collections::BTreeMap;
 
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 
 use crate::core::py_repr;
 
@@ -38,6 +38,12 @@ pub const REVIEW_BY_OVERSIGHT_KEY: &str = "dispatch.review_by_oversight_only";
 /// How many times the core restarts an item's worker from its hand-off after
 /// a budget stop (WI-1833). `0` turns the restart off.
 pub const BUDGET_RESTARTS_KEY: &str = "dispatch.budget_restarts_per_item";
+/// Per-role context budget (WI-3132): `{"oversight": {"tokens": 250000}}`.
+/// A role that crosses its budget is asked for a hand-off and replaced by a
+/// fresh session seeded with it. A role with no entry is never rotated.
+pub const CONTEXT_BUDGET_KEY: &str = "dispatch.context_budget";
+/// The roles a context budget can name. Only oversight rotates today.
+pub const CONTEXT_BUDGET_ROLES: [&str; 1] = ["oversight"];
 
 pub const DEFAULT_MAX_WORKERS_PER_OVERSEER: i64 = 5;
 pub const DEFAULT_ESCALATE_AFTER_FAILED_REVIEWS: i64 = 2;
@@ -97,6 +103,8 @@ pub struct DispatchSettings {
     pub escalate_after_failed_reviews: i64,
     pub review_by_oversight_only: bool,
     pub budget_restarts_per_item: i64,
+    /// Context-token budget by role; a role absent here has none.
+    pub context_budget: BTreeMap<String, i64>,
 }
 
 impl DispatchSettings {
@@ -108,7 +116,8 @@ impl DispatchSettings {
 
 /// The preference keys a write may name. Every other `dispatch.*` key is
 /// refused, so a typo is said rather than stored and silently ignored.
-pub const KEYS: [&str; 5] = [
+pub const KEYS: [&str; 6] = [
+    CONTEXT_BUDGET_KEY,
     PROFILES_KEY,
     MAX_WORKERS_KEY,
     ESCALATE_KEY,
@@ -141,7 +150,41 @@ pub fn validate(key: &str, value: &Value) -> Result<Value, String> {
     if key == PROFILES_KEY {
         return validate_profiles(object);
     }
+    if key == CONTEXT_BUDGET_KEY {
+        return validate_context_budget(object);
+    }
     validate_scalar(key, value)
+}
+
+/// `{role: {"tokens": n}}` with `n` a positive whole number.
+fn validate_context_budget(object: &Map<String, Value>) -> Result<Value, String> {
+    let mut out = Map::new();
+    for (role, fields) in object {
+        if !CONTEXT_BUDGET_ROLES.contains(&role.as_str()) {
+            return Err(format!(
+                "unknown role {} in {CONTEXT_BUDGET_KEY}; the roles are {}",
+                py_repr(role),
+                CONTEXT_BUDGET_ROLES.join(", ")
+            ));
+        }
+        let fields = fields
+            .as_object()
+            .ok_or_else(|| format!("invalid {CONTEXT_BUDGET_KEY}.{role} — expected an object"))?;
+        if let Some(extra) = fields.keys().find(|name| name.as_str() != "tokens") {
+            return Err(format!(
+                "invalid {CONTEXT_BUDGET_KEY}.{role} — {extra}: Extra inputs are not permitted"
+            ));
+        }
+        let tokens = fields
+            .get("tokens")
+            .and_then(Value::as_i64)
+            .filter(|tokens| *tokens > 0)
+            .ok_or_else(|| {
+                format!("invalid {CONTEXT_BUDGET_KEY}.{role} — tokens: must be a whole number greater than 0")
+            })?;
+        out.insert(role.clone(), json!({"tokens": tokens}));
+    }
+    Ok(Value::Object(out))
 }
 
 fn validate_profiles(object: &Map<String, Value>) -> Result<Value, String> {
@@ -464,7 +507,27 @@ pub fn resolve(stored: &BTreeMap<String, Value>) -> DispatchSettings {
             .unwrap_or(DEFAULT_REVIEW_BY_OVERSIGHT_ONLY),
         budget_restarts_per_item: scalar_count(stored, BUDGET_RESTARTS_KEY)
             .unwrap_or(DEFAULT_BUDGET_RESTARTS_PER_ITEM),
+        context_budget: context_budget(stored),
     }
+}
+
+/// The roles with a stored budget; a malformed entry is ignored, as a stored
+/// profile that no longer parses is.
+fn context_budget(stored: &BTreeMap<String, Value>) -> BTreeMap<String, i64> {
+    let Some(object) = stored.get(CONTEXT_BUDGET_KEY).and_then(Value::as_object) else {
+        return BTreeMap::new();
+    };
+    object
+        .iter()
+        .filter(|(role, _)| CONTEXT_BUDGET_ROLES.contains(&role.as_str()))
+        .filter_map(|(role, fields)| {
+            let tokens = fields
+                .get("tokens")?
+                .as_i64()
+                .filter(|tokens| *tokens > 0)?;
+            Some((role.clone(), tokens))
+        })
+        .collect()
 }
 
 /// Lay the fields an override names over a profile; the rest stand.
