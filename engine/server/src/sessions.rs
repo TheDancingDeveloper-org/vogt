@@ -206,30 +206,40 @@ impl SessionRegistry {
     /// Start the loop that settles the cluster's session pods against this
     /// engine's sessions (`pod_reconcile`). A no-op unless pod backends are on.
     pub fn start_pod_reconciler(&self) -> Option<tokio::task::JoinHandle<()>> {
-        self.cfg.pod_backends_enabled.then(|| {
-            crate::pod_reconcile::spawn(
-                self.pod_launcher(),
+        if !self.cfg.pod_backends_enabled {
+            return None;
+        }
+        let started = self
+            .pod_config()
+            .and_then(|cfg| Ok((self.pod_launcher()?, cfg)));
+        match started {
+            Ok((launcher, cfg)) => Some(crate::pod_reconcile::spawn(
+                launcher,
                 crate::agent_stream::global(),
-                self.pod_config(),
-            )
-        })
+                cfg,
+            )),
+            Err(e) => {
+                tracing::error!("pod reconciler not started: {e}");
+                None
+            }
+        }
     }
 
-    fn pod_launcher(&self) -> Arc<dyn crate::pod_backend::PodLauncher> {
-        Arc::clone(self.pod_launcher.lock().get_or_insert_with(|| {
-            Arc::new(crate::pod_backend::KubeLauncher::new(self.pod_config()))
-        }))
+    fn pod_launcher(&self) -> Result<Arc<dyn crate::pod_backend::PodLauncher>> {
+        let mut slot = self.pod_launcher.lock();
+        if let Some(launcher) = slot.as_ref() {
+            return Ok(Arc::clone(launcher));
+        }
+        let launcher: Arc<dyn crate::pod_backend::PodLauncher> =
+            Arc::new(crate::pod_backend::KubeLauncher::new(self.pod_config()?));
+        *slot = Some(Arc::clone(&launcher));
+        Ok(launcher)
     }
 
-    fn pod_config(&self) -> crate::pod_backend::PodConfig {
-        let mut cfg = crate::pod_backend::PodConfig::default();
-        if let Some(url) = self.cfg.agent_auth_public_url.clone() {
-            cfg.engine_endpoint = url;
-        }
-        if let Ok(id) = std::env::var("ENGINE_POD_ENGINE_ID") {
-            cfg.engine_id = crate::pod_backend::sanitize_engine_id(&id);
-        }
-        cfg
+    /// The pod backend's settings: defaults, then `ENGINE_POD_*`, with the
+    /// engine's `agent_auth_public_url` as the endpoint unless overridden.
+    pub fn pod_config(&self) -> Result<crate::pod_backend::PodConfig> {
+        crate::pod_backend::PodConfig::from_env(self.cfg.agent_auth_public_url.clone())
     }
 
     /// Start a session whose process runs in a pod: register the engine's half
@@ -243,7 +253,8 @@ impl SessionRegistry {
         template: &crate::config::SessionTemplate,
     ) -> Result<crate::pty::SpawnedSession> {
         let auth = crate::agent_stream::global();
-        let launcher = self.pod_launcher();
+        let pod_config = self.pod_config()?;
+        let launcher = self.pod_launcher()?;
         let (link, reader) = auth.register_pod(id);
         let backend = Arc::new(crate::pod_backend::PodBackend::new(
             id,
@@ -274,10 +285,10 @@ impl SessionRegistry {
         let spawned = spawned?;
         let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple()).into_bytes();
         let pod = crate::pod_backend::pod_template(
-            &self.pod_config(),
+            &pod_config,
             template,
             id,
-            &self.pod_config().graft_repo,
+            &pod_config.graft_repo,
             "session",
             spec.account.as_deref(),
             spec.command.as_deref().unwrap_or_default(),

@@ -42,6 +42,9 @@ pub struct PodConfig {
     pub extra_ca_file: Option<String>,
     pub priority_class: Option<String>,
     pub service_account: String,
+    /// Secret holding registry credentials for the session image, if private.
+    #[serde(default)]
+    pub image_pull_secret: Option<String>,
     /// How often the reconciler compares the cluster with the engine's sessions.
     #[serde(default = "default_reconcile_interval")]
     pub reconcile_interval: Duration,
@@ -151,6 +154,7 @@ impl Default for PodConfig {
             extra_ca_file: None,
             priority_class: Some("vogt-session".into()),
             service_account: "vogt-session".into(),
+            image_pull_secret: None,
             reconcile_interval: default_reconcile_interval(),
             pending_timeout: default_pending_timeout(),
             engine_id: default_engine_id(),
@@ -158,6 +162,102 @@ impl Default for PodConfig {
     }
 }
 impl PodConfig {
+    /// Defaults overridden by `ENGINE_POD_*` settings, read through `get` so
+    /// tests need not touch the process environment. An empty value for the
+    /// priority class, a cache name, the pull secret or a resource list turns
+    /// that item off. `endpoint` is the engine's own `agent_auth_public_url`,
+    /// used when `ENGINE_POD_ENGINE_ENDPOINT` is unset.
+    pub fn from_lookup(
+        get: impl Fn(&str) -> Option<String>,
+        endpoint: Option<String>,
+    ) -> Result<Self> {
+        let mut cfg = Self::default();
+        // `VOGT_ENGINE_POD_*` is accepted as an alias (the smoke harness sets
+        // it); `ENGINE_POD_*` wins when both are present.
+        let text = |name: &str| {
+            get(name)
+                .or_else(|| get(&format!("VOGT_{name}")))
+                .map(|v| v.trim().to_string())
+        };
+        let set = |name: &str, field: &mut String| {
+            if let Some(v) = text(name).filter(|v| !v.is_empty()) {
+                *field = v;
+            }
+        };
+        // Cache names may be emptied: a namespace without the cache objects
+        // (the smoke cluster) runs sessions with no cache.
+        let set_or_empty = |name: &str, field: &mut String| {
+            if let Some(v) = text(name) {
+                *field = v;
+            }
+        };
+        let optional = |name: &str, field: &mut Option<String>| {
+            if let Some(v) = text(name) {
+                *field = (!v.is_empty()).then_some(v);
+            }
+        };
+        set("ENGINE_POD_NAMESPACE", &mut cfg.namespace);
+        set("ENGINE_POD_IMAGE", &mut cfg.default_image);
+        set("ENGINE_POD_SERVICE_ACCOUNT", &mut cfg.service_account);
+        set("ENGINE_POD_GRAFT_REPO", &mut cfg.graft_repo);
+        set("ENGINE_POD_GRAFT_LINE", &mut cfg.graft_line);
+        set("ENGINE_POD_CLI", &mut cfg.cli);
+        set_or_empty("ENGINE_POD_CACHE_PVC", &mut cfg.cache_pvc);
+        set_or_empty("ENGINE_POD_CACHE_NODE", &mut cfg.cache_node);
+        set_or_empty(
+            "ENGINE_POD_CACHE_ENV_CONFIG_MAP",
+            &mut cfg.cache_env_config_map,
+        );
+        set_or_empty("ENGINE_POD_CACHE_SECRET", &mut cfg.cache_secret);
+        set_or_empty("ENGINE_POD_KACHE_CONFIG_MAP", &mut cfg.kache_config_map);
+        optional("ENGINE_POD_PRIORITY_CLASS", &mut cfg.priority_class);
+        optional("ENGINE_POD_IMAGE_PULL_SECRET", &mut cfg.image_pull_secret);
+        optional("ENGINE_POD_EXTRA_CA_FILE", &mut cfg.extra_ca_file);
+        if let Some(v) = text("ENGINE_POD_RESOURCE_REQUESTS") {
+            cfg.resource_requests = parse_resources("ENGINE_POD_RESOURCE_REQUESTS", &v)?;
+        }
+        if let Some(v) = text("ENGINE_POD_RESOURCE_LIMITS") {
+            cfg.resource_limits = parse_resources("ENGINE_POD_RESOURCE_LIMITS", &v)?;
+        }
+        if let Some(v) = text("ENGINE_POD_ENGINE_ID") {
+            cfg.engine_id = sanitize_engine_id(&v);
+        }
+        let insecure = match text("ENGINE_POD_ALLOW_INSECURE_ENDPOINT").as_deref() {
+            None | Some("") | Some("false") | Some("0") => false,
+            Some("true") | Some("1") => true,
+            Some(other) => {
+                return Err(ApiError::Config(format!(
+                    "ENGINE_POD_ALLOW_INSECURE_ENDPOINT must be true or false, got {other:?}"
+                )))
+            }
+        };
+        match text("ENGINE_POD_ENGINE_ENDPOINT").filter(|v| !v.is_empty()) {
+            Some(url) => {
+                let url = url.trim_end_matches('/').to_string();
+                let ok = url.starts_with("https://") || (insecure && url.starts_with("http://"));
+                if !ok {
+                    return Err(ApiError::Config(
+                        "ENGINE_POD_ENGINE_ENDPOINT must be an https URL \
+                         (plain http needs ENGINE_POD_ALLOW_INSECURE_ENDPOINT=true)"
+                            .into(),
+                    ));
+                }
+                cfg.engine_endpoint = url;
+            }
+            None => {
+                if let Some(url) = endpoint {
+                    cfg.engine_endpoint = url;
+                }
+            }
+        }
+        Ok(cfg)
+    }
+
+    /// `from_lookup` over the process environment.
+    pub fn from_env(endpoint: Option<String>) -> Result<Self> {
+        Self::from_lookup(|name| std::env::var(name).ok(), endpoint)
+    }
+
     pub async fn client(&self) -> Result<Client> {
         let config = match self.kubeconfig.as_ref() {
             Some(path) => {
@@ -173,6 +273,26 @@ impl PodConfig {
         }?;
         Client::try_from(config).map_err(|e| ApiError::Config(format!("kubernetes client: {e}")))
     }
+}
+/// `cpu=100m,memory=256Mi` into a resource map; empty means none.
+fn parse_resources(
+    name: &str,
+    value: &str,
+) -> Result<BTreeMap<String, k8s_openapi::apimachinery::pkg::api::resource::Quantity>> {
+    let mut out = BTreeMap::new();
+    for pair in value.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+        let (k, v) = pair
+            .split_once('=')
+            .filter(|(k, v)| !k.trim().is_empty() && !v.trim().is_empty())
+            .ok_or_else(|| {
+                ApiError::Config(format!("{name}: expected name=quantity, got {pair:?}"))
+            })?;
+        out.insert(
+            k.trim().to_string(),
+            k8s_openapi::apimachinery::pkg::api::resource::Quantity(v.trim().to_string()),
+        );
+    }
+    Ok(out)
 }
 pub fn pod_name(id: Uuid) -> String {
     format!("vogt-session-{}", id.simple())
@@ -338,6 +458,58 @@ pub fn pod_template(
         .find_map(|(k, v)| (k == "VOGT_SESSION_IMAGE").then_some(v.as_str()))
         .unwrap_or(&cfg.default_image);
     let env = pod_env(cfg, id, bootstrap_token);
+    // Each cache object is optional: an empty name leaves it out.
+    let mut env_from = Vec::new();
+    if !cfg.cache_env_config_map.is_empty() {
+        env_from.push(EnvFromSource {
+            config_map_ref: Some(ConfigMapEnvSource {
+                name: cfg.cache_env_config_map.clone(),
+                optional: Some(false),
+            }),
+            ..Default::default()
+        });
+    }
+    if !cfg.cache_secret.is_empty() {
+        env_from.push(EnvFromSource {
+            secret_ref: Some(SecretEnvSource {
+                name: cfg.cache_secret.clone(),
+                optional: Some(false),
+            }),
+            ..Default::default()
+        });
+    }
+    let mut mounts = Vec::new();
+    let mut volumes = Vec::new();
+    if !cfg.cache_pvc.is_empty() {
+        mounts.push(VolumeMount {
+            name: "session-cache".into(),
+            mount_path: "/cache".into(),
+            ..Default::default()
+        });
+        volumes.push(Volume {
+            name: "session-cache".into(),
+            persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
+                claim_name: cfg.cache_pvc.clone(),
+                read_only: Some(false),
+            }),
+            ..Default::default()
+        });
+    }
+    if !cfg.kache_config_map.is_empty() {
+        mounts.push(VolumeMount {
+            name: "kache-config".into(),
+            mount_path: "/etc/kache".into(),
+            ..Default::default()
+        });
+        volumes.push(Volume {
+            name: "kache-config".into(),
+            config_map: Some(ConfigMapVolumeSource {
+                name: cfg.kache_config_map.clone(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+    }
     Pod {
         metadata: ObjectMeta {
             name: Some(pod_name(id)),
@@ -351,34 +523,8 @@ pub fn pod_template(
                 image: Some(image.into()),
                 command: (!command.is_empty()).then(|| command.to_vec()),
                 env: Some(env),
-                env_from: Some(vec![
-                    EnvFromSource {
-                        config_map_ref: Some(ConfigMapEnvSource {
-                            name: cfg.cache_env_config_map.clone(),
-                            optional: Some(false),
-                        }),
-                        ..Default::default()
-                    },
-                    EnvFromSource {
-                        secret_ref: Some(SecretEnvSource {
-                            name: cfg.cache_secret.clone(),
-                            optional: Some(false),
-                        }),
-                        ..Default::default()
-                    },
-                ]),
-                volume_mounts: Some(vec![
-                    VolumeMount {
-                        name: "session-cache".into(),
-                        mount_path: "/cache".into(),
-                        ..Default::default()
-                    },
-                    VolumeMount {
-                        name: cfg.kache_config_map.clone(),
-                        mount_path: "/etc/kache".into(),
-                        ..Default::default()
-                    },
-                ]),
+                env_from: Some(env_from),
+                volume_mounts: Some(mounts),
                 resources: Some(ResourceRequirements {
                     requests: (!cfg.resource_requests.is_empty())
                         .then(|| cfg.resource_requests.clone()),
@@ -409,25 +555,11 @@ pub fn pod_template(
                 ..Default::default()
             }),
             node_selector: (!cfg.node_selector.is_empty()).then(|| cfg.node_selector.clone()),
-            node_name: Some(cfg.cache_node.clone()),
-            volumes: Some(vec![
-                Volume {
-                    name: "session-cache".into(),
-                    persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
-                        claim_name: cfg.cache_pvc.clone(),
-                        read_only: Some(false),
-                    }),
-                    ..Default::default()
-                },
-                Volume {
-                    name: "kache-config".into(),
-                    config_map: Some(ConfigMapVolumeSource {
-                        name: cfg.kache_config_map.clone(),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                },
-            ]),
+            node_name: (!cfg.cache_node.is_empty()).then(|| cfg.cache_node.clone()),
+            image_pull_secrets: cfg.image_pull_secret.as_ref().map(|name| {
+                vec![k8s_openapi::api::core::v1::LocalObjectReference { name: name.clone() }]
+            }),
+            volumes: Some(volumes),
             priority_class_name: cfg.priority_class.clone(),
             restart_policy: Some("Never".into()),
             ..Default::default()
@@ -1022,5 +1154,182 @@ mod tests {
         // With the uid of the pod that is there, the delete goes through.
         factory.delete(id, Some("uid-new".into())).await.unwrap();
         assert!(store.lock().unwrap().is_empty());
+    }
+
+    fn lookup(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let map: BTreeMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        move |name| map.get(name).cloned()
+    }
+
+    fn pod_template_for(cfg: &PodConfig) -> Pod {
+        let template = SessionTemplate {
+            name: "Pod".into(),
+            description: "pod".into(),
+            command: None,
+            cwd: None,
+            env: vec![],
+            default_name: None,
+            match_repo_names: vec![],
+            match_path_prefixes: vec![],
+            tags: vec![],
+            backend: "pod".into(),
+            account: None,
+        };
+        pod_template(
+            cfg,
+            &template,
+            Uuid::nil(),
+            "vogt",
+            "session",
+            None,
+            &[],
+            b"t",
+        )
+    }
+
+    #[test]
+    fn config_defaults_are_the_current_values() {
+        let cfg = PodConfig::from_lookup(lookup(&[]), None).unwrap();
+        let d = PodConfig::default();
+        assert_eq!(cfg.namespace, "vogt-sessions");
+        assert_eq!(cfg.default_image, d.default_image);
+        assert_eq!(cfg.engine_endpoint, d.engine_endpoint);
+        assert_eq!(cfg.service_account, "vogt-session");
+        assert_eq!(cfg.priority_class.as_deref(), Some("vogt-session"));
+        assert_eq!(cfg.cache_pvc, "session-cache-winrarhost1");
+        assert_eq!(cfg.image_pull_secret, None);
+        assert_eq!(cfg.resource_requests, d.resource_requests);
+        assert_eq!(cfg.resource_limits, d.resource_limits);
+    }
+
+    #[test]
+    fn config_reads_every_override() {
+        let cfg = PodConfig::from_lookup(
+            lookup(&[
+                ("ENGINE_POD_NAMESPACE", "smoke-sessions"),
+                ("ENGINE_POD_IMAGE", "reg/pod:1"),
+                ("ENGINE_POD_SERVICE_ACCOUNT", "sa"),
+                ("ENGINE_POD_IMAGE_PULL_SECRET", "pull"),
+                ("ENGINE_POD_PRIORITY_CLASS", ""),
+                ("ENGINE_POD_CACHE_PVC", "pvc"),
+                ("ENGINE_POD_RESOURCE_REQUESTS", "cpu=50m, memory=64Mi"),
+                ("ENGINE_POD_RESOURCE_LIMITS", ""),
+                ("ENGINE_POD_ENGINE_ID", "Smoke Engine"),
+            ]),
+            None,
+        )
+        .unwrap();
+        assert_eq!(cfg.namespace, "smoke-sessions");
+        assert_eq!(cfg.default_image, "reg/pod:1");
+        assert_eq!(cfg.service_account, "sa");
+        assert_eq!(cfg.image_pull_secret.as_deref(), Some("pull"));
+        assert_eq!(cfg.priority_class, None);
+        assert_eq!(cfg.cache_pvc, "pvc");
+        assert_eq!(cfg.resource_requests.len(), 2);
+        assert_eq!(cfg.resource_requests["cpu"].0, "50m");
+        assert!(cfg.resource_limits.is_empty());
+        assert_eq!(cfg.engine_id, sanitize_engine_id("Smoke Engine"));
+    }
+
+    #[test]
+    fn endpoint_must_be_https_unless_explicitly_allowed() {
+        let http = "http://vogt-smoke-engine.vogt-smoke.svc:8910/";
+        assert!(
+            PodConfig::from_lookup(lookup(&[("ENGINE_POD_ENGINE_ENDPOINT", http)]), None).is_err()
+        );
+        assert!(PodConfig::from_lookup(
+            lookup(&[
+                ("ENGINE_POD_ENGINE_ENDPOINT", http),
+                ("ENGINE_POD_ALLOW_INSECURE_ENDPOINT", "false"),
+            ]),
+            None
+        )
+        .is_err());
+        let cfg = PodConfig::from_lookup(
+            lookup(&[
+                ("ENGINE_POD_ENGINE_ENDPOINT", http),
+                ("ENGINE_POD_ALLOW_INSECURE_ENDPOINT", "true"),
+            ]),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.engine_endpoint,
+            "http://vogt-smoke-engine.vogt-smoke.svc:8910"
+        );
+        let https = PodConfig::from_lookup(
+            lookup(&[("ENGINE_POD_ENGINE_ENDPOINT", "https://e.example:18197")]),
+            None,
+        )
+        .unwrap();
+        assert_eq!(https.engine_endpoint, "https://e.example:18197");
+        assert!(PodConfig::from_lookup(
+            lookup(&[("ENGINE_POD_ALLOW_INSECURE_ENDPOINT", "maybe")]),
+            None
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn the_public_url_is_the_endpoint_unless_overridden() {
+        let cfg = PodConfig::from_lookup(lookup(&[]), Some("https://pub.example".into())).unwrap();
+        assert_eq!(cfg.engine_endpoint, "https://pub.example");
+        let cfg = PodConfig::from_lookup(
+            lookup(&[("ENGINE_POD_ENGINE_ENDPOINT", "https://own.example")]),
+            Some("https://pub.example".into()),
+        )
+        .unwrap();
+        assert_eq!(cfg.engine_endpoint, "https://own.example");
+    }
+
+    #[test]
+    fn the_vogt_prefixed_alias_is_read_and_the_plain_name_wins() {
+        let cfg = PodConfig::from_lookup(
+            lookup(&[
+                ("VOGT_ENGINE_POD_NAMESPACE", "alias-ns"),
+                ("VOGT_ENGINE_POD_IMAGE", "alias/img"),
+                ("ENGINE_POD_IMAGE", "plain/img"),
+            ]),
+            None,
+        )
+        .unwrap();
+        assert_eq!(cfg.namespace, "alias-ns");
+        assert_eq!(cfg.default_image, "plain/img");
+    }
+
+    #[test]
+    fn bad_resources_are_refused() {
+        for bad in ["cpu", "cpu=", "=1"] {
+            assert!(
+                PodConfig::from_lookup(lookup(&[("ENGINE_POD_RESOURCE_LIMITS", bad)]), None)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn empty_cache_names_leave_the_cache_out_of_the_pod() {
+        let cfg = PodConfig::from_lookup(
+            lookup(&[
+                ("ENGINE_POD_CACHE_PVC", ""),
+                ("ENGINE_POD_CACHE_NODE", ""),
+                ("ENGINE_POD_CACHE_ENV_CONFIG_MAP", ""),
+                ("ENGINE_POD_CACHE_SECRET", ""),
+                ("ENGINE_POD_KACHE_CONFIG_MAP", ""),
+                ("ENGINE_POD_IMAGE_PULL_SECRET", "pull"),
+            ]),
+            None,
+        )
+        .unwrap();
+        let spec = pod_template_for(&cfg).spec.unwrap();
+        assert!(spec.volumes.unwrap().is_empty());
+        assert!(spec.node_name.is_none());
+        let c = &spec.containers[0];
+        assert!(c.env_from.as_ref().unwrap().is_empty());
+        assert!(c.volume_mounts.as_ref().unwrap().is_empty());
+        assert_eq!(spec.image_pull_secrets.unwrap()[0].name, "pull");
     }
 }
