@@ -11,6 +11,7 @@ unchanged, which is why the compose files do not change.
 from __future__ import annotations
 
 import re
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -41,6 +42,17 @@ def test_server_build_compiles_vogt_core_and_the_runtime_copies_it() -> None:
         "COPY --from=server-build /usr/local/bin/vogt-core /usr/local/bin/vogt-core"
         in text
     )
+
+
+def test_server_build_check_copies_every_workspace_member() -> None:
+    manifest = tomllib.loads((REPO_ROOT / "engine/Cargo.toml").read_text())
+    workflow = (REPO_ROOT / ".github/workflows/rust-core.yml").read_text()
+    stage = workflow.split("- name: server-build stage loads\n", 1)[1].split("\n\n", 1)[
+        0
+    ]
+    for member in manifest["workspace"]["members"]:
+        for entry in ("Cargo.toml", "src"):
+            assert f"copy engine/{member}/{entry} {member}/{entry}" in stage
 
 
 def test_the_engine_image_does_not_lift_a_published_core() -> None:
