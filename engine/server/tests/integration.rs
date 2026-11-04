@@ -17122,13 +17122,13 @@ mod pod_stream {
         for name in [
             "VOGT_ENGINE_URL",
             "VOGT_SESSION_ID",
-            "VOGT_BOOTSTRAP_TOKEN",
+            "VOGT_BOOTSTRAP_TOKEN_FILE",
             "VOGT_GRAFT_REPO",
             "VOGT_GRAFT_LINE",
             "VOGT_CLI",
         ] {
             assert!(spec_env.contains_key(name), "pod spec.env lacks {name}");
-            if name == "VOGT_BOOTSTRAP_TOKEN" {
+            if name == "VOGT_BOOTSTRAP_TOKEN_FILE" {
                 continue;
             }
             assert!(
@@ -17139,7 +17139,18 @@ mod pod_stream {
         assert_eq!(body["env"]["VOGT_ENGINE_URL"], spec_env["VOGT_ENGINE_URL"]);
         assert_eq!(spec_env["VOGT_SESSION_ID"], id.to_string());
         assert_eq!(body["env"]["VOGT_SESSION_ID"], id.to_string());
-        assert_eq!(spec_env["VOGT_BOOTSTRAP_TOKEN"], token);
+        // The credential is not in the pod spec at all, only the path of the
+        // file the per-session Secret is mounted at.
+        assert_eq!(
+            spec_env["VOGT_BOOTSTRAP_TOKEN_FILE"],
+            "/run/vogt-bootstrap/token"
+        );
+        assert!(!spec_env.contains_key("VOGT_BOOTSTRAP_TOKEN"));
+        assert!(!spec_env.contains_key("VOGT_AGENT_BOOTSTRAP_TOKEN"));
+        assert!(
+            !spec_env.values().any(|v| v.contains(&token)),
+            "bootstrap token in the pod env"
+        );
         assert!(body["env"].get("VOGT_BOOTSTRAP_TOKEN").is_none());
         assert!(!body.to_string().contains(&token));
         assert_eq!(body["env"]["VOGT_GRAFT_REPO"], "vogt");
@@ -17183,6 +17194,9 @@ mod pod_stream {
         );
         let work = tmp.path().join("work");
         let token_file = tmp.path().join("run").join("session-token");
+        // What the kubelet mounts from the per-session Secret.
+        let bootstrap_file = tmp.path().join("bootstrap-token");
+        std::fs::write(&bootstrap_file, &token).unwrap();
         let run = |tmp_dir: std::path::PathBuf| {
             let mut cmd = std::process::Command::new("sh");
             cmd.arg(concat!(
@@ -17196,7 +17210,7 @@ mod pod_stream {
             .env("CLAUDE_CONFIG_DIR", tmp.path().join("claude"))
             .env("VOGT_ENGINE_URL", &h.base)
             .env("VOGT_SESSION_ID", id.to_string())
-            .env("VOGT_BOOTSTRAP_TOKEN", &token)
+            .env("VOGT_BOOTSTRAP_TOKEN_FILE", &bootstrap_file)
             .env("VOGT_GRAFT_REPO", "vogt")
             .env("VOGT_GRAFT_LINE", "rust-2")
             .env("VOGT_CLI", "claude")

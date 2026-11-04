@@ -328,7 +328,6 @@ impl SessionRegistry {
                 "session",
                 spec.account.as_deref(),
                 spec.command.as_deref().unwrap_or_default(),
-                &token,
             )
         });
         tokio::spawn(async move {

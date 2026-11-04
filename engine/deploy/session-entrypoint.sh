@@ -10,19 +10,24 @@ trap cleanup EXIT HUP INT TERM
 fail() { printf 'session-entrypoint: %s failed: %s\n' "$step" "$1" >&2; exit 1; }
 say() { printf 'session-entrypoint: step %s\n' "$1" >&2; }
 need() { eval "value=\${$1:-}"; [ -n "$value" ] || fail "required environment variable $1 is not set"; }
-need VOGT_ENGINE_URL; need VOGT_SESSION_ID; need VOGT_BOOTSTRAP_TOKEN
+need VOGT_ENGINE_URL; need VOGT_SESSION_ID; need VOGT_BOOTSTRAP_TOKEN_FILE
 need VOGT_GRAFT_REPO; need VOGT_GRAFT_LINE; need VOGT_CLI
 case "$VOGT_CLI" in claude|codex) ;; *) fail 'VOGT_CLI must be claude or codex' ;; esac
 step=bootstrap; say bootstrap
 auth="$tmp_dir/auth"; response="$tmp_dir/response"; request="$tmp_dir/request.json"
 umask 077
-printf 'header = "Authorization: Bearer %s"\n' "$VOGT_BOOTSTRAP_TOKEN" >"$auth"
+# The credential is a file the engine mounts from a per-session Secret, never
+# an environment value; the path is not a secret.
+[ -r "$VOGT_BOOTSTRAP_TOKEN_FILE" ] || fail "bootstrap token file $VOGT_BOOTSTRAP_TOKEN_FILE is not readable"
+bootstrap_token=$(cat "$VOGT_BOOTSTRAP_TOKEN_FILE")
+[ -n "$bootstrap_token" ] || fail "bootstrap token file $VOGT_BOOTSTRAP_TOKEN_FILE is empty"
+printf 'header = "Authorization: Bearer %s"\n' "$bootstrap_token" >"$auth"
 # shellcheck disable=SC2153 # VOGT_SESSION_ID is validated by need() above
 jq -n --arg session_id "$VOGT_SESSION_ID" --arg graft_repo "$VOGT_GRAFT_REPO" \
   --arg graft_line "$VOGT_GRAFT_LINE" --arg cli "$VOGT_CLI" --arg extra_ca_file "${VOGT_EXTRA_CA_FILE:-}" \
   '{session_id: $session_id, graft_repo: $graft_repo, graft_line: $graft_line, cli: $cli}
    + (if $extra_ca_file == "" then {} else {extra_ca_file: $extra_ca_file} end)' >"$request"
-unset VOGT_BOOTSTRAP_TOKEN
+unset bootstrap_token VOGT_BOOTSTRAP_TOKEN_FILE
 url="${VOGT_ENGINE_URL%/}/api/agent-auth/bootstrap"
 # A new pod's IP reaches the engine's allow-set 1-3 s after start; until then
 # the connection is refused (curl exit 7) or times out (28). Retry those with
@@ -59,7 +64,7 @@ step=brokered-env; say brokered-env
 jq -r '.env // {} | to_entries[] | [.key, (.value|tostring)] | @tsv' "$response" >"$tmp_dir/env.tsv"
 while IFS="$(printf '\t')" read -r name value; do
   case "$name" in ''|[!A-Za-z_]*|*[!A-Za-z0-9_]*) fail 'bootstrap returned an invalid environment name' ;; esac
-  case "$name" in VOGT_BOOTSTRAP_TOKEN|VOGT_AGENT_BOOTSTRAP_TOKEN) continue ;; esac
+  case "$name" in VOGT_BOOTSTRAP_TOKEN|VOGT_BOOTSTRAP_TOKEN_FILE|VOGT_AGENT_BOOTSTRAP_TOKEN) continue ;; esac
   export "$name=$value"
 done <"$tmp_dir/env.tsv"
 step=graft-token; say graft-token
