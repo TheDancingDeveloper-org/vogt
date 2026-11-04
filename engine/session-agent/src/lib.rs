@@ -43,10 +43,10 @@ pub struct BundleFile {
     pub bytes: Vec<u8>,
 }
 
-/// Select bundle files without ever following a path outside the configured
-/// Claude directory. Transcripts are intentionally limited to the session's
-/// own id; credentials and global config are account-scoped.
-pub fn bundle_files(root: &Path, conversation: &str) -> Vec<BundleFile> {
+/// Select the whole-file bundle files (credentials, global config) without
+/// following a path outside the configured Claude directory. Both are
+/// account-scoped; the transcript travels separately, see `transcript_path`.
+pub fn bundle_files(root: &Path) -> Vec<BundleFile> {
     let mut files = Vec::new();
     for (name, kind) in [
         (".credentials.json", BundleFileKind::Credentials),
@@ -57,27 +57,70 @@ pub fn bundle_files(root: &Path, conversation: &str) -> Vec<BundleFile> {
             files.push(BundleFile { kind, path, bytes });
         }
     }
+    files
+}
+
+/// The session's own transcript under `<root>/projects`, found without
+/// following symlinks. It is sent as append-only deltas, never read whole.
+pub fn transcript_path(root: &Path, conversation: &str) -> Option<PathBuf> {
     if conversation.is_empty() || conversation.contains('/') || conversation.contains('\\') {
-        return files;
+        return None;
     }
-    let found = walkdir::WalkDir::new(root.join("projects"))
+    walkdir::WalkDir::new(root.join("projects"))
         .follow_links(false)
         .into_iter()
         .filter_map(Result::ok)
         .find(|entry| {
             entry.file_type().is_file()
                 && entry.file_name() == std::ffi::OsStr::new(&format!("{conversation}.jsonl"))
-        });
-    if let Some(entry) = found {
-        if let Ok(bytes) = std::fs::read(entry.path()) {
-            files.push(BundleFile {
-                kind: BundleFileKind::Transcript,
-                path: entry.into_path(),
-                bytes,
-            });
+        })
+        .map(walkdir::DirEntry::into_path)
+}
+
+/// The largest transcript delta in one request; the engine refuses more.
+pub const TRANSCRIPT_DELTA_BYTES: usize = 512 * 1024;
+/// Resyncs tolerated in one flush before it gives up until the next debounce.
+const MAX_RESYNCS: u32 = 8;
+
+/// Read up to `TRANSCRIPT_DELTA_BYTES` of `path` from `offset`.
+pub fn read_delta(path: &Path, offset: u64) -> std::io::Result<Vec<u8>> {
+    use std::os::unix::fs::FileExt;
+    let file = std::fs::File::open(path)?;
+    let mut buf = vec![0u8; TRANSCRIPT_DELTA_BYTES];
+    let mut filled = 0;
+    while filled < buf.len() {
+        let n = file.read_at(&mut buf[filled..], offset + filled as u64)?;
+        if n == 0 {
+            break;
         }
+        filled += n;
     }
-    files
+    buf.truncate(filled);
+    Ok(buf)
+}
+
+/// What the engine's answer to a transcript delta means for the next send.
+#[derive(Debug, PartialEq, Eq)]
+pub enum DeltaReply {
+    /// Accepted (or already held): continue from this engine length.
+    Advance(u64),
+    /// The engine is at a different length: resend from it.
+    Resync(u64),
+    /// Refused for another reason: stop until the next flush.
+    Stop,
+}
+
+pub fn delta_reply(status: u16, body: &serde_json::Value) -> DeltaReply {
+    let offset = body.get("offset").and_then(serde_json::Value::as_u64);
+    match (status, offset) {
+        (200..=299, Some(next)) => DeltaReply::Advance(next),
+        (409, Some(next))
+            if body.get("resync").and_then(serde_json::Value::as_bool) == Some(true) =>
+        {
+            DeltaReply::Resync(next)
+        }
+        _ => DeltaReply::Stop,
+    }
 }
 
 /// Messages exchanged on the authenticated engine stream. Binary PTY data is
@@ -302,6 +345,7 @@ async fn flush_bundle(
     config: &Config,
     tls: &Arc<rustls::ClientConfig>,
     seen: &mut std::collections::HashMap<PathBuf, [u8; 32]>,
+    offsets: &mut std::collections::HashMap<PathBuf, u64>,
 ) {
     let (Some(root), Some(account), Some(conversation)) = (
         config.claude_config_dir.as_deref(),
@@ -317,7 +361,7 @@ async fn flush_bundle(
     };
     let mut url = config.engine_url.clone();
     url.push_str("/api/agent-auth/store/bundle/bundle-file");
-    for file in bundle_files(root, conversation) {
+    for file in bundle_files(root) {
         let marker = bundle_marker(&file.bytes);
         if seen.get(&file.path).copied() == Some(marker) {
             continue;
@@ -325,7 +369,7 @@ async fn flush_bundle(
         let kind = match file.kind {
             BundleFileKind::Credentials => "credentials",
             BundleFileKind::Config => "config",
-            BundleFileKind::Transcript => "transcript",
+            BundleFileKind::Transcript => continue,
         };
         let body = serde_json::json!({"account": account, "conversation_id": conversation, "path": file.path.strip_prefix(root).unwrap_or(&file.path).to_string_lossy(), "kind": kind, "bytes": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &file.bytes)});
         if client
@@ -334,10 +378,49 @@ async fn flush_bundle(
             .json(&body)
             .send()
             .await
-            .is_ok()
+            .is_ok_and(|reply| reply.status().is_success())
         {
             seen.insert(file.path, marker);
         }
+    }
+    if let Some(path) = transcript_path(root, conversation) {
+        let relative = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .into_owned();
+        let mut offset = offsets.get(&path).copied().unwrap_or(0);
+        let mut resyncs = 0;
+        while let Ok(delta) = read_delta(&path, offset) {
+            if delta.is_empty() {
+                break;
+            }
+            let body = serde_json::json!({"account": account, "conversation_id": conversation, "path": relative, "kind": "transcript", "offset": offset, "bytes": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &delta)});
+            let Ok(reply) = client
+                .post(&url)
+                .bearer_auth(&config.token)
+                .json(&body)
+                .send()
+                .await
+            else {
+                break;
+            };
+            let status = reply.status().as_u16();
+            let json = reply.json::<serde_json::Value>().await.unwrap_or_default();
+            match delta_reply(status, &json) {
+                DeltaReply::Advance(next) => offset = next,
+                DeltaReply::Resync(next) => {
+                    resyncs += 1;
+                    if next == offset || resyncs > MAX_RESYNCS {
+                        break;
+                    }
+                    offset = next;
+                }
+                DeltaReply::Stop => break,
+            }
+            offsets.insert(path.clone(), offset);
+        }
+        offsets.insert(path, offset);
     }
 }
 
@@ -516,7 +599,8 @@ pub fn spawn_pty(config: &Config) -> Result<PtyIo, AgentError> {
 pub async fn run(config: Config) -> Result<(), AgentError> {
     let tls = tls_config()?;
     let mut bundle_seen = std::collections::HashMap::new();
-    flush_bundle(&config, &tls, &mut bundle_seen).await;
+    let mut transcript_offsets = std::collections::HashMap::new();
+    flush_bundle(&config, &tls, &mut bundle_seen, &mut transcript_offsets).await;
     tracing::info!(
         cli = %config.cli,
         program = config.command.as_ref().map(|argv| argv[0].as_str()).unwrap_or("-"),
@@ -620,7 +704,7 @@ pub async fn run(config: Config) -> Result<(), AgentError> {
                         }
                     }
                     _ = tokio::time::sleep(BUNDLE_DEBOUNCE) => {
-                        flush_bundle(&config, &tls, &mut bundle_seen).await;
+                        flush_bundle(&config, &tls, &mut bundle_seen, &mut transcript_offsets).await;
                         if let Some(c) = child.as_mut() {
                             if let Ok(Some(status)) = c.try_wait() {
                                 tracing::info!(exit_code = status.exit_code(), "session-agent: the CLI exited");
@@ -781,6 +865,45 @@ mod tests {
         let mut req = http::Request::new(());
         authorize(&mut req, "secret").unwrap();
         assert_eq!(req.headers()["authorization"], "Bearer secret");
+    }
+
+    #[test]
+    fn deltas_are_read_from_the_offset_in_bounded_chunks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.jsonl");
+        let mut data = vec![b'a'; TRANSCRIPT_DELTA_BYTES + 10];
+        data[TRANSCRIPT_DELTA_BYTES..].fill(b'b');
+        std::fs::write(&path, &data).unwrap();
+        let first = read_delta(&path, 0).unwrap();
+        assert_eq!(first.len(), TRANSCRIPT_DELTA_BYTES);
+        let second = read_delta(&path, first.len() as u64).unwrap();
+        assert_eq!(second, vec![b'b'; 10]);
+        assert!(read_delta(&path, data.len() as u64).unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_engine_reply_decides_advance_resync_or_stop() {
+        use serde_json::json;
+        assert_eq!(
+            delta_reply(200, &json!({"ok": true, "offset": 9})),
+            DeltaReply::Advance(9)
+        );
+        assert_eq!(
+            delta_reply(409, &json!({"ok": false, "resync": true, "offset": 4})),
+            DeltaReply::Resync(4)
+        );
+        assert_eq!(delta_reply(403, &json!({"offset": 4})), DeltaReply::Stop);
+        assert_eq!(delta_reply(500, &json!(null)), DeltaReply::Stop);
+    }
+
+    #[test]
+    fn the_transcript_is_found_without_following_links() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("projects/work")).unwrap();
+        assert!(transcript_path(dir.path(), "conv").is_none());
+        std::fs::write(dir.path().join("projects/work/conv.jsonl"), b"x").unwrap();
+        assert!(transcript_path(dir.path(), "conv").is_some());
+        assert!(transcript_path(dir.path(), "../conv").is_none());
     }
 
     #[test]
