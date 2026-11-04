@@ -186,7 +186,7 @@ fn over_budget_oversight_is_asked_then_rotated() {
         .unwrap()
         .clone();
     assert!(create.contains("\"role\":\"oversight\""), "{create}");
-    assert!(create.contains("eng-old.md"), "{create}");
+    assert!(create.contains("eng-old.rotated.md"), "{create}");
     drop(seen);
 
     // The old session is hibernated and the new one is small: nothing more.
@@ -320,5 +320,69 @@ fn an_audit_failure_neither_orphans_the_replacement_nor_aborts_the_pass() {
         "the old session is hibernated"
     );
     assert_eq!(creates(&script), 2);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_finished_rotation_leaves_no_markers_and_a_woken_session_rotates_afresh() {
+    let (built, script, dir) = ready(400_000);
+    let folder = dir.join("context-rotation");
+    std::fs::write(folder.join("eng-old.asked"), "1").unwrap();
+
+    let done = rotate_over_budget(ctx(&built)).unwrap();
+    assert_eq!(done.rotated.len(), 1);
+    assert_eq!(creates(&script), 2);
+    assert_eq!(script.posts("/hibernate"), 1);
+    for gone in ["eng-old.md", "eng-old.rotating", "eng-old.asked"] {
+        assert!(!folder.join(gone).exists(), "{gone} outlived the rotation");
+    }
+    // The replacement reads its own copy of the hand-off.
+    assert_eq!(
+        std::fs::read_to_string(folder.join("eng-old.rotated.md")).unwrap(),
+        "fleet: eng-1\n"
+    );
+
+    // Someone wakes the old session; it is still over budget. It is asked
+    // for a new hand-off, not hibernated again with no replacement.
+    *script.hibernated.lock().unwrap() = false;
+    let woken = rotate_over_budget(ctx(&built)).unwrap();
+    assert_eq!(woken.asked, vec!["eng-old".to_string()]);
+    assert!(woken.rotated.is_empty());
+    assert_eq!(script.posts("/hibernate"), 1);
+    assert_eq!(creates(&script), 2);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_rotation_that_cannot_be_recorded_starts_no_replacement() {
+    let (built, script, dir) = ready(400_000);
+    let folder = dir.join("context-rotation");
+    // The rotation's record cannot be written (a directory is in the way).
+    std::fs::create_dir(folder.join("eng-old.rotating")).unwrap();
+
+    for _ in 0..2 {
+        let pass = rotate_over_budget(ctx(&built)).unwrap();
+        assert!(pass.rotated.is_empty(), "{pass:?}");
+    }
+    assert_eq!(creates(&script), 1, "only the original session exists");
+    assert_eq!(script.posts("/hibernate"), 0);
+    assert!(folder.join("eng-old.md").exists(), "the hand-off is kept");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_claim_with_no_replacement_id_is_never_answered_with_a_second_replacement() {
+    let (built, script, dir) = ready(400_000);
+    // What a lost id leaves behind: the claim, empty.
+    let claim = dir.join("context-rotation").join("eng-old.rotating");
+    std::fs::write(&claim, "").unwrap();
+
+    for _ in 0..2 {
+        let pass = rotate_over_budget(ctx(&built)).unwrap();
+        assert!(pass.rotated.is_empty(), "{pass:?}");
+    }
+    assert_eq!(creates(&script), 1);
+    assert_eq!(script.posts("/hibernate"), 0, "the session stays as it is");
+    assert!(claim.exists(), "an operator clears the claim, not a pass");
     let _ = std::fs::remove_dir_all(dir);
 }

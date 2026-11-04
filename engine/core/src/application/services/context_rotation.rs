@@ -14,6 +14,16 @@
 //!    role in the same project, seeded with the file, then hibernate the old
 //!    one (a failed hibernate is retried alone, never with a second replacement).
 //!    The rotation is an audited `session.context_rotated` event.
+//! 3. Once the old session is hibernated, its `.asked`, `.rotating` and
+//!    hand-off files are removed (the replacement reads a copy, `.rotated.md`,
+//!    pruned after `ARCHIVE_KEEP`). A woken session still over budget is then
+//!    asked for a fresh hand-off and rotated again, rather than hibernated
+//!    again with no replacement.
+//!
+//! The replacement is claimed in `<id>.rotating` before it is started and the
+//! file is then given the new id. If the claim or the id cannot be persisted
+//! the rotation stops there: a claim with no id is never overwritten, so a
+//! later pass cannot start a second replacement.
 //!
 //! Idempotent: a hibernated session is not a candidate, and an unanswered ask
 //! waits for its marker to age. The old session is not woken by this module,
@@ -40,6 +50,10 @@ const DIR_NAME: &str = "context-rotation";
 const REASK_AFTER: Duration = Duration::from_secs(15 * 60);
 const MAX_ASKS: u32 = 3;
 const HIBERNATE_RETRY_AFTER: Duration = Duration::from_secs(5 * 60);
+/// How long a replacement's copy of the hand-off is kept: it only has to
+/// outlive the replacement's first read.
+const ARCHIVE_KEEP: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+const ARCHIVE_SUFFIX: &str = ".rotated.md";
 const ROTATE_OP: &str = "session.context_rotate";
 
 /// What one pass did, by engine session id.
@@ -69,6 +83,34 @@ fn marker_path(dir: &Path, engine_id: &str) -> PathBuf {
 
 fn rotating_path(dir: &Path, engine_id: &str) -> PathBuf {
     dir.join(format!("{}.rotating", safe_name(engine_id)))
+}
+
+/// The copy of the hand-off the replacement is told to read, so the original
+/// can be removed once the rotation is done.
+fn archive_path(dir: &Path, engine_id: &str) -> PathBuf {
+    dir.join(format!("{}{ARCHIVE_SUFFIX}", safe_name(engine_id)))
+}
+
+/// Drop replacement copies old enough that no replacement still needs them.
+fn prune_archives(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let old = entry
+            .file_name()
+            .to_string_lossy()
+            .ends_with(ARCHIVE_SUFFIX)
+            && entry
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .ok()
+                .and_then(|at| SystemTime::now().duration_since(at).ok())
+                .is_some_and(|age| age >= ARCHIVE_KEEP);
+        if old {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// An engine id is a UUID or `eng-…`; anything else cannot climb out of `dir`.
@@ -158,6 +200,7 @@ where
         Err(error) => return Err(error),
     };
     let dir = ctx.config.resolved_data_dir().join(DIR_NAME);
+    prune_archives(&dir);
     for row in rows.iter().filter(|row| row.alive && !row.hibernated()) {
         let Some(budget) = budgets.get(&row.role).copied() else {
             continue;
@@ -240,15 +283,55 @@ where
             }
             text.trim().to_string()
         }
-        _ => {
-            let Some(new_id) = start_replacement(ctx, row, path)? else {
+        // A claim with no id: a replacement may have been started and its id
+        // lost. Never start another; an operator clears the file.
+        Ok(_) => {
+            tracing::warn!(
+                "context rotation: {} has a replacement claim with no id ({}); \
+                 not starting another",
+                row.id,
+                pending.display()
+            );
+            return Ok(None);
+        }
+        Err(_) => {
+            // Claim the rotation before starting anything, so a failure to
+            // persist it stops the rotation instead of leaving a replacement
+            // nothing remembers.
+            if let Err(error) = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&pending)
+            {
+                tracing::warn!(
+                    "context rotation: cannot claim the rotation of {}: {error}",
+                    row.id
+                );
                 return Ok(None);
+            }
+            let archive = archive_path(dir, &row.id);
+            if let Err(error) = std::fs::copy(path, &archive) {
+                tracing::warn!(
+                    "context rotation: cannot copy the hand-off of {}: {error}",
+                    row.id
+                );
+                let _ = std::fs::remove_file(&pending);
+                return Ok(None);
+            }
+            let started = start_replacement(ctx, row, &archive);
+            let Some(new_id) = started.as_ref().ok().and_then(|id| id.clone()) else {
+                // Nothing was started: release the claim for a later pass.
+                let _ = std::fs::remove_file(&pending);
+                let _ = std::fs::remove_file(&archive);
+                return started.map(|_| None);
             };
             if let Err(error) = std::fs::write(&pending, &new_id) {
                 tracing::warn!(
-                    "context rotation: cannot record replacement {new_id} of {}: {error}",
+                    "context rotation: cannot record replacement {new_id} of {}: {error}; \
+                     not hibernating it",
                     row.id
                 );
+                return Ok(None);
             }
             new_id
         }
@@ -269,6 +352,19 @@ where
             error.message()
         );
         return Ok(None);
+    }
+    // Rotated: forget it, so a wake of this session starts a new rotation.
+    // `.rotating` goes first; left behind, it would hibernate the woken
+    // session again with no replacement.
+    for stale in [pending, path.to_path_buf(), marker_path(dir, &row.id)] {
+        if let Err(error) = std::fs::remove_file(&stale) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(
+                    "context rotation: cannot remove {}: {error}",
+                    stale.display()
+                );
+            }
+        }
     }
     let outcome = json!({
         "from": row.id,

@@ -653,16 +653,14 @@ fn read_json(path: &Path) -> Option<serde_json::Value> {
 /// 0600: a kept entry's env can name a credential.
 fn write_private(path: &Path, value: &serde_json::Value) -> std::io::Result<()> {
     use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut file = options.open(path)?;
     file.write_all(serde_json::to_string_pretty(value)?.as_bytes())
 }
 
