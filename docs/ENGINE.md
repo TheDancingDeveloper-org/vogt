@@ -1926,7 +1926,9 @@ engine id (WI-912; the design is `docs/design/session-hibernation.md`).
     account bundle (login, global config and the conversation's transcript)
     back through the broker's bundle-file path. The engine waits for the
     agent's `flushed` reply (20 s), then writes the usual record and 256 KiB
-    snapshot, stops the agent and waits for the pod to be deleted. An agent
+    snapshot, stops the agent and deletes the pod (by the uid it was created
+    with, 5 s grace) and waits, up to 20 s, until the pod has left the
+    cluster, so a wake can reuse the pod's name. An agent
     that is attached but reports failure or stays silent makes the
     hibernation a `409` (a wake would resume a conversation missing its
     newest turns); an agent that is not attached hibernates with the

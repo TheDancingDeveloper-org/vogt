@@ -193,7 +193,9 @@ pub fn spawn(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pod_backend::{LaunchFuture, ListFuture, DEFAULT_ENGINE_ID, ENGINE_LABEL};
+    use crate::pod_backend::{
+        CreateFuture, GoneFuture, LaunchFuture, ListFuture, DEFAULT_ENGINE_ID, ENGINE_LABEL,
+    };
     use k8s_openapi::api::core::v1::{
         ContainerState, ContainerStateTerminated, ContainerStateWaiting, ContainerStatus, PodStatus,
     };
@@ -215,8 +217,11 @@ mod tests {
         }
     }
     impl PodLauncher for MockKube {
-        fn create<'a>(&'a self, _: Uuid, _: &'a [u8], _: Pod) -> LaunchFuture<'a> {
-            Box::pin(async { Ok(()) })
+        fn create<'a>(&'a self, _: Uuid, _: &'a [u8], _: Pod) -> CreateFuture<'a> {
+            Box::pin(async { Ok(None) })
+        }
+        fn gone(&self, _: Uuid, _: Option<String>) -> GoneFuture<'_> {
+            Box::pin(async { Ok(true) })
         }
         fn delete(&self, id: Uuid, uid: Option<String>) -> LaunchFuture<'_> {
             Box::pin(async move {
