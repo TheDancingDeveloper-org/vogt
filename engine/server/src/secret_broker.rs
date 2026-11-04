@@ -62,7 +62,7 @@
 //! becomes real.
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::{
     body::Body,
@@ -154,6 +154,15 @@ const DEFAULT_CREDENTIAL_MAX_LIFETIME: Duration = Duration::from_secs(9 * 60 * 6
 /// a later expiry is refused, so one session cannot pin the shared file with
 /// an expiry no genuine refresh can beat.
 pub const CREDENTIAL_MAX_LIFETIME_ENV: &str = "ENGINE_AGENT_CREDENTIAL_MAX_LIFETIME_SECS";
+/// How many credential write-backs one session may land in
+/// `CREDENTIAL_WRITE_WINDOW`. A genuine session refreshes about once per token
+/// lifetime (eight hours), plus perhaps one catch-up at start, so three leaves
+/// slack. A session that keeps rewriting a login with an expiry just under the
+/// ceiling can hold off every genuine refresh for as long as it keeps writing
+/// (each rewrite beats an honest refresh for up to ceiling minus lifetime); the
+/// cap bounds that to a few windows of that gap instead of the session's life.
+const CREDENTIAL_WRITES_PER_WINDOW: usize = 3;
+const CREDENTIAL_WRITE_WINDOW: Duration = Duration::from_secs(8 * 60 * 60);
 /// How far ahead of the engine's clock a `.claude.json` version (the file's
 /// mtime in milliseconds) may be, for pod clock skew.
 const CONFIG_VERSION_SKEW_MS: u64 = 10 * 60 * 1000;
@@ -363,6 +372,9 @@ pub struct SecretBroker {
     account_locks: DashMap<String, Arc<Mutex<()>>>,
     /// How far ahead a written-back credential's `expiresAt` may be.
     credential_max_lifetime: Duration,
+    /// Session id → when its accepted credential write-backs landed, within
+    /// `CREDENTIAL_WRITE_WINDOW`.
+    credential_writes: DashMap<Uuid, Vec<Instant>>,
 }
 
 /// The longest a grant may live.
@@ -460,6 +472,7 @@ impl SecretBroker {
             account_dirs: HashMap::new(),
             account_locks: DashMap::new(),
             credential_max_lifetime: credential_max_lifetime_from_env(),
+            credential_writes: DashMap::new(),
         }
     }
 
@@ -643,6 +656,30 @@ impl SecretBroker {
     pub fn revoke(&self, session: Uuid) {
         self.grants.remove(&session);
         self.session_grants.remove(&session);
+        self.credential_writes.remove(&session);
+    }
+
+    /// Claim one of `session`'s credential write-backs for the window ending
+    /// at `now`. `false` when it has used them all; nothing is claimed then.
+    /// A claim for a write that is then refused is given back with
+    /// `release_credential_write`, so only landed writes count.
+    pub fn reserve_credential_write(&self, session: Uuid, now: Instant) -> bool {
+        let mut landed = self.credential_writes.entry(session).or_default();
+        landed.retain(|at| now.saturating_duration_since(*at) < CREDENTIAL_WRITE_WINDOW);
+        if landed.len() >= CREDENTIAL_WRITES_PER_WINDOW {
+            return false;
+        }
+        landed.push(now);
+        true
+    }
+
+    /// Give back the claim `reserve_credential_write` made at `now`.
+    pub fn release_credential_write(&self, session: Uuid, now: Instant) {
+        if let Some(mut landed) = self.credential_writes.get_mut(&session) {
+            if let Some(index) = landed.iter().rposition(|at| *at == now) {
+                landed.remove(index);
+            }
+        }
     }
 
     /// Which live session presented this token, if any. Constant-time per
@@ -798,6 +835,29 @@ impl SecretBroker {
         Ok(StoreOutcome::from_helper_stdout(&output.stdout))
     }
 
+    /// `store_bundle_file` on behalf of `(session, now)`: a credentials write
+    /// counts against the session's allowance for the window ending at `now`, and
+    /// only a write that lands keeps its count.
+    pub fn store_bundle_file_for(
+        &self,
+        (session, now): (Uuid, Instant),
+        account: &str,
+        name: &str,
+        kind: BundleFileKind,
+        bytes: &[u8],
+        version: Option<u64>,
+    ) -> Result<(), BundleRefusal> {
+        let limited = kind == BundleFileKind::Credentials;
+        if limited && !self.reserve_credential_write(session, now) {
+            return Err(BundleRefusal::CredentialWriteLimit);
+        }
+        let result = self.store_bundle_file(account, name, kind, bytes, version);
+        if limited && result.is_err() {
+            self.release_credential_write(session, now);
+        }
+        result
+    }
+
     pub fn store_bundle_file(
         &self,
         account: &str,
@@ -845,6 +905,13 @@ impl SecretBroker {
                         };
                         if expiry <= stored {
                             return Err(BundleRefusal::OlderCredentials);
+                        }
+                        // A refresh mints a new access token. The same one
+                        // under a later expiry is a bump, not a refresh: it
+                        // is how a session pins the file ahead of an honest
+                        // refresh without holding a login at all.
+                        if oauth_access_token(&old) == oauth_access_token(bytes) {
+                            return Err(BundleRefusal::UnchangedCredentials);
                         }
                     }
                 }
@@ -1098,6 +1165,11 @@ pub enum BundleRefusal {
     TranscriptNeedsOffset,
     Storage,
     OlderCredentials,
+    /// The access token is the stored one: an `expiresAt` bump on tokens that
+    /// were not refreshed, which no genuine refresh produces.
+    UnchangedCredentials,
+    /// The session has used its credential write-backs for the window.
+    CredentialWriteLimit,
     OlderConfig,
     /// A credentials file that is not a usable login; says which check failed.
     Credentials(CredentialRejection),
@@ -1117,6 +1189,8 @@ pub enum CredentialRejection {
     MissingExpiry,
     /// `expiresAt` is further ahead than a real token's lifetime allows.
     ExpiryTooFar,
+    /// `expiresAt` is not in the future: not a login a pod could use.
+    AlreadyExpired,
 }
 
 impl CredentialRejection {
@@ -1129,6 +1203,7 @@ impl CredentialRejection {
             CredentialRejection::ExpiryTooFar => {
                 "credentials expiry is beyond the token lifetime ceiling"
             }
+            CredentialRejection::AlreadyExpired => "credentials are already expired",
         }
     }
 }
@@ -1147,6 +1222,12 @@ impl BundleRefusal {
             BundleRefusal::Storage => "bundle-file could not be persisted",
             BundleRefusal::OlderCredentials => {
                 "bundle-file credentials are not newer than the stored credentials"
+            }
+            BundleRefusal::UnchangedCredentials => {
+                "bundle-file credentials keep the stored access token"
+            }
+            BundleRefusal::CredentialWriteLimit => {
+                "bundle-file credential write limit reached for this session"
             }
             BundleRefusal::OlderConfig => {
                 "bundle-file config version is not newer than the stored config"
@@ -1202,6 +1283,9 @@ fn validate_credentials(
     }
     if expiry > now_ms.saturating_add(max_ms) {
         return Err(CredentialRejection::ExpiryTooFar);
+    }
+    if expiry <= now_ms {
+        return Err(CredentialRejection::AlreadyExpired);
     }
     Ok(expiry)
 }
@@ -1305,6 +1389,14 @@ fn atomic_bundle_write(root: &FsPath, relative: &FsPath, bytes: &[u8]) -> std::i
 /// Create one directory that is private from the moment it exists.
 fn create_private_dir(path: &FsPath) -> std::io::Result<()> {
     std::fs::DirBuilder::new().mode(0o700).create(path)
+}
+
+fn oauth_access_token(bytes: &[u8]) -> Option<String> {
+    serde_json::from_slice::<serde_json::Value>(bytes)
+        .ok()?
+        .pointer("/claudeAiOauth/accessToken")?
+        .as_str()
+        .map(str::to_string)
 }
 
 fn oauth_expiry(bytes: &[u8]) -> u64 {
@@ -1520,7 +1612,8 @@ pub async fn store_bundle_file(
             Err(error) => refuse_bundle(session_id, account, &payload.path, error),
         };
     }
-    let result = broker.store_bundle_file(
+    let result = broker.store_bundle_file_for(
+        (session_id, Instant::now()),
         account,
         &payload.path,
         payload.kind,
@@ -1543,6 +1636,7 @@ fn refuse_bundle(session_id: Uuid, account: &str, file: &str, error: BundleRefus
         file = %file, reason, "bundle file refused");
     let status = match error {
         BundleRefusal::TooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+        BundleRefusal::CredentialWriteLimit => StatusCode::TOO_MANY_REQUESTS,
         BundleRefusal::Storage => StatusCode::INTERNAL_SERVER_ERROR,
         _ => StatusCode::FORBIDDEN,
     };
@@ -2148,10 +2242,15 @@ mod tests {
         );
     }
 
-    /// A credentials file as Claude writes it, with `expiry` in ms.
+    /// A credentials file as Claude writes it, with `expiry` in ms. Each
+    /// expiry is its own refresh, so it carries its own access token.
     fn credentials(expiry: u64) -> Vec<u8> {
+        credentials_with("SECRET-ACCESS", "SECRET-REFRESH", expiry)
+    }
+
+    fn credentials_with(access: &str, refresh: &str, expiry: u64) -> Vec<u8> {
         format!(
-            r#"{{"claudeAiOauth":{{"accessToken":"SECRET-ACCESS","refreshToken":"SECRET-REFRESH","expiresAt":{expiry}}}}}"#
+            r#"{{"claudeAiOauth":{{"accessToken":"{access}-{expiry}","refreshToken":"{refresh}","expiresAt":{expiry}}}}}"#
         )
         .into_bytes()
     }
@@ -2294,6 +2393,158 @@ mod tests {
             std::fs::read(dir.path().join(".credentials.json")).unwrap(),
             refreshed
         );
+    }
+
+    #[test]
+    fn an_expiry_bump_on_the_stored_access_token_is_not_a_refresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let broker = credential_broker(dir.path());
+        let stored = credentials(in_hours(1));
+        store_credentials(&broker, &stored).unwrap();
+        // The same tokens under an expiry that outranks any honest refresh.
+        let bump = format!(
+            r#"{{"claudeAiOauth":{{"accessToken":"SECRET-ACCESS-{}","refreshToken":"SECRET-REFRESH","expiresAt":{}}}}}"#,
+            oauth_expiry(&stored),
+            in_hours(8),
+        );
+        assert!(matches!(
+            store_credentials(&broker, bump.as_bytes()),
+            Err(BundleRefusal::UnchangedCredentials)
+        ));
+        assert_eq!(
+            std::fs::read(dir.path().join(".credentials.json")).unwrap(),
+            stored
+        );
+        // A rotated refresh token behind the same access token is no better.
+        let rotated = format!(
+            r#"{{"claudeAiOauth":{{"accessToken":"SECRET-ACCESS-{}","refreshToken":"SECRET-OTHER","expiresAt":{}}}}}"#,
+            oauth_expiry(&stored),
+            in_hours(8),
+        );
+        assert!(matches!(
+            store_credentials(&broker, rotated.as_bytes()),
+            Err(BundleRefusal::UnchangedCredentials)
+        ));
+        // A genuine refresh (new access token) still lands afterwards.
+        store_credentials(&broker, &credentials(in_hours(8))).unwrap();
+    }
+
+    #[test]
+    fn credentials_that_are_already_expired_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let broker = credential_broker(dir.path());
+        assert!(matches!(
+            store_credentials(&broker, &credentials(now_millis().saturating_sub(1000))),
+            Err(BundleRefusal::Credentials(
+                CredentialRejection::AlreadyExpired
+            ))
+        ));
+        assert!(!dir.path().join(".credentials.json").exists());
+    }
+
+    #[test]
+    fn a_session_has_a_bounded_number_of_credential_writes() {
+        let broker = broker_with("", "127.0.0.1:1");
+        let (busy, quiet) = (Uuid::new_v4(), Uuid::new_v4());
+        let start = Instant::now();
+        for n in 0..CREDENTIAL_WRITES_PER_WINDOW {
+            assert!(broker.reserve_credential_write(busy, start + Duration::from_secs(n as u64)));
+        }
+        assert!(
+            !broker.reserve_credential_write(busy, start + Duration::from_secs(60)),
+            "the window is used up"
+        );
+        // Another session has its own allowance.
+        assert!(broker.reserve_credential_write(quiet, start));
+        // A refused write gives its claim back, so only landed writes count.
+        let at = start + Duration::from_secs(2 * 60 * 60);
+        broker.release_credential_write(busy, start);
+        assert!(broker.reserve_credential_write(busy, at));
+        assert!(!broker.reserve_credential_write(busy, at + Duration::from_secs(1)));
+        broker.release_credential_write(busy, at);
+        assert!(broker.reserve_credential_write(busy, at + Duration::from_secs(2)));
+        // The allowance returns as writes age out of the window.
+        let later = start + CREDENTIAL_WRITE_WINDOW + Duration::from_secs(120);
+        assert!(broker.reserve_credential_write(busy, later));
+        // A revoked session starts clean.
+        broker.revoke(busy);
+        for n in 0..CREDENTIAL_WRITES_PER_WINDOW {
+            assert!(broker.reserve_credential_write(busy, later + Duration::from_secs(n as u64)));
+        }
+    }
+
+    #[test]
+    fn only_credential_writes_that_land_use_up_the_session_allowance() {
+        let dir = tempfile::tempdir().unwrap();
+        let broker = credential_broker(dir.path());
+        let session = Uuid::new_v4();
+        let now = Instant::now();
+        let write = |bytes: &[u8], at: Instant| {
+            broker.store_bundle_file_for(
+                (session, at),
+                "acct",
+                ".credentials.json",
+                BundleFileKind::Credentials,
+                bytes,
+                None,
+            )
+        };
+        // Refusals (a bump, a dead login) do not spend the allowance.
+        let first = credentials(in_hours(1));
+        write(&first, now).unwrap();
+        for _ in 0..2 * CREDENTIAL_WRITES_PER_WINDOW {
+            assert!(write(&first, now).is_err());
+        }
+        // The rest of the allowance is spent on refreshes that land...
+        for hours in 2..=CREDENTIAL_WRITES_PER_WINDOW as u64 {
+            write(&credentials(in_hours(hours)), now).unwrap();
+        }
+        // ...and the next genuine-looking one is refused as the limit.
+        let before = std::fs::read(dir.path().join(".credentials.json")).unwrap();
+        assert!(matches!(
+            write(&credentials(in_hours(9)), now),
+            Err(BundleRefusal::CredentialWriteLimit)
+        ));
+        assert_eq!(
+            std::fs::read(dir.path().join(".credentials.json")).unwrap(),
+            before
+        );
+        // It lands again once the window has passed.
+        write(
+            &credentials(in_hours(9)),
+            now + CREDENTIAL_WRITE_WINDOW + Duration::from_secs(1),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn the_credential_write_limit_and_a_bump_are_audited_refusals() {
+        let session = Uuid::new_v4();
+        for (error, status, reason) in [
+            (
+                BundleRefusal::CredentialWriteLimit,
+                StatusCode::TOO_MANY_REQUESTS,
+                "credential write limit",
+            ),
+            (
+                BundleRefusal::UnchangedCredentials,
+                StatusCode::FORBIDDEN,
+                "keep the stored access token",
+            ),
+            (
+                BundleRefusal::Credentials(CredentialRejection::AlreadyExpired),
+                StatusCode::FORBIDDEN,
+                "already expired",
+            ),
+        ] {
+            let log = audited(|| {
+                let response = refuse_bundle(session, "acct", ".credentials.json", error);
+                assert_eq!(response.status(), status);
+            });
+            assert!(log.contains(&session.to_string()), "session in: {log}");
+            assert!(log.contains(reason), "{reason:?} in: {log}");
+            assert!(log.contains("vogt::audit"), "audit target in: {log}");
+        }
     }
 
     /// Collects what the audit log writes, so a test can read it back.
