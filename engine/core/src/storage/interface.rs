@@ -438,6 +438,9 @@ pub trait ReadView {
         &self,
         engine_session_id: &str,
     ) -> Result<Option<CodingSession>, crate::errors::VogtError>;
+    /// Whether the session opted out of cold-wake compaction (WI-2037).
+    fn session_cold_wake_opt_out(&self, session_id: &str)
+        -> Result<bool, crate::errors::VogtError>;
     /// The newest report each of these engine sessions made, keyed by id.
     /// A session that never reported is absent.
     fn latest_session_reports(
@@ -673,6 +676,11 @@ pub trait WriteTxn: ReadView {
         &mut self,
         session_id: &str,
         at: Moment,
+    ) -> Result<(), crate::errors::VogtError>;
+    fn set_session_cold_wake_opt_out(
+        &mut self,
+        session_id: &str,
+        opt_out: bool,
     ) -> Result<(), crate::errors::VogtError>;
 
     fn insert_drift(&mut self, proposal: &DriftProposal) -> Result<(), crate::errors::VogtError>;

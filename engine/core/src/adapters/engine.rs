@@ -639,6 +639,7 @@ impl EngineClient {
         session_id: &str,
         env: Option<&[(String, String)]>,
         force: bool,
+        fresh_prompt: Option<&str>,
     ) -> Result<Option<EngineSession>, VogtError> {
         let mut body = Map::new();
         if let Some(env) = env.filter(|pairs| !pairs.is_empty()) {
@@ -647,6 +648,12 @@ impl EngineClient {
         }
         if force {
             body.insert("force".to_string(), Value::Bool(true));
+        }
+        if let Some(prompt) = fresh_prompt.filter(|prompt| !prompt.is_empty()) {
+            body.insert(
+                "fresh_prompt".to_string(),
+                Value::String(prompt.to_string()),
+            );
         }
         let payload = self.call(
             &session_path(session_id, "/wake"),
@@ -2522,11 +2529,15 @@ mod tests {
         assert!(seen.lock().unwrap()[0].contains(r#""superseded_by":"s2""#));
 
         let (seen, transport) = scripted(200, r#"{"id":"s1","name":"one","cwd":"/w"}"#);
-        client(transport).wake_session("s1", None, true).unwrap();
+        client(transport)
+            .wake_session("s1", None, true, None)
+            .unwrap();
         assert!(seen.lock().unwrap()[0].contains(r#""force":true"#));
 
         let (seen, transport) = scripted(200, r#"{"id":"s1","name":"one","cwd":"/w"}"#);
-        client(transport).wake_session("s1", None, false).unwrap();
+        client(transport)
+            .wake_session("s1", None, false, None)
+            .unwrap();
         assert!(!seen.lock().unwrap()[0].contains("force"));
     }
 

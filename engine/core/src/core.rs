@@ -4,6 +4,7 @@
 //! `crate::core::` paths are unchanged. Nothing here reads storage or
 //! configuration.
 
+pub mod cold_wake;
 pub mod session_economics;
 pub mod usage_board;
 

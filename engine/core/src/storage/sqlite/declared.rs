@@ -1319,6 +1319,15 @@ impl ReadView for SqliteReadView {
             row_session,
         )
     }
+    fn session_cold_wake_opt_out(&self, session_id: &str) -> Result<bool, VogtError> {
+        Ok(one(
+            &self.conn,
+            "SELECT cold_wake_opt_out FROM coding_sessions WHERE id = ?",
+            [session_id],
+            |row| row.get::<_, i64>(0),
+        )?
+        .is_some_and(|flag| flag != 0))
+    }
 
     fn latest_session_reports(
         &self,
@@ -1816,6 +1825,9 @@ impl<I: IdFactory> ReadView for SqliteWrite<I> {
     }
     fn session_by_engine_id(&self, a: &str) -> Result<Option<CodingSession>, VogtError> {
         self.view.session_by_engine_id(a)
+    }
+    fn session_cold_wake_opt_out(&self, a: &str) -> Result<bool, VogtError> {
+        self.view.session_cold_wake_opt_out(a)
     }
 
     fn latest_session_reports(
@@ -2549,6 +2561,20 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
             .execute(
                 "UPDATE coding_sessions SET work_item_id = ? WHERE id = ?",
                 params![work_item_id, session_id],
+            )
+            .map(|_| ())
+            .map_err(sql_err)
+    }
+    fn set_session_cold_wake_opt_out(
+        &mut self,
+        session_id: &str,
+        opt_out: bool,
+    ) -> Result<(), VogtError> {
+        self.view
+            .conn
+            .execute(
+                "UPDATE coding_sessions SET cold_wake_opt_out = ? WHERE id = ?",
+                params![i64::from(opt_out), session_id],
             )
             .map(|_| ())
             .map_err(sql_err)
