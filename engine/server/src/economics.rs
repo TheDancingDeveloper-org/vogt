@@ -47,6 +47,21 @@ pub struct Meter {
     reads: HashMap<String, i64>,
     tool_names: HashMap<String, String>,
     stamps: Vec<String>,
+    /// Codex's own `token_count` readings. Once one is seen the session is
+    /// measured and these replace the estimate.
+    codex: Option<CodexUsage>,
+    /// A Codex `compacted` line not yet followed by a `token_count`: an
+    /// `item_completed` ContextCompaction in that gap is the same compaction.
+    codex_compaction_open: bool,
+}
+
+/// What Codex's `token_count` events said, latest and largest.
+#[derive(Default)]
+struct CodexUsage {
+    context: i64,
+    peak: i64,
+    window: i64,
+    output: i64,
 }
 
 impl Meter {
@@ -67,6 +82,8 @@ impl Meter {
             reads: HashMap::new(),
             tool_names: HashMap::new(),
             stamps: Vec::new(),
+            codex: None,
+            codex_compaction_open: false,
         }
     }
 
@@ -85,7 +102,31 @@ impl Meter {
         };
         let kind = entry.get("type").and_then(Value::as_str);
 
-        if is_compaction(entry) {
+        let codex_compaction = match codex_compaction(entry) {
+            Some(CodexCompaction::Rollout) => {
+                self.codex_compaction_open = true;
+                true
+            }
+            Some(CodexCompaction::Item) => {
+                !std::mem::replace(&mut self.codex_compaction_open, false)
+            }
+            None => false,
+        };
+        if let Some(reading) = codex_token_count(entry) {
+            self.codex_compaction_open = false;
+            let codex = self.codex.get_or_insert_with(CodexUsage::default);
+            codex.context = reading.context;
+            codex.peak = codex.peak.max(reading.context);
+            if reading.window > 0 {
+                codex.window = reading.window;
+            }
+            match reading.total_output {
+                Some(total) => codex.output = total,
+                None => codex.output += reading.last_output,
+            }
+        }
+
+        if codex_compaction || is_compaction(entry) {
             self.compactions += 1;
             if self.tool_calls_since_compaction < PROGRESS_TOOL_CALLS {
                 self.compaction_streak += 1;
@@ -162,6 +203,14 @@ impl Meter {
             context = self.live_chars / CHARS_PER_TOKEN;
             peak = context;
         }
+        let mut output = self.output_by_turn.values().sum::<i64>() + self.unkeyed_output;
+        let mut window = 0;
+        if let Some(codex) = &self.codex {
+            context = codex.context;
+            peak = codex.peak;
+            output = codex.output;
+            window = codex.window;
+        }
         let tool_result_bytes: BTreeMap<String, i64> = self
             .tools
             .iter()
@@ -175,8 +224,9 @@ impl Meter {
             tool_result_bytes,
             reads_repeated: self.reads.values().filter(|n| **n > 1).count() as i64,
             wall_clock: timing(&self.stamps),
-            output_tokens: self.output_by_turn.values().sum::<i64>() + self.unkeyed_output,
-            usage_measured: self.measured && peak > 0,
+            output_tokens: output,
+            usage_measured: (self.measured && peak > 0) || self.codex.is_some(),
+            context_window_tokens: window,
         }
     }
 }
@@ -198,16 +248,70 @@ fn is_compaction(entry: &serde_json::Map<String, Value>) -> bool {
     if entry.get("subtype").and_then(Value::as_str) == Some("compact_boundary") {
         return true;
     }
-    // Codex writes a top-level `compacted` line after each compaction.
-    if entry.get("type").and_then(Value::as_str) == Some("compacted") {
-        return true;
-    }
     entry
         .get("message")
         .and_then(Value::as_object)
         .and_then(|message| message.get("isCompactSummary"))
         .and_then(Value::as_bool)
         == Some(true)
+}
+
+enum CodexCompaction {
+    /// The rollout's own `compacted` item.
+    Rollout,
+    /// An `item_completed` event whose item is a ContextCompaction.
+    Item,
+}
+
+fn codex_compaction(entry: &serde_json::Map<String, Value>) -> Option<CodexCompaction> {
+    let kind = entry.get("type").and_then(Value::as_str);
+    if kind == Some("compacted") {
+        return Some(CodexCompaction::Rollout);
+    }
+    let payload = entry.get("payload").and_then(Value::as_object)?;
+    if kind == Some("event_msg")
+        && payload.get("type").and_then(Value::as_str) == Some("item_completed")
+        && payload
+            .get("item")
+            .and_then(Value::as_object)
+            .and_then(|item| item.get("type"))
+            .and_then(Value::as_str)
+            == Some("ContextCompaction")
+    {
+        return Some(CodexCompaction::Item);
+    }
+    None
+}
+
+struct CodexReading {
+    context: i64,
+    window: i64,
+    total_output: Option<i64>,
+    last_output: i64,
+}
+
+/// A Codex `event_msg` `token_count` with usage info. `last_token_usage` is
+/// the latest request, so its `total_tokens` is what the window holds;
+/// `total_token_usage` is cumulative and only its output count is used.
+fn codex_token_count(entry: &serde_json::Map<String, Value>) -> Option<CodexReading> {
+    if entry.get("type").and_then(Value::as_str) != Some("event_msg") {
+        return None;
+    }
+    let payload = entry.get("payload").and_then(Value::as_object)?;
+    if payload.get("type").and_then(Value::as_str) != Some("token_count") {
+        return None;
+    }
+    let info = payload.get("info").and_then(Value::as_object)?;
+    let last = info.get("last_token_usage").and_then(Value::as_object)?;
+    Some(CodexReading {
+        context: json_int(last.get("total_tokens")),
+        window: json_int(info.get("model_context_window")),
+        total_output: info
+            .get("total_token_usage")
+            .and_then(Value::as_object)
+            .map(|total| json_int(total.get("output_tokens"))),
+        last_output: json_int(last.get("output_tokens")),
+    })
 }
 
 /// Whether the entry is the agent calling a tool: a Codex `*_call` response
@@ -824,6 +928,7 @@ mod tests {
             },
             output_tokens: 16,
             usage_measured: true,
+            context_window_tokens: 0,
         }
     }
 
@@ -842,15 +947,16 @@ mod tests {
             },
             output_tokens: 0,
             usage_measured: false,
+            context_window_tokens: 0,
         }
     }
 
     fn expected_codex() -> SessionEconomics {
         SessionEconomics {
             turns: 3,
-            context_tokens: 191,
-            peak_context_tokens: 191,
-            compactions: 0,
+            context_tokens: 625,
+            peak_context_tokens: 940,
+            compactions: 1,
             tool_result_bytes: BTreeMap::from([
                 ("cat".to_string(), 10),
                 ("grep".to_string(), 9),
@@ -862,8 +968,9 @@ mod tests {
                 max_ms: 45_000,
                 mean_ms: 22_500,
             },
-            output_tokens: 0,
-            usage_measured: false,
+            output_tokens: 65,
+            usage_measured: true,
+            context_window_tokens: 272_000,
         }
     }
 
