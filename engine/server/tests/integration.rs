@@ -16881,21 +16881,29 @@ mod pod_stream {
     }
 
     async fn harness(fail: bool) -> Harness {
+        harness_with(fail, None).await
+    }
+
+    /// `templates` replaces the harness's own `pod` template, e.g. with the
+    /// stock set a real engine boots with.
+    async fn harness_with(fail: bool, templates: Option<Vec<SessionTemplate>>) -> Harness {
         let mut cfg = test_config();
         cfg.pod_backends_enabled = true;
-        cfg.session_templates = vec![SessionTemplate {
-            name: "pod".into(),
-            description: "pod-backed".into(),
-            command: Some(vec!["/bin/cat".into()]),
-            cwd: None,
-            env: Vec::new(),
-            account: None,
-            default_name: None,
-            match_repo_names: Vec::new(),
-            match_path_prefixes: Vec::new(),
-            tags: Vec::new(),
-            backend: "pod".into(),
-        }];
+        cfg.session_templates = templates.unwrap_or_else(|| {
+            vec![SessionTemplate {
+                name: "pod".into(),
+                description: "pod-backed".into(),
+                command: Some(vec!["/bin/cat".into()]),
+                cwd: None,
+                env: Vec::new(),
+                account: None,
+                default_name: None,
+                match_repo_names: Vec::new(),
+                match_path_prefixes: Vec::new(),
+                tags: Vec::new(),
+                backend: "pod".into(),
+            }]
+        });
         let (base, state, guard) = boot_with_state(cfg).await;
         let (tx, created) = tokio::sync::mpsc::unbounded_channel();
         let launcher = Arc::new(FakeLauncher {
@@ -17280,6 +17288,41 @@ mod pod_stream {
         let pod = h.launcher.pods.lock().unwrap().pop().expect("pod created");
         let container = &pod.spec.unwrap().containers[0];
         assert!(container.command.is_none());
+        let raw = container
+            .env
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|v| v.name == "VOGT_SESSION_COMMAND")
+            .and_then(|v| v.value.clone())
+            .expect("VOGT_SESSION_COMMAND is set");
+        assert_eq!(
+            vogt_session_agent::parse_command(Some(&raw)),
+            Some(vec!["bash".to_string(), "-l".to_string()])
+        );
+    }
+
+    /// The smoke harness's exact request against the stock `Pod` template (no
+    /// command of its own): the argv in the body must still reach the pod.
+    #[tokio::test]
+    async fn the_stock_pod_template_keeps_the_requested_command() {
+        let mut h = harness_with(false, Some(SessionTemplate::default_templates())).await;
+        let body = r#"{"name":"smoke-x","template":"pod","command":["bash","-l"]}"#;
+        let created: Value = h
+            .client
+            .post(format!("{}/api/sessions", h.base))
+            .header("content-type", "application/json")
+            .body(body)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(created["id"].is_string(), "{created}");
+        h.created.recv().await.expect("a pod is created");
+        let pod = h.launcher.pods.lock().unwrap().pop().expect("pod created");
+        let container = &pod.spec.unwrap().containers[0];
         let raw = container
             .env
             .as_ref()
