@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 
-use super::context_rotation::rotate_over_budget;
+use super::context_rotation::{rotate_over_budget, rotate_with};
 use super::preferences::preference_set_op;
 use super::sessions::start_session;
 use super::sessions_test::{insert_project, start_params};
@@ -23,6 +23,7 @@ struct Script {
     seen: Mutex<Vec<String>>,
     created: Mutex<Vec<String>>,
     hibernated: Mutex<bool>,
+    fail_hibernate: Mutex<bool>,
     context: i64,
 }
 
@@ -42,6 +43,7 @@ fn opened(context: i64) -> (Built, Arc<Script>, PathBuf) {
         seen: Mutex::new(Vec::new()),
         created: Mutex::new(Vec::new()),
         hibernated: Mutex::new(false),
+        fail_hibernate: Mutex::new(false),
         context,
     });
     let seen = Arc::clone(&script);
@@ -84,6 +86,9 @@ fn opened(context: i64) -> (Built, Arc<Script>, PathBuf) {
                 return (200, format!(r#"{{"id":"{id}"}}"#).into_bytes());
             }
             if method == "POST" && path.ends_with("/hibernate") {
+                if *seen.fail_hibernate.lock().unwrap() {
+                    return (500, br#"{"error":"boom"}"#.to_vec());
+                }
                 *seen.hibernated.lock().unwrap() = true;
                 return (200, br#"{"id":"eng-old","activity":"hibernated"}"#.to_vec());
             }
@@ -241,4 +246,79 @@ fn the_budget_setting_is_validated() {
         .as_object()
         .unwrap()
         .is_empty());
+}
+
+fn creates(script: &Script) -> usize {
+    script.posts("/api/sessions ")
+}
+
+/// Hand-off written, session over budget.
+fn ready(context: i64) -> (Built, Arc<Script>, PathBuf) {
+    let (built, script, dir) = opened(context);
+    budget(&built, 250_000);
+    let folder = dir.join("context-rotation");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join("eng-old.md"), "fleet: eng-1\n").unwrap();
+    (built, script, dir)
+}
+
+#[test]
+fn a_failing_hibernate_starts_one_replacement_and_retries_alone() {
+    let (built, script, dir) = ready(400_000);
+    *script.fail_hibernate.lock().unwrap() = true;
+    assert_eq!(creates(&script), 1); // the original session
+
+    let first = rotate_over_budget(ctx(&built)).unwrap();
+    assert!(first.rotated.is_empty(), "not marked rotated: {first:?}");
+    assert_eq!(creates(&script), 2);
+    assert_eq!(script.posts("/hibernate"), 1);
+
+    // Backing off: no second replacement, no second hibernate yet.
+    let again = rotate_over_budget(ctx(&built)).unwrap();
+    assert!(again.rotated.is_empty());
+    assert_eq!(creates(&script), 2);
+    assert_eq!(script.posts("/hibernate"), 1);
+
+    // The hand-off is kept. Once the back-off passes and hibernate works, the
+    // retry finishes the rotation without a third session.
+    let folder = dir.join("context-rotation");
+    assert!(folder.join("eng-old.md").exists());
+    *script.fail_hibernate.lock().unwrap() = false;
+    let marker = std::fs::File::options()
+        .write(true)
+        .open(folder.join("eng-old.rotating"))
+        .unwrap();
+    marker
+        .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3600))
+        .unwrap();
+    drop(marker);
+    let done = rotate_over_budget(ctx(&built)).unwrap();
+    assert_eq!(
+        done.rotated,
+        vec![("eng-old".to_string(), "eng-new".to_string())]
+    );
+    assert_eq!(creates(&script), 2);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn an_audit_failure_neither_orphans_the_replacement_nor_aborts_the_pass() {
+    let (built, script, dir) = ready(400_000);
+    let outcome = rotate_with(ctx(&built), |_, _, _| {
+        Err(crate::errors::VogtError::InvalidRequest(
+            "audit down".into(),
+        ))
+    })
+    .expect("an audit failure does not abort the pass");
+    assert_eq!(
+        outcome.rotated,
+        vec![("eng-old".to_string(), "eng-new".to_string())]
+    );
+    assert_eq!(
+        script.posts("/hibernate"),
+        1,
+        "the old session is hibernated"
+    );
+    assert_eq!(creates(&script), 2);
+    let _ = std::fs::remove_dir_all(dir);
 }
