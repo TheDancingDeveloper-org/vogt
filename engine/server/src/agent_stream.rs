@@ -192,6 +192,51 @@ pub struct BootstrapResponse {
     pub bundle: serde_json::Value,
     pub env: serde_json::Value,
     pub brief: String,
+    /// Graft credential for the session's repo and line, delivered to the
+    /// entrypoint as a 0600 file rather than an environment value. Absent
+    /// when the engine has none configured.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub graft_token: Option<String>,
+}
+
+/// The contract env the bootstrap response carries (the same fields as the
+/// pod's spec.env), as strings. Graft's endpoint is engine config.
+fn bootstrap_env(
+    engine: String,
+    graft_endpoint: Option<String>,
+    id: Uuid,
+    req: &BootstrapRequest,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut env = serde_json::Map::new();
+    for (name, value) in [
+        ("VOGT_ENGINE_URL", engine),
+        ("VOGT_SESSION_ID", id.to_string()),
+        ("VOGT_GRAFT_REPO", req.graft_repo.clone()),
+        ("VOGT_GRAFT_LINE", req.graft_line.clone()),
+        ("GRAFT_LINE", req.graft_line.clone()),
+        ("VOGT_CLI", req.cli.clone()),
+    ] {
+        env.insert(name.into(), serde_json::Value::String(value));
+    }
+    if let Some(endpoint) = graft_endpoint {
+        env.insert("GRAFT_ENDPOINT".into(), serde_json::Value::String(endpoint));
+    }
+    if let Some(path) = req.extra_ca_file.as_ref() {
+        env.insert(
+            "VOGT_EXTRA_CA_FILE".into(),
+            serde_json::Value::String(path.clone()),
+        );
+    }
+    env
+}
+
+/// Read the configured graft token file. The path is engine config (a mounted
+/// secret); the token is never logged or stored.
+async fn read_graft_token(path: Option<&str>) -> std::io::Result<Option<String>> {
+    let Some(path) = path else { return Ok(None) };
+    let text = tokio::fs::read_to_string(path).await?;
+    let token = text.trim();
+    Ok((!token.is_empty()).then(|| token.to_owned()))
 }
 pub fn global() -> Arc<AgentAuth> {
     Arc::clone(AUTH.get_or_init(|| Arc::new(AgentAuth::default())))
@@ -361,28 +406,21 @@ pub async fn bootstrap(
     let Some(session_token) = state.agent_auth.session_token(id).await else {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
-    let engine = match state.sessions.pod_config() {
-        Ok(cfg) => cfg.engine_endpoint,
+    let cfg = match state.sessions.pod_config() {
+        Ok(cfg) => cfg,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
-    // The same contract fields the pod's spec.env carries (pod_backend::pod_env),
-    // as strings, so the agent can take either source.
-    let mut env = serde_json::Map::new();
-    for (name, value) in [
-        ("VOGT_ENGINE_URL", engine),
-        ("VOGT_SESSION_ID", id.to_string()),
-        ("VOGT_GRAFT_REPO", req.graft_repo.clone()),
-        ("VOGT_GRAFT_LINE", req.graft_line.clone()),
-        ("VOGT_CLI", req.cli.clone()),
-    ] {
-        env.insert(name.into(), serde_json::Value::String(value));
-    }
-    if let Some(path) = req.extra_ca_file.as_ref() {
-        env.insert(
-            "VOGT_EXTRA_CA_FILE".into(),
-            serde_json::Value::String(path.clone()),
-        );
-    }
+    let graft_token = match read_graft_token(cfg.graft_token_file.as_deref()).await {
+        Ok(token) => token,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "graft token file is configured but unreadable",
+            )
+                .into_response()
+        }
+    };
+    let env = bootstrap_env(cfg.engine_endpoint, cfg.graft_endpoint, id, &req);
     axum::Json(BootstrapResponse {
         session_token,
         // Account bundle files (path -> base64) belong to the broker store; the
@@ -390,6 +428,7 @@ pub async fn bootstrap(
         // written as a credential.
         bundle: serde_json::json!({}),
         env: serde_json::Value::Object(env),
+        graft_token,
         brief: state
             .sessions
             .summary_of(id)
@@ -500,6 +539,45 @@ async fn relay(mut socket: axum::extract::ws::WebSocket, state: Arc<AppState>, i
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bootstrap_env_carries_the_graft_endpoint_and_line() {
+        let req = BootstrapRequest {
+            session_id: String::new(),
+            graft_repo: "vogt".into(),
+            graft_line: "rust-2".into(),
+            cli: "claude".into(),
+            extra_ca_file: None,
+        };
+        let env = bootstrap_env(
+            "http://engine".into(),
+            Some("http://graft-dev.graft-dev.svc:17888".into()),
+            Uuid::nil(),
+            &req,
+        );
+        assert_eq!(
+            env["GRAFT_ENDPOINT"],
+            "http://graft-dev.graft-dev.svc:17888"
+        );
+        assert_eq!(env["GRAFT_LINE"], "rust-2");
+        assert_eq!(env["VOGT_GRAFT_LINE"], "rust-2");
+        assert!(!bootstrap_env("e".into(), None, Uuid::nil(), &req).contains_key("GRAFT_ENDPOINT"));
+    }
+
+    #[tokio::test]
+    async fn graft_token_is_read_from_the_configured_file_only() {
+        assert_eq!(read_graft_token(None).await.unwrap(), None);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("graft-token");
+        std::fs::write(&path, "tok\n").unwrap();
+        assert_eq!(
+            read_graft_token(path.to_str()).await.unwrap().as_deref(),
+            Some("tok")
+        );
+        assert!(read_graft_token(dir.path().join("missing").to_str())
+            .await
+            .is_err());
+    }
 
     #[tokio::test]
     async fn bootstrap_is_single_use_and_rejects_bad_tokens() {
