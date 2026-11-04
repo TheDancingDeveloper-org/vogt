@@ -677,6 +677,36 @@ impl SessionRegistry {
             ),
             None => self.cfg.agent_onboarding.settings_file.as_deref(),
         };
+        let mcp_set = crate::mcp_set::McpSet::for_agent(
+            spec.mcp_set
+                .as_deref()
+                .or_else(|| recorded.and_then(|r| r.mcp_set.as_deref())),
+            self.agent_of(&spec.command, spec.template.as_deref())
+                .as_deref(),
+        )?;
+        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+        let claude_dir = spec
+            .env
+            .iter()
+            .flatten()
+            .rev()
+            .find(|(k, _)| k == "CLAUDE_CONFIG_DIR")
+            .map(|(_, v)| std::path::PathBuf::from(v))
+            .or_else(|| std::env::var_os("CLAUDE_CONFIG_DIR").map(std::path::PathBuf::from));
+        let claude_json = crate::mcp_set::claude_json_path(claude_dir.as_deref(), home.as_deref());
+        let mcp_extra: Vec<String> = spec
+            .mcp_extra
+            .clone()
+            .or_else(|| recorded.map(|r| r.mcp_extra.clone()))
+            .unwrap_or_default();
+        let mcp_trim = crate::mcp_set::prepare(
+            mcp_set,
+            &mcp_extra,
+            home.as_deref(),
+            claude_json.as_deref(),
+            &self.cfg.state_dir,
+            id,
+        );
         let launch = agent_cli::launch(
             spec.command.as_deref(),
             &agent_cli::LaunchRequest {
@@ -693,6 +723,7 @@ impl SessionRegistry {
                 add_dirs: recorded.map(|r| r.add_dirs.as_slice()).unwrap_or(&[]),
                 opencode_config: self.cfg.agent_onboarding.opencode_config.as_deref(),
                 codex_approval_policy: self.cfg.codex_approval_policy.as_str(),
+                mcp: Some(&mcp_trim),
             },
         )?;
         if let Some(rewritten) = launch.command {
@@ -820,7 +851,24 @@ impl SessionRegistry {
             }
         }
 
-        let prompt_file = match brief {
+        // A worker brief says which MCP servers the session got (WI-2746).
+        let brief_text = brief.map(|text| {
+            if mcp_set != crate::mcp_set::McpSet::Worker {
+                return text.to_string();
+            }
+            let servers = match self
+                .agent_of(&spec.command, spec.template.as_deref())
+                .as_deref()
+            {
+                Some("codex") => &mcp_trim.codex_servers,
+                _ => &mcp_trim.claude_servers,
+            };
+            format!(
+                "{text}{}",
+                crate::mcp_set::brief_section(servers, &mcp_trim.unregistered)
+            )
+        });
+        let prompt_file = match brief_text.as_deref() {
             Some(text) => Some(prompt_files::write_session_prompt(
                 &self.cfg.state_dir,
                 id,
@@ -1040,6 +1088,12 @@ impl SessionRegistry {
                 record.permission_mode = posture.clone();
                 record.account = account.clone();
                 record.settings_file = applied_settings.clone();
+                record.mcp_set = Some(mcp_set.name().to_string());
+                record.mcp_extra = if mcp_set == crate::mcp_set::McpSet::Worker {
+                    mcp_extra.clone()
+                } else {
+                    Vec::new()
+                };
                 record.add_dirs = prompt_file
                     .as_ref()
                     .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
@@ -1821,6 +1875,8 @@ impl SessionRegistry {
             model: record.model.clone(),
             effort: record.effort.clone(),
             permission_mode: record.permission_mode.clone(),
+            mcp_set: record.mcp_set.clone(),
+            mcp_extra: (!record.mcp_extra.is_empty()).then(|| record.mcp_extra.clone()),
             account: record.account.clone(),
             autopilot: record.autopilot,
             policy: record.policy.clone(),
