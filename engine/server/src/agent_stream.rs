@@ -361,11 +361,10 @@ pub async fn bootstrap(
     let Some(session_token) = state.agent_auth.session_token(id).await else {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
-    let engine = state
-        .config
-        .agent_auth_public_url
-        .clone()
-        .unwrap_or_else(|| crate::pod_backend::PodConfig::default().engine_endpoint);
+    let engine = match state.sessions.pod_config() {
+        Ok(cfg) => cfg.engine_endpoint,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
     // The same contract fields the pod's spec.env carries (pod_backend::pod_env),
     // as strings, so the agent can take either source.
     let mut env = serde_json::Map::new();
