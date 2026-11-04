@@ -346,6 +346,83 @@ async fn connect_websocket(
     connect_async_tls_with_config(request, None, false, Some(Connector::Rustls(tls))).await
 }
 
+const CONNECT_INITIAL_BACKOFF: Duration = Duration::from_millis(250);
+const CONNECT_BACKOFF_CAP: Duration = Duration::from_secs(2);
+const CONNECT_TOTAL: Duration = Duration::from_secs(15);
+const CONNECT_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// A new pod's IP is admitted to the engine's allow-set 1-3 s after it starts;
+/// until then the engine refuses the connection. Connection failures, timeouts
+/// and 5xx are transient; a 4xx (bad token, unknown session) is not.
+fn connect_retryable(error: &tokio_tungstenite::tungstenite::Error) -> bool {
+    use tokio_tungstenite::tungstenite::Error;
+    match error {
+        Error::Io(_) | Error::ConnectionClosed | Error::AlreadyClosed => true,
+        Error::Http(response) => response.status().is_server_error(),
+        _ => false,
+    }
+}
+
+/// Retry `attempt` with doubling backoff capped at `cap`, until `total` has
+/// elapsed. The last error is returned once retrying stops.
+async fn retry_with_backoff<T, E, Fut>(
+    mut attempt: impl FnMut() -> Fut,
+    retryable: impl Fn(&E) -> bool,
+    initial: Duration,
+    cap: Duration,
+    total: Duration,
+) -> Result<T, E>
+where
+    Fut: std::future::Future<Output = Result<T, E>>,
+{
+    let started = tokio::time::Instant::now();
+    let mut backoff = initial;
+    loop {
+        match attempt().await {
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                let remaining = total.saturating_sub(started.elapsed());
+                if !retryable(&error) || remaining.is_zero() {
+                    return Err(error);
+                }
+                tokio::time::sleep(backoff.min(remaining)).await;
+                backoff = (backoff * 2).min(cap);
+            }
+        }
+    }
+}
+
+async fn connect_with_retry(
+    request: &http::Request<()>,
+    tls: Arc<rustls::ClientConfig>,
+    total: Duration,
+) -> Result<
+    (
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        tokio_tungstenite::tungstenite::handshake::client::Response,
+    ),
+    tokio_tungstenite::tungstenite::Error,
+> {
+    retry_with_backoff(
+        || async {
+            let attempt = connect_websocket(request.clone(), tls.clone());
+            match tokio::time::timeout(CONNECT_ATTEMPT_TIMEOUT, attempt).await {
+                Ok(result) => result,
+                Err(_) => Err(tokio_tungstenite::tungstenite::Error::Io(
+                    std::io::ErrorKind::TimedOut.into(),
+                )),
+            }
+        },
+        connect_retryable,
+        CONNECT_INITIAL_BACKOFF,
+        CONNECT_BACKOFF_CAP,
+        total,
+    )
+    .await
+}
+
 fn bundle_marker(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
 }
@@ -463,7 +540,7 @@ pub async fn run(config: Config) -> Result<(), AgentError> {
             return Err(error);
         }
         let connection: Result<(), AgentError> = async {
-            let (socket, _) = connect_websocket(req, tls.clone()).await?;
+            let (socket, _) = connect_with_retry(&req, tls.clone(), CONNECT_TOTAL).await?;
             backoff = Duration::from_millis(100);
             let (mut sink, mut stream) = socket.split();
             send_frame(&mut sink, &Frame::Hello { session_id: config.session_id.clone() }).await?;
@@ -621,6 +698,74 @@ mod tests {
         assert_eq!(req.headers()["authorization"], "Bearer session-secret");
         assert!(encoded.contains("\"type\":\"exited\""));
         assert!(encoded.contains("\"status\":7"));
+    }
+
+    #[tokio::test]
+    async fn connect_retries_until_the_engine_admits_the_pod() {
+        let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = probe.local_addr().unwrap();
+        drop(probe); // refused until the server below binds
+        let server = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(900)).await;
+            let listener = tokio::net::TcpListener::bind(address).await.unwrap();
+            let (stream, _) = listener.accept().await.unwrap();
+            tokio_tungstenite::accept_async(stream).await.unwrap();
+        });
+        let request = format!("ws://{address}/").into_client_request().unwrap();
+        let started = std::time::Instant::now();
+        let result =
+            connect_with_retry(&request, tls_config().unwrap(), Duration::from_secs(10)).await;
+        assert!(result.is_ok(), "{:?}", result.err());
+        assert!(started.elapsed() >= Duration::from_millis(800));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn connect_gives_up_after_the_total_budget() {
+        let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = probe.local_addr().unwrap();
+        drop(probe);
+        let request = format!("ws://{address}/").into_client_request().unwrap();
+        let started = std::time::Instant::now();
+        let result =
+            connect_with_retry(&request, tls_config().unwrap(), Duration::from_secs(1)).await;
+        assert!(result.is_err());
+        assert!(started.elapsed() >= Duration::from_secs(1));
+        assert!(started.elapsed() < Duration::from_secs(4));
+    }
+
+    #[tokio::test]
+    async fn retry_does_not_repeat_non_retryable_errors() {
+        let calls = std::sync::atomic::AtomicU32::new(0);
+        let result: Result<(), &str> = retry_with_backoff(
+            || async {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Err("401")
+            },
+            |_| false,
+            Duration::from_millis(10),
+            Duration::from_millis(20),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert_eq!(result, Err("401"));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn http_4xx_is_not_retryable_but_5xx_and_io_are() {
+        use tokio_tungstenite::tungstenite::Error;
+        let response = |status| {
+            Error::Http(Box::new(
+                http::Response::builder().status(status).body(None).unwrap(),
+            ))
+        };
+        assert!(!connect_retryable(&response(401)));
+        assert!(!connect_retryable(&response(404)));
+        assert!(connect_retryable(&response(503)));
+        assert!(connect_retryable(&Error::Io(
+            std::io::ErrorKind::ConnectionRefused.into()
+        )));
     }
 
     #[tokio::test]
