@@ -1525,7 +1525,9 @@ def build_operations() -> list[Operation[Any, Any]]:
                 "Read the last N replies of a session's agent (Claude Code or "
                 "Codex) from its own transcript — whole, current and "
                 "redacted, unlike the screen. Says how the conversation was "
-                "found (`basis`). Takes either id."
+                "found (`basis`). Every answer carries a `cursor`; pass it back "
+                "as `since` and an unchanged answer is `{unchanged: true, "
+                "cursor}` with no messages. Takes either id."
             ),
             scope="read",
             mutating=False,
@@ -1560,7 +1562,9 @@ def build_operations() -> list[Operation[Any, Any]]:
                 "(at most 120 characters), and the economics the engine already "
                 "computed (turns, context, compactions). Numbers are null when "
                 "the row has none — this does not meter a transcript. Pass "
-                "context_window to get context_pct. Takes either id."
+                "context_window to get context_pct. Every answer carries a "
+                "`cursor`; pass it back as `since` and an unchanged digest is "
+                "`{unchanged: true, cursor}` with no body. Takes either id."
             ),
             scope="read",
             mutating=False,
@@ -1610,9 +1614,11 @@ def build_operations() -> list[Operation[Any, Any]]:
             name="session.wait_any",
             summary=(
                 "Wait for any of the named sessions instead of polling them: "
-                "blocks (up to timeout_s, max 600) until one publishes a kind "
-                "in `until` (default: ready, blocked, approval, exited, "
-                "errored). Returns the delta, or `timeout`. Pass `cursor` (the "
+                "blocks (up to timeout_s, default 300, max 600; an oversight "
+                "session's wait is at least 60 so it cannot become a poll "
+                "loop) until one publishes a kind in `until` (default: ready, "
+                "blocked, approval, exited, errored). Returns the delta with "
+                "that session's digest, or `timeout`. Pass `cursor` (the "
                 "previous `next_cursor`) so a replayed page is not waited on "
                 "twice. `cursor=now` skips events already published and waits "
                 "only for one that lands after the call starts; a timeout then "

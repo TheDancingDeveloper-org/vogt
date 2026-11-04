@@ -756,6 +756,11 @@ def test_wait_any_on_an_engine_without_the_route_says_so(
         session_wait_any(wired, SessionWaitAnyParams())
 
 
+def test_wait_any_defaults_to_a_long_wait(wired: AppContext, engine: Engine) -> None:
+    session_wait_any(wired, SessionWaitAnyParams())
+    assert "timeout_s=300" in engine.wait_any_queries[-1]
+
+
 def test_wait_any_bounds_its_timeout() -> None:
     with pytest.raises(ValueError):
         SessionWaitAnyParams(timeout_s=601)

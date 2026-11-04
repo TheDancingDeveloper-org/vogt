@@ -1,6 +1,6 @@
 {
-  "main_sha": "84ec1058a69a8a82175a03a18b88134739d7237e",
-  "recorded_at": "2026-11-04T11:03:49Z",
+  "main_sha": "unknown",
+  "recorded_at": "2026-11-04T12:02:37Z",
   "recorder": "scripts/parity.py",
   "recorder_version": 2
 }

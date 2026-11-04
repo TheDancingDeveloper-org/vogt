@@ -6158,10 +6158,14 @@ class SessionWaitAnyParams(Params):
         ),
     )
     timeout_s: int = Field(
-        default=120,
+        default=300,
         ge=1,
         le=600,
-        description="Seconds to wait at most (1-600). Answers `timeout` then.",
+        description=(
+            "Seconds to wait at most (1-600, default 300). Answers `timeout` "
+            "then. An oversight session's value is raised to 60 so a short "
+            "wait cannot become a poll loop."
+        ),
     )
 
     @field_validator("cursor", mode="before")
@@ -6195,12 +6199,26 @@ class SessionWaitAnyResult(Result):
     next_cursor: int = Field(
         description="The seq to pass as `cursor` on the next wait."
     )
+    digest: SessionDigestResult | None = Field(
+        default=None,
+        description=(
+            "The changed session's digest, so a sweep need not follow up with "
+            "session.digest. Null on a timeout."
+        ),
+    )
 
 
 class SessionLastReplyParams(Params):
     id: str = Field(description=SESSION_ID_DESCRIPTION)
     n: int = Field(
         default=1, ge=1, le=20, description="How many of the last replies (1-20)."
+    )
+    since: str | None = Field(
+        default=None,
+        description=(
+            "The `cursor` of an earlier read. When the replies have not changed "
+            "since, the answer is `{unchanged: true, cursor}` with no messages."
+        ),
     )
 
 
@@ -6234,6 +6252,13 @@ class SessionLastReplyResult(Result):
     )
     detail: str | None = Field(
         default=None, description="Why there are no messages, when there are none."
+    )
+    unchanged: bool = Field(
+        default=False,
+        description="True when `since` still matches: nothing else is in the answer.",
+    )
+    cursor: str | None = Field(
+        default=None, description="Pass as `since` on the next read."
     )
 
 
@@ -6322,6 +6347,13 @@ class SessionDigestParams(Params):
             "There is no model table."
         ),
     )
+    since: str | None = Field(
+        default=None,
+        description=(
+            "The `cursor` of an earlier read. When the digest has not changed "
+            "since, the answer is `{unchanged: true, cursor}` with no body."
+        ),
+    )
 
 
 class SessionDigestResult(Result):
@@ -6372,6 +6404,13 @@ class SessionDigestResult(Result):
     )
     updated_at: datetime | None = Field(
         default=None, description="When the session's activity last changed."
+    )
+    unchanged: bool = Field(
+        default=False,
+        description="True when `since` still matches: nothing else is in the answer.",
+    )
+    cursor: str | None = Field(
+        default=None, description="Pass as `since` on the next read."
     )
 
 

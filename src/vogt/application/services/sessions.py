@@ -27,15 +27,20 @@ Three rules this module exists to keep:
 from __future__ import annotations
 
 import contextlib
+import hashlib
+import json
 import logging
 import os
 import re
 import subprocess
 import threading
 import time
+from collections.abc import Callable
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, TypeVar
+
+from pydantic import BaseModel
 
 from vogt.adapters import transcripts
 from vogt.adapters.engine import EngineClient, EngineSession, EngineUnavailable
@@ -167,6 +172,12 @@ from vogt.observability import logger
 from vogt.storage.interface import ReadView, WriteTxn
 
 _LOG = logger("sessions")
+
+# An oversight caller's shortest wait. Below this a wait is a poll loop, and
+# each poll is a full-context turn.
+OVERSIGHT_MIN_WAIT_S = 60
+
+_Stamped = TypeVar("_Stamped", bound=BaseModel)
 
 SESSION_START = "session.start"
 SESSION_STOP = "session.stop"
@@ -1249,10 +1260,52 @@ def _running(
     )
 
 
+def _cursor_of(body: BaseModel) -> str:
+    """Sixteen hex digits of the SHA-256 of the answer's compact JSON.
+
+    Mirrors the Rust core's `unchanged::cursor_of`: the body is hashed with
+    `unchanged` false and `cursor` null, in field order.
+    """
+    text = json.dumps(
+        body.model_dump(mode="json", by_alias=True),
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def _stamp_cursor(
+    body: _Stamped, since: str | None, short: Callable[[], _Stamped]
+) -> _Stamped:
+    """Stamp `body` with its cursor, or cut it to the unchanged answer
+    (`short`, the identity fields only) when `since` names that cursor."""
+    cursor = _cursor_of(body)
+    if since is not None and since.strip() == cursor:
+        return short().model_copy(update={"unchanged": True, "cursor": cursor})
+    return body.model_copy(update={"unchanged": False, "cursor": cursor})
+
+
 def last_reply(
     ctx: AppContext, params: SessionLastReplyParams
 ) -> SessionLastReplyResult:
-    """The last `n` assistant messages of the session's agent conversation."""
+    """The last `n` assistant messages of the session's agent conversation.
+
+    Every answer carries a `cursor`; passed back as `since`, an unchanged
+    answer is `{unchanged: true, cursor}` with no messages.
+    """
+    body = _last_reply_body(ctx, params)
+    return _stamp_cursor(
+        body,
+        params.since,
+        lambda: SessionLastReplyResult(
+            id=body.id, engine_session_id=body.engine_session_id
+        ),
+    )
+
+
+def _last_reply_body(
+    ctx: AppContext, params: SessionLastReplyParams
+) -> SessionLastReplyResult:
     target = _target(ctx, params.id)
     engine_id = target.engine_session_id
     engine_session: EngineSession | None = None
@@ -1526,6 +1579,13 @@ def _int_or_none(value: object) -> int | None:
 
 
 def digest(ctx: AppContext, params: SessionDigestParams) -> SessionDigestResult:
+    """One session's digest, stamped with a `cursor`; passed back as `since`,
+    an unchanged digest is `{unchanged: true, cursor}` with no body."""
+    body = _digest_body(ctx, params)
+    return _stamp_cursor(body, params.since, lambda: SessionDigestResult(id=body.id))
+
+
+def _digest_body(ctx: AppContext, params: SessionDigestParams) -> SessionDigestResult:
     """One session's digest, from a single engine row plus a transcript tail.
 
     Numbers come from the row's `economics` when the engine already computed
@@ -2371,12 +2431,15 @@ def session_wait_any(
     engine = _engine(ctx)
     ids = _engine_ids(ctx, params.ids)
     kinds = [one.strip() for one in params.until if one.strip()] or None
+    timeout_s = params.timeout_s
+    if _is_oversight_caller(ctx, engine):
+        timeout_s = max(timeout_s, OVERSIGHT_MIN_WAIT_S)
     try:
         waited = engine.wait_any(
             ids=ids,
             until=kinds,
             cursor=params.cursor,
-            timeout_s=params.timeout_s,
+            timeout_s=timeout_s,
         )
     except Conflict:
         waited = None
@@ -2390,10 +2453,20 @@ def session_wait_any(
     labels = (
         {} if waited.change is None else _session_labels(ctx, [waited.change.session])
     )
+    # The changed session's digest rides along, so a sweep does not follow up
+    # with session.digest. A session the engine no longer has is simply bare.
+    digest_of: SessionDigestResult | None = None
+    if waited.change is not None:
+        label = labels.get(waited.change.session, waited.change.session)
+        try:
+            digest_of = _digest_body(ctx, SessionDigestParams(id=label))
+        except VogtError:
+            digest_of = None
     return SessionWaitAnyResult(
         outcome=waited.outcome,
         change=None if waited.change is None else _change(waited.change, labels),
         next_cursor=waited.next_cursor,
+        digest=digest_of,
     )
 
 
