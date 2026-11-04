@@ -189,6 +189,13 @@ pub struct Config {
     pub conversation_id: Option<String>,
 }
 
+/// The argv in `VOGT_SESSION_COMMAND` (a JSON array of strings), if any.
+pub fn parse_command(raw: Option<&str>) -> Option<Vec<String>> {
+    serde_json::from_str::<Vec<String>>(raw?)
+        .ok()
+        .filter(|argv| !argv.is_empty())
+}
+
 impl Config {
     pub fn from_env() -> Result<Self, AgentError> {
         let get = |key: &'static str| std::env::var(key).map_err(|_| AgentError::MissingEnv(key));
@@ -200,10 +207,7 @@ impl Config {
                 .trim()
                 .to_owned(),
             cli: get("VOGT_CLI")?,
-            command: std::env::var("VOGT_SESSION_COMMAND")
-                .ok()
-                .and_then(|v| serde_json::from_str::<Vec<String>>(&v).ok())
-                .filter(|argv| !argv.is_empty()),
+            command: parse_command(std::env::var("VOGT_SESSION_COMMAND").ok().as_deref()),
             cwd: std::env::var("VOGT_SESSION_CWD").ok(),
             cols: std::env::var("VOGT_PTY_COLS")
                 .ok()
@@ -703,6 +707,16 @@ mod tests {
         let size = master.get_size().unwrap();
         assert_eq!((size.cols, size.rows), (132, 43));
         let _ = child.kill();
+    }
+
+    #[test]
+    fn the_engine_env_value_becomes_the_spawned_argv() {
+        // The value pod_template writes for ["bash", "-l"].
+        let argv = parse_command(Some(r#"["bash","-l"]"#)).unwrap();
+        assert_eq!(argv, ["bash", "-l"]);
+        assert_eq!(parse_command(None), None);
+        assert_eq!(parse_command(Some("[]")), None);
+        assert_eq!(parse_command(Some("bash -l")), None);
     }
 
     #[test]
