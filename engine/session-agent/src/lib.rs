@@ -178,6 +178,8 @@ pub struct Config {
     pub engine_url: String,
     pub token: String,
     pub cli: String,
+    /// Argv to run in the PTY instead of the agent CLI (`VOGT_SESSION_COMMAND`, a JSON array).
+    pub command: Option<Vec<String>>,
     pub cwd: Option<String>,
     pub cols: u16,
     pub rows: u16,
@@ -198,6 +200,10 @@ impl Config {
                 .trim()
                 .to_owned(),
             cli: get("VOGT_CLI")?,
+            command: std::env::var("VOGT_SESSION_COMMAND")
+                .ok()
+                .and_then(|v| serde_json::from_str::<Vec<String>>(&v).ok())
+                .filter(|argv| !argv.is_empty()),
             cwd: std::env::var("VOGT_SESSION_CWD").ok(),
             cols: std::env::var("VOGT_PTY_COLS")
                 .ok()
@@ -466,14 +472,25 @@ pub fn spawn_pty(config: &Config) -> Result<PtyIo, AgentError> {
             pixel_height: 0,
         })
         .map_err(|e| AgentError::Pty(e.to_string()))?;
-    let command_line = match config.cli.as_str() {
-        "claude" => "claude --add-dir \"$VOGT_SESSION_CWD\"",
-        "codex" => "codex --add-dir \"$VOGT_SESSION_CWD\"",
-        _ => return Err(AgentError::Pty("VOGT_CLI must be claude or codex".into())),
+    let command = match &config.command {
+        Some(argv) => {
+            let mut command = CommandBuilder::new(&argv[0]);
+            command.args(&argv[1..]);
+            command
+        }
+        None => {
+            let command_line = match config.cli.as_str() {
+                "claude" => "claude --add-dir \"$VOGT_SESSION_CWD\"",
+                "codex" => "codex --add-dir \"$VOGT_SESSION_CWD\"",
+                _ => return Err(AgentError::Pty("VOGT_CLI must be claude or codex".into())),
+            };
+            let mut command = CommandBuilder::new("/bin/sh");
+            command.arg("-lc");
+            command.arg(command_line);
+            command
+        }
     };
-    let mut command = CommandBuilder::new("/bin/sh");
-    command.arg("-lc");
-    command.arg(command_line);
+    let mut command = command;
     if let Some(cwd) = &config.cwd {
         command.cwd(cwd);
     }
@@ -642,6 +659,7 @@ mod tests {
             engine_url: "http://127.0.0.1:1".into(),
             token: "t".into(),
             cli: "claude".into(),
+            command: None,
             cwd: None,
             cols: 80,
             rows: 24,
@@ -657,6 +675,35 @@ mod tests {
         let size = master.get_size().unwrap();
         assert_eq!((size.cols, size.rows), (132, 43));
         let _ = child.kill();
+    }
+
+    #[test]
+    fn command_argv_runs_instead_of_the_cli() {
+        let config = Config {
+            session_id: "s".into(),
+            engine_url: "http://127.0.0.1:1".into(),
+            token: "t".into(),
+            cli: "claude".into(),
+            command: Some(vec!["sh".into(), "-c".into(), "echo argv-ran".into()]),
+            cwd: None,
+            cols: 80,
+            rows: 24,
+            buffer_bytes: 1024,
+            claude_config_dir: None,
+            account: None,
+            conversation_id: None,
+        };
+        let (mut reader, _writer, mut child, _master) = spawn_pty(&config).unwrap();
+        let mut out = String::new();
+        let mut buf = [0u8; 256];
+        while !out.contains("argv-ran") {
+            match reader.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => out.push_str(&String::from_utf8_lossy(&buf[..n])),
+            }
+        }
+        assert!(out.contains("argv-ran"), "got {out:?}");
+        let _ = child.wait();
     }
 
     #[test]
