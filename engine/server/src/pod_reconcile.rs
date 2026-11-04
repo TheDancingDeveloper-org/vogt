@@ -383,7 +383,8 @@ mod tests {
     #[tokio::test]
     async fn a_session_whose_pod_died_without_exited_ends_with_the_reason() {
         let id = Uuid::new_v4();
-        let (auth, link) = live(id);
+        let auth = AgentAuth::default();
+        let (link, _reader) = auth.register_pod(id);
         link.ingest(0, b"hello").unwrap();
         let kube = MockKube::with(vec![pod(id, terminated("Failed", 137, "OOMKilled"))]);
 
