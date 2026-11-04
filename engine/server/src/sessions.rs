@@ -119,15 +119,7 @@ pub struct SessionRegistry {
     graft_minter: parking_lot::Mutex<Option<Arc<dyn crate::graft_mint::GraftMinter>>>,
     /// Stream halves rebuilt for pods an engine restart is adopting, taken by
     /// `spawn_pod_session` when the session over them is built.
-    adopting: parking_lot::Mutex<
-        std::collections::HashMap<
-            Uuid,
-            (
-                Arc<crate::agent_stream::PodLink>,
-                crate::agent_stream::PodReader,
-            ),
-        >,
-    >,
+    adopting: parking_lot::Mutex<std::collections::HashMap<Uuid, AdoptedPod>>,
 }
 
 const MAX_SESSION_NAME_BYTES: usize = 256;
@@ -166,6 +158,14 @@ enum Scratch {
 /// How long hibernating a pod session waits for its agent to write the
 /// transcript back.
 const POD_FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+/// A pod an engine restart is taking back: its rebuilt stream halves and the
+/// uid its listing gave, which its teardown names.
+type AdoptedPod = (
+    Arc<crate::agent_stream::PodLink>,
+    crate::agent_stream::PodReader,
+    Option<String>,
+);
+
 /// How long it waits for the pod to be deleted after the agent exits.
 const POD_TEARDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -306,11 +306,11 @@ impl SessionRegistry {
         let pod_config = self.pod_config()?;
         let launcher = self.pod_launcher()?;
         let minter = self.graft_minter(&pod_config)?;
-        let (link, reader, adopting) = match self.adopting.lock().remove(&id) {
-            Some((link, reader)) => (link, reader, true),
+        let (link, reader, adopted_uid, adopting) = match self.adopting.lock().remove(&id) {
+            Some((link, reader, uid)) => (link, reader, uid, true),
             None => {
                 let (link, reader) = auth.register_pod(id);
-                (link, reader, false)
+                (link, reader, None, false)
             }
         };
         let backend = Arc::new(crate::pod_backend::PodBackend::new(
@@ -379,6 +379,9 @@ impl SessionRegistry {
         tokio::spawn(async move {
             let auth = crate::agent_stream::global();
             let mut revocable: Option<crate::graft_mint::GraftToken> = None;
+            // The uid of the pod this task owns: every delete names it, so a
+            // late teardown cannot remove a later incarnation's pod.
+            let mut pod_uid = adopted_uid;
             if let Some(pod) = pod {
                 auth.issue(id, &token).await;
                 // The pod's own graft token, minted before the pod exists so a
@@ -411,18 +414,29 @@ impl SessionRegistry {
                     launcher.create(id, &token, pod).await
                 }
                 .await;
-                if let Err(e) = created {
-                    tracing::warn!(session = %id, error = %e, "creating the session pod failed");
-                    auth.withdraw(id).await;
-                    let note = format!("\r\nsession pod could not be created: {e}\r\n");
-                    let _ = link.ingest(link.next_offset(), note.as_bytes());
-                    link.finish(1);
+                match created {
+                    Ok(uid) => pod_uid = uid,
+                    Err(e) => {
+                        tracing::warn!(session = %id, error = %e, "creating the session pod failed");
+                        auth.withdraw(id).await;
+                        let note = format!("\r\nsession pod could not be created: {e}\r\n");
+                        let _ = link.ingest(link.next_offset(), note.as_bytes());
+                        link.finish(1);
+                    }
                 }
             }
             link.exited().await;
-            if let Err(e) = launcher.delete(id, None).await {
-                tracing::debug!(session = %id, error = %e, "deleting the session pod failed");
-            }
+            // Torn down only once the pod has left the cluster, so a wake
+            // right after can create its replacement under the same name
+            // instead of meeting the old pod still `Terminating`.
+            crate::pod_backend::teardown_pod(
+                launcher.as_ref(),
+                id,
+                pod_uid,
+                crate::pod_backend::POD_GONE_TIMEOUT,
+                crate::pod_backend::POD_GONE_POLL,
+            )
+            .await;
             remove_pod_token(&state_dir, id);
             auth.forget_pod_if(id, &link);
             link.mark_torn_down();
@@ -532,7 +546,8 @@ impl SessionRegistry {
                 .as_ref()
                 .and_then(|h| std::fs::metadata(h.log_path(id)).ok())
                 .map_or(0, |m| m.len());
-            match self.adopt_one(record, cursor, token).await {
+            let uid = pod.metadata.uid.clone();
+            match self.adopt_one(record, cursor, token, uid).await {
                 Ok(link) => {
                     tracing::info!(session = %id, cursor, "adopted a running session pod after the restart");
                     adopted.push(id);
@@ -573,13 +588,16 @@ impl SessionRegistry {
         record: Record,
         cursor: u64,
         token: String,
+        uid: Option<String>,
     ) -> Result<Arc<crate::agent_stream::PodLink>> {
         let id = record.id;
         let auth = crate::agent_stream::global();
         // The link is built here, ahead of the session, so the credential and
         // the cursor are in place before any agent can dial in.
         let (link, reader) = auth.adopt_pod(id, cursor, token).await;
-        self.adopting.lock().insert(id, (Arc::clone(&link), reader));
+        self.adopting
+            .lock()
+            .insert(id, (Arc::clone(&link), reader, uid));
         let (command, template) = self.wake_launch(&record);
         let spec = self.wake_spec(
             &record,

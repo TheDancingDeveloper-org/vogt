@@ -16883,17 +16883,26 @@ mod pod_stream {
         tungstenite::client::IntoClientRequest, MaybeTlsStream, WebSocketStream,
     };
     use vogt_engine_contract::ActivityState;
-    use vogt_engine_server::pod_backend::{LaunchFuture, PodLauncher};
+    use vogt_engine_server::pod_backend::{CreateFuture, GoneFuture, LaunchFuture, PodLauncher};
     use vogt_session_agent::Frame;
 
     type Agent = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
+    /// A mocked cluster. A pod occupies its name (and uid) from `create` until
+    /// `terminating` after its delete, as a real `Terminating` pod does, and a
+    /// second `create` under an occupied name is refused (409 AlreadyExists).
     struct FakeLauncher {
         created: tokio::sync::mpsc::UnboundedSender<(Uuid, Vec<u8>)>,
         deleted: Mutex<Vec<Uuid>>,
+        /// Every delete as the engine sent it: session id and the uid named.
+        delete_uids: Mutex<Vec<(Uuid, Option<String>)>>,
         pods: Mutex<Vec<k8s_openapi::api::core::v1::Pod>>,
         /// What the mocked cluster lists.
         listed: Mutex<Vec<k8s_openapi::api::core::v1::Pod>>,
+        /// Name -> uid of the pods that exist, `Terminating` ones included.
+        cluster: Arc<Mutex<std::collections::HashMap<Uuid, String>>>,
+        /// How long a deleted pod stays `Terminating`.
+        terminating: Mutex<Duration>,
         fail: bool,
     }
 
@@ -16903,26 +16912,91 @@ mod pod_stream {
             id: Uuid,
             token: &'a [u8],
             pod: k8s_openapi::api::core::v1::Pod,
-        ) -> LaunchFuture<'a> {
+        ) -> CreateFuture<'a> {
             Box::pin(async move {
                 if self.fail {
                     return Err(vogt_engine_server::error::ApiError::Internal(
                         "no cluster".into(),
                     ));
                 }
+                let uid = format!("uid-{}", Uuid::new_v4());
+                {
+                    let mut cluster = self.cluster.lock().unwrap();
+                    if cluster.contains_key(&id) {
+                        return Err(vogt_engine_server::error::ApiError::Internal(
+                            "creating session pod: AlreadyExists".into(),
+                        ));
+                    }
+                    cluster.insert(id, uid.clone());
+                }
                 self.pods.lock().unwrap().push(pod);
                 let _ = self.created.send((id, token.to_vec()));
+                Ok(Some(uid))
+            })
+        }
+        fn delete(&self, id: Uuid, uid: Option<String>) -> LaunchFuture<'_> {
+            Box::pin(async move {
+                self.delete_uids.lock().unwrap().push((id, uid.clone()));
+                let held = self.cluster.lock().unwrap().get(&id).cloned();
+                if let (Some(want), Some(held)) = (&uid, &held) {
+                    if want != held {
+                        return Err(vogt_engine_server::error::ApiError::Internal(
+                            "deleting session pod: uid precondition failed".into(),
+                        ));
+                    }
+                }
+                self.deleted.lock().unwrap().push(id);
+                if let Some(held) = held {
+                    let linger = *self.terminating.lock().unwrap();
+                    let cluster = Arc::clone(&self.cluster);
+                    tokio::spawn(async move {
+                        tokio::time::sleep(linger).await;
+                        let mut cluster = cluster.lock().unwrap();
+                        if cluster.get(&id) == Some(&held) {
+                            cluster.remove(&id);
+                        }
+                    });
+                }
                 Ok(())
             })
         }
-        fn delete(&self, id: Uuid, _uid: Option<String>) -> LaunchFuture<'_> {
+        fn gone(&self, id: Uuid, uid: Option<String>) -> GoneFuture<'_> {
             Box::pin(async move {
-                self.deleted.lock().unwrap().push(id);
-                Ok(())
+                let held = self.cluster.lock().unwrap().get(&id).cloned();
+                Ok(match held {
+                    None => true,
+                    Some(held) => uid.is_some_and(|uid| uid != held),
+                })
             })
         }
         fn list(&self) -> vogt_engine_server::pod_backend::ListFuture<'_> {
             Box::pin(async move { Ok(self.listed.lock().unwrap().clone()) })
+        }
+    }
+
+    impl FakeLauncher {
+        fn new(
+            created: tokio::sync::mpsc::UnboundedSender<(Uuid, Vec<u8>)>,
+            listed: Vec<k8s_openapi::api::core::v1::Pod>,
+            fail: bool,
+        ) -> Arc<Self> {
+            let cluster = listed
+                .iter()
+                .filter_map(|pod| {
+                    let id = pod.metadata.labels.as_ref()?.get("vogt.session")?;
+                    Some((id.parse().ok()?, pod.metadata.uid.clone()?))
+                })
+                .collect();
+            Arc::new(Self {
+                created,
+                deleted: Mutex::new(Vec::new()),
+                delete_uids: Mutex::new(Vec::new()),
+                pods: Mutex::new(Vec::new()),
+                listed: Mutex::new(listed),
+                cluster: Arc::new(Mutex::new(cluster)),
+                terminating: Mutex::new(Duration::ZERO),
+                fail,
+            })
         }
     }
 
@@ -16961,13 +17035,7 @@ mod pod_stream {
         });
         let (base, state, guard) = boot_with_state(cfg).await;
         let (tx, created) = tokio::sync::mpsc::unbounded_channel();
-        let launcher = Arc::new(FakeLauncher {
-            created: tx,
-            deleted: Mutex::new(Vec::new()),
-            pods: Mutex::new(Vec::new()),
-            listed: Mutex::new(Vec::new()),
-            fail,
-        });
+        let launcher = FakeLauncher::new(tx, Vec::new(), fail);
         state.sessions.set_pod_launcher(launcher.clone());
         let client = reqwest::Client::builder()
             .default_headers(auth())
@@ -18328,13 +18396,7 @@ mod pod_stream {
         }];
         let (base, state, guard) = boot_with_state(cfg).await;
         let (tx, created) = tokio::sync::mpsc::unbounded_channel();
-        let launcher = Arc::new(FakeLauncher {
-            created: tx,
-            deleted: Mutex::new(Vec::new()),
-            pods: Mutex::new(Vec::new()),
-            listed: Mutex::new(Vec::new()),
-            fail: false,
-        });
+        let launcher = FakeLauncher::new(tx, Vec::new(), false);
         state.sessions.set_pod_launcher(launcher.clone());
         let client = reqwest::Client::builder()
             .default_headers(auth())
@@ -18422,6 +18484,7 @@ mod pod_stream {
             )
             .unwrap();
 
+        let pod_uid = h.launcher.cluster.lock().unwrap().get(&id).cloned();
         let hibernate = tokio::spawn({
             let client = h.client.clone();
             let url = format!("{}/api/sessions/{id}/hibernate", h.base);
@@ -18433,6 +18496,12 @@ mod pod_stream {
         assert!(
             h.launcher.deleted.lock().unwrap().contains(&id),
             "the pod is deleted"
+        );
+        assert!(pod_uid.is_some());
+        assert_eq!(
+            *h.launcher.delete_uids.lock().unwrap(),
+            vec![(id, pod_uid)],
+            "the teardown names the uid of the pod it created, never just the name"
         );
         assert!(h.state.sessions.is_hibernated(id));
         assert_eq!(
@@ -18474,6 +18543,77 @@ mod pod_stream {
         let summary = h.state.sessions.summary_of(id).unwrap();
         assert_eq!(summary.account.as_deref(), Some("acct"));
         assert_ne!(summary.activity, ActivityState::Hibernated);
+    }
+
+    #[tokio::test]
+    async fn a_wake_right_after_hibernate_waits_for_the_terminating_pod() {
+        let (mut h, _accounts) = claude_harness().await;
+        // The old pod lingers in Terminating long after the delete returned.
+        *h.launcher.terminating.lock().unwrap() = Duration::from_millis(1500);
+        let id = h.start().await;
+        let conversation = conversation_of(&h, id).await;
+        let token = h.session_token(id).await;
+        let old_uid = h
+            .launcher
+            .cluster
+            .lock()
+            .unwrap()
+            .get(&id)
+            .cloned()
+            .unwrap();
+        let mut agent = h.dial(id, &token, 0).await;
+        assert_eq!(take(&mut agent).await, Frame::Ack { offset: 0 });
+        h.state
+            .sessions
+            .secret_broker()
+            .append_transcript(
+                "acct",
+                &conversation,
+                &transcript_path(&conversation),
+                0,
+                b"turn one\n",
+            )
+            .unwrap();
+        let hibernate = tokio::spawn({
+            let client = h.client.clone();
+            let url = format!("{}/api/sessions/{id}/hibernate", h.base);
+            async move { client.post(url).json(&json!({})).send().await.unwrap() }
+        });
+        agent_hibernates(&h, &mut agent, "acct", &conversation, 9, b"turn two\n").await;
+        assert_eq!(hibernate.await.unwrap().status(), StatusCode::OK);
+
+        // Wake straight away: the hibernate has returned, so the old pod must
+        // be gone from the cluster already, not still Terminating.
+        let woken = h
+            .client
+            .post(format!("{}/api/sessions/{id}/wake", h.base))
+            .json(&json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(woken.status(), StatusCode::OK);
+        let (created_id, _) = tokio::time::timeout(Duration::from_secs(10), h.created.recv())
+            .await
+            .expect("the wake creates its pod instead of meeting the old one")
+            .expect("a new pod is created");
+        assert_eq!(created_id, id);
+        let new_uid = h
+            .launcher
+            .cluster
+            .lock()
+            .unwrap()
+            .get(&id)
+            .cloned()
+            .unwrap();
+        assert_ne!(new_uid, old_uid, "a replacement, not the old pod");
+        assert_ne!(
+            h.detail(id).await.summary.activity,
+            ActivityState::Hibernated
+        );
+        assert_eq!(
+            *h.launcher.delete_uids.lock().unwrap(),
+            vec![(id, Some(old_uid))]
+        );
     }
 
     #[tokio::test]
@@ -18535,6 +18675,7 @@ mod pod_stream {
 
     fn running_pod_of(id: Uuid, engine: &str) -> k8s_openapi::api::core::v1::Pod {
         let mut pod = k8s_openapi::api::core::v1::Pod::default();
+        pod.metadata.uid = Some(format!("uid-adopted-{id}"));
         pod.metadata.labels = Some(std::collections::BTreeMap::from([
             ("vogt.session".to_string(), id.to_string()),
             ("vogt.engine".to_string(), engine.to_string()),
@@ -18559,13 +18700,7 @@ mod pod_stream {
 
     fn fake_launcher(listed: Vec<k8s_openapi::api::core::v1::Pod>) -> Arc<FakeLauncher> {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        Arc::new(FakeLauncher {
-            created: tx,
-            deleted: Mutex::new(Vec::new()),
-            pods: Mutex::new(Vec::new()),
-            listed: Mutex::new(listed),
-            fail: false,
-        })
+        FakeLauncher::new(tx, listed, false)
     }
 
     #[tokio::test]
@@ -18645,6 +18780,11 @@ mod pod_stream {
         })
         .await
         .expect("a pod that never reconnects is deleted and its session left hibernated");
+        assert_eq!(
+            *launcher.delete_uids.lock().unwrap(),
+            vec![(id, Some(format!("uid-adopted-{id}")))],
+            "an adopted pod is deleted by the uid its listing gave"
+        );
         let summary = registry.summary_of(id).unwrap();
         assert_eq!(summary.activity, ActivityState::Hibernated);
     }
