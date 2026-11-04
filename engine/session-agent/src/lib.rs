@@ -513,7 +513,12 @@ pub async fn run(config: Config) -> Result<(), AgentError> {
     let tls = tls_config()?;
     let mut bundle_seen = std::collections::HashMap::new();
     flush_bundle(&config, &tls, &mut bundle_seen).await;
-    tracing::info!(cli = %config.cli, cwd = ?config.cwd, "session-agent: starting the PTY");
+    tracing::info!(
+        cli = %config.cli,
+        program = config.command.as_ref().map(|argv| argv[0].as_str()).unwrap_or("-"),
+        cwd = ?config.cwd,
+        "session-agent: starting the PTY"
+    );
     let (reader, writer, child, master) = spawn_pty(&config)?;
     tracing::info!("session-agent: PTY spawned");
     let writer = Arc::new(Mutex::new(writer));
@@ -589,8 +594,14 @@ pub async fn run(config: Config) -> Result<(), AgentError> {
                             Message::Text(text) => {
                                 let frame = serde_json::from_str::<Frame>(&text)?;
                                 match frame {
-                                    Frame::Input { data } => writer.lock().await.write_all(&data).map_err(|e| AgentError::Pty(e.to_string()))?,
-                                    Frame::Resize { cols, rows } => resize_pty(&master, cols, rows)?,
+                                    Frame::Input { data } => {
+                                        tracing::info!(bytes = data.len(), "session-agent: input from the engine");
+                                        writer.lock().await.write_all(&data).map_err(|e| AgentError::Pty(e.to_string()))?
+                                    },
+                                    Frame::Resize { cols, rows } => {
+                                        tracing::info!(cols, rows, "session-agent: resize from the engine");
+                                        resize_pty(&master, cols, rows)?
+                                    },
                                     Frame::Signal { signal } if signal == "kill" => {
                                         if let Some(c) = child.as_mut() { c.kill().map_err(|e| AgentError::Pty(e.to_string()))?; }
                                     },
@@ -619,6 +630,15 @@ pub async fn run(config: Config) -> Result<(), AgentError> {
             }
         }.await;
         if let Err(error) = &connection {
+            // The engine refuses a session it no longer knows (it ended and its
+            // credential was dropped): retrying cannot succeed.
+            if is_auth_refusal(error) {
+                tracing::info!(%error, "session-agent: the engine refused the session credential; stopping");
+                if let Some(c) = child.as_mut() {
+                    let _ = c.kill();
+                }
+                return Ok(());
+            }
             tracing::warn!(%error, retry_in_ms = backoff.as_millis() as u64, "session-agent: engine stream ended");
             tokio::time::sleep(backoff).await;
             backoff = (backoff * 2).min(Duration::from_secs(10));
@@ -627,6 +647,14 @@ pub async fn run(config: Config) -> Result<(), AgentError> {
         // the reconnect sends Hello/Resume and then Exited on that same
         // authenticated socket from the timer branch above.
     }
+}
+
+fn is_auth_refusal(error: &AgentError) -> bool {
+    matches!(
+        error,
+        AgentError::WebSocket(tokio_tungstenite::tungstenite::Error::Http(response))
+            if matches!(response.status().as_u16(), 401 | 403)
+    )
 }
 
 fn frame_data_len(frame: &Frame) -> u64 {
