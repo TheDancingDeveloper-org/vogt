@@ -82,7 +82,7 @@ use crate::app::AppState;
 use crate::auth;
 use std::io::Write;
 #[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{DirBuilderExt, FileExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path as FsPath, PathBuf};
 use std::{collections::HashMap, fs::OpenOptions, net::SocketAddr};
 
@@ -132,7 +132,11 @@ const HELPER_TIMEOUT: Duration = Duration::from_secs(30);
 /// secret and the cause, not enough to carry a value by accident.
 const STDERR_EXCERPT: usize = 300;
 const MAX_IN_MEMORY_TRANSCRIPT: usize = 4 * 1024 * 1024;
+/// A whole credentials or config file; these are small and replaced whole.
 const MAX_BUNDLE_REQUEST_BYTES: usize = 16 * 1024 * 1024;
+/// One transcript delta. The transcript itself is unbounded: the agent sends
+/// it in chunks no larger than this, each at the offset the engine expects.
+pub const MAX_TRANSCRIPT_DELTA_BYTES: usize = 1024 * 1024;
 
 /// What a manifest line says about when its secret is resolved.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -762,7 +766,6 @@ impl SecretBroker {
     pub fn store_bundle_file(
         &self,
         account: &str,
-        conversation: &str,
         name: &str,
         kind: BundleFileKind,
         bytes: &[u8],
@@ -788,7 +791,7 @@ impl SecretBroker {
                 let filename = match kind {
                     BundleFileKind::Credentials => ".credentials.json",
                     BundleFileKind::Config => ".claude.json",
-                    BundleFileKind::Transcript => unreachable!(),
+                    BundleFileKind::Transcript => return Err(BundleRefusal::TranscriptNeedsOffset),
                 };
                 if kind == BundleFileKind::Credentials {
                     if let Ok(old) = std::fs::read(root.join(filename)) {
@@ -817,31 +820,109 @@ impl SecretBroker {
                         .insert((account.to_string(), name.to_string()), version);
                 }
             }
-            BundleFileKind::Transcript => {
-                if !name.ends_with(&format!("/{conversation}.jsonl"))
-                    && name != format!("{conversation}.jsonl")
-                {
-                    return Err(BundleRefusal::ConversationScope);
-                }
-                ensure_bundle_path(root, FsPath::new(name)).map_err(|_| BundleRefusal::Storage)?;
-                let key = (account.to_string(), name.to_string());
-                let current = match std::fs::read(root.join(name)) {
-                    Ok(bytes) => bytes,
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-                    Err(_) => return Err(BundleRefusal::Storage),
-                };
-                if current.as_slice() != bytes {
-                    if !bytes.starts_with(&current) {
-                        return Err(BundleRefusal::TranscriptRewrite);
-                    }
-                    atomic_bundle_write(root, FsPath::new(name), bytes)
-                        .map_err(|_| BundleRefusal::Storage)?;
-                    let keep_from = bytes.len().saturating_sub(MAX_IN_MEMORY_TRANSCRIPT);
-                    self.put_bundle(key, bytes[keep_from..].to_vec());
-                }
-            }
+            BundleFileKind::Transcript => return Err(BundleRefusal::TranscriptNeedsOffset),
         }
         Ok(())
+    }
+
+    /// Append a transcript delta at `offset`. The engine appends only when
+    /// `offset` is the file's current length; `Ok` carries the new length.
+    /// A delta that is already on disk at `offset` (a retry, or a concurrent
+    /// duplicate) is accepted without writing again, and any other offset is a
+    /// `Resync` naming the length the agent must resend from.
+    pub fn append_transcript(
+        &self,
+        account: &str,
+        conversation: &str,
+        name: &str,
+        offset: u64,
+        bytes: &[u8],
+    ) -> Result<u64, BundleRefusal> {
+        if bytes.len() > MAX_TRANSCRIPT_DELTA_BYTES {
+            return Err(BundleRefusal::TooLarge);
+        }
+        if !name.ends_with(&format!("/{conversation}.jsonl"))
+            && name != format!("{conversation}.jsonl")
+        {
+            return Err(BundleRefusal::ConversationScope);
+        }
+        let root = self
+            .account_dirs
+            .get(account)
+            .map(FsPath::new)
+            .ok_or(BundleRefusal::Storage)?;
+        let account_lock = self
+            .account_locks
+            .entry(account.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone();
+        let _account_guard = account_lock.lock().map_err(|_| BundleRefusal::Storage)?;
+        ensure_bundle_root(root).map_err(|_| BundleRefusal::Storage)?;
+        ensure_bundle_path(root, FsPath::new(name)).map_err(|_| BundleRefusal::Storage)?;
+        let path = std::fs::canonicalize(root)
+            .map_err(|_| BundleRefusal::Storage)?
+            .join(name);
+        let file = match OpenOptions::new()
+            .read(true)
+            .append(true)
+            .create(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&path)
+        {
+            Ok(file) => file,
+            Err(_) => return Err(BundleRefusal::Storage),
+        };
+        let meta = file.metadata().map_err(|_| BundleRefusal::Storage)?;
+        if !meta.is_file() {
+            return Err(BundleRefusal::Storage);
+        }
+        let length = meta.len();
+        let end = offset + bytes.len() as u64;
+        if offset == length {
+            if !bytes.is_empty() {
+                let mut file = &file;
+                file.write_all(bytes).map_err(|_| BundleRefusal::Storage)?;
+                file.sync_all().map_err(|_| BundleRefusal::Storage)?;
+                self.append_cache((account.to_string(), name.to_string()), bytes, &path);
+            }
+            return Ok(end);
+        }
+        if end <= length {
+            let mut existing = vec![0u8; bytes.len()];
+            file.read_exact_at(&mut existing, offset)
+                .map_err(|_| BundleRefusal::Storage)?;
+            if existing == bytes {
+                return Ok(length);
+            }
+        }
+        Err(BundleRefusal::Resync { offset: length })
+    }
+
+    /// Keep only the newest `MAX_IN_MEMORY_TRANSCRIPT` bytes of a transcript.
+    fn append_cache(&self, key: (String, String), delta: &[u8], path: &FsPath) {
+        let mut tail = self
+            .bundle
+            .get(&key)
+            .map(|entry| entry.clone())
+            .unwrap_or_else(|| {
+                // First append since start: seed from the file's own tail.
+                let Ok(file) = std::fs::File::open(path) else {
+                    return Vec::new();
+                };
+                let length = file.metadata().map(|m| m.len()).unwrap_or(0);
+                let before = length.saturating_sub(delta.len() as u64);
+                let from = before.saturating_sub(MAX_IN_MEMORY_TRANSCRIPT as u64);
+                let mut seeded = vec![0u8; (before - from) as usize];
+                if file.read_exact_at(&mut seeded, from).is_err() {
+                    seeded.clear();
+                }
+                seeded
+            });
+        tail.extend_from_slice(delta);
+        let keep_from = tail.len().saturating_sub(MAX_IN_MEMORY_TRANSCRIPT);
+        tail.drain(..keep_from);
+        self.put_bundle(key, tail);
     }
 
     fn put_bundle(&self, key: (String, String), bytes: Vec<u8>) {
@@ -876,13 +957,20 @@ pub struct BundleFileRequest {
     pub bytes: String,
     #[serde(default)]
     pub version: Option<u64>,
+    /// Transcripts only: the length of the file the delta in `bytes` extends.
+    #[serde(default)]
+    pub offset: Option<u64>,
 }
 
 #[derive(Debug)]
 pub enum BundleRefusal {
     TooLarge,
     ConversationScope,
-    TranscriptRewrite,
+    /// The delta is not at the engine's end of the transcript; resend from `offset`.
+    Resync {
+        offset: u64,
+    },
+    TranscriptNeedsOffset,
     Storage,
     OlderCredentials,
     OlderConfig,
@@ -928,9 +1016,7 @@ fn atomic_bundle_write(root: &FsPath, relative: &FsPath, bytes: &[u8]) -> std::i
             }
             Ok(_) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                std::fs::create_dir(&parent)?;
-                #[cfg(unix)]
-                std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700))?;
+                create_private_dir(&parent)?;
             }
             Err(e) => return Err(e),
         }
@@ -961,10 +1047,14 @@ fn atomic_bundle_write(root: &FsPath, relative: &FsPath, bytes: &[u8]) -> std::i
             attempt
         );
         tmp = parent.join(&temp_name);
-        match OpenOptions::new().write(true).create_new(true).open(&tmp) {
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&tmp)
+        {
             Ok(mut file) => {
-                #[cfg(unix)]
-                file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
                 file.write_all(bytes)?;
                 file.sync_all()?;
                 std::fs::rename(&tmp, &target)?;
@@ -980,6 +1070,11 @@ fn atomic_bundle_write(root: &FsPath, relative: &FsPath, bytes: &[u8]) -> std::i
         std::io::ErrorKind::AlreadyExists,
         "unable to allocate temporary bundle file",
     ))
+}
+
+/// Create one directory that is private from the moment it exists.
+fn create_private_dir(path: &FsPath) -> std::io::Result<()> {
+    std::fs::DirBuilder::new().mode(0o700).create(path)
 }
 
 fn oauth_expiry(bytes: &[u8]) -> u64 {
@@ -1002,7 +1097,10 @@ fn ensure_bundle_root(root: &FsPath) -> std::io::Result<()> {
     let metadata = match std::fs::symlink_metadata(root) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            std::fs::create_dir_all(root)?;
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(root)?;
             std::fs::symlink_metadata(root)?
         }
         Err(error) => return Err(error),
@@ -1047,9 +1145,7 @@ fn ensure_bundle_path(root: &FsPath, relative: &FsPath) -> std::io::Result<()> {
                 }
                 Ok(_) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    std::fs::create_dir(&parent)?;
-                    #[cfg(unix)]
-                    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700))?;
+                    create_private_dir(&parent)?;
                 }
                 Err(error) => return Err(error),
             }
@@ -1143,21 +1239,52 @@ pub async fn store_bundle_file(
         );
     }
     let length = bytes.len();
+    if payload.kind == BundleFileKind::Transcript {
+        let Some(offset) = payload.offset else {
+            return refusal(
+                StatusCode::BAD_REQUEST,
+                "bundle-file transcript needs an offset",
+            );
+        };
+        return match broker.append_transcript(account, conversation, &payload.path, offset, &bytes)
+        {
+            Ok(next) => {
+                tracing::info!(target: "vogt::audit", session_id = %session_id, account = %account,
+                    file = %payload.path, bytes = length, offset, "bundle transcript appended");
+                Json(json!({"ok": true, "bytes": length, "offset": next})).into_response()
+            }
+            Err(BundleRefusal::Resync { offset }) => (
+                StatusCode::CONFLICT,
+                Json(json!({"ok": false, "resync": true, "offset": offset})),
+            )
+                .into_response(),
+            Err(error) => bundle_refusal(error),
+        };
+    }
     let result = broker.store_bundle_file(
         account,
-        conversation,
         &payload.path,
         payload.kind,
         &bytes,
         payload.version,
     );
     if let Err(error) = result {
+        return bundle_refusal(error);
+    }
+    tracing::info!(target: "vogt::audit", session_id = %session_id, account = %account,
+        file = %payload.path, bytes = length, "bundle file replaced");
+    Json(json!({"ok": true, "bytes": length})).into_response()
+}
+
+fn bundle_refusal(error: BundleRefusal) -> Response {
+    {
         let reason = match error {
             BundleRefusal::TooLarge => "bundle-file exceeds the size cap",
             BundleRefusal::ConversationScope => {
                 "bundle-file transcript is outside the session conversation"
             }
-            BundleRefusal::TranscriptRewrite => "bundle-file transcript is not append-only",
+            BundleRefusal::Resync { .. } => "bundle-file transcript offset is stale",
+            BundleRefusal::TranscriptNeedsOffset => "bundle-file transcript needs an offset",
             BundleRefusal::Storage => "bundle-file could not be persisted",
             BundleRefusal::OlderCredentials => {
                 "bundle-file credentials are not newer than the stored credentials"
@@ -1166,11 +1293,8 @@ pub async fn store_bundle_file(
                 "bundle-file config version is not newer than the stored config"
             }
         };
-        return refusal(StatusCode::FORBIDDEN, reason);
+        refusal(StatusCode::FORBIDDEN, reason)
     }
-    tracing::info!(target: "vogt::audit", session_id = %session_id, account = %account,
-        file = %payload.path, bytes = length, "bundle file replaced");
-    Json(json!({"ok": true, "bytes": length})).into_response()
 }
 
 fn digest(token: &str) -> [u8; 32] {
@@ -1784,7 +1908,6 @@ mod tests {
         broker
             .store_bundle_file(
                 "acct",
-                "conv",
                 ".credentials.json",
                 BundleFileKind::Credentials,
                 newer,
@@ -1800,7 +1923,6 @@ mod tests {
         assert!(matches!(
             broker.store_bundle_file(
                 "acct",
-                "conv",
                 ".credentials.json",
                 BundleFileKind::Credentials,
                 older,
@@ -1822,7 +1944,6 @@ mod tests {
         broker
             .store_bundle_file(
                 "acct",
-                "conv",
                 ".credentials.json",
                 BundleFileKind::Credentials,
                 br#"{"claudeAiOauth":{"expiresAt":10}}"#,
@@ -1853,7 +1974,6 @@ mod tests {
                 barrier.wait();
                 broker.store_bundle_file(
                     "acct",
-                    "conv",
                     ".credentials.json",
                     BundleFileKind::Credentials,
                     bytes.as_bytes(),
@@ -1872,74 +1992,173 @@ mod tests {
         assert_eq!(oauth_expiry(&stored), 20);
     }
 
-    #[test]
-    fn transcript_is_append_only_and_bounded_in_memory() {
-        let dir = tempfile::tempdir().unwrap();
+    fn transcript_broker(dir: &FsPath) -> SecretBroker {
         let mut dirs = HashMap::new();
-        dirs.insert("acct".to_string(), dir.path().to_path_buf());
-        let broker = broker_with("", "127.0.0.1:1").with_account_dirs(dirs);
-        let path = "projects/work/conv.jsonl";
-        broker
-            .store_bundle_file(
-                "acct",
-                "conv",
-                path,
-                BundleFileKind::Transcript,
-                b"one\n",
-                None,
-            )
-            .unwrap();
+        dirs.insert("acct".to_string(), dir.to_path_buf());
+        broker_with("", "127.0.0.1:1").with_account_dirs(dirs)
+    }
+
+    const TRANSCRIPT: &str = "projects/work/conv.jsonl";
+
+    fn append(broker: &SecretBroker, offset: u64, bytes: &[u8]) -> Result<u64, BundleRefusal> {
+        broker.append_transcript("acct", "conv", TRANSCRIPT, offset, bytes)
+    }
+
+    #[test]
+    fn a_transcript_past_sixteen_mib_grows_in_chunks() {
+        let dir = tempfile::tempdir().unwrap();
+        let broker = transcript_broker(dir.path());
+        let chunk = vec![b'x'; MAX_TRANSCRIPT_DELTA_BYTES];
+        let mut offset = 0u64;
+        for _ in 0..20 {
+            offset = append(&broker, offset, &chunk).unwrap();
+        }
+        offset = append(&broker, offset, b"tail\n").unwrap();
+        let expected = 20 * MAX_TRANSCRIPT_DELTA_BYTES as u64 + 5;
+        assert!(expected > MAX_BUNDLE_REQUEST_BYTES as u64);
+        assert_eq!(offset, expected);
+        assert_eq!(
+            std::fs::metadata(dir.path().join(TRANSCRIPT))
+                .unwrap()
+                .len(),
+            expected
+        );
+        let cached = broker
+            .bundle
+            .get(&("acct".into(), TRANSCRIPT.into()))
+            .unwrap()
+            .len();
+        assert_eq!(cached, MAX_IN_MEMORY_TRANSCRIPT);
+    }
+
+    #[test]
+    fn a_delta_over_the_request_bound_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let broker = transcript_broker(dir.path());
+        let big = vec![b'x'; MAX_TRANSCRIPT_DELTA_BYTES + 1];
         assert!(matches!(
-            broker.store_bundle_file(
-                "acct",
-                "conv",
-                path,
-                BundleFileKind::Transcript,
-                b"nope",
-                None
-            ),
-            Err(BundleRefusal::TranscriptRewrite)
+            append(&broker, 0, &big),
+            Err(BundleRefusal::TooLarge)
         ));
-        let mut huge = b"one\n".to_vec();
-        huge.resize(MAX_IN_MEMORY_TRANSCRIPT + 64, b'x');
+    }
+
+    #[test]
+    fn an_offset_mismatch_asks_for_a_resync_from_the_engine_length() {
+        let dir = tempfile::tempdir().unwrap();
+        let broker = transcript_broker(dir.path());
+        assert_eq!(append(&broker, 0, b"one\n").unwrap(), 4);
+        // Ahead of the engine: a gap the agent must fill.
+        assert!(matches!(
+            append(&broker, 10, b"gap\n"),
+            Err(BundleRefusal::Resync { offset: 4 })
+        ));
+        // Behind the engine but not the same bytes: a rewrite, not a retry.
+        assert!(matches!(
+            append(&broker, 0, b"two\n"),
+            Err(BundleRefusal::Resync { offset: 4 })
+        ));
+        // Resending from the reported offset lands.
+        assert_eq!(append(&broker, 4, b"two\n").unwrap(), 8);
+        assert_eq!(
+            std::fs::read(dir.path().join(TRANSCRIPT)).unwrap(),
+            b"one\ntwo\n"
+        );
+    }
+
+    #[test]
+    fn a_repeated_delta_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let broker = transcript_broker(dir.path());
+        assert_eq!(append(&broker, 0, b"one\n").unwrap(), 4);
+        assert_eq!(append(&broker, 0, b"one\n").unwrap(), 4);
+        assert_eq!(
+            std::fs::read(dir.path().join(TRANSCRIPT)).unwrap(),
+            b"one\n"
+        );
+    }
+
+    #[test]
+    fn concurrent_duplicate_deltas_land_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let broker = Arc::new(transcript_broker(dir.path()));
+        let barrier = Arc::new(std::sync::Barrier::new(4));
+        let threads: Vec<_> = (0..4)
+            .map(|_| {
+                let broker = Arc::clone(&broker);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    append(&broker, 0, b"same delta\n")
+                })
+            })
+            .collect();
+        for thread in threads {
+            assert_eq!(thread.join().unwrap().unwrap(), 11);
+        }
+        assert_eq!(
+            std::fs::read(dir.path().join(TRANSCRIPT)).unwrap(),
+            b"same delta\n"
+        );
+    }
+
+    #[test]
+    fn a_transcript_outside_the_conversation_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let broker = transcript_broker(dir.path());
+        assert!(matches!(
+            broker.append_transcript("acct", "conv", "projects/work/other.jsonl", 0, b"x"),
+            Err(BundleRefusal::ConversationScope)
+        ));
+    }
+
+    #[test]
+    fn the_whole_file_path_refuses_transcripts() {
+        let dir = tempfile::tempdir().unwrap();
+        let broker = transcript_broker(dir.path());
+        assert!(matches!(
+            broker.store_bundle_file("acct", TRANSCRIPT, BundleFileKind::Transcript, b"x", None),
+            Err(BundleRefusal::TranscriptNeedsOffset)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bundle_files_and_dirs_are_private_when_created() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("fresh/account");
+        let broker = transcript_broker(&root);
+        append(&broker, 0, b"entry\n").unwrap();
         broker
             .store_bundle_file(
                 "acct",
-                "conv",
-                path,
-                BundleFileKind::Transcript,
-                &huge,
+                ".credentials.json",
+                BundleFileKind::Credentials,
+                br#"{"claudeAiOauth":{"expiresAt":1}}"#,
                 None,
             )
             .unwrap();
-        assert_eq!(
-            broker
-                .bundle
-                .get(&("acct".into(), path.into()))
-                .unwrap()
-                .len(),
-            MAX_IN_MEMORY_TRANSCRIPT
-        );
-        huge.extend_from_slice(b"tail\n");
-        broker
-            .store_bundle_file(
-                "acct",
-                "conv",
-                path,
-                BundleFileKind::Transcript,
-                &huge,
-                None,
-            )
-            .unwrap();
-        assert_eq!(std::fs::read(dir.path().join(path)).unwrap(), huge);
-        assert_eq!(
-            broker
-                .bundle
-                .get(&("acct".into(), path.into()))
-                .unwrap()
-                .len(),
-            MAX_IN_MEMORY_TRANSCRIPT
-        );
+        let mode = |p: &FsPath| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&root), 0o700);
+        assert_eq!(mode(&root.join("projects")), 0o700);
+        assert_eq!(mode(&root.join("projects/work")), 0o700);
+        assert_eq!(mode(&root.join(TRANSCRIPT)), 0o600);
+        assert_eq!(mode(&root.join(".credentials.json")), 0o600);
+        // The ancestors created on the way are private too, with no chmod after.
+        assert_eq!(mode(&parent.path().join("fresh")), 0o700);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn creation_modes_hold_under_a_permissive_umask() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = unsafe { libc::umask(0) };
+        let made = dir.path().join("made");
+        create_private_dir(&made).unwrap();
+        atomic_bundle_write(dir.path(), FsPath::new("file.json"), b"{}").unwrap();
+        unsafe { libc::umask(old) };
+        let mode = |p: &FsPath| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&made), 0o700);
+        assert_eq!(mode(&dir.path().join("file.json")), 0o600);
     }
 
     #[cfg(unix)]
@@ -1951,21 +2170,29 @@ mod tests {
         let outside = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join("projects")).unwrap();
         symlink(outside.path(), dir.path().join("projects/work")).unwrap();
-        let mut dirs = HashMap::new();
-        dirs.insert("acct".to_string(), dir.path().to_path_buf());
-        let broker = broker_with("", "127.0.0.1:1").with_account_dirs(dirs);
+        let broker = transcript_broker(dir.path());
 
         assert!(matches!(
-            broker.store_bundle_file(
-                "acct",
-                "conv",
-                "projects/work/conv.jsonl",
-                BundleFileKind::Transcript,
-                b"entry\n",
-                None,
-            ),
+            append(&broker, 0, b"entry\n"),
             Err(BundleRefusal::Storage)
         ));
         assert!(!outside.path().join("conv.jsonl").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transcript_rejects_a_symlinked_file() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("projects/work")).unwrap();
+        symlink(outside.path().join("target"), dir.path().join(TRANSCRIPT)).unwrap();
+        let broker = transcript_broker(dir.path());
+        assert!(matches!(
+            append(&broker, 0, b"entry\n"),
+            Err(BundleRefusal::Storage)
+        ));
+        assert!(!outside.path().join("target").exists());
     }
 }
