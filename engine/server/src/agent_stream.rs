@@ -591,6 +591,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_bootstrap_issued_token_authenticates_the_agent_stream() {
+        let auth = AgentAuth::default();
+        let id = Uuid::new_v4();
+        auth.issue(id, b"one-time").await;
+        assert!(auth.consume(id, b"one-time").await);
+        let issued = auth.session_token(id).await.unwrap();
+        assert!(auth.session_ok(id, issued.as_bytes()).await);
+        assert!(!auth.session_ok(id, b"one-time").await);
+        assert!(!auth.session_ok(Uuid::new_v4(), issued.as_bytes()).await);
+    }
+
+    #[tokio::test]
     async fn commands_reach_the_connected_agent() {
         let auth = AgentAuth::default();
         let id = Uuid::new_v4();
