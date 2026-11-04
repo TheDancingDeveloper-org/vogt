@@ -22,6 +22,9 @@ use tokio::sync::{mpsc, Mutex, Notify};
 use uuid::Uuid;
 use vogt_session_agent::Frame;
 const BOOTSTRAP_TTL: Duration = Duration::from_secs(300);
+const AGENT_WS_MAX_MESSAGE_SIZE: usize = 1024 * 1024;
+const AGENT_OUTPUT_CHANNEL_CAPACITY: usize = 16;
+const AGENT_BUFFER_BYTES: usize = vogt_session_agent::DEFAULT_BUFFER_BYTES;
 static AUTH: OnceLock<Arc<AgentAuth>> = OnceLock::new();
 #[derive(Debug, Clone)]
 struct Pending {
@@ -67,7 +70,7 @@ pub enum FlushOutcome {
 pub struct PodLink {
     /// Absolute offset of the next output byte the engine has not yet taken.
     next_offset: std::sync::Mutex<u64>,
-    out: std::sync::Mutex<Option<std::sync::mpsc::Sender<Vec<u8>>>>,
+    out: std::sync::Mutex<Option<std::sync::mpsc::SyncSender<Vec<u8>>>>,
     exit: std::sync::Mutex<Option<i32>>,
     exited: Condvar,
     exit_notify: Notify,
@@ -98,7 +101,7 @@ pub struct OutputGap {
 }
 
 impl PodLink {
-    fn new(out: std::sync::mpsc::Sender<Vec<u8>>) -> Self {
+    fn new(out: std::sync::mpsc::SyncSender<Vec<u8>>) -> Self {
         Self {
             next_offset: std::sync::Mutex::new(0),
             out: std::sync::Mutex::new(Some(out)),
@@ -172,6 +175,12 @@ impl PodLink {
     /// replays from its last ack, so the overlap is dropped here; data that
     /// starts beyond the cursor would leave a hole and is refused.
     pub fn ingest(&self, offset: u64, data: &[u8]) -> Result<u64, OutputGap> {
+        if data.len() > AGENT_BUFFER_BYTES {
+            return Err(OutputGap {
+                expected: self.next_offset(),
+                got: offset,
+            });
+        }
         let mut next = self.next_offset.lock().expect("pod link lock poisoned");
         if offset > *next {
             return Err(OutputGap {
@@ -179,13 +188,15 @@ impl PodLink {
                 got: offset,
             });
         }
-        let skip = ((*next - offset) as usize).min(data.len());
+        let skip = (*next - offset).min(data.len() as u64) as usize;
         let fresh = &data[skip..];
         if !fresh.is_empty() {
-            if let Some(out) = self.out.lock().expect("pod link lock poisoned").as_ref() {
-                let _ = out.send(fresh.to_vec());
-            }
-            *next += fresh.len() as u64;
+            let end = next.checked_add(fresh.len() as u64).ok_or(OutputGap {
+                expected: *next,
+                got: offset,
+            })?;
+            self.enqueue(fresh.to_vec(), *next, offset)?;
+            *next = end;
         }
         Ok(*next)
     }
@@ -203,15 +214,36 @@ impl PodLink {
                 got: offset,
             });
         }
-        let end = offset.saturating_add(lost);
+        if lost > AGENT_BUFFER_BYTES as u64 {
+            return Err(OutputGap {
+                expected: *next,
+                got: offset,
+            });
+        }
+        let Some(end) = offset.checked_add(lost) else {
+            return Err(OutputGap {
+                expected: *next,
+                got: offset,
+            });
+        };
         if end > *next {
             let missing = end - *next;
-            if let Some(out) = self.out.lock().expect("pod link lock poisoned").as_ref() {
-                let _ = out.send(format!("\r\n[{missing} bytes lost]\r\n").into_bytes());
-            }
+            self.enqueue(
+                format!("\r\n[{missing} bytes lost]\r\n").into_bytes(),
+                *next,
+                offset,
+            )?;
             *next = end;
         }
         Ok(*next)
+    }
+
+    fn enqueue(&self, data: Vec<u8>, expected: u64, got: u64) -> Result<(), OutputGap> {
+        let out = self.out.lock().expect("pod link lock poisoned");
+        let Some(out) = out.as_ref() else {
+            return Err(OutputGap { expected, got });
+        };
+        out.try_send(data).map_err(|_| OutputGap { expected, got })
     }
 
     /// Record the exit and end the output stream, so the reader thread sees
@@ -455,7 +487,7 @@ impl AgentAuth {
     /// Create the engine's half of a pod session's stream before the pod
     /// exists, so output the agent sends the moment it dials in has a home.
     pub fn register_pod(&self, id: Uuid) -> (Arc<PodLink>, PodReader) {
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::sync_channel(AGENT_OUTPUT_CHANNEL_CAPACITY);
         let link = Arc::new(PodLink::new(tx));
         self.pods
             .lock()
@@ -756,7 +788,8 @@ pub async fn stream(
     if !state.agent_auth.session_ok(id, &token).await {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    ws.on_upgrade(move |socket| relay(socket, state, id))
+    ws.max_message_size(AGENT_WS_MAX_MESSAGE_SIZE)
+        .on_upgrade(move |socket| relay(socket, state, id))
         .into_response()
 }
 async fn send_frame(socket: &mut axum::extract::ws::WebSocket, frame: &Frame) -> bool {
@@ -821,7 +854,15 @@ async fn relay(mut socket: axum::extract::ws::WebSocket, state: Arc<AppState>, i
                             // Tell the agent how much it can discard.
                             if !send_frame(&mut socket, &Frame::Ack { offset: next }).await { break; }
                         }
-                        Frame::Output { offset, data } => match link.ingest(offset, &data) {
+                        Frame::Output { offset, data } => {
+                            if data.len() > AGENT_BUFFER_BYTES {
+                                let _ = send_frame(&mut socket, &Frame::Error {
+                                    code: "output_too_large".into(),
+                                    message: format!("output frame exceeds {} bytes", AGENT_BUFFER_BYTES),
+                                }).await;
+                                break;
+                            }
+                            match link.ingest(offset, &data) {
                             Ok(next) => {
                                 if !send_frame(&mut socket, &Frame::Ack { offset: next }).await { break; }
                             }
@@ -834,15 +875,25 @@ async fn relay(mut socket: axum::extract::ws::WebSocket, state: Arc<AppState>, i
                                 // resend from there or mark what it cannot.
                                 if !send_frame(&mut socket, &Frame::Resync { offset: gap.expected }).await { break; }
                             }
-                        },
-                        Frame::Gap { offset, lost } => match link.ingest_gap(offset, lost) {
+                            }
+                        }
+                        Frame::Gap { offset, lost } => {
+                            if lost > AGENT_BUFFER_BYTES as u64 || offset.checked_add(lost).is_none() {
+                                let _ = send_frame(&mut socket, &Frame::Error {
+                                    code: "invalid_gap".into(),
+                                    message: "gap exceeds the replay limit or overflows the stream offset".into(),
+                                }).await;
+                                break;
+                            }
+                            match link.ingest_gap(offset, lost) {
                             Ok(next) => {
                                 if !send_frame(&mut socket, &Frame::Ack { offset: next }).await { break; }
                             }
                             Err(gap) => {
                                 if !send_frame(&mut socket, &Frame::Resync { offset: gap.expected }).await { break; }
                             }
-                        },
+                            }
+                        }
                         Frame::Flushed { ok } => {
                             let counter = if ok { &link.flushes } else { &link.flush_failures };
                             counter.fetch_add(1, Ordering::AcqRel);
@@ -870,6 +921,37 @@ async fn relay(mut socket: axum::extract::ws::WebSocket, state: Arc<AppState>, i
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn full_output_queue_preserves_cursor_until_retry() {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let link = PodLink::new(sender);
+        assert_eq!(link.ingest(0, b"a"), Ok(1));
+        assert!(link.ingest(1, b"b").is_err());
+        assert!(link.ingest_gap(1, 1).is_err());
+        assert_eq!(link.next_offset(), 1);
+        assert_eq!(receiver.recv().unwrap(), b"a");
+        assert_eq!(link.ingest(1, b"b"), Ok(2));
+        assert_eq!(receiver.recv().unwrap(), b"b");
+        drop(receiver);
+        assert!(link.ingest(2, b"c").is_err());
+        assert_eq!(link.next_offset(), 2);
+    }
+
+    #[test]
+    fn invalid_lengths_and_overflow_leave_output_and_cursor_unchanged() {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let link = PodLink::new(sender);
+        assert!(link.ingest(0, &vec![0; AGENT_BUFFER_BYTES + 1]).is_err());
+        assert!(link.ingest_gap(0, u64::MAX).is_err());
+        assert!(link.ingest_gap(0, AGENT_BUFFER_BYTES as u64 + 1).is_err());
+        assert_eq!(link.next_offset(), 0);
+        link.skip_to(u64::MAX - 1);
+        assert!(link.ingest_gap(u64::MAX - 1, 2).is_err());
+        assert!(link.ingest(u64::MAX - 1, b"ab").is_err());
+        assert_eq!(link.next_offset(), u64::MAX - 1);
+        assert!(receiver.try_recv().is_err());
+    }
 
     #[test]
     fn bootstrap_env_carries_the_graft_endpoint_and_line() {
@@ -1028,7 +1110,7 @@ mod tests {
 
     #[test]
     fn a_gap_marker_records_the_loss_and_continues_after_it() {
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::sync_channel(AGENT_OUTPUT_CHANNEL_CAPACITY);
         let link = PodLink::new(tx);
         assert_eq!(link.ingest(0, b"abcd"), Ok(4));
         // Bytes 4..10 are gone; the stream picks up at 10.
@@ -1062,7 +1144,7 @@ mod tests {
 
     #[test]
     fn ingest_drops_replayed_bytes_and_refuses_gaps() {
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::sync_channel(AGENT_OUTPUT_CHANNEL_CAPACITY);
         let link = PodLink::new(tx);
         assert_eq!(link.ingest(0, b"abcd"), Ok(4));
         assert_eq!(link.ingest(2, b"cdef"), Ok(6));

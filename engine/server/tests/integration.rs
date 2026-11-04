@@ -17769,6 +17769,46 @@ mod pod_stream {
     }
 
     #[tokio::test]
+    async fn excessive_gap_is_rejected_without_poisoning_reconnect() {
+        let mut harness = harness(false).await;
+        let id = harness.start().await;
+        let token = harness.session_token(id).await;
+        let mut agent = harness.dial(id, &token, 0).await;
+        assert_eq!(take(&mut agent).await, Frame::Ack { offset: 0 });
+        put(
+            &mut agent,
+            Frame::Gap {
+                offset: 0,
+                lost: u64::MAX,
+            },
+        )
+        .await;
+        assert!(
+            matches!(take(&mut agent).await, Frame::Error { code, .. } if code == "invalid_gap")
+        );
+        drop(agent);
+        let mut agent = harness.dial(id, &token, 0).await;
+        assert_eq!(take(&mut agent).await, Frame::Ack { offset: 0 });
+        put(
+            &mut agent,
+            Frame::Output {
+                offset: 0,
+                data: b"alive".to_vec(),
+            },
+        )
+        .await;
+        assert_eq!(take(&mut agent).await, Frame::Ack { offset: 5 });
+        put(&mut agent, Frame::Exited { status: Some(0) }).await;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while harness.detail(id).await.summary.exit_code.is_none() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the agent exit is processed before runtime shutdown");
+    }
+
+    #[tokio::test]
     async fn reconnect_replays_exactly_the_unacked_bytes() {
         let mut h = harness(false).await;
         let id = h.start().await;
