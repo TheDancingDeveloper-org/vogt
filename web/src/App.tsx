@@ -122,6 +122,7 @@ import {
   hasUnsavedWork,
   protectDirtyEditorExit,
   shouldMountTab,
+  touchRecentTerminal,
 } from "./tabLifecycle";
 import { discardEditorDraft } from "./editorDrafts";
 import {
@@ -852,6 +853,19 @@ const App: Component = () => {
   const editorWorkspaceActive = () =>
     isIDEMode && activeKind() === "editor" && location.pathname.startsWith("/e/");
   const sessionWorkspaceActive = () => routeOutcome()?.kind === "tool";
+
+  // Terminal tabs stay mounted only while recent (WI-3129): an older tab's
+  // xterm and WebGL context are disposed and its screen restores from the
+  // terminal cache on revisit.
+  const [recentTerminals, setRecentTerminals] = createSignal<string[]>([]);
+  const liveTerminals = createMemo(() => new Set(recentTerminals()));
+  createEffect(() => {
+    const id = tabsStore.active;
+    if (!id || !sessionWorkspaceActive()) return;
+    const tab = tabsStore.tabs.find((t) => t.id === id);
+    if (tab?.kind !== "terminal") return;
+    setRecentTerminals((recent) => touchRecentTerminal(recent, id));
+  });
   const terminalScreenActive = () =>
     activeKind() === "terminal" && location.pathname.startsWith("/t/");
   const guiEnabled = () => Boolean(publicCfg()?.gui_stream_available);
@@ -2520,6 +2534,7 @@ const App: Component = () => {
                       tab,
                       sessionWorkspaceActive() ? tabsStore.active : null,
                       shellNarrow(),
+                      liveTerminals(),
                     )
                 )}>
                   {(t) => (
