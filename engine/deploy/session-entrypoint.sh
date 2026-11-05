@@ -120,8 +120,28 @@ if [ "$VOGT_CLI" = codex ] && [ -n "$(jq -r '.codex_config // empty' "$response"
   codex_home=${CODEX_HOME:-$HOME/.codex}; mkdir -p "$codex_home"; chmod 700 "$codex_home"
   codex_cfg="$codex_home/config.toml"
   if [ -f "$codex_cfg" ]; then
-    # Drop earlier [mcp_servers.vogt|cadastre] tables (and their keys), keep the rest.
-    awk '/^\[/ { skip = ($0 ~ /^\[mcp_servers\.(vogt|cadastre)(\.|\])/) } !skip' "$codex_cfg" >"$tmp_dir/codex.toml"
+    # Drop earlier vogt/cadastre MCP server definitions, keep the rest. A table
+    # header is compared with its spaces and quotes removed, so [mcp_servers."vogt"],
+    # [ mcp_servers . 'vogt' ] and [mcp_servers.vogt.env] all match, as do
+    # single-line dotted keys (mcp_servers.vogt.url = ... at the top level, vogt.url
+    # = ... under [mcp_servers]). A multi-line value on such a dotted key is not split.
+    awk '
+      /^[ \t]*\[\[?[^][]*\]\]?[ \t]*(#.*)?$/ {
+        h = $0; sub(/[ \t]*#.*$/, "", h); gsub(/[ \t"\047]/, "", h)
+        skip = (h ~ /^\[\[?mcp_servers\.(vogt|cadastre)(\.|\])/)
+        root = (h == "[mcp_servers]") ? 2 : 0
+        if (skip) next
+        print; next
+      }
+      BEGIN { root = 1 }
+      skip { next }
+      root && /=/ {
+        k = $0; sub(/[ \t]*=.*$/, "", k); gsub(/[ \t"\047]/, "", k)
+        if (root == 1 && k ~ /^mcp_servers\.(vogt|cadastre)(\.|$)/) next
+        if (root == 2 && k ~ /^(vogt|cadastre)(\.|$)/) next
+      }
+      { print }
+    ' "$codex_cfg" >"$tmp_dir/codex.toml"
   else : >"$tmp_dir/codex.toml"; fi
   jq -r '.codex_config' "$response" >>"$tmp_dir/codex.toml"
   cat "$tmp_dir/codex.toml" >"$codex_cfg"; chmod 600 "$codex_cfg"
