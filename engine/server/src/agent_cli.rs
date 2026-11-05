@@ -122,6 +122,10 @@ pub struct LaunchRequest<'a> {
     pub codex_approval_policy: &'a str,
     /// The trimmed MCP set, when the start asked for one (WI-2740).
     pub mcp: Option<&'a crate::mcp_set::McpTrim>,
+    /// Codex's `model_auto_compact_token_limit`, when Vogt overrides the
+    /// configured one: a session that thrashed on compaction restarts above
+    /// the size it came back to (WI-2832, `compact_backoff`).
+    pub codex_compact_limit: Option<u64>,
 }
 
 impl<'a> LaunchRequest<'a> {
@@ -141,6 +145,7 @@ impl<'a> LaunchRequest<'a> {
             opencode_config: None,
             codex_approval_policy: CODEX_APPROVAL_DEFAULT,
             mcp: None,
+            codex_compact_limit: None,
         }
     }
 }
@@ -507,6 +512,16 @@ pub fn launch(command: Option<&[String]>, req: &LaunchRequest<'_>) -> Result<Lau
                 "-c".to_string(),
                 "tui.animations=false".to_string(),
             ]);
+            if let Some(limit) = req.codex_compact_limit {
+                // Scope `total` so the fixed prefix counts, as mcp-bootstrap
+                // sets it; the limit is the backed-off one, not the default.
+                rewritten.extend([
+                    "-c".to_string(),
+                    format!("model_auto_compact_token_limit={limit}"),
+                    "-c".to_string(),
+                    "model_auto_compact_token_limit_scope=\"total\"".to_string(),
+                ]);
+            }
             if let Some(mcp) = req.mcp {
                 rewritten.extend(mcp.codex_args.iter().cloned());
             }
@@ -1249,6 +1264,39 @@ mod tests {
                 "{hostile:?} reached argv"
             );
         }
+    }
+
+    #[test]
+    fn a_backed_off_codex_launch_carries_the_compact_limit() {
+        // WI-2832: a session that thrashed on compaction restarts with a limit
+        // above the size it came back to, in total scope.
+        let req = LaunchRequest {
+            codex_compact_limit: Some(152_000),
+            ..LaunchRequest::bare()
+        };
+        let out = launch(Some(&protected("codex")), &req)
+            .unwrap()
+            .command
+            .unwrap();
+        let at = out
+            .iter()
+            .position(|a| a == "model_auto_compact_token_limit=152000")
+            .expect("limit override present");
+        assert_eq!(out[at - 1], "-c");
+        assert_eq!(out[at + 1], "-c");
+        assert_eq!(
+            out[at + 2],
+            "model_auto_compact_token_limit_scope=\"total\""
+        );
+        // Not asked for: the configured limit stands, nothing is added.
+        let plain = launch(Some(&protected("codex")), &LaunchRequest::bare())
+            .unwrap()
+            .command
+            .unwrap();
+        assert!(!plain.iter().any(|a| a.contains("auto_compact")));
+        // Never for another agent.
+        let claude = launch(Some(&protected("claude")), &req).unwrap().command;
+        assert!(!claude.iter().flatten().any(|a| a.contains("auto_compact")));
     }
 
     #[test]

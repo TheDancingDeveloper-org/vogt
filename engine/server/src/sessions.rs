@@ -1066,6 +1066,11 @@ impl SessionRegistry {
                 opencode_config: self.cfg.agent_onboarding.opencode_config.as_deref(),
                 codex_approval_policy: self.cfg.codex_approval_policy.as_str(),
                 mcp: Some(&mcp_trim),
+                codex_compact_limit: crate::compact_backoff::launch_limit(
+                    &self.cfg.state_dir,
+                    id,
+                    None,
+                ),
             },
         )?;
         if let Some(rewritten) = launch.command {
