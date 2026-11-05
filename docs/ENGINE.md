@@ -4695,6 +4695,34 @@ the minted token in `<state_dir>/pod-graft-tokens/<session>` (`0600`, directory
 attempt, so a pod an engine restart adopts is still revoked when it ends. A
 session hibernated or removed with no pod running has nothing left to revoke.
 
+**Per-session kache key (WI-3242).** The shared Secret `ENGINE_POD_CACHE_SECRET`
+(default `kache-s3`, read through `envFrom`) must hold only a **read-only** key
+for the shared `kache` bucket; only CI on `main` writes it. When
+`ENGINE_POD_CACHE_PROVISIONER_URL` is set, the engine also gives each pod a
+bucket and write key of its own, through the trusted provisioner of ops
+`apps/vogt-sessions/docs/kache-per-session-keys.md` (the engine never holds
+the Garage admin token). Before creating the pod it sends
+`POST <url>/internal/cache/sessions` with only `expires_at` (now + 36 h, which
+the provisioner clamps), the bearer read on every call from
+`ENGINE_POD_CACHE_PROVISIONER_TOKEN_FILE`. The provisioner mints the
+`allocation_id`; the engine refuses a reply whose id is not a 16–52 character
+lowercase token or whose bucket is not `vogt-session-<id>`. The id is stamped
+on the pod as label `vogt.dev/session-cache-id`, and the pod's last `envFrom`
+names the Secret `vogt-session-cache-<id>` (keys `KACHE_SESSION_ACCESS_KEY_ID`,
+`KACHE_SESSION_SECRET_KEY`, `KACHE_SESSION_BUCKET`), which the engine creates
+after the bootstrap Secret, immutable and owned by the pod. A `429` (the
+provisioner at its allocation cap) starts the pod with the shared read-only key
+only; any other refusal or a timeout fails the pod create before anything
+exists. If the pod cannot be created the allocation is released; if either
+Secret cannot be created the pod is deleted, then the allocation released.
+Teardown releases it with `DELETE <url>/internal/cache/sessions/<id>` after the
+pod delete (a `404` is done); the engine also learns the allocation of a pod it
+adopts after a restart from the label. A failed release is logged and audited
+and left to the provisioner's sweep. Unset, pods get the shared read-only key
+alone. The URL must be `https` unless `ENGINE_POD_ALLOW_INSECURE_ENDPOINT=true`.
+Mapping the `KACHE_SESSION_*` values into kache's write remote is the
+session image's and `kache-config`'s job (ops).
+
 **Claude Code's posture in a pod (WI-3243).** A pod Claude session is
 started with the same posture as a host one. The image ships the
 driven-session policy, root-owned, at

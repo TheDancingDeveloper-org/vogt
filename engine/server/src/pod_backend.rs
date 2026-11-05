@@ -3,6 +3,7 @@ use crate::{
     config::SessionTemplate,
     error::{ApiError, Result},
     session_backend::SessionBackend,
+    session_cache::{self, CacheProvisioner, HttpCacheProvisioner},
 };
 use k8s_openapi::api::core::v1::{
     Capabilities, ConfigMapEnvSource, ConfigMapVolumeSource, Container, EmptyDirVolumeSource,
@@ -38,6 +39,16 @@ pub struct PodConfig {
     pub cache_env_config_map: String,
     pub cache_secret: String,
     pub kache_config_map: String,
+    /// The trusted kache provisioner (`ENGINE_POD_CACHE_PROVISIONER_URL`).
+    /// When set, every pod gets a bucket and write key of its own and
+    /// `cache_secret` must hold only the shared read-only key; unset, pods get
+    /// the shared read-only key alone (WI-3242). See [`crate::session_cache`].
+    #[serde(default)]
+    pub cache_provisioner_url: Option<String>,
+    /// File holding the engine's bearer for the provisioner (a projected
+    /// ServiceAccount token); read on every call.
+    #[serde(default)]
+    pub cache_provisioner_token_file: Option<String>,
     pub graft_repo: String,
     pub graft_line: String,
     /// Graft server the entrypoint clones from, passed to the pod as
@@ -173,6 +184,8 @@ impl Default for PodConfig {
             cache_env_config_map: "session-cache-env".into(),
             cache_secret: "kache-s3".into(),
             kache_config_map: "kache-config".into(),
+            cache_provisioner_url: None,
+            cache_provisioner_token_file: None,
             graft_repo: "vogt".into(),
             graft_line: "rust-2".into(),
             cli: "codex".into(),
@@ -248,6 +261,14 @@ impl PodConfig {
             &mut cfg.graft_mint_token_file,
         );
         optional("ENGINE_POD_EXTRA_CA_FILE", &mut cfg.extra_ca_file);
+        optional(
+            "ENGINE_POD_CACHE_PROVISIONER_URL",
+            &mut cfg.cache_provisioner_url,
+        );
+        optional(
+            "ENGINE_POD_CACHE_PROVISIONER_TOKEN_FILE",
+            &mut cfg.cache_provisioner_token_file,
+        );
         if let Some(v) = text("ENGINE_POD_RESOURCE_REQUESTS") {
             cfg.resource_requests = parse_resources("ENGINE_POD_RESOURCE_REQUESTS", &v)?;
         }
@@ -283,6 +304,15 @@ impl PodConfig {
                 if let Some(url) = endpoint {
                     cfg.engine_endpoint = url;
                 }
+            }
+        }
+        if let Some(url) = &cfg.cache_provisioner_url {
+            if !(url.starts_with("https://") || (insecure && url.starts_with("http://"))) {
+                return Err(ApiError::Config(
+                    "ENGINE_POD_CACHE_PROVISIONER_URL must be an https URL \
+                     (plain http needs ENGINE_POD_ALLOW_INSECURE_ENDPOINT=true)"
+                        .into(),
+                ));
             }
         }
         Ok(cfg)
@@ -813,14 +843,45 @@ pub fn pod_template(
 pub struct PodBackendFactory {
     pub cfg: Arc<PodConfig>,
     pub client: Client,
+    /// The kache provisioner, when configured (WI-3242).
+    pub cache: Option<Arc<dyn CacheProvisioner>>,
+    /// Pod uid to the kache allocation it holds, so teardown can release it.
+    /// Filled at create and from listed pods' labels (an adopted pod).
+    allocations: Arc<dashmap::DashMap<String, String>>,
 }
 impl PodBackendFactory {
     pub async fn new(cfg: PodConfig) -> Result<Self> {
         let client = cfg.client().await?;
-        Ok(Self {
-            cfg: Arc::new(cfg),
+        let cache = HttpCacheProvisioner::from_config(&cfg)?
+            .map(|p| Arc::new(p) as Arc<dyn CacheProvisioner>);
+        Ok(Self::from_parts(Arc::new(cfg), client, cache))
+    }
+    pub fn from_parts(
+        cfg: Arc<PodConfig>,
+        client: Client,
+        cache: Option<Arc<dyn CacheProvisioner>>,
+    ) -> Self {
+        Self {
+            cfg,
             client,
-        })
+            cache,
+            allocations: Arc::default(),
+        }
+    }
+    /// Release a kache allocation; a failure is logged, the provisioner's
+    /// sweep is the backstop.
+    async fn release_cache(&self, id: Uuid, allocation: &str) {
+        let Some(cache) = &self.cache else { return };
+        match cache.release(allocation).await {
+            Ok(()) => tracing::info!(
+                target: "vogt::audit", session_id = %id, allocation,
+                "released the session's kache allocation"
+            ),
+            Err(e) => tracing::warn!(
+                target: "vogt::audit", session_id = %id, allocation, error = %e,
+                "could not release the session's kache allocation; the provisioner sweep will"
+            ),
+        }
     }
     pub async fn create(&self, pod: Pod) -> Result<Pod> {
         let shared = shared_writable_volumes(&pod);
@@ -846,18 +907,70 @@ impl PodBackendFactory {
         let name = bootstrap_secret_name_in(&pod).ok_or_else(|| {
             ApiError::BadRequest("session pod has no bootstrap secret volume".into())
         })?;
+        // The session's own kache bucket and key, allocated before the pod so
+        // a refusal creates nothing. At the provisioner's cap the pod runs
+        // with the shared read-only key only.
+        let mut pod = pod;
+        let allocation = match &self.cache {
+            Some(cache) => {
+                let shared = shared_writable_volumes(&pod);
+                if !shared.is_empty() {
+                    return Err(ApiError::Internal(format!(
+                        "refusing to create a session pod with a shared writable volume: {}",
+                        shared.join(", ")
+                    )));
+                }
+                match cache.allocate().await? {
+                    Some(alloc) => {
+                        session_cache::attach(&mut pod, &alloc.allocation_id);
+                        tracing::info!(
+                            target: "vogt::audit", session_id = %id,
+                            allocation = %alloc.allocation_id,
+                            "allocated the session's kache bucket"
+                        );
+                        Some(alloc)
+                    }
+                    None => {
+                        tracing::warn!(
+                            session = %id,
+                            "the kache provisioner is at its cap; this pod gets the shared \
+                             read-only cache key only"
+                        );
+                        None
+                    }
+                }
+            }
+            None => None,
+        };
         let auth = crate::agent_stream::global();
         auth.issue(id, token).await;
         let created = match self.create(pod).await {
             Ok(created) => created,
             Err(e) => {
                 auth.withdraw(id).await;
+                if let Some(alloc) = &allocation {
+                    self.release_cache(id, &alloc.allocation_id).await;
+                }
                 return Err(e);
             }
         };
         let secret = bootstrap_secret(&self.cfg, id, &name, token, &created);
         let api = Api::<Secret>::namespaced(self.client.clone(), &self.cfg.namespace);
-        if let Err(e) = api.create(&PostParams::default(), &secret).await {
+        let mut made = api
+            .create(&PostParams::default(), &secret)
+            .await
+            .map(|_| ())
+            .map_err(|e| format!("creating bootstrap secret: {e}"));
+        if let (Ok(()), Some(alloc)) = (&made, &allocation) {
+            let secret = session_cache::session_cache_secret(&self.cfg, id, alloc, &created);
+            // The error names the Secret, never its data.
+            made = api
+                .create(&PostParams::default(), &secret)
+                .await
+                .map(|_| ())
+                .map_err(|e| format!("creating session cache secret: {e}"));
+        }
+        if let Err(e) = made {
             // No pod will ever present the bootstrap credential.
             auth.withdraw(id).await;
             if let Err(delete_error) = self.delete(id, created.metadata.uid.clone()).await {
@@ -868,9 +981,14 @@ impl PodBackendFactory {
                      it may be left behind"
                 );
             }
-            return Err(ApiError::Internal(format!(
-                "creating bootstrap secret: {e}"
-            )));
+            if let Some(alloc) = &allocation {
+                self.release_cache(id, &alloc.allocation_id).await;
+            }
+            return Err(ApiError::Internal(e));
+        }
+        if let (Some(alloc), Some(uid)) = (&allocation, &created.metadata.uid) {
+            self.allocations
+                .insert(uid.clone(), alloc.allocation_id.clone());
         }
         Ok(created)
     }
@@ -882,7 +1000,16 @@ impl PodBackendFactory {
     /// time the engine deletes, and the pod must leave `Terminating` quickly
     /// enough for a wake to create its replacement under the same name. A pod
     /// that is already gone is not an error.
+    /// The pod's kache allocation, if it held one, is released once the pod
+    /// is deleted (or already gone).
     pub async fn delete(&self, id: Uuid, uid: Option<String>) -> Result<()> {
+        self.delete_pod(id, uid.clone()).await?;
+        if let Some((_, allocation)) = uid.and_then(|uid| self.allocations.remove(&uid)) {
+            self.release_cache(id, &allocation).await;
+        }
+        Ok(())
+    }
+    async fn delete_pod(&self, id: Uuid, uid: Option<String>) -> Result<()> {
         let params = DeleteParams {
             grace_period_seconds: Some(POD_DELETE_GRACE_SECONDS),
             preconditions: uid.map(|uid| Preconditions {
@@ -919,6 +1046,14 @@ impl PodBackendFactory {
             .list(&ListParams::default().labels(&session_pod_selector(&self.cfg)))
             .await
             .map_err(|e| ApiError::Internal(format!("listing session pods: {e}")))?;
+        // A pod adopted after an engine restart still holds its allocation.
+        for pod in &pods.items {
+            if let (Some(uid), Some(allocation)) =
+                (&pod.metadata.uid, session_cache::allocation_of(pod))
+            {
+                self.allocations.entry(uid.clone()).or_insert(allocation);
+            }
+        }
         Ok(pods.items)
     }
 }
@@ -1648,10 +1783,7 @@ mod tests {
             engine_id: "vogt-dev".into(),
             ..Default::default()
         };
-        let factory = PodBackendFactory {
-            cfg: Arc::new(cfg),
-            client,
-        };
+        let factory = PodBackendFactory::from_parts(Arc::new(cfg), client, None);
         factory.reconcile().await.unwrap();
         let seen = seen.lock().unwrap();
         assert_eq!(seen.len(), 1);
@@ -1672,10 +1804,7 @@ mod tests {
         // name with a new uid.
         let (client, seen, store) =
             mock_kube::client(vec![named(id, DEFAULT_ENGINE_ID, "uid-new")]);
-        let factory = PodBackendFactory {
-            cfg: Arc::new(PodConfig::default()),
-            client,
-        };
+        let factory = PodBackendFactory::from_parts(Arc::new(PodConfig::default()), client, None);
 
         assert!(factory.delete(id, Some("uid-old".into())).await.is_err());
         assert_eq!(store.lock().unwrap().len(), 1, "the new pod survives");
@@ -1691,10 +1820,7 @@ mod tests {
     async fn a_pod_delete_has_a_short_grace_and_a_missing_pod_is_not_an_error() {
         let id = Uuid::new_v4();
         let (client, seen, store) = mock_kube::client(vec![named(id, DEFAULT_ENGINE_ID, "uid-1")]);
-        let factory = PodBackendFactory {
-            cfg: Arc::new(PodConfig::default()),
-            client,
-        };
+        let factory = PodBackendFactory::from_parts(Arc::new(PodConfig::default()), client, None);
         factory.delete(id, Some("uid-1".into())).await.unwrap();
         assert!(store.lock().unwrap().is_empty());
         let sent = seen.lock().unwrap()[0].2.clone();
@@ -1712,10 +1838,7 @@ mod tests {
     async fn a_pod_is_gone_when_absent_or_replaced_by_another_uid() {
         let id = Uuid::new_v4();
         let (client, _, store) = mock_kube::client(vec![named(id, DEFAULT_ENGINE_ID, "uid-new")]);
-        let factory = PodBackendFactory {
-            cfg: Arc::new(PodConfig::default()),
-            client,
-        };
+        let factory = PodBackendFactory::from_parts(Arc::new(PodConfig::default()), client, None);
         assert!(!factory.pod_gone(id, Some("uid-new")).await.unwrap());
         assert!(!factory.pod_gone(id, None).await.unwrap());
         assert!(factory.pod_gone(id, Some("uid-old")).await.unwrap());
@@ -1881,10 +2004,7 @@ mod tests {
         let id = Uuid::new_v4();
         let cfg = PodConfig::default();
         let (client, seen) = mock_create::client(vec![]);
-        let factory = PodBackendFactory {
-            cfg: Arc::new(cfg.clone()),
-            client,
-        };
+        let factory = PodBackendFactory::from_parts(Arc::new(cfg.clone()), client, None);
         let mut pod = pod_for(&cfg, id);
         for v in pod.spec.as_mut().unwrap().volumes.as_mut().unwrap() {
             if let Some(pvc) = v.persistent_volume_claim.as_mut() {
@@ -1907,10 +2027,7 @@ mod tests {
             ..Default::default()
         };
         let (client, seen) = mock_create::client(vec![]);
-        let factory = PodBackendFactory {
-            cfg: Arc::new(cfg.clone()),
-            client,
-        };
+        let factory = PodBackendFactory::from_parts(Arc::new(cfg.clone()), client, None);
         factory
             .create_resources(id, b"s3cret-bootstrap", pod_for(&cfg, id))
             .await
@@ -1962,10 +2079,7 @@ mod tests {
         let id = Uuid::new_v4();
         let cfg = PodConfig::default();
         let (client, seen) = mock_create::client(vec![403]);
-        let factory = PodBackendFactory {
-            cfg: Arc::new(cfg.clone()),
-            client,
-        };
+        let factory = PodBackendFactory::from_parts(Arc::new(cfg.clone()), client, None);
         assert!(factory
             .create_resources(id, b"t", pod_for(&cfg, id))
             .await
@@ -1990,10 +2104,7 @@ mod tests {
         let id = Uuid::new_v4();
         let cfg = PodConfig::default();
         let (client, _seen) = mock_create::client(vec![403]);
-        let factory = PodBackendFactory {
-            cfg: Arc::new(cfg.clone()),
-            client,
-        };
+        let factory = PodBackendFactory::from_parts(Arc::new(cfg.clone()), client, None);
         assert!(factory
             .create_resources(id, b"unused-token", pod_for(&cfg, id))
             .await
@@ -2011,10 +2122,7 @@ mod tests {
         let id = Uuid::new_v4();
         let cfg = PodConfig::default();
         let (client, seen) = mock_create::client(vec![]);
-        let factory = PodBackendFactory {
-            cfg: Arc::new(cfg.clone()),
-            client,
-        };
+        let factory = PodBackendFactory::from_parts(Arc::new(cfg.clone()), client, None);
         // Two pods of the same session, as after a wake: the earlier pod's
         // Secret may still be waiting for the garbage collector.
         let (first, second) = (pod_for(&cfg, id), pod_for(&cfg, id));
@@ -2049,10 +2157,7 @@ mod tests {
         let id = Uuid::new_v4();
         let cfg = PodConfig::default();
         let (client, seen) = mock_create::client(vec![409]);
-        let factory = PodBackendFactory {
-            cfg: Arc::new(cfg.clone()),
-            client,
-        };
+        let factory = PodBackendFactory::from_parts(Arc::new(cfg.clone()), client, None);
         assert!(factory
             .create_resources(id, b"t", pod_for(&cfg, id))
             .await
@@ -2061,6 +2166,145 @@ mod tests {
         let deletes: Vec<_> = seen.iter().filter(|(m, _, _)| m == "DELETE").collect();
         assert_eq!(deletes.len(), 1);
         assert!(deletes[0].1.contains("/pods/"), "{}", deletes[0].1);
+    }
+
+    fn cached_factory(
+        secret_posts: Vec<u16>,
+        prov: Arc<crate::session_cache::tests::FakeProvisioner>,
+    ) -> (PodBackendFactory, mock_create::Seen, PodConfig) {
+        let cfg = PodConfig::default();
+        let (client, seen) = mock_create::client(secret_posts);
+        let factory = PodBackendFactory::from_parts(
+            Arc::new(cfg.clone()),
+            client,
+            Some(prov as Arc<dyn CacheProvisioner>),
+        );
+        (factory, seen, cfg)
+    }
+
+    #[tokio::test]
+    async fn a_pod_gets_its_own_kache_key_in_an_owned_secret_and_releases_it_at_delete() {
+        use crate::session_cache::tests::{FakeProvisioner, ALLOC_ID};
+        let id = Uuid::new_v4();
+        let prov = Arc::new(FakeProvisioner::default());
+        let (factory, seen, cfg) = cached_factory(vec![], prov.clone());
+        let created = factory
+            .create_resources(id, b"t", pod_for(&cfg, id))
+            .await
+            .unwrap();
+        {
+            let seen = seen.lock().unwrap();
+            let paths: Vec<_> = seen.iter().map(|(m, p, _)| format!("{m} {p}")).collect();
+            assert_eq!(
+                paths,
+                [
+                    "POST /api/v1/namespaces/vogt-sessions/pods",
+                    "POST /api/v1/namespaces/vogt-sessions/secrets",
+                    "POST /api/v1/namespaces/vogt-sessions/secrets",
+                ]
+            );
+            let pod: Pod = serde_json::from_str(&seen[0].2).unwrap();
+            assert!(!seen[0].2.contains("s3ssion-secret"), "key in the pod spec");
+            assert_eq!(
+                pod.metadata.labels.as_ref().unwrap()[crate::session_cache::ALLOCATION_LABEL],
+                ALLOC_ID
+            );
+            let env_from = pod.spec.unwrap().containers[0].env_from.clone().unwrap();
+            let last = env_from.last().unwrap().secret_ref.as_ref().unwrap();
+            assert_eq!(last.name, format!("vogt-session-cache-{ALLOC_ID}"));
+            let secret: Secret = serde_json::from_str(&seen[2].2).unwrap();
+            assert_eq!(secret.metadata.name.as_deref(), Some(last.name.as_str()));
+            assert_eq!(secret.metadata.owner_references.unwrap()[0].uid, "uid-pod");
+        }
+        assert!(prov.released.lock().unwrap().is_empty());
+        factory.delete(id, created.metadata.uid).await.unwrap();
+        assert_eq!(*prov.released.lock().unwrap(), [ALLOC_ID]);
+    }
+
+    #[tokio::test]
+    async fn a_failed_cache_secret_deletes_the_pod_then_releases_the_allocation() {
+        use crate::session_cache::tests::{FakeProvisioner, ALLOC_ID};
+        let id = Uuid::new_v4();
+        let prov = Arc::new(FakeProvisioner::default());
+        // The bootstrap Secret is made; the cache Secret is refused.
+        let (factory, seen, cfg) = cached_factory(vec![201, 403], prov.clone());
+        let err = factory
+            .create_resources(id, b"t", pod_for(&cfg, id))
+            .await
+            .expect_err("no pod without its cache secret");
+        assert!(!err.to_string().contains("s3ssion"), "{err}");
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.last().unwrap().0, "DELETE");
+        assert!(seen.last().unwrap().1.contains("/pods/"));
+        assert_eq!(*prov.released.lock().unwrap(), [ALLOC_ID]);
+    }
+
+    #[tokio::test]
+    async fn a_refused_allocation_creates_nothing_and_the_cap_runs_without_a_bucket() {
+        use crate::session_cache::tests::FakeProvisioner;
+        let id = Uuid::new_v4();
+        let prov = FakeProvisioner::answering(Err(ApiError::Internal("HTTP 403".into())));
+        let (factory, seen, cfg) = cached_factory(vec![], prov.clone());
+        assert!(factory
+            .create_resources(id, b"t", pod_for(&cfg, id))
+            .await
+            .is_err());
+        assert!(seen.lock().unwrap().is_empty(), "the cluster was called");
+
+        let prov = FakeProvisioner::answering(Ok(None));
+        let (factory, seen, cfg) = cached_factory(vec![], prov.clone());
+        factory
+            .create_resources(id, b"t", pod_for(&cfg, id))
+            .await
+            .unwrap();
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2, "pod and bootstrap secret only: {seen:?}");
+        let pod: Pod = serde_json::from_str(&seen[0].2).unwrap();
+        assert!(crate::session_cache::allocation_of(&pod).is_none());
+    }
+
+    #[tokio::test]
+    async fn an_adopted_pods_allocation_is_released_at_its_teardown() {
+        use crate::session_cache::tests::{FakeProvisioner, ALLOC_ID};
+        let id = Uuid::new_v4();
+        let mut pod = named(id, DEFAULT_ENGINE_ID, "uid-1");
+        crate::session_cache::attach(&mut pod, ALLOC_ID);
+        let (client, _seen, _store) = mock_kube::client(vec![pod]);
+        let prov = Arc::new(FakeProvisioner::default());
+        let factory = PodBackendFactory::from_parts(
+            Arc::new(PodConfig::default()),
+            client,
+            Some(prov.clone() as Arc<dyn CacheProvisioner>),
+        );
+        factory.reconcile().await.unwrap();
+        factory.delete(id, Some("uid-1".into())).await.unwrap();
+        assert_eq!(*prov.released.lock().unwrap(), [ALLOC_ID]);
+    }
+
+    #[test]
+    fn the_provisioner_url_is_read_and_must_be_https() {
+        let cfg = PodConfig::from_lookup(
+            lookup(&[
+                ("ENGINE_POD_CACHE_PROVISIONER_URL", "https://prov.svc:8443"),
+                ("ENGINE_POD_CACHE_PROVISIONER_TOKEN_FILE", "/run/prov/token"),
+            ]),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.cache_provisioner_url.as_deref(),
+            Some("https://prov.svc:8443")
+        );
+        assert_eq!(
+            cfg.cache_provisioner_token_file.as_deref(),
+            Some("/run/prov/token")
+        );
+        assert!(PodConfig::default().cache_provisioner_url.is_none());
+        assert!(PodConfig::from_lookup(
+            lookup(&[("ENGINE_POD_CACHE_PROVISIONER_URL", "http://prov.svc")]),
+            None
+        )
+        .is_err());
     }
 
     fn lookup(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
