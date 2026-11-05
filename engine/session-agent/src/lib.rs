@@ -26,6 +26,8 @@ use tokio_tungstenite::{
 };
 
 pub const DEFAULT_BUFFER_BYTES: usize = 1024 * 1024;
+/// The most data one replayed `Output` frame carries.
+pub const RESEND_CHUNK_BYTES: usize = 64 * 1024;
 pub const BUNDLE_DEBOUNCE: Duration = Duration::from_secs(1);
 
 /// The only files a Claude account bundle may receive from a pod.
@@ -248,11 +250,16 @@ impl ReplayBuffer {
             });
             at = self.start;
         }
-        if let Some(bytes) = self.replay(at).filter(|b| !b.is_empty()) {
-            frames.push(Frame::Output {
-                offset: at,
-                data: bytes,
-            });
+        if let Some(bytes) = self.replay(at) {
+            // Chunked, so one frame stays well inside the engine's WS message
+            // limit whatever VOGT_AGENT_BUFFER_BYTES is set to.
+            for chunk in bytes.chunks(RESEND_CHUNK_BYTES) {
+                frames.push(Frame::Output {
+                    offset: at,
+                    data: chunk.to_vec(),
+                });
+                at += chunk.len() as u64;
+            }
         }
         frames
     }
@@ -1255,6 +1262,32 @@ mod tests {
             }]
         );
         assert!(b.resend_frames(6).is_empty());
+    }
+    #[test]
+    fn resend_frames_chunk_a_large_replay() {
+        let held = 3 * DEFAULT_BUFFER_BYTES;
+        let mut b = ReplayBuffer::new(held);
+        b.append(&vec![255; held + 10]);
+        let frames = b.resend_frames(0);
+        assert_eq!(
+            frames[0],
+            Frame::Gap {
+                offset: 0,
+                lost: 10
+            }
+        );
+        let mut at = 10;
+        for frame in &frames[1..] {
+            let Frame::Output { offset, data } = frame else {
+                panic!("expected output, got {frame:?}");
+            };
+            assert_eq!(*offset, at);
+            assert!(data.len() <= RESEND_CHUNK_BYTES);
+            // Well inside the engine's 1 MiB-scale WS message limit.
+            assert!(serde_json::to_string(frame).unwrap().len() < 1024 * 1024);
+            at += data.len() as u64;
+        }
+        assert_eq!(at, b.end());
     }
     #[test]
     fn frames_are_stable_json() {

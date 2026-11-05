@@ -22,9 +22,17 @@ use tokio::sync::{mpsc, Mutex, Notify};
 use uuid::Uuid;
 use vogt_session_agent::Frame;
 const BOOTSTRAP_TTL: Duration = Duration::from_secs(300);
-const AGENT_WS_MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 const AGENT_OUTPUT_CHANNEL_CAPACITY: usize = 16;
 const AGENT_BUFFER_BYTES: usize = vogt_session_agent::DEFAULT_BUFFER_BYTES;
+/// The largest agent WS message: an `Output` frame carrying
+/// `AGENT_BUFFER_BYTES` of data, JSON-encoded as a byte array (up to four
+/// characters a byte, "255,"), plus room for the envelope. A legitimate replay
+/// always fits, so a big replay never loops through refuse-and-reconnect.
+const AGENT_WS_MAX_MESSAGE_SIZE: usize = AGENT_BUFFER_BYTES * 4 + 64 * 1024;
+/// The most bytes one `Gap` may report lost. A gap carries no data, and a
+/// long disconnect legitimately loses far more than the replay buffer holds,
+/// so this only keeps the cursor finite and far from overflow (256 TiB).
+const AGENT_MAX_GAP_BYTES: u64 = 1 << 48;
 static AUTH: OnceLock<Arc<AgentAuth>> = OnceLock::new();
 #[derive(Debug, Clone)]
 struct Pending {
@@ -214,7 +222,7 @@ impl PodLink {
                 got: offset,
             });
         }
-        if lost > AGENT_BUFFER_BYTES as u64 {
+        if lost > AGENT_MAX_GAP_BYTES {
             return Err(OutputGap {
                 expected: *next,
                 got: offset,
@@ -878,7 +886,7 @@ async fn relay(mut socket: axum::extract::ws::WebSocket, state: Arc<AppState>, i
                             }
                         }
                         Frame::Gap { offset, lost } => {
-                            if lost > AGENT_BUFFER_BYTES as u64 || offset.checked_add(lost).is_none() {
+                            if lost > AGENT_MAX_GAP_BYTES || offset.checked_add(lost).is_none() {
                                 let _ = send_frame(&mut socket, &Frame::Error {
                                     code: "invalid_gap".into(),
                                     message: "gap exceeds the replay limit or overflows the stream offset".into(),
@@ -939,12 +947,40 @@ mod tests {
     }
 
     #[test]
+    fn largest_output_frame_fits_the_ws_message_limit() {
+        // Worst case for JSON byte-array encoding: every byte is three digits.
+        let frame = Frame::Output {
+            offset: u64::MAX,
+            data: vec![255; AGENT_BUFFER_BYTES],
+        };
+        let encoded = serde_json::to_string(&frame).unwrap();
+        assert!(
+            encoded.len() <= AGENT_WS_MAX_MESSAGE_SIZE,
+            "{}",
+            encoded.len()
+        );
+    }
+
+    #[test]
+    fn gap_larger_than_the_replay_buffer_is_accepted() {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(4);
+        let link = PodLink::new(sender);
+        let lost = 64 * AGENT_BUFFER_BYTES as u64;
+        assert_eq!(link.ingest_gap(0, lost), Ok(lost));
+        assert_eq!(
+            receiver.recv().unwrap(),
+            format!("\r\n[{lost} bytes lost]\r\n").into_bytes()
+        );
+        assert_eq!(link.ingest(lost, b"x"), Ok(lost + 1));
+    }
+
+    #[test]
     fn invalid_lengths_and_overflow_leave_output_and_cursor_unchanged() {
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
         let link = PodLink::new(sender);
         assert!(link.ingest(0, &vec![0; AGENT_BUFFER_BYTES + 1]).is_err());
         assert!(link.ingest_gap(0, u64::MAX).is_err());
-        assert!(link.ingest_gap(0, AGENT_BUFFER_BYTES as u64 + 1).is_err());
+        assert!(link.ingest_gap(0, AGENT_MAX_GAP_BYTES + 1).is_err());
         assert_eq!(link.next_offset(), 0);
         link.skip_to(u64::MAX - 1);
         assert!(link.ingest_gap(u64::MAX - 1, 2).is_err());
