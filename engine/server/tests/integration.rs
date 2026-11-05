@@ -17306,7 +17306,34 @@ mod pod_stream {
             .await
             .unwrap();
         assert!(body.get("mcp_config").is_none(), "{body}");
-        assert!(body["env"].get("VOGT_HTTP_TOKEN").is_none(), "{body}");
+        assert_eq!(
+            body["env"]["VOGT_HTTP_TOKEN"],
+            format!("minted-for-{other}")
+        );
+        let toml = body["codex_config"].as_str().unwrap();
+        assert!(
+            toml.contains(&format!("url = \"{endpoint}/mcp\"")),
+            "{toml}"
+        );
+        assert!(
+            toml.contains("bearer_token_env_var = \"VOGT_HTTP_TOKEN\""),
+            "{toml}"
+        );
+        assert!(!toml.contains("minted-for"), "{toml}");
+
+        let third = h.start().await;
+        let (_, token) = h.created.recv().await.unwrap();
+        let body: Value = h
+            .bootstrap_as(third, &token, "opencode")
+            .await
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            body["opencode_config"]["mcp"]["vogt"]["headers"]["Authorization"],
+            "Bearer {env:VOGT_HTTP_TOKEN}"
+        );
+        assert!(body.get("codex_config").is_none(), "{body}");
     }
 
     /// Without a core to mint from, a Claude pod still gets a config, with no

@@ -755,7 +755,10 @@ pub fn command_line(config: &Config) -> Result<String, AgentError> {
             Ok(line)
         }
         "codex" => Ok("codex --add-dir \"$VOGT_SESSION_CWD\"".into()),
-        _ => Err(AgentError::Pty("VOGT_CLI must be claude or codex".into())),
+        "opencode" => Ok("opencode".into()),
+        _ => Err(AgentError::Pty(
+            "VOGT_CLI must be claude, codex or opencode".into(),
+        )),
     }
 }
 
@@ -1101,6 +1104,29 @@ mod tests {
         let argv = argv_of(&command_line(&resumed).unwrap());
         assert_eq!(&argv[..2], ["--resume", "abc-123"]);
         assert!(argv.contains(&"--strict-mcp-config".to_string()));
+    }
+
+    #[test]
+    fn codex_and_opencode_launch_by_name_and_others_are_refused() {
+        let mut config = Config {
+            session_id: "s".into(),
+            engine_url: "http://127.0.0.1:1".into(),
+            token: "t".into(),
+            cli: "opencode".into(),
+            command: None,
+            cwd: None,
+            cols: 80,
+            rows: 24,
+            buffer_bytes: 1024,
+            claude_config_dir: None,
+            account: None,
+            conversation_id: None,
+            resume: false,
+            claude: ClaudeLaunch::default(),
+        };
+        assert_eq!(command_line(&config).unwrap(), "opencode");
+        config.cli = "nope".into();
+        assert!(command_line(&config).is_err());
     }
 
     #[test]

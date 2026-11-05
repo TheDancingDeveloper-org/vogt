@@ -34,6 +34,8 @@ fi
 [ "${BOOT_MODE:-ok}" != 401 ] || { echo unauthorized >&2; exit 22; }
 graft=""; [ -z "${GRAFT_TOKEN:-}" ] || graft=$(printf ',"graft_token":"%s"' "$GRAFT_TOKEN")
 [ -z "${MCP_CONFIG:-}" ] || graft="$graft,\"mcp_config\":$MCP_CONFIG"
+[ -z "${CODEX_CONFIG:-}" ] || graft="$graft,\"codex_config\":$(printf %s "$CODEX_CONFIG" | jq -Rs .)"
+[ -z "${OPENCODE_CONFIG:-}" ] || graft="$graft,\"opencode_config\":$OPENCODE_CONFIG"
 printf '{"session_token":"%s"%s,"bundle":{"sub/.credentials.json":"%s"},"env":{"VOGT_SESSION_ID":"s1","VOGT_BOOTSTRAP_TOKEN":"%s","EXTRA":"yes"},"brief":"hello brief"}' \
   "$(cat "$CASE_DIR/session")" "$graft" "$(printf bundle | base64)" "$(cat "$CASE_DIR/boot")"
 SH
@@ -125,6 +127,25 @@ posture=$(run_case "$tmp/posture2" VOGT_CLAUDE_SETTINGS_FILE="$tmp/policy.json" 
 run_case "$tmp/codex" VOGT_CLI=codex MCP_CONFIG="$MCP" >/dev/null 2>&1 || fail "codex path"
 [ ! -e "$tmp/codex/vogt-policy-hook.calls" ] || fail "claude hooks installed for codex"
 [ ! -e "$tmp/codex/run/mcp.json" ] || fail "mcp config written for codex"
+# WI-3161: Codex gets the engine's MCP servers in $CODEX_HOME/config.toml,
+# replacing only the tables the engine owns; opencode gets opencode.json.
+# shellcheck disable=SC2016
+CODEX_TOML=$'[mcp_servers.vogt]\nurl = "https://e/mcp"\nbearer_token_env_var = "VOGT_HTTP_TOKEN"\n\n'
+mkdir -p "$tmp/codexcfg/home/.codex"
+printf '[model]\nname = "x"\n\n[mcp_servers.vogt]\nurl = "https://stale/mcp"\n\n[mcp_servers.other]\nurl = "https://o"\n' >"$tmp/codexcfg/home/.codex/config.toml"
+out=$(run_case "$tmp/codexcfg" VOGT_CLI=codex CODEX_CONFIG="$CODEX_TOML" 2>&1) || fail "codex config path: $out"
+cfg="$tmp/codexcfg/home/.codex/config.toml"
+[[ $(stat -c %a "$cfg") == 600 ]] || fail "codex config mode"
+grep -q 'url = "https://e/mcp"' "$cfg" || fail "codex vogt table missing"
+! grep -q stale "$cfg" || fail "stale vogt table kept"
+{ grep -q '^\[model\]' "$cfg" && grep -q 'mcp_servers.other' "$cfg"; } || fail "codex config's own tables lost"
+[ "$(grep -c 'mcp_servers.vogt' "$cfg")" = 1 ] || fail "duplicate vogt table"
+grep -q '^session-entrypoint: codex posture: mcp-config$' <<<"$out" || fail "codex posture line"
+! grep -q 'minted' "$cfg" || fail "credential in codex config"
+OC='{"mcp":{"vogt":{"type":"remote","url":"https://e/mcp"}}}'
+out=$(run_case "$tmp/ocfg" VOGT_CLI=opencode OPENCODE_CONFIG="$OC" XDG_CONFIG_HOME="$tmp/ocfg/xdg" 2>&1) || fail "opencode path: $out"
+jq -e '.mcp.vogt.url=="https://e/mcp"' "$tmp/ocfg/xdg/opencode/opencode.json" >/dev/null || fail "opencode config content"
+[[ $(stat -c %a "$tmp/ocfg/xdg/opencode/opencode.json") == 600 ]] || fail "opencode config mode"
 [[ $(<"$tmp/no-graft-token/graft.token") == "$SESSION" ]] || fail "clone should fall back to the session token"
 
 # A pod's IP reaches the engine's allow-set a moment after start: refused
