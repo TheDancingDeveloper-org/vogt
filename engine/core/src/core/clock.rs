@@ -82,6 +82,12 @@ pub trait Clock {
     fn steps(&self) -> bool {
         false
     }
+    /// The instant the next read answers, on a clock that steps, without
+    /// spending it. A caller counts the reads a stretch of work made by
+    /// comparing two of these.
+    fn peek(&self) -> Option<Moment> {
+        None
+    }
 }
 
 pub struct SystemClock;
@@ -113,6 +119,10 @@ impl Clock for StepClock {
 
     fn steps(&self) -> bool {
         true
+    }
+
+    fn peek(&self) -> Option<Moment> {
+        Some(self.next)
     }
 }
 

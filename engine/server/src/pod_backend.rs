@@ -885,7 +885,6 @@ pub fn session_id_from_pod(pod: &Pod) -> Option<Uuid> {
         .ok()
 }
 
-#[allow(clippy::too_many_arguments)]
 type ResourceMap = BTreeMap<String, k8s_openapi::apimachinery::pkg::api::resource::Quantity>;
 
 /// The deployment defaults with a template policy's entries laid over them.
