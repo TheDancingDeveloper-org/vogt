@@ -972,3 +972,34 @@ fn declared_overflow_is_a_floor_on_total_and_stays_truncated() {
     assert!(listed.truncated);
     assert_eq!(listed.digests.len(), 50);
 }
+
+#[test]
+fn full_mode_with_fields_slims_each_row_to_id_and_the_named_fields() {
+    let body =
+        r#"{"sessions":[{"id":"live","name":"live","cwd":"/w","activity":"idle","alive":true}]}"#;
+    let script = script_with(vec![(200, body.to_string()), (200, body.to_string())]);
+    let built = opened(Some(Arc::clone(&script)));
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!("opened() builds a step clock");
+    };
+    let mut params = digest_params();
+    params.mode = "full".to_string();
+    let whole = serde_json::to_value(list_sessions(ctx, &params).unwrap()).unwrap();
+    // Default output is unchanged: no fields, every column.
+    let mut untouched = whole.clone();
+    super::sessions::slim_full_rows(&mut untouched, None);
+    assert_eq!(untouched, whole);
+    super::sessions::slim_full_rows(&mut untouched, Some(&[]));
+    assert_eq!(untouched, whole);
+    let mut slim = whole.clone();
+    super::sessions::slim_full_rows(
+        &mut slim,
+        Some(&["activity".to_string(), "no_such_field".to_string()]),
+    );
+    let row = slim["sessions"][0].as_object().unwrap();
+    let mut keys: Vec<&str> = row.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(keys, vec!["activity", "id"], "{row:?}");
+    assert!(whole["sessions"][0].as_object().unwrap().len() > 2);
+    assert_eq!(slim["total"], whole["total"]);
+}

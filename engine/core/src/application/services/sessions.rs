@@ -199,7 +199,37 @@ where
         include_hidden: optional_bool(&params, "include_hidden")?.unwrap_or(false),
         fields: optional_string_list(&params, "fields")?,
     };
-    Ok(serde_json::to_value(list_sessions(ctx, &parsed)?).expect("a session result serialises"))
+    let mut listed =
+        serde_json::to_value(list_sessions(ctx, &parsed)?).expect("a session result serialises");
+    if parsed.mode == "full" {
+        slim_full_rows(&mut listed, parsed.fields.as_deref());
+    }
+    Ok(listed)
+}
+
+/// Slim `mode=full` rows to `id` plus the named `fields` (WI-3130). A full page
+/// of the whole roster is over a megabyte; a caller that reads a few columns
+/// names them. No `fields` (the default) leaves every row whole, which is what
+/// the Python core returns, and an unknown name is left out, as a digest's
+/// `extra` leaves it.
+pub(super) fn slim_full_rows(listed: &mut Value, fields: Option<&[String]>) {
+    let Some(fields) = fields.filter(|fields| !fields.is_empty()) else {
+        return;
+    };
+    let Some(rows) = listed.get_mut("sessions").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for row in rows {
+        let Some(whole) = row.as_object() else {
+            continue;
+        };
+        let slim: serde_json::Map<String, Value> = whole
+            .iter()
+            .filter(|(name, _)| name.as_str() == "id" || fields.iter().any(|f| f == *name))
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect();
+        *row = Value::Object(slim);
+    }
 }
 
 fn sweep_sessions_json<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
