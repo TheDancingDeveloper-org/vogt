@@ -6,10 +6,11 @@ use crate::{
     session_cache::{self, CacheProvisioner, HttpCacheProvisioner},
 };
 use k8s_openapi::api::core::v1::{
-    Capabilities, ConfigMapEnvSource, ConfigMapVolumeSource, Container, EmptyDirVolumeSource,
-    EnvFromSource, EnvVar, PersistentVolumeClaimVolumeSource, Pod, PodSecurityContext, PodSpec,
-    ResourceRequirements, SeccompProfile, Secret, SecretEnvSource, SecretVolumeSource,
-    SecurityContext, Volume, VolumeMount,
+    Affinity, Capabilities, ConfigMapEnvSource, ConfigMapVolumeSource, Container,
+    EmptyDirVolumeSource, EnvFromSource, EnvVar, HostPathVolumeSource,
+    PersistentVolumeClaimVolumeSource, Pod, PodSecurityContext, PodSpec, ResourceRequirements,
+    SeccompProfile, Secret, SecretEnvSource, SecretVolumeSource, SecurityContext, Volume,
+    VolumeMount,
 };
 use k8s_openapi::{apimachinery::pkg::apis::meta::v1::OwnerReference, ByteString};
 use kube::config::{KubeConfigOptions, Kubeconfig};
@@ -20,6 +21,23 @@ use kube::{
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use uuid::Uuid;
+
+/// What one session template changes about its pod. An unset field keeps the
+/// deployment default; a set resource map replaces the default map whole.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PodTemplatePolicy {
+    #[serde(default)]
+    pub resource_requests:
+        Option<BTreeMap<String, k8s_openapi::apimachinery::pkg::api::resource::Quantity>>,
+    #[serde(default)]
+    pub resource_limits:
+        Option<BTreeMap<String, k8s_openapi::apimachinery::pkg::api::resource::Quantity>>,
+    #[serde(default)]
+    pub node_selector: Option<BTreeMap<String, String>>,
+    #[serde(default)]
+    pub affinity: Option<Affinity>,
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PodConfig {
@@ -39,6 +57,22 @@ pub struct PodConfig {
     pub cache_env_config_map: String,
     pub cache_secret: String,
     pub kache_config_map: String,
+    /// Per-template overrides, keyed by template name (WI-3166). A template
+    /// with no entry gets the defaults above.
+    #[serde(default)]
+    pub template_policies: BTreeMap<String, PodTemplatePolicy>,
+    /// Node directories mounted read-only as seeds beside the private cache
+    /// (WI-3181). A `hostPath` is refused by the restricted Pod Security
+    /// Standard, so these stay empty until the session namespace is relaxed
+    /// for them; they are never writable (WI-3242).
+    #[serde(default)]
+    pub cargo_seed_host_path: Option<String>,
+    #[serde(default)]
+    pub pnpm_seed_host_path: Option<String>,
+    /// sccache S3-compatible endpoint, passed as `SCCACHE_ENDPOINT`. The
+    /// credentials come from `cache_secret`, not from here.
+    #[serde(default)]
+    pub sccache_endpoint: Option<String>,
     /// The trusted kache provisioner (`ENGINE_POD_CACHE_PROVISIONER_URL`).
     /// When set, every pod gets a bucket and write key of its own and
     /// `cache_secret` must hold only the shared read-only key; unset, pods get
@@ -184,6 +218,10 @@ impl Default for PodConfig {
             cache_env_config_map: "session-cache-env".into(),
             cache_secret: "kache-s3".into(),
             kache_config_map: "kache-config".into(),
+            template_policies: BTreeMap::new(),
+            cargo_seed_host_path: None,
+            pnpm_seed_host_path: None,
+            sccache_endpoint: None,
             cache_provisioner_url: None,
             cache_provisioner_token_file: None,
             graft_repo: "vogt".into(),
@@ -269,6 +307,20 @@ impl PodConfig {
             "ENGINE_POD_CACHE_PROVISIONER_TOKEN_FILE",
             &mut cfg.cache_provisioner_token_file,
         );
+        optional(
+            "ENGINE_POD_CARGO_SEED_HOST_PATH",
+            &mut cfg.cargo_seed_host_path,
+        );
+        optional(
+            "ENGINE_POD_PNPM_SEED_HOST_PATH",
+            &mut cfg.pnpm_seed_host_path,
+        );
+        optional("ENGINE_POD_SCCACHE_ENDPOINT", &mut cfg.sccache_endpoint);
+        if let Some(v) = text("ENGINE_POD_TEMPLATE_POLICIES").filter(|v| !v.is_empty()) {
+            cfg.template_policies = serde_json::from_str(&v).map_err(|e| {
+                ApiError::Config(format!("ENGINE_POD_TEMPLATE_POLICIES: invalid JSON: {e}"))
+            })?;
+        }
         if let Some(v) = text("ENGINE_POD_RESOURCE_REQUESTS") {
             cfg.resource_requests = parse_resources("ENGINE_POD_RESOURCE_REQUESTS", &v)?;
         }
@@ -304,6 +356,14 @@ impl PodConfig {
                 if let Some(url) = endpoint {
                     cfg.engine_endpoint = url;
                 }
+            }
+        }
+        for (name, path) in [
+            ("ENGINE_POD_CARGO_SEED_HOST_PATH", &cfg.cargo_seed_host_path),
+            ("ENGINE_POD_PNPM_SEED_HOST_PATH", &cfg.pnpm_seed_host_path),
+        ] {
+            if path.as_deref().is_some_and(|p| !p.starts_with('/')) {
+                return Err(ApiError::Config(format!("{name} must be an absolute path")));
             }
         }
         if let Some(url) = &cfg.cache_provisioner_url {
@@ -697,6 +757,14 @@ pub fn pod_template(
             ..Default::default()
         });
     }
+    if let Some(endpoint) = &cfg.sccache_endpoint {
+        env.push(EnvVar {
+            name: "SCCACHE_ENDPOINT".into(),
+            value: Some(endpoint.clone()),
+            ..Default::default()
+        });
+    }
+    let policy = cfg.template_policies.get(&template.name);
     // Each cache object is optional: an empty name leaves it out.
     let mut env_from = Vec::new();
     if !cfg.cache_env_config_map.is_empty() {
@@ -745,6 +813,43 @@ pub fn pod_template(
                 claim_name: cfg.cache_pvc.clone(),
                 read_only: Some(true),
             }),
+            ..Default::default()
+        });
+    }
+    // Host seeds are read-only at both the volume and the mount, so they can
+    // never be a path between sessions.
+    for (name, host, dir, env_name) in [
+        (
+            "cargo-seed",
+            &cfg.cargo_seed_host_path,
+            "/cache-ro/cargo-seed",
+            "VOGT_CARGO_SEED_DIR",
+        ),
+        (
+            "pnpm-seed",
+            &cfg.pnpm_seed_host_path,
+            "/cache-ro/pnpm-seed",
+            "VOGT_PNPM_SEED_DIR",
+        ),
+    ] {
+        let Some(host) = host else { continue };
+        mounts.push(VolumeMount {
+            name: name.into(),
+            mount_path: dir.into(),
+            read_only: Some(true),
+            ..Default::default()
+        });
+        volumes.push(Volume {
+            name: name.into(),
+            host_path: Some(HostPathVolumeSource {
+                path: host.clone(),
+                type_: Some("Directory".into()),
+            }),
+            ..Default::default()
+        });
+        env.push(EnvVar {
+            name: env_name.into(),
+            value: Some(dir.into()),
             ..Default::default()
         });
     }
@@ -797,11 +902,18 @@ pub fn pod_template(
                 env: Some(env),
                 env_from: Some(env_from),
                 volume_mounts: Some(mounts),
-                resources: Some(ResourceRequirements {
-                    requests: (!cfg.resource_requests.is_empty())
-                        .then(|| cfg.resource_requests.clone()),
-                    limits: (!cfg.resource_limits.is_empty()).then(|| cfg.resource_limits.clone()),
-                    claims: None,
+                resources: Some({
+                    let requests = policy
+                        .and_then(|p| p.resource_requests.as_ref())
+                        .unwrap_or(&cfg.resource_requests);
+                    let limits = policy
+                        .and_then(|p| p.resource_limits.as_ref())
+                        .unwrap_or(&cfg.resource_limits);
+                    ResourceRequirements {
+                        requests: (!requests.is_empty()).then(|| requests.clone()),
+                        limits: (!limits.is_empty()).then(|| limits.clone()),
+                        claims: None,
+                    }
                 }),
                 security_context: Some(SecurityContext {
                     allow_privilege_escalation: Some(false),
@@ -826,7 +938,13 @@ pub fn pod_template(
                 }),
                 ..Default::default()
             }),
-            node_selector: (!cfg.node_selector.is_empty()).then(|| cfg.node_selector.clone()),
+            node_selector: {
+                let selector = policy
+                    .and_then(|p| p.node_selector.as_ref())
+                    .unwrap_or(&cfg.node_selector);
+                (!selector.is_empty()).then(|| selector.clone())
+            },
+            affinity: policy.and_then(|p| p.affinity.clone()),
             node_name: (!cfg.cache_node.is_empty()).then(|| cfg.cache_node.clone()),
             image_pull_secrets: cfg.image_pull_secret.as_ref().map(|name| {
                 vec![k8s_openapi::api::core::v1::LocalObjectReference { name: name.clone() }]
@@ -2478,5 +2596,103 @@ mod tests {
         assert!(c.env_from.as_ref().unwrap().is_empty());
         assert_eq!(c.volume_mounts.as_ref().unwrap().len(), 2);
         assert_eq!(spec.image_pull_secrets.unwrap()[0].name, "pull");
+    }
+
+    #[test]
+    fn a_template_policy_replaces_resources_selector_and_adds_affinity() {
+        let cfg = PodConfig::from_lookup(
+            lookup(&[(
+                "ENGINE_POD_TEMPLATE_POLICIES",
+                r#"{"Pod":{"resource_requests":{"cpu":"2"},"resource_limits":{"cpu":"4","memory":"8Gi"},
+                   "node_selector":{"disk":"nvme"},
+                   "affinity":{"nodeAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":
+                     {"nodeSelectorTerms":[{"matchExpressions":[{"key":"k","operator":"Exists"}]}]}}}},
+                   "Other":{"resource_limits":{"cpu":"9"}}}"#,
+            )]),
+            None,
+        )
+        .unwrap();
+        let spec = pod_template_for(&cfg).spec.unwrap();
+        let r = spec.containers[0].resources.clone().unwrap();
+        assert_eq!(r.requests.unwrap().len(), 1);
+        assert_eq!(r.limits.unwrap()["memory"].0, "8Gi");
+        assert_eq!(spec.node_selector.unwrap()["disk"], "nvme");
+        assert!(spec.affinity.unwrap().node_affinity.is_some());
+        // A template with no entry keeps the defaults.
+        let d = PodConfig::default();
+        let plain = PodConfig {
+            template_policies: BTreeMap::new(),
+            ..d.clone()
+        };
+        let spec = pod_template_for(&plain).spec.unwrap();
+        assert!(spec.affinity.is_none());
+        assert_eq!(
+            spec.containers[0]
+                .resources
+                .clone()
+                .unwrap()
+                .limits
+                .unwrap()["ephemeral-storage"]
+                .0,
+            "40Gi"
+        );
+    }
+
+    #[test]
+    fn bad_template_policies_are_refused() {
+        for bad in ["not json", r#"{"Pod":{"bogus":1}}"#] {
+            assert!(
+                PodConfig::from_lookup(lookup(&[("ENGINE_POD_TEMPLATE_POLICIES", bad)]), None)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn host_seeds_and_sccache_are_off_by_default() {
+        let spec = pod_template_for(&PodConfig::default()).spec.unwrap();
+        assert!(spec.volumes.unwrap().iter().all(|v| v.host_path.is_none()));
+        assert!(
+            !cache_env(&pod_template_for(&PodConfig::default())).contains_key("SCCACHE_ENDPOINT")
+        );
+    }
+
+    #[test]
+    fn host_seeds_are_read_only_and_sccache_endpoint_is_passed() {
+        let cfg = PodConfig::from_lookup(
+            lookup(&[
+                ("ENGINE_POD_CARGO_SEED_HOST_PATH", "/srv/cargo"),
+                ("ENGINE_POD_PNPM_SEED_HOST_PATH", "/srv/pnpm"),
+                ("ENGINE_POD_SCCACHE_ENDPOINT", "https://s3.example/sccache"),
+            ]),
+            None,
+        )
+        .unwrap();
+        let pod = pod_template_for(&cfg);
+        // The WI-3242 guard accepts them: read-only mounts only.
+        assert!(shared_writable_volumes(&pod).is_empty());
+        let spec = pod.spec.as_ref().unwrap();
+        let mounts = spec.containers[0].volume_mounts.as_ref().unwrap();
+        for (name, path) in [("cargo-seed", "/srv/cargo"), ("pnpm-seed", "/srv/pnpm")] {
+            let m = mounts.iter().find(|m| m.name == name).unwrap();
+            assert_eq!(m.read_only, Some(true));
+            assert!(m.mount_path.starts_with(SHARED_CACHE_DIR));
+            let v = spec
+                .volumes
+                .as_ref()
+                .unwrap()
+                .iter()
+                .find(|v| v.name == name)
+                .unwrap();
+            assert_eq!(v.host_path.as_ref().unwrap().path, path);
+        }
+        let env = cache_env(&pod);
+        assert_eq!(env["SCCACHE_ENDPOINT"], "https://s3.example/sccache");
+        assert_eq!(env["VOGT_CARGO_SEED_DIR"], "/cache-ro/cargo-seed");
+        assert!(PodConfig::from_lookup(
+            lookup(&[("ENGINE_POD_CARGO_SEED_HOST_PATH", "relative")]),
+            None
+        )
+        .is_err());
     }
 }
