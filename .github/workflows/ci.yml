@@ -493,10 +493,10 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$FULL" = "true" ]; then
-            timeout --signal=SIGINT 420 pnpm exec playwright test tests/browser/demo.spec.ts \
+            timeout --signal=SIGINT 420 pnpm exec playwright test tests/browser/demo.spec.ts tests/browser/terminalLiveCap.spec.ts \
               --project=desktop --project=phone --reporter=list
           else
-            timeout --signal=SIGINT 240 pnpm exec playwright test tests/browser/demo.spec.ts \
+            timeout --signal=SIGINT 240 pnpm exec playwright test tests/browser/demo.spec.ts tests/browser/terminalLiveCap.spec.ts \
               --project=desktop --grep-invert "visually stable|mobile demo website" --reporter=list
           fi
 
