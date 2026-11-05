@@ -25,6 +25,15 @@
 //! the rotation stops there: a claim with no id is never overwritten, so a
 //! later pass cannot start a second replacement.
 //!
+//! The hand-off is trusted only when it is bound to the ask (WI-3246). Every
+//! ask carries a fresh one-time token, typed only into the asked session's
+//! terminal; the marker keeps its SHA-256, never the token. A hand-off is
+//! accepted only if it is a regular file whose first line is
+//! `vogt-handoff: <token>` for the latest ask. Anything else (no ask, a stale
+//! or wrong token, a symlink) is moved aside to `<id>.rejected` and logged,
+//! never fed to a replacement. The directory is kept 0700 and the
+//! replacement's copy is written 0600 without the token line.
+//!
 //! Idempotent: a hibernated session is not a candidate, and an unanswered ask
 //! waits for its marker to age. The old session is not woken by this module,
 //! but `session.input` to it would wake it: tell reviewers the new id.
@@ -54,6 +63,8 @@ const HIBERNATE_RETRY_AFTER: Duration = Duration::from_secs(5 * 60);
 /// outlive the replacement's first read.
 const ARCHIVE_KEEP: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const ARCHIVE_SUFFIX: &str = ".rotated.md";
+const REJECTED_SUFFIX: &str = ".rejected";
+const TOKEN_PREFIX: &str = "vogt-handoff: ";
 const ROTATE_OP: &str = "session.context_rotate";
 
 /// What one pass did, by engine session id.
@@ -126,15 +137,97 @@ fn safe_name(id: &str) -> String {
         .collect()
 }
 
-fn ask_text(path: &Path, tokens: i64, budget: i64) -> String {
+fn ask_text(path: &Path, tokens: i64, budget: i64, token: &str) -> String {
     format!(
         "[vogt] Your context is {tokens} tokens, over the {budget} budget for this role. \
          Write a hand-off file at {} so a fresh session can take over: fleet session ids \
          and what each is doing, your wait_any cursor, open decisions, batch state, pending \
-         reviews, and anything you promised. Write it to a temp name and rename it into \
-         place when complete. Then stop; Vogt starts your replacement and hibernates you.",
+         reviews, and anything you promised. Its first line must be exactly \
+         `{TOKEN_PREFIX}{token}` (do not repeat this token anywhere else). Write it to a \
+         temp name and rename it into place when complete. Then stop; Vogt starts your \
+         replacement and hibernates you.",
         path.display()
     )
+}
+
+fn rejected_path(dir: &Path, engine_id: &str) -> PathBuf {
+    dir.join(format!("{}{REJECTED_SUFFIX}", safe_name(engine_id)))
+}
+
+/// A fresh one-time hand-off token, or `None` when no entropy is available.
+fn new_token() -> Option<String> {
+    let mut bytes = [0u8; 16];
+    getrandom::getrandom(&mut bytes).ok()?;
+    Some(hex::encode(bytes))
+}
+
+fn token_digest(token: &str) -> String {
+    use sha2::Digest;
+    hex::encode(sha2::Sha256::digest(token.as_bytes()))
+}
+
+/// Restrict `dir` to the engine's uid: sessions running as another uid cannot
+/// plant or read hand-offs.
+fn secure_dir(dir: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+/// Write `contents` to a new file at `path`, readable by the engine's uid only.
+fn write_private(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)?.write_all(contents)
+}
+
+/// The hand-off body if `path` is a regular file bound to the latest ask
+/// (`digest` from its marker); the token line is stripped.
+fn verified_handoff(path: &Path, digest: Option<&str>) -> Result<String, &'static str> {
+    let digest = digest.ok_or("no ask was issued")?;
+    let meta = std::fs::symlink_metadata(path).map_err(|_| "unreadable")?;
+    if !meta.file_type().is_file() {
+        return Err("not a regular file");
+    }
+    let text = std::fs::read_to_string(path).map_err(|_| "unreadable")?;
+    let (first, body) = text.split_once('\n').unwrap_or((text.as_str(), ""));
+    let token = first
+        .trim_end_matches('\r')
+        .strip_prefix(TOKEN_PREFIX)
+        .ok_or("no hand-off token")?
+        .trim();
+    // Both sides are digests of fixed length, so the compare leaks nothing
+    // about the token.
+    if token_digest(token) != digest {
+        return Err("token does not match the latest ask");
+    }
+    if body.trim().is_empty() {
+        return Err("empty");
+    }
+    Ok(body.to_string())
+}
+
+/// Move an untrusted hand-off aside so it is never read, and say so.
+fn reject_handoff(dir: &Path, engine_id: &str, path: &Path, why: &str) {
+    tracing::warn!(
+        "context rotation: refusing the hand-off of {engine_id} at {} ({why}); \
+         moved aside, a new one will be asked for",
+        path.display()
+    );
+    let rejected = rejected_path(dir, engine_id);
+    if std::fs::rename(path, &rejected).is_err() {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 fn seed_task(old_id: &str, path: &Path) -> String {
@@ -147,20 +240,42 @@ fn seed_task(old_id: &str, path: &Path) -> String {
     )
 }
 
-/// How many asks the marker records and whether it is old enough to repeat.
-fn marker_state(marker: &Path) -> (u32, bool) {
-    let count = std::fs::read_to_string(marker)
-        .ok()
-        .and_then(|text| text.trim().parse::<u32>().ok());
+/// What an ask marker records: how many asks, whether the last is old enough
+/// to repeat, and the digest of the last ask's token.
+struct Marker {
+    asks: u32,
+    aged: bool,
+    digest: Option<String>,
+}
+
+fn marker_state(marker: &Path) -> Marker {
+    let text = std::fs::read_to_string(marker).unwrap_or_default();
+    let mut lines = text.lines();
+    let count = lines
+        .next()
+        .and_then(|line| line.trim().parse::<u32>().ok());
+    let digest = lines
+        .next()
+        .map(str::trim)
+        .filter(|digest| digest.len() == 64)
+        .map(str::to_string);
     let Some(count) = count else {
-        return (0, true);
+        return Marker {
+            asks: 0,
+            aged: true,
+            digest: None,
+        };
     };
     let aged = std::fs::metadata(marker)
         .and_then(|meta| meta.modified())
         .ok()
         .and_then(|at| SystemTime::now().duration_since(at).ok())
         .is_some_and(|age| age >= REASK_AFTER);
-    (count, aged)
+    Marker {
+        asks: count,
+        aged,
+        digest,
+    }
 }
 
 /// Writes the audited rotation event for `(old engine id, outcome)`.
@@ -209,23 +324,49 @@ where
             continue;
         };
         let path = handoff_path(&dir, &row.id);
-        let written = std::fs::metadata(&path).is_ok_and(|meta| meta.len() > 0);
         if row.activity != "idle" {
             continue;
         }
-        if !written {
-            let marker = marker_path(&dir, &row.id);
-            let (asks, aged) = marker_state(&marker);
-            if asks >= MAX_ASKS || !aged {
+        let marker = marker_path(&dir, &row.id);
+        let state = marker_state(&marker);
+        let present = std::fs::symlink_metadata(&path).is_ok();
+        let body = if present {
+            match verified_handoff(&path, state.digest.as_deref()) {
+                Ok(body) => Some(body),
+                Err(why) => {
+                    reject_handoff(&dir, &row.id, &path, why);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let Some(body) = body else {
+            if state.asks >= MAX_ASKS || !state.aged {
                 continue;
             }
-            if std::fs::create_dir_all(&dir).is_err() {
+            if secure_dir(&dir).is_err() {
                 tracing::warn!("context rotation: cannot create {}", dir.display());
                 continue;
             }
-            match engine.send_input(&row.id, &ask_text(&path, tokens, budget), true, false, None) {
+            let Some(token) = new_token() else {
+                tracing::warn!("context rotation: no entropy for a hand-off token");
+                continue;
+            };
+            // Record the token before asking, so an answer is never refused
+            // for want of its digest.
+            let _ = std::fs::remove_file(&marker);
+            let record = format!("{}\n{}\n", state.asks + 1, token_digest(&token));
+            if let Err(error) = write_private(&marker, record.as_bytes()) {
+                tracing::warn!(
+                    "context rotation: cannot record the ask of {}: {error}",
+                    row.id
+                );
+                continue;
+            }
+            let ask = ask_text(&path, tokens, budget, &token);
+            match engine.send_input(&row.id, &ask, true, false, None) {
                 Ok(true) => {
-                    let _ = std::fs::write(&marker, (asks + 1).to_string());
                     done.asked.push(row.id.clone());
                 }
                 Ok(false) => {}
@@ -236,8 +377,8 @@ where
                 ),
             }
             continue;
-        }
-        match rotate_one(ctx, row, &dir, &path, tokens, budget, audit) {
+        };
+        match rotate_one(ctx, row, &dir, &path, &body, tokens, budget, audit) {
             Ok(Some(new_id)) => done.rotated.push((row.id.clone(), new_id)),
             Ok(None) => {}
             // One session's failure never ends the pass for the others.
@@ -256,11 +397,13 @@ where
 /// a hibernate that fails is retried on its own after `HIBERNATE_RETRY_AFTER`
 /// and never starts a second replacement. The audit comes last: its failure
 /// is logged and cannot orphan the replacement.
+#[allow(clippy::too_many_arguments)]
 fn rotate_one<C, I>(
     ctx: &AppContext<C, I>,
     row: &EngineSession,
     dir: &Path,
     path: &Path,
+    body: &str,
     tokens: i64,
     budget: i64,
     audit: Audit<C, I>,
@@ -309,7 +452,10 @@ where
                 return Ok(None);
             }
             let archive = archive_path(dir, &row.id);
-            if let Err(error) = std::fs::copy(path, &archive) {
+            // The replacement reads only what was verified, from a file the
+            // engine wrote.
+            let _ = std::fs::remove_file(&archive);
+            if let Err(error) = write_private(&archive, body.as_bytes()) {
                 tracing::warn!(
                     "context rotation: cannot copy the hand-off of {}: {error}",
                     row.id
