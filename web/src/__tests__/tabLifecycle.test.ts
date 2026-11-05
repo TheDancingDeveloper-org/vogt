@@ -3,7 +3,9 @@ import {
   hasDirtyEditor,
   hasUnsavedWork,
   protectDirtyEditorExit,
+  MAX_LIVE_TERMINAL_TABS,
   shouldMountTab,
+  touchRecentTerminal,
   terminalPaneParked,
   tabRetention,
 } from "../tabLifecycle";
@@ -79,5 +81,34 @@ describe("dirty editor browser lifecycle", () => {
     protectDirtyEditorExit(event);
     expect(event.defaultPrevented).toBe(true);
     expect(event.returnValue).toBe(false);
+  });
+});
+
+describe("Live terminal bound (WI-3129)", () => {
+  const terminals: Tab[] = Array.from({ length: 20 }, (_, i) => ({
+    id: `term:${i}`,
+    kind: "terminal" as const,
+    sessionId: String(i),
+    label: String(i),
+  }));
+
+  it("keeps only the most recent terminals in the recency list", () => {
+    let recent: string[] = [];
+    for (const t of terminals) recent = touchRecentTerminal(recent, t.id);
+    expect(recent).toEqual(["term:19", "term:18", "term:17"]);
+    expect(recent).toHaveLength(MAX_LIVE_TERMINAL_TABS);
+    expect(touchRecentTerminal(recent, "term:17")[0]).toBe("term:17");
+  });
+
+  it("mounts (so unmounts and disposes the rest) at most the bound after 20 switches", () => {
+    let recent: string[] = [];
+    for (const t of terminals) recent = touchRecentTerminal(recent, t.id);
+    const live = new Set(recent);
+    const mounted = terminals.filter((t) =>
+      shouldMountTab(t, "term:19", false, live),
+    );
+    expect(mounted.map((t) => t.id).sort()).toEqual(
+      ["term:17", "term:18", "term:19"],
+    );
   });
 });
