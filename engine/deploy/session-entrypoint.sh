@@ -12,7 +12,7 @@ say() { printf 'session-entrypoint: step %s\n' "$1" >&2; }
 need() { eval "value=\${$1:-}"; [ -n "$value" ] || fail "required environment variable $1 is not set"; }
 need VOGT_ENGINE_URL; need VOGT_SESSION_ID; need VOGT_BOOTSTRAP_TOKEN_FILE
 need VOGT_GRAFT_REPO; need VOGT_GRAFT_LINE; need VOGT_CLI
-case "$VOGT_CLI" in claude|codex) ;; *) fail 'VOGT_CLI must be claude or codex' ;; esac
+case "$VOGT_CLI" in claude|codex|opencode) ;; *) fail 'VOGT_CLI must be claude, codex or opencode' ;; esac
 # /cache is a per-pod emptyDir (WI-3242), so the directories the image creates
 # there are shadowed by it. Recreate the tool caches best-effort; each tool
 # would create its own anyway.
@@ -111,6 +111,26 @@ if [ "$VOGT_CLI" = claude ]; then
   hooked vogt-policy-hook && posture="$posture policy-hook"
   hooked vogt-claude-session-hook && posture="$posture session-hook"
   printf 'session-entrypoint: claude posture:%s\n' "$posture" >&2
+fi
+# Codex and opencode read their MCP servers from their own config (WI-3161).
+# The bootstrap response carries the file's content; the bearer is named by
+# environment variable, so no credential is written. An existing config keeps
+# its own settings: the engine's servers replace only the tables it owns.
+if [ "$VOGT_CLI" = codex ] && [ -n "$(jq -r '.codex_config // empty' "$response")" ]; then
+  codex_home=${CODEX_HOME:-$HOME/.codex}; mkdir -p "$codex_home"; chmod 700 "$codex_home"
+  codex_cfg="$codex_home/config.toml"
+  if [ -f "$codex_cfg" ]; then
+    # Drop earlier [mcp_servers.vogt|cadastre] tables (and their keys), keep the rest.
+    awk '/^\[/ { skip = ($0 ~ /^\[mcp_servers\.(vogt|cadastre)(\.|\])/) } !skip' "$codex_cfg" >"$tmp_dir/codex.toml"
+  else : >"$tmp_dir/codex.toml"; fi
+  jq -r '.codex_config' "$response" >>"$tmp_dir/codex.toml"
+  cat "$tmp_dir/codex.toml" >"$codex_cfg"; chmod 600 "$codex_cfg"
+  printf 'session-entrypoint: codex posture: mcp-config\n' >&2
+fi
+if [ "$VOGT_CLI" = opencode ] && jq -e '.opencode_config | type == "object"' "$response" >/dev/null 2>&1; then
+  oc_dir=${XDG_CONFIG_HOME:-$HOME/.config}/opencode; mkdir -p "$oc_dir"; chmod 700 "$oc_dir"
+  jq '.opencode_config' "$response" >"$oc_dir/opencode.json"; chmod 600 "$oc_dir/opencode.json"
+  printf 'session-entrypoint: opencode posture: mcp-config\n' >&2
 fi
 step=graft-token; say graft-token
 # The graft credential (scoped to this repo and line) arrives as .graft_token

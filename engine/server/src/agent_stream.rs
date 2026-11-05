@@ -359,6 +359,13 @@ pub struct BootstrapResponse {
     /// CLI that takes no such file.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mcp_config: Option<serde_json::Value>,
+    /// The Codex counterpart (WI-3161): a `config.toml` fragment with the
+    /// engine's MCP servers, for the entrypoint to merge into `$CODEX_HOME`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub codex_config: Option<String>,
+    /// The opencode counterpart (WI-3161): an `opencode.json` body.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub opencode_config: Option<serde_json::Value>,
 }
 
 /// The contract env the bootstrap response carries (the same fields as the
@@ -713,10 +720,24 @@ pub async fn bootstrap(
     // A Claude session gets what a host-launched one does: its own core
     // credential and the engine's MCP endpoints (WI-3243). The credential
     // travels in the environment, never in the config file.
-    let mcp_config = if req.cli == "claude" {
-        let token = state.sessions.mint_agent_token("claude", id).await;
+    let (mut mcp_config, mut codex_config, mut opencode_config) = (None, None, None);
+    if matches!(req.cli.as_str(), "claude" | "codex" | "opencode") {
+        let token = state.sessions.mint_agent_token(&req.cli, id).await;
         let endpoints = state.sessions.pod_mcp_endpoints(&engine_endpoint);
-        let config = crate::session_endpoints::claude_mcp_config(&endpoints, token.is_some());
+        let has = token.is_some();
+        match req.cli.as_str() {
+            "claude" => {
+                mcp_config = Some(crate::session_endpoints::claude_mcp_config(&endpoints, has))
+            }
+            "codex" => {
+                codex_config = Some(crate::session_endpoints::codex_mcp_config(&endpoints, has))
+            }
+            _ => {
+                opencode_config = Some(crate::session_endpoints::opencode_mcp_config(
+                    &endpoints, has,
+                ))
+            }
+        }
         if let Some(token) = token {
             for (name, value) in [
                 ("VOGT_HTTP_TOKEN", token),
@@ -725,10 +746,7 @@ pub async fn bootstrap(
                 env.insert(name.into(), serde_json::Value::String(value));
             }
         }
-        Some(config)
-    } else {
-        None
-    };
+    }
     // A pod resumes from the account bundle the engine holds: the login, the
     // global config and, for a woken session, its conversation's transcript.
     let summary = state.sessions.summary_of(id);
@@ -782,6 +800,8 @@ pub async fn bootstrap(
         env: serde_json::Value::Object(env),
         graft_token,
         mcp_config,
+        codex_config,
+        opencode_config,
         brief: state
             .sessions
             .summary_of(id)
