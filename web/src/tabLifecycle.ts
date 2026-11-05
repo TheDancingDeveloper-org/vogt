@@ -9,12 +9,32 @@ export function tabRetention(tab: Tab): TabRetention {
   return "active";
 }
 
+/**
+ * How many terminal tabs stay mounted at once: the active one plus the most
+ * recently left. Each mounted terminal holds an xterm, a WebGL context and
+ * a glyph atlas, and browsers cap WebGL contexts per page (WI-3129).
+ */
+export const MAX_LIVE_TERMINAL_TABS = 3;
+
+/** Move `tabId` to the front of the recency list, bounded to `max`. */
+export function touchRecentTerminal(
+  recent: readonly string[],
+  tabId: string,
+  max = MAX_LIVE_TERMINAL_TABS,
+): string[] {
+  return [tabId, ...recent.filter((id) => id !== tabId)].slice(0, max);
+}
+
 export function shouldMountTab(
   tab: Tab,
   activeTabId: string | null,
   narrow = false,
+  liveTerminals?: ReadonlySet<string>,
 ): boolean {
   if (narrow && tab.kind === "terminal") return tab.id === activeTabId;
+  if (tab.kind === "terminal" && liveTerminals) {
+    return tab.id === activeTabId || liveTerminals.has(tab.id);
+  }
   const retention = tabRetention(tab);
   if (retention === "always") return true;
   return tab.id === activeTabId;
