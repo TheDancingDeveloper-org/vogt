@@ -26,6 +26,10 @@ FROM ${PYTHON_IMAGE} AS build
 # uv resolves and installs from the committed lockfile, so the image contains
 # exactly what CI tested.
 #
+# The managed Python and the wheels come over the network on a cold build
+# (a GitHub 504 failed the merge queue, WI-3308), so uv gets a long timeout
+# and retries below rather than a cache mount.
+#
 # No `--mount=type=cache` on the two `uv sync` steps below, deliberately: a
 # cache mount is a BuildKit feature, and the legacy builder — which is what a
 # plain `docker compose up --build` still uses on some hosts — fails outright
@@ -68,6 +72,8 @@ ENV UV_COMPILE_BYTECODE=1 \
     UV_PYTHON_DOWNLOADS=automatic \
     UV_PYTHON_INSTALL_DIR=/opt/vogt/python \
     UV_PYTHON_PREFERENCE=only-managed \
+    UV_HTTP_TIMEOUT=120 \
+    UV_HTTP_RETRIES=5 \
     UV_PROJECT_ENVIRONMENT=/opt/vogt/.venv
 
 WORKDIR /src
