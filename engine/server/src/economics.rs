@@ -58,6 +58,8 @@ pub struct Meter {
     /// compacted (WI-2832).
     codex_cycle_peak: i64,
     codex_last_cycle_peak: i64,
+    /// Compactions in a row that had real work before them.
+    clean_compactions: i64,
 }
 
 /// What Codex's `token_count` events said, latest and largest.
@@ -91,6 +93,7 @@ impl Meter {
             codex_compaction_open: false,
             codex_cycle_peak: 0,
             codex_last_cycle_peak: 0,
+            clean_compactions: 0,
         }
     }
 
@@ -142,8 +145,10 @@ impl Meter {
             self.compactions += 1;
             if self.tool_calls_since_compaction < PROGRESS_TOOL_CALLS {
                 self.compaction_streak += 1;
+                self.clean_compactions = 0;
             } else {
                 self.compaction_streak = 1;
+                self.clean_compactions += 1;
             }
             self.tool_calls_since_compaction = 0;
             // The compacted history is no longer in the window.
@@ -206,6 +211,17 @@ impl Meter {
     /// act on, else `None`.
     pub(crate) fn compaction_loop(&self) -> Option<i64> {
         (self.compaction_streak >= COMPACTION_LOOP_STREAK).then_some(self.compaction_streak)
+    }
+
+    /// True once `needed` compactions in a row each had real work before them,
+    /// and starts the count again: the loop is over, so a recorded back-off
+    /// can be dropped (WI-2832).
+    pub(crate) fn take_clean_compactions(&mut self, needed: i64) -> bool {
+        if self.clean_compactions < needed {
+            return false;
+        }
+        self.clean_compactions = 0;
+        true
     }
 
     /// The context size, in tokens, a Codex session had reached when it was
@@ -878,6 +894,15 @@ pub fn spawn_economics_tailer(state: Arc<AppState>, home: PathBuf, tick: Duratio
                         }
                     }
                 }
+                // Clean compactions after a loop: drop the back-off, and let a
+                // later loop be reported and backed off again.
+                if tail
+                    .meter
+                    .take_clean_compactions(crate::compact_backoff::CLEAN_COMPACTIONS_TO_RESET)
+                {
+                    crate::compact_backoff::clear_floor(&state.config.state_dir, session.id);
+                    tail.loop_reported = false;
+                }
                 session.store_economics_tail(tail, snapshot.clone());
                 // The hibernation record is what a later removal counts, so it
                 // has to carry the snapshot the session ends with.
@@ -1172,6 +1197,33 @@ mod tests {
         meter.feed_line(&count(133_000));
         meter.feed_line(compacted);
         assert_eq!(meter.codex_compacted_at(), Some(133_000));
+    }
+
+    /// WI-2832 review note 3: compactions with work between them end a
+    /// back-off; a thrashing compaction restarts the count.
+    #[test]
+    fn clean_compactions_in_a_row_are_counted_and_taken() {
+        let compacted = r#"{"type":"compacted","payload":{"message":""}}"#;
+        let call = r#"{"type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{}","call_id":"c"}}"#;
+        let mut meter = Meter::new("codex");
+        let clean = |meter: &mut Meter| {
+            for _ in 0..PROGRESS_TOOL_CALLS {
+                meter.feed_line(call);
+            }
+            meter.feed_line(compacted);
+        };
+        clean(&mut meter);
+        clean(&mut meter);
+        assert!(!meter.take_clean_compactions(3));
+        // A compaction with no work before it breaks the run.
+        meter.feed_line(compacted);
+        clean(&mut meter);
+        clean(&mut meter);
+        assert!(!meter.take_clean_compactions(3));
+        clean(&mut meter);
+        assert!(meter.take_clean_compactions(3));
+        // Taken: the count starts again.
+        assert!(!meter.take_clean_compactions(3));
     }
 
     /// WI-2832: Codex writes a `compacted` line; one compaction, one call,
