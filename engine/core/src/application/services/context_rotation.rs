@@ -742,6 +742,20 @@ mod tests {
         );
     }
 
+    /// The descriptor itself refuses a symlink (O_NOFOLLOW), with no path
+    /// check in front of it: a link swapped in after any earlier check is
+    /// still not followed (WI-3282).
+    #[test]
+    fn read_handoff_does_not_follow_a_symlink() {
+        let dir = tempdir("nofollow");
+        let real = dir.path().join("real.md");
+        std::fs::write(&real, "secret\n").unwrap();
+        let link = dir.path().join("link.md");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert_eq!(read_handoff(&real).as_deref(), Ok("secret\n"));
+        assert_eq!(read_handoff(&link), Err("not a regular file"));
+    }
+
     #[test]
     fn oversized_handoff_is_refused() {
         let dir = tempdir("big");
