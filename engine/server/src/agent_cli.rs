@@ -519,7 +519,10 @@ pub fn launch(command: Option<&[String]>, req: &LaunchRequest<'_>) -> Result<Lau
                     "-c".to_string(),
                     format!("model_auto_compact_token_limit={limit}"),
                     "-c".to_string(),
-                    "model_auto_compact_token_limit_scope=\"total\"".to_string(),
+                    format!(
+                        "model_auto_compact_token_limit_scope=\"{}\"",
+                        crate::compact_backoff::COMPACT_SCOPE
+                    ),
                 ]);
             }
             if let Some(mcp) = req.mcp {

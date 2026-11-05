@@ -1069,7 +1069,7 @@ impl SessionRegistry {
                 codex_compact_limit: crate::compact_backoff::launch_limit(
                     &self.cfg.state_dir,
                     id,
-                    None,
+                    crate::compact_backoff::default_limit(),
                 ),
             },
         )?;
