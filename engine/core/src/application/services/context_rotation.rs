@@ -27,11 +27,17 @@
 //!
 //! The hand-off is trusted only when it is bound to the ask (WI-3246). Every
 //! ask carries a fresh one-time token, typed only into the asked session's
-//! terminal; the marker keeps its SHA-256, never the token. A hand-off is
+//! terminal; the marker keeps its SHA-256, never the token. The token is
+//! typed, so it sits in that session's screen and output log: anyone allowed
+//! to read the session (attach, scrollback, history search) can see it and
+//! could forge a hand-off. It binds the hand-off to the ask, and keeps out
+//! other sessions that cannot read this one; it is not a secret from this
+//! session's readers. A hand-off is
 //! accepted only if it is a regular file whose first line is
 //! `vogt-handoff: <token>` for the latest ask. Anything else (no ask, a stale
 //! or wrong token, a symlink) is moved aside to `<id>.rejected` and logged,
-//! never fed to a replacement. The directory is kept 0700 and the
+//! never fed to a replacement. The file is opened with `O_NOFOLLOW` and read
+//! through that one descriptor, capped at 1 MiB (WI-3282). The directory is kept 0700 and the
 //! replacement's copy is written 0600 without the token line.
 //!
 //! Idempotent: a hibernated session is not a candidate, and an unanswered ask
@@ -191,15 +197,52 @@ fn write_private(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     options.open(path)?.write_all(contents)
 }
 
+/// Largest hand-off accepted; a bigger file is refused unread (WI-3282).
+const MAX_HANDOFF_BYTES: u64 = 1024 * 1024;
+
+/// Read the hand-off through one descriptor: opened without following a
+/// symlink, checked to be a regular file on that descriptor, and read no
+/// further than `MAX_HANDOFF_BYTES`. Checking the path and then reading it
+/// would leave a gap in which the file could be swapped.
+fn read_handoff(path: &Path) -> Result<String, &'static str> {
+    use std::io::Read;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = match options.open(path) {
+        Ok(file) => file,
+        #[cfg(unix)]
+        Err(error) if error.raw_os_error() == Some(libc::ELOOP) => {
+            return Err("not a regular file")
+        }
+        Err(_) => return Err("unreadable"),
+    };
+    let meta = file.metadata().map_err(|_| "unreadable")?;
+    if !meta.file_type().is_file() {
+        return Err("not a regular file");
+    }
+    if meta.len() > MAX_HANDOFF_BYTES {
+        return Err("too large");
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_HANDOFF_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "unreadable")?;
+    if bytes.len() as u64 > MAX_HANDOFF_BYTES {
+        return Err("too large");
+    }
+    String::from_utf8(bytes).map_err(|_| "unreadable")
+}
+
 /// The hand-off body if `path` is a regular file bound to the latest ask
 /// (`digest` from its marker); the token line is stripped.
 fn verified_handoff(path: &Path, digest: Option<&str>) -> Result<String, &'static str> {
     let digest = digest.ok_or("no ask was issued")?;
-    let meta = std::fs::symlink_metadata(path).map_err(|_| "unreadable")?;
-    if !meta.file_type().is_file() {
-        return Err("not a regular file");
-    }
-    let text = std::fs::read_to_string(path).map_err(|_| "unreadable")?;
+    let text = read_handoff(path)?;
     let (first, body) = text.split_once('\n').unwrap_or((text.as_str(), ""));
     let token = first
         .trim_end_matches('\r')
@@ -656,4 +699,71 @@ where
         "session.context_rotated",
         Some(outcome),
     )
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    fn digest_for(token: &str) -> String {
+        token_digest(token)
+    }
+
+    struct TempDir(PathBuf);
+    impl TempDir {
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    fn tempdir(name: &str) -> TempDir {
+        let dir = std::env::temp_dir().join(format!("vogt-rotation-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        TempDir(dir)
+    }
+
+    #[test]
+    fn handoff_through_a_symlink_is_refused() {
+        let dir = tempdir("symlink");
+        let real = dir.path().join("real.md");
+        std::fs::write(&real, format!("{TOKEN_PREFIX}tok\nbody\n")).unwrap();
+        let link = dir.path().join("link.md");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let digest = digest_for("tok");
+        assert_eq!(verified_handoff(&real, Some(&digest)).unwrap(), "body\n");
+        assert_eq!(
+            verified_handoff(&link, Some(&digest)),
+            Err("not a regular file")
+        );
+    }
+
+    #[test]
+    fn oversized_handoff_is_refused() {
+        let dir = tempdir("big");
+        let path = dir.path().join("big.md");
+        let mut text = format!("{TOKEN_PREFIX}tok\n");
+        text.push_str(&"x".repeat(MAX_HANDOFF_BYTES as usize));
+        std::fs::write(&path, text).unwrap();
+        assert_eq!(
+            verified_handoff(&path, Some(&digest_for("tok"))),
+            Err("too large")
+        );
+    }
+
+    #[test]
+    fn fifo_handoff_is_refused_without_blocking() {
+        let dir = tempdir("fifo");
+        let path = dir.path().join("fifo.md");
+        let c = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        assert_eq!(
+            verified_handoff(&path, Some(&digest_for("tok"))),
+            Err("not a regular file")
+        );
+    }
 }
