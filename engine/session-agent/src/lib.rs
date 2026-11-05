@@ -897,8 +897,16 @@ pub async fn run(config: Config) -> Result<(), AgentError> {
                                         tracing::info!(cols, rows, "session-agent: resize from the engine");
                                         resize_pty(&master, cols, rows)?
                                     },
+                                    // A stop ends this agent whether or not the
+                                    // signal could be delivered: the agent is the
+                                    // container's PID 1, so its exit takes the CLI
+                                    // with it. A failed kill used to drop the
+                                    // stream; the engine re-sent the stop on every
+                                    // reconnect, and the pod was never torn down.
                                     Frame::Signal { signal } if signal == "kill" => {
-                                        if let Some(c) = child.as_mut() { c.kill().map_err(|e| AgentError::Pty(e.to_string()))?; }
+                                        let frame = stop_child(&mut child);
+                                        let _ = send_frame(&mut sink, &frame).await;
+                                        return Ok(());
                                     },
                                     Frame::Ack { offset } if offset <= cursor => { replay.ack(offset); acked = acked.max(offset); },
                                     // The engine's stream ends at `offset`, short of
@@ -956,6 +964,34 @@ pub async fn run(config: Config) -> Result<(), AgentError> {
     }
 }
 
+/// Stop the CLI for an engine `kill` and say how it ended. Never fails: a
+/// kill the kernel or an LSM refuses (an AppArmor signal rule answers
+/// `EACCES`) is logged, then `SIGKILL` is tried by pid, and the caller exits
+/// anyway, which ends the container and everything in it.
+fn stop_child(child: &mut Option<PtyChild>) -> Frame {
+    let Some(c) = child.as_mut() else {
+        return Frame::Exited { status: None };
+    };
+    if let Err(error) = c.kill() {
+        tracing::warn!(%error, "session-agent: could not signal the CLI; trying SIGKILL, then exiting");
+        #[cfg(unix)]
+        if let Some(pid) = c.process_id() {
+            // SAFETY: a plain kill(2) on the child's pid; the child is not
+            // reaped yet (try_wait below reaps it), so the pid is still ours.
+            if unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) } != 0 {
+                let error = std::io::Error::last_os_error();
+                tracing::warn!(%error, pid, "session-agent: SIGKILL refused too; the container's exit ends the CLI");
+            }
+        }
+    }
+    let status = match c.try_wait() {
+        Ok(Some(status)) => Some(status.exit_code() as i32),
+        _ => None,
+    };
+    tracing::info!(?status, "session-agent: stopped on the engine's request");
+    Frame::Exited { status }
+}
+
 fn is_auth_refusal(error: &AgentError) -> bool {
     matches!(
         error,
@@ -987,6 +1023,69 @@ where
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    /// A child whose signals are all refused, as an AppArmor signal rule does.
+    #[derive(Debug)]
+    struct Unkillable;
+    impl portable_pty::ChildKiller for Unkillable {
+        fn kill(&mut self) -> std::io::Result<()> {
+            Err(std::io::Error::from_raw_os_error(libc::EACCES))
+        }
+        fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+            Box::new(Unkillable)
+        }
+    }
+    impl portable_pty::Child for Unkillable {
+        fn try_wait(&mut self) -> std::io::Result<Option<portable_pty::ExitStatus>> {
+            Ok(None)
+        }
+        fn wait(&mut self) -> std::io::Result<portable_pty::ExitStatus> {
+            Err(std::io::Error::from_raw_os_error(libc::EACCES))
+        }
+        fn process_id(&self) -> Option<u32> {
+            None
+        }
+    }
+
+    // WI-3319: a refused kill must still end the session, not fail the stream.
+    #[test]
+    fn a_refused_kill_still_reports_the_exit() {
+        let mut child: Option<PtyChild> = Some(Box::new(Unkillable));
+        assert!(matches!(
+            stop_child(&mut child),
+            Frame::Exited { status: None }
+        ));
+        assert!(matches!(
+            stop_child(&mut None),
+            Frame::Exited { status: None }
+        ));
+    }
+
+    #[test]
+    fn a_kill_reports_the_cli_exit() {
+        let config = Config {
+            session_id: "s".into(),
+            engine_url: "http://127.0.0.1:1".into(),
+            token: "t".into(),
+            cli: "claude".into(),
+            command: Some(vec!["sleep".into(), "30".into()]),
+            cwd: None,
+            cols: 80,
+            rows: 24,
+            buffer_bytes: 1024,
+            claude_config_dir: None,
+            account: None,
+            conversation_id: None,
+            resume: false,
+            claude: ClaudeLaunch::default(),
+        };
+        let (_reader, _writer, child, _master) = spawn_pty(&config).unwrap();
+        let mut child = Some(child);
+        assert!(matches!(
+            stop_child(&mut child),
+            Frame::Exited { status: Some(_) }
+        ));
+    }
+
     #[test]
     fn resize_changes_the_pty_size() {
         let config = Config {
