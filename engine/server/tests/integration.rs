@@ -18969,10 +18969,26 @@ mod pod_stream {
         )
         .await;
         assert_eq!(take(&mut agent).await, Frame::Ack { offset: 16 });
-        let (bytes, _) = registry.get(id).unwrap().snapshot();
-        assert_eq!(String::from_utf8_lossy(&bytes), "XYZ!!");
+        // The ack means the bytes are in the link's channel, not yet in the
+        // scrollback: the session's reader thread moves them there after.
+        // Wait for it (WI-3286), and end the session before asserting, so a
+        // mismatch fails instead of hanging on the reader thread at runtime
+        // drop.
+        let session = registry.get(id).unwrap();
+        let settled = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let (bytes, _) = session.snapshot();
+                if bytes.len() >= 5 {
+                    return bytes;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
         put(&mut agent, Frame::Exited { status: Some(0) }).await;
         ended(&registry, id).await;
+        let bytes = settled.expect("the replayed output reaches the scrollback");
+        assert_eq!(String::from_utf8_lossy(&bytes), "XYZ!!");
     }
 
     #[tokio::test]
