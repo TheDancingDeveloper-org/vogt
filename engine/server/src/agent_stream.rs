@@ -803,7 +803,7 @@ pub async fn stream(
         return StatusCode::UNAUTHORIZED.into_response();
     }
     ws.max_message_size(AGENT_WS_MAX_MESSAGE_SIZE)
-        .on_upgrade(move |socket| relay(socket, state, id))
+        .on_upgrade(move |socket| relay(socket, Arc::clone(&state.agent_auth), id))
         .into_response()
 }
 /// Decides when a refused frame earns a `Resync` (WI-3282). While the reader
@@ -836,15 +836,24 @@ impl ResyncGate {
     }
 }
 
-async fn send_frame(socket: &mut axum::extract::ws::WebSocket, frame: &Frame) -> bool {
+async fn send_frame<S>(socket: &mut S, frame: &Frame) -> bool
+where
+    S: futures_util::Sink<axum::extract::ws::Message> + Unpin,
+{
     let text = serde_json::to_string(frame).expect("frames serialize");
     socket
         .send(axum::extract::ws::Message::Text(text.into()))
         .await
         .is_ok()
 }
-async fn relay(mut socket: axum::extract::ws::WebSocket, state: Arc<AppState>, id: Uuid) {
-    let Some(link) = state.agent_auth.pod(id) else {
+/// Generic over the socket so tests can drive it without an HTTP server.
+async fn relay<S, E>(mut socket: S, agent_auth: Arc<AgentAuth>, id: Uuid)
+where
+    S: futures_util::Stream<Item = Result<axum::extract::ws::Message, E>>
+        + futures_util::Sink<axum::extract::ws::Message>
+        + Unpin,
+{
+    let Some(link) = agent_auth.pod(id) else {
         let _ = socket.close().await;
         return;
     };
@@ -861,7 +870,7 @@ async fn relay(mut socket: axum::extract::ws::WebSocket, state: Arc<AppState>, i
     }
     link.connected.store(true, Ordering::Release);
     let (tx, mut commands) = mpsc::unbounded_channel();
-    state.agent_auth.attach(id, tx.clone()).await;
+    agent_auth.attach(id, tx.clone()).await;
     // A stop asked for while no agent was attached is delivered on arrival.
     if link.stop_requested() {
         let _ = tx.send(Frame::Signal {
@@ -975,7 +984,7 @@ async fn relay(mut socket: axum::extract::ws::WebSocket, state: Arc<AppState>, i
             }
         }
     }
-    state.agent_auth.detach(id, &tx).await;
+    agent_auth.detach(id, &tx).await;
 }
 
 #[cfg(test)]
@@ -1025,6 +1034,175 @@ mod tests {
             .ingest(0, &vec![0; AGENT_BUFFER_BYTES + 1])
             .unwrap_err();
         assert_eq!(gate.refused(&gap, link.output_closed()), Some(0));
+    }
+
+    /// An in-memory WebSocket for driving [`relay`] (WI-3282): what the test
+    /// sends arrives as agent messages, and what relay sends comes back.
+    struct FakeSocket {
+        incoming: mpsc::UnboundedReceiver<axum::extract::ws::Message>,
+        outgoing: mpsc::UnboundedSender<axum::extract::ws::Message>,
+    }
+
+    impl futures_util::Stream for FakeSocket {
+        type Item = Result<axum::extract::ws::Message, std::convert::Infallible>;
+        fn poll_next(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Self::Item>> {
+            self.incoming.poll_recv(cx).map(|m| m.map(Ok))
+        }
+    }
+
+    impl futures_util::Sink<axum::extract::ws::Message> for FakeSocket {
+        type Error = ();
+        fn poll_ready(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), ()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+        fn start_send(
+            self: std::pin::Pin<&mut Self>,
+            item: axum::extract::ws::Message,
+        ) -> Result<(), ()> {
+            self.outgoing.send(item).map_err(|_| ())
+        }
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), ()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+        fn poll_close(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), ()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    /// The agent's end of a relay running over a [`FakeSocket`].
+    struct Agent {
+        to_engine: mpsc::UnboundedSender<axum::extract::ws::Message>,
+        from_engine: mpsc::UnboundedReceiver<axum::extract::ws::Message>,
+    }
+
+    impl Agent {
+        fn send(&self, frame: Frame) {
+            let text = serde_json::to_string(&frame).unwrap();
+            self.to_engine
+                .send(axum::extract::ws::Message::Text(text.into()))
+                .unwrap();
+        }
+
+        /// Every frame relay sends until it falls quiet, and whether it
+        /// closed the socket.
+        async fn drain(&mut self) -> (Vec<Frame>, bool) {
+            let mut frames = Vec::new();
+            loop {
+                match tokio::time::timeout(Duration::from_millis(300), self.from_engine.recv())
+                    .await
+                {
+                    Err(_) => return (frames, false),
+                    Ok(None) => return (frames, true),
+                    Ok(Some(axum::extract::ws::Message::Text(text))) => {
+                        frames.push(serde_json::from_str(&text).unwrap())
+                    }
+                    Ok(Some(_)) => {}
+                }
+            }
+        }
+    }
+
+    async fn connect(auth: &Arc<AgentAuth>, id: Uuid) -> Agent {
+        let (to_engine, incoming) = mpsc::unbounded_channel();
+        let (outgoing, from_engine) = mpsc::unbounded_channel();
+        let socket = FakeSocket { incoming, outgoing };
+        tokio::spawn(relay(socket, Arc::clone(auth), id));
+        let agent = Agent {
+            to_engine,
+            from_engine,
+        };
+        agent.send(Frame::Hello {
+            session_id: id.to_string(),
+        });
+        agent
+    }
+
+    fn resyncs(frames: &[Frame]) -> usize {
+        frames
+            .iter()
+            .filter(|f| matches!(f, Frame::Resync { .. }))
+            .count()
+    }
+
+    #[tokio::test]
+    async fn relay_sends_one_resync_for_a_burst_of_refused_frames() {
+        let auth = Arc::new(AgentAuth::default());
+        let id = Uuid::new_v4();
+        let (_link, _reader) = auth.register_pod(id);
+        let mut agent = connect(&auth, id).await;
+        let capacity = AGENT_OUTPUT_CHANNEL_CAPACITY as u64;
+        // Fill the queue; the reader never drains it.
+        for offset in 0..capacity {
+            agent.send(Frame::Output {
+                offset,
+                data: b"a".to_vec(),
+            });
+        }
+        // A burst behind the full queue: every frame is refused.
+        for offset in capacity..capacity + 10 {
+            agent.send(Frame::Output {
+                offset,
+                data: b"b".to_vec(),
+            });
+        }
+        let (frames, closed) = agent.drain().await;
+        assert!(!closed);
+        assert_eq!(resyncs(&frames), 1, "{frames:?}");
+        assert!(frames.contains(&Frame::Resync { offset: capacity }));
+    }
+
+    #[tokio::test]
+    async fn relay_sends_no_resync_for_output_after_finish() {
+        let auth = Arc::new(AgentAuth::default());
+        let id = Uuid::new_v4();
+        let (link, _reader) = auth.register_pod(id);
+        let mut agent = connect(&auth, id).await;
+        link.finish(0);
+        for _ in 0..3 {
+            agent.send(Frame::Output {
+                offset: 0,
+                data: b"a".to_vec(),
+            });
+        }
+        let (frames, closed) = agent.drain().await;
+        assert!(!closed);
+        assert_eq!(frames, vec![]);
+    }
+
+    #[tokio::test]
+    async fn relay_refuses_an_oversized_output_and_keeps_the_socket_open() {
+        let auth = Arc::new(AgentAuth::default());
+        let id = Uuid::new_v4();
+        let (_link, _reader) = auth.register_pod(id);
+        let mut agent = connect(&auth, id).await;
+        agent.send(Frame::Output {
+            offset: 0,
+            data: vec![0; AGENT_BUFFER_BYTES + 1],
+        });
+        let (frames, closed) = agent.drain().await;
+        assert!(
+            !closed,
+            "socket closed after an oversized frame: {frames:?}"
+        );
+        assert!(
+            matches!(&frames[0], Frame::Error { code, .. } if code == "output_too_large"),
+            "{frames:?}"
+        );
+        assert_eq!(frames[1..], [Frame::Resync { offset: 0 }]);
+        agent.send(Frame::Heartbeat { cursor: 0 });
+        assert_eq!(agent.drain().await, (vec![Frame::Ack { offset: 0 }], false));
     }
 
     #[test]
