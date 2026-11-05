@@ -4801,10 +4801,14 @@ graft and agent, covering the markers, the token files, the retry, the
 `VOGT_SESSION_COMMAND` passthrough and the Claude config. `pod_stream::real_entrypoint_*` in
 `engine/server/tests/integration.rs` runs the same script against a real engine.
 
-The agent WebSocket accepts messages up to 1 MiB. Engine ingest holds at most
-16 output chunks, each capped at the default 1 MiB agent replay limit. A full
+The agent WebSocket accepts messages up to 4 MiB + 64 KiB, enough for an
+`output` frame carrying the full 1 MiB data cap in its worst-case JSON
+encoding. The agent replays held output in 64 KiB `output` frames. Engine
+ingest holds at most 16 output chunks, each capped at the default 1 MiB agent
+replay limit. A full
 queue refuses the chunk without advancing or acknowledging its cursor and
-requests replay with `resync`; the agent can report trimmed output with `gap`.
-Gap claims above 1 MiB or overflowing offsets receive `invalid_gap` and close
+requests replay with `resync`; the agent can report trimmed output with `gap`,
+which may exceed the replay buffer after a long disconnect.
+Gap claims above 2^48 bytes or overflowing offsets receive `invalid_gap` and close
 the connection without changing the cursor. These engine limits are fixed;
 changing the pod's `VOGT_AGENT_BUFFER_BYTES` does not increase them.
