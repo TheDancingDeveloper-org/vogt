@@ -266,6 +266,12 @@ impl PodLink {
         self.exit_notify.notify_waiters();
     }
 
+    /// The output stream has ended (see [`Self::finish`]): nothing more can
+    /// be taken, however often it is resent.
+    fn output_closed(&self) -> bool {
+        self.out.lock().expect("pod link lock poisoned").is_none()
+    }
+
     pub fn is_finished(&self) -> bool {
         self.exit.lock().expect("pod link lock poisoned").is_some()
     }
@@ -800,6 +806,36 @@ pub async fn stream(
         .on_upgrade(move |socket| relay(socket, state, id))
         .into_response()
 }
+/// Decides when a refused frame earns a `Resync` (WI-3282). While the reader
+/// is slow every frame behind the first refused one is refused too; one
+/// Resync per expected offset is enough, since the agent resends everything
+/// from there. A frame that starts at the expected offset is the head of
+/// that resend, so a refusal of it may ask again. Once the output stream is
+/// closed (the session finished) nothing can be taken, so frames are dropped
+/// without a Resync rather than looping resend after resend.
+#[derive(Debug, Default)]
+struct ResyncGate {
+    sent_for: Option<u64>,
+}
+
+impl ResyncGate {
+    fn accepted(&mut self) {
+        self.sent_for = None;
+    }
+
+    /// The offset to send a `Resync` for, or `None` to drop quietly.
+    fn refused(&mut self, gap: &OutputGap, closed: bool) -> Option<u64> {
+        if closed {
+            return None;
+        }
+        if self.sent_for == Some(gap.expected) && gap.got != gap.expected {
+            return None;
+        }
+        self.sent_for = Some(gap.expected);
+        Some(gap.expected)
+    }
+}
+
 async fn send_frame(socket: &mut axum::extract::ws::WebSocket, frame: &Frame) -> bool {
     let text = serde_json::to_string(frame).expect("frames serialize");
     socket
@@ -832,6 +868,7 @@ async fn relay(mut socket: axum::extract::ws::WebSocket, state: Arc<AppState>, i
             signal: "kill".into(),
         });
     }
+    let mut resync = ResyncGate::default();
     loop {
         tokio::select! {
             Some(frame) = commands.recv() => {
@@ -863,25 +900,37 @@ async fn relay(mut socket: axum::extract::ws::WebSocket, state: Arc<AppState>, i
                             if !send_frame(&mut socket, &Frame::Ack { offset: next }).await { break; }
                         }
                         Frame::Output { offset, data } => {
-                            if data.len() > AGENT_BUFFER_BYTES {
-                                let _ = send_frame(&mut socket, &Frame::Error {
-                                    code: "output_too_large".into(),
-                                    message: format!("output frame exceeds {} bytes", AGENT_BUFFER_BYTES),
-                                }).await;
-                                break;
-                            }
-                            match link.ingest(offset, &data) {
+                            let refused = if data.len() > AGENT_BUFFER_BYTES {
+                                // Refused but not fatal: the Resync below has
+                                // the agent resend from its replay, in chunks.
+                                Err((
+                                    OutputGap { expected: link.next_offset(), got: offset },
+                                    Frame::Error {
+                                        code: "output_too_large".into(),
+                                        message: format!("output frame exceeds {} bytes", AGENT_BUFFER_BYTES),
+                                    },
+                                ))
+                            } else {
+                                link.ingest(offset, &data).map_err(|gap| {
+                                    let error = Frame::Error {
+                                        code: "output_gap".into(),
+                                        message: format!("expected offset {}, got {}", gap.expected, gap.got),
+                                    };
+                                    (gap, error)
+                                })
+                            };
+                            match refused {
                             Ok(next) => {
+                                resync.accepted();
                                 if !send_frame(&mut socket, &Frame::Ack { offset: next }).await { break; }
                             }
-                            Err(gap) => {
-                                let _ = send_frame(&mut socket, &Frame::Error {
-                                    code: "output_gap".into(),
-                                    message: format!("expected offset {}, got {}", gap.expected, gap.got),
-                                }).await;
+                            Err((gap, error)) => {
                                 // Say where the stream ends, so the agent can
                                 // resend from there or mark what it cannot.
-                                if !send_frame(&mut socket, &Frame::Resync { offset: gap.expected }).await { break; }
+                                if let Some(offset) = resync.refused(&gap, link.output_closed()) {
+                                    let _ = send_frame(&mut socket, &error).await;
+                                    if !send_frame(&mut socket, &Frame::Resync { offset }).await { break; }
+                                }
                             }
                             }
                         }
@@ -895,10 +944,13 @@ async fn relay(mut socket: axum::extract::ws::WebSocket, state: Arc<AppState>, i
                             }
                             match link.ingest_gap(offset, lost) {
                             Ok(next) => {
+                                resync.accepted();
                                 if !send_frame(&mut socket, &Frame::Ack { offset: next }).await { break; }
                             }
                             Err(gap) => {
-                                if !send_frame(&mut socket, &Frame::Resync { offset: gap.expected }).await { break; }
+                                if let Some(offset) = resync.refused(&gap, link.output_closed()) {
+                                    if !send_frame(&mut socket, &Frame::Resync { offset }).await { break; }
+                                }
                             }
                             }
                         }
@@ -929,6 +981,51 @@ async fn relay(mut socket: axum::extract::ws::WebSocket, state: Arc<AppState>, i
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_slow_reader_gets_one_resync_per_expected_offset() {
+        let (sender, _receiver) = std::sync::mpsc::sync_channel(1);
+        let link = PodLink::new(sender);
+        let mut gate = ResyncGate::default();
+        assert_eq!(link.ingest(0, b"a"), Ok(1));
+        let mut resyncs = 0;
+        for offset in 1..17 {
+            let gap = link.ingest(offset, b"b").unwrap_err();
+            if gate.refused(&gap, link.output_closed()).is_some() {
+                resyncs += 1;
+            }
+        }
+        assert_eq!(resyncs, 1);
+        // The resend's head, refused again, may ask once more.
+        let gap = link.ingest(1, b"b").unwrap_err();
+        assert_eq!(gate.refused(&gap, link.output_closed()), Some(1));
+        let gap = link.ingest(2, b"c").unwrap_err();
+        assert_eq!(gate.refused(&gap, link.output_closed()), None);
+    }
+
+    #[test]
+    fn output_after_finish_is_dropped_without_a_resync() {
+        let (sender, _receiver) = std::sync::mpsc::sync_channel(4);
+        let link = PodLink::new(sender);
+        let mut gate = ResyncGate::default();
+        link.finish(0);
+        assert!(link.output_closed());
+        for _ in 0..3 {
+            let gap = link.ingest(0, b"a").unwrap_err();
+            assert_eq!(gate.refused(&gap, link.output_closed()), None);
+        }
+    }
+
+    #[test]
+    fn an_oversized_frame_is_refused_with_a_resync_not_a_disconnect() {
+        let (sender, _receiver) = std::sync::mpsc::sync_channel(4);
+        let link = PodLink::new(sender);
+        let mut gate = ResyncGate::default();
+        let gap = link
+            .ingest(0, &vec![0; AGENT_BUFFER_BYTES + 1])
+            .unwrap_err();
+        assert_eq!(gate.refused(&gap, link.output_closed()), Some(0));
+    }
 
     #[test]
     fn full_output_queue_preserves_cursor_until_retry() {
