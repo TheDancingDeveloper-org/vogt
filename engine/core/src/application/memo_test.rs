@@ -14,10 +14,10 @@ use serde_json::{json, Value};
 use super::context::{build_context, Built};
 use super::memo::{store_state, StoreMemo};
 use super::place::{place_metrics_op, COUNTS_COMPUTED};
-use super::services::inbox::STORED_COMPUTED;
+use super::services::inbox::{inbox_list_op, LISTED_COMPUTED, STORED_COMPUTED};
 use super::services::work::create_op;
 use crate::adapters::engine::EngineClient;
-use crate::core::{ActorKind, Moment, Principal};
+use crate::core::{ActorKind, Clock, Moment, Principal, StepClock};
 use crate::storage::interface::{DeclaredStore, ObservedStore};
 
 const WHY: &str = "badge cache test";
@@ -393,4 +393,57 @@ fn forgetting_one_data_directory_keeps_the_others() {
         .get(ctx, || Ok("again"), |_| true)
         .unwrap());
     assert_eq!(answer, "again");
+}
+
+fn listed() -> usize {
+    LISTED_COMPUTED.with(|n| n.get())
+}
+
+fn stepping(dir: &Path) -> Built {
+    build_context(
+        crate::config::VogtConfig {
+            data_dir: dir.to_path_buf(),
+            ..crate::config::VogtConfig::default()
+        },
+        Some(Principal::new("local:test-user", ActorKind::Human, "Test").unwrap()),
+        Some(StepClock::new(Moment::from_unix(1_700_000_000, 0))),
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap()
+}
+
+#[test]
+fn the_inbox_list_shares_its_stored_half_whatever_its_limit() {
+    let dir = data_dir("list-shared");
+    let first = inbox_list_op(&fresh(&dir), json!({"limit": 1})).unwrap();
+    let before = listed();
+    let second = inbox_list_op(&fresh(&dir), json!({"limit": 50})).unwrap();
+    assert_eq!(listed(), before, "the second list rebuilt the stored half");
+    assert_eq!(first["counts"], second["counts"]);
+    // A write moves the key, so the next list builds again.
+    create_bug(&fresh(&dir), "moves the revision");
+    inbox_list_op(&fresh(&dir), json!({"limit": 1})).unwrap();
+    assert_eq!(listed(), before + 1);
+}
+
+#[test]
+fn a_cached_inbox_list_reads_the_step_clock_as_an_uncached_one_does() {
+    // Parity with the Python core, which rebuilds on every list: the clock a
+    // list leaves behind must not depend on whether the build was shared.
+    // `snapshot_at` is the first read of a list, so the next list's is the
+    // clock's position after this one.
+    let dir = data_dir("list-clock");
+    let snapshot = |limit: i64| {
+        let built = stepping(&dir);
+        let result = inbox_list_op(&built, json!({"limit": limit})).unwrap();
+        let after = crate::with_ctx!(&built, |ctx| ctx.clock.lock().unwrap().peek());
+        (result["snapshot_at"].clone(), after)
+    };
+    let (_, built_position) = snapshot(1);
+    let (_, hit_position) = snapshot(1);
+    assert_eq!(built_position, hit_position);
 }
