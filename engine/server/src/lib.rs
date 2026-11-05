@@ -61,6 +61,7 @@ pub mod screen;
 pub mod scrollback;
 pub mod secret_broker;
 pub mod session_backend;
+pub mod session_cache;
 pub mod session_endpoints;
 pub mod session_scratch;
 pub mod sessions;
