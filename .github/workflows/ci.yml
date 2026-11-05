@@ -222,6 +222,19 @@ jobs:
       # bumps this line.
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
 
+      # uv's managed CPython comes from python-build-standalone on GitHub; a 504
+      # there failed the merge queue (WI-3308). Keep the install dir in the
+      # actions cache, keyed on the Python version, so a warm run downloads
+      # nothing. `~` is the home actions/cache expands against.
+      - name: point uv at a cacheable Python install dir
+        run: echo "UV_PYTHON_INSTALL_DIR=$HOME/.uv-python" >> "$GITHUB_ENV"
+
+      - name: restore uv's managed Python
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.uv-python
+          key: uv-python-${{ matrix.python-version }}-${{ runner.os }}-${{ runner.arch }}
+
       # The self-hosted image preinstalls no language runtime.
       - name: install matrix Python
         run: uv python install ${{ matrix.python-version }}
@@ -274,6 +287,19 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+
+      # uv's managed CPython comes from python-build-standalone on GitHub; a 504
+      # there failed the merge queue (WI-3308). Keep the install dir in the
+      # actions cache, keyed on the Python version, so a warm run downloads
+      # nothing. `~` is the home actions/cache expands against.
+      - name: point uv at a cacheable Python install dir
+        run: echo "UV_PYTHON_INSTALL_DIR=$HOME/.uv-python" >> "$GITHUB_ENV"
+
+      - name: restore uv's managed Python
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.uv-python
+          key: uv-python-3.13-${{ runner.os }}-${{ runner.arch }}
 
       - name: install Python
         run: uv python install 3.13
@@ -737,6 +763,15 @@ jobs:
           java-version: "21"
 
       - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
+
+      # The wrapper downloads gradle-<ver>-all.zip from services.gradle.org; a
+      # timeout there failed the merge queue (WI-3308). Cache the unpacked
+      # distributions, keyed on the wrapper properties (which pin the version).
+      - name: restore the Gradle wrapper distribution
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.gradle/wrapper/dists
+          key: gradle-wrapper-${{ runner.os }}-${{ hashFiles('mobile/android/gradle/wrapper/gradle-wrapper.properties') }}
 
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
         with:
