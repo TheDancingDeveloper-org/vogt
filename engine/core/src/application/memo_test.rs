@@ -430,20 +430,95 @@ fn the_inbox_list_shares_its_stored_half_whatever_its_limit() {
     assert_eq!(listed(), before + 1);
 }
 
+/// A store whose stored half reads the clock: CI failures (each entry's
+/// freshness is judged against now) and one snoozed entry.
+fn seed_ci_and_snooze(dir: &Path) {
+    use crate::core::{LinkState, Project};
+    use crate::storage::interface::WriteTxn;
+    use crate::storage::observed_types::PendingObservation;
+
+    let built = stepping(dir);
+    crate::with_ctx!(&built, |ctx| {
+        let now = Moment::from_unix(1_700_000_000, 0);
+        {
+            let mut txn = ctx.declared.write().unwrap();
+            let mut project = Project::new("prj_ci", "ci", "ci", "/work/ci", now);
+            project.link_state = LinkState::Unlinked;
+            txn.insert_project(&project).unwrap();
+            txn.commit().unwrap();
+        }
+        let findings: Vec<PendingObservation> = ["build", "lint", "test"]
+            .iter()
+            .map(|name| PendingObservation {
+                kind: crate::adapters::forge::KIND_CHECK.to_string(),
+                subject_key: format!("ci:prj_ci@9fe53d8:{name}"),
+                payload: json!({
+                    "revision": "9fe53d8",
+                    "check": name,
+                    "conclusion": "failure",
+                    "updated_at": "2023-11-14T22:13:20Z",
+                }),
+                content_digest: format!("sha256:prj_ci:{name}"),
+                project_id: Some("prj_ci".to_string()),
+                source_url: None,
+                promoted: false,
+            })
+            .collect();
+        let sweep = ctx
+            .observed
+            .begin_sweep("forge-checks", &["prj_ci".to_string()], now)
+            .unwrap();
+        ctx.observed.append(&sweep.id, &findings, now).unwrap();
+        ctx.observed
+            .finish_sweep(
+                &sweep.id,
+                crate::core::SweepOutcome::Ok,
+                &[("projects", 1)],
+                now,
+                None,
+            )
+            .unwrap();
+        ctx.observed.rebuild_latest().unwrap();
+    });
+    let listed = inbox_list_op(&built, json!({"limit": 50})).unwrap();
+    let key = listed["entries"][0]["entry_key"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no entry: {listed}"))
+        .to_string();
+    super::services::inbox::inbox_snooze_op(
+        &built,
+        json!({"entry_key": key, "until": "2099-01-01T00:00:00Z", "reason": WHY}),
+    )
+    .unwrap();
+}
+
 #[test]
 fn a_cached_inbox_list_reads_the_step_clock_as_an_uncached_one_does() {
-    // Parity with the Python core, which rebuilds on every list: the clock a
-    // list leaves behind must not depend on whether the build was shared.
-    // `snapshot_at` is the first read of a list, so the next list's is the
-    // clock's position after this one.
+    // Parity with the Python core, which rebuilds on every list: a list served
+    // from the shared stored half must answer, and leave the clock, exactly as
+    // a rebuilt one does at the same clock position. Two lists run back to
+    // back on one clock, as the server's requests do.
     let dir = data_dir("list-clock");
-    let snapshot = |limit: i64| {
+    seed_ci_and_snooze(&dir);
+    let twice = |cached: bool| {
+        super::services::inbox::clear_badge_cache(&dir);
         let built = stepping(&dir);
-        let result = inbox_list_op(&built, json!({"limit": limit})).unwrap();
+        let first = inbox_list_op(&built, json!({"limit": 50})).unwrap();
+        if !cached {
+            super::services::inbox::clear_badge_cache(&dir);
+        }
+        let before = listed();
+        let second = inbox_list_op(&built, json!({"limit": 1})).unwrap();
+        assert_eq!(listed() == before, cached, "cached={cached}");
         let after = crate::with_ctx!(&built, |ctx| ctx.clock.lock().unwrap().peek());
-        (result["snapshot_at"].clone(), after)
+        (first, second, after)
     };
-    let (_, built_position) = snapshot(1);
-    let (_, hit_position) = snapshot(1);
-    assert_eq!(built_position, hit_position);
+    let (first, hit, hit_position) = twice(true);
+    let (_, rebuilt, rebuilt_position) = twice(false);
+    assert!(
+        first["entries"].as_array().unwrap().len() >= 2,
+        "the seed reads the clock: {first}"
+    );
+    assert_eq!(hit, rebuilt);
+    assert_eq!(hit_position, rebuilt_position);
 }
