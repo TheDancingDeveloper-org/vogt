@@ -83,9 +83,16 @@ thread_local! {
 struct ListedStored {
     projects: BTreeMap<String, Project>,
     entries: Vec<Value>,
+    /// The entries whose trust and freshness are judged against now, each
+    /// with the instant the build judged it at. A hit judges them again, so
+    /// a cached entry goes stale when an uncached one would (WI-3130 B1).
+    judged: Vec<(usize, Moment)>,
     /// How many times building it read a stepping clock. A hit replays them,
     /// so the clock reads that follow land where an uncached list's do.
     clock_reads: u64,
+    /// The stepping clock's instant before the build: a judged entry's read
+    /// lies this far into the replay.
+    started: Option<Moment>,
 }
 
 /// The stored half of `inbox.list`, shared between every list read while the
@@ -106,6 +113,15 @@ pub fn clear_badge_cache(data_dir: &std::path::Path) {
     LISTED.forget(data_dir);
 }
 
+thread_local! {
+    /// The instant the last [`freshness`] read, taken by the [`entry`] it judged.
+    static JUDGED_AT: std::cell::Cell<Option<Moment>> = const { std::cell::Cell::new(None) };
+}
+
+/// Where an entry carries [`JUDGED_AT`] until [`collect_stored_judged`] takes
+/// it off. No entry field starts with a NUL.
+const JUDGED_KEY: &str = "\u{0}judged_at";
+
 fn listed_stored<C, I>(
     ctx: &AppContext<C, I>,
     observed: &crate::storage::sqlite::observed::SqliteObservedStore<C, I>,
@@ -124,7 +140,7 @@ where
             LISTED_COMPUTED.with(|n| n.set(n.get() + 1));
             let view = ctx.declared.read()?;
             let before = peek_clock(ctx);
-            let (projects, entries) = collect_stored(ctx, observed, &view, config)?;
+            let (projects, entries, judged) = collect_stored_judged(ctx, observed, &view, config)?;
             let clock_reads = match (before, peek_clock(ctx)) {
                 (Some(before), Some(after)) => {
                     (after.unix_seconds() - before.unix_seconds()).max(0) as u64
@@ -134,7 +150,9 @@ where
             Ok(ListedStored {
                 projects,
                 entries,
+                judged,
                 clock_reads,
+                started: before,
             })
         },
         |_| true,
@@ -149,17 +167,53 @@ fn peek_clock<C: Clock, I: IdFactory>(ctx: &AppContext<C, I>) -> Option<Moment> 
         .peek()
 }
 
-/// Take the clock reads a cached build would have made, on a clock that moves
-/// per read. Only a hit has any to replay: a build made its own.
-fn replay_clock_reads<C, I>(ctx: &AppContext<C, I>, built: bool, reads: u64)
+/// The cached stored half as this call sees it. A build answers as built. A
+/// hit judges every time-dependent entry again against now, as an uncached
+/// build would. On a clock that moves per read it takes the reads the build
+/// made, each judged entry against the read at its own position, so the hit
+/// answers, and leaves the clock, where a rebuild does.
+fn rejudged<C, I>(ctx: &AppContext<C, I>, listed: ListedStored, built: bool) -> Vec<Value>
 where
     C: Clock,
     I: IdFactory,
 {
-    if !built && peek_clock(ctx).is_some() {
-        for _ in 0..reads {
-            now_of(&ctx.clock);
+    let mut entries = listed.entries;
+    if built {
+        return entries;
+    }
+    match (listed.started, peek_clock(ctx)) {
+        (Some(started), Some(_)) => {
+            let mut judged = listed.judged.iter().peekable();
+            for read in 0..listed.clock_reads {
+                let moment = now_of(&ctx.clock);
+                while let Some((index, _)) = judged
+                    .next_if(|(_, at)| (at.unix_seconds() - started.unix_seconds()) as u64 == read)
+                {
+                    judge(ctx, &mut entries[*index], moment);
+                }
+            }
         }
+        _ => {
+            for (index, _) in &listed.judged {
+                let moment = now_of(&ctx.clock);
+                judge(ctx, &mut entries[*index], moment);
+            }
+        }
+    }
+    entries
+}
+
+/// Set an entry's trust and freshness from its `observed_at` against `now`.
+fn judge<C: Clock, I: IdFactory>(ctx: &AppContext<C, I>, entry: &mut Value, now: Moment) {
+    let observed_at = entry
+        .get("observed_at")
+        .and_then(Value::as_str)
+        .and_then(|text| crate::core::from_iso(text).ok())
+        .expect("a judged entry carries its observed_at");
+    let (trust, freshness) = verdict(ctx, observed_at, now);
+    if let Some(object) = entry.as_object_mut() {
+        object.insert("trust_state".to_string(), Value::from(trust));
+        object.insert("freshness".to_string(), Value::from(freshness));
     }
 }
 
@@ -232,7 +286,7 @@ where
     Ok((filtered, active_total))
 }
 
-fn inbox_list<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
+pub(crate) fn inbox_list<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
 where
     C: Clock + 'static,
     I: IdFactory + 'static,
@@ -256,9 +310,9 @@ where
 
     let mut entries = {
         let (listed, built) = listed_stored(ctx, observed, config)?;
-        replay_clock_reads(ctx, built, listed.clock_reads);
-        let mut entries = listed.entries;
-        entries.extend(collect_live(ctx, &view, &listed.projects)?);
+        let projects = listed.projects.clone();
+        let mut entries = rejudged(ctx, listed, built);
+        entries.extend(collect_live(ctx, &view, &projects)?);
         entries
     };
     let triage = view.inbox_triage_by_keys(
@@ -567,6 +621,24 @@ where
     C: Clock,
     I: IdFactory,
 {
+    let (projects, entries, _) = collect_stored_judged(ctx, observed, view, config)?;
+    Ok((projects, entries))
+}
+
+/// [`collect_stored`], naming the entries whose trust was judged against now
+/// and the instant each was judged at, in the order the clock was read.
+#[allow(clippy::type_complexity)]
+fn collect_stored_judged<C, I>(
+    ctx: &AppContext<C, I>,
+    observed: &crate::storage::sqlite::observed::SqliteObservedStore<C, I>,
+    view: &impl ReadView,
+    config: &crate::config::VogtConfig,
+) -> Result<(BTreeMap<String, Project>, Vec<Value>, Vec<(usize, Moment)>), VogtError>
+where
+    C: Clock,
+    I: IdFactory,
+{
+    JUDGED_AT.with(|at| at.set(None));
     let projects: BTreeMap<String, Project> = view
         .list_projects(MAX_SCAN, 0)?
         .into_iter()
@@ -847,7 +919,18 @@ where
         entries.push(drift_entry(view, &proposal, &projects)?);
     }
 
-    Ok((projects, entries))
+    let mut judged = Vec::new();
+    for (index, entry) in entries.iter_mut().enumerate() {
+        let at = entry
+            .as_object_mut()
+            .and_then(|object| object.shift_remove(JUDGED_KEY))
+            .and_then(|at| at.as_i64());
+        if let Some(at) = at {
+            judged.push((index, Moment::from_unix(at, 0)));
+        }
+    }
+    judged.sort_by_key(|(_, at)| at.unix_seconds());
+    Ok((projects, entries, judged))
 }
 
 /// The live half, untriaged: grants and decisions waiting for a person and
@@ -982,6 +1065,9 @@ fn entry(spec: EntrySpec<'_>) -> Value {
         for (key, extra_value) in extra {
             object.insert(key.clone(), extra_value.clone());
         }
+    }
+    if let (Some(object), Some(at)) = (value.as_object_mut(), JUDGED_AT.with(|at| at.take())) {
+        object.insert(JUDGED_KEY.to_string(), Value::from(at.unix_seconds()));
     }
     value
 }
@@ -1703,12 +1789,26 @@ fn drift_entry(
 
 /// `views.trust_for`: verified while the observation is inside the verify
 /// horizon, stale past it. Freshness is current only when verified.
+///
+/// The instant read is left for the entry built next, which carries it to
+/// [`collect_stored_judged`]: the list's cache judges that entry again per call.
 fn freshness<C: Clock, I: IdFactory>(
     observed_at: Moment,
     ctx: &AppContext<C, I>,
 ) -> (String, &'static str) {
+    let now = now_of(&ctx.clock);
+    JUDGED_AT.with(|at| at.set(Some(now)));
+    verdict(ctx, observed_at, now)
+}
+
+/// [`freshness`] against a given now.
+fn verdict<C: Clock, I: IdFactory>(
+    ctx: &AppContext<C, I>,
+    observed_at: Moment,
+    now: Moment,
+) -> (String, &'static str) {
     let horizon = ctx.config.verify_horizon_hours * 3600;
-    let trust = if now_of(&ctx.clock).unix_seconds() - observed_at.unix_seconds() <= horizon {
+    let trust = if now.unix_seconds() - observed_at.unix_seconds() <= horizon {
         "verified"
     } else {
         "stale"

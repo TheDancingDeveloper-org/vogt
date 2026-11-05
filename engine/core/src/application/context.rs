@@ -310,6 +310,22 @@ where
     )
 }
 
+/// A context on a clock the caller holds, for a test that moves time itself.
+#[cfg(test)]
+pub(crate) fn context_on_clock<C, I>(
+    config: VogtConfig,
+    principal: Principal,
+    clock: Arc<std::sync::Mutex<C>>,
+    ids: I,
+) -> AppContext<C, I>
+where
+    C: Clock,
+    I: IdFactory,
+{
+    let ids = Arc::new(std::sync::Mutex::new(ids));
+    context_from(config, Some(principal), clock, ids, None, None, None, None)
+}
+
 // The signature mirrors `build_context` in context.py; splitting it would
 // hide which argument is which.
 #[allow(clippy::too_many_arguments)]

@@ -522,3 +522,74 @@ fn a_cached_inbox_list_reads_the_step_clock_as_an_uncached_one_does() {
     assert_eq!(hit, rebuilt);
     assert_eq!(hit_position, rebuilt_position);
 }
+
+/// A wall clock a test can move: every read answers the instant it was set
+/// to, and it never says where its next read lands, as `SystemClock` does not.
+struct JumpClock(Moment);
+
+impl crate::core::Clock for JumpClock {
+    fn now(&mut self) -> Moment {
+        self.0
+    }
+}
+
+#[test]
+fn a_cached_inbox_list_goes_stale_when_the_wall_clock_passes_the_horizon() {
+    // B1: the stored half is shared while the stores stand still, but trust
+    // and freshness are judged against now. With no write, a list made after
+    // the verify horizon has passed must report the entries stale, as an
+    // uncached list (and the Python core) does.
+    let dir = data_dir("list-horizon");
+    seed_ci_and_snooze(&dir);
+    super::services::inbox::clear_badge_cache(&dir);
+    let observed = 1_700_000_000;
+    let clock = std::sync::Arc::new(std::sync::Mutex::new(JumpClock(Moment::from_unix(
+        observed + 60,
+        0,
+    ))));
+    let ctx = || {
+        crate::application::context::context_on_clock(
+            crate::config::VogtConfig {
+                data_dir: dir.to_path_buf(),
+                ..crate::config::VogtConfig::default()
+            },
+            Principal::new("local:test-user", ActorKind::Human, "Test").unwrap(),
+            std::sync::Arc::clone(&clock),
+            crate::application::context::RandomIds,
+        )
+    };
+    let states = |list: &Value| {
+        list["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| {
+                (
+                    entry["trust_state"].as_str().unwrap().to_string(),
+                    entry["freshness"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let before = super::services::inbox::inbox_list(&ctx(), json!({"limit": 50})).unwrap();
+    let inside = states(&before);
+    assert!(!inside.is_empty(), "the seed has entries: {before}");
+    assert!(
+        inside
+            .iter()
+            .all(|(trust, fresh)| trust == "verified" && fresh == "current"),
+        "{inside:?}"
+    );
+    let horizon = crate::config::VogtConfig::default().verify_horizon_hours * 3600;
+    clock.lock().unwrap().0 = Moment::from_unix(observed + horizon + 60, 0);
+    let built = listed();
+    let after = super::services::inbox::inbox_list(&ctx(), json!({"limit": 50})).unwrap();
+    assert_eq!(listed(), built, "no store moved, so the list is a hit");
+    let past = states(&after);
+    assert_eq!(past.len(), inside.len());
+    assert!(
+        past.iter()
+            .all(|(trust, fresh)| trust == "stale" && fresh == "stale"),
+        "a hit kept the judgement made before the horizon: {past:?}"
+    );
+}
