@@ -13,6 +13,7 @@ use serde_json::{json, Value};
 
 use crate::adapters::forge::current_collector;
 use crate::application::context::{write_of, AppContext, Built};
+use crate::application::memo::StoreMemo;
 use crate::application::resolve;
 use crate::application::writes::{audited_write, WriteOutcome};
 use crate::core::{Clock, IdFactory, Moment, Observation};
@@ -158,7 +159,27 @@ fn detect<C: Clock + 'static, I: IdFactory + 'static>(
     }))
 }
 
-fn list<C: Clock, I: IdFactory>(
+/// The proposals a `drift.list` shows, per filter, for one state of the stores.
+/// A new container is made whenever the stores move, so a write drops every
+/// filter's answer at once (WI-3130).
+type Listed = std::sync::Arc<std::sync::Mutex<std::collections::HashMap<ListKey, Value>>>;
+
+type ListKey = (Option<String>, Option<String>, Option<String>, i64);
+
+static LISTED: std::sync::LazyLock<StoreMemo<Listed>> = std::sync::LazyLock::new(StoreMemo::new);
+
+#[cfg(test)]
+thread_local! {
+    /// How many times this thread read the proposals from the store.
+    pub(crate) static LISTED_READ: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Drop the shared proposal lists over `data_dir` (a restore).
+pub fn clear_list_cache(data_dir: &std::path::Path) {
+    LISTED.forget(data_dir);
+}
+
+fn list<C: Clock + 'static, I: IdFactory + 'static>(
     ctx: &AppContext<C, I>,
     status: Option<&str>,
     kind: Option<&str>,
@@ -170,7 +191,41 @@ fn list<C: Clock, I: IdFactory>(
         Some(slug) => Some(resolve::project(&declared, slug)?.id),
         None => None,
     };
-    let proposals = declared.list_drift(status, kind, project_id.as_deref(), limit)?;
+    drop(declared);
+    let key: ListKey = (
+        status.map(str::to_string),
+        kind.map(str::to_string),
+        project_id,
+        limit,
+    );
+    // The proposals are a pure function of the declared store, so they are
+    // shared while it stands still. Freshness is judged against the clock on
+    // every call, never remembered.
+    let shelf = LISTED.get(ctx, || Ok(Listed::default()), |_| true)?;
+    let remembered = shelf
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&key)
+        .cloned();
+    let proposals = match remembered {
+        Some(proposals) => proposals,
+        None => {
+            #[cfg(test)]
+            LISTED_READ.with(|n| n.set(n.get() + 1));
+            let declared = ctx.declared.read()?;
+            let proposals = json!(declared.list_drift(
+                key.0.as_deref(),
+                key.1.as_deref(),
+                key.2.as_deref(),
+                limit
+            )?);
+            shelf
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(key, proposals.clone());
+            proposals
+        }
+    };
     // Insertion order, not sorted. `BTreeMap` would alphabetise the keys, and
     // Python's answer keeps `HUMAN_GATED_REASON`'s order on every list.
     let mut human_gated = serde_json::Map::new();
@@ -1087,5 +1142,77 @@ mod tests {
             message,
             "resolution must be one of accepted, rejected, contested"
         );
+    }
+
+    fn swept(built: &Built) {
+        let Built::StepSequential(ctx) = built else {
+            unreachable!()
+        };
+        ctx.observed.migrate().unwrap();
+        let at = Moment::from_unix(1_700_000_000, 0);
+        let sweep = ctx.observed.begin_sweep("test", &[], at).unwrap();
+        ctx.observed
+            .finish_sweep(&sweep.id, crate::core::SweepOutcome::Ok, &[], at, None)
+            .unwrap();
+    }
+
+    fn reads() -> usize {
+        LISTED_READ.with(|n| n.get())
+    }
+
+    fn age(listed: &Value) -> i64 {
+        listed["freshness"]["age_seconds"].as_i64().unwrap()
+    }
+
+    #[test]
+    fn a_second_list_shares_the_proposals_but_judges_freshness_again() {
+        let built = context();
+        swept(&built);
+        let before = reads();
+        let first = drift_list_op(&built, json!({"limit": 100})).unwrap();
+        let second = drift_list_op(&built, json!({"limit": 100})).unwrap();
+        assert_eq!(reads() - before, 1, "the second list read the store again");
+        assert_eq!(first["proposals"], second["proposals"]);
+        // Each call reads the stepping clock once: the age moved on.
+        assert!(age(&second) > age(&first), "{first} {second}");
+        // Another filter is another answer.
+        drift_list_op(&built, json!({"limit": 100, "status": "rejected"})).unwrap();
+        assert_eq!(reads() - before, 2);
+    }
+
+    #[test]
+    fn a_cached_list_ages_when_the_clock_jumps_with_no_write() {
+        let built = context();
+        swept(&built);
+        let first = drift_list_op(&built, json!({"limit": 100})).unwrap();
+        let before = reads();
+        // The wall passes the sweep by hours with nothing written.
+        let Built::StepSequential(ctx) = &built else {
+            unreachable!()
+        };
+        for _ in 0..20_000 {
+            ctx.clock.lock().unwrap().now();
+        }
+        let second = drift_list_op(&built, json!({"limit": 100})).unwrap();
+        assert_eq!(reads(), before, "the jump alone must not rebuild the list");
+        assert!(
+            age(&second) >= age(&first) + 20_000,
+            "a hit kept the age from before the jump: {first} {second}"
+        );
+    }
+
+    #[test]
+    fn a_write_drops_the_shared_proposals() {
+        let built = context();
+        swept(&built);
+        drift_list_op(&built, json!({"limit": 100})).unwrap();
+        let before = reads();
+        crate::application::services::work::create_op(
+            &built,
+            json!({"kind": "bug", "title": "moves the revision", "reason": "drift cache test"}),
+        )
+        .unwrap();
+        drift_list_op(&built, json!({"limit": 100})).unwrap();
+        assert_eq!(reads() - before, 1, "a write left the old list in place");
     }
 }

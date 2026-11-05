@@ -320,6 +320,7 @@ fn verify_store(source: &Path, name: &str) -> Result<(), VogtError> {
 /// directory sees the swap through the memo's key.
 fn forget_live_stores(data_dir: &Path) {
     crate::application::services::inbox::clear_badge_cache(data_dir);
+    crate::application::drift::clear_list_cache(data_dir);
     crate::application::place::clear_metrics_cache(data_dir);
 }
 
