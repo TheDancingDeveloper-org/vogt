@@ -142,6 +142,32 @@ grep -q 'url = "https://e/mcp"' "$cfg" || fail "codex vogt table missing"
 [ "$(grep -c 'mcp_servers.vogt' "$cfg")" = 1 ] || fail "duplicate vogt table"
 grep -q '^session-entrypoint: codex posture: mcp-config$' <<<"$out" || fail "codex posture line"
 ! grep -q 'minted' "$cfg" || fail "credential in codex config"
+# WI-3288: quoted, spaced and dotted-key forms of the owned tables are replaced
+# too, so Codex never sees a duplicate table.
+mkdir -p "$tmp/codexq/home/.codex"
+cat >"$tmp/codexq/home/.codex/config.toml" <<'TOML'
+mcp_servers.cadastre.url = "https://stale-dotted/cadastre"
+model = "x"
+[mcp_servers."vogt"]
+url = "https://stale-quoted/mcp"
+[ mcp_servers . 'cadastre' . env ]
+A = "stale-spaced"
+[mcp_servers]
+vogt.url = "https://stale-under-parent/mcp"
+keep.url = "https://keep"
+[[mcp_servers.vogt.extra]]
+n = "stale-array-table"
+[mcp_servers."other.one"]
+args = [
+  "a",
+]
+TOML
+out=$(run_case "$tmp/codexq" VOGT_CLI=codex CODEX_CONFIG="$CODEX_TOML" 2>&1) || fail "codex quoted config path: $out"
+cfg="$tmp/codexq/home/.codex/config.toml"
+! grep -q stale "$cfg" || fail "stale quoted/dotted vogt/cadastre definition kept: $(grep stale "$cfg")"
+grep -q 'url = "https://e/mcp"' "$cfg" || fail "codex vogt table missing (quoted case)"
+{ grep -q '^model = "x"' "$cfg" && grep -q 'keep.url' "$cfg" && grep -q 'other.one' "$cfg" && grep -q '^  "a",' "$cfg"; } || fail "codex config's own entries lost (quoted case)"
+[ "$(grep -c '^\[mcp_servers.vogt\]' "$cfg")" = 1 ] || fail "duplicate vogt table (quoted case)"
 OC='{"mcp":{"vogt":{"type":"remote","url":"https://e/mcp"}}}'
 out=$(run_case "$tmp/ocfg" VOGT_CLI=opencode OPENCODE_CONFIG="$OC" XDG_CONFIG_HOME="$tmp/ocfg/xdg" 2>&1) || fail "opencode path: $out"
 jq -e '.mcp.vogt.url=="https://e/mcp"' "$tmp/ocfg/xdg/opencode/opencode.json" >/dev/null || fail "opencode config content"

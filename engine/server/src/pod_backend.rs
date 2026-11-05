@@ -23,7 +23,8 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use uuid::Uuid;
 
 /// What one session template changes about its pod. An unset field keeps the
-/// deployment default; a set resource map replaces the default map whole.
+/// deployment default; a set resource map is merged over the default map key
+/// by key, so a policy that leaves out `ephemeral-storage` keeps its cap.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PodTemplatePolicy {
@@ -69,6 +70,10 @@ pub struct PodConfig {
     pub cargo_seed_host_path: Option<String>,
     #[serde(default)]
     pub pnpm_seed_host_path: Option<String>,
+    /// A seed path must be at or under one of these directories (and never
+    /// under a sensitive root, whatever is listed here).
+    #[serde(default = "default_seed_allowed_prefixes")]
+    pub seed_allowed_prefixes: Vec<String>,
     /// sccache S3-compatible endpoint, passed as `SCCACHE_ENDPOINT`. The
     /// credentials come from `cache_secret`, not from here.
     #[serde(default)]
@@ -127,6 +132,153 @@ pub struct PodConfig {
     #[serde(default = "default_engine_id")]
     pub engine_id: String,
 }
+/// Where a node's seed directories may live unless the deployment says so.
+fn default_seed_allowed_prefixes() -> Vec<String> {
+    [
+        "/srv",
+        "/mnt",
+        "/data",
+        "/opt",
+        "/var/cache",
+        "/var/lib/vogt",
+    ]
+    .map(String::from)
+    .to_vec()
+}
+
+/// Node roots a seed can never be mounted from, even if an allowed prefix
+/// would cover them.
+const SENSITIVE_SEED_ROOTS: &[&str] = &[
+    "/etc",
+    "/proc",
+    "/sys",
+    "/dev",
+    "/boot",
+    "/root",
+    "/run",
+    "/var/run",
+    "/var/lib/kubelet",
+    "/var/lib/containerd",
+    "/var/lib/docker",
+];
+
+fn under(path: &str, root: &str) -> bool {
+    path == root || path.strip_prefix(root).is_some_and(|r| r.starts_with('/'))
+}
+
+/// A seed host path: absolute, normalised (no `.`/`..`/empty segments), not
+/// `/`, outside the sensitive roots and under an allowed prefix.
+fn validate_seed_path(name: &str, path: &str, allowed: &[String]) -> Result<()> {
+    let bad = |why: &str| Err(ApiError::Config(format!("{name} {why}: {path:?}")));
+    let Some(rest) = path.strip_prefix('/') else {
+        return bad("must be an absolute path");
+    };
+    let rest = rest.strip_suffix('/').unwrap_or(rest);
+    if rest.is_empty() {
+        return bad("must not be the node root");
+    }
+    if rest.split('/').any(|s| matches!(s, "" | "." | "..")) {
+        return bad("must not contain empty, `.` or `..` segments");
+    }
+    let path = format!("/{rest}");
+    if SENSITIVE_SEED_ROOTS.iter().any(|r| under(&path, r)) {
+        return bad("is under a sensitive node directory");
+    }
+    if !allowed
+        .iter()
+        .any(|a| under(&path, a.trim_end_matches('/')))
+    {
+        return bad(&format!(
+            "must be under one of ENGINE_POD_SEED_ALLOWED_PREFIXES ({})",
+            allowed.join(", ")
+        ));
+    }
+    Ok(())
+}
+
+/// The sccache endpoint: an http(s) URL with a host and no userinfo, so no
+/// credential rides in the pod env (those come from the cache secret).
+fn validate_sccache_endpoint(raw: &str) -> Result<()> {
+    let bad = |why: &str| {
+        Err(ApiError::Config(format!(
+            "ENGINE_POD_SCCACHE_ENDPOINT {why}"
+        )))
+    };
+    let Ok(url) = url::Url::parse(raw) else {
+        return bad("is not a valid URL");
+    };
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return bad("must be an http(s) URL with a host");
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return bad("must not carry credentials (userinfo)");
+    }
+    Ok(())
+}
+
+fn is_hostname_key(key: &str) -> bool {
+    key == "kubernetes.io/hostname"
+}
+
+/// `nodeName` binds the pod to the cache node and skips the scheduler, so a
+/// template's selector or affinity cannot move it; the kubelet then fails the
+/// pod instead. Refuse a policy whose hostname constraint excludes that node.
+fn check_policy_against_node(template: &str, p: &PodTemplatePolicy, node: &str) -> Result<()> {
+    if node.is_empty() {
+        return Ok(());
+    }
+    let conflict = |what: &str| {
+        Err(ApiError::Config(format!(
+            "ENGINE_POD_TEMPLATE_POLICIES[{template}]: {what} conflicts with \
+             ENGINE_POD_CACHE_NODE={node}; the pod is pinned by nodeName, which \
+             wins over scheduling"
+        )))
+    };
+    if let Some(h) = p
+        .node_selector
+        .as_ref()
+        .and_then(|s| s.get("kubernetes.io/hostname"))
+    {
+        if h != node {
+            return conflict("node_selector kubernetes.io/hostname");
+        }
+    }
+    let required = p
+        .affinity
+        .as_ref()
+        .and_then(|a| a.node_affinity.as_ref())
+        .and_then(|n| {
+            n.required_during_scheduling_ignored_during_execution
+                .as_ref()
+        });
+    if let Some(sel) = required {
+        // Terms are ORed: the pod is only excluded if every term excludes it.
+        let excluded = |t: &k8s_openapi::api::core::v1::NodeSelectorTerm| {
+            let by_expr = t.match_expressions.iter().flatten().any(|e| {
+                is_hostname_key(&e.key)
+                    && match e.operator.as_str() {
+                        "In" => !e.values.iter().flatten().any(|v| v == node),
+                        "NotIn" => e.values.iter().flatten().any(|v| v == node),
+                        _ => false,
+                    }
+            });
+            let by_field = t.match_fields.iter().flatten().any(|e| {
+                e.key == "metadata.name"
+                    && match e.operator.as_str() {
+                        "In" => !e.values.iter().flatten().any(|v| v == node),
+                        "NotIn" => e.values.iter().flatten().any(|v| v == node),
+                        _ => false,
+                    }
+            });
+            by_expr || by_field
+        };
+        if !sel.node_selector_terms.is_empty() && sel.node_selector_terms.iter().all(excluded) {
+            return conflict("required node affinity");
+        }
+    }
+    Ok(())
+}
+
 fn default_reconnect_timeout() -> Duration {
     Duration::from_secs(120)
 }
@@ -221,6 +373,7 @@ impl Default for PodConfig {
             template_policies: BTreeMap::new(),
             cargo_seed_host_path: None,
             pnpm_seed_host_path: None,
+            seed_allowed_prefixes: default_seed_allowed_prefixes(),
             sccache_endpoint: None,
             cache_provisioner_url: None,
             cache_provisioner_token_file: None,
@@ -358,13 +511,27 @@ impl PodConfig {
                 }
             }
         }
+        if let Some(v) = text("ENGINE_POD_SEED_ALLOWED_PREFIXES") {
+            cfg.seed_allowed_prefixes = v
+                .split(',')
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+                .map(String::from)
+                .collect();
+        }
         for (name, path) in [
             ("ENGINE_POD_CARGO_SEED_HOST_PATH", &cfg.cargo_seed_host_path),
             ("ENGINE_POD_PNPM_SEED_HOST_PATH", &cfg.pnpm_seed_host_path),
         ] {
-            if path.as_deref().is_some_and(|p| !p.starts_with('/')) {
-                return Err(ApiError::Config(format!("{name} must be an absolute path")));
+            if let Some(path) = path {
+                validate_seed_path(name, path, &cfg.seed_allowed_prefixes)?;
             }
+        }
+        if let Some(endpoint) = &cfg.sccache_endpoint {
+            validate_sccache_endpoint(endpoint)?;
+        }
+        for (template, policy) in &cfg.template_policies {
+            check_policy_against_node(template, policy, &cfg.cache_node)?;
         }
         if let Some(url) = &cfg.cache_provisioner_url {
             if !(url.starts_with("https://") || (insecure && url.starts_with("http://"))) {
@@ -719,6 +886,17 @@ pub fn session_id_from_pod(pod: &Pod) -> Option<Uuid> {
 }
 
 #[allow(clippy::too_many_arguments)]
+type ResourceMap = BTreeMap<String, k8s_openapi::apimachinery::pkg::api::resource::Quantity>;
+
+/// The deployment defaults with a template policy's entries laid over them.
+fn merge_resources(defaults: &ResourceMap, over: Option<&ResourceMap>) -> ResourceMap {
+    let mut merged = defaults.clone();
+    if let Some(over) = over {
+        merged.extend(over.iter().map(|(k, v)| (k.clone(), v.clone())));
+    }
+    merged
+}
+
 pub fn pod_template(
     cfg: &PodConfig,
     template: &SessionTemplate,
@@ -837,6 +1015,9 @@ pub fn pod_template(
             name: name.into(),
             mount_path: dir.into(),
             read_only: Some(true),
+            // Submounts under the seed are read-only too where the runtime
+            // supports it; older ones ignore the request.
+            recursive_read_only: Some("IfPossible".into()),
             ..Default::default()
         });
         volumes.push(Volume {
@@ -903,15 +1084,17 @@ pub fn pod_template(
                 env_from: Some(env_from),
                 volume_mounts: Some(mounts),
                 resources: Some({
-                    let requests = policy
-                        .and_then(|p| p.resource_requests.as_ref())
-                        .unwrap_or(&cfg.resource_requests);
-                    let limits = policy
-                        .and_then(|p| p.resource_limits.as_ref())
-                        .unwrap_or(&cfg.resource_limits);
+                    let requests = merge_resources(
+                        &cfg.resource_requests,
+                        policy.and_then(|p| p.resource_requests.as_ref()),
+                    );
+                    let limits = merge_resources(
+                        &cfg.resource_limits,
+                        policy.and_then(|p| p.resource_limits.as_ref()),
+                    );
                     ResourceRequirements {
-                        requests: (!requests.is_empty()).then(|| requests.clone()),
-                        limits: (!limits.is_empty()).then(|| limits.clone()),
+                        requests: (!requests.is_empty()).then_some(requests),
+                        limits: (!limits.is_empty()).then_some(limits),
                         claims: None,
                     }
                 }),
@@ -2570,6 +2753,139 @@ mod tests {
         }
     }
 
+    fn with_policy(json: &str) -> Result<PodConfig> {
+        PodConfig::from_lookup(lookup(&[("ENGINE_POD_TEMPLATE_POLICIES", json)]), None)
+    }
+
+    #[test]
+    fn a_policy_limit_map_keeps_the_default_ephemeral_cap() {
+        let cfg = with_policy(r#"{"Pod":{"resource_limits":{"cpu":"4","memory":"8Gi"}}}"#).unwrap();
+        let spec = pod_template_for(&cfg).spec.unwrap();
+        let limits = spec.containers[0]
+            .resources
+            .as_ref()
+            .unwrap()
+            .limits
+            .clone()
+            .unwrap();
+        assert_eq!(limits["cpu"].0, "4");
+        assert_eq!(limits["memory"].0, "8Gi");
+        assert_eq!(limits["ephemeral-storage"].0, "40Gi");
+        // A policy can still raise the cap itself.
+        let cfg =
+            with_policy(r#"{"Pod":{"resource_limits":{"ephemeral-storage":"80Gi"}}}"#).unwrap();
+        let limits = pod_template_for(&cfg).spec.unwrap().containers[0]
+            .resources
+            .clone()
+            .unwrap()
+            .limits
+            .unwrap();
+        assert_eq!(limits["ephemeral-storage"].0, "80Gi");
+        assert_eq!(limits["cpu"].0, "1");
+    }
+
+    #[test]
+    fn seed_paths_are_normalised_absolute_and_allow_listed() {
+        let seed = |p: &str| {
+            PodConfig::from_lookup(lookup(&[("ENGINE_POD_CARGO_SEED_HOST_PATH", p)]), None)
+        };
+        assert!(seed("/srv/seeds/cargo").is_ok());
+        assert!(seed("/srv/seeds/cargo/").is_ok());
+        for bad in [
+            "relative/dir",
+            "/",
+            "/srv/../etc",
+            "/srv/./x",
+            "/srv//x",
+            "/etc/kubernetes",
+            "/var/run/docker.sock",
+            "/run/x",
+            "/srv/../..",
+            "/home/other",
+            "/srvx/seed",
+        ] {
+            assert!(seed(bad).is_err(), "{bad} must be refused");
+        }
+        // A sensitive root stays refused even when an operator allows it.
+        let cfg = PodConfig::from_lookup(
+            lookup(&[
+                ("ENGINE_POD_PNPM_SEED_HOST_PATH", "/etc/x"),
+                ("ENGINE_POD_SEED_ALLOWED_PREFIXES", "/etc"),
+            ]),
+            None,
+        );
+        assert!(cfg.is_err());
+        let cfg = PodConfig::from_lookup(
+            lookup(&[
+                ("ENGINE_POD_PNPM_SEED_HOST_PATH", "/home/seeds/pnpm"),
+                ("ENGINE_POD_SEED_ALLOWED_PREFIXES", "/home/seeds"),
+            ]),
+            None,
+        )
+        .unwrap();
+        let pod = pod_template_for(&cfg);
+        let mounts = pod.spec.unwrap().containers[0]
+            .volume_mounts
+            .clone()
+            .unwrap();
+        let m = mounts.iter().find(|m| m.name == "pnpm-seed").unwrap();
+        assert_eq!(m.read_only, Some(true));
+        assert_eq!(m.recursive_read_only.as_deref(), Some("IfPossible"));
+    }
+
+    #[test]
+    fn the_sccache_endpoint_refuses_userinfo_and_non_http() {
+        let ep =
+            |v: &str| PodConfig::from_lookup(lookup(&[("ENGINE_POD_SCCACHE_ENDPOINT", v)]), None);
+        assert_eq!(
+            ep("https://s3.example:9000")
+                .unwrap()
+                .sccache_endpoint
+                .as_deref(),
+            Some("https://s3.example:9000")
+        );
+        for bad in [
+            "https://key:secret@s3.example",
+            "https://key@s3.example",
+            "ftp://s3.example",
+            "not a url",
+            "s3.example:9000",
+        ] {
+            assert!(ep(bad).is_err(), "{bad} must be refused");
+        }
+    }
+
+    #[test]
+    fn a_policy_that_excludes_the_cache_node_is_refused_at_config_time() {
+        // nodeName (winrarhost1) wins over scheduling, so these could never run.
+        for bad in [
+            r#"{"Pod":{"node_selector":{"kubernetes.io/hostname":"other"}}}"#,
+            r#"{"Pod":{"affinity":{"nodeAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":{"nodeSelectorTerms":[{"matchExpressions":[{"key":"kubernetes.io/hostname","operator":"In","values":["other"]}]}]}}}}}"#,
+            r#"{"Pod":{"affinity":{"nodeAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":{"nodeSelectorTerms":[{"matchExpressions":[{"key":"kubernetes.io/hostname","operator":"NotIn","values":["winrarhost1"]}]}]}}}}}"#,
+        ] {
+            let err = with_policy(bad).unwrap_err().to_string();
+            assert!(err.contains("ENGINE_POD_CACHE_NODE"), "{err}");
+        }
+        // A matching or unrelated constraint is fine, as is any policy when
+        // no node is pinned.
+        assert!(with_policy(
+            r#"{"Pod":{"node_selector":{"kubernetes.io/hostname":"winrarhost1"}}}"#
+        )
+        .is_ok());
+        assert!(with_policy(r#"{"Pod":{"node_selector":{"disk":"ssd"}}}"#).is_ok());
+        assert!(PodConfig::from_lookup(
+            lookup(&[
+                ("ENGINE_POD_CACHE_NODE", ""),
+                (
+                    "ENGINE_POD_TEMPLATE_POLICIES",
+                    r#"{"Pod":{"node_selector":{"kubernetes.io/hostname":"other"}}}"#
+                ),
+            ]),
+            None
+        )
+        .is_ok());
+    }
+
     #[test]
     fn empty_cache_names_leave_the_cache_out_of_the_pod() {
         let cfg = PodConfig::from_lookup(
@@ -2599,7 +2915,7 @@ mod tests {
     }
 
     #[test]
-    fn a_template_policy_replaces_resources_selector_and_adds_affinity() {
+    fn a_template_policy_overrides_resources_selector_and_adds_affinity() {
         let cfg = PodConfig::from_lookup(
             lookup(&[(
                 "ENGINE_POD_TEMPLATE_POLICIES",
@@ -2614,7 +2930,9 @@ mod tests {
         .unwrap();
         let spec = pod_template_for(&cfg).spec.unwrap();
         let r = spec.containers[0].resources.clone().unwrap();
-        assert_eq!(r.requests.unwrap().len(), 1);
+        let requests = r.requests.unwrap();
+        assert_eq!(requests["cpu"].0, "2");
+        assert_eq!(requests["memory"].0, "256Mi");
         assert_eq!(r.limits.unwrap()["memory"].0, "8Gi");
         assert_eq!(spec.node_selector.unwrap()["disk"], "nvme");
         assert!(spec.affinity.unwrap().node_affinity.is_some());
