@@ -77,9 +77,90 @@ thread_local! {
     pub(crate) static STORED_COMPUTED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// Drop the shared badge projection over `data_dir` (a restore).
+/// The stored half as `inbox.list` reads it: untriaged, because triage and a
+/// snooze that has run out are judged per call.
+#[derive(Clone)]
+struct ListedStored {
+    projects: BTreeMap<String, Project>,
+    entries: Vec<Value>,
+    /// How many times building it read a stepping clock. A hit replays them,
+    /// so the clock reads that follow land where an uncached list's do.
+    clock_reads: u64,
+}
+
+/// The stored half of `inbox.list`, shared between every list read while the
+/// stores have not moved (WI-3130). The list's cost does not depend on its
+/// `limit`: every call used to rebuild the whole stored projection.
+static LISTED: std::sync::LazyLock<StoreMemo<ListedStored>> =
+    std::sync::LazyLock::new(StoreMemo::new);
+
+#[cfg(test)]
+thread_local! {
+    /// How many times this thread built the stored half of the list.
+    pub(crate) static LISTED_COMPUTED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Drop the shared badge and list projections over `data_dir` (a restore).
 pub fn clear_badge_cache(data_dir: &std::path::Path) {
     STORED.forget(data_dir);
+    LISTED.forget(data_dir);
+}
+
+fn listed_stored<C, I>(
+    ctx: &AppContext<C, I>,
+    observed: &crate::storage::sqlite::observed::SqliteObservedStore<C, I>,
+    config: &crate::config::VogtConfig,
+) -> Result<(ListedStored, bool), VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let built = std::cell::Cell::new(false);
+    let listed = LISTED.get(
+        ctx,
+        || {
+            built.set(true);
+            #[cfg(test)]
+            LISTED_COMPUTED.with(|n| n.set(n.get() + 1));
+            let view = ctx.declared.read()?;
+            let before = peek_clock(ctx);
+            let (projects, entries) = collect_stored(ctx, observed, &view, config)?;
+            let clock_reads = match (before, peek_clock(ctx)) {
+                (Some(before), Some(after)) => {
+                    (after.unix_seconds() - before.unix_seconds()).max(0) as u64
+                }
+                _ => 0,
+            };
+            Ok(ListedStored {
+                projects,
+                entries,
+                clock_reads,
+            })
+        },
+        |_| true,
+    )?;
+    Ok((listed, built.get()))
+}
+
+fn peek_clock<C: Clock, I: IdFactory>(ctx: &AppContext<C, I>) -> Option<Moment> {
+    ctx.clock
+        .lock()
+        .expect("the shared clock is not poisoned")
+        .peek()
+}
+
+/// Take the clock reads a cached build would have made, on a clock that moves
+/// per read. Only a hit has any to replay: a build made its own.
+fn replay_clock_reads<C, I>(ctx: &AppContext<C, I>, built: bool, reads: u64)
+where
+    C: Clock,
+    I: IdFactory,
+{
+    if !built && peek_clock(ctx).is_some() {
+        for _ in 0..reads {
+            now_of(&ctx.clock);
+        }
+    }
 }
 
 fn triaged<C, I>(
@@ -173,7 +254,13 @@ where
     let (declared, observed, _, _, _, config) = context_parts(ctx);
     let view = declared.read()?;
 
-    let mut entries = collect(ctx, observed, &view, config)?;
+    let mut entries = {
+        let (listed, built) = listed_stored(ctx, observed, config)?;
+        replay_clock_reads(ctx, built, listed.clock_reads);
+        let mut entries = listed.entries;
+        entries.extend(collect_live(ctx, &view, &listed.projects)?);
+        entries
+    };
     let triage = view.inbox_triage_by_keys(
         &entries
             .iter()
