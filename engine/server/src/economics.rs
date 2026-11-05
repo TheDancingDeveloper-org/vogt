@@ -53,6 +53,11 @@ pub struct Meter {
     /// A Codex `compacted` line not yet followed by a `token_count`: an
     /// `item_completed` ContextCompaction in that gap is the same compaction.
     codex_compaction_open: bool,
+    /// The largest Codex request since the last compaction, and the one for
+    /// the cycle before it: the size the context had reached when it was
+    /// compacted (WI-2832).
+    codex_cycle_peak: i64,
+    codex_last_cycle_peak: i64,
 }
 
 /// What Codex's `token_count` events said, latest and largest.
@@ -84,6 +89,8 @@ impl Meter {
             stamps: Vec::new(),
             codex: None,
             codex_compaction_open: false,
+            codex_cycle_peak: 0,
+            codex_last_cycle_peak: 0,
         }
     }
 
@@ -117,6 +124,7 @@ impl Meter {
             let codex = self.codex.get_or_insert_with(CodexUsage::default);
             codex.context = reading.context;
             codex.peak = codex.peak.max(reading.context);
+            self.codex_cycle_peak = self.codex_cycle_peak.max(reading.context);
             if reading.window > 0 {
                 codex.window = reading.window;
             }
@@ -127,6 +135,10 @@ impl Meter {
         }
 
         if codex_compaction || is_compaction(entry) {
+            if codex_compaction && self.codex_cycle_peak > 0 {
+                self.codex_last_cycle_peak = self.codex_cycle_peak;
+                self.codex_cycle_peak = 0;
+            }
             self.compactions += 1;
             if self.tool_calls_since_compaction < PROGRESS_TOOL_CALLS {
                 self.compaction_streak += 1;
@@ -194,6 +206,14 @@ impl Meter {
     /// act on, else `None`.
     pub(crate) fn compaction_loop(&self) -> Option<i64> {
         (self.compaction_streak >= COMPACTION_LOOP_STREAK).then_some(self.compaction_streak)
+    }
+
+    /// The context size, in tokens, a Codex session had reached when it was
+    /// last compacted: what a restart must set its auto-compact limit above.
+    pub(crate) fn codex_compacted_at(&self) -> Option<u64> {
+        u64::try_from(self.codex_last_cycle_peak)
+            .ok()
+            .filter(|n| *n > 0)
     }
 
     pub fn snapshot(&self) -> SessionEconomics {
@@ -845,6 +865,17 @@ pub fn spawn_economics_tailer(state: Arc<AppState>, home: PathBuf, tick: Duratio
                     if let Some(streak) = tail.meter.compaction_loop() {
                         tail.loop_reported = true;
                         report_compaction_loop(&session, &state.bus, streak);
+                        // The next launch of this session backs its limit off
+                        // past the size it thrashed at.
+                        if let Some(size) = tail.meter.codex_compacted_at() {
+                            if let Err(e) = crate::compact_backoff::record_floor(
+                                &state.config.state_dir,
+                                session.id,
+                                size,
+                            ) {
+                                tracing::warn!(session = %session.id, error = %e, "failed to record the compaction floor");
+                            }
+                        }
                     }
                 }
                 session.store_economics_tail(tail, snapshot.clone());
@@ -880,7 +911,7 @@ fn report_compaction_loop(
              them. The context after compaction is still over the agent's auto-compact limit."
         ),
         items: vec![
-            "Stop the session, then restart it with fewer MCP servers (the worker set) or a higher auto-compact limit."
+            "Restart the session: Vogt raises its auto-compact limit past the size it thrashed at. Fewer MCP servers (the worker set) shrinks the fixed context itself."
                 .to_string(),
         ],
         since: time::OffsetDateTime::now_utc()
@@ -1118,6 +1149,29 @@ mod tests {
             meter.feed_line(line);
         }
         meter.snapshot()
+    }
+
+    /// WI-2832: the size a Codex context had reached when it was compacted is
+    /// what a restart raises its auto-compact limit above.
+    #[test]
+    fn codex_compacted_at_is_the_largest_request_of_the_last_cycle() {
+        let count = |total: i64| {
+            format!(
+                r#"{{"type":"event_msg","payload":{{"type":"token_count","info":{{"last_token_usage":{{"total_tokens":{total},"output_tokens":1}},"model_context_window":272000}}}}}}"#
+            )
+        };
+        let compacted = r#"{"type":"compacted","payload":{"message":""}}"#;
+        let mut meter = Meter::new("codex");
+        assert_eq!(meter.codex_compacted_at(), None);
+        for line in [count(40_000), count(132_000), compacted.into()] {
+            meter.feed_line(&line);
+        }
+        // The compaction call itself is small and does not lower the floor.
+        meter.feed_line(&count(23_000));
+        assert_eq!(meter.codex_compacted_at(), Some(132_000));
+        meter.feed_line(&count(133_000));
+        meter.feed_line(compacted);
+        assert_eq!(meter.codex_compacted_at(), Some(133_000));
     }
 
     /// WI-2832: Codex writes a `compacted` line; one compaction, one call,
