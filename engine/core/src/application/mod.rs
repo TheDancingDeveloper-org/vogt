@@ -49,6 +49,7 @@ pub mod usage;
 pub mod views;
 #[cfg(test)]
 mod workspace_disk_test;
+pub mod workspaces;
 pub mod writes;
 #[cfg(test)]
 mod writes_test;
