@@ -138,6 +138,7 @@ pub const DERIVED: &[&str] = &[
     "session.digest",
     "session.wait",
     "session.changes",
+    "workspace.list",
     "session.wait_any",
     "session.report_blocked",
     "session.report",
@@ -183,6 +184,7 @@ mod session_ops;
 pub(crate) mod system;
 pub(crate) mod views;
 mod work;
+pub(crate) mod workspace;
 
 /// `(operation name, params schema, result schema)` for every name in
 /// [`DERIVED`], as `registry::dump()` emits them.
@@ -793,6 +795,11 @@ pub fn derived_schemas() -> Vec<(&'static str, serde_json::Value, serde_json::Va
             "session.changes",
             schema_of::<session_ops::SessionChangesParams>(),
             schema_of::<session_ops::SessionChangesResult>(),
+        ),
+        (
+            "workspace.list",
+            schema_of::<workspace::WorkspaceListParams>(),
+            schema_of::<workspace::WorkspaceListResult>(),
         ),
         (
             "session.wait_any",
