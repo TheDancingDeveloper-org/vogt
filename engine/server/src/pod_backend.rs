@@ -7,10 +7,10 @@ use crate::{
 };
 use k8s_openapi::api::core::v1::{
     Affinity, Capabilities, ConfigMapEnvSource, ConfigMapVolumeSource, Container,
-    EmptyDirVolumeSource, EnvFromSource, EnvVar, HostPathVolumeSource,
-    PersistentVolumeClaimVolumeSource, Pod, PodSecurityContext, PodSpec, ResourceRequirements,
-    SeccompProfile, Secret, SecretEnvSource, SecretVolumeSource, SecurityContext, Volume,
-    VolumeMount,
+    EmptyDirVolumeSource, EnvFromSource, EnvVar, HostPathVolumeSource, NodeAffinity, NodeSelector,
+    NodeSelectorRequirement, NodeSelectorTerm, PersistentVolumeClaimVolumeSource, Pod,
+    PodSecurityContext, PodSpec, PreferredSchedulingTerm, ResourceRequirements, SeccompProfile,
+    Secret, SecretEnvSource, SecretVolumeSource, SecurityContext, Toleration, Volume, VolumeMount,
 };
 use k8s_openapi::{apimachinery::pkg::apis::meta::v1::OwnerReference, ByteString};
 use kube::config::{KubeConfigOptions, Kubeconfig};
@@ -109,6 +109,21 @@ pub struct PodConfig {
     pub cli: String,
     pub extra_ca_file: Option<String>,
     pub priority_class: Option<String>,
+    /// Hostnames the scheduler should prefer, with a weight 1..=100 each
+    /// (`ENGINE_POD_PREFERRED_NODES=winrarhost4:100,winrarhost1:50`, WI-3343).
+    /// Added to every pod as preferred node affinity on top of the template
+    /// policy's own; ignored by the scheduler while `cache_node` pins the pod
+    /// by `nodeName`.
+    #[serde(default)]
+    pub preferred_nodes: Vec<(String, i32)>,
+    /// Hostnames no session pod may land on (`ENGINE_POD_EXCLUDED_NODES`),
+    /// ANDed into every required node-affinity term of the pod.
+    #[serde(default)]
+    pub excluded_nodes: Vec<String>,
+    /// Tolerations for every session pod (`ENGINE_POD_TOLERATIONS`, a JSON
+    /// array of Kubernetes tolerations), e.g. Node B's `estate/dedicated`.
+    #[serde(default)]
+    pub tolerations: Vec<Toleration>,
     pub service_account: String,
     /// Secret holding registry credentials for the session image, if private.
     #[serde(default)]
@@ -279,6 +294,80 @@ fn check_policy_against_node(template: &str, p: &PodTemplatePolicy, node: &str) 
     Ok(())
 }
 
+fn hostname_requirement(operator: &str, nodes: &[String]) -> NodeSelectorRequirement {
+    NodeSelectorRequirement {
+        key: "kubernetes.io/hostname".into(),
+        operator: operator.into(),
+        values: Some(nodes.to_vec()),
+    }
+}
+
+/// `name:weight,name:weight` with weight 1..=100 (default 1 when omitted).
+fn parse_preferred_nodes(raw: &str) -> Result<Vec<(String, i32)>> {
+    let bad = |item: &str| {
+        ApiError::Config(format!(
+            "ENGINE_POD_PREFERRED_NODES: {item:?} is not NAME[:WEIGHT] with weight 1..=100"
+        ))
+    };
+    raw.split(',')
+        .map(str::trim)
+        .filter(|i| !i.is_empty())
+        .map(|item| {
+            let (name, weight) = match item.split_once(':') {
+                Some((n, w)) => (n.trim(), w.trim().parse::<i32>().map_err(|_| bad(item))?),
+                None => (item, 1),
+            };
+            if name.is_empty() || !(1..=100).contains(&weight) {
+                return Err(bad(item));
+            }
+            Ok((name.to_string(), weight))
+        })
+        .collect()
+}
+
+/// The pod's affinity: the template policy's, plus the deployment's preferred
+/// nodes (one weighted term each) and excluded nodes (a `NotIn` hostname
+/// expression added to every required term, since terms are ORed).
+fn merged_affinity(cfg: &PodConfig, policy: Option<&PodTemplatePolicy>) -> Option<Affinity> {
+    let mut affinity = policy.and_then(|p| p.affinity.clone());
+    if cfg.preferred_nodes.is_empty() && cfg.excluded_nodes.is_empty() {
+        return affinity;
+    }
+    let a = affinity.get_or_insert_with(Affinity::default);
+    let n = a.node_affinity.get_or_insert_with(NodeAffinity::default);
+    for (node, weight) in &cfg.preferred_nodes {
+        n.preferred_during_scheduling_ignored_during_execution
+            .get_or_insert_with(Vec::new)
+            .push(PreferredSchedulingTerm {
+                weight: *weight,
+                preference: NodeSelectorTerm {
+                    match_expressions: Some(vec![hostname_requirement(
+                        "In",
+                        std::slice::from_ref(node),
+                    )]),
+                    match_fields: None,
+                },
+            });
+    }
+    if !cfg.excluded_nodes.is_empty() {
+        let exclude = hostname_requirement("NotIn", &cfg.excluded_nodes);
+        let sel = n
+            .required_during_scheduling_ignored_during_execution
+            .get_or_insert_with(|| NodeSelector {
+                node_selector_terms: Vec::new(),
+            });
+        if sel.node_selector_terms.is_empty() {
+            sel.node_selector_terms.push(NodeSelectorTerm::default());
+        }
+        for term in &mut sel.node_selector_terms {
+            term.match_expressions
+                .get_or_insert_with(Vec::new)
+                .push(exclude.clone());
+        }
+    }
+    affinity
+}
+
 fn default_reconnect_timeout() -> Duration {
     Duration::from_secs(120)
 }
@@ -385,6 +474,9 @@ impl Default for PodConfig {
             graft_mint_token_file: None,
             extra_ca_file: None,
             priority_class: Some("vogt-session".into()),
+            preferred_nodes: Vec::new(),
+            excluded_nodes: Vec::new(),
+            tolerations: Vec::new(),
             service_account: "vogt-session".into(),
             image_pull_secret: None,
             reconcile_interval: default_reconcile_interval(),
@@ -444,6 +536,22 @@ impl PodConfig {
         set_or_empty("ENGINE_POD_CACHE_SECRET", &mut cfg.cache_secret);
         set_or_empty("ENGINE_POD_KACHE_CONFIG_MAP", &mut cfg.kache_config_map);
         optional("ENGINE_POD_PRIORITY_CLASS", &mut cfg.priority_class);
+        if let Some(v) = text("ENGINE_POD_PREFERRED_NODES") {
+            cfg.preferred_nodes = parse_preferred_nodes(&v)?;
+        }
+        if let Some(v) = text("ENGINE_POD_EXCLUDED_NODES") {
+            cfg.excluded_nodes = v
+                .split(',')
+                .map(str::trim)
+                .filter(|n| !n.is_empty())
+                .map(String::from)
+                .collect();
+        }
+        if let Some(v) = text("ENGINE_POD_TOLERATIONS").filter(|v| !v.is_empty()) {
+            cfg.tolerations = serde_json::from_str(&v).map_err(|e| {
+                ApiError::Config(format!("ENGINE_POD_TOLERATIONS: invalid JSON: {e}"))
+            })?;
+        }
         optional("ENGINE_POD_IMAGE_PULL_SECRET", &mut cfg.image_pull_secret);
         optional("ENGINE_POD_GRAFT_ENDPOINT", &mut cfg.graft_endpoint);
         optional("ENGINE_POD_GRAFT_TOKEN_FILE", &mut cfg.graft_token_file);
@@ -529,6 +637,15 @@ impl PodConfig {
         }
         if let Some(endpoint) = &cfg.sccache_endpoint {
             validate_sccache_endpoint(endpoint)?;
+        }
+        // nodeName wins over scheduling, so an excluded cache node could never
+        // run a pod; refuse it rather than let the kubelet fail every pod.
+        if cfg.excluded_nodes.contains(&cfg.cache_node) {
+            return Err(ApiError::Config(format!(
+                "ENGINE_POD_EXCLUDED_NODES lists ENGINE_POD_CACHE_NODE={}; the pod is \
+                 pinned by nodeName, which wins over scheduling",
+                cfg.cache_node
+            )));
         }
         for (template, policy) in &cfg.template_policies {
             check_policy_against_node(template, policy, &cfg.cache_node)?;
@@ -1138,7 +1255,8 @@ pub fn pod_template(
                     .unwrap_or(&cfg.node_selector);
                 (!selector.is_empty()).then(|| selector.clone())
             },
-            affinity: policy.and_then(|p| p.affinity.clone()),
+            affinity: merged_affinity(cfg, policy),
+            tolerations: (!cfg.tolerations.is_empty()).then(|| cfg.tolerations.clone()),
             node_name: (!cfg.cache_node.is_empty()).then(|| cfg.cache_node.clone()),
             image_pull_secrets: cfg.image_pull_secret.as_ref().map(|name| {
                 vec![k8s_openapi::api::core::v1::LocalObjectReference { name: name.clone() }]
@@ -3021,6 +3139,117 @@ mod tests {
                 .0,
             "40Gi"
         );
+    }
+
+    #[test]
+    fn node_preferences_exclusions_and_tolerations_reach_the_pod() {
+        let cfg = PodConfig::from_lookup(
+            lookup(&[
+                ("ENGINE_POD_CACHE_NODE", ""),
+                (
+                    "ENGINE_POD_PREFERRED_NODES",
+                    "winrarhost4:100, winrarhost1:50,winrarhost",
+                ),
+                ("ENGINE_POD_EXCLUDED_NODES", "winrarhost3"),
+                (
+                    "ENGINE_POD_TOLERATIONS",
+                    r#"[{"key":"estate/dedicated","operator":"Exists","effect":"NoSchedule"}]"#,
+                ),
+                (
+                    "ENGINE_POD_TEMPLATE_POLICIES",
+                    r#"{"Pod":{"affinity":{"nodeAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":
+                      {"nodeSelectorTerms":[{"matchExpressions":[{"key":"k","operator":"Exists"}]}]}}}}}"#,
+                ),
+            ]),
+            None,
+        )
+        .unwrap();
+        let spec = pod_template_for(&cfg).spec.unwrap();
+        assert!(spec.node_name.is_none());
+        let n = spec.affinity.unwrap().node_affinity.unwrap();
+        let pref = n
+            .preferred_during_scheduling_ignored_during_execution
+            .unwrap();
+        let got: Vec<(i32, String)> = pref
+            .iter()
+            .map(|t| {
+                let e = &t.preference.match_expressions.as_ref().unwrap()[0];
+                assert_eq!(e.key, "kubernetes.io/hostname");
+                assert_eq!(e.operator, "In");
+                (t.weight, e.values.as_ref().unwrap()[0].clone())
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (100, "winrarhost4".to_string()),
+                (50, "winrarhost1".to_string()),
+                (1, "winrarhost".to_string())
+            ]
+        );
+        // The template's own required term is kept and the exclusion ANDed in.
+        let terms = n
+            .required_during_scheduling_ignored_during_execution
+            .unwrap()
+            .node_selector_terms;
+        assert_eq!(terms.len(), 1);
+        let exprs = terms[0].match_expressions.as_ref().unwrap();
+        assert_eq!(exprs[0].key, "k");
+        assert_eq!(exprs[1].operator, "NotIn");
+        assert_eq!(exprs[1].values.as_ref().unwrap(), &["winrarhost3"]);
+        let tol = spec.tolerations.unwrap();
+        assert_eq!(tol[0].key.as_deref(), Some("estate/dedicated"));
+    }
+
+    #[test]
+    fn exclusions_alone_make_a_required_term_and_defaults_add_nothing() {
+        let cfg = PodConfig::from_lookup(
+            lookup(&[
+                ("ENGINE_POD_CACHE_NODE", ""),
+                ("ENGINE_POD_EXCLUDED_NODES", "a,b"),
+            ]),
+            None,
+        )
+        .unwrap();
+        let spec = pod_template_for(&cfg).spec.unwrap();
+        let req = spec
+            .affinity
+            .unwrap()
+            .node_affinity
+            .unwrap()
+            .required_during_scheduling_ignored_during_execution
+            .unwrap();
+        assert_eq!(
+            req.node_selector_terms[0]
+                .match_expressions
+                .as_ref()
+                .unwrap()[0]
+                .values
+                .as_ref()
+                .unwrap(),
+            &["a", "b"]
+        );
+        assert!(spec.tolerations.is_none());
+        let plain = pod_template_for(&PodConfig::default()).spec.unwrap();
+        assert!(plain.affinity.is_none() && plain.tolerations.is_none());
+    }
+
+    #[test]
+    fn bad_node_placement_settings_are_refused() {
+        for (name, bad) in [
+            ("ENGINE_POD_PREFERRED_NODES", "n:0"),
+            ("ENGINE_POD_PREFERRED_NODES", "n:101"),
+            ("ENGINE_POD_PREFERRED_NODES", ":5"),
+            ("ENGINE_POD_PREFERRED_NODES", "n:x"),
+            ("ENGINE_POD_TOLERATIONS", "not json"),
+            // Default cache node winrarhost1 is pinned by nodeName.
+            ("ENGINE_POD_EXCLUDED_NODES", "winrarhost1"),
+        ] {
+            assert!(
+                PodConfig::from_lookup(lookup(&[(name, bad)]), None).is_err(),
+                "{name}={bad}"
+            );
+        }
     }
 
     #[test]
