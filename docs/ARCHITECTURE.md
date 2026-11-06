@@ -365,6 +365,21 @@ as a service principal; `sweep` is also callable on demand from every
 transport. Each registered project carries exclusion patterns applied before
 collection, so vendored and generated trees never become observations.
 
+On the Rust `rust-2` line, `engine/core/src/adapters/http/scheduler.rs` also
+runs an independent watch pass every `watch_interval_seconds` (default 60;
+zero disables it). Each pass uses a fresh service context, evaluates persisted
+active watches and reuses session input for delivery and wake-up. Failures are
+retried with bounded exponential backoff; expiration and settlement are audited.
+Both schedules run immediately, sleep after each pass, survive failed ticks,
+and stop with the listener, waiting for an in-flight writer.
+
+Forge posture is **not** a separate timer: like Python it runs inside sweeps,
+throttled per repository by `forge_posture_interval_seconds` (default 86400).
+Only successful reads mark the process-local timestamp, so failures retry on
+the next sweep and a restart reads each repository again. The GitHub client
+shares a per-credential core rate budget and honors `github_rate_limit_floor`;
+search/GraphQL buckets do not gate core reads.
+
 ### 6.2 Observed-first without drowning
 
 1. **Promotion by convention.** Only markers matching

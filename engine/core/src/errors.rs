@@ -70,6 +70,7 @@ pub enum VogtError {
     GitCommandFailed(String),
     /// GitHub did not answer or refused the credential (`adapters/github/client.py`).
     GitHubUnavailable(String),
+    GitHubRateLimited(String),
     /// A peer instance could not be reached, refused, or answered nonsense
     /// (`adapters/peer.py`). `status` is `unreachable`, `refused` or
     /// `invalid_response`.
@@ -165,6 +166,7 @@ impl VogtError {
             | Self::EngineUnavailable(m)
             | Self::GitUnavailable(m)
             | Self::GitCommandFailed(m)
+            | Self::GitHubRateLimited(m)
             | Self::GitHubUnavailable(m)
             | Self::ForgejoUnavailable(m) => m,
             Self::PeerUnavailable { message, .. }
@@ -222,6 +224,7 @@ impl VogtError {
             Self::EngineUnavailable(_) => "engine_unavailable",
             Self::GitUnavailable(_) | Self::GitCommandFailed(_) => "git_unavailable",
             Self::GitHubUnavailable(_) => "github_unavailable",
+            Self::GitHubRateLimited(_) => "github_rate_limited",
             Self::PeerUnavailable { .. } => "peer_unavailable",
             Self::ForgejoUnavailable(_) => "forgejo_unavailable",
             Self::TransitionRejected { .. } => "transition_rejected",
@@ -288,7 +291,7 @@ impl VogtError {
             | Self::ForgejoUnavailable(_) => 502,
             Self::InvalidParams(_) => 422,
             Self::MigrationError(_) => 500,
-            Self::MigrationLocked(_) => 503,
+            Self::MigrationLocked(_) | Self::GitHubRateLimited(_) => 503,
             Self::TransitionRejected { .. } => 409,
             Self::Unauthenticated(_) => 401,
             Self::Forbidden(_) => 403,

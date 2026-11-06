@@ -309,6 +309,7 @@ it, and the items are still open in Vogt.
 | **WI-2660** — the `VOGT_CORE_IMPL` gate, so merging is not the cutover | The switch is in the entrypoint, the image and the Compose file. No pipeline builds and smokes an image with `rust` selected. |
 | **WI-2021** — the in-process schedule | Collector sweeps and budget-stop settlement run. Watch evaluation and the forge-posture loop are not ported (WI-3385). |
 | **WI-2663** — dispatch must not block the async workers; bound the `/mcp` body | Built. |
+| **WI-3385** — watch evaluation and posture cadence | Watch evaluation now runs independently; posture remains in the collector sweep with per-repository successful-read throttling, matching Python. Runtime deployment verification remains separate. |
 | **WI-2664, WI-2665** — operations that were stubbed | Charters, watches, `session.report`, `usage.board` and `instance.diagnostics` are built. The inbox does not read session reports yet. |
 | **WI-2662, WI-2667** — parity green at the tip, with engine-backed steps for the session and chat operations | The steps exist. Whether parity is green can't be told without running it, and the Rust CLI transport is not checked in CI. |
 | **WI-2022, WI-2024** — session digest rows; the `session.start` model policy | Digest rows are built. The model policy is not started. |

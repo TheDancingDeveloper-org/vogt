@@ -128,6 +128,7 @@ fn sweep<C: Clock + 'static, I: IdFactory + 'static>(
             ctx.forge_transport(),
         )?);
         if forge {
+            crate::adapters::github::configure_rate_limit_floor(ctx.config.github_rate_limit_floor);
             register_forge(&mut registry, ctx, &directory)?;
         }
         if !ctx.config.deploy_lanes.is_empty() {
@@ -443,7 +444,11 @@ impl<C: Clock + 'static, I: IdFactory + 'static> crate::collectors::Collector
             }
             ForgeReadKind::Releases => ForgeReleasesCollector::new(directory).collect(project),
             ForgeReadKind::Labels => ForgeLabelsCollector::new(directory).collect(project),
-            ForgeReadKind::Posture => ForgePostureCollector::new(directory).collect(project),
+            ForgeReadKind::Posture => ForgePostureCollector::new(directory).collect_scheduled(
+                project,
+                Some(ctx.config.forge_posture_interval_seconds),
+                _now,
+            ),
             ForgeReadKind::Notifications => {
                 ForgeNotificationsCollector::new(directory, Some(&prior), &self.actors)
                     .collect(project)
@@ -949,6 +954,7 @@ impl ErrorName for VogtError {
             Self::GitUnavailable(_) => "GitUnavailable",
             Self::GitCommandFailed(_) => "GitCommandFailed",
             Self::GitHubUnavailable(_) => "GitHubUnavailable",
+            Self::GitHubRateLimited(_) => "GitHubRateLimited",
             Self::PeerUnavailable { .. } => "PeerUnavailable",
             Self::ForgejoUnavailable(_) => "ForgejoUnavailable",
             Self::TransitionRejected { .. } => "TransitionRejected",
