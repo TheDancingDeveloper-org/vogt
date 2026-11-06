@@ -15,6 +15,11 @@ registry. An operation that is absent there is absent from the product's CLI,
 REST, and MCP surfaces. The engine consumes the core; the core never imports or
 depends on the engine.
 
+That split describes `main`. A Rust core that replaces the Python one, and
+sessions that run as Kubernetes pods, are being built on the graft line
+`rust-2`. [`docs/ROADMAP.md`](docs/ROADMAP.md) has the current state of both
+lines, the target, and the work items in order.
+
 ## Start here
 
 - This file applies repository-wide. Before changing `engine/`, `web/`, or
@@ -34,6 +39,9 @@ depends on the engine.
 - Use `docs/ARCHITECTURE.md` for architecture, domain decisions, and behavior that
   exists. Do not describe aspirations as current behavior or create a
   competing design document.
+- Read `docs/ROADMAP.md` before a change that touches the core/engine
+  boundary, how a session is started, or where a session's files live. It is
+  the one place for the target state; update it when a decision changes.
 - Keep a change scoped to the requested behavior. A nearby cleanup belongs in
   the same change only when it is necessary to make that behavior correct.
 
@@ -95,6 +103,8 @@ Rust engine front door <- Solid PWA <- browser / installed PWA / Android shell
 - `docs/` — `USER_GUIDE.md` describes use, `ENGINE.md` the engine and wire
   contract, `DEPLOYMENT.md` production operation, `CUSTOMISATION.md` supported
   extension points, and `CONTRIBUTING.md` the contributor workflow.
+  `ROADMAP.md` is the current and target state; `design/` holds
+  single-feature designs.
 - `design/` is intentionally empty and tracked to satisfy Vogt's own project
   contract.
 
