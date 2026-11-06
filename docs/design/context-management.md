@@ -382,3 +382,14 @@ Initiative `context-management-for-oversight-and-worker-sessions` (weight
 
 C5 (checkpoints), C10 (profiles), C9 (repo map) and C12 (guidance) are
 folded into the items above or wait on WI-956 slices 4 and 5.
+
+## In a pod session
+
+Engine/core state owns budgets, blocked reports, digests, hand-offs and
+scheduling; the pod owns only the current CLI context and its clone. Hooks and
+settings are installed by `session-agent` in the pod, while budget/policy
+checks remain engine-side. Hibernate flushes the conversation and starts a
+fresh pod on wake; it does not checkpoint files or caches. Stop and engine
+restart discard the live pod link (restart recovery is hibernated today), and
+there is no shared workspace, sibling worktree or engine loopback in a pod.
+Any design step that requires those is a gap, not an implicit pod feature.

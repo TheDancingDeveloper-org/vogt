@@ -280,3 +280,17 @@ follows, and items 5–7 can run in parallel after it. Item 8 is last.
 - Is an agent token with `FilesystemWrite` allowed to attach to *another*
   session, or should attaching to another session be limited to people
   (WI-983 person gate)?
+
+## In a pod session
+
+The attachment upload and path selection are engine file APIs scoped to the
+engine's `workspace_root`; they do not write directly into a session pod's
+`/work`. A pod can read an attachment only when the engine's session contract
+explicitly makes the file available; the pod clone and private cache are not
+an attachment store. The engine retains uploaded files according to its
+workspace/state policy; pod-local copies disappear on stop, hibernate or
+restart, and wake starts a fresh clone. The upload capability check remains
+engine-side; no pod hook or loopback assumption changes it. The current design
+therefore has a deployment gap if composer attachments must be visible inside
+pod `/work`: add a mediated transfer or shared storage before claiming that
+behavior.

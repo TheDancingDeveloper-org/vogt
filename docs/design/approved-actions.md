@@ -581,3 +581,14 @@ Still open:
    Does adopting approved actions change the case for leaving identity mode?
 5. **Delegable Ansible plays.** Should a play tagged `non_destructive` become
    delegable (§4.4), or does `ansible.apply` stay person-only?
+
+## In a pod session
+
+The core owns the approved action and audit; the engine validates the live
+session, holds its machine identity and performs the effect. The pod only
+requests through the engine endpoint using its bootstrap/broker credential;
+it has no host path, sibling worktree, Infisical identity or Kubernetes API
+access. Settings and policy hooks run inside the pod, but approval checks do
+not move into the pod. Action state survives pod stop on the engine volume;
+its process, `/work` and local caches do not. A restart loses the live link,
+so an action must not rely on pod re-adoption.

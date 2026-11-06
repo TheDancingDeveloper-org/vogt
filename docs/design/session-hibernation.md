@@ -270,3 +270,16 @@ before slice 3 lands.
 8. **Pre-accepting folder trust and external `CLAUDE.md` imports** for any
    cwd inside `workspace_root`. On by default, with
    `ENGINE_AGENT_QUIET_ONBOARDING=0` to opt out.
+
+## In a pod session
+
+The hibernation record, screen and successful account/transcript write-back
+live on the engine's persistent `state_dir`; the pod's `/work`, private cache
+and process tree do not. Before deleting a pod the engine requests a flush;
+an unconfirmed flush refuses hibernation, while an unattached pod contributes
+only its last write-back. Wake creates a new pod and clone, then resumes the
+saved conversation. Stop/kill/exit remove the pod and its unpersisted files.
+A graceful engine restart archives state but currently loses the live pod link;
+the reconciler deletes the orphan and the session returns hibernated (WI-3205).
+The engine-side hibernation policy and record are authoritative; the pod's
+session hook and CLI transcript are flush participants, not policy owners.
