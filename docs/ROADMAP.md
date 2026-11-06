@@ -424,7 +424,7 @@ by sentence.
 | `README.md` | Current. | Near identical. |
 | `docs/ARCHITECTURE.md` | Current for the released product. | WI-3378 documents core selection, crate ownership and both session paths. |
 | `docs/ENGINE.md` | Current for local sessions. | WI-3378 clarifies pod hibernation, resources, files/git, worktree cleanup and tasks. Other main-line reconciliation remains separate. |
-| `docs/DEPLOYMENT.md` | Current (0.7.27). Compose only. | Adds `VOGT_CORE_IMPL` and the pod settings; version strings behind (0.7.22). Neither line has a Kubernetes chapter. |
+| `docs/DEPLOYMENT.md` | Current (0.7.27). Compose only. | WI-3379 adds the Kubernetes chapter, complete pod-settings inventory and generic manifest example; live cluster validation remains operator-owned. |
 | `docs/CONTRIBUTING.md`, `docs/ci.md` | Current. | Behind `main` (90 and 102 lines). |
 | `docs/AGENT_GUIDE.md`, `docs/API.md` | Current. | Behind `main` (178 and 100 lines). Not checked for what changes in a pod. |
 | `docs/USER_GUIDE.md`, `docs/CONFIG.md`, `docs/CUSTOMISATION.md` | Current. | Small differences. `CONFIG.md` is generated. |

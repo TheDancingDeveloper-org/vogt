@@ -1,0 +1,209 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: vogt
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: vogt-sessions
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vogt-engine
+  namespace: vogt
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vogt-session
+  namespace: vogt-sessions
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: vogt-engine
+  namespace: vogt-sessions
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [create, get, list, delete]
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [create]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: vogt-engine
+  namespace: vogt-sessions
+subjects:
+  - kind: ServiceAccount
+    name: vogt-engine
+    namespace: vogt
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: vogt-engine
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: vogt-session
+value: 1000
+globalDefault: false
+description: Session priority; coordinate this value with other cluster workloads.
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: sessions
+  namespace: vogt-sessions
+spec:
+  hard:
+    pods: "6"
+    requests.cpu: "6"
+    requests.memory: 12Gi
+    limits.cpu: "12"
+    limits.memory: 24Gi
+    requests.ephemeral-storage: 12Gi
+    limits.ephemeral-storage: 120Gi
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: session-isolation
+  namespace: vogt-sessions
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: vogt
+          podSelector:
+            matchLabels:
+              app: vogt-engine
+      ports:
+        - {protocol: TCP, port: 8910}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: state
+  namespace: vogt
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: engine-config
+  namespace: vogt
+data:
+  engine.toml: |
+    workspace_root = "/var/lib/vogt/core/repos"
+    state_dir = "/var/lib/vogt/engine"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vogt-engine
+  namespace: vogt
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: vogt-engine
+  template:
+    metadata:
+      labels:
+        app: vogt-engine
+    spec:
+      serviceAccountName: vogt-engine
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: engine
+          image: REPLACE_ENGINE_IMAGE_WITH_DIGEST
+          env:
+            - {name: ENGINE_BIND, value: "0.0.0.0:8910"}
+            - {name: ENGINE_CONFIG, value: /etc/vogt/engine.toml}
+            - {name: VOGT_DATA_DIR, value: /var/lib/vogt/core}
+            - {name: VOGT_ENGINE_STATE_DIR, value: /var/lib/vogt/engine}
+            - {name: VOGT_CORE_IMPL, value: rust}
+            - {name: VOGT_CORE_URL, value: "http://127.0.0.1:8911"}
+            - {name: VOGT_ENGINE_URL, value: "http://127.0.0.1:8910"}
+            - {name: VOGT_CORE_TOKEN_FILE, value: /run/vogt/core-token}
+            - {name: VOGT_BOOTSTRAP_CORE_TOKEN_FILE, value: /run/vogt/core-token}
+            - {name: ENGINE_SESSION_BACKEND, value: pod}
+            - {name: ENGINE_POD_BACKENDS_ENABLED, value: "true"}
+            - {name: ENGINE_POD_NAMESPACE, value: vogt-sessions}
+            - {name: ENGINE_POD_SERVICE_ACCOUNT, value: vogt-session}
+            - {name: ENGINE_POD_ENGINE_ID, value: example-engine}
+            - {name: ENGINE_POD_ENGINE_ENDPOINT, value: "http://vogt-engine.vogt.svc:8910"}
+            - {name: ENGINE_POD_ALLOW_INSECURE_ENDPOINT, value: "true"}
+            - {name: ENGINE_POD_IMAGE, value: REPLACE_SESSION_IMAGE_WITH_DIGEST}
+            - {name: ENGINE_POD_GRAFT_ENDPOINT, value: REPLACE_GRAFT_ENDPOINT}
+            - {name: ENGINE_POD_GRAFT_REPO, value: REPLACE_GRAFT_REPOSITORY}
+            - {name: ENGINE_POD_GRAFT_LINE, value: REPLACE_GRAFT_LINE}
+            - {name: ENGINE_GRAFT_MINT_TOKEN_FILE, value: /run/vogt/graft-mint-token}
+            - {name: ENGINE_POD_CLI, value: codex}
+            - {name: ENGINE_POD_PRIORITY_CLASS, value: vogt-session}
+            - {name: ENGINE_POD_CACHE_PVC, value: ""}
+            - {name: ENGINE_POD_CACHE_NODE, value: ""}
+            - {name: ENGINE_POD_CACHE_ENV_CONFIG_MAP, value: ""}
+            - {name: ENGINE_POD_CACHE_SECRET, value: ""}
+            - {name: ENGINE_POD_KACHE_CONFIG_MAP, value: ""}
+            - {name: ENGINE_POD_RESOURCE_REQUESTS, value: "cpu=250m,memory=512Mi,ephemeral-storage=2Gi"}
+            - {name: ENGINE_POD_RESOURCE_LIMITS, value: "cpu=2,memory=4Gi,ephemeral-storage=20Gi"}
+          ports:
+            - {name: http, containerPort: 8910}
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+          resources:
+            requests: {cpu: 250m, memory: 512Mi}
+            limits: {cpu: "2", memory: 4Gi}
+          volumeMounts:
+            - {name: state, mountPath: /var/lib/vogt}
+            - {name: config, mountPath: /etc/vogt, readOnly: true}
+            - {name: credentials, mountPath: /run/vogt, readOnly: true}
+      volumes:
+        - name: state
+          persistentVolumeClaim: {claimName: state}
+        - name: config
+          configMap: {name: engine-config}
+        - name: credentials
+          secret: {secretName: engine-credentials, defaultMode: 256}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vogt-engine
+  namespace: vogt
+spec:
+  selector:
+    app: vogt-engine
+  ports:
+    - {name: http, port: 8910, targetPort: http}
