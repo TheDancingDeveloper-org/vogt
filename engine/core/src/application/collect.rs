@@ -904,6 +904,7 @@ impl ErrorName for VogtError {
             Self::BypassRefused(_) => "BypassRefused",
             Self::RoleRefused(_) => "RoleRefused",
             Self::GrantRefused(_) => "GrantRefused",
+            Self::CleanRefused(_) => "CleanRefused",
             Self::ReportRefused(_) => "ReportRefused",
             Self::PersonRequired(_) => "PersonRequired",
             Self::EngineOnly(_) => "EngineOnly",
