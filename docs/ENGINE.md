@@ -4652,6 +4652,15 @@ MCP, and the session engine itself — are in
 
 #### Session pod boot
 
+`engine/Dockerfile.pod` installs the same Codex fork release and Klaudia
+commit as the stack image, from `engine/agent-versions.env`, rather than
+stock npm Codex. The fork and its companion binaries are checksum-checked;
+Klaudia is built with the manifest's checksum-pinned Go toolchain. The shared
+managed requirements are installed at `/etc/codex/requirements.toml`, with
+root ownership and permissions checked at build time. The session agent
+checks the policy inside the pod before launching Codex. Architectures without
+a published fork checksum cannot run Codex; no stock fallback is installed.
+
 The engine creates one pod per session from the `vogt-session-base` image,
 whose command is `deploy/session-entrypoint.sh`. The pod spec carries no
 token at all. The single-use bootstrap credential lives in a per-session
