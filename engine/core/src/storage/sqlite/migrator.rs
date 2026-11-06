@@ -701,6 +701,47 @@ mod tests {
     }
 
     #[test]
+    fn a_main_schema_30_database_opens_without_reapplying_migrations() {
+        let dir = scratch("main-schema-30");
+        let path = dir.join("declared.sqlite3");
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../src/vogt/storage/sqlite/migrations/declared");
+        let mut conn = connect(&path).unwrap();
+        migrate(&mut conn, "declared", Some(&source), "main/1", NOW).unwrap();
+        assert_eq!(applied_version(&conn).unwrap(), 30);
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES ('instance_id', 'inst_main')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let mut conn = connect_with(&path, false, "normal").unwrap();
+        let report = migrate(&mut conn, "declared", None, "rust/1", NOW).unwrap();
+        assert!(report.applied.is_empty());
+        assert_eq!(applied_version(&conn).unwrap(), 30);
+        let instance: String = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'instance_id'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(instance, "inst_main");
+        let comments_sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE name = 'comments'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(comments_sql.contains("'verdict', 'verification'"));
+        conn.prepare("SELECT mcp_extra FROM projects").unwrap();
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn an_old_database_opens_and_migrates_forward() {
         // A database written by an earlier build (only 0001) upgrades through
         // the embedded SQL and keeps the row it already held.
