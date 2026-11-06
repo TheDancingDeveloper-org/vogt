@@ -20,6 +20,10 @@
     500
   ],
   [
+    "comment_refused",
+    403
+  ],
+  [
     "conflict",
     409
   ],

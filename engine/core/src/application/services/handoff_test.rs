@@ -180,7 +180,7 @@ fn fields_on_a_note_are_refused() {
     )
     .unwrap_err();
     assert!(
-        matches!(&err, VogtError::InvalidRequest(m) if m.contains("belong on a handoff comment")),
+        matches!(&err, VogtError::InvalidRequest(m) if m.contains("belong on a comment of kind handoff")),
         "{err:?}"
     );
 }

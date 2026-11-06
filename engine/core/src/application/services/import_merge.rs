@@ -1674,6 +1674,8 @@ fn apply_plan<T: WriteTxn>(
             created_at: now,
             kind: "note".into(),
             handoff: None,
+            verdict: None,
+            verification: None,
         })?;
     }
     Ok(())

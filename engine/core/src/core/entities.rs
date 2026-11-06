@@ -658,11 +658,16 @@ pub struct Comment {
     pub actor_display_name: String,
     pub body: String,
     pub created_at: Moment,
-    /// `note` or `handoff`. A hand-off carries `handoff`; a note does not.
+    /// `note`, `handoff`, `verdict` or `verification` (WI-1319). Each
+    /// structured kind carries its own field set; a note carries none.
     #[serde(default = "note_kind")]
     pub kind: String,
     #[serde(default)]
     pub handoff: Option<serde_json::Value>,
+    #[serde(default)]
+    pub verdict: Option<serde_json::Value>,
+    #[serde(default)]
+    pub verification: Option<serde_json::Value>,
 }
 
 fn note_kind() -> String {
