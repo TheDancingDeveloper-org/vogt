@@ -9,6 +9,7 @@ use serde_json::{json, Value};
 
 use crate::adapters::engine::EngineClient;
 use crate::application::context::{build_context, Built};
+use crate::application::workspaces;
 use crate::application::writes::audited_write;
 use crate::core::{ActorKind, CodingSession, Moment, Principal, Project, StepClock, SweepOutcome};
 use crate::errors::VogtError;
@@ -238,6 +239,72 @@ fn rows_join_project_session_and_merged() {
     assert_eq!(
         list(&built, json!({"alive": false})).unwrap(),
         vec![unlinked.clone()]
+    );
+}
+
+#[test]
+fn disk_candidates_only_suggest_stopped_merged_worktrees() {
+    let rows: Rows = Arc::new(Mutex::new(Some(vec![
+        row("eng-1", "wi-1-landed", false),
+        row(UNLINKED, "wi-2-open", false),
+    ])));
+    let built = wired("disk-candidates", &rows);
+    let full = json!({"needs_attention": true});
+    let candidates =
+        crate::with_ctx!(&built, |ctx| workspaces::disk_candidates(ctx, &full)).unwrap();
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0]["branch"], "wi-1-landed");
+    assert!(candidates[0]["call"]
+        .as_str()
+        .unwrap()
+        .contains("mode='remove'"));
+    for disk in [Value::Null, json!({"needs_attention": false})] {
+        assert!(
+            crate::with_ctx!(&built, |ctx| workspaces::disk_candidates(ctx, &disk))
+                .unwrap()
+                .is_empty()
+        );
+    }
+    rows.lock().unwrap().as_mut().unwrap()[0]["alive"] = json!(true);
+    assert!(
+        crate::with_ctx!(&built, |ctx| workspaces::disk_candidates(ctx, &full))
+            .unwrap()
+            .is_empty()
+    );
+    *rows.lock().unwrap() = None;
+    assert!(
+        crate::with_ctx!(&built, |ctx| workspaces::disk_candidates(ctx, &full))
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn disk_candidates_are_size_ordered_and_limited() {
+    let mut candidates = Vec::new();
+    for size in 1..=7 {
+        let mut candidate = row("eng-1", "wi-1-landed", false);
+        candidate["path"] = json!(format!("/w/candidate-{size}"));
+        candidate["size_bytes"] = json!(size);
+        candidates.push(candidate);
+    }
+    let mut checkout = row("eng-1", "wi-1-landed", false);
+    checkout["kind"] = json!("checkout");
+    checkout["size_bytes"] = json!(1000);
+    candidates.push(checkout);
+    let rows = Arc::new(Mutex::new(Some(candidates)));
+    let built = wired("disk-order", &rows);
+    let result = crate::with_ctx!(&built, |ctx| workspaces::disk_candidates(
+        ctx,
+        &json!({"needs_attention": true})
+    ))
+    .unwrap();
+    assert_eq!(
+        result
+            .iter()
+            .map(|row| row["size_bytes"].as_i64().unwrap())
+            .collect::<Vec<_>>(),
+        vec![7, 6, 5, 4, 3]
     );
 }
 

@@ -2206,6 +2206,80 @@ mod tests {
     }
 
     #[test]
+    fn land_pins_the_tip_and_preserves_the_workers_checkout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = dirty_checkout(&tmp);
+        std::fs::write(repo.join("f.txt"), "base\n").unwrap();
+        git(&repo, &["checkout", "-B", "landing-test", "origin/main"]);
+        std::fs::write(repo.join("land.txt"), "reviewed change\n").unwrap();
+        git(&repo, &["add", "land.txt"]);
+        git(&repo, &["commit", "-m", "reviewed change"]);
+        git(&repo, &["push", "origin", "landing-test"]);
+        let head = git_output(&repo, &["rev-parse", "HEAD"])
+            .unwrap()
+            .trim()
+            .to_string();
+        let before = git_output(&repo, &["rev-parse", "origin/main"])
+            .unwrap()
+            .trim()
+            .to_string();
+        std::fs::write(repo.join("land.txt"), "uncommitted work\n").unwrap();
+        let dirty = git_output(&repo, &["status", "--porcelain"]).unwrap();
+        let mut request = LandReq {
+            branch: "landing-test".into(),
+            onto: "main".into(),
+            head_sha: before.clone(),
+            mode: LandMode::FastForward,
+            forbidden_text: Vec::new(),
+            linear_history: true,
+        };
+        assert!(
+            matches!(land(&repo, &request, None), Err(ApiError::Conflict(message)) if message.contains("stale tip"))
+        );
+        request.head_sha = head.clone();
+        request.forbidden_text = vec!["reviewed change".into()];
+        assert!(
+            matches!(land(&repo, &request, None), Err(ApiError::Conflict(message)) if message.contains("forbidden text"))
+        );
+        let remote = tmp.path().join("origin.git");
+        assert_eq!(
+            git_output(&remote, &["rev-parse", "main"]).unwrap().trim(),
+            before
+        );
+        request.forbidden_text.clear();
+        let result = land(&repo, &request, None).unwrap();
+        assert_eq!(result.onto_before, before);
+        assert_eq!(result.onto_after, head);
+        assert_eq!(result.commits, vec![head.clone()]);
+        assert!(!result.rebased);
+        assert_eq!(
+            git_output(&remote, &["rev-parse", "main"]).unwrap().trim(),
+            head
+        );
+        assert_eq!(
+            git_output(&repo, &["status", "--porcelain"]).unwrap(),
+            dirty
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.join("land.txt")).unwrap(),
+            "uncommitted work\n"
+        );
+        assert_eq!(
+            git_output(&repo, &["branch", "--show-current"])
+                .unwrap()
+                .trim(),
+            "landing-test"
+        );
+        assert_eq!(
+            git_output(&repo, &["worktree", "list", "--porcelain"])
+                .unwrap()
+                .matches("worktree ")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn workspace_capture_names_the_tree_and_its_baseline() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = dirty_checkout(&tmp);

@@ -93,6 +93,12 @@ fn status_and_sweep_carry_the_disk_row() {
         assert_eq!(row["needs_attention"], json!(true), "{which}");
         assert_eq!(row["free_bytes"], json!(100), "{which}");
         assert_eq!(row["used_percent"], json!(90), "{which}");
+        if which == "sweep" {
+            assert_eq!(
+                sweep_op(&built, json!({"reason": "test"})).unwrap()["disk_candidates"],
+                json!([])
+            );
+        }
     }
 }
 

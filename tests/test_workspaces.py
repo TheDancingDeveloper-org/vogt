@@ -11,6 +11,7 @@ import pytest
 from vogt.adapters.engine import EngineClient, EngineUnavailable
 from vogt.application.context import AppContext
 from vogt.application.models import (
+    EngineDiskStatus,
     RegisterProjectParams,
     StartSessionParams,
     WorkspaceCleanParams,
@@ -22,12 +23,29 @@ from vogt.application.services import (
     workspace_clean,
     workspace_list,
 )
+from vogt.application.services.workspaces import disk_candidates
 from vogt.errors import CleanRefused, Conflict, InvalidRequest, NotFound
 from vogt.storage.observed_types import PendingObservation
 
 from tests.test_session_drive import ROOT, WHY, Engine, _as
 
 UNLINKED = "0b0e5f0c-1111-4222-8333-944455556666"
+
+
+def test_disk_candidates_only_suggest_stopped_merged_worktrees(
+    wired: AppContext, engine: WorkspaceEngine
+) -> None:
+    started = start_session(wired, StartSessionParams(project="vogt", reason=WHY))
+    engine.rows = [_row(started.session.engine_session_id, "wi-1-landed", alive=False)]
+    assert disk_candidates(wired, None) == []
+    assert disk_candidates(wired, EngineDiskStatus(needs_attention=False)) == []
+    full = EngineDiskStatus(needs_attention=True)
+    (candidate,) = disk_candidates(wired, full)
+    assert candidate.branch == "wi-1-landed"
+    assert "mode='remove'" in candidate.call
+    assert engine.cleans == []
+    engine.rows[0]["alive"] = True
+    assert disk_candidates(wired, full) == []
 
 
 class WorkspaceEngine(Engine):

@@ -241,12 +241,20 @@ fn sweep<C: Clock + 'static, I: IdFactory + 'static>(
         }
     }
 
+    let disk = crate::application::instance::workspace_disk(ctx).unwrap_or(Value::Null);
+    let candidates =
+        crate::application::workspaces::disk_candidates(ctx, &disk).unwrap_or_else(|error| {
+            tracing::warn!(target: "vogt.collect", error = %error,
+                "sweep could not list workspace clean candidates");
+            Vec::new()
+        });
     Ok(json!({
         "scope": project_slug.unwrap_or_else(|| "all registered projects".to_string()),
         "projects": projects.len(),
         "subjects": subjects,
         "dep_refs": dep_refs,
-        "disk": crate::application::instance::workspace_disk(ctx).unwrap_or(Value::Null),
+        "disk": disk,
+        "disk_candidates": candidates,
         "reports": reports.iter().map(report_view).collect::<Vec<_>>(),
     }))
 }
