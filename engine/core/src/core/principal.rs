@@ -1,6 +1,5 @@
 //! Who is acting. Ports the principal helpers of `src/vogt/core/`.
 
-#![allow(dead_code)] // Domain vocabulary the bin re-exports; tests and later services use what the bin does not.
 pub const LOCAL_SCHEME: &str = "local";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -101,6 +100,7 @@ fn passwd_name() -> Option<String> {
 mod tests {
     use super::*;
 
+    #[test]
     fn a_principal_needs_an_identity() {
         assert!(Principal::new("  ", ActorKind::Human, "nobody").is_err());
         let local = local_principal("sprooty");
