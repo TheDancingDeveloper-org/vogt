@@ -8,6 +8,10 @@ Companion documents: [`SCHEMA.md`](SCHEMA.md) (tables and data topology),
 session engine's own reference), [`USER_GUIDE.md`](USER_GUIDE.md) (driving
 it) and [`CONFIG.md`](CONFIG.md) (the generated settings reference).
 
+It does not describe plans. The Rust core and pod-backed sessions being built
+on the `rust-2` line, and the shape they lead to, are in
+[`ROADMAP.md`](ROADMAP.md).
+
 ---
 
 ## 1. Mission
