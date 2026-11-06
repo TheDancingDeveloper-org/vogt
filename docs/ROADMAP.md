@@ -34,6 +34,7 @@ settles a question in §6 updates this file in the same change.
 | **Where a session runs** | A PTY inside the engine's container. | Per template: a PTY in the container, or a Kubernetes pod. | A pod per session. The local PTY backend is removed last. |
 | **A session's workspace** | A worktree or clone in the workspace folder on the engine's host, shared by every session. | The pod's own clone of one repository, at `/work`. | A clean clone per session, with the workspace-level agent configuration mounted read-only. |
 | **Deployment** | One `vogt-stack` container and the voice sidecar, run by Compose. | That, or a Kubernetes Deployment (engine, core and PWA in one pod) with session pods in a second namespace. | The Kubernetes shape for pod sessions. What the single-host Compose shape runs is open (§6). |
+| **Source control** | Git throughout. A project's landing policy can name graft, but only as text in the brief. | Pods clone with graft only; everything else is git only. | A project has a source, git or graft, behind one provider interface. Git is the default. |
 | **How a change lands** | graft line `backlog-1`, batched into a pull request to `main`. | graft line `rust-2`, rebased onto `main` when needed. | One line. |
 
 The two changes are developed together on `rust-2` and reach a deployment
@@ -224,7 +225,48 @@ This drops three things local sessions have, each with an open item: work
 that was never landed surviving a stop (WI-3370), Claude's per-project memory
 (WI-3371), and sessions for projects that don't land through graft (WI-3372).
 
-### 4.5 Placement and caches
+### 4.5 Source control: one interface, two providers
+
+Decided 2026-11-06 (WI-3392). The maintainers land their own work through
+graft, so graft is the primary mechanism there. Git stays fully supported and
+is the default for anyone else. Vogt itself names neither outside a provider.
+
+Today each is wired into a different set of code paths. Session pods on
+`rust-2` can only clone with graft. Local sessions, the engine's git routes,
+the PWA's git views, the collectors and the tracker's delivery evidence only
+know git. The target:
+
+- **A project has a source:** its kind (`git` or `graft`), where it lives,
+  its line or branch, and how work lands. It is defined once, in the
+  `contract` crate that the core and the engine both use.
+- **The core owns it and passes it on.** The project record holds the
+  source. The core gives it to the engine when a session starts, and the
+  engine gives it to the pod.
+- **A provider does six things:** check out into a folder; mint and revoke a
+  scoped credential; show status, diff and log; save unlanded work; land;
+  report what landed.
+- **Git and graft are the two providers.** Both run in the pod smoke. The
+  tracker reads "what landed" through the provider, so work landed through
+  graft shows as delivered (WI-3393).
+
+A pod cloning its session's project (WI-3369), repositories that land by git
+and a second repository (WI-3372), and saving unlanded work (WI-3370) are
+built on this interface, not as separate cases.
+
+### 4.6 The core and the engine stay two programs
+
+The port replaces the Python core with a Rust one behind the same loopback
+HTTP contract. It does not join the core and the engine. After the swap they
+are two Rust programs in one Cargo workspace that share no types: on `rust-2`
+today the core does not depend on the `contract` crate.
+
+That split is why knowledge goes missing between them. The core knows a
+session's project; the engine does the clone; nothing carried one to the
+other. Sharing the `contract` crate, starting with the source descriptor
+above, is the first step toward one codebase. Whether to go further and merge
+them into one process is open (§6).
+
+### 4.7 Placement and caches
 
 - **Placement is deployment configuration:** preferred nodes with weights,
   excluded nodes and tolerations, merged with a template's own policy
@@ -305,10 +347,12 @@ Parent WI-3364.
 - **Audits first:** WI-3365 (unlanded work in existing session copies),
   WI-3366 (files outside any repository), WI-3367 (what sessions read outside
   their own checkout), WI-3368 (which projects can run in a pod).
+- **The source provider interface first:** WI-3392. Three items below are
+  built on it.
 - **Build:** WI-3369 (a pod clones its session's project), WI-3373 and
   WI-3374 (the read-only workspace configuration), WI-3372 (repositories that
-  don't land through graft, and a second repository), WI-3370 (unlanded
-  work), WI-3371 (agent memory).
+  land by git, and a second repository), WI-3370 (unlanded work), WI-3371
+  (agent memory), WI-3393 (the tracker sees work landed through graft).
 
 ### 5.4 Cutover of a deployment
 
@@ -341,6 +385,7 @@ Rust-only core (WI-2506), remove the Python core and rename `vogt-core` to
 | 2026-11-03 | Claude accounts are bundles the engine leases to pods, with write-back. |
 | 2026-11-06 | Session pods prefer one node and spill over to others; placement is deployment configuration (WI-3343). |
 | 2026-11-06 | No shared working tree. A clean clone per session, plus the workspace-level agent configuration mounted read-only (WI-3364). |
+| 2026-11-06 | Graft is the maintainers' primary source-control mechanism; git stays supported and is the default; graft is not hard-coded. Both sit behind one source provider interface (WI-3392). |
 
 ### Open
 
@@ -348,6 +393,11 @@ Rust-only core (WI-2506), remove the Python core and rename `vogt-core` to
   Compose deployment with no cluster has nowhere to run a session. Nothing
   read for this review records what that deployment does: keep a local
   backend for it, require a single-node cluster, or something else.
+- **One program or two.** After the swap the core and the engine are both
+  Rust but still separate programs joined by HTTP (§4.6). Whether to merge
+  them into one process is undecided, and no work item covers it. It is a
+  question for after the swap; sharing the `contract` crate comes first
+  either way (WI-3392).
 - **Two pods on one Claude account.** Whether an OAuth refresh in one pod
   signs the other out (WI-3152).
 - **Unlanded work when a pod stops.** Save it as a draft, or refuse to stop a
