@@ -1,7 +1,6 @@
 //! Clock, timestamps and the deterministic test hooks. Ports the time helpers
 //! of `src/vogt/core/`.
 
-#![allow(dead_code)] // Domain vocabulary the bin re-exports; tests and later services use what the bin does not.
 use std::collections::BTreeMap;
 
 use crate::errors::VogtError;
@@ -90,6 +89,7 @@ pub trait Clock {
     }
 }
 
+#[allow(dead_code)] // Ported domain item; only tests use it until the service layer wires it.
 pub struct SystemClock;
 
 impl Clock for SystemClock {
@@ -775,6 +775,7 @@ mod tests {
         assert!(from_iso("10000-01-01").is_err());
     }
 
+    #[test]
     fn the_step_clock_advances_one_second_a_read() {
         let start = from_iso("2026-01-02T03:04:05Z").unwrap();
         let mut clock = StepClock::new(start);
