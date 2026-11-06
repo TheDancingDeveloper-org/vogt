@@ -19,6 +19,9 @@ use serde_json::{json, Value};
 use crate::adapters::forge::registry::ForgeClient;
 use crate::adapters::forge::{ForgeProvider, RepoRef, WriteBackOutcome, WriteBackResult};
 use crate::application::context::{AppContext, Built};
+use crate::application::models::views::{
+    VerdictFields, VerdictFieldsReviewerStartedBy, VerificationFields,
+};
 use crate::application::resolve;
 use crate::application::services::forge_writeback::writer_provider;
 use crate::application::upstream;
@@ -1540,8 +1543,9 @@ const WORK_BRANCH_BOUND: &str = "work.branch_bound";
 const WORK_ADOPT: &str = "work.adopt";
 const WORK_ADOPTED: &str = "work.adopted";
 
-/// Append a comment to a native item. `kind` is `note` or `handoff`; a
-/// hand-off stores its structured fields. The write-back record is written
+/// Append a comment to a native item. `kind` is `note`, `handoff`, `verdict`
+/// or `verification`; each structured kind stores its own fields, and a
+/// verdict or verification is first checked against who is posting it. The write-back record is written
 /// in the same transaction (`writeback.attempt`), outcome `skipped` while no
 /// forge provider is wired. An upstream item is the write-through and stores
 /// nothing.
@@ -1556,26 +1560,25 @@ where
         .ok_or_else(|| VogtError::InvalidRequest("body is required".into()))?;
     let reason = text_of(&params, "reason").unwrap_or_default();
     let kind = text_of(&params, "kind").unwrap_or_else(|| "note".to_string());
-    if kind != "note" && kind != "handoff" {
+    if !COMMENT_KINDS.contains(&kind.as_str()) {
         return Err(VogtError::InvalidRequest(format!(
             "unknown comment kind {}",
             crate::core::py_repr(&kind)
         )));
     }
-    if kind == "note"
-        && params
-            .get("handoff")
-            .map(|value| !value.is_null())
-            .unwrap_or(false)
-    {
-        return Err(VogtError::InvalidRequest(
-            "handoff fields belong on a handoff comment".into(),
-        ));
+    for field in &COMMENT_KINDS[1..] {
+        if kind != *field && params.get(*field).is_some_and(|value| !value.is_null()) {
+            return Err(VogtError::InvalidRequest(format!(
+                "{field} fields belong on a comment of kind {field}"
+            )));
+        }
     }
     let handoff = params
         .get("handoff")
         .filter(|value| !value.is_null())
         .cloned();
+    let verdict = structured::<VerdictFields>(&params, "verdict")?;
+    let verification = structured::<VerificationFields>(&params, "verification")?;
     let view = ctx.declared.read()?;
     let resolved = upstream::resolve_work_ref(ctx, &view, &reference)?;
     if view.work_item_by_ref(&reference)?.is_none() {
@@ -1587,11 +1590,11 @@ where
             .flatten()
             .ok_or_else(|| VogtError::NotFound(format!("no project for {reference}")))?;
         drop(view);
-        if kind == "handoff" {
+        if kind != "note" {
             // The forge thread has no kind: a hand-off posted there would
             // flatten to free text and the next session could not find it.
             return Err(VogtError::InvalidRequest(format!(
-                "{} is an upstream item; a hand-off comment is a local record and cannot be posted to the forge",
+                "{} is an upstream item; a {kind} comment is a local record and cannot be posted to the forge",
                 resolved.reference
             )));
         }
@@ -1609,6 +1612,19 @@ where
     let subject = linked_subject(&view, &item.id)?;
     drop(view);
     let writer = native_writer(ctx, &reference)?;
+    // Resolved before the write: the caller's own session row, read from its
+    // token, never from the parameters.
+    let agent = ctx.principal.kind == crate::core::ActorKind::Agent;
+    let engine_id = if agent && (kind == "verdict" || kind == "verification") {
+        crate::application::session_commit::caller_engine_session_id(ctx)?
+    } else {
+        None
+    };
+    let caller = Caller {
+        agent,
+        identity_ref: ctx.principal.identity_ref.clone(),
+        engine_id,
+    };
     let plan = plan_writeback(
         crate::core::WriteBackAction::Comment,
         project.as_ref(),
@@ -1629,6 +1645,8 @@ where
     let (stored, outcome) =
         audited_write(&mut writing, WORK_COMMENT, &reason, move |txn, actor| {
             let item = resolve::work_item(txn, &reference)?;
+            let (verdict, verification) =
+                authorize_structured(txn, &caller, &item, verdict, verification)?;
             let now = super::now_of(&clock);
             let comment = Comment {
                 id: super::next_id(&ids, "cmt"),
@@ -1639,6 +1657,8 @@ where
                 created_at: now,
                 kind: kind.clone(),
                 handoff: handoff.clone(),
+                verdict,
+                verification,
             };
             txn.insert_comment(&comment)?;
             let record = record_writeback(
@@ -1665,6 +1685,121 @@ where
         "comment": stored,
         "write_back": outcome,
     }))
+}
+
+const COMMENT_KINDS: [&str; 4] = ["note", "handoff", "verdict", "verification"];
+
+const VERDICT_RULE: &str = "a verdict is posted by a person, or by a review session started by a person or oversight, on the item it reviews";
+const VERIFICATION_RULE: &str = "a verification is posted by someone other than the worker";
+
+/// Who is commenting, read from the principal before the write opens.
+struct Caller {
+    agent: bool,
+    identity_ref: String,
+    engine_id: Option<String>,
+}
+
+/// A structured field set off the (already validated) parameters.
+fn structured<T: serde::de::DeserializeOwned>(
+    params: &Value,
+    field: &str,
+) -> Result<Option<T>, VogtError> {
+    params
+        .get(field)
+        .filter(|value| !value.is_null())
+        .map(|value| {
+            serde_json::from_value(value.clone())
+                .map_err(|_| VogtError::InvalidRequest(format!("{field} fields are malformed")))
+        })
+        .transpose()
+}
+
+/// Whether any of `ids` is the session named by the item's latest hand-off.
+fn is_worker(view: &impl ReadView, item: &WorkItem, ids: &[&str]) -> Result<bool, VogtError> {
+    for prior in view.comments_for(&item.id, 500, true)? {
+        if prior.kind == "handoff" {
+            if let Some(handoff) = &prior.handoff {
+                return Ok(handoff
+                    .get("session")
+                    .and_then(Value::as_str)
+                    .is_some_and(|session| ids.contains(&session)));
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// Who may post a verdict or verification (WI-1319), and the filled fields.
+/// Ports `_authorize_structured`: every fact comes from the acting principal
+/// and the session store; the reviewer and `by` fields a caller supplies are
+/// overwritten.
+fn authorize_structured(
+    view: &impl ReadView,
+    caller: &Caller,
+    item: &WorkItem,
+    verdict: Option<VerdictFields>,
+    verification: Option<VerificationFields>,
+) -> Result<(Option<Value>, Option<Value>), VogtError> {
+    let acting = || -> Result<Option<crate::core::CodingSession>, VogtError> {
+        match caller.engine_id.as_deref() {
+            Some(id) => view.session_by_engine_id(id),
+            None => Ok(None),
+        }
+    };
+    if let Some(mut verdict) = verdict {
+        if !caller.agent {
+            verdict.reviewer_session = None;
+            verdict.reviewer_started_by = Some(VerdictFieldsReviewerStartedBy::Person);
+            return Ok((Some(to_value(&verdict)), None));
+        }
+        let refused = |why: String| VogtError::CommentRefused(format!("{VERDICT_RULE}: {why}"));
+        let session = acting()?.ok_or_else(|| refused("this caller is not a session".into()))?;
+        if session.purpose.as_deref() != Some("review") {
+            return Err(refused("this session is not a review".into()));
+        }
+        let started_by = match session.started_by_kind.as_deref() {
+            Some("person") => VerdictFieldsReviewerStartedBy::Person,
+            Some("oversight") => VerdictFieldsReviewerStartedBy::Oversight,
+            other => {
+                return Err(refused(format!(
+                    "this review was started by {}",
+                    other
+                        .filter(|text| !text.is_empty())
+                        .unwrap_or("an unknown starter")
+                )))
+            }
+        };
+        if session.work_item_id.as_deref() != Some(item.id.as_str()) {
+            return Err(refused(format!(
+                "this review is not bound to {}",
+                item.reference
+            )));
+        }
+        if is_worker(view, item, &[&session.id, &session.engine_session_id])? {
+            return Err(refused("this session is the worker".into()));
+        }
+        verdict.reviewer_session = Some(session.engine_session_id);
+        verdict.reviewer_started_by = Some(started_by);
+        return Ok((Some(to_value(&verdict)), None));
+    }
+    if let Some(mut verification) = verification {
+        let session = acting()?;
+        if let Some(session) = &session {
+            if is_worker(view, item, &[&session.id, &session.engine_session_id])? {
+                return Err(VogtError::CommentRefused(VERIFICATION_RULE.into()));
+            }
+        }
+        verification.by = Some(match session {
+            None => caller.identity_ref.clone(),
+            Some(session) => session.engine_session_id,
+        });
+        return Ok((None, Some(to_value(&verification))));
+    }
+    Ok((None, None))
+}
+
+fn to_value<T: serde::Serialize>(fields: &T) -> Value {
+    serde_json::to_value(fields).unwrap_or(Value::Null)
 }
 
 /// Post a comment on an upstream item's forge thread. Ports
@@ -1720,6 +1855,8 @@ where
                 created_at: super::now_of(&clock),
                 kind: "note".to_string(),
                 handoff: None,
+                verdict: None,
+                verification: None,
             };
             let comment_id = comment.id.clone();
             let payload = serde_json::to_value(&comment).unwrap_or(Value::Null);

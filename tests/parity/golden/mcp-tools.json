@@ -1759,6 +1759,135 @@
             },
             "title": "HandoffFields",
             "type": "object"
+          },
+          "VerdictFields": {
+            "additionalProperties": false,
+            "description": "The structured half of a review verdict (WI-1319, design §2.2).\n\n`verdict=\"blockers\"` names at least one blocker. `reviewer_session` and\n`reviewer_started_by` are filled by the core from the acting session's\nrecord; values a caller supplies are ignored.",
+            "properties": {
+              "head_sha": {
+                "title": "Head Sha",
+                "type": "string"
+              },
+              "base": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Base"
+              },
+              "verdict": {
+                "enum": [
+                  "no_blockers",
+                  "blockers"
+                ],
+                "title": "Verdict",
+                "type": "string"
+              },
+              "blockers": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "title": "Blockers",
+                "type": "array"
+              },
+              "deployment_paths_covered": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "title": "Deployment Paths Covered",
+                "type": "array"
+              },
+              "reviewer_session": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Reviewer Session"
+              },
+              "reviewer_started_by": {
+                "anyOf": [
+                  {
+                    "enum": [
+                      "person",
+                      "oversight"
+                    ],
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Reviewer Started By"
+              }
+            },
+            "required": [
+              "head_sha",
+              "verdict"
+            ],
+            "title": "VerdictFields",
+            "type": "object"
+          },
+          "VerificationFields": {
+            "additionalProperties": false,
+            "description": "The structured half of a verification (WI-1319, design §2.2).\n\n`by` is filled by the core from the acting actor; a supplied value is\nignored.",
+            "properties": {
+              "head_sha": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Head Sha"
+              },
+              "lane": {
+                "title": "Lane",
+                "type": "string"
+              },
+              "what": {
+                "title": "What",
+                "type": "string"
+              },
+              "evidence": {
+                "title": "Evidence",
+                "type": "string"
+              },
+              "by": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "By"
+              }
+            },
+            "required": [
+              "lane",
+              "what",
+              "evidence"
+            ],
+            "title": "VerificationFields",
+            "type": "object"
           }
         },
         "additionalProperties": false,
@@ -1775,10 +1904,12 @@
           },
           "kind": {
             "default": "note",
-            "description": "`note` (default) is an ordinary remark. `handoff` is the structured hand-off a fresh session starts from, and requires `handoff`.",
+            "description": "`note` (default) is an ordinary remark. `handoff` is the structured hand-off a fresh session starts from, and requires `handoff`. `verdict` is a review verdict, requires `verdict`, and is posted by a person or by a review session started by a person or oversight on the item it reviews. `verification` records a check, requires `verification`, and is posted by someone other than the worker.",
             "enum": [
               "note",
-              "handoff"
+              "handoff",
+              "verdict",
+              "verification"
             ],
             "title": "Kind",
             "type": "string"
@@ -1793,7 +1924,31 @@
               }
             ],
             "default": null,
-            "description": "The structured fields of a hand-off: branch, head_sha, base, done, remaining, touch_points, gates_run, blockers, session. Required when kind is `handoff`, refused on a note."
+            "description": "The structured fields of a hand-off: branch, head_sha, base, done, remaining, touch_points, gates_run, blockers, session. Required when kind is `handoff`, refused on any other kind."
+          },
+          "verdict": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/VerdictFields"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "The structured fields of a review verdict: head_sha, base, verdict (no_blockers | blockers), blockers (non-empty for `blockers`), deployment_paths_covered. reviewer_session and reviewer_started_by are filled by Vogt; supplied values are ignored. Required when kind is `verdict`, refused otherwise."
+          },
+          "verification": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/VerificationFields"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "The structured fields of a verification: head_sha, lane, what, evidence. `by` is filled by Vogt. Required when kind is `verification`, refused otherwise."
           },
           "reason": {
             "minLength": 1,
