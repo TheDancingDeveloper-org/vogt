@@ -3310,6 +3310,19 @@ the engine. A reconciler sweeps the namespace every `reconcile_interval` (15 s):
 it ends a live session whose pod failed, vanished or sat Pending too long, and
 deletes a pod that no live session owns.
 
+The built-in templates (used when the config file lists none) run on
+`ENGINE_SESSION_BACKEND` (or `VOGT_ENGINE_SESSION_BACKEND`): `local`
+(default) or `pod`, which needs `ENGINE_POD_BACKENDS_ENABLED`. Any other value
+refuses to start the engine. A template's own `backend` in the config file is
+kept as written.
+
+A pod template whose command names an agent CLI (`claude`, `codex` or
+`opencode`, bare or behind `vogt-agent-auth run --`) sets the pod's
+`VOGT_CLI` to that CLI and passes no argv. The session agent builds the
+command line, with the driven-session policy, the MCP set and the
+conversation. Any other command runs as given (`VOGT_SESSION_COMMAND`), and no
+command uses `ENGINE_POD_CLI` (default `codex`).
+
 Engines can share the namespace (dev and prod, or an old process during a
 rollout), so ownership is explicit:
 
