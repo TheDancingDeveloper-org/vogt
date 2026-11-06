@@ -280,12 +280,7 @@ pub struct Launch {
 /// is and what to do with it. Short and fixed, so it is quoting-proof and
 /// carries nothing of the brief into a `ps` listing.
 pub fn brief_instruction(path: &Path) -> String {
-    format!(
-        "Vogt started this session with a brief in {}. Read that file now. \
-         If it has a \"Task\" section, carry that task out; otherwise \
-         summarise the brief in one line and wait for instructions.",
-        path.display()
-    )
+    vogt_session_agent::brief_instruction(path)
 }
 
 /// Rewrite `command` so the agent CLI it names runs `model` at `effort`.

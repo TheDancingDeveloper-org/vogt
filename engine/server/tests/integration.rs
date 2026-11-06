@@ -17063,10 +17063,15 @@ mod pod_stream {
 
     impl Harness {
         async fn start(&self) -> Uuid {
+            self.start_body(json!({ "name": "pod-session", "template": "pod" }))
+                .await
+        }
+
+        async fn start_body(&self, body: Value) -> Uuid {
             let created: Value = self
                 .client
                 .post(format!("{}/api/sessions", self.base))
-                .json(&json!({ "name": "pod-session", "template": "pod" }))
+                .json(&body)
                 .send()
                 .await
                 .unwrap()
@@ -17438,6 +17443,12 @@ mod pod_stream {
         .unwrap();
         let config: Value = serde_json::from_slice(&config).unwrap();
         assert_eq!(config["hasCompletedOnboarding"], true);
+        // WI-3355: the pod's checkout is trusted, so Claude Code does not open
+        // at "Is this a project you trust?".
+        assert_eq!(
+            config["projects"]["/work"]["hasTrustDialogAccepted"], true,
+            "{config}"
+        );
 
         let session_token = body["session_token"].as_str().unwrap();
         let conversation = body["env"]["VOGT_SESSION_CONVERSATION_ID"]
@@ -17472,6 +17483,31 @@ mod pod_stream {
         assert!(std::fs::read_to_string(acct.join(".claude.json"))
             .unwrap()
             .contains("light"));
+    }
+
+    /// WI-3355: the bootstrap response carries the session's brief, not its
+    /// name, so the pod's brief file holds the task.
+    #[tokio::test]
+    async fn a_bootstrap_carries_the_sessions_brief_text() {
+        let mut h = harness(false).await;
+        let id = h
+            .start_body(json!({
+                "name": "pod-session",
+                "template": "pod",
+                "prompt": "Fix the flaky forge test.\n\n## Task\nDo it.",
+            }))
+            .await;
+        let (_, token) = h.created.recv().await.unwrap();
+        let body: Value = h
+            .bootstrap_as(id, &token, "claude")
+            .await
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            body["brief"], "Fix the flaky forge test.\n\n## Task\nDo it.",
+            "{body}"
+        );
     }
 
     /// Without a core to mint from, a Claude pod still gets a config, with no

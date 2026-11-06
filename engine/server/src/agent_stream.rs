@@ -664,8 +664,12 @@ fn bearer(h: &HeaderMap) -> Option<&[u8]> {
         .strip_prefix("Bearer ")
         .map(str::as_bytes)
 }
-/// Mark the bundle's `.claude.json` onboarded. Without `hasCompletedOnboarding`
-/// Claude Code runs its first-run flow (theme picker, then "Select login
+/// The directory a pod session runs in: `VOGT_WORK_DIR`'s default in
+/// `deploy/session-entrypoint.sh`.
+const POD_WORK_DIR: &str = "/work";
+
+/// Mark the bundle's `.claude.json` onboarded and `/work` trusted. Without
+/// `hasCompletedOnboarding` Claude Code runs its first-run flow (theme picker, then "Select login
 /// method") and never reads the login it was handed (WI-3334). The account's
 /// stored config (the engine's own trust entries, say) often lacks the flag,
 /// and a fresh account has no config at all. Only a bundle with a login is
@@ -684,16 +688,26 @@ fn with_onboarding_config(mut files: Vec<(String, Vec<u8>)>) -> Vec<(String, Vec
     let Ok(serde_json::Value::Object(mut map)) = serde_json::from_slice(config) else {
         return files;
     };
-    if map.get("hasCompletedOnboarding") == Some(&serde_json::Value::Bool(true)) {
+    let mut changed = false;
+    if map.get("hasCompletedOnboarding") != Some(&serde_json::Value::Bool(true)) {
+        map.insert(
+            "hasCompletedOnboarding".into(),
+            serde_json::Value::Bool(true),
+        );
+        map.entry("theme")
+            .or_insert_with(|| serde_json::Value::String("dark".into()));
+        changed = true;
+    }
+    // The pod's checkout is the one directory the session runs in, and the
+    // engine put it there: without this Claude Code opens at "Is this a
+    // project you trust?", and autopilot's nudge answers its default, "No,
+    // exit" (WI-3355).
+    let mut value = serde_json::Value::Object(map);
+    changed |= crate::claude_config::accept_in_config(&mut value, POD_WORK_DIR);
+    if !changed {
         return files;
     }
-    map.insert(
-        "hasCompletedOnboarding".into(),
-        serde_json::Value::Bool(true),
-    );
-    map.entry("theme")
-        .or_insert_with(|| serde_json::Value::String("dark".into()));
-    if let Ok(bytes) = serde_json::to_vec(&map) {
+    if let Ok(bytes) = serde_json::to_vec(&value) {
         *config = bytes;
     }
     files
@@ -842,11 +856,7 @@ pub async fn bootstrap(
         mcp_config,
         codex_config,
         opencode_config,
-        brief: state
-            .sessions
-            .summary_of(id)
-            .map(|s| s.name)
-            .unwrap_or_default(),
+        brief: state.sessions.session_brief(id),
     })
     .into_response()
 }

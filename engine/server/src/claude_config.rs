@@ -446,6 +446,37 @@ fn reassert_project(path: &Path, cwd: &str, after: &[std::time::Duration]) {
     }
 }
 
+/// Record in the parsed config that `cwd` is trusted and its external
+/// `CLAUDE.md` imports approved. `false` when nothing needed writing, or the
+/// config is not shaped as Claude Code writes it.
+pub fn accept_in_config(config: &mut serde_json::Value, cwd: &str) -> bool {
+    let Some(root) = config.as_object_mut() else {
+        return false;
+    };
+    let projects = root
+        .entry("projects")
+        .or_insert_with(|| serde_json::json!({}));
+    let Some(projects) = projects.as_object_mut() else {
+        return false;
+    };
+    let project = projects
+        .entry(cwd.to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    let Some(project) = project.as_object_mut() else {
+        return false;
+    };
+    if KEYS
+        .iter()
+        .all(|k| project.get(*k) == Some(&serde_json::Value::Bool(true)))
+    {
+        return false;
+    }
+    for key in KEYS {
+        project.insert((*key).to_string(), serde_json::Value::Bool(true));
+    }
+    true
+}
+
 /// Record, in the config at `path`, that `cwd` is trusted and its external
 /// `CLAUDE.md` imports approved. `Ok(false)` when nothing needed writing.
 pub fn accept_project(path: &Path, cwd: &str) -> std::io::Result<bool> {
@@ -458,29 +489,8 @@ pub fn accept_project(path: &Path, cwd: &str) -> std::io::Result<bool> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
         Err(e) => return Err(e),
     };
-    let Some(root) = config.as_object_mut() else {
+    if !accept_in_config(&mut config, cwd) {
         return Ok(false);
-    };
-    let projects = root
-        .entry("projects")
-        .or_insert_with(|| serde_json::json!({}));
-    let Some(projects) = projects.as_object_mut() else {
-        return Ok(false);
-    };
-    let project = projects
-        .entry(cwd.to_string())
-        .or_insert_with(|| serde_json::json!({}));
-    let Some(project) = project.as_object_mut() else {
-        return Ok(false);
-    };
-    if KEYS
-        .iter()
-        .all(|k| project.get(*k) == Some(&serde_json::Value::Bool(true)))
-    {
-        return Ok(false);
-    }
-    for key in KEYS {
-        project.insert((*key).to_string(), serde_json::Value::Bool(true));
     }
     let body = serde_json::to_vec_pretty(&config).map_err(std::io::Error::other)?;
     let parent = path.parent().unwrap_or_else(|| Path::new("."));

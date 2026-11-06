@@ -336,6 +336,20 @@ pub struct ClaudeLaunch {
     /// --mcp-config=<file>` so only these servers apply, not the account's
     /// own set. The session entrypoint writes it from the bootstrap response.
     pub mcp_config: Option<PathBuf>,
+    /// The brief the entrypoint wrote (`VOGT_SESSION_BRIEF_FILE`), when it
+    /// has something in it: the first prompt points Claude Code at it, as the
+    /// host launcher's does (WI-3355).
+    pub brief: Option<PathBuf>,
+}
+
+/// The first prompt of a session started with a brief.
+pub fn brief_instruction(path: &Path) -> String {
+    format!(
+        "Vogt started this session with a brief in {}. Read that file now. \
+         If it has a \"Task\" section, carry that task out; otherwise \
+         summarise the brief in one line and wait for instructions.",
+        path.display()
+    )
 }
 
 impl ClaudeLaunch {
@@ -350,6 +364,17 @@ impl ClaudeLaunch {
             Path::new(IMAGE_SETTINGS_FILE),
             std::env::var_os("VOGT_CLAUDE_MCP_CONFIG"),
         )
+        .with_brief(std::env::var_os("VOGT_SESSION_BRIEF_FILE"))
+    }
+
+    /// Keep `brief` only when the file holds text: an empty brief is no
+    /// brief, and a prompt naming it would send Claude Code to read nothing.
+    fn with_brief(mut self, brief: Option<std::ffi::OsString>) -> Self {
+        self.brief = brief
+            .filter(|p| !p.is_empty())
+            .map(PathBuf::from)
+            .filter(|p| std::fs::read_to_string(p).is_ok_and(|t| !t.trim().is_empty()));
+        self
     }
 
     fn resolve(
@@ -365,6 +390,7 @@ impl ClaudeLaunch {
         Self {
             settings,
             mcp_config: mcp_config.filter(|p| !p.is_empty()).map(PathBuf::from),
+            brief: None,
         }
     }
 }
@@ -758,7 +784,13 @@ pub fn command_line(config: &Config) -> Result<String, AgentError> {
                     sh_quote(file)
                 ));
             }
-            line.push_str(" --add-dir \"$VOGT_SESSION_CWD\"");
+            // The `=` form: `--add-dir` is variadic, and the prompt after it
+            // must stay a prompt. A resumed conversation has read its brief.
+            line.push_str(" --add-dir=\"$VOGT_SESSION_CWD\"");
+            if let (Some(file), false) = (&config.claude.brief, config.resume) {
+                line.push(' ');
+                line.push_str(&sh_quote(Path::new(&brief_instruction(file))));
+            }
             Ok(line)
         }
         // No `--add-dir`: Codex's effective sandbox refuses extra writable
@@ -769,6 +801,16 @@ pub fn command_line(config: &Config) -> Result<String, AgentError> {
         _ => Err(AgentError::Pty(
             "VOGT_CLI must be claude, codex or opencode".into(),
         )),
+    }
+}
+
+/// What the session agent adds to the CLI's environment. Claude Code's own
+/// updater cannot write to the image and only prints "Auto-update failed"
+/// into the session (WI-3355).
+pub fn launch_env(config: &Config) -> Vec<(&'static str, &'static str)> {
+    match (config.command.as_ref(), config.cli.as_str()) {
+        (None, "claude") => vec![("DISABLE_AUTOUPDATER", "1")],
+        _ => Vec::new(),
     }
 }
 
@@ -828,6 +870,9 @@ pub fn spawn_pty(config: &Config) -> Result<PtyIo, AgentError> {
         }
     };
     let mut command = command;
+    for (name, value) in launch_env(config) {
+        command.env(name, value);
+    }
     if let Some(cwd) = &config.cwd {
         command.cwd(cwd);
     }
@@ -1285,7 +1330,7 @@ mod tests {
         config.conversation_id = Some("x; rm -rf /".into());
         assert_eq!(
             command_line(&config).unwrap(),
-            "claude --add-dir \"$VOGT_SESSION_CWD\""
+            "claude --add-dir=\"$VOGT_SESSION_CWD\""
         );
     }
 
@@ -1324,6 +1369,7 @@ mod tests {
             claude: ClaudeLaunch {
                 settings: Some(IMAGE_SETTINGS_FILE.into()),
                 mcp_config: Some("/run/vogt/mcp.json".into()),
+                brief: None,
             },
         };
         // The host launcher's flags, in its order.
@@ -1335,8 +1381,7 @@ mod tests {
                 "--settings=/usr/local/share/vogt/driven-session-settings.json",
                 "--strict-mcp-config",
                 "--mcp-config=/run/vogt/mcp.json",
-                "--add-dir",
-                "/work",
+                "--add-dir=/work",
             ]
         );
         let resumed = Config {
@@ -1346,6 +1391,68 @@ mod tests {
         let argv = argv_of(&command_line(&resumed).unwrap());
         assert_eq!(&argv[..2], ["--resume", "abc-123"]);
         assert!(argv.contains(&"--strict-mcp-config".to_string()));
+    }
+
+    fn claude_config(claude: ClaudeLaunch, resume: bool) -> Config {
+        Config {
+            session_id: "s".into(),
+            engine_url: "http://127.0.0.1:1".into(),
+            token: "t".into(),
+            cli: "claude".into(),
+            command: None,
+            cwd: None,
+            cols: 80,
+            rows: 24,
+            buffer_bytes: 1024,
+            claude_config_dir: None,
+            account: None,
+            conversation_id: Some("abc-123".into()),
+            resume,
+            claude,
+        }
+    }
+
+    /// WI-3355: the brief reached the entrypoint's file but never the CLI, so
+    /// a pod started with a task opened at an empty prompt.
+    #[test]
+    fn a_fresh_claude_is_given_its_brief_as_the_prompt() {
+        let brief = PathBuf::from("/work/.vogt/brief.md");
+        let claude = ClaudeLaunch {
+            brief: Some(brief.clone()),
+            ..ClaudeLaunch::default()
+        };
+        let argv = argv_of(&command_line(&claude_config(claude.clone(), false)).unwrap());
+        assert_eq!(argv.last().unwrap(), &brief_instruction(&brief));
+        // `--add-dir` takes one value, so the prompt is not read as a directory.
+        assert!(argv.contains(&"--add-dir=/work".to_string()), "{argv:?}");
+        // A resumed conversation has read it already.
+        let argv = argv_of(&command_line(&claude_config(claude, true)).unwrap());
+        assert!(!argv.iter().any(|a| a.contains("brief")), "{argv:?}");
+        // No brief, no prompt.
+        let argv = argv_of(&command_line(&claude_config(ClaudeLaunch::default(), false)).unwrap());
+        assert_eq!(argv, ["--session-id", "abc-123", "--add-dir=/work"]);
+    }
+
+    #[test]
+    fn only_a_brief_with_text_in_it_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let full = dir.path().join("full.md");
+        let empty = dir.path().join("empty.md");
+        std::fs::write(&full, "# task\n").unwrap();
+        std::fs::write(&empty, "\n").unwrap();
+        let kept = |p: &Path| ClaudeLaunch::default().with_brief(Some(p.into())).brief;
+        assert_eq!(kept(&full), Some(full.clone()));
+        assert_eq!(kept(&empty), None);
+        assert_eq!(kept(&dir.path().join("missing.md")), None);
+        assert_eq!(ClaudeLaunch::default().with_brief(None).brief, None);
+    }
+
+    #[test]
+    fn claude_in_a_pod_runs_with_its_updater_off() {
+        let mut config = claude_config(ClaudeLaunch::default(), false);
+        assert_eq!(launch_env(&config), [("DISABLE_AUTOUPDATER", "1")]);
+        config.cli = "codex".into();
+        assert!(launch_env(&config).is_empty());
     }
 
     #[test]
@@ -1447,15 +1554,12 @@ mod tests {
             claude: ClaudeLaunch {
                 settings: Some("/a b/it's; touch /tmp/x.json".into()),
                 mcp_config: None,
+                brief: None,
             },
         };
         assert_eq!(
             argv_of(&command_line(&config).unwrap()),
-            [
-                "--settings=/a b/it's; touch /tmp/x.json",
-                "--add-dir",
-                "/work"
-            ]
+            ["--settings=/a b/it's; touch /tmp/x.json", "--add-dir=/work"]
         );
     }
 
