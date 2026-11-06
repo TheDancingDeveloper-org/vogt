@@ -1027,17 +1027,16 @@ def _block_is_stale(summary: SessionSummary) -> bool:
     A report is made mid-turn, just before the agent stops. A turn that
     began after it means the session went back to work — it was typed into,
     woken, or nudged on — so the report no longer says what it waits on
-    (WI-1834). So does a done declaration (`AUTOPILOT: DONE`) made after
-    the report, even in the same turn: the agent says nothing is left for it.
-    The report stays on the row, flagged stale, so it is not lost.
+    (WI-1834). A done declaration (`AUTOPILOT: DONE`) does not age it out:
+    a session that reported blocked and then printed DONE is still waiting on
+    a person, not finished (WI-3356). The report stays on the row, flagged
+    stale, so it is not lost.
     """
     blocked = summary.blocked
     if blocked is None or blocked.since is None:
         return False
-    return any(
-        at is not None and at > blocked.since
-        for at in (summary.turn_started_at, summary.done_at)
-    )
+    turn = summary.turn_started_at
+    return turn is not None and turn > blocked.since
 
 
 def _block_age(
