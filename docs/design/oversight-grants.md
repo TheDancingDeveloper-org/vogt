@@ -311,3 +311,15 @@ the person cancels it.
    boundary there (invariant 10). Should a deployment that adopts grants move
    to `brokered`, and make grants the way a session gets what the manifest
    does not give it?
+
+## In a pod session
+
+The core records the grant decision and expiry; the engine applies it and the
+broker mediates the fetch. The pod receives only the one bootstrap/broker
+credential permitted for its session; it has no Infisical identity or
+Kubernetes API token. The pod hook calls the engine's supplied endpoint, not
+loopback. Grant state and audit survive pod deletion on the engine state
+volume; process-local environment, `/work`, cache and unconsumed temporary
+files do not. Hibernate/stop ends the pod credential; wake requires the
+engine to establish a fresh session credential. Engine restart loses the live
+link, so no pod grant should be treated as surviving re-adoption.

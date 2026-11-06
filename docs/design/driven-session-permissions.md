@@ -241,3 +241,14 @@ restores `on-request` per stack), so they stop prompting at all.
 Deployments that replace this file (the ops overlay's
 `/run/vogt/driven-session-settings.json`) must copy the new `permissions`
 block to get the worker-loop allow list.
+
+## In a pod session
+
+The engine selects the policy and the pod's `session-agent` installs the
+settings file and hooks inside the pod's account directory. The engine owns
+the policy decision and broker; the pod enforces the CLI settings and session
+hook. The policy file is image-provided/read-only, while the account settings
+and hook state are pod-local and are recreated on wake. A pod has no host
+workspace, sibling worktree or engine loopback: hooks use the supplied engine
+endpoint and bootstrap credential. Engine restart drops the live link; it does
+not grant a pod a new permission or preserve its unfinished work.

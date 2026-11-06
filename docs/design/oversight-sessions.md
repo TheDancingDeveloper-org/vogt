@@ -402,3 +402,15 @@ Slice 6a unblocks prod work without weakening WI-926.
 4. **Pending bypass starts** (6a): who may approve (any person, or `admin`
    only) and the default expiry.
 5. **Standing delegation** (6b): whether to build it at all.
+
+## In a pod session
+
+The oversight role, work-item binding, conversation identity and durable
+history live in the engine/core, not in the session pod. The pod holds only
+its live CLI process, transcript/config files awaiting write-back, and its
+independent clone. Session-start/end hooks run in the pod and call the engine
+endpoint; role and grant checks run in the engine/core. Hibernate/stop removes
+that pod after write-back; wake makes a new one. Engine restart currently
+loses the live pod link and resumes from the engine record, rather than
+re-adopting the process. A shared workspace, sibling worktree and pod-loopback
+assumption are invalid.
