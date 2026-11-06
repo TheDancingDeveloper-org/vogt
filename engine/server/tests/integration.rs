@@ -18864,6 +18864,16 @@ mod pod_stream {
         let token = h.session_token(id).await;
         let mut agent = h.dial(id, &token, 0).await;
         assert_eq!(take(&mut agent).await, Frame::Ack { offset: 0 });
+        let session = h.state.sessions.get(id).unwrap();
+        let (_, initial_rows, initial_cols) = session.screen_source(0);
+        session.resize(101, 37).unwrap();
+        assert_eq!(
+            take(&mut agent).await,
+            Frame::Resize {
+                cols: 101,
+                rows: 37
+            }
+        );
         let broker = h.state.sessions.secret_broker();
         broker
             .append_transcript(
@@ -18895,6 +18905,9 @@ mod pod_stream {
             "the teardown names the uid of the pod it created, never just the name"
         );
         assert!(h.state.sessions.is_hibernated(id));
+        assert_eq!((initial_rows, initial_cols), (24, 80));
+        let (_, rows, cols, _) = h.state.sessions.hibernated_screen(id).unwrap();
+        assert_eq!((rows, cols), (37, 101));
         assert_eq!(
             h.detail(id).await.summary.activity,
             ActivityState::Hibernated
@@ -18934,6 +18947,8 @@ mod pod_stream {
         let summary = h.state.sessions.summary_of(id).unwrap();
         assert_eq!(summary.account.as_deref(), Some("acct"));
         assert_ne!(summary.activity, ActivityState::Hibernated);
+        let (_, rows, cols) = h.state.sessions.get(id).unwrap().screen_source(0);
+        assert_eq!((rows, cols), (37, 101));
     }
 
     #[tokio::test]
@@ -19092,6 +19107,42 @@ mod pod_stream {
     fn fake_launcher(listed: Vec<k8s_openapi::api::core::v1::Pod>) -> Arc<FakeLauncher> {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         FakeLauncher::new(tx, listed, false)
+    }
+
+    #[tokio::test]
+    async fn restart_adopts_a_pod_before_it_reports_a_conversation() {
+        let mut h = harness(false).await;
+        let id = h.start().await;
+        let token = h.session_token(id).await;
+        assert!(h
+            .state
+            .sessions
+            .summary_of(id)
+            .unwrap()
+            .conversation
+            .is_none());
+        h.state.sessions.hibernate_for_shutdown().await;
+        let old_link = h.state.agent_auth.pod(id).unwrap();
+        h.state.agent_auth.forget_pod(id);
+        let launcher = fake_launcher(vec![running_pod(id)]);
+        let registry = restarted(&h, launcher.clone());
+        let adopted = registry.readopt_pods(Duration::from_secs(60)).await;
+        old_link.finish(137);
+        assert_eq!(adopted, vec![id]);
+        let sweep = vogt_engine_server::pod_reconcile::sweep(
+            launcher.as_ref(),
+            &h.state.agent_auth,
+            &registry.pod_config().unwrap(),
+        )
+        .await
+        .unwrap();
+        assert!(sweep.deleted.is_empty());
+        assert!(launcher.deleted.lock().unwrap().is_empty());
+        assert!(registry.get(id).unwrap().is_alive());
+        let mut agent = h.dial(id, &token, 0).await;
+        assert_eq!(take(&mut agent).await, Frame::Ack { offset: 0 });
+        put(&mut agent, Frame::Exited { status: Some(0) }).await;
+        ended(&registry, id).await;
     }
 
     #[tokio::test]

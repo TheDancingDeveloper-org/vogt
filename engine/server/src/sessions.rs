@@ -3332,7 +3332,10 @@ fn recover_records(
             // (or crashed). Reserve its recorded account before turning it
             // into a wakeable recovered record, so new starts see the slot.
             let resumable = record.conversation.is_some();
-            if !resumable && record.role != SessionRole::Oversight {
+            if !resumable
+                && record.role != SessionRole::Oversight
+                && read_pod_token(state_dir, id).is_none()
+            {
                 hibernation::remove(state_dir, id);
                 continue;
             }
