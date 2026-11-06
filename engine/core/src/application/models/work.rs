@@ -21,9 +21,9 @@ use super::views::{
     ListWorkParamsMode, ListWorkParamsPrioritiesItem, MirroredSource, Observation,
     ProjectBriefParamsMode, PublishInitiativeResultState, RankedItem, RecommendationView,
     RelateWorkParamsKind, SessionSummary, SweepReportView, UnrelateWorkParamsKind,
-    UpdateInitiativeParamsState, UpdateWorkParamsEffort, UpdateWorkParamsPriority, WorkItem,
-    WorkItemBranchView, WorkItemGitStory, WorkItemRow, WorkListResultItems,
-    WorkListResultLinkState, WorkListResultMode, WriteResultMode,
+    UpdateInitiativeParamsState, UpdateWorkParamsEffort, UpdateWorkParamsPriority, VerdictFields,
+    VerificationFields, WorkItem, WorkItemBranchView, WorkItemGitStory, WorkItemRow,
+    WorkListResultItems, WorkListResultLinkState, WorkListResultMode, WriteResultMode,
 };
 use super::{date_time, optional_date_time, optional_string};
 
@@ -470,12 +470,18 @@ pub struct CommentParams {
     /// The comment text.
     #[schemars(length(min = 1))]
     pub body: String,
-    /// `note` (default) is an ordinary remark. `handoff` is the structured hand-off a fresh session starts from, and requires `handoff`.
+    /// `note` (default) is an ordinary remark. `handoff` is the structured hand-off a fresh session starts from, and requires `handoff`. `verdict` is a review verdict, requires `verdict`, and is posted by a person or by a review session started by a person or oversight on the item it reviews. `verification` records a check, requires `verification`, and is posted by someone other than the worker.
     #[serde(default = "default_comment_params_kind")]
     pub kind: CommentParamsKind,
-    /// The structured fields of a hand-off: branch, head_sha, base, done, remaining, touch_points, gates_run, blockers, session. Required when kind is `handoff`, refused on a note.
+    /// The structured fields of a hand-off: branch, head_sha, base, done, remaining, touch_points, gates_run, blockers, session. Required when kind is `handoff`, refused on any other kind.
     #[serde(default)]
     pub handoff: Option<HandoffFields>,
+    /// The structured fields of a review verdict: head_sha, base, verdict (no_blockers | blockers), blockers (non-empty for `blockers`), deployment_paths_covered. reviewer_session and reviewer_started_by are filled by Vogt; supplied values are ignored. Required when kind is `verdict`, refused otherwise.
+    #[serde(default)]
+    pub verdict: Option<VerdictFields>,
+    /// The structured fields of a verification: head_sha, lane, what, evidence. `by` is filled by Vogt. Required when kind is `verification`, refused otherwise.
+    #[serde(default)]
+    pub verification: Option<VerificationFields>,
     #[schemars(length(min = 1))]
     pub reason: String,
     /// `compact` (default) returns a few fields: enough to confirm the write without re-reading the whole record. `full` returns the complete result.

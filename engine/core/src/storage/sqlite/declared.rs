@@ -2102,6 +2102,8 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
         let data = comment
             .handoff
             .as_ref()
+            .or(comment.verdict.as_ref())
+            .or(comment.verification.as_ref())
             .map(|value| crate::decisions::python_json_dumps(value, false));
         self.view.conn.execute("INSERT INTO comments (id, work_item_id, actor_id, body, created_at, kind, data) VALUES (?, ?, ?, ?, ?, ?, ?)", params![comment.id, comment.work_item_id, comment.actor_id, comment.body, to_iso(comment.created_at), comment.kind, data]).map_err(sql_err)?;
         Ok(())
@@ -3673,7 +3675,16 @@ fn row_relation(row: &Row<'_>) -> rusqlite::Result<crate::core::Relation> {
 
 fn row_comment(row: &Row<'_>) -> rusqlite::Result<Comment> {
     let raw: Option<String> = row.get("data").ok().flatten();
-    let handoff = raw.and_then(|text| serde_json::from_str(&text).ok());
+    let kind: String = row.get("kind").unwrap_or_else(|_| "note".to_string());
+    // `data` holds the kind's own field set; which one is read off `kind`.
+    let fields = raw.and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
+    let (mut handoff, mut verdict, mut verification) = (None, None, None);
+    match kind.as_str() {
+        "handoff" => handoff = fields,
+        "verdict" => verdict = fields,
+        "verification" => verification = fields,
+        _ => {}
+    }
     Ok(Comment {
         id: row.get("id")?,
         work_item_id: row.get("work_item_id")?,
@@ -3681,8 +3692,10 @@ fn row_comment(row: &Row<'_>) -> rusqlite::Result<Comment> {
         actor_display_name: row.get("actor_display_name")?,
         body: row.get("body")?,
         created_at: moment(row, "created_at")?,
-        kind: row.get("kind").unwrap_or_else(|_| "note".to_string()),
+        kind,
         handoff,
+        verdict,
+        verification,
     })
 }
 
@@ -4321,6 +4334,8 @@ mod more {
             created_at: now,
             kind: "note".into(),
             handoff: None,
+            verdict: None,
+            verification: None,
         })
         .unwrap();
         let audit = txn
