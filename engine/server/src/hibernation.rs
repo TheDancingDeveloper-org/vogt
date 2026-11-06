@@ -124,6 +124,10 @@ pub struct Record {
     /// record written before the field existed, which wakes without one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy: Option<SessionPolicy>,
+    /// The project source a pod-backed session checked out (WI-3369); a wake
+    /// keeps it. Absent means the deployment's default source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<vogt_engine_contract::source::SourceDescriptor>,
     /// The budget the session was started with (WI-1245); a wake keeps it,
     /// and the two flags with it, so a warning already given is not given
     /// again.
@@ -231,6 +235,7 @@ impl Record {
             autopilot: false,
             done_at: None,
             policy: None,
+            source: None,
             budget: None,
             budget_soft_sent: false,
             budget_hard_done: false,

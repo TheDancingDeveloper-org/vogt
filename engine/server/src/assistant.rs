@@ -3303,6 +3303,7 @@ mod tests {
                 companion: None,
                 charter: None,
                 budget: None,
+                source: None,
             })
             .expect("spawn cat")
     }
@@ -4630,6 +4631,7 @@ mod tests {
                 companion: None,
                 charter: None,
                 budget: None,
+                source: None,
             })
             .expect("spawn worker")
     }

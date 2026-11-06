@@ -1492,6 +1492,7 @@ impl AgentTaskRegistry {
             companion: None,
             charter: None,
             budget: None,
+            source: None,
         })?;
 
         // Capture the run's starting git position in its own workspace, so the

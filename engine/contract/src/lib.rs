@@ -183,6 +183,12 @@ pub struct SessionSpec {
     /// byte-identical to a request from before the field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<WorktreeSpec>,
+    /// The project's source (WI-3369): which repository and ref a pod-backed
+    /// session checks out, and which provider mints its credential. Absent
+    /// means the deployment's default source, so a request from before the
+    /// field existed starts as it did. Kept in the record, so a wake keeps it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<source::SourceDescriptor>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cols: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
