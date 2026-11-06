@@ -24,6 +24,8 @@ before applying. This is a template, not a tested deployment receipt.
    the cluster path; use HTTPS and remove the insecure flag if your trust
    model requires encryption. Add your TLS ingress and exact allowed origins
    deliberately; no public ingress is created by this example.
+   In `stack.yaml`, change `ENGINE_POD_ALLOW_INSECURE_ENDPOINT=true` and the
+   `ENGINE_POD_ENGINE_ID: example-engine` placeholder for your environment.
 6. Run `kubectl apply --dry-run=server -f stack.yaml` on the configured copy,
    inspect admission/RBAC/quota results, then apply after operator approval.
    Check `/readyz`, install/login, start a session and confirm cloning and
