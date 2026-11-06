@@ -28427,6 +28427,48 @@
             ],
             "title": "SweepReportView",
             "type": "object"
+          },
+          "WorkspaceCleanCandidate": {
+            "description": "A merged, stopped workspace a sweep suggests removing (WI-1325).",
+            "properties": {
+              "path": {
+                "title": "Path",
+                "type": "string"
+              },
+              "branch": {
+                "title": "Branch",
+                "type": "string"
+              },
+              "size_bytes": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Size Bytes"
+              },
+              "session": {
+                "title": "Session",
+                "type": "string"
+              },
+              "call": {
+                "description": "The `workspace_clean` call that would remove it.",
+                "title": "Call",
+                "type": "string"
+              }
+            },
+            "required": [
+              "path",
+              "branch",
+              "session",
+              "call"
+            ],
+            "title": "WorkspaceCleanCandidate",
+            "type": "object"
           }
         },
         "additionalProperties": false,
@@ -28465,6 +28507,14 @@
             ],
             "default": null,
             "description": "The workspace volume, when a session engine answers. needs_attention once used space passes its threshold."
+          },
+          "disk_candidates": {
+            "description": "Only while disk.needs_attention: the largest stopped workspaces whose branch is merged, each with the workspace_clean call that removes it. A suggestion; nothing is removed by the sweep.",
+            "items": {
+              "$ref": "#/$defs/WorkspaceCleanCandidate"
+            },
+            "title": "Disk Candidates",
+            "type": "array"
           }
         },
         "required": [
