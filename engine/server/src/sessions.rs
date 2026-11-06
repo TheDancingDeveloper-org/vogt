@@ -1709,6 +1709,17 @@ impl SessionRegistry {
         }
     }
 
+    /// Return the account and conversation a pod bootstrap must seed. A pod
+    /// can connect immediately after spawn, before `create_inner` has copied
+    /// the wake record's metadata onto the live session, so the persisted
+    /// record is the authoritative fallback for a resumed wake.
+    pub fn pod_account_conversation(&self, id: Uuid) -> Option<(String, String)> {
+        pod_account_conversation_from(
+            self.summary_of(id).as_ref(),
+            self.records.get(&id).as_deref(),
+        )
+    }
+
     /// The engine sessions Vogt started as `vogt_id` (`ses_…`): the ones whose
     /// recorded environment carries `VOGT_SESSION_ID=<vogt_id>`, the variable
     /// vogt-core gives each session it starts. More than one means somebody
@@ -3176,6 +3187,21 @@ fn latest_event_at(summary: &SessionSummary) -> String {
         .to_string()
 }
 
+fn pod_account_conversation_from(
+    live: Option<&SessionSummary>,
+    record: Option<&Record>,
+) -> Option<(String, String)> {
+    let pair = |account: Option<&String>, conversation: Option<&AgentConversation>| {
+        account
+            .cloned()
+            .zip(conversation.map(|conversation| conversation.id.clone()))
+    };
+    live.and_then(|summary| pair(summary.account.as_ref(), summary.conversation.as_ref()))
+        .or_else(|| {
+            record.and_then(|record| pair(record.account.as_ref(), record.conversation.as_ref()))
+        })
+}
+
 fn parse_rfc3339(raw: &str) -> Option<time::OffsetDateTime> {
     time::OffsetDateTime::parse(raw, &time::format_description::well_known::Rfc3339).ok()
 }
@@ -3601,6 +3627,50 @@ mod tests {
             super::codex_policy_refusal(Some(&codex), false, &no_hook),
             Err(crate::error::ApiError::BadRequest(_))
         ));
+    }
+
+    #[test]
+    fn pod_bootstrap_falls_back_to_wake_record_metadata() {
+        let mut record = crate::hibernation::Record::new(
+            uuid::Uuid::new_v4(),
+            "claude".into(),
+            "2026-01-01T00:00:00Z".into(),
+        );
+        record.account = Some("acct2".into());
+        record.conversation = Some(vogt_engine_contract::AgentConversation {
+            agent: "claude".into(),
+            id: "conversation-id".into(),
+        });
+
+        assert_eq!(
+            super::pod_account_conversation_from(None, Some(&record)),
+            Some(("acct2".into(), "conversation-id".into()))
+        );
+    }
+
+    #[test]
+    fn pod_bootstrap_prefers_complete_live_metadata() {
+        let mut record = crate::hibernation::Record::new(
+            uuid::Uuid::new_v4(),
+            "claude".into(),
+            "2026-01-01T00:00:00Z".into(),
+        );
+        record.account = Some("record-account".into());
+        record.conversation = Some(vogt_engine_contract::AgentConversation {
+            agent: "claude".into(),
+            id: "record-conversation".into(),
+        });
+        let mut live = super::tests::aged(1, vogt_engine_contract::ActivityState::Idle);
+        live.account = Some("live-account".into());
+        live.conversation = Some(vogt_engine_contract::AgentConversation {
+            agent: "claude".into(),
+            id: "live-conversation".into(),
+        });
+
+        assert_eq!(
+            super::pod_account_conversation_from(Some(&live), Some(&record)),
+            Some(("live-account".into(), "live-conversation".into()))
+        );
     }
 
     #[test]
