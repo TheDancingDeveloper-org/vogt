@@ -1280,6 +1280,171 @@ mod tests {
         assert_eq!(accepts.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
+    /// A fake engine on one port: bundle-file POSTs are answered 200 and their
+    /// `kind` recorded (the first `fail_first` get a 503 and are not), as is each Exited frame (`exited`), in arrival order; anything else is the session stream, which reads Hello
+    /// and Resume and then, when `kill` is set, calls `before_kill` and sends
+    /// a kill.
+    async fn fake_engine(
+        kill: bool,
+        fail_first: usize,
+        before_kill: impl Fn() + Send + Sync + 'static,
+    ) -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let stored = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let record = stored.clone();
+        let before_kill = Arc::new(before_kill);
+        let failures = Arc::new(std::sync::atomic::AtomicUsize::new(fail_first));
+        tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let record = record.clone();
+                let before_kill = before_kill.clone();
+                let failures = failures.clone();
+                tokio::spawn(async move {
+                    let mut head = [0u8; 32];
+                    let n = stream.peek(&mut head).await.unwrap_or(0);
+                    if head[..n].starts_with(b"POST /api/agent-auth/store/") {
+                        use tokio::io::AsyncReadExt;
+                        let mut buf = Vec::new();
+                        let mut chunk = [0u8; 8192];
+                        let (header_end, length) = loop {
+                            let n = stream.read(&mut chunk).await.unwrap();
+                            assert!(n > 0, "bundle POST ended early");
+                            buf.extend_from_slice(&chunk[..n]);
+                            if let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                                let head = String::from_utf8_lossy(&buf[..end]).to_lowercase();
+                                let length = head
+                                    .lines()
+                                    .find_map(|l| l.strip_prefix("content-length:"))
+                                    .map(|v| v.trim().parse::<usize>().unwrap())
+                                    .unwrap_or(0);
+                                break (end + 4, length);
+                            }
+                        };
+                        while buf.len() < header_end + length {
+                            let n = stream.read(&mut chunk).await.unwrap();
+                            assert!(n > 0, "bundle POST body ended early");
+                            buf.extend_from_slice(&chunk[..n]);
+                        }
+                        let body: serde_json::Value =
+                            serde_json::from_slice(&buf[header_end..header_end + length]).unwrap();
+                        let fail = failures
+                            .try_update(
+                                std::sync::atomic::Ordering::SeqCst,
+                                std::sync::atomic::Ordering::SeqCst,
+                                |n| n.checked_sub(1),
+                            )
+                            .is_ok();
+                        if fail {
+                            let _ = stream
+                                .write_all(b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                                .await;
+                            return;
+                        }
+                        record
+                            .lock()
+                            .unwrap()
+                            .push(body["kind"].as_str().unwrap_or("").to_string());
+                        let _ = stream
+                            .write_all(b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}")
+                            .await;
+                        return;
+                    }
+                    let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                    for _ in 0..2 {
+                        socket.next().await.unwrap().unwrap();
+                    }
+                    if kill {
+                        before_kill();
+                        let kill = serde_json::to_string(&Frame::Signal {
+                            signal: "kill".into(),
+                        })
+                        .unwrap();
+                        socket.send(Message::Text(kill.into())).await.unwrap();
+                    }
+                    while let Some(Ok(message)) = socket.next().await {
+                        if let Message::Text(text) = message {
+                            if let Ok(Frame::Exited { .. }) = serde_json::from_str::<Frame>(&text) {
+                                record.lock().unwrap().push("exited".into());
+                            }
+                        }
+                    }
+                });
+            }
+        });
+        (format!("http://{address}"), stored)
+    }
+
+    const VALID_CREDENTIALS: &str =
+        r#"{"claudeAiOauth":{"accessToken":"a","refreshToken":"r","expiresAt":1}}"#;
+
+    // WI-3160: a stop or hibernate kills the CLI; its last login write must
+    // reach the engine before run() returns, not wait for a debounce that
+    // never comes.
+    #[tokio::test]
+    async fn a_kill_flushes_the_bundle_before_run_returns() {
+        let dir = tempfile::tempdir().unwrap();
+        let credentials = dir.path().join(".credentials.json");
+        let (url, stored) = fake_engine(true, 0, move || {
+            std::fs::write(&credentials, VALID_CREDENTIALS).unwrap();
+        })
+        .await;
+        let mut config = kill_config(url);
+        config.claude_config_dir = Some(dir.path().to_path_buf());
+        config.account = Some("acct".into());
+        let result = tokio::time::timeout(Duration::from_secs(20), run(config)).await;
+        assert!(
+            matches!(result, Ok(Ok(()))),
+            "run() did not end: {result:?}"
+        );
+        // The Exited send may lose the race with the socket closing; the push
+        // must not.
+        assert_eq!(
+            stored.lock().unwrap().first().map(String::as_str),
+            Some("credentials")
+        );
+    }
+
+    // WI-3160: a CLI that writes its login and exits still has that write
+    // pushed before the agent reports the exit, even when the debounce flush
+    // that saw it was refused (a 503 the agent must retry).
+    #[tokio::test]
+    async fn a_cli_exit_flushes_its_last_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let credentials = dir.path().join(".credentials.json");
+        let (url, stored) = fake_engine(false, 1, || {}).await;
+        let mut config = kill_config(url);
+        config.command = Some(vec![
+            "sh".into(),
+            "-c".into(),
+            format!(
+                "sleep 1.5; printf '%s' '{VALID_CREDENTIALS}' > '{}'",
+                credentials.display()
+            ),
+        ]);
+        config.claude_config_dir = Some(dir.path().to_path_buf());
+        config.account = Some("acct".into());
+        // After Exited the agent keeps its stream until the pod is reaped, so
+        // run() does not return here: wait for the Exited frame instead.
+        let exited = async {
+            while !stored.lock().unwrap().iter().any(|k| k == "exited") {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        };
+        tokio::select! {
+            () = exited => {},
+            result = run(config) => panic!("run() ended before Exited: {result:?}"),
+            () = tokio::time::sleep(Duration::from_secs(20)) => panic!("no Exited frame"),
+        }
+        let events = stored.lock().unwrap().clone();
+        let exited = events.iter().position(|k| k == "exited").unwrap();
+        assert!(
+            events[..exited].iter().any(|k| k == "credentials"),
+            "the last write was not pushed before Exited: {events:?}"
+        );
+    }
+
     #[test]
     fn resize_changes_the_pty_size() {
         let config = Config {
