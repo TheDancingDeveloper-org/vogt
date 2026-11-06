@@ -1,6 +1,5 @@
 //! Entity vocabulary and records. Ports the models of `src/vogt/core/`.
 
-#![allow(dead_code)] // Domain vocabulary the bin re-exports; tests and later services use what the bin does not.
 use std::collections::BTreeMap;
 
 #[allow(unused_imports)]
@@ -309,6 +308,7 @@ pub struct Project {
 }
 
 impl Project {
+    #[allow(dead_code)] // Ported domain item; only tests use it until the service layer wires it.
     pub fn new(id: &str, slug: &str, name: &str, root_path: &str, now: Moment) -> Self {
         Self {
             id: id.to_string(),
@@ -692,6 +692,7 @@ pub struct Suppression {
 
 impl Suppression {
     /// A suppression holds until someone revokes it.
+    #[allow(dead_code)] // Ported domain item; only tests use it until the service layer wires it.
     pub fn active(&self) -> bool {
         self.revoked_at.is_none()
     }
@@ -769,6 +770,7 @@ pub struct Token {
 }
 
 impl Token {
+    #[allow(dead_code)] // Ported domain item; only tests use it until the service layer wires it.
     pub fn active(&self) -> bool {
         self.revoked_at.is_none()
     }
