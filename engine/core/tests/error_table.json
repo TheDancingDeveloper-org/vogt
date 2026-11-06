@@ -112,6 +112,10 @@
     409
   ],
   [
+    "land_refused",
+    403
+  ],
+  [
     "login_throttled",
     429
   ],
