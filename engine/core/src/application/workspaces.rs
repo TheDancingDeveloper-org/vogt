@@ -1,5 +1,6 @@
-//! `workspace.list` (WI-1340): every session's working tree, joined to Vogt.
-//! Ports `src/vogt/application/services/workspaces.py`.
+//! `workspace.list` (WI-1340): every session's working tree, joined to Vogt,
+//! and `workspace.clean` (WI-1325). Ports
+//! `src/vogt/application/services/workspaces.py`.
 //!
 //! The engine owns the trees: `GET /api/workspaces` gives each session's
 //! workspace block with its size and whether it is running. Vogt adds what the
@@ -11,15 +12,17 @@
 
 use std::collections::HashMap;
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
-use crate::application::context::{AppContext, Built};
+use crate::application::context::{write_of, AppContext, Built};
 use crate::application::models::workspace::{
-    WorkspaceListParams, WorkspaceListResult, WorkspaceRow,
+    WorkspaceCleanParams, WorkspaceCleanResult, WorkspaceListParams, WorkspaceListResult,
+    WorkspaceRow,
 };
 use crate::application::services::sessions::engine_of;
+use crate::application::writes::{audited_action, validate_reason};
 use crate::core::Project;
-use crate::core::{py_repr, Clock, IdFactory};
+use crate::core::{py_repr, ActorKind, Clock, IdFactory};
 use crate::errors::VogtError;
 use crate::storage::interface::{DeclaredStore, ObservedStore, ReadView};
 
@@ -144,6 +147,143 @@ where
         merged.insert(name.to_string(), ahead.map(|ahead| ahead == 0));
     }
     Ok(merged)
+}
+
+const WORKSPACE_CLEAN: &str = "workspace.clean";
+const WORKSPACE_CLEANED_EVENT: &str = "workspace.cleaned";
+
+pub(crate) fn workspace_clean_op(built: &Built, params: Value) -> Result<Value, VogtError> {
+    let parsed: WorkspaceCleanParams = serde_json::from_value(params)
+        .map_err(|error| VogtError::InvalidRequest(format!("invalid parameters: {error}")))?;
+    crate::with_ctx!(built, |ctx| workspace_clean(ctx, &parsed))
+        .map(|result| serde_json::to_value(result).expect("a workspace clean serialises"))
+}
+
+/// Drop a workspace's build output, or remove its worktree (WI-1325).
+///
+/// The engine makes every safety check — no session in the tree, a clean
+/// tree, a merged branch unless forced — and refuses with a 409 that names
+/// the reason. Here: who may force, and the audit row.
+pub(crate) fn workspace_clean<C, I>(
+    ctx: &AppContext<C, I>,
+    params: &WorkspaceCleanParams,
+) -> Result<WorkspaceCleanResult, VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let reason = validate_reason(&params.reason)?;
+    if params.force && ctx.principal.kind == ActorKind::Agent {
+        // A forced removal throws away a worktree whose branch has not
+        // landed, so it is a person's call, as a grant decision is.
+        return Err(VogtError::CleanRefused(format!(
+            "only a person forces a workspace removal, not an agent ({}); ask a person to do it",
+            ctx.principal.identity_ref
+        )));
+    }
+    if params.id.is_none() == params.path.is_none() {
+        return Err(VogtError::InvalidRequest(
+            "give exactly one of `id` (a session) or `path` (a workspace)".to_string(),
+        ));
+    }
+    let engine = engine_of(ctx)?;
+    let path = match &params.path {
+        Some(path) => path.clone(),
+        None => path_of_session(ctx, params.id.as_deref().unwrap_or(""))?,
+    };
+    let mode = params.mode.as_str();
+    let Some(done) = engine.clean_workspace(&path, mode, params.force, &reason)? else {
+        return Err(VogtError::EngineUnavailable(
+            "the session engine cannot clean workspaces yet (it has no \
+             POST /api/workspaces/clean route); upgrade the engine"
+                .to_string(),
+        ));
+    };
+    let optional_text = |name: &str| match done.get(name) {
+        Some(Value::String(text)) => Some(text.clone()),
+        _ => None,
+    };
+    let result = WorkspaceCleanResult {
+        // Python's `str(done.get("path", path))`.
+        path: match done.get("path") {
+            None => path.clone(),
+            Some(Value::String(text)) => text.clone(),
+            Some(Value::Null) => "None".to_string(),
+            Some(other) => other.to_string(),
+        },
+        mode: mode.to_string(),
+        bytes_freed: python_int(done.get("bytes_freed")),
+        removed: done.get("removed").is_some_and(python_truthy),
+        branch_deleted: optional_text("branch_deleted"),
+        cleaned_at: optional_text("cleaned_at"),
+    };
+    let mut writing = write_of(ctx);
+    audited_action(
+        &mut writing,
+        WORKSPACE_CLEAN,
+        &reason,
+        "workspace",
+        &result.path,
+        &json!({
+            "mode": result.mode,
+            "force": params.force,
+            "bytes_freed": result.bytes_freed,
+            "removed": result.removed,
+            "branch_deleted": result.branch_deleted,
+        }),
+        WORKSPACE_CLEANED_EVENT,
+        None,
+    )?;
+    Ok(result)
+}
+
+/// The workspace path of session `reference` (a `ses_…` id or engine UUID).
+fn path_of_session<C, I>(ctx: &AppContext<C, I>, reference: &str) -> Result<String, VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let mut engine_id = reference.to_string();
+    if reference.starts_with("ses_") {
+        if let Some(linked) = ctx.declared.read()?.session_by_id(reference)? {
+            if !linked.engine_session_id.is_empty() {
+                engine_id = linked.engine_session_id;
+            }
+        }
+    }
+    let rows = engine_of(ctx)?.list_workspaces()?.unwrap_or_default();
+    match rows.into_iter().find(|row| row.session_id == engine_id) {
+        Some(row) => Ok(row.path),
+        None => Err(VogtError::NotFound(format!(
+            "session {} has no workspace",
+            py_repr(reference)
+        ))),
+    }
+}
+
+/// Python's `int(value or 0)` for a decoded JSON number or bool; anything
+/// else reads as 0.
+fn python_int(value: Option<&Value>) -> i64 {
+    match value {
+        Some(Value::Bool(flag)) => i64::from(*flag),
+        Some(Value::Number(number)) => number
+            .as_i64()
+            .or_else(|| number.as_f64().map(|n| n.trunc() as i64))
+            .unwrap_or(0),
+        _ => 0,
+    }
+}
+
+/// Python's `bool(value)` for a decoded JSON value.
+fn python_truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(flag) => *flag,
+        Value::Number(number) => number.as_f64().is_some_and(|n| n != 0.0),
+        Value::String(text) => !text.is_empty(),
+        Value::Array(items) => !items.is_empty(),
+        Value::Object(map) => !map.is_empty(),
+    }
 }
 
 #[cfg(test)]
