@@ -212,6 +212,16 @@ every live or hibernated session's working tree from the engine's
 branch with nothing ahead of the project's default branch, false when it is
 ahead, and null when the collector has no row for it.
 
+`workspace.clean` (`work.write`; `id` of a session or `path`, `mode`,
+`force`, `reason`) asks the engine's `POST /api/workspaces/clean` to drop a
+workspace's build output (`mode=build_output`, stamping `cleaned_at`) or to
+remove the worktree (`mode=remove`, deleting the branch when merged). The
+engine refuses (409, `conflict`) a tree a live or hibernated session uses, a
+dirty tree, and an unmerged branch unless `force`; only a person may pass
+`force` (`clean_refused`, 403). The sweep never removes anything: while
+`disk.needs_attention`, its `disk_candidates` lists the largest stopped
+worktrees whose branch is merged, each with the `workspace_clean` call to run.
+
 `session.wait` blocks (up to `timeout_s`, at most 600) until a session is
 ready — or needs a person, or exits — or, with `until`, until it exits or
 changes at all, and returns why with the screen: one call instead of a
