@@ -1696,7 +1696,8 @@ impl SessionBackend for PodBackend {
         }
     }
     fn current_size(&self) -> Result<(u16, u16)> {
-        Ok(*self.size.lock())
+        let (cols, rows) = *self.size.lock();
+        Ok((rows, cols))
     }
     fn wait(&self) -> std::io::Result<portable_pty::ExitStatus> {
         Ok(portable_pty::ExitStatus::with_exit_code(
