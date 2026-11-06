@@ -798,11 +798,10 @@ pub async fn bootstrap(
     }
     // A pod resumes from the account bundle the engine holds: the login, the
     // global config and, for a woken session, its conversation's transcript.
-    let account_conversation = state.sessions.pod_account_conversation(id);
-    let account = account_conversation
-        .as_ref()
-        .map(|(account, _)| account.clone());
-    let conversation = account_conversation.map(|(_, conversation)| conversation);
+    let crate::sessions::PodAccountConversation {
+        account,
+        conversation,
+    } = state.sessions.pod_account_conversation(id);
     let mut bundle = serde_json::Map::new();
     let mut resume = false;
     // The login travels whenever the session holds an account: an agent-task
