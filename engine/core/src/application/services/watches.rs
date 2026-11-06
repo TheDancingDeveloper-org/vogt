@@ -1,8 +1,8 @@
 //! Watches a session arms so it can sleep until an event (WI-2036). Ports
-//! `application/services/watches.py` except the evaluation loop.
+//! `application/services/watches.py` including scheduled evaluation.
 //!
 //! `watch.list`, `watch.create` and `watch.cancel` are served. Evaluating
-//! watches stays unported: that loop needs the engine.
+//! watches uses the optional engine for delivery.
 
 use serde_json::{json, Map, Value};
 
@@ -440,4 +440,360 @@ fn text(params: &Value, name: &str) -> String {
         .unwrap_or("")
         .trim()
         .to_string()
+}
+
+/// Evaluate persisted watches once, caching forge evidence per project and kind.
+pub fn evaluate_watches<C: Clock + 'static, I: IdFactory + 'static>(
+    ctx: &AppContext<C, I>,
+) -> Result<(), VogtError> {
+    use crate::storage::interface::ObservedStore;
+    let now = now_of(&ctx.clock);
+    let active = ctx
+        .declared
+        .read()?
+        .list_watches(Some("active"), None, None, 500)?;
+    let mut evidence =
+        std::collections::HashMap::<(String, String), Vec<crate::core::Observation>>::new();
+    for watch in active {
+        if watch.expires_at <= now {
+            settle(
+                ctx,
+                &watch,
+                WatchState::Expired,
+                "watch.expired",
+                None,
+                None,
+                false,
+            )?;
+            continue;
+        }
+        if watch
+            .outcome
+            .as_ref()
+            .and_then(|v| v["next_attempt_at"].as_str())
+            .and_then(|s| crate::core::from_iso(s).ok())
+            .is_some_and(|stamp| stamp > now)
+        {
+            continue;
+        }
+        let evaluated = (|| -> Result<Option<Value>, VogtError> {
+            if let Some(outcome) = &watch.outcome {
+                return Ok(Some(outcome.clone()));
+            }
+            let t = &watch.trigger;
+            let mut observations =
+                |kind: &str| -> Result<Vec<crate::core::Observation>, VogtError> {
+                    let project = t["project_id"].as_str().unwrap_or("");
+                    let key = (kind.to_owned(), project.to_owned());
+                    if !evidence.contains_key(&key) {
+                        evidence.insert(
+                            key.clone(),
+                            ctx.observed.latest(
+                                &[kind.to_owned()],
+                                Some(project),
+                                false,
+                                false,
+                                2000,
+                            )?,
+                        );
+                    }
+                    Ok(evidence[&key].clone())
+                };
+            Ok(match watch.kind.as_str() {
+                "work_item" => {
+                    match ctx
+                        .declared
+                        .read()?
+                        .work_item_by_id(t["work_item_id"].as_str().unwrap_or(""))?
+                    {
+                        None => Some(json!({"state":"gone"})),
+                        Some(item) => t["states"]
+                            .as_array()
+                            .filter(|states| states.iter().any(|s| s == &item.state))
+                            .map(|_| json!({"state":item.state})),
+                    }
+                }
+                "session" => {
+                    let Some(engine) = &ctx.engine else {
+                        return Ok(None);
+                    };
+                    match engine.get_session(t["engine_session_id"].as_str().unwrap_or(""))? {
+                        None => Some(json!({"state":"gone"})),
+                        Some(s)
+                            if !s.alive
+                                || ["exited", "hibernated", "stopped"]
+                                    .contains(&s.activity.as_str()) =>
+                        {
+                            Some(
+                                json!({"state":if s.activity.is_empty() { "exited" } else { &s.activity }}),
+                            )
+                        }
+                        Some(s)
+                            if t["until"] == "done"
+                                && s.done_at.as_ref().is_some_and(|s| !s.is_empty()) =>
+                        {
+                            Some(json!({"state":"done", "done_at":s.done_at}))
+                        }
+                        _ => None,
+                    }
+                }
+                "pr" => observations("forge.pull_request")?
+                    .iter()
+                    .find(|p| p.payload["number"] == t["number"])
+                    .and_then(|p| {
+                        crate::core::watches::pr_outcome(&p.payload, &t["on"], &p.source_url)
+                    }),
+                "ci" => {
+                    let revision = t["sha"]
+                        .as_str()
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned);
+                    let revision = match revision {
+                        Some(r) => Some(r),
+                        None => observations("forge.pull_request")?
+                            .iter()
+                            .find(|p| p.payload["number"] == t["pr"])
+                            .and_then(|p| {
+                                p.payload["head"]
+                                    .as_str()
+                                    .filter(|s| !s.is_empty())
+                                    .map(str::to_owned)
+                            }),
+                    };
+                    match revision {
+                        Some(r) => crate::core::watches::ci_outcome(
+                            &observations("ci.check")?,
+                            &r,
+                            t["checks"].as_array().map(Vec::as_slice).unwrap_or(&[]),
+                        ),
+                        None => None,
+                    }
+                }
+                _ => None,
+            })
+        })();
+        let mut outcome = match evaluated {
+            Ok(Some(outcome)) => outcome,
+            Ok(None) => continue,
+            Err(error) => {
+                tracing::info!(watch = %watch.id, %error, "watch not evaluated");
+                continue;
+            }
+        };
+        let error = if ctx.engine.is_none() {
+            Some("no engine is configured".to_owned())
+        } else {
+            super::sessions::input(
+                ctx,
+                &super::sessions::InputParams {
+                    id: watch.target_session.clone(),
+                    text: Some(crate::core::watches::notice(
+                        &watch.kind,
+                        &describe(&watch.kind, &watch.trigger),
+                        &outcome,
+                        &watch.note,
+                    )),
+                    keys: None,
+                    submit: true,
+                    confirm: true,
+                    wake_timeout_s: 30,
+                    reason: format!("{FIRE_REASON}: {}", watch.id),
+                },
+            )
+            .err()
+            .map(|e| e.to_string().chars().take(500).collect())
+        };
+        let (state, event, fired) = if error.is_none() {
+            outcome["delivered"] = json!(true);
+            (WatchState::Fired, "watch.fired", true)
+        } else if watch.attempts + 1 >= 5 {
+            outcome["delivered"] = json!(false);
+            (WatchState::Failed, "watch.failed", true)
+        } else {
+            outcome["next_attempt_at"] =
+                json!(plus_seconds(now, 60 * 2_i64.pow(watch.attempts as u32)).to_iso());
+            (WatchState::Active, "watch.failed", false)
+        };
+        settle(ctx, &watch, state, event, Some(outcome), error, fired)?;
+    }
+    Ok(())
+}
+
+const FIRE_REASON: &str = "watch fired: deliver its outcome (WI-2036)";
+fn settle<C: Clock + 'static, I: IdFactory + 'static>(
+    ctx: &AppContext<C, I>,
+    watch: &Watch,
+    state: WatchState,
+    event: &str,
+    outcome: Option<Value>,
+    error: Option<String>,
+    fired: bool,
+) -> Result<(), VogtError> {
+    let mut write = write_of(ctx);
+    audited_write(&mut write, "watch.fire", FIRE_REASON, |txn, _actor| {
+        let mut current = txn.watch(&watch.id)?.unwrap_or_else(|| watch.clone());
+        if current.state != WatchState::Active {
+            return outcome_of(&current, event);
+        }
+        current.state = state;
+        if outcome.is_some() {
+            current.attempts += 1;
+            current.outcome = outcome;
+        }
+        current.last_error = error;
+        if fired {
+            current.fired_at = Some(now_of(&ctx.clock));
+        }
+        txn.update_watch(&current)?;
+        outcome_of(&current, event)
+    })
+    .map(drop)
+}
+
+#[cfg(test)]
+mod evaluation_tests {
+    use super::*;
+    use crate::application::context::build_context;
+    use crate::core::{ActorKind, Principal, StepClock};
+
+    #[test]
+    fn persisted_watch_fires_and_missing_engine_retries_then_expires() {
+        let dir =
+            std::env::temp_dir().join(format!("vogt-watch-evaluation-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        crate::application::instance::init(&dir, &mut None, &mut None).unwrap();
+        let writes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let recorded = Arc::clone(&writes);
+        let engine = crate::adapters::engine::EngineClient::new(
+            "http://engine",
+            None,
+            Some(Arc::new(move |path, _, _, method| {
+                if method == "GET" && path.contains("watched") {
+                    return (404, b"{}".to_vec());
+                }
+                if method == "GET" {
+                    return (
+                        200,
+                        br#"{"id":"target","alive":true,"activity":"running","role":"worker"}"#
+                            .to_vec(),
+                    );
+                }
+                recorded.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                (200, b"{}".to_vec())
+            })),
+        );
+        let config = crate::config::VogtConfig {
+            data_dir: dir.clone(),
+            ..Default::default()
+        };
+        let built = build_context(
+            config,
+            Some(Principal::new("service:watch-test", ActorKind::Agent, "watch test").unwrap()),
+            Some(StepClock::new(Moment::from_unix(1_700_000_000, 0))),
+            None,
+            None,
+            Some(engine),
+            None,
+            None,
+        )
+        .unwrap();
+        crate::with_ctx!(&built, |ctx| {
+            let made = create(ctx, &json!({"session":"target", "trigger":{"kind":"session", "session":"watched", "until":"done"}, "reason":"test", "ttl_seconds":3600})).unwrap();
+            let id = made["watch"]["id"].as_str().unwrap();
+            evaluate_watches(ctx).unwrap();
+            let fired = ctx.declared.read().unwrap().watch(id).unwrap().unwrap();
+            assert_eq!(fired.state, WatchState::Fired);
+            assert_eq!(fired.outcome.unwrap()["delivered"], true);
+            assert_eq!(fired.attempts, 1);
+            let count = writes.load(std::sync::atomic::Ordering::SeqCst);
+            assert!(count > 0);
+            evaluate_watches(ctx).unwrap();
+            assert_eq!(writes.load(std::sync::atomic::Ordering::SeqCst), count);
+            // Seed a delivery retry, which must survive a fresh pass without
+            // re-evaluating a now-changed trigger.
+            let mut write = write_of(ctx);
+            audited_write(&mut write, "watch.create", "test retry", |txn, actor| {
+                let watch = Watch {
+                    id: "wat_retry".into(),
+                    owner_actor_id: actor.id.clone(),
+                    target_session: "target".into(),
+                    kind: "work_item".into(),
+                    trigger: json!({"ref":"WI-1"}),
+                    note: String::new(),
+                    state: WatchState::Active,
+                    created_at: Moment::from_unix(1_700_000_000, 0),
+                    expires_at: Moment::from_unix(1_700_003_600, 0),
+                    fired_at: None,
+                    outcome: Some(json!({"state":"done"})),
+                    attempts: 0,
+                    last_error: None,
+                    reason: "test".into(),
+                };
+                txn.insert_watch(&watch)?;
+                outcome_of(&watch, WATCH_CREATED_EVENT)
+            })
+            .unwrap();
+        });
+        // Rebuild without an engine, as a restarted standalone core would.
+        let absent = build_context(
+            crate::config::VogtConfig {
+                data_dir: dir.clone(),
+                ..Default::default()
+            },
+            Some(Principal::new("service:watch-test", ActorKind::Agent, "watch test").unwrap()),
+            Some(StepClock::new(Moment::from_unix(1_700_000_100, 0))),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        crate::with_ctx!(&absent, |ctx| {
+            evaluate_watches(ctx).unwrap();
+            let retry = ctx
+                .declared
+                .read()
+                .unwrap()
+                .watch("wat_retry")
+                .unwrap()
+                .unwrap();
+            assert_eq!(retry.state, WatchState::Active);
+            assert_eq!(retry.attempts, 1);
+            assert_eq!(retry.last_error.as_deref(), Some("no engine is configured"));
+            evaluate_watches(ctx).unwrap();
+            assert_eq!(
+                ctx.declared
+                    .read()
+                    .unwrap()
+                    .watch("wat_retry")
+                    .unwrap()
+                    .unwrap()
+                    .attempts,
+                1
+            );
+            let mut write = write_of(ctx);
+            audited_write(&mut write, "watch.fire", "expire test", |txn, _| {
+                let mut watch = txn.watch("wat_retry")?.unwrap();
+                watch.expires_at = Moment::from_unix(1, 0);
+                txn.update_watch(&watch)?;
+                outcome_of(&watch, "watch.failed")
+            })
+            .unwrap();
+            evaluate_watches(ctx).unwrap();
+            assert_eq!(
+                ctx.declared
+                    .read()
+                    .unwrap()
+                    .watch("wat_retry")
+                    .unwrap()
+                    .unwrap()
+                    .state,
+                WatchState::Expired
+            );
+        });
+        drop(absent);
+        drop(built);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }

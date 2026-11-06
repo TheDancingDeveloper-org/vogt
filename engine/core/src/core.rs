@@ -7,6 +7,7 @@
 pub mod cold_wake;
 pub mod session_economics;
 pub mod usage_board;
+pub mod watches;
 
 mod clock;
 mod entities;
