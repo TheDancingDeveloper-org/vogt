@@ -23,7 +23,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order", "float_roundtrip", "arbitrary_precision"] }
 # Derives every operation schema from the models in `application/models`.
 schemars = "1.2.3"
-toml = "0.8"
+toml = "1"
 sha2 = "0.11"
 rsa = { version = "0.9.10", default-features = false, features = ["std", "pem"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
@@ -59,7 +59,6 @@ ureq = { version = "3", features = ["rustls-no-provider"], default-features = fa
 # plus the platform bundle openssl-probe finds. rustls-pemfile did this before
 # and is unmaintained (RUSTSEC-2025-0134).
 rustls = { version = "0.23.19", default-features = false, features = ["ring", "std", "tls12"] }
-rustls-native-certs = "0.8"
 openssl-probe = "0.2"
 portable-pty = "0.9"
 
