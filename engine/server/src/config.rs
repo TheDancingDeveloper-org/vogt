@@ -91,7 +91,46 @@ fn default_session_backend() -> String {
     "local".to_string()
 }
 
+/// The backend the built-in templates run on (WI-3169):
+/// `ENGINE_SESSION_BACKEND`, else `VOGT_ENGINE_SESSION_BACKEND`, else `local`.
+/// `pod` needs pod backends enabled, so a deployment cannot name a backend
+/// that every session start would then refuse.
+fn default_templates_backend(pod_backends_enabled: bool) -> Result<String> {
+    let value = ["ENGINE_SESSION_BACKEND", "VOGT_ENGINE_SESSION_BACKEND"]
+        .into_iter()
+        .find_map(|name| engine_env(name).ok().map(|v| (name, v)))
+        .map(|(name, v)| (name, v.trim().to_ascii_lowercase()))
+        .filter(|(_, v)| !v.is_empty());
+    match value {
+        None => Ok(default_session_backend()),
+        Some((_, v)) if v == "local" => Ok(v),
+        Some((name, v)) if v == "pod" => {
+            if pod_backends_enabled {
+                Ok(v)
+            } else {
+                Err(ApiError::Config(format!(
+                    "{name}=pod needs ENGINE_POD_BACKENDS_ENABLED=true"
+                )))
+            }
+        }
+        Some((name, v)) => Err(ApiError::Config(format!(
+            "{name} must be local or pod, got {v:?}"
+        ))),
+    }
+}
+
 impl SessionTemplate {
+    /// The built-in templates with every `local` one moved to `backend`.
+    pub fn default_templates_on(backend: &str) -> Vec<Self> {
+        let mut templates = Self::default_templates();
+        for template in &mut templates {
+            if template.backend == "local" {
+                template.backend = backend.to_string();
+            }
+        }
+        templates
+    }
+
     pub fn default_templates() -> Vec<Self> {
         vec![
             SessionTemplate {
@@ -968,9 +1007,12 @@ pub fn load(
                     .collect()
             })
             .unwrap_or_default(),
-        session_templates: from_file
-            .session_templates
-            .unwrap_or_else(SessionTemplate::default_templates),
+        session_templates: match from_file.session_templates {
+            Some(templates) => templates,
+            None => SessionTemplate::default_templates_on(&default_templates_backend(
+                pod_backends_enabled,
+            )?),
+        },
         pod_backends_enabled,
         assistant_api_key,
         assistant_base_url: match from_file
@@ -2360,6 +2402,9 @@ mod prefix_tests {
             std::env::remove_var("ENGINE_BIND");
             std::env::remove_var("VOGT_CODEX_SESSION_ID");
             std::env::remove_var("ENGINE_CODEX_APPROVAL_POLICY");
+            std::env::remove_var("ENGINE_SESSION_BACKEND");
+            std::env::remove_var("VOGT_ENGINE_SESSION_BACKEND");
+            std::env::remove_var("ENGINE_POD_BACKENDS_ENABLED");
         };
         clear();
 
@@ -2404,6 +2449,47 @@ mod prefix_tests {
         assert_eq!(cfg.codex_approval_policy, "on-request");
         unsafe { std::env::set_var("ENGINE_CODEX_APPROVAL_POLICY", "sometimes") };
         assert!(load(Some(&cfg_path), None, None).is_err());
+        unsafe { std::env::remove_var("ENGINE_CODEX_APPROVAL_POLICY") };
+
+        // WI-3169: a pod deployment's agent templates run as pods. vogt-dev
+        // sets VOGT_ENGINE_SESSION_BACKEND=pod and every built-in template
+        // still ran in the engine container.
+        let backend_of = |cfg: &Config, name: &str| {
+            cfg.session_templates
+                .iter()
+                .find(|t| t.name == name)
+                .map(|t| t.backend.clone())
+                .unwrap()
+        };
+        let cfg = load(Some(&cfg_path), None, None).unwrap();
+        assert_eq!(backend_of(&cfg, "Claude Code (protected)"), "local");
+        unsafe {
+            std::env::set_var("VOGT_ENGINE_SESSION_BACKEND", "pod");
+            std::env::set_var("ENGINE_POD_BACKENDS_ENABLED", "true");
+        }
+        let cfg = load(Some(&cfg_path), None, None).unwrap();
+        for name in [
+            "Claude Code (protected)",
+            "Codex (protected)",
+            "Shell",
+            "Pod",
+        ] {
+            assert_eq!(backend_of(&cfg, name), "pod", "{name}");
+        }
+        unsafe { std::env::set_var("ENGINE_SESSION_BACKEND", "local") };
+        let cfg = load(Some(&cfg_path), None, None).unwrap();
+        assert_eq!(backend_of(&cfg, "Claude Code (protected)"), "local");
+        assert_eq!(backend_of(&cfg, "Pod"), "pod");
+        unsafe { std::env::set_var("ENGINE_SESSION_BACKEND", "k8s") };
+        assert!(load(Some(&cfg_path), None, None).is_err());
+        unsafe {
+            std::env::remove_var("ENGINE_SESSION_BACKEND");
+            std::env::set_var("ENGINE_POD_BACKENDS_ENABLED", "false");
+        }
+        assert!(
+            load(Some(&cfg_path), None, None).is_err(),
+            "pod needs pods enabled"
+        );
 
         clear();
     }

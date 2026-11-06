@@ -925,9 +925,21 @@ pub fn pod_template(
         value: Some((*value).into()),
         ..Default::default()
     }));
-    // The requested argv runs in the PTY (the session agent reads it); the
-    // container command stays the image entrypoint.
-    if !command.is_empty() {
+    // An agent template (`vogt-agent-auth run -- claude`) names the pod's CLI
+    // instead of its argv (WI-3169): the session agent builds that CLI's
+    // command line itself, with the driven-session policy, the MCP set and
+    // the conversation, which a raw argv would leave out. Without this every
+    // pod ran the deployment's `cli` whatever the template asked for.
+    let agent = crate::agent_cli::agent_name(command)
+        .filter(|name| matches!(name.as_str(), "claude" | "codex" | "opencode"));
+    if let Some(agent) = &agent {
+        if let Some(cli) = env.iter_mut().find(|e| e.name == "VOGT_CLI") {
+            cli.value = Some(agent.clone());
+        }
+    }
+    // Any other requested argv runs in the PTY (the session agent reads it);
+    // the container command stays the image entrypoint.
+    if !command.is_empty() && agent.is_none() {
         env.push(EnvVar {
             name: "VOGT_SESSION_COMMAND".into(),
             value: Some(serde_json::to_string(command).expect("argv serialises")),
@@ -2033,6 +2045,62 @@ mod tests {
             (ENGINE_LABEL.into(), engine.into()),
         ]));
         pod
+    }
+
+    /// WI-3169: an agent template's argv picks the pod's CLI, and the
+    /// session agent builds the command line, so the posture is not lost.
+    #[test]
+    fn an_agent_template_command_names_the_pod_cli() {
+        let cfg = PodConfig::default();
+        let template = SessionTemplate {
+            name: "Claude Code (protected)".into(),
+            description: "claude".into(),
+            command: None,
+            cwd: None,
+            env: vec![],
+            default_name: None,
+            match_repo_names: vec![],
+            match_path_prefixes: vec![],
+            tags: vec![],
+            backend: "pod".into(),
+            account: None,
+        };
+        let env_of = |command: &[String]| {
+            let pod = pod_template(
+                &cfg,
+                &template,
+                Uuid::nil(),
+                "vogt",
+                "session",
+                None,
+                command,
+            );
+            pod.spec.unwrap().containers[0]
+                .env
+                .clone()
+                .unwrap()
+                .into_iter()
+                .map(|e| (e.name, e.value.unwrap_or_default()))
+                .collect::<BTreeMap<_, _>>()
+        };
+        let argv = |words: &[&str]| words.iter().map(|w| w.to_string()).collect::<Vec<_>>();
+
+        let env = env_of(&argv(&["vogt-agent-auth", "run", "--", "claude"]));
+        assert_eq!(env["VOGT_CLI"], "claude");
+        assert!(!env.contains_key("VOGT_SESSION_COMMAND"));
+
+        let env = env_of(&argv(&["opencode"]));
+        assert_eq!(env["VOGT_CLI"], "opencode");
+
+        let env = env_of(&[]);
+        assert_eq!(
+            env["VOGT_CLI"], cfg.cli,
+            "no command keeps the deployment CLI"
+        );
+
+        let env = env_of(&argv(&["bash", "-l"]));
+        assert_eq!(env["VOGT_CLI"], cfg.cli);
+        assert_eq!(env["VOGT_SESSION_COMMAND"], r#"["bash","-l"]"#);
     }
 
     #[test]
