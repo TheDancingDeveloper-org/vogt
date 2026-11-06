@@ -174,6 +174,13 @@ loudly instead.
 
 ## 6. Workspace
 
+On `rust-2`, distinguish local PTYs from pod templates. `core/` contains the
+selectable Rust core; `session-agent/` owns the pod PTY. The workspace rules
+below describe engine-side routes and local sessions, not the pod's separate
+graft clone. A pod has no sibling worktrees or automatically mounted workspace
+rules. Preserve code through graft and read `docs/ENGINE.md`'s pod lifecycle
+limits before treating hibernation as workspace persistence.
+
 The engine serves one `workspace_root` (default `~/Working`; inside the image
 that is the pod user's `~/Working`, declared as a volume). Every file, search and git route is
 scoped to it, and `cwd` on a session is resolved inside it. The image does
