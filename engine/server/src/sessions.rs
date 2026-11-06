@@ -1664,6 +1664,13 @@ impl SessionRegistry {
 
     /// A session's summary whether it is live, exited but still listed, or
     /// hibernated; `None` when the engine does not know it.
+    /// The brief the session was started with, as a pod's entrypoint writes
+    /// it into the checkout; empty when there is none (WI-3355).
+    pub fn session_brief(&self, id: Uuid) -> String {
+        std::fs::read_to_string(prompt_files::session_prompt_path(&self.cfg.state_dir, id))
+            .unwrap_or_default()
+    }
+
     pub fn summary_of(&self, id: Uuid) -> Option<SessionSummary> {
         match self.sessions.get(&id) {
             Some(session) => Some(session.summary()),
