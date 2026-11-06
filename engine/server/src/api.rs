@@ -279,6 +279,42 @@ fn require_role_authority(
     }
 }
 
+/// A session's source picks the graft repo and line the engine mints a land
+/// token for into the pod (WI-3369), so it comes from the project config
+/// vogt-core holds and from nothing else. Only vogt-core (the stack secret,
+/// never `name`) may name one; any other caller that names a source is
+/// refused, so no session token, person or break-glass caller can point a
+/// pod's token at another repo or line. A request with no source gets the
+/// deployment's default, as before. A refusal is a 403 with an audit line.
+fn require_source_authority(
+    identity: Option<&crate::auth::AuthorizedIdentity>,
+    source: Option<&vogt_engine_contract::source::SourceDescriptor>,
+) -> crate::error::Result<()> {
+    let Some(source) = source else {
+        return Ok(());
+    };
+    match identity {
+        Some(identity) if identity.stack_secret => Ok(()),
+        Some(identity) => {
+            tracing::warn!(
+                target: "vogt::audit",
+                event = "session.source",
+                outcome = "refused",
+                caller = %identity.name,
+                repo = source.location.repo(),
+                line = %source.reference,
+                "session source refused"
+            );
+            Err(crate::error::ApiError::Forbidden(
+                "a session's source comes from its project's config in vogt-core; \
+                 start the session through vogt-core instead of naming a source"
+                    .into(),
+            ))
+        }
+        None => Err(crate::error::ApiError::Unauthorized),
+    }
+}
+
 /// Nominate a session as oversight, or make it a worker again (WI-957).
 /// Becoming oversight pins it awake too. Only a person, break-glass or
 /// vogt-core (`require_role_authority`).
@@ -820,6 +856,7 @@ pub async fn create_session(
     if !spec.role.is_worker() {
         require_role_authority(identity.as_deref(), "(new)", spec.role)?;
     }
+    require_source_authority(identity.as_deref(), spec.source.as_ref())?;
     let s = state.sessions.create_launched(spec).await?;
     Ok(Json(s.summary()))
 }
@@ -1796,5 +1833,69 @@ mod disk_status_tests {
         let row = disk_status(missing, 85);
         assert!(row.needs_attention);
         assert_eq!(row.total_bytes, 0);
+    }
+}
+
+#[cfg(test)]
+mod source_authority_tests {
+    use super::require_source_authority;
+    use crate::auth::AuthorizedIdentity;
+    use crate::error::ApiError;
+    use vogt_engine_contract::source::{LandingMode, SourceDescriptor, SourceLocation};
+
+    fn caller(stack_secret: bool, break_glass: bool, person: bool) -> AuthorizedIdentity {
+        AuthorizedIdentity {
+            name: "agent:session:x".into(),
+            capabilities: Vec::new(),
+            scopes: Vec::new(),
+            core_bearer: None,
+            mutating_requests_per_minute: 0,
+            stack_secret,
+            break_glass,
+            person,
+        }
+    }
+
+    fn graft(repo: &str, line: &str) -> SourceDescriptor {
+        SourceDescriptor {
+            location: SourceLocation::Graft {
+                endpoint: String::new(),
+                repo: repo.into(),
+            },
+            reference: line.into(),
+            landing: LandingMode::Line,
+        }
+    }
+
+    /// WI-3369 review blocker: a caller other than vogt-core that names
+    /// another repo or line is refused before `create_launched`, which is
+    /// where the land token is minted, so it gets no token for it.
+    #[test]
+    fn a_caller_other_than_vogt_core_cannot_name_a_source() {
+        let other = graft("someone-elses-repo", "main");
+        for identity in [
+            caller(false, false, false),
+            caller(false, true, false),
+            caller(false, false, true),
+        ] {
+            assert!(matches!(
+                require_source_authority(Some(&identity), Some(&other)),
+                Err(ApiError::Forbidden(_))
+            ));
+        }
+        assert!(matches!(
+            require_source_authority(None, Some(&other)),
+            Err(ApiError::Unauthorized)
+        ));
+    }
+
+    /// The project's own source, as vogt-core resolves it from the project
+    /// config, still starts; a request with no source gets the deployment's
+    /// default from anyone.
+    #[test]
+    fn vogt_core_names_the_projects_source_and_no_source_is_the_default() {
+        let own = graft("farmeggs", "backlog-1");
+        assert!(require_source_authority(Some(&caller(true, false, false)), Some(&own)).is_ok());
+        assert!(require_source_authority(Some(&caller(false, false, false)), None).is_ok());
     }
 }
