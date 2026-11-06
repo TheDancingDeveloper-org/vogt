@@ -18443,6 +18443,8 @@
     "body": "x",
     "kind": "note",
     "handoff": null,
+    "verdict": null,
+    "verification": null,
     "reason": "x",
     "mode": "compact"
    }
@@ -18601,6 +18603,8 @@
     "body": "x",
     "kind": "note",
     "handoff": null,
+    "verdict": null,
+    "verification": null,
     "reason": "x",
     "mode": "compact"
    }
@@ -18665,6 +18669,8 @@
     "body": "x",
     "kind": "note",
     "handoff": null,
+    "verdict": null,
+    "verification": null,
     "reason": "x",
     "mode": "compact"
    }
@@ -18707,6 +18713,8 @@
     "body": "x",
     "kind": "note",
     "handoff": null,
+    "verdict": null,
+    "verification": null,
     "reason": "x",
     "mode": "compact"
    }
@@ -18815,6 +18823,8 @@
     "body": "é😀",
     "kind": "note",
     "handoff": null,
+    "verdict": null,
+    "verification": null,
     "reason": "x",
     "mode": "compact"
    }
@@ -18831,7 +18841,7 @@
   },
   "py": {
    "ok": false,
-   "text": "invalid arguments for work.comment:\n1 validation error for CommentParams\nkind\n  Input should be 'note' or 'handoff' [type=literal_error, input_value=None, input_type=NoneType]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "text": "invalid arguments for work.comment:\n1 validation error for CommentParams\nkind\n  Input should be 'note', 'handoff', 'verdict' or 'verification' [type=literal_error, input_value=None, input_type=NoneType]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
    "sent": "{\"ref\": \"x\", \"body\": \"x\", \"reason\": \"x\", \"kind\": null}",
    "errors": [
     {
@@ -18859,6 +18869,8 @@
     "body": "x",
     "kind": "note",
     "handoff": null,
+    "verdict": null,
+    "verification": null,
     "reason": "x",
     "mode": "compact"
    }
@@ -18875,7 +18887,7 @@
   },
   "py": {
    "ok": false,
-   "text": "invalid arguments for work.comment:\n1 validation error for CommentParams\nkind\n  Input should be 'note' or 'handoff' [type=literal_error, input_value='zzz-bad', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "text": "invalid arguments for work.comment:\n1 validation error for CommentParams\nkind\n  Input should be 'note', 'handoff', 'verdict' or 'verification' [type=literal_error, input_value='zzz-bad', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
    "sent": "{\"ref\": \"x\", \"body\": \"x\", \"reason\": \"x\", \"kind\": \"zzz-bad\"}",
    "errors": [
     {
@@ -18898,7 +18910,7 @@
   },
   "py": {
    "ok": false,
-   "text": "invalid arguments for work.comment:\n1 validation error for CommentParams\nkind\n  Input should be 'note' or 'handoff' [type=literal_error, input_value='NOTE', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "text": "invalid arguments for work.comment:\n1 validation error for CommentParams\nkind\n  Input should be 'note', 'handoff', 'verdict' or 'verification' [type=literal_error, input_value='NOTE', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
    "sent": "{\"ref\": \"x\", \"body\": \"x\", \"reason\": \"x\", \"kind\": \"NOTE\"}",
    "errors": [
     {
@@ -18921,7 +18933,7 @@
   },
   "py": {
    "ok": false,
-   "text": "invalid arguments for work.comment:\n1 validation error for CommentParams\nkind\n  Input should be 'note' or 'handoff' [type=literal_error, input_value=5, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "text": "invalid arguments for work.comment:\n1 validation error for CommentParams\nkind\n  Input should be 'note', 'handoff', 'verdict' or 'verification' [type=literal_error, input_value=5, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
    "sent": "{\"ref\": \"x\", \"body\": \"x\", \"reason\": \"x\", \"kind\": 5}",
    "errors": [
     {
@@ -18944,7 +18956,7 @@
   },
   "py": {
    "ok": false,
-   "text": "invalid arguments for work.comment:\n1 validation error for CommentParams\nkind\n  Input should be 'note' or 'handoff' [type=literal_error, input_value=True, input_type=bool]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "text": "invalid arguments for work.comment:\n1 validation error for CommentParams\nkind\n  Input should be 'note', 'handoff', 'verdict' or 'verification' [type=literal_error, input_value=True, input_type=bool]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
    "sent": "{\"ref\": \"x\", \"body\": \"x\", \"reason\": \"x\", \"kind\": true}",
    "errors": [
     {
@@ -18967,7 +18979,7 @@
   },
   "py": {
    "ok": false,
-   "text": "invalid arguments for work.comment:\n1 validation error for CommentParams\nkind\n  Input should be 'note' or 'handoff' [type=literal_error, input_value='é😀', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "text": "invalid arguments for work.comment:\n1 validation error for CommentParams\nkind\n  Input should be 'note', 'handoff', 'verdict' or 'verification' [type=literal_error, input_value='é😀', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
    "sent": "{\"ref\": \"x\", \"body\": \"x\", \"reason\": \"x\", \"kind\": \"é😀\"}",
    "errors": [
     {
@@ -18995,6 +19007,8 @@
     "body": "x",
     "kind": "note",
     "handoff": null,
+    "verdict": null,
+    "verification": null,
     "reason": "x",
     "mode": "compact"
    }
@@ -19093,6 +19107,303 @@
  },
  {
   "op": "work.comment",
+  "tag": "verdict:null",
+  "params": {
+   "ref": "x",
+   "body": "x",
+   "reason": "x",
+   "verdict": null
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "ref": "x",
+    "body": "x",
+    "kind": "note",
+    "handoff": null,
+    "verdict": null,
+    "verification": null,
+    "reason": "x",
+    "mode": "compact"
+   }
+  }
+ },
+ {
+  "op": "work.comment",
+  "tag": "verdict:valid",
+  "params": {
+   "ref": "x",
+   "body": "x",
+   "reason": "x",
+   "verdict": {
+    "head_sha": "x",
+    "verdict": "no_blockers"
+   }
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for work.comment:\n1 validation error for CommentParams\n  Value error, verdict fields belong on a comment of kind verdict [type=value_error, input_value={'ref': 'x', 'body': 'x',...erdict': 'no_blockers'}}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/value_error",
+   "sent": "{\"ref\": \"x\", \"body\": \"x\", \"reason\": \"x\", \"verdict\": {\"head_sha\": \"x\", \"verdict\": \"no_blockers\"}}",
+   "errors": [
+    {
+     "loc": [],
+     "type": "value_error"
+    }
+   ]
+  }
+ },
+ {
+  "op": "work.comment",
+  "tag": "verdict:obj-str",
+  "params": {
+   "ref": "x",
+   "body": "x",
+   "reason": "x",
+   "verdict": "x"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for work.comment:\n1 validation error for CommentParams\nverdict\n  Input should be a valid dictionary or instance of VerdictFields [type=model_type, input_value='x', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/model_type",
+   "sent": "{\"ref\": \"x\", \"body\": \"x\", \"reason\": \"x\", \"verdict\": \"x\"}",
+   "errors": [
+    {
+     "loc": [
+      "verdict"
+     ],
+     "type": "model_type"
+    }
+   ]
+  }
+ },
+ {
+  "op": "work.comment",
+  "tag": "verdict:obj-extra",
+  "params": {
+   "ref": "x",
+   "body": "x",
+   "reason": "x",
+   "verdict": {
+    "zz_extra": 1
+   }
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for work.comment:\n3 validation errors for CommentParams\nverdict.head_sha\n  Field required [type=missing, input_value={'zz_extra': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/missing\nverdict.verdict\n  Field required [type=missing, input_value={'zz_extra': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/missing\nverdict.zz_extra\n  Extra inputs are not permitted [type=extra_forbidden, input_value=1, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.13/v/extra_forbidden",
+   "sent": "{\"ref\": \"x\", \"body\": \"x\", \"reason\": \"x\", \"verdict\": {\"zz_extra\": 1}}",
+   "errors": [
+    {
+     "loc": [
+      "verdict",
+      "head_sha"
+     ],
+     "type": "missing"
+    },
+    {
+     "loc": [
+      "verdict",
+      "verdict"
+     ],
+     "type": "missing"
+    },
+    {
+     "loc": [
+      "verdict",
+      "zz_extra"
+     ],
+     "type": "extra_forbidden"
+    }
+   ]
+  }
+ },
+ {
+  "op": "work.comment",
+  "tag": "verdict:obj-empty",
+  "params": {
+   "ref": "x",
+   "body": "x",
+   "reason": "x",
+   "verdict": {}
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for work.comment:\n2 validation errors for CommentParams\nverdict.head_sha\n  Field required [type=missing, input_value={}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/missing\nverdict.verdict\n  Field required [type=missing, input_value={}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/missing",
+   "sent": "{\"ref\": \"x\", \"body\": \"x\", \"reason\": \"x\", \"verdict\": {}}",
+   "errors": [
+    {
+     "loc": [
+      "verdict",
+      "head_sha"
+     ],
+     "type": "missing"
+    },
+    {
+     "loc": [
+      "verdict",
+      "verdict"
+     ],
+     "type": "missing"
+    }
+   ]
+  }
+ },
+ {
+  "op": "work.comment",
+  "tag": "verification:null",
+  "params": {
+   "ref": "x",
+   "body": "x",
+   "reason": "x",
+   "verification": null
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "ref": "x",
+    "body": "x",
+    "kind": "note",
+    "handoff": null,
+    "verdict": null,
+    "verification": null,
+    "reason": "x",
+    "mode": "compact"
+   }
+  }
+ },
+ {
+  "op": "work.comment",
+  "tag": "verification:valid",
+  "params": {
+   "ref": "x",
+   "body": "x",
+   "reason": "x",
+   "verification": {
+    "lane": "x",
+    "what": "x",
+    "evidence": "x"
+   }
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for work.comment:\n1 validation error for CommentParams\n  Value error, verification fields belong on a comment of kind verification [type=value_error, input_value={'ref': 'x', 'body': 'x',...: 'x', 'evidence': 'x'}}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/value_error",
+   "sent": "{\"ref\": \"x\", \"body\": \"x\", \"reason\": \"x\", \"verification\": {\"lane\": \"x\", \"what\": \"x\", \"evidence\": \"x\"}}",
+   "errors": [
+    {
+     "loc": [],
+     "type": "value_error"
+    }
+   ]
+  }
+ },
+ {
+  "op": "work.comment",
+  "tag": "verification:obj-str",
+  "params": {
+   "ref": "x",
+   "body": "x",
+   "reason": "x",
+   "verification": "x"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for work.comment:\n1 validation error for CommentParams\nverification\n  Input should be a valid dictionary or instance of VerificationFields [type=model_type, input_value='x', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/model_type",
+   "sent": "{\"ref\": \"x\", \"body\": \"x\", \"reason\": \"x\", \"verification\": \"x\"}",
+   "errors": [
+    {
+     "loc": [
+      "verification"
+     ],
+     "type": "model_type"
+    }
+   ]
+  }
+ },
+ {
+  "op": "work.comment",
+  "tag": "verification:obj-extra",
+  "params": {
+   "ref": "x",
+   "body": "x",
+   "reason": "x",
+   "verification": {
+    "zz_extra": 1
+   }
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for work.comment:\n4 validation errors for CommentParams\nverification.lane\n  Field required [type=missing, input_value={'zz_extra': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/missing\nverification.what\n  Field required [type=missing, input_value={'zz_extra': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/missing\nverification.evidence\n  Field required [type=missing, input_value={'zz_extra': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/missing\nverification.zz_extra\n  Extra inputs are not permitted [type=extra_forbidden, input_value=1, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.13/v/extra_forbidden",
+   "sent": "{\"ref\": \"x\", \"body\": \"x\", \"reason\": \"x\", \"verification\": {\"zz_extra\": 1}}",
+   "errors": [
+    {
+     "loc": [
+      "verification",
+      "lane"
+     ],
+     "type": "missing"
+    },
+    {
+     "loc": [
+      "verification",
+      "what"
+     ],
+     "type": "missing"
+    },
+    {
+     "loc": [
+      "verification",
+      "evidence"
+     ],
+     "type": "missing"
+    },
+    {
+     "loc": [
+      "verification",
+      "zz_extra"
+     ],
+     "type": "extra_forbidden"
+    }
+   ]
+  }
+ },
+ {
+  "op": "work.comment",
+  "tag": "verification:obj-empty",
+  "params": {
+   "ref": "x",
+   "body": "x",
+   "reason": "x",
+   "verification": {}
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for work.comment:\n3 validation errors for CommentParams\nverification.lane\n  Field required [type=missing, input_value={}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/missing\nverification.what\n  Field required [type=missing, input_value={}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/missing\nverification.evidence\n  Field required [type=missing, input_value={}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/missing",
+   "sent": "{\"ref\": \"x\", \"body\": \"x\", \"reason\": \"x\", \"verification\": {}}",
+   "errors": [
+    {
+     "loc": [
+      "verification",
+      "lane"
+     ],
+     "type": "missing"
+    },
+    {
+     "loc": [
+      "verification",
+      "what"
+     ],
+     "type": "missing"
+    },
+    {
+     "loc": [
+      "verification",
+      "evidence"
+     ],
+     "type": "missing"
+    }
+   ]
+  }
+ },
+ {
+  "op": "work.comment",
   "tag": "reason:null",
   "params": {
    "ref": "x",
@@ -19128,6 +19439,8 @@
     "body": "x",
     "kind": "note",
     "handoff": null,
+    "verdict": null,
+    "verification": null,
     "reason": "x",
     "mode": "compact"
    }
@@ -19236,6 +19549,8 @@
     "body": "x",
     "kind": "note",
     "handoff": null,
+    "verdict": null,
+    "verification": null,
     "reason": "é😀",
     "mode": "compact"
    }
@@ -19280,6 +19595,8 @@
     "body": "x",
     "kind": "note",
     "handoff": null,
+    "verdict": null,
+    "verification": null,
     "reason": "x",
     "mode": "compact"
    }
@@ -66192,6 +66509,1023 @@
     "ids": [],
     "limit": 500
    }
+  }
+ },
+ {
+  "op": "workspace.list",
+  "tag": "valid-minimal",
+  "params": {},
+  "py": {
+   "ok": true,
+   "dump": {
+    "project": null,
+    "alive": null
+   }
+  }
+ },
+ {
+  "op": "workspace.list",
+  "tag": "empty",
+  "params": {},
+  "py": {
+   "ok": true,
+   "dump": {
+    "project": null,
+    "alive": null
+   }
+  }
+ },
+ {
+  "op": "workspace.list",
+  "tag": "extra-key",
+  "params": {
+   "zz_extra": 1
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for workspace.list:\n1 validation error for WorkspaceListParams\nzz_extra\n  Extra inputs are not permitted [type=extra_forbidden, input_value=1, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.13/v/extra_forbidden",
+   "sent": "{\"zz_extra\": 1}",
+   "errors": [
+    {
+     "loc": [
+      "zz_extra"
+     ],
+     "type": "extra_forbidden"
+    }
+   ]
+  }
+ },
+ {
+  "op": "workspace.list",
+  "tag": "project:null",
+  "params": {
+   "project": null
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "project": null,
+    "alive": null
+   }
+  }
+ },
+ {
+  "op": "workspace.list",
+  "tag": "project:valid",
+  "params": {
+   "project": "x"
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "project": "x",
+    "alive": null
+   }
+  }
+ },
+ {
+  "op": "workspace.list",
+  "tag": "project:int",
+  "params": {
+   "project": 5
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for workspace.list:\n1 validation error for WorkspaceListParams\nproject\n  Input should be a valid string [type=string_type, input_value=5, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.13/v/string_type",
+   "sent": "{\"project\": 5}",
+   "errors": [
+    {
+     "loc": [
+      "project"
+     ],
+     "type": "string_type"
+    }
+   ]
+  }
+ },
+ {
+  "op": "workspace.list",
+  "tag": "project:bool",
+  "params": {
+   "project": true
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for workspace.list:\n1 validation error for WorkspaceListParams\nproject\n  Input should be a valid string [type=string_type, input_value=True, input_type=bool]\n    For further information visit https://errors.pydantic.dev/2.13/v/string_type",
+   "sent": "{\"project\": true}",
+   "errors": [
+    {
+     "loc": [
+      "project"
+     ],
+     "type": "string_type"
+    }
+   ]
+  }
+ },
+ {
+  "op": "workspace.list",
+  "tag": "project:unicode",
+  "params": {
+   "project": "é😀"
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "project": "é😀",
+    "alive": null
+   }
+  }
+ },
+ {
+  "op": "workspace.list",
+  "tag": "alive:null",
+  "params": {
+   "alive": null
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "project": null,
+    "alive": null
+   }
+  }
+ },
+ {
+  "op": "workspace.list",
+  "tag": "alive:valid",
+  "params": {
+   "alive": true
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "project": null,
+    "alive": true
+   }
+  }
+ },
+ {
+  "op": "workspace.list",
+  "tag": "alive:int1",
+  "params": {
+   "alive": 1
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "project": null,
+    "alive": true
+   }
+  }
+ },
+ {
+  "op": "workspace.list",
+  "tag": "alive:int0",
+  "params": {
+   "alive": 0
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "project": null,
+    "alive": false
+   }
+  }
+ },
+ {
+  "op": "workspace.list",
+  "tag": "alive:int2",
+  "params": {
+   "alive": 2
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for workspace.list:\n1 validation error for WorkspaceListParams\nalive\n  Input should be a valid boolean, unable to interpret input [type=bool_parsing, input_value=2, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.13/v/bool_parsing",
+   "sent": "{\"alive\": 2}",
+   "errors": [
+    {
+     "loc": [
+      "alive"
+     ],
+     "type": "bool_parsing"
+    }
+   ]
+  }
+ },
+ {
+  "op": "workspace.list",
+  "tag": "alive:strtrue",
+  "params": {
+   "alive": "true"
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "project": null,
+    "alive": true
+   }
+  }
+ },
+ {
+  "op": "workspace.list",
+  "tag": "alive:stryes",
+  "params": {
+   "alive": "yes"
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "project": null,
+    "alive": true
+   }
+  }
+ },
+ {
+  "op": "workspace.list",
+  "tag": "alive:strjunk",
+  "params": {
+   "alive": "maybe"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for workspace.list:\n1 validation error for WorkspaceListParams\nalive\n  Input should be a valid boolean, unable to interpret input [type=bool_parsing, input_value='maybe', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/bool_parsing",
+   "sent": "{\"alive\": \"maybe\"}",
+   "errors": [
+    {
+     "loc": [
+      "alive"
+     ],
+     "type": "bool_parsing"
+    }
+   ]
+  }
+ },
+ {
+  "op": "workspace.list",
+  "tag": "alive:float1",
+  "params": {
+   "alive": 1.0
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "project": null,
+    "alive": true
+   }
+  }
+ },
+ {
+  "op": "workspace.clean",
+  "tag": "valid-minimal",
+  "params": {
+   "mode": "build_output",
+   "reason": "x"
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "id": null,
+    "path": null,
+    "mode": "build_output",
+    "force": false,
+    "reason": "x"
+   }
+  }
+ },
+ {
+  "op": "workspace.clean",
+  "tag": "empty",
+  "params": {},
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for workspace.clean:\n2 validation errors for WorkspaceCleanParams\nmode\n  Field required [type=missing, input_value={}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/missing\nreason\n  Field required [type=missing, input_value={}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/missing",
+   "sent": "{}",
+   "errors": [
+    {
+     "loc": [
+      "mode"
+     ],
+     "type": "missing"
+    },
+    {
+     "loc": [
+      "reason"
+     ],
+     "type": "missing"
+    }
+   ]
+  }
+ },
+ {
+  "op": "workspace.clean",
+  "tag": "extra-key",
+  "params": {
+   "mode": "build_output",
+   "reason": "x",
+   "zz_extra": 1
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for workspace.clean:\n1 validation error for WorkspaceCleanParams\nzz_extra\n  Extra inputs are not permitted [type=extra_forbidden, input_value=1, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.13/v/extra_forbidden",
+   "sent": "{\"mode\": \"build_output\", \"reason\": \"x\", \"zz_extra\": 1}",
+   "errors": [
+    {
+     "loc": [
+      "zz_extra"
+     ],
+     "type": "extra_forbidden"
+    }
+   ]
+  }
+ },
+ {
+  "op": "workspace.clean",
+  "tag": "missing:mode",
+  "params": {
+   "reason": "x"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for workspace.clean:\n1 validation error for WorkspaceCleanParams\nmode\n  Field required [type=missing, input_value={'reason': 'x'}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/missing",
+   "sent": "{\"reason\": \"x\"}",
+   "errors": [
+    {
+     "loc": [
+      "mode"
+     ],
+     "type": "missing"
+    }
+   ]
+  }
+ },
+ {
+  "op": "workspace.clean",
+  "tag": "missing:reason",
+  "params": {
+   "mode": "build_output"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for workspace.clean:\n1 validation error for WorkspaceCleanParams\nreason\n  Field required [type=missing, input_value={'mode': 'build_output'}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/missing",
+   "sent": "{\"mode\": \"build_output\"}",
+   "errors": [
+    {
+     "loc": [
+      "reason"
+     ],
+     "type": "missing"
+    }
+   ]
+  }
+ },
+ {
+  "op": "workspace.clean",
+  "tag": "id:null",
+  "params": {
+   "mode": "build_output",
+   "reason": "x",
+   "id": null
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "id": null,
+    "path": null,
+    "mode": "build_output",
+    "force": false,
+    "reason": "x"
+   }
+  }
+ },
+ {
+  "op": "workspace.clean",
+  "tag": "id:valid",
+  "params": {
+   "mode": "build_output",
+   "reason": "x",
+   "id": "x"
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "id": "x",
+    "path": null,
+    "mode": "build_output",
+    "force": false,
+    "reason": "x"
+   }
+  }
+ },
+ {
+  "op": "workspace.clean",
+  "tag": "id:int",
+  "params": {
+   "mode": "build_output",
+   "reason": "x",
+   "id": 5
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for workspace.clean:\n1 validation error for WorkspaceCleanParams\nid\n  Input should be a valid string [type=string_type, input_value=5, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.13/v/string_type",
+   "sent": "{\"mode\": \"build_output\", \"reason\": \"x\", \"id\": 5}",
+   "errors": [
+    {
+     "loc": [
+      "id"
+     ],
+     "type": "string_type"
+    }
+   ]
+  }
+ },
+ {
+  "op": "workspace.clean",
+  "tag": "id:bool",
+  "params": {
+   "mode": "build_output",
+   "reason": "x",
+   "id": true
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for workspace.clean:\n1 validation error for WorkspaceCleanParams\nid\n  Input should be a valid string [type=string_type, input_value=True, input_type=bool]\n    For further information visit https://errors.pydantic.dev/2.13/v/string_type",
+   "sent": "{\"mode\": \"build_output\", \"reason\": \"x\", \"id\": true}",
+   "errors": [
+    {
+     "loc": [
+      "id"
+     ],
+     "type": "string_type"
+    }
+   ]
+  }
+ },
+ {
+  "op": "workspace.clean",
+  "tag": "id:unicode",
+  "params": {
+   "mode": "build_output",
+   "reason": "x",
+   "id": "é😀"
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "id": "é😀",
+    "path": null,
+    "mode": "build_output",
+    "force": false,
+    "reason": "x"
+   }
+  }
+ },
+ {
+  "op": "workspace.clean",
+  "tag": "path:null",
+  "params": {
+   "mode": "build_output",
+   "reason": "x",
+   "path": null
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "id": null,
+    "path": null,
+    "mode": "build_output",
+    "force": false,
+    "reason": "x"
+   }
+  }
+ },
+ {
+  "op": "workspace.clean",
+  "tag": "path:valid",
+  "params": {
+   "mode": "build_output",
+   "reason": "x",
+   "path": "x"
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "id": null,
+    "path": "x",
+    "mode": "build_output",
+    "force": false,
+    "reason": "x"
+   }
+  }
+ },
+ {
+  "op": "workspace.clean",
+  "tag": "path:int",
+  "params": {
+   "mode": "build_output",
+   "reason": "x",
+   "path": 5
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for workspace.clean:\n1 validation error for WorkspaceCleanParams\npath\n  Input should be a valid string [type=string_type, input_value=5, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.13/v/string_type",
+   "sent": "{\"mode\": \"build_output\", \"reason\": \"x\", \"path\": 5}",
+   "errors": [
+    {
+     "loc": [
+      "path"
+     ],
+     "type": "string_type"
+    }
+   ]
+  }
+ },
+ {
+  "op": "workspace.clean",
+  "tag": "path:bool",
+  "params": {
+   "mode": "build_output",
+   "reason": "x",
+   "path": true
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for workspace.clean:\n1 validation error for WorkspaceCleanParams\npath\n  Input should be a valid string [type=string_type, input_value=True, input_type=bool]\n    For further information visit https://errors.pydantic.dev/2.13/v/string_type",
+   "sent": "{\"mode\": \"build_output\", \"reason\": \"x\", \"path\": true}",
+   "errors": [
+    {
+     "loc": [
+      "path"
+     ],
+     "type": "string_type"
+    }
+   ]
+  }
+ },
+ {
+  "op": "workspace.clean",
+  "tag": "path:unicode",
+  "params": {
+   "mode": "build_output",
+   "reason": "x",
+   "path": "é😀"
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "id": null,
+    "path": "é😀",
+    "mode": "build_output",
+    "force": false,
+    "reason": "x"
+   }
+  }
+ },
+ {
+  "op": "workspace.clean",
+  "tag": "mode:null",
+  "params": {
+   "mode": null,
+   "reason": "x"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for workspace.clean:\n1 validation error for WorkspaceCleanParams\nmode\n  Input should be 'build_output' or 'remove' [type=literal_error, input_value=None, input_type=NoneType]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"mode\": null, \"reason\": \"x\"}",
+   "errors": [
+    {
+     "loc": [
+      "mode"
+     ],
+     "type": "literal_error"
+    }
+   ]
+  }
+ },
+ {
+  "op": "workspace.clean",
+  "tag": "mode:valid",
+  "params": {
+   "mode": "build_output",
+   "reason": "x"
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "id": null,
+    "path": null,
+    "mode": "build_output",
+    "force": false,
+    "reason": "x"
+   }
+  }
+ },
+ {
+  "op": "workspace.clean",
+  "tag": "mode:enum-bad",
+  "params": {
+   "mode": "zzz-bad",
+   "reason": "x"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for workspace.clean:\n1 validation error for WorkspaceCleanParams\nmode\n  Input should be 'build_output' or 'remove' [type=literal_error, input_value='zzz-bad', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"mode\": \"zzz-bad\", \"reason\": \"x\"}",
+   "errors": [
+    {
+     "loc": [
+      "mode"
+     ],
+     "type": "literal_error"
+    }
+   ]
+  }
+ },
+ {
+  "op": "workspace.clean",
+  "tag": "mode:enum-case",
+  "params": {
+   "mode": "BUILD_OUTPUT",
+   "reason": "x"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for workspace.clean:\n1 validation error for WorkspaceCleanParams\nmode\n  Input should be 'build_output' or 'remove' [type=literal_error, input_value='BUILD_OUTPUT', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"mode\": \"BUILD_OUTPUT\", \"reason\": \"x\"}",
+   "errors": [
+    {
+     "loc": [
+      "mode"
+     ],
+     "type": "literal_error"
+    }
+   ]
+  }
+ },
+ {
+  "op": "workspace.clean",
+  "tag": "mode:int",
+  "params": {
+   "mode": 5,
+   "reason": "x"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for workspace.clean:\n1 validation error for WorkspaceCleanParams\nmode\n  Input should be 'build_output' or 'remove' [type=literal_error, input_value=5, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"mode\": 5, \"reason\": \"x\"}",
+   "errors": [
+    {
+     "loc": [
+      "mode"
+     ],
+     "type": "literal_error"
+    }
+   ]
+  }
+ },
+ {
+  "op": "workspace.clean",
+  "tag": "mode:bool",
+  "params": {
+   "mode": true,
+   "reason": "x"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for workspace.clean:\n1 validation error for WorkspaceCleanParams\nmode\n  Input should be 'build_output' or 'remove' [type=literal_error, input_value=True, input_type=bool]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"mode\": true, \"reason\": \"x\"}",
+   "errors": [
+    {
+     "loc": [
+      "mode"
+     ],
+     "type": "literal_error"
+    }
+   ]
+  }
+ },
+ {
+  "op": "workspace.clean",
+  "tag": "mode:unicode",
+  "params": {
+   "mode": "é😀",
+   "reason": "x"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for workspace.clean:\n1 validation error for WorkspaceCleanParams\nmode\n  Input should be 'build_output' or 'remove' [type=literal_error, input_value='é😀', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"mode\": \"é😀\", \"reason\": \"x\"}",
+   "errors": [
+    {
+     "loc": [
+      "mode"
+     ],
+     "type": "literal_error"
+    }
+   ]
+  }
+ },
+ {
+  "op": "workspace.clean",
+  "tag": "force:null",
+  "params": {
+   "mode": "build_output",
+   "reason": "x",
+   "force": null
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for workspace.clean:\n1 validation error for WorkspaceCleanParams\nforce\n  Input should be a valid boolean [type=bool_type, input_value=None, input_type=NoneType]\n    For further information visit https://errors.pydantic.dev/2.13/v/bool_type",
+   "sent": "{\"mode\": \"build_output\", \"reason\": \"x\", \"force\": null}",
+   "errors": [
+    {
+     "loc": [
+      "force"
+     ],
+     "type": "bool_type"
+    }
+   ]
+  }
+ },
+ {
+  "op": "workspace.clean",
+  "tag": "force:valid",
+  "params": {
+   "mode": "build_output",
+   "reason": "x",
+   "force": true
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "id": null,
+    "path": null,
+    "mode": "build_output",
+    "force": true,
+    "reason": "x"
+   }
+  }
+ },
+ {
+  "op": "workspace.clean",
+  "tag": "force:int1",
+  "params": {
+   "mode": "build_output",
+   "reason": "x",
+   "force": 1
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "id": null,
+    "path": null,
+    "mode": "build_output",
+    "force": true,
+    "reason": "x"
+   }
+  }
+ },
+ {
+  "op": "workspace.clean",
+  "tag": "force:int0",
+  "params": {
+   "mode": "build_output",
+   "reason": "x",
+   "force": 0
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "id": null,
+    "path": null,
+    "mode": "build_output",
+    "force": false,
+    "reason": "x"
+   }
+  }
+ },
+ {
+  "op": "workspace.clean",
+  "tag": "force:int2",
+  "params": {
+   "mode": "build_output",
+   "reason": "x",
+   "force": 2
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for workspace.clean:\n1 validation error for WorkspaceCleanParams\nforce\n  Input should be a valid boolean, unable to interpret input [type=bool_parsing, input_value=2, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.13/v/bool_parsing",
+   "sent": "{\"mode\": \"build_output\", \"reason\": \"x\", \"force\": 2}",
+   "errors": [
+    {
+     "loc": [
+      "force"
+     ],
+     "type": "bool_parsing"
+    }
+   ]
+  }
+ },
+ {
+  "op": "workspace.clean",
+  "tag": "force:strtrue",
+  "params": {
+   "mode": "build_output",
+   "reason": "x",
+   "force": "true"
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "id": null,
+    "path": null,
+    "mode": "build_output",
+    "force": true,
+    "reason": "x"
+   }
+  }
+ },
+ {
+  "op": "workspace.clean",
+  "tag": "force:stryes",
+  "params": {
+   "mode": "build_output",
+   "reason": "x",
+   "force": "yes"
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "id": null,
+    "path": null,
+    "mode": "build_output",
+    "force": true,
+    "reason": "x"
+   }
+  }
+ },
+ {
+  "op": "workspace.clean",
+  "tag": "force:strjunk",
+  "params": {
+   "mode": "build_output",
+   "reason": "x",
+   "force": "maybe"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for workspace.clean:\n1 validation error for WorkspaceCleanParams\nforce\n  Input should be a valid boolean, unable to interpret input [type=bool_parsing, input_value='maybe', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/bool_parsing",
+   "sent": "{\"mode\": \"build_output\", \"reason\": \"x\", \"force\": \"maybe\"}",
+   "errors": [
+    {
+     "loc": [
+      "force"
+     ],
+     "type": "bool_parsing"
+    }
+   ]
+  }
+ },
+ {
+  "op": "workspace.clean",
+  "tag": "force:float1",
+  "params": {
+   "mode": "build_output",
+   "reason": "x",
+   "force": 1.0
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "id": null,
+    "path": null,
+    "mode": "build_output",
+    "force": true,
+    "reason": "x"
+   }
+  }
+ },
+ {
+  "op": "workspace.clean",
+  "tag": "reason:null",
+  "params": {
+   "mode": "build_output",
+   "reason": null
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for workspace.clean:\n1 validation error for WorkspaceCleanParams\nreason\n  Input should be a valid string [type=string_type, input_value=None, input_type=NoneType]\n    For further information visit https://errors.pydantic.dev/2.13/v/string_type",
+   "sent": "{\"mode\": \"build_output\", \"reason\": null}",
+   "errors": [
+    {
+     "loc": [
+      "reason"
+     ],
+     "type": "string_type"
+    }
+   ]
+  }
+ },
+ {
+  "op": "workspace.clean",
+  "tag": "reason:valid",
+  "params": {
+   "mode": "build_output",
+   "reason": "x"
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "id": null,
+    "path": null,
+    "mode": "build_output",
+    "force": false,
+    "reason": "x"
+   }
+  }
+ },
+ {
+  "op": "workspace.clean",
+  "tag": "reason:int",
+  "params": {
+   "mode": "build_output",
+   "reason": 5
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for workspace.clean:\n1 validation error for WorkspaceCleanParams\nreason\n  Input should be a valid string [type=string_type, input_value=5, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.13/v/string_type",
+   "sent": "{\"mode\": \"build_output\", \"reason\": 5}",
+   "errors": [
+    {
+     "loc": [
+      "reason"
+     ],
+     "type": "string_type"
+    }
+   ]
+  }
+ },
+ {
+  "op": "workspace.clean",
+  "tag": "reason:bool",
+  "params": {
+   "mode": "build_output",
+   "reason": true
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for workspace.clean:\n1 validation error for WorkspaceCleanParams\nreason\n  Input should be a valid string [type=string_type, input_value=True, input_type=bool]\n    For further information visit https://errors.pydantic.dev/2.13/v/string_type",
+   "sent": "{\"mode\": \"build_output\", \"reason\": true}",
+   "errors": [
+    {
+     "loc": [
+      "reason"
+     ],
+     "type": "string_type"
+    }
+   ]
+  }
+ },
+ {
+  "op": "workspace.clean",
+  "tag": "reason:unicode",
+  "params": {
+   "mode": "build_output",
+   "reason": "é😀"
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "id": null,
+    "path": null,
+    "mode": "build_output",
+    "force": false,
+    "reason": "é😀"
+   }
+  }
+ },
+ {
+  "op": "workspace.clean",
+  "tag": "two-missing",
+  "params": {},
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for workspace.clean:\n2 validation errors for WorkspaceCleanParams\nmode\n  Field required [type=missing, input_value={}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/missing\nreason\n  Field required [type=missing, input_value={}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/missing",
+   "sent": "{}",
+   "errors": [
+    {
+     "loc": [
+      "mode"
+     ],
+     "type": "missing"
+    },
+    {
+     "loc": [
+      "reason"
+     ],
+     "type": "missing"
+    }
+   ]
   }
  },
  {

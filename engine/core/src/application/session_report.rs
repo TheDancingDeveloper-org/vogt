@@ -157,6 +157,8 @@ fn report<C: Clock + 'static, I: IdFactory + 'static>(
                 created_at: now,
                 kind: "note".to_string(),
                 handoff: None,
+                verdict: None,
+                verification: None,
             })?;
         }
         let result = view_of(txn, &row)?;
