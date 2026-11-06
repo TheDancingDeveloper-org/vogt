@@ -664,6 +664,41 @@ fn bearer(h: &HeaderMap) -> Option<&[u8]> {
         .strip_prefix("Bearer ")
         .map(str::as_bytes)
 }
+/// Mark the bundle's `.claude.json` onboarded. Without `hasCompletedOnboarding`
+/// Claude Code runs its first-run flow (theme picker, then "Select login
+/// method") and never reads the login it was handed (WI-3334). The account's
+/// stored config (the engine's own trust entries, say) often lacks the flag,
+/// and a fresh account has no config at all. Only a bundle with a login is
+/// touched, and a config that is not a JSON object is passed through as is.
+fn with_onboarding_config(mut files: Vec<(String, Vec<u8>)>) -> Vec<(String, Vec<u8>)> {
+    if !files.iter().any(|(path, _)| path == ".credentials.json") {
+        return files;
+    }
+    let config = match files.iter().position(|(path, _)| path == ".claude.json") {
+        Some(at) => &mut files[at].1,
+        None => {
+            files.push((".claude.json".into(), b"{}".to_vec()));
+            &mut files.last_mut().expect("just pushed").1
+        }
+    };
+    let Ok(serde_json::Value::Object(mut map)) = serde_json::from_slice(config) else {
+        return files;
+    };
+    if map.get("hasCompletedOnboarding") == Some(&serde_json::Value::Bool(true)) {
+        return files;
+    }
+    map.insert(
+        "hasCompletedOnboarding".into(),
+        serde_json::Value::Bool(true),
+    );
+    map.entry("theme")
+        .or_insert_with(|| serde_json::Value::String("dark".into()));
+    if let Ok(bytes) = serde_json::to_vec(&map) {
+        *config = bytes;
+    }
+    files
+}
+
 pub async fn bootstrap(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -757,13 +792,18 @@ pub async fn bootstrap(
         .map(|c| c.id.clone());
     let mut bundle = serde_json::Map::new();
     let mut resume = false;
-    if let (Some(account), Some(conversation)) = (account.as_deref(), conversation.as_deref()) {
-        for (path, bytes) in state
+    // The login travels whenever the session holds an account: an agent-task
+    // session has no conversation pinned yet, but still needs to be signed in
+    // (WI-3334).
+    if let Some(account) = account.as_deref() {
+        let files = state
             .sessions
             .secret_broker()
-            .bundle_snapshot(account, conversation)
-        {
-            resume |= path.ends_with(&format!("/{conversation}.jsonl"));
+            .bundle_snapshot(account, conversation.as_deref().unwrap_or(""));
+        for (path, bytes) in with_onboarding_config(files) {
+            resume |= conversation
+                .as_deref()
+                .is_some_and(|c| path.ends_with(&format!("/{c}.jsonl")));
             bundle.insert(
                 path,
                 serde_json::Value::String(base64::Engine::encode(

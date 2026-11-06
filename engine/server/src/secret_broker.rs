@@ -1146,6 +1146,8 @@ pub enum BundleFileKind {
 #[derive(Debug, Deserialize)]
 pub struct BundleFileRequest {
     pub account: String,
+    /// Empty when the session has no conversation yet; transcripts need one.
+    #[serde(default)]
     pub conversation_id: String,
     pub path: String,
     pub kind: BundleFileKind,
@@ -1504,10 +1506,18 @@ pub async fn store_bundle_file(
     let Some(presented) = presented else {
         return ApiError::Unauthorized.into_response();
     };
-    let Some(session_id) = broker
-        .authenticate(presented)
-        .filter(|id| state.sessions.get(*id).is_ok())
-    else {
+    // A host session presents its broker grant; a pod presents the stream
+    // credential its bootstrap handed it, the only one it holds (WI-3334).
+    let session_id = match broker.authenticate(presented) {
+        Some(id) => Some(id),
+        None => {
+            state
+                .agent_auth
+                .session_for_token(presented.as_bytes())
+                .await
+        }
+    };
+    let Some(session_id) = session_id.filter(|id| state.sessions.get(*id).is_ok()) else {
         return ApiError::Unauthorized.into_response();
     };
     if let Some(retry_after) = state.auth.check_mutation_rate_limit(
@@ -1555,16 +1565,23 @@ pub async fn store_bundle_file(
             "bundle-file account is not owned by this session",
         );
     };
-    let Some(conversation) = summary
-        .conversation
-        .as_ref()
-        .map(|c| c.id.as_str())
-        .filter(|v| *v == payload.conversation_id)
-    else {
-        return refusal(
-            StatusCode::FORBIDDEN,
-            "bundle-file conversation is not owned by this session",
-        );
+    // A transcript belongs to the session's conversation. The login and the
+    // global config belong to the account, so a session with no conversation
+    // pinned yet may still write them back (WI-3334).
+    let owned = summary.conversation.as_ref().map(|c| c.id.as_str());
+    let conversation = match owned {
+        Some(id) if id == payload.conversation_id => id,
+        None if payload.kind != BundleFileKind::Transcript
+            && payload.conversation_id.is_empty() =>
+        {
+            ""
+        }
+        _ => {
+            return refusal(
+                StatusCode::FORBIDDEN,
+                "bundle-file conversation is not owned by this session",
+            )
+        }
     };
     let bytes =
         match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, payload.bytes) {
