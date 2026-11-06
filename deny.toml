@@ -2,24 +2,28 @@
 # (WI-2674). The advisory ignores match the reasoned ones in ci.yml (WI-2373).
 
 [advisories]
-unmaintained = "workspace"
+# Review transitive crates too, matching cargo-audit's scope (2026-11-06).
+unmaintained = "all"
 yanked = "deny"
 ignore = [
-    # RUSTSEC-2023-0071 (Marvin Attack): no fixed rsa release. Vogt never
-    # decrypts with RSA; it parses an unencrypted PKCS#1 or PKCS#8 key.
+    # Reviewed 2026-11-06 (WI-2674): RUSTSEC-2023-0071 (Marvin Attack).
+    # No fixed rsa release. Core parses unencrypted PKCS#1/PKCS#8 keys;
+    # engine JWT consumers sign/verify rather than expose RSA decryption.
     "RUSTSEC-2023-0071",
-    # RUSTSEC-2025-0134: rustls-pemfile is unmaintained, with no successor, and
-    # arrives through rustls-native-certs and axum-server. No fixed release
-    # exists; ignored here and in rust-core.yml's cargo audit (WI-3229, 2026-11-04).
+    # Reviewed 2026-11-06 (WI-2674): RUSTSEC-2025-0134, unmaintained
+    # rustls-pemfile. Retained by kube-client 0.98 and session-agent. Migration
+    # to rustls-pki-types::pem::PemObject needs source changes, outside this
+    # manifest-only cleanup; core already uses PemObject. No fixed release.
     "RUSTSEC-2025-0134",
     # RUSTSEC-2026-0387: crypto-bigint 0.5.5 timing variability. jsonwebtoken
     # and web-push pin elliptic-curve 0.13, which pins crypto-bigint 0.5.
-    # Accepted by the operator 2026-10-24; WI-2373 drops it at 0.14.
+    # Accepted by the operator 2026-10-24; reviewed 2026-11-06 (WI-2674).
+    # WI-2373 tracks removal when the consumers move to elliptic-curve 0.14.
     "RUSTSEC-2026-0387",
     # RUSTSEC-2024-0449: unsafe-libyaml is unmaintained and has no published
     # fixed release. It is pulled by kube 0.98 through deprecated serde_yaml;
     # replacing kube or its transitive YAML stack is outside this CI fix. Ignored here and in
-    # rust-core.yml's cargo audit (WI-3229, 2026-11-04).
+    # rust-core.yml's cargo audit (WI-3229). Reviewed 2026-11-06 (WI-2674).
     "RUSTSEC-2024-0449",
 ]
 
@@ -53,9 +57,19 @@ highlight = "simplest-path"
 # and foldhash. What remains, and why it cannot move yet:
 #   RustCrypto 0.10 vs 0.11 line (aes, block-buffer, cipher, crypto-common,
 #     digest, hkdf, hmac, inout, sha1, sha2, cpufeatures): rsa 0.9, aes 0.8,
-#     cbc 0.1, scrypt 0.12, jsonwebtoken 11 and web-push pin the old line.
-#     Bump them together when those crates publish against digest 0.11.
-#   base64 0.13 / 0.23: 0.13 is transitive; direct users share 0.23.
+#     cbc 0.1, jsonwebtoken 11 and web-push retain the old line. scrypt 0.12
+#     already uses digest 0.11. Upgrade consumers together, not digest alone.
+# Reviewed 2026-11-06 (WI-2674): session-agent now shares sha2 0.11 and
+# base64 0.23 with core/server; old versions remain transitive. Core shares
+# toml 1 with the other members, removing toml 0.8, toml_datetime 0.6 and
+# serde_spanned 0.6, toml_edit 0.22 and winnow 0.7. Removed core's unused
+# direct rustls-native-certs and session-agent's unused bytes (cargo-machete).
+# Lockfile duplicate names decreased from 41 to 37.
+# AES/CBC cannot be bumped without a source migration: cipher 0.5 renamed
+# BlockEncryptMut/BlockDecryptMut and its padded methods. Keep aes 0.8/cbc
+# 0.1 together until the Fernet implementation is migrated and tested.
+#   base64 0.13 / 0.22 / 0.23: old versions are transitive (web-push, axum,
+#     reqwest, kube, sqlx, tonic); direct users share 0.23.
 #   hashbrown 0.14 / 0.16 / 0.17 and hashlink 0.9 / 0.11: rusqlite 0.32 pins
 #     hashlink 0.9, which pins hashbrown 0.14.
 #   openssl-probe 0.1.6 / 0.2: the direct pin is 0.2; curl 0.4 (via isahc,
@@ -63,6 +77,19 @@ highlight = "simplest-path"
 #   syn 1 / 2 / 3, thiserror 1 / 2: proc-macro crates we do not choose.
 #   windows-sys 0.52 / 0.61, and the rand / der / const-oid / pkcs8 splits:
 #     transitive through the crates above.
+# Remaining split families reviewed 2026-11-06 (WI-2674):
+#   bitflags 1 / 2: portable-pty vs current platform/database crates;
+#     cfg_aliases 0.1 / 0.2: nix vs quinn. Upgrade upstream consumers.
+#   getrandom 0.2 / 0.3 / 0.4, r-efi 5 / 6, rand_core 0.6 / 0.9 / 0.10,
+#     rand_chacha 0.3 / 0.9: ring, RSA, JWT, tempfile and WebSocket consumers
+#     use different RNG traits; do not substitute across incompatible APIs.
+#   http 0.2 / 1: isahc/web-push vs axum; pem 0.8 / 3 and
+#     synstructure 0.12 / 0.14: sec1_decode/der_derive vs current consumers.
+#   signature 2 / 3 and spki 0.7 / 0.8: RSA/ECDSA vs newer ML-DSA in
+#     jsonwebtoken; thiserror-impl follows the thiserror 1 / 2 split.
+#   tokio-tungstenite/tungstenite 0.29 / 0.30: axum 0.8 vs session-agent;
+#     tower-http 0.6 / 0.7: kube/reqwest vs server. Wait for upstream bumps
+#     rather than downgrade direct consumers or patch their dependency graph.
 # ureq 3 is ported without changing the HTTP contract: error statuses remain
 # responses, reads retain their existing caps, and the engine adapter still
 # uses the merged platform/environment trust roots with rustls ring.
