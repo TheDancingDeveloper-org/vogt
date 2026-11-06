@@ -31,7 +31,7 @@ mod writeback;
 pub use actors::ActorResolver;
 pub use collectors::{
     ForgeChecksCollector, ForgeLabelsCollector, ForgeNotificationsCollector, ForgePostureCollector,
-    ForgeReleasesCollector, PriorObservations,
+    ForgeReleasesCollector, PostureSchedule, PriorObservations,
 };
 pub use directory::ForgeClients;
 pub use github::repo_of;

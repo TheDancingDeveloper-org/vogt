@@ -512,6 +512,7 @@ mod tests {
             "engine_unavailable" => VogtError::EngineUnavailable(message),
             "git_unavailable" => VogtError::GitUnavailable(message),
             "github_unavailable" => VogtError::GitHubUnavailable(message),
+            "github_rate_limited" => VogtError::GitHubRateLimited(message),
             "peer_unavailable" => VogtError::PeerUnavailable {
                 status: "refused".to_string(),
                 message,

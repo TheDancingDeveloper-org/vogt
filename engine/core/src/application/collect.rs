@@ -387,6 +387,7 @@ pub(crate) struct OwnedForgeRead<C: Clock + 'static, I: IdFactory + 'static> {
     store: crate::storage::sqlite::observed::SqliteObservedStore<C, I>,
     directory: Rc<crate::adapters::forge::ForgeClients>,
     actors: crate::adapters::forge::ActorResolver,
+    posture: std::sync::Mutex<crate::adapters::forge::PostureSchedule>,
 }
 
 /// The registry's form of one provider read.
@@ -400,6 +401,7 @@ pub(crate) fn owned_forge_read<C: Clock + 'static, I: IdFactory + 'static>(
         store,
         directory: Rc::clone(directory),
         actors: crate::adapters::forge::ActorResolver::new(),
+        posture: Default::default(),
     }))
 }
 
@@ -447,6 +449,7 @@ impl<C: Clock + 'static, I: IdFactory + 'static> crate::collectors::Collector
             ForgeReadKind::Posture => ForgePostureCollector::new(directory).collect_scheduled(
                 project,
                 Some(ctx.config.forge_posture_interval_seconds),
+                &self.posture,
                 _now,
             ),
             ForgeReadKind::Notifications => {

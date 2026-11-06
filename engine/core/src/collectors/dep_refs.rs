@@ -275,7 +275,7 @@ fn references_of(path: &Path) -> Option<Vec<(&'static str, String)>> {
         return Some(from_package_json(&document));
     }
     let text = std::fs::read_to_string(path).ok()?;
-    let document: toml::Value = text.parse().ok()?;
+    let document = toml::Value::Table(text.parse::<toml::Table>().ok()?);
     if name == "Cargo.toml" {
         Some(from_cargo(&document))
     } else {
