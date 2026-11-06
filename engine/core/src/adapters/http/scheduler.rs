@@ -23,8 +23,7 @@
 //! whether or not the sweep succeeded, `settle_budget_stops` (WI-1833).
 //! [`sweep_then_settle`] catches a panicking sweep and still settles, so one
 //! bad collector does not skip the hand-off. The loop counts that failure and
-//! carries on. The watch pass (`evaluate_watches`, WI-2036) is not ported:
-//! `watch_interval_seconds` stays unread, and no watch loop is started.
+//! carries on. Watch evaluation uses the same independent, failure-resilient loop.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -113,6 +112,25 @@ pub fn serve_tick(config: VogtConfig) -> Tick {
     })
 }
 
+/// A fresh service context for each watch pass; no caller identity leaks in.
+pub fn watch_tick(config: VogtConfig) -> Tick {
+    Arc::new(move || {
+        let built = build_context(
+            config.clone(),
+            Some(scheduler_principal()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )?;
+        with_ctx!(&built, |ctx| {
+            crate::application::services::watches::evaluate_watches(ctx)
+        })
+    })
+}
+
 /// Runs sweeps in the background for as long as the server is up.
 pub struct CollectorSchedule {
     tick: Tick,
@@ -162,10 +180,13 @@ impl CollectorSchedule {
     /// nothing. `notify` is the same stop the listener waits on: the first
     /// change ends the gap between sweeps without waiting out the interval.
     pub fn start(&mut self, mut notify: tokio::sync::watch::Receiver<bool>) {
+        if self.running() || *notify.borrow() {
+            return;
+        }
         if !self.enabled() {
             tracing::info!(
                 target: TARGET,
-                "collector schedule disabled (sweep_interval_seconds=0)"
+                "schedule disabled (interval_seconds=0)"
             );
             return;
         }
@@ -179,7 +200,9 @@ impl CollectorSchedule {
             // forwarder is joined (or aborted if the loop ends first) so stop
             // does not leave a detached task.
             let forward = tokio::spawn(async move {
-                let _ = notify.changed().await;
+                if !*notify.borrow() {
+                    let _ = notify.changed().await;
+                }
                 let _ = sender.send(true);
             });
             run_loop(tick, counts, interval, receiver).await;
@@ -188,7 +211,7 @@ impl CollectorSchedule {
         }));
         tracing::info!(
             target: TARGET,
-            "collector schedule started; every {}s",
+            "schedule started; every {}s",
             self.interval_seconds
         );
     }
@@ -234,7 +257,15 @@ async fn run_loop(
         // Sleeping on the stop signal rather than on the clock, so shutdown
         // does not wait out a fifteen-minute interval. A dropped sender is a
         // stop too.
-        let _ = tokio::time::timeout(interval, stopping.changed()).await;
+        if *stopping.borrow() {
+            break;
+        }
+        if matches!(
+            tokio::time::timeout(interval, stopping.changed()).await,
+            Ok(Err(_))
+        ) {
+            break;
+        }
     }
 }
 
@@ -246,11 +277,11 @@ async fn run_once(tick: &Tick, counts: &Counts) {
         }
         Ok(Err(error)) => {
             counts.failed.fetch_add(1, Ordering::SeqCst);
-            tracing::warn!(target: TARGET, "scheduled sweep failed: {error}");
+            tracing::warn!(target: TARGET, "scheduled pass failed: {error}");
         }
         Err(join) => {
             counts.failed.fetch_add(1, Ordering::SeqCst);
-            tracing::warn!(target: TARGET, "scheduled sweep failed: {join}");
+            tracing::warn!(target: TARGET, "scheduled pass failed: {join}");
         }
     }
 }
@@ -471,5 +502,40 @@ mod tests {
         );
         assert!(swept.is_err());
         assert_eq!(order.lock().unwrap().as_slice(), ["sweep", "settle"]);
+    }
+}
+
+#[cfg(test)]
+mod interval_tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn watch_interval_retries_failure_and_shutdown_cancels_sleep() {
+        let calls = Arc::new(AtomicU64::new(0));
+        let seen = Arc::clone(&calls);
+        let tick: Tick = Arc::new(move || {
+            if seen.fetch_add(1, Ordering::SeqCst) == 0 {
+                Err(VogtError::InvalidRequest("first tick".into()))
+            } else {
+                Ok(())
+            }
+        });
+        let mut schedule = CollectorSchedule::new(tick, 60);
+        let (_tx, rx) = tokio::sync::watch::channel(false);
+        schedule.start(rx);
+        while schedule.failed() != 1 {
+            tokio::task::yield_now().await;
+        }
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(59)).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        tokio::time::advance(Duration::from_secs(1)).await;
+        while schedule.completed() != 1 {
+            tokio::task::yield_now().await;
+        }
+        schedule.stop().await;
+        tokio::time::advance(Duration::from_secs(600)).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(!schedule.running());
     }
 }

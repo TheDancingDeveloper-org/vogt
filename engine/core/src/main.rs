@@ -864,8 +864,14 @@ fn serve(args: ServeArgs<'_>) -> ExitCode {
                 config.sweep_interval_seconds
             },
         );
-        // watch_interval_seconds is unread on purpose: evaluate_watches is not
-        // ported, so no watch loop is started and the key stays on UNREAD_KEYS.
+        let mut watches = adapters::http::scheduler::CollectorSchedule::new(
+            adapters::http::scheduler::watch_tick(config.clone()),
+            if no_schedule {
+                0
+            } else {
+                config.watch_interval_seconds
+            },
+        );
         // The schedule starts only after TLS has loaded and the listener has
         // bound. A certificate that will not parse, or a port that will not
         // bind, must not begin a sweep — Python starts its schedule in the
@@ -890,6 +896,7 @@ fn serve(args: ServeArgs<'_>) -> ExitCode {
                 let listener = std::net::TcpListener::bind(addr)?;
                 listener.set_nonblocking(true)?;
                 schedule.start(stop_rx.clone());
+                watches.start(stop_rx.clone());
                 bounded_serve(
                     axum_server::from_tcp_rustls(listener, tls)?
                         .handle(handle)
@@ -902,6 +909,7 @@ fn serve(args: ServeArgs<'_>) -> ExitCode {
             None => {
                 let listener = tokio::net::TcpListener::bind(addr).await?;
                 schedule.start(stop_rx.clone());
+                watches.start(stop_rx.clone());
                 // `notified`, not `shutdown`: axum's graceful shutdown stops
                 // accepting and then drains with no bound of its own. Sleeping
                 // the grace inside that future would keep accepting for the
@@ -919,6 +927,7 @@ fn serve(args: ServeArgs<'_>) -> ExitCode {
         // out the interval. `stop` returns as soon as the stop watch fires,
         // which it already has if we got here via the signal.
         schedule.stop().await;
+        watches.stop().await;
         outcome
     });
     match result {

@@ -473,6 +473,15 @@ impl<'a> ForgePostureCollector<'a> {
     }
 
     pub fn collect(&self, project: &Project) -> Result<Vec<PendingObservation>, VogtError> {
+        self.collect_scheduled(project, None, &mut || crate::core::Moment::from_unix(0, 0))
+    }
+
+    pub fn collect_scheduled(
+        &self,
+        project: &Project,
+        interval: Option<i64>,
+        now: &mut dyn FnMut() -> crate::core::Moment,
+    ) -> Result<Vec<PendingObservation>, VogtError> {
         const MISSING: &str = "this forge does not expose repository update-automation \
 posture, so it is not collected here — not that automation is off";
         read_all(
@@ -482,7 +491,23 @@ posture, so it is not collected here — not that automation is off";
             Some("supports_posture"),
             Some(MISSING),
             |provider, repo| {
+                let timing = interval.map(|interval| (now(), interval));
+                if let Some((now, interval)) = timing {
+                    if !posture_schedule()
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .due(&repo.slug(), now, interval)
+                    {
+                        return Ok(Vec::new());
+                    }
+                }
                 let posture = provider.posture(repo)?;
+                if let Some((now, _)) = timing {
+                    posture_schedule()
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .mark(&repo.slug(), now);
+                }
                 let mut payload = Map::new();
                 payload.insert(
                     "version_updates_config".into(),
@@ -780,6 +805,64 @@ mod tests {
         }
     }
 
+    struct GithubOnly(super::super::github::GitHubProvider<crate::adapters::github::GitHubClient>);
+    impl ForgeDirectory for GithubOnly {
+        fn provider_for(&self, _: Option<&str>) -> Option<&dyn ForgeProvider> {
+            Some(&self.0)
+        }
+        fn unsupported_reason(&self, _: Option<&str>) -> String {
+            "unused".into()
+        }
+    }
+
+    #[test]
+    fn failed_posture_read_retries_next_sweep_then_emits_only_receipt_until_due() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&calls);
+        let client =
+            crate::adapters::github::GitHubClient::with_transport(Box::new(move |_, _, _, _| {
+                let n = seen.fetch_add(1, Ordering::SeqCst);
+                (
+                    if n == 0 { 429 } else { 404 },
+                    b"{}".to_vec(),
+                    if n == 0 {
+                        std::collections::BTreeMap::from([
+                            ("x-ratelimit-remaining".into(), "0".into()),
+                            ("x-ratelimit-reset".into(), "0".into()),
+                        ])
+                    } else {
+                        Default::default()
+                    },
+                )
+            }));
+        let directory = GithubOnly(super::super::github::GitHubProvider::new(client));
+        let now = crate::core::Moment::from_unix(1_700_000_000, 0);
+        let mut project = Project::new("prj_posture", "posture", "Posture", "/tmp", now);
+        project.repo_url = Some("https://github.com/watch-test/posture-retry".into());
+        let collector = ForgePostureCollector::new(&directory);
+        assert!(collector
+            .collect_scheduled(&project, Some(86400), &mut || now)
+            .is_err());
+        let found = collector
+            .collect_scheduled(&project, Some(86400), &mut || now)
+            .unwrap();
+        assert_eq!(found.len(), 2);
+        let count = calls.load(Ordering::SeqCst);
+        let found = collector
+            .collect_scheduled(&project, Some(86400), &mut || now)
+            .unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(calls.load(Ordering::SeqCst), count);
+        collector
+            .collect_scheduled(&project, Some(86400), &mut || now.plus_days(1))
+            .unwrap();
+        assert!(calls.load(Ordering::SeqCst) > count);
+    }
+
     #[test]
     fn a_forge_without_posture_gets_a_receipt_not_a_zero() {
         let directory = ForgejoOnly(super::super::forgejo::ForgejoProvider::new(
@@ -805,5 +888,46 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("posture"));
+    }
+}
+
+/// Process-local successful-read timestamps, not observation change timestamps.
+#[derive(Default)]
+struct PostureSchedule(std::collections::HashMap<String, crate::core::Moment>);
+impl PostureSchedule {
+    fn due(&self, slug: &str, now: crate::core::Moment, interval: i64) -> bool {
+        self.0
+            .get(slug)
+            .is_none_or(|last| now.seconds_since(*last) >= interval as f64)
+    }
+    fn mark(&mut self, slug: &str, now: crate::core::Moment) {
+        self.0.insert(slug.to_owned(), now);
+    }
+}
+fn posture_schedule() -> &'static std::sync::Mutex<PostureSchedule> {
+    static SCHEDULE: std::sync::OnceLock<std::sync::Mutex<PostureSchedule>> =
+        std::sync::OnceLock::new();
+    SCHEDULE.get_or_init(Default::default)
+}
+
+#[cfg(test)]
+mod posture_schedule_tests {
+    use super::*;
+    #[tokio::test(start_paused = true)]
+    async fn posture_interval_is_per_repo_and_failures_remain_due() {
+        let base = tokio::time::Instant::now();
+        let now = || crate::core::Moment::from_unix(base.elapsed().as_secs() as i64, 0);
+        let mut schedule = PostureSchedule::default();
+        assert!(schedule.due("a/repo", now(), 86400));
+        // Failed reads never mark; the next sweep is immediately eligible.
+        assert!(schedule.due("a/repo", now(), 86400));
+        schedule.mark("a/repo", now());
+        assert!(!schedule.due("a/repo", now(), 86400));
+        assert!(schedule.due("b/repo", now(), 86400));
+        tokio::time::advance(std::time::Duration::from_secs(86399)).await;
+        assert!(!schedule.due("a/repo", now(), 86400));
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        assert!(schedule.due("a/repo", now(), 86400));
+        assert!(schedule.due("a/repo", now(), 0));
     }
 }
