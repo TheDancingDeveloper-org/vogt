@@ -722,6 +722,21 @@ pub struct SweepResult {
     /// The workspace volume, when a session engine answers. needs_attention once used space passes its threshold.
     #[serde(default)]
     pub disk: Option<EngineDiskStatus>,
+    /// Only while disk.needs_attention: the largest stopped workspaces whose branch is merged, each with the workspace_clean call that removes it. A suggestion; nothing is removed by the sweep.
+    #[serde(default)]
+    pub disk_candidates: Vec<WorkspaceCleanCandidate>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[schemars(description = "A merged, stopped workspace a sweep suggests removing (WI-1325).")]
+pub struct WorkspaceCleanCandidate {
+    pub path: String,
+    pub branch: String,
+    #[serde(default)]
+    pub size_bytes: Option<i64>,
+    pub session: String,
+    /// The `workspace_clean` call that would remove it.
+    pub call: String,
 }
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]

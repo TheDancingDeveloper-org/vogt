@@ -15,6 +15,8 @@ from vogt.adapters.engine import EngineUnavailable
 from vogt.application import writes
 from vogt.application.context import AppContext
 from vogt.application.models import (
+    EngineDiskStatus,
+    WorkspaceCleanCandidate,
     WorkspaceCleanParams,
     WorkspaceCleanResult,
     WorkspaceListParams,
@@ -28,6 +30,32 @@ from vogt.errors import CleanRefused, InvalidRequest, NotFound
 
 WORKSPACE_CLEAN = "workspace.clean"
 WORKSPACE_CLEANED_EVENT = "workspace.cleaned"
+
+
+def disk_candidates(
+    ctx: AppContext, disk: EngineDiskStatus | None, *, limit: int = 5
+) -> list[WorkspaceCleanCandidate]:
+    if disk is None or not disk.needs_attention:
+        return []
+    try:
+        rows = workspace_list(ctx, WorkspaceListParams(alive=False)).workspaces
+    except EngineUnavailable:
+        return []
+    merged = [row for row in rows if row.kind == "worktree" and row.merged is True]
+    merged.sort(key=lambda row: row.size_bytes or 0, reverse=True)
+    return [
+        WorkspaceCleanCandidate(
+            path=row.path,
+            branch=row.branch,
+            size_bytes=row.size_bytes,
+            session=row.session,
+            call=(
+                f"workspace_clean(path={row.path!r}, mode='remove', "
+                "reason='disk over threshold; branch merged')"
+            ),
+        )
+        for row in merged[:limit]
+    ]
 
 
 def workspace_list(ctx: AppContext, params: WorkspaceListParams) -> WorkspaceListResult:

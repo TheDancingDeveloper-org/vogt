@@ -2639,6 +2639,16 @@ class SweepReportView(Result):
     failures: dict[str, str] = {}
 
 
+class WorkspaceCleanCandidate(BaseModel):
+    """A merged, stopped workspace a sweep suggests removing (WI-1325)."""
+
+    path: str
+    branch: str
+    size_bytes: int | None = None
+    session: str
+    call: str = Field(description="The `workspace_clean` call that would remove it.")
+
+
 class SweepResult(Result):
     scope: str
     projects: int
@@ -2650,6 +2660,15 @@ class SweepResult(Result):
         description=(
             "The workspace volume, when a session engine answers. "
             "needs_attention once used space passes its threshold."
+        ),
+    )
+
+    disk_candidates: list[WorkspaceCleanCandidate] = Field(
+        default_factory=list,
+        description=(
+            "Only while disk.needs_attention: the largest stopped workspaces "
+            "whose branch is merged, each with the workspace_clean call that "
+            "removes it. A suggestion; nothing is removed by the sweep."
         ),
     )
 
