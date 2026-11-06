@@ -1,5 +1,18 @@
 # Vogt — Agent Guide
 
+## Local and pod sessions on rust-2
+
+A local session uses the engine workspace. A pod session has its own graft
+clone at `/work`, not sibling checkouts or the engine's host paths. The boot
+script builds a best-effort Git inspection view with no remote; use graft
+to land. Workspace-wide rules are not automatically mounted (WI-3374).
+Read the repository's rules and the supplied brief instead of assuming a
+shared `~/Working`. Engine loopback is not reachable as pod loopback: use
+the supplied engine endpoint and credentials, never copy a host token.
+Land uncommitted work before teardown. Account/transcript write-back is not
+a workspace backup; hibernate wakes into a fresh clone and an engine restart
+currently loses running pod links (WI-3205).
+
 You are an agent, and this guide is for you. It is not about developing Vogt —
 [`../AGENTS.md`](../AGENTS.md), [`../engine/AGENTS.md`](../engine/AGENTS.md) and
 [`CONTRIBUTING.md`](CONTRIBUTING.md) cover working *on* the product. This guide
