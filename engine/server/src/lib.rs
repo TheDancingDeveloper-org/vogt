@@ -35,6 +35,7 @@ pub mod files;
 pub mod gates;
 pub mod git;
 pub mod graft_mint;
+pub mod graft_provider;
 pub mod gui;
 pub mod handoff;
 pub mod hibernate_policy;
