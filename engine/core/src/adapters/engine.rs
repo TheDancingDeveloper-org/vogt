@@ -511,6 +511,34 @@ impl EngineClient {
         ))
     }
 
+    /// `POST /api/workspaces/clean` (WI-1325). `None` on a 404 (an engine
+    /// without the route); a refusal is `Conflict` (409) or `InvalidRequest`
+    /// (400) with the engine's reason.
+    pub fn clean_workspace(
+        &self,
+        path: &str,
+        mode: &str,
+        force: bool,
+        reason: &str,
+    ) -> Result<Option<Map<String, Value>>, VogtError> {
+        let payload = self.call(
+            "/api/workspaces/clean",
+            "POST",
+            Some(&serde_json::json!({
+                "path": path,
+                "mode": mode,
+                "force": force,
+                "reason": reason,
+            })),
+            true,
+            None,
+        )?;
+        Ok(match payload {
+            Value::Object(done) => Some(done),
+            _ => None,
+        })
+    }
+
     pub fn wait_any(
         &self,
         ids: Option<&[String]>,
