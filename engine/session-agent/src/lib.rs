@@ -499,13 +499,15 @@ async fn flush_bundle(
     seen: &mut std::collections::HashMap<PathBuf, [u8; 32]>,
     offsets: &mut std::collections::HashMap<PathBuf, u64>,
 ) -> bool {
-    let (Some(root), Some(account), Some(conversation)) = (
+    let (Some(root), Some(account)) = (
         config.claude_config_dir.as_deref(),
         config.account.as_deref(),
-        config.conversation_id.as_deref(),
     ) else {
         return true;
     };
+    // The login and global config are the account's and are written back with
+    // or without a conversation; only a transcript needs one (WI-3334).
+    let conversation = config.conversation_id.as_deref().unwrap_or("");
     // The broker token is a credential and must only ever go to the engine.
     // In particular, do not let ambient HTTP(S)_PROXY redirect this request.
     let Ok(client) = http_client(tls.clone()) else {
@@ -549,7 +551,10 @@ async fn flush_bundle(
             }
         }
     }
-    if let Some(path) = transcript_path(root, conversation) {
+    if let Some(path) = (!conversation.is_empty())
+        .then(|| transcript_path(root, conversation))
+        .flatten()
+    {
         // Caught up when the delta is empty; any send failure leaves it behind.
         let mut caught_up = false;
         let relative = path
