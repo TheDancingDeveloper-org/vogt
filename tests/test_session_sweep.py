@@ -398,10 +398,10 @@ def test_a_report_older_than_the_current_turn_is_stale(
     assert rows[worker_engine].blocked_since is not None
 
 
-def test_a_done_declaration_after_the_report_makes_it_stale(
+def test_a_done_declaration_after_the_report_stays_blocked(
     wired: AppContext, engine: Engine
 ) -> None:
-    """AUTOPILOT: DONE after the report, even in the same turn, ages it out."""
+    """WI-3356: AUTOPILOT: DONE after a blocked report does not clear it."""
     _worker, worker_engine = _start(wired)
     engine.rows[worker_engine].update(
         activity="idle",
@@ -412,9 +412,9 @@ def test_a_done_declaration_after_the_report_makes_it_stale(
 
     result = sweep_sessions(wired, SweepSessionsParams(mode="full", screen_lines=0))
 
-    assert result.counts["needs_you"] == 0
-    assert result.rows[0].blocked_stale
-    assert result.rows[0].attention != "blocked"
+    assert result.counts["needs_you"] == 1
+    assert not result.rows[0].blocked_stale
+    assert result.rows[0].attention == "blocked"
 
 
 def test_a_question_menu_is_needs_you_with_its_options_in_the_digest(

@@ -42,10 +42,20 @@ SH
   cat >"$dir/bin/graft" <<'SH'
 #!/bin/sh
 [ "${CLONE_FAIL:-0}" = 0 ] || exit 9
-printf '%s\n' "$*" >"$CASE_DIR/graft.args"
-if [ "$1" = --token-file ]; then cp "$2" "$CASE_DIR/graft.token"; fi
-while [ "$1" != clone ]; do shift; done
+case " $* " in *" clone "*)
+  printf '%s\n' "$*" >"$CASE_DIR/graft.args"
+  if [ "$1" = --token-file ]; then cp "$2" "$CASE_DIR/graft.token"; fi ;;
+esac
+while [ $# -gt 0 ]; do
+  case "$1" in
+    clone) break ;;
+    log) printf '{"changesets":[{"id":"tip1","subject":"tip change (WI-1)"}],"next":"par1"}\n'; exit 0 ;;
+    diff) printf 'put file a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n'; exit 0 ;;
+  esac
+  shift
+done
 mkdir -p "$3"
+printf 'new\n' >"$3/a.txt"
 SH
   cat >"$dir/bin/vogt-session-agent" <<'SH'
 #!/bin/sh
@@ -83,6 +93,17 @@ jq -e '.session_id=="s1" and .graft_repo=="vogt" and .graft_line=="rust-2" and .
 [[ $(<"$tmp/happy/run/session-token") == "$SESSION" ]] || fail "token content"
 [[ $(stat -c %a "$tmp/happy/claude/sub/.credentials.json") == 600 ]] || fail "bundle mode"
 grep -q "clone vogt $tmp/happy/work --line rust-2" "$tmp/happy/graft.args" || fail "clone args"
+# WI-3356: /work is a git repository whose last commit is the line's tip
+# changeset, with no remote, so git log -1 -p, git diff and git status work.
+w="$tmp/happy/work"
+[[ $(git -C "$w" log -1 --format=%s) == "tip change (WI-1)" ]] || fail "git view: tip subject"
+git -C "$w" log -1 -p | grep -q '^+new$' || fail "git view: tip patch"
+git -C "$w" log -1 -p | grep -q '^-old$' || fail "git view: tip patch removal"
+[[ $(git -C "$w" rev-list --count HEAD) == 2 ]] || fail "git view: expected baseline plus tip"
+[[ -z $(git -C "$w" status --porcelain) ]] || fail "git view: tree not clean"
+[[ -z $(git -C "$w" remote) ]] || fail "git view: a remote would allow a push"
+[[ $(<"$w/a.txt") == new ]] || fail "git view: files changed"
+grep -q '^session-entrypoint: step git-view$' <<<"$out" || fail "git-view step marker"
 ! grep -q "$BOOT" "$tmp/happy/agent.env" || fail "bootstrap token reached the agent"
 ! grep -q "VOGT_BOOTSTRAP_TOKEN" "$tmp/happy/agent.env" || fail "bootstrap name re-exported"
 grep -q '^EXTRA=yes$' "$tmp/happy/agent.env" || fail "brokered env not exported"
