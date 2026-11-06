@@ -58,3 +58,56 @@ pub struct WorkspaceListResult {
     #[schemars(extend("x-keep-default" = true))]
     pub workspaces: Vec<WorkspaceRow>,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[schemars(inline)]
+pub enum WorkspaceCleanParamsMode {
+    #[serde(rename = "build_output")]
+    BuildOutput,
+    #[serde(rename = "remove")]
+    Remove,
+}
+
+impl WorkspaceCleanParamsMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::BuildOutput => "build_output",
+            Self::Remove => "remove",
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceCleanParams {
+    /// The session whose workspace to clean (`ses_…` or engine UUID).
+    #[serde(default)]
+    #[schemars(schema_with = "optional_string")]
+    pub id: Option<String>,
+    /// The workspace path, instead of `id`.
+    #[serde(default)]
+    #[schemars(schema_with = "optional_string")]
+    pub path: Option<String>,
+    /// `build_output`: drop target/, node_modules, .venv. `remove`: `git worktree remove` it, deleting the branch when merged.
+    pub mode: WorkspaceCleanParamsMode,
+    /// Remove a worktree whose branch is unmerged (the branch is kept). A person only. Never removes a dirty tree or one a session uses.
+    #[serde(default)]
+    pub force: bool,
+    pub reason: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceCleanResult {
+    pub path: String,
+    pub mode: String,
+    pub bytes_freed: i64,
+    #[serde(default)]
+    pub removed: bool,
+    #[serde(default)]
+    #[schemars(schema_with = "optional_string")]
+    pub branch_deleted: Option<String>,
+    #[serde(default)]
+    #[schemars(schema_with = "optional_string")]
+    pub cleaned_at: Option<String>,
+}

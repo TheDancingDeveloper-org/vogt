@@ -139,6 +139,7 @@ pub const DERIVED: &[&str] = &[
     "session.wait",
     "session.changes",
     "workspace.list",
+    "workspace.clean",
     "session.wait_any",
     "session.report_blocked",
     "session.report",
@@ -800,6 +801,11 @@ pub fn derived_schemas() -> Vec<(&'static str, serde_json::Value, serde_json::Va
             "workspace.list",
             schema_of::<workspace::WorkspaceListParams>(),
             schema_of::<workspace::WorkspaceListResult>(),
+        ),
+        (
+            "workspace.clean",
+            schema_of::<workspace::WorkspaceCleanParams>(),
+            schema_of::<workspace::WorkspaceCleanResult>(),
         ),
         (
             "session.wait_any",

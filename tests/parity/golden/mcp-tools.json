@@ -5398,6 +5398,66 @@
       }
     },
     {
+      "name": "workspace_clean",
+      "description": "Clean one session's working tree, by session `id` or `path`. mode=build_output drops target/, node_modules and .venv and stamps cleaned_at; mode=remove runs `git worktree remove` and deletes the branch when merged. The engine refuses (409) a tree a live or hibernated session uses, a dirty tree (always), and an unmerged branch unless force (a person only; the branch is then kept).",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "The session whose workspace to clean (`ses_…` or engine UUID).",
+            "title": "Id"
+          },
+          "path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "The workspace path, instead of `id`.",
+            "title": "Path"
+          },
+          "mode": {
+            "description": "`build_output`: drop target/, node_modules, .venv. `remove`: `git worktree remove` it, deleting the branch when merged.",
+            "enum": [
+              "build_output",
+              "remove"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "force": {
+            "default": false,
+            "description": "Remove a worktree whose branch is unmerged (the branch is kept). A person only. Never removes a dirty tree or one a session uses.",
+            "title": "Force",
+            "type": "boolean"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "mode",
+          "reason"
+        ],
+        "title": "WorkspaceCleanParams",
+        "type": "object"
+      }
+    },
+    {
       "name": "session_wait_any",
       "description": "Wait for any of the named sessions instead of polling them: blocks (up to timeout_s, default 300, max 600; an oversight session's wait is at least 60 so it cannot become a poll loop) until one publishes a kind in `until` (default: ready, blocked, approval, exited, errored). Returns the delta with that session's digest, or `timeout`. Pass `cursor` (the previous `next_cursor`) so a replayed page is not waited on twice. `cursor=now` skips events already published and waits only for one that lands after the call starts; a timeout then returns that head as `next_cursor`. `ids` empty waits on every session.",
       "inputSchema": {

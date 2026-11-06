@@ -12,6 +12,10 @@
     409
   ],
   [
+    "clean_refused",
+    403
+  ],
+  [
     "collector_failed",
     500
   ],

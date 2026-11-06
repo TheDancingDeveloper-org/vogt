@@ -763,6 +763,14 @@ pub fn build_operations() -> Vec<Operation> {
             CliBinding::new(&["workspace", "list"]),
         ),
         Operation::new(
+            "workspace.clean",
+            "Clean one session's working tree, by session `id` or `path`. mode=build_output drops target/, node_modules and .venv and stamps cleaned_at; mode=remove runs `git worktree remove` and deletes the branch when merged. The engine refuses (409) a tree a live or hibernated session uses, a dirty tree (always), and an unmerged branch unless force (a person only; the branch is then kept).",
+            Scope::WorkWrite,
+            true,
+            HttpRoute::new(HttpMethod::Post, "/workspaces/clean"),
+            CliBinding::new(&["workspace", "clean"]),
+        ),
+        Operation::new(
             "session.wait_any",
             "Wait for any of the named sessions instead of polling them: blocks (up to timeout_s, default 300, max 600; an oversight session's wait is at least 60 so it cannot become a poll loop) until one publishes a kind in `until` (default: ready, blocked, approval, exited, errored). Returns the delta with that session's digest, or `timeout`. Pass `cursor` (the previous `next_cursor`) so a replayed page is not waited on twice. `cursor=now` skips events already published and waits only for one that lands after the call starts; a timeout then returns that head as `next_cursor`. `ids` empty waits on every session.",
             Scope::Read,

@@ -1231,6 +1231,20 @@ class EngineClient:
             return []
         return [EngineWorkspace.from_payload(r) for r in rows if isinstance(r, dict)]
 
+    def clean_workspace(
+        self, *, path: str, mode: str, force: bool, reason: str
+    ) -> dict[str, Any] | None:
+        """`POST /api/workspaces/clean` (WI-1325). `None` on a 404 (an engine
+        without the route); a refusal raises `Conflict` (409) or
+        `InvalidRequest` (400) with the engine's reason."""
+        payload = self._call(
+            "/api/workspaces/clean",
+            method="POST",
+            payload={"path": path, "mode": mode, "force": force, "reason": reason},
+            allow_missing=True,
+        )
+        return payload if isinstance(payload, dict) else None
+
     def wait_any(
         self,
         *,
