@@ -74,7 +74,9 @@ def test_status_and_sweep_carry_the_disk_row(
     if surface == "status":
         disk = status(ctx, StatusParams()).disk
     else:
-        disk = sweep(ctx, SweepParams(reason="test")).disk
+        result = sweep(ctx, SweepParams(reason="test"))
+        disk = result.disk
+        assert result.disk_candidates == []
     assert disk is not None
     assert disk.needs_attention is True
     assert disk.free_bytes == 100
