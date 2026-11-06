@@ -27,6 +27,11 @@ use crate::{
 
 /// The variable every session finds this engine's own URL in.
 pub(crate) const ENGINE_URL_ENV: &str = "VOGT_ENGINE_URL";
+/// The kind of git tree the session runs in (`worktree` | `checkout`), set
+/// only when it runs in one (WI-1324).
+pub(crate) const WORKSPACE_ENV: &str = "VOGT_ENGINE_WORKSPACE";
+/// That tree's top level.
+pub(crate) const WORKSPACE_PATH_ENV: &str = "VOGT_ENGINE_WORKSPACE_PATH";
 
 /// The URL a process in this pod reaches the engine at: its bind address,
 /// with a wildcard bind (`0.0.0.0`, `::`) read as loopback, since a session
@@ -1150,6 +1155,7 @@ impl SessionRegistry {
         // has its sibling outside it. From here on the guard removes the
         // worktree and its branch again unless the child is spawned.
         let mut cut = CutWorktree::default();
+        let worktree_base = worktree.as_ref().map(|w| w.base_ref.trim().to_string());
         if let Some(worktree) = worktree {
             let checkout = spec.cwd.clone().ok_or_else(|| {
                 ApiError::BadRequest("a worktree needs the checkout it is cut from as cwd".into())
@@ -1170,6 +1176,29 @@ impl SessionRegistry {
             let created = git::create_worktree(&checkout, &worktree.branch, &worktree.base_ref)?;
             spec.cwd = Some(created.to_string_lossy().into_owned());
             cut.0 = Some((checkout, created, worktree.branch.trim().to_string()));
+        }
+
+        // The session's git tree and what was dirty in it beforehand
+        // (WI-1324). Taken once, at the first start: a wake reuses the
+        // recorded block, because the baseline must not move to include what
+        // the session itself has since changed. The two variables tell the
+        // agent's own guard (Klaudia) that the engine is guarding the tree.
+        let workspace = match &creating {
+            Creating::Wake(record) => record.workspace.clone(),
+            Creating::Fresh(_) => {
+                let cwd = spec
+                    .cwd
+                    .as_deref()
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|| self.cfg.default_cwd.clone());
+                let base_ref = cut.0.as_ref().and(worktree_base.as_deref());
+                git::capture_workspace(&cwd, base_ref)
+            }
+        };
+        if let Some(ws) = workspace.as_ref() {
+            let env = spec.env.get_or_insert_with(Vec::new);
+            env.push((WORKSPACE_ENV.to_string(), ws.kind.as_str().to_string()));
+            env.push((WORKSPACE_PATH_ENV.to_string(), ws.path.clone()));
         }
 
         // Scratch builds share one Cargo target per repository (WI-1810):
@@ -1411,6 +1440,7 @@ impl SessionRegistry {
         session.set_budget(spec.budget.clone());
         session.set_role(spec.role);
         session.set_work_item(spec.work_item.clone());
+        session.set_workspace(workspace.clone());
         // An oversight session is the one that brings the others back, so it
         // must come back by itself: pinned awake, it is never hibernated by
         // policy and is woken at boot (WI-957).
@@ -1463,6 +1493,7 @@ impl SessionRegistry {
                 record.budget = spec.budget.clone();
                 record.role = spec.role;
                 record.work_item = spec.work_item.clone();
+                record.workspace = workspace.clone();
                 record.keep_awake = session.keep_awake();
                 record.conversation = conversation.clone();
                 record.brief_file = prompt_file.clone();
@@ -2773,6 +2804,28 @@ impl SessionRegistry {
         }
     }
 
+    /// Every live or hibernated session that has a workspace block, with
+    /// whether its process is running (WI-1340). Hidden sessions are
+    /// included: a stale worktree is exactly what a cleanup wants to see.
+    pub fn workspaces(&self) -> Vec<(Uuid, bool, vogt_engine_contract::Workspace)> {
+        let mut out = Vec::new();
+        for kv in self.sessions.iter() {
+            if let Some(ws) = kv.value().workspace() {
+                out.push((*kv.key(), kv.value().is_alive(), ws));
+            }
+        }
+        for kv in self.records.iter() {
+            if kv.hibernation.is_none() || self.sessions.contains_key(kv.key()) {
+                continue;
+            }
+            if let Some(ws) = kv.workspace.clone() {
+                out.push((*kv.key(), false, ws));
+            }
+        }
+        out.sort_by_key(|(id, _, _)| *id);
+        out
+    }
+
     /// A configured session template matched by name (case-insensitive) or,
     /// failing that, by tag — so a caller can say `claude` and reach the
     /// template tagged `claude`. When a tag matches more than one template an
@@ -3195,6 +3248,7 @@ fn hibernated_summary(record: &Record, screen_bytes: u64) -> Option<SessionSumma
         done_at: record.done_at.clone(),
         role: record.role,
         work_item: record.work_item.clone(),
+        workspace: record.workspace.clone(),
         resources: None,
         template: record.template.clone(),
         permission_mode: record.permission_mode.clone(),
@@ -3689,6 +3743,7 @@ mod tests {
             done_at: None,
             role: vogt_engine_contract::SessionRole::Worker,
             work_item: None,
+            workspace: None,
             resources: None,
             template: None,
             permission_mode: None,
