@@ -754,7 +754,10 @@ pub fn command_line(config: &Config) -> Result<String, AgentError> {
             line.push_str(" --add-dir \"$VOGT_SESSION_CWD\"");
             Ok(line)
         }
-        "codex" => Ok("codex --add-dir \"$VOGT_SESSION_CWD\"".into()),
+        // No `--add-dir`: Codex's effective sandbox refuses extra writable
+        // roots and exits. The PTY already starts in the session cwd, which
+        // is the workspace root Codex uses.
+        "codex" => Ok("codex".into()),
         "opencode" => Ok("opencode".into()),
         _ => Err(AgentError::Pty(
             "VOGT_CLI must be claude, codex or opencode".into(),
@@ -1326,6 +1329,10 @@ mod tests {
             claude: ClaudeLaunch::default(),
         };
         assert_eq!(command_line(&config).unwrap(), "opencode");
+        // Codex refuses extra writable roots, so it gets no `--add-dir`; the
+        // PTY already starts in the session cwd.
+        config.cli = "codex".into();
+        assert_eq!(command_line(&config).unwrap(), "codex");
         config.cli = "nope".into();
         assert!(command_line(&config).is_err());
     }
