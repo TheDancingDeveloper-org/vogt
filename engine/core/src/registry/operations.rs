@@ -227,6 +227,14 @@ pub fn build_operations() -> Vec<Operation> {
             CliBinding::new(&["work", "bind-branch"]),
         ),
         Operation::new(
+            "work.land",
+            "Land a work item's reviewed branch onto the project's base branch at a pinned tip: a fast-forward, or a rebase where the landing rule says so, never a merge commit. Only a person or an oversight session may call it, only on a project whose merges are oversight's, and only when the latest verdict is `no_blockers` for exactly `head_sha` from a review session a person or oversight started for this item (or a person). The branch is the latest hand-off's. Refusals name the rule.",
+            Scope::WorkWrite,
+            true,
+            HttpRoute::new(HttpMethod::Post, "/work/land"),
+            CliBinding::new(&["work", "land"]),
+        ),
+        Operation::new(
             "work.comment",
             "Comment on a work item, attributed to the acting actor.",
             Scope::WorkWrite,

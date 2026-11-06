@@ -24889,6 +24889,91 @@
       "exclusion_reason": null
     },
     {
+      "name": "work.land",
+      "summary": "Land a work item's reviewed branch onto the project's base branch at a pinned tip: a fast-forward, or a rebase where the landing rule says so, never a merge commit. Only a person or an oversight session may call it, only on a project whose merges are oversight's, and only when the latest verdict is `no_blockers` for exactly `head_sha` from a review session a person or oversight started for this item (or a person). The branch is the latest hand-off's. Refusals name the rule.",
+      "scope": "work.write",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/work/land",
+      "mcp_tool": "work_land",
+      "cli_path": [
+        "work",
+        "land"
+      ],
+      "params_schema": {
+        "additionalProperties": false,
+        "description": "Land a work item's reviewed branch onto its base (WI-1328).",
+        "properties": {
+          "ref": {
+            "description": "Work item reference, e.g. WI-7.",
+            "title": "Ref",
+            "type": "string"
+          },
+          "head_sha": {
+            "description": "The branch tip the review saw. The latest verdict must name this SHA, and the engine refuses when the branch has moved past it.",
+            "minLength": 7,
+            "title": "Head Sha",
+            "type": "string"
+          },
+          "reason": {
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "ref",
+          "head_sha",
+          "reason"
+        ],
+        "title": "LandWorkParams",
+        "type": "object"
+      },
+      "result_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "onto_before": {
+            "description": "The base branch's SHA before the land.",
+            "title": "Onto Before",
+            "type": "string"
+          },
+          "onto_after": {
+            "description": "The base branch's SHA after the land.",
+            "title": "Onto After",
+            "type": "string"
+          },
+          "commits": {
+            "description": "The commits now on the base that were not before, oldest first.",
+            "items": {
+              "type": "string"
+            },
+            "title": "Commits",
+            "type": "array"
+          },
+          "rebased": {
+            "description": "Whether the branch was rebased onto the base before landing.",
+            "title": "Rebased",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "onto_before",
+          "onto_after",
+          "rebased"
+        ],
+        "title": "LandWorkResult",
+        "type": "object"
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
       "name": "work.comment",
       "summary": "Comment on a work item, attributed to the acting actor.",
       "scope": "work.write",

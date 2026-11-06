@@ -782,6 +782,41 @@ impl EngineClient {
         Ok(payload)
     }
 
+    /// Land `branch` on `onto` at the pinned `head_sha` (WI-1341): `POST
+    /// /api/git/op` with `op: land`, a fast-forward push, rebasing first when
+    /// `mode` is `rebase`, never a merge commit. The engine's refusal (moved
+    /// tip, behind in fast-forward mode, forbidden text) arrives as
+    /// `InvalidRequest` or `Conflict` carrying its own words.
+    #[allow(clippy::too_many_arguments)]
+    pub fn land(
+        &self,
+        repo: &str,
+        branch: &str,
+        head_sha: &str,
+        onto: &str,
+        mode: &str,
+        forbidden_text: &[String],
+        linear_history: bool,
+    ) -> Result<Map<String, Value>, VogtError> {
+        let body = serde_json::json!({
+            "op": "land",
+            "repo": repo,
+            "branch": branch,
+            "head_sha": head_sha,
+            "onto": onto,
+            "mode": mode,
+            "forbidden_text": forbidden_text,
+            "linear_history": linear_history,
+        });
+        match self.call("/api/git/op", "POST", Some(&body), false, None)? {
+            Value::Object(landed) => Ok(landed),
+            _ => Err(VogtError::EngineUnavailable(format!(
+                "the {} returned nothing for the land of {branch}",
+                self.label
+            ))),
+        }
+    }
+
     /// Hand the engine a person-approved grant. `NotFound` when it does not know
     /// the session, `Conflict` when it cannot hold the grant, `GrantRefused` for
     /// a project not open to grants, `InvalidRequest` for a field it rejects.
