@@ -1660,6 +1660,39 @@
       }
     },
     {
+      "name": "work_land",
+      "description": "Land a work item's reviewed branch onto the project's base branch at a pinned tip: a fast-forward, or a rebase where the landing rule says so, never a merge commit. Only a person or an oversight session may call it, only on a project whose merges are oversight's, and only when the latest verdict is `no_blockers` for exactly `head_sha` from a review session a person or oversight started for this item (or a person). The branch is the latest hand-off's. Refusals name the rule.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "description": "Land a work item's reviewed branch onto its base (WI-1328).",
+        "properties": {
+          "ref": {
+            "description": "Work item reference, e.g. WI-7.",
+            "title": "Ref",
+            "type": "string"
+          },
+          "head_sha": {
+            "description": "The branch tip the review saw. The latest verdict must name this SHA, and the engine refuses when the branch has moved past it.",
+            "minLength": 7,
+            "title": "Head Sha",
+            "type": "string"
+          },
+          "reason": {
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "ref",
+          "head_sha",
+          "reason"
+        ],
+        "title": "LandWorkParams",
+        "type": "object"
+      }
+    },
+    {
       "name": "work_comment",
       "description": "Comment on a work item, attributed to the acting actor.",
       "inputSchema": {

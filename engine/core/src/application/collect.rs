@@ -906,6 +906,7 @@ impl ErrorName for VogtError {
             Self::GrantRefused(_) => "GrantRefused",
             Self::CleanRefused(_) => "CleanRefused",
             Self::CommentRefused(_) => "CommentRefused",
+            Self::LandRefused(_) => "LandRefused",
             Self::ReportRefused(_) => "ReportRefused",
             Self::PersonRequired(_) => "PersonRequired",
             Self::EngineOnly(_) => "EngineOnly",
