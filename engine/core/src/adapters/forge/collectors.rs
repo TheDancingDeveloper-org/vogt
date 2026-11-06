@@ -899,7 +899,7 @@ mod tests {
 }
 
 /// Successful-read timestamps, not observation change timestamps. The sweep
-/// registry's posture collector owns one, so two engines never share a schedule.
+/// context owns one (shared by the scheduler across sweeps), so two engines never share a schedule.
 #[derive(Default)]
 pub struct PostureSchedule(std::collections::HashMap<String, crate::core::Moment>);
 impl PostureSchedule {

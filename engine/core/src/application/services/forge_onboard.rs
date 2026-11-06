@@ -7,6 +7,7 @@
 //! records the run whichever way it ended.
 
 use std::rc::Rc;
+use std::sync::Arc;
 
 use serde_json::{json, Value};
 
@@ -97,8 +98,18 @@ where
     let collectors = vec![
         sync_collector(ctx, &directory, ForgeSyncKind::Issues),
         sync_collector(ctx, &directory, ForgeSyncKind::Pulls),
-        owned_forge_read(ctx.observed.clone(), &directory, ForgeReadKind::Labels),
-        owned_forge_read(ctx.observed.clone(), &directory, ForgeReadKind::Releases),
+        owned_forge_read(
+            ctx.observed.clone(),
+            &directory,
+            ForgeReadKind::Labels,
+            Arc::clone(&ctx.posture_schedule),
+        ),
+        owned_forge_read(
+            ctx.observed.clone(),
+            &directory,
+            ForgeReadKind::Releases,
+            Arc::clone(&ctx.posture_schedule),
+        ),
     ];
     let reports = {
         let mut clock = ctx

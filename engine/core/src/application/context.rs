@@ -81,7 +81,16 @@ pub struct AppContext<C, I> {
     /// one request spends the stand-in on more than one provider. The resolvers
     /// take the boxed form, so [`Self::forge_transport`] hands one back.
     pub(crate) forge_transport: Option<super::forge_transport::SharedForgeTransport>,
+    /// When each repository's forge posture was last read. A context is built
+    /// per request or tick and a sweep builds its registry afresh, so a schedule
+    /// that must outlive a sweep lives here and is shared by whoever drives the
+    /// sweeps ([`Built::with_posture_schedule`]). A new context starts with its
+    /// own, empty one: two engines (or two tests) never share a schedule.
+    pub(crate) posture_schedule: PostureScheduleHandle,
 }
+
+/// The shared form of [`crate::adapters::forge::PostureSchedule`].
+pub type PostureScheduleHandle = Arc<std::sync::Mutex<crate::adapters::forge::PostureSchedule>>;
 
 /// The wall clock. Reads the system; it holds no state of its own.
 #[derive(Debug, Clone, Copy, Default)]
@@ -122,6 +131,20 @@ pub enum Built {
     SystemSequential(AppContext<SystemClock, SequentialIds>),
     StepRandom(AppContext<StepClock, RandomIds>),
     StepSequential(AppContext<StepClock, SequentialIds>),
+}
+
+impl Built {
+    /// Replace the context's posture schedule with one the caller keeps across
+    /// builds, so `forge_posture_interval_seconds` holds between sweeps.
+    pub fn with_posture_schedule(mut self, schedule: PostureScheduleHandle) -> Self {
+        match &mut self {
+            Built::SystemRandom(c) => c.posture_schedule = schedule,
+            Built::SystemSequential(c) => c.posture_schedule = schedule,
+            Built::StepRandom(c) => c.posture_schedule = schedule,
+            Built::StepSequential(c) => c.posture_schedule = schedule,
+        }
+        self
+    }
 }
 
 /// Run one function against whichever concrete context the hooks built.
@@ -386,6 +409,7 @@ where
         peer,
         public_identity: public_identity.unwrap_or_else(|| identity_of(&config)),
         forge_transport: None,
+        posture_schedule: Default::default(),
         config,
     }
 }
@@ -460,6 +484,7 @@ where
         peer: None,
         public_identity: ctx.public_identity.clone(),
         forge_transport: ctx.forge_transport.clone(),
+        posture_schedule: Arc::clone(&ctx.posture_schedule),
     }
 }
 

@@ -16,6 +16,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use serde_json::{json, Value};
 
@@ -305,7 +306,12 @@ fn register_forge<C: Clock + 'static, I: IdFactory + 'static>(
         ))));
     }
     for kind in ForgeReadKind::ALL {
-        collectors.push(owned_forge_read(ctx.observed.clone(), directory, kind));
+        collectors.push(owned_forge_read(
+            ctx.observed.clone(),
+            directory,
+            kind,
+            Arc::clone(&ctx.posture_schedule),
+        ));
     }
     for collector in collectors {
         registry.add(collector).map_err(VogtError::InvalidRequest)?;
@@ -387,7 +393,7 @@ pub(crate) struct OwnedForgeRead<C: Clock + 'static, I: IdFactory + 'static> {
     store: crate::storage::sqlite::observed::SqliteObservedStore<C, I>,
     directory: Rc<crate::adapters::forge::ForgeClients>,
     actors: crate::adapters::forge::ActorResolver,
-    posture: std::sync::Mutex<crate::adapters::forge::PostureSchedule>,
+    posture: crate::application::context::PostureScheduleHandle,
 }
 
 /// The registry's form of one provider read.
@@ -395,13 +401,14 @@ pub(crate) fn owned_forge_read<C: Clock + 'static, I: IdFactory + 'static>(
     store: crate::storage::sqlite::observed::SqliteObservedStore<C, I>,
     directory: &Rc<crate::adapters::forge::ForgeClients>,
     kind: ForgeReadKind,
+    posture: crate::application::context::PostureScheduleHandle,
 ) -> Registered {
     Registered::Collector(Box::new(OwnedForgeRead {
         kind,
         store,
         directory: Rc::clone(directory),
         actors: crate::adapters::forge::ActorResolver::new(),
-        posture: Default::default(),
+        posture,
     }))
 }
 
@@ -1103,6 +1110,125 @@ mod tests {
             requests.iter().all(|request| request.starts_with("GET ")),
             "a sweep only reads: {requests:?}"
         );
+    }
+
+    /// A forged context over the stand-in, one registered project, and the
+    /// posture interval given. Returns the stand-in to count requests.
+    fn posture_fixture(
+        interval: i64,
+    ) -> (
+        Built,
+        crate::application::forge_standin::StandInForge,
+        VogtConfig,
+    ) {
+        use crate::application::forge_standin::StandInForge;
+        let dir = std::env::temp_dir().join(format!(
+            "vogt-collect-posture-{}-{}",
+            std::process::id(),
+            unique()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let token = dir.join("forge-token");
+        std::fs::write(&token, "secret-token\n").unwrap();
+        let mut clock = Some(StepClock::new(moment()));
+        let mut ids = Some(SequentialIds::new(None).unwrap());
+        crate::application::instance::init(&dir, &mut clock, &mut ids).unwrap();
+        let config = VogtConfig {
+            data_dir: dir.clone(),
+            github_token_file: Some(token),
+            forge_posture_interval_seconds: interval,
+            ..VogtConfig::default()
+        };
+        let built = build_context(
+            config.clone(),
+            Some(Principal::new("local:test-user", ActorKind::Human, "Test").unwrap()),
+            clock,
+            ids,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let standin = StandInForge::one_of_each();
+        let transport = standin.transport();
+        let Built::StepSequential(ctx) = built else {
+            panic!("expected a step clock");
+        };
+        let forged =
+            Built::StepSequential(ctx.with_forge_transport(move |url, headers, body, method| {
+                transport(url, headers, body, method)
+            }));
+        register(
+            &forged,
+            "widget",
+            &dir,
+            Some("https://github.com/acme/widget"),
+        );
+        (forged, standin, config)
+    }
+
+    fn posture_reads(standin: &crate::application::forge_standin::StandInForge) -> usize {
+        standin
+            .requests()
+            .iter()
+            .filter(|request| request.contains("/vulnerability-alerts"))
+            .count()
+    }
+
+    fn posture_sweep(built: &Built) {
+        sweep_op(
+            built,
+            json!({"project": "widget", "collectors": ["forge-posture"]}),
+        )
+        .unwrap();
+    }
+
+    /// The registry is rebuilt on every sweep, so the interval can only hold
+    /// if the schedule lives outside it: a second sweep inside the interval
+    /// makes no posture call.
+    #[test]
+    fn a_second_sweep_inside_the_posture_interval_makes_no_posture_call() {
+        let (built, standin, _) = posture_fixture(86_400);
+        posture_sweep(&built);
+        assert_eq!(posture_reads(&standin), 1, "first sweep reads posture");
+        posture_sweep(&built);
+        assert_eq!(
+            posture_reads(&standin),
+            1,
+            "inside the interval nothing is re-read: {:?}",
+            standin.requests()
+        );
+    }
+
+    /// Once the interval has elapsed the repo is due again (an interval of 0 is
+    /// elapsed at any later instant).
+    #[test]
+    fn a_sweep_after_the_posture_interval_reads_posture_again() {
+        let (built, standin, _) = posture_fixture(0);
+        posture_sweep(&built);
+        posture_sweep(&built);
+        assert_eq!(posture_reads(&standin), 2);
+    }
+
+    /// The scheduler builds a fresh context per tick; the schedule it hands each
+    /// one is what carries the interval across ticks. A context without it is
+    /// due every time, and two engines never share one.
+    #[test]
+    fn a_shared_posture_schedule_holds_the_interval_across_contexts() {
+        let (first, standin, _) = posture_fixture(86_400);
+        let (second, other, _) = posture_fixture(86_400);
+        let Built::StepSequential(ctx) = &first else {
+            panic!("expected a step clock");
+        };
+        let shared = std::sync::Arc::clone(&ctx.posture_schedule);
+        let second = second.with_posture_schedule(shared);
+        posture_sweep(&first);
+        assert_eq!(posture_reads(&standin), 1);
+        // The other context shares the schedule, so its repo (same slug) is not due.
+        posture_sweep(&second);
+        assert_eq!(posture_reads(&other), 0);
     }
 
     /// A configured forge no longer refuses the sweep: forge-issues and

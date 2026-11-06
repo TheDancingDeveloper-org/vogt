@@ -32,7 +32,7 @@ use std::time::Duration;
 use serde_json::json;
 
 use crate::application::collect::sweep_built;
-use crate::application::context::build_context;
+use crate::application::context::{build_context, PostureScheduleHandle};
 use crate::application::services::{budget_handoff, context_rotation};
 use crate::config::VogtConfig;
 use crate::core::{ActorKind, Principal};
@@ -89,6 +89,9 @@ pub fn sweep_then_settle(
 /// The sweep, then the budget settlement, as Python's `try: sweep finally:
 /// settle_budget_stops`, via [`sweep_then_settle`].
 pub fn serve_tick(config: VogtConfig) -> Tick {
+    // One schedule for this engine's ticks, so the posture interval holds
+    // between sweeps although each tick builds a fresh context.
+    let posture = PostureScheduleHandle::default();
     Arc::new(move || {
         let built = build_context(
             config.clone(),
@@ -99,7 +102,8 @@ pub fn serve_tick(config: VogtConfig) -> Tick {
             None,
             None,
             None,
-        )?;
+        )?
+        .with_posture_schedule(Arc::clone(&posture));
         sweep_then_settle(
             || sweep_built(&built, &json!({ "reason": SCHEDULED_REASON })).map(drop),
             || {
