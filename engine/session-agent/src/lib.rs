@@ -996,6 +996,10 @@ pub async fn run(config: Config) -> Result<(), AgentError> {
                                     Frame::Signal { signal } if signal == "kill" => {
                                         let frame = stop_child(&mut child).await;
                                         stopped = true;
+                                        // Final flush: the CLI's last credential and
+                                        // transcript writes reach the engine before the
+                                        // pod goes (hibernate and stop both kill).
+                                        let _ = flush_bundle(&config, &tls, &mut bundle_seen, &mut transcript_offsets).await;
                                         let _ = send_frame(&mut sink, &frame).await;
                                         return Ok(());
                                     },
@@ -1026,6 +1030,8 @@ pub async fn run(config: Config) -> Result<(), AgentError> {
                         if let Some(c) = child.as_mut() {
                             if let Ok(Some(status)) = c.try_wait() {
                                 tracing::info!(exit_code = status.exit_code(), "session-agent: the CLI exited");
+                                // The CLI may have written after the flush above.
+                                let _ = flush_bundle(&config, &tls, &mut bundle_seen, &mut transcript_offsets).await;
                                 send_frame(&mut sink, &Frame::Exited { status: Some(status.exit_code() as i32) }).await?;
                                 return Ok(());
                             }
