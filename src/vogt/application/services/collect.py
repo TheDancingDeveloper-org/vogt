@@ -32,6 +32,7 @@ from vogt.application.services import _resolve
 from vogt.application.services.ci_watch import announce_concluded
 from vogt.application.services.engine_status import workspace_disk
 from vogt.application.services.views import freshness_of
+from vogt.application.services.workspaces import disk_candidates
 from vogt.collectors import CollectorContext, CollectorRegistry, Sweeper
 from vogt.collectors.agent_activity import AgentActivityCollector
 from vogt.collectors.dep_refs import KIND_DEP_REF, KIND_DEP_SCAN
@@ -301,12 +302,22 @@ def sweep(ctx: AppContext, params: SweepParams) -> SweepResult:
                 extra={"vogt": {"error": f"{type(exc).__name__}: {exc}"}},
             )
 
+    disk = workspace_disk(ctx)
+    try:
+        candidates = disk_candidates(ctx, disk)
+    except Exception as exc:
+        _log.warning(
+            "sweep could not list workspace clean candidates",
+            extra={"vogt": {"error": f"{type(exc).__name__}: {exc}"}},
+        )
+        candidates = []
     return SweepResult(
         scope=params.project or "all registered projects",
         projects=len(projects),
         subjects=subjects,
         dep_refs=dep_ref_count,
-        disk=workspace_disk(ctx),
+        disk=disk,
+        disk_candidates=candidates,
         reports=[
             SweepReportView(
                 collector=report.collector,

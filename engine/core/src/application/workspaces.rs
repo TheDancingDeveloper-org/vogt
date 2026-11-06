@@ -26,6 +26,38 @@ use crate::core::{py_repr, ActorKind, Clock, IdFactory};
 use crate::errors::VogtError;
 use crate::storage::interface::{DeclaredStore, ObservedStore, ReadView};
 
+pub(crate) fn disk_candidates<C: Clock + 'static, I: IdFactory + 'static>(
+    ctx: &AppContext<C, I>,
+    disk: &Value,
+) -> Result<Vec<Value>, VogtError> {
+    if disk["needs_attention"] != true {
+        return Ok(Vec::new());
+    }
+    let rows = match workspace_list(
+        ctx,
+        &WorkspaceListParams {
+            alive: Some(false),
+            ..Default::default()
+        },
+    ) {
+        Ok(result) => result.workspaces,
+        Err(VogtError::EngineUnavailable(_)) => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    let mut merged: Vec<_> = rows
+        .into_iter()
+        .filter(|row| row.kind == "worktree" && row.merged == Some(true))
+        .collect();
+    merged.sort_by_key(|row| std::cmp::Reverse(row.size_bytes.unwrap_or(0)));
+    Ok(merged.into_iter().take(5).map(|row| json!({
+        "path": row.path,
+        "branch": row.branch,
+        "size_bytes": row.size_bytes,
+        "session": row.session,
+        "call": format!("workspace_clean(path={}, mode='remove', reason='disk over threshold; branch merged')", py_repr(&row.path)),
+    })).collect())
+}
+
 pub(crate) fn workspace_list_op(built: &Built, params: Value) -> Result<Value, VogtError> {
     let parsed: WorkspaceListParams = serde_json::from_value(params)
         .map_err(|error| VogtError::InvalidRequest(format!("invalid parameters: {error}")))?;

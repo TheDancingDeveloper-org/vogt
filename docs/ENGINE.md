@@ -2222,6 +2222,12 @@ what is free, the percent used, and `needs_attention` once that passes
 `ENGINE_DISK_WARN_PERCENT` (`85`). A deployment with no engine reports no row,
 which is a different fact from a volume that is fine.
 
+While `disk.needs_attention` is true, `sweep.disk_candidates` suggests up to
+five stopped, merged worktrees, largest first, with a `workspace_clean`
+call for each. Unknown merge state and ordinary checkouts are excluded.
+An unavailable workspace listing leaves the suggestions empty; the sweep
+never removes anything.
+
 
 #### Session scratch, background processes and free space
 
