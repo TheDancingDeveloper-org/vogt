@@ -258,6 +258,21 @@ impl SessionRegistry {
         Ok(Some(minter))
     }
 
+    /// The source providers this engine can serve pod sessions from: the
+    /// default git provider and graft, minting through `minter` when the
+    /// deployment holds a mint token.
+    fn source_registry(
+        &self,
+        minter: Option<Arc<dyn crate::graft_mint::GraftMinter>>,
+    ) -> crate::source_provider::SourceRegistry {
+        let mut registry = crate::source_provider::SourceRegistry::with_defaults();
+        registry.register(Arc::new(crate::graft_provider::GraftProvider::new(
+            graft_token_dir(&self.cfg.state_dir),
+            minter,
+        )));
+        registry
+    }
+
     /// Start the loop that settles the cluster's session pods against this
     /// engine's sessions (`pod_reconcile`). A no-op unless pod backends are on.
     pub fn start_pod_reconciler(&self) -> Option<tokio::task::JoinHandle<()>> {
@@ -325,6 +340,14 @@ impl SessionRegistry {
         let pod_config = self.pod_config()?;
         let launcher = self.pod_launcher()?;
         let minter = self.graft_minter(&pod_config)?;
+        // The project decides what the pod checks out (WI-3369); the
+        // deployment's repo and line are only the default.
+        let source = crate::pod_backend::session_source(
+            &pod_config,
+            spec.source.as_ref(),
+            &self.source_registry(minter.clone()),
+        )
+        .map_err(ApiError::BadRequest)?;
         let (link, reader, adopted_uid, adopting) = match self.adopting.lock().remove(&id) {
             Some((link, reader, uid)) => (link, reader, uid, true),
             None => {
@@ -376,7 +399,7 @@ impl SessionRegistry {
                 &pod_config,
                 template,
                 id,
-                &pod_config.graft_repo,
+                &source,
                 "session",
                 spec.account.as_deref(),
                 spec.command.as_deref().unwrap_or_default(),
@@ -387,8 +410,8 @@ impl SessionRegistry {
             .then(|| {
                 crate::graft_mint::SessionGrant::new(
                     id,
-                    &pod_config.graft_repo,
-                    &pod_config.graft_line,
+                    source.location.repo(),
+                    &source.reference,
                     spec.work_item.as_deref(),
                     spec.budget.as_ref(),
                 )
@@ -1490,6 +1513,7 @@ impl SessionRegistry {
                     .collect();
                 record.autopilot = spec.autopilot;
                 record.policy = spec.policy.clone();
+                record.source = spec.source.clone();
                 record.budget = spec.budget.clone();
                 record.role = spec.role;
                 record.work_item = spec.work_item.clone();
@@ -2362,6 +2386,7 @@ impl SessionRegistry {
             // A wake returns to the worktree the first start already cut; it
             // does not cut another (WI-1298).
             worktree: None,
+            source: record.source.clone(),
             resume: if fresh.is_some() {
                 None
             } else {
