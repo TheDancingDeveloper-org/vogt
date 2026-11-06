@@ -5361,6 +5361,43 @@
       }
     },
     {
+      "name": "workspace_list",
+      "description": "List every live or hibernated session's working tree: path, kind (worktree|checkout), branch, base_sha, size_bytes, alive, merged (branch tip in the default branch, per the git-local collector; null when unobserved), work_item and session. Filter by `project` slug and `alive`.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "project": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Only workspaces of this project's sessions (slug).",
+            "title": "Project"
+          },
+          "alive": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "true: only running sessions; false: only stopped or hibernated.",
+            "title": "Alive"
+          }
+        },
+        "title": "WorkspaceListParams",
+        "type": "object"
+      }
+    },
+    {
       "name": "session_wait_any",
       "description": "Wait for any of the named sessions instead of polling them: blocks (up to timeout_s, default 300, max 600; an oversight session's wait is at least 60 so it cannot become a poll loop) until one publishes a kind in `until` (default: ready, blocked, approval, exited, errored). Returns the delta with that session's digest, or `timeout`. Pass `cursor` (the previous `next_cursor`) so a replayed page is not waited on twice. `cursor=now` skips events already published and waits only for one that lands after the call starts; a timeout then returns that head as `next_cursor`. `ids` empty waits on every session.",
       "inputSchema": {
