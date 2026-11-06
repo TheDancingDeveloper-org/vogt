@@ -663,6 +663,7 @@ impl<T: ForgeTransport> GitHubProvider<T> {
                 &format!("/repos/{}/{}/contents/{path}", repo.owner, repo.repo),
                 &[],
             ) {
+                Err(error @ VogtError::GitHubRateLimited(_)) => return Err(error),
                 Err(_) => return Ok(None),
                 Ok(ForgeResponse::Missing | ForgeResponse::Empty) => {}
                 Ok(_) => return Ok(Some((*path).to_owned())),
@@ -677,6 +678,7 @@ impl<T: ForgeTransport> GitHubProvider<T> {
             &format!("/repos/{}/{}/{endpoint}", repo.owner, repo.repo),
             &[],
         ) {
+            Err(error @ VogtError::GitHubRateLimited(_)) => Err(error),
             Err(_) => Ok(None),
             Ok(ForgeResponse::Missing) => Ok(Some(false)),
             Ok(_) => Ok(Some(true)),

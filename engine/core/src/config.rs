@@ -372,17 +372,13 @@ pub struct VogtConfig {
 /// quietly.
 ///
 /// None of these features is ported: the forge posture collector interval,
-/// the GitHub rate-limit floor, GitHub App installation auth, cold-wake
+/// GitHub App installation auth, cold-wake
 /// compaction (WI-2588), the session-scratch project, and the autopilot
 /// result-report gate. The collector schedule reads `sweep_interval_seconds`
 /// (WI-2021), `usage.board` reads all four `usage_*` settings, and
 /// `instance.diagnostics` reads `image_digest`.
-/// `watch_interval_seconds` stays unread: `evaluate_watches` is not ported, so
-/// no watch loop runs and nothing else reads the key.
+/// Watch evaluation and per-repository forge posture throttling read their intervals (WI-3385).
 pub const UNREAD_KEYS: &[(&str, &str)] = &[
-    ("watch_interval_seconds", "WI-2021"),
-    ("forge_posture_interval_seconds", "WI-2021"),
-    ("github_rate_limit_floor", "WI-2021"),
     ("github_app_installation_id", "WI-2021"),
     ("cold_wake_compaction", "WI-2588"),
     ("cold_wake_threshold_tokens", "WI-2588"),
@@ -2388,9 +2384,6 @@ mod tests {
         assert_eq!(
             code,
             [
-                "watch_interval_seconds",
-                "forge_posture_interval_seconds",
-                "github_rate_limit_floor",
                 "github_app_installation_id",
                 "cold_wake_compaction",
                 "cold_wake_threshold_tokens",

@@ -139,7 +139,7 @@ pinned by the `application/resolve.rs` tests in the Rust core (WI-1058).
 | test_registry.py | ported | `registry.rs` (duplicate names, routes, a required reason, scopes). |
 | test_release_workflow.py | retired | `.github/workflows/release.yml` digest promotion. CI policy, not product behaviour. |
 | test_rust_schemas.py | ported | Derived operation schemas in `application/models.rs` and `registry.rs`, compared with Python's live `registry.dump` by this file, which runs the Rust binary under pytest. |
-| test_scheduler.py | ported | In-process collector schedule in `collectors/sweeper.rs` and `application/collect.rs`. |
+| test_scheduler.py | ported | In-process collector/watch schedules in `adapters/http/scheduler.rs`; posture interval and failed-read retry coverage in `adapters/forge/collectors.rs` (WI-3385). |
 | test_schema_gate.py | ported | Readiness migration gate in `adapters/http/health.rs` and the migrator. |
 | test_serve.py | ported | Serve, health, and MCP-over-HTTP in `main.rs` and `adapters/http`. |
 | test_session_bind_work.py | ported | `application/session_work.rs`. |
@@ -166,7 +166,7 @@ pinned by the `application/resolve.rs` tests in the Rust core (WI-1058).
 | test_usage_board.py | unported | Usage-board limits and key spend are not yet in the Rust core. Deferred to WI-2588.
 | test_view_paging.py | ported | Ranked backlog and bugs paging in `application/views.rs`. |
 | test_voice_capabilities.py | retired | Voice sidecar policy. `voice/` is a separate workspace. |
-| test_watches.py | unported | Event watches and wake-on are not yet in the Rust core. Deferred to WI-2588.
+| test_watches.py | unported | Deferred to WI-2588 for full test-by-test parity.  WI-3385 adds persisted watch evaluation, session-input delivery, retries/expiry, pure PR/CI decisions, and paused-time scheduling coverage in `core/watches.rs`, `application/services/watches.rs`, and `adapters/http/scheduler.rs`. Full Python test-by-test parity and live hibernated-session wake verification remain unverified.
 | test_work_get_many.py | ported | `work.get_many` batched chip read (WI-1224). Owner WI-1068. |
 | test_work_land.py | ported | `engine/core/src/application/work_land_test.rs`: every case (WI-1328): an overseer lands at an oversight reviewer's verdict (the engine body, the note, the `work.landed` event, the audit), a person lands at a person's verdict, and each refusal (a worker caller, an operator-merged project, no branch, a stale SHA, a blockers verdict, the worker's own verdict, a worker-started reviewer, a reviewer of another item, a non-review reviewer) is audited with its rule; the engine's refusal is surfaced verbatim. Extra Rust cases: no verdict, an unknown reviewer session, and a short `head_sha` refused by the validator. |
 | test_workflow.py | ported | Workflow machines in `decisions.rs`. |

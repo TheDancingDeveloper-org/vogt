@@ -114,7 +114,36 @@ impl GitHubClient {
     /// `github_unavailable` rather than a silent empty answer.
     pub fn get(&self, path: &str, query: &[(&str, String)]) -> Result<ForgeResponse, VogtError> {
         let url = self.url(path, query);
-        let (status, body, _) = self.fetch(&url, &self.headers(false), b"", "GET")?;
+        let key = budget_key(self.token.as_deref());
+        let now = crate::core::utc_now().unix_seconds() as f64;
+        {
+            let mut budget = rate_budget()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(reset) = budget.blocked_until(&key, now) {
+                let when = chrono::DateTime::from_timestamp(reset as i64, 0)
+                    .map(|t| t.format("%H:%M:%SZ").to_string())
+                    .unwrap_or_default();
+                return Err(VogtError::GitHubRateLimited(format!(
+                    "GitHub rate budget below {}; skipping {path} until the reset at {when}",
+                    budget.floor
+                )));
+            }
+        }
+        let (status, body, headers) = self.fetch(&url, &self.headers(false), b"", "GET")?;
+        rate_budget()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .observe(&key, &headers);
+        if matches!(status, 403 | 429)
+            && headers
+                .get("x-ratelimit-remaining")
+                .is_some_and(|s| s == "0")
+        {
+            return Err(VogtError::GitHubRateLimited(format!(
+                "GitHub rate limit exhausted reading {path}"
+            )));
+        }
         self.read_outcome(path, status, &body)
     }
 
@@ -130,12 +159,31 @@ impl GitHubClient {
         let verb = method.as_str();
         let url = self.url(path, &[]);
         let encoded = body.map(|value| value.to_string()).unwrap_or_default();
-        let (status, response, _) = self.fetch(
+        let key = budget_key(self.token.as_deref());
+        {
+            let mut budget = rate_budget()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if budget
+                .blocked_until(&key, crate::core::utc_now().unix_seconds() as f64)
+                .is_some()
+            {
+                return Err(VogtError::GitHubRateLimited(format!(
+                    "GitHub rate budget below {}; not sending {path}",
+                    budget.floor
+                )));
+            }
+        }
+        let (status, response, response_headers) = self.fetch(
             &url,
             &self.headers(true),
             encoded.as_bytes(),
             method.as_str(),
         )?;
+        rate_budget()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .observe(&key, &response_headers);
         if status == 404 {
             return Ok(Value::Null);
         }
@@ -570,5 +618,90 @@ mod tests {
         };
         assert!(error.to_string().contains("valid UTF-8"), "{error}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// Process-wide per-credential core API budget, shared by rebuilt collectors.
+struct RateBudget {
+    floor: i64,
+    seen: BTreeMap<String, (i64, f64)>,
+}
+impl Default for RateBudget {
+    fn default() -> Self {
+        Self {
+            floor: 500,
+            seen: BTreeMap::new(),
+        }
+    }
+}
+impl RateBudget {
+    fn observe(&mut self, key: &str, headers: &BTreeMap<String, String>) {
+        if headers
+            .get("x-ratelimit-resource")
+            .is_some_and(|s| s != "core")
+        {
+            return;
+        }
+        let remaining = headers
+            .get("x-ratelimit-remaining")
+            .and_then(|s| s.parse().ok());
+        let reset = headers
+            .get("x-ratelimit-reset")
+            .and_then(|s| s.parse().ok());
+        if let (Some(remaining), Some(reset)) = (remaining, reset) {
+            self.seen.insert(key.to_owned(), (remaining, reset));
+        }
+    }
+    fn blocked_until(&mut self, key: &str, now: f64) -> Option<f64> {
+        let (remaining, reset) = *self.seen.get(key)?;
+        if now >= reset {
+            self.seen.remove(key);
+            return None;
+        }
+        (remaining < self.floor).then_some(reset)
+    }
+}
+fn rate_budget() -> &'static std::sync::Mutex<RateBudget> {
+    static BUDGET: std::sync::OnceLock<std::sync::Mutex<RateBudget>> = std::sync::OnceLock::new();
+    BUDGET.get_or_init(Default::default)
+}
+pub fn configure_rate_limit_floor(floor: i64) {
+    rate_budget()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .floor = floor.max(0);
+}
+
+#[cfg(test)]
+mod rate_budget_tests {
+    use super::*;
+    #[test]
+    fn floor_reset_and_token_isolation_match_python() {
+        let mut budget = RateBudget::default();
+        let headers = BTreeMap::from([
+            ("x-ratelimit-remaining".into(), "499".into()),
+            ("x-ratelimit-reset".into(), "100".into()),
+        ]);
+        budget.observe("a", &headers);
+        assert_eq!(budget.blocked_until("a", 99.0), Some(100.0));
+        assert_eq!(budget.blocked_until("b", 99.0), None);
+        assert_eq!(budget.blocked_until("a", 100.0), None);
+        let mut other = headers.clone();
+        other.insert("x-ratelimit-resource".into(), "search".into());
+        budget.observe("a", &other);
+        assert_eq!(budget.blocked_until("a", 1.0), None);
+        budget.observe("a", &headers);
+        budget.floor = 499;
+        assert_eq!(budget.blocked_until("a", 1.0), None);
+        budget.floor = 0;
+        assert_eq!(budget.blocked_until("a", 1.0), None);
+    }
+}
+
+fn budget_key(token: Option<&str>) -> String {
+    use sha2::Digest;
+    match token {
+        Some(token) => hex::encode(sha2::Sha256::digest(token.as_bytes()))[..16].to_owned(),
+        None => "anonymous".into(),
     }
 }
