@@ -1,11 +1,11 @@
 //! The workflow machine and project lifecycle. Ports the workflow of
 //! `src/vogt/core/`.
 
-#![allow(dead_code)] // Domain vocabulary the bin re-exports; tests and later services use what the bin does not.
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::errors::VogtError;
 
+#[allow(dead_code)] // Ported domain item; only tests use it until the service layer wires it.
 pub type LifecycleState = &'static str;
 
 pub const OPEN: &str = "open";
@@ -115,6 +115,7 @@ impl Workflow {
         Ok(())
     }
 
+    #[allow(dead_code)] // Ported domain item; only tests use it until the service layer wires it.
     /// The stored form: `{"initial_state", "transitions"}` with keys sorted,
     /// matching `json.dumps(..., sort_keys=True)` — spaced separators and
     /// non-ASCII escaped as `\uXXXX`, the same bytes Python writes.
@@ -133,6 +134,7 @@ impl Workflow {
         )
     }
 
+    #[allow(dead_code)] // Ported domain item; only tests use it until the service layer wires it.
     /// Inverse of `to_definition_json`. A definition without a transitions
     /// object is refused, matching `Workflow.from_definition`.
     pub fn from_definition_json(kind: &str, text: &str) -> Result<Self, String> {
@@ -227,6 +229,7 @@ pub fn default_workflow(kind: &str) -> Workflow {
 impl Workflow {
     /// The persisted shape: the initial state and the transition map, in the
     /// map's insertion order. Ports `Workflow.to_definition`.
+    #[allow(dead_code)] // Ported domain item; only tests use it until the service layer wires it.
     pub fn to_definition(&self) -> serde_json::Value {
         serde_json::json!({
             "initial_state": self.initial_state,
@@ -239,6 +242,7 @@ impl Workflow {
     /// A stored definition back into a machine. A missing `transitions` map is
     /// an error; a source whose targets are not a list is skipped; a missing
     /// initial state is `open`. Ports `Workflow.from_definition`.
+    #[allow(dead_code)] // Ported domain item; only tests use it until the service layer wires it.
     pub fn from_definition(kind: &str, definition: &serde_json::Value) -> Result<Self, String> {
         let raw = definition
             .get("transitions")
@@ -274,6 +278,7 @@ impl Workflow {
     }
 }
 
+#[allow(dead_code)] // Ported domain item; only tests use it until the service layer wires it.
 pub fn check_completion_allowed(
     to_state: &str,
     blockers: &[(&str, &str)],
@@ -327,6 +332,7 @@ pub fn check_lifecycle_transition(from_state: &str, to_state: &str) -> Result<()
     Ok(())
 }
 
+#[allow(dead_code)] // Ported domain item; only tests use it until the service layer wires it.
 /// Declared-store shapes. Ports `src/vogt/core/entities.py`.
 ///
 /// Closed structs stand in for pydantic's `extra="forbid"`. Timestamps are the
@@ -336,6 +342,7 @@ pub fn check_lifecycle_transition(from_state: &str, to_state: &str) -> Result<()
 pub const DECLARABLE_RELATION_KINDS: &[&str] =
     &["depends_on", "relates_to", "duplicate_of", "parent_of"];
 
+#[allow(dead_code)] // Ported domain item; only tests use it until the service layer wires it.
 pub fn require_text(value: &str) -> Result<String, String> {
     let stripped = value.trim();
     if stripped.is_empty() {
