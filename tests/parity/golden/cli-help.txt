@@ -49,6 +49,7 @@ positional arguments:
     session            session operations
     watch              watch operations
     decision           decision operations
+    workspace          workspace operations
     agent-cli          agent-cli operations
     agent-activity     agent-activity operations
     token              token operations
@@ -405,6 +406,14 @@ positional arguments:
     relate       Add a typed relation between two work items.
     unrelate     Remove a typed relation between two work items.
     bind-branch  Declare the git branch a work item is worked on.
+    land         Land a work item's reviewed branch onto the project's base
+                 branch at a pinned tip: a fast-forward, or a rebase where the
+                 landing rule says so, never a merge commit. Only a person or
+                 an oversight session may call it, only on a project whose
+                 merges are oversight's, and only when the latest verdict is
+                 `no_blockers` for exactly `head_sha` from a review session a
+                 person or oversight started for this item (or a person). The
+                 branch is the latest hand-off's. Refusals name the rule.
     comment      Comment on a work item, attributed to the acting actor.
     adopt        Promote an observed subject into a declared work item.
 
@@ -614,24 +623,53 @@ options:
                    creates, renames or deletes a branch in git.
   --reason REASON
 
+$ vogt work land --help
+[exit 0]
+usage: vogt work land [-h] --ref REF --head-sha HEAD_SHA --reason REASON
+
+options:
+  -h, --help           show this help message and exit
+  --ref REF            Work item reference, e.g. WI-7.
+  --head-sha HEAD_SHA  The branch tip the review saw. The latest verdict must
+                       name this SHA, and the engine refuses when the branch
+                       has moved past it.
+  --reason REASON
+
 $ vogt work comment --help
 [exit 0]
-usage: vogt work comment [-h] --ref REF --body BODY [--kind {note,handoff}]
-                         [--handoff HANDOFF] --reason REASON
+usage: vogt work comment [-h] --ref REF --body BODY
+                         [--kind {note,handoff,verdict,verification}]
+                         [--handoff HANDOFF] [--verdict VERDICT]
+                         [--verification VERIFICATION] --reason REASON
                          [--mode {compact,full}]
 
 options:
   -h, --help            show this help message and exit
   --ref REF
   --body BODY           The comment text.
-  --kind {note,handoff}
+  --kind {note,handoff,verdict,verification}
                         `note` (default) is an ordinary remark. `handoff` is
                         the structured hand-off a fresh session starts from,
-                        and requires `handoff`.
+                        and requires `handoff`. `verdict` is a review verdict,
+                        requires `verdict`, and is posted by a person or by a
+                        review session started by a person or oversight on the
+                        item it reviews. `verification` records a check,
+                        requires `verification`, and is posted by someone
+                        other than the worker.
   --handoff HANDOFF     The structured fields of a hand-off: branch, head_sha,
                         base, done, remaining, touch_points, gates_run,
                         blockers, session. Required when kind is `handoff`,
-                        refused on a note.
+                        refused on any other kind.
+  --verdict VERDICT     The structured fields of a review verdict: head_sha,
+                        base, verdict (no_blockers | blockers), blockers (non-
+                        empty for `blockers`), deployment_paths_covered.
+                        reviewer_session and reviewer_started_by are filled by
+                        Vogt; supplied values are ignored. Required when kind
+                        is `verdict`, refused otherwise.
+  --verification VERIFICATION
+                        The structured fields of a verification: head_sha,
+                        lane, what, evidence. `by` is filled by Vogt. Required
+                        when kind is `verification`, refused otherwise.
   --reason REASON
   --mode {compact,full}
                         `compact` (default) returns a few fields: enough to
@@ -2347,6 +2385,58 @@ options:
   -h, --help       show this help message and exit
   --id ID          The decision id (dec_…).
   --reason REASON  Why this write is being made (audited).
+
+$ vogt workspace --help
+[exit 0]
+usage: vogt workspace [-h] <subcommand> ...
+
+positional arguments:
+  <subcommand>
+    list        List every live or hibernated session's working tree: path,
+                kind (worktree|checkout), branch, base_sha, size_bytes, alive,
+                merged (branch tip in the default branch, per the git-local
+                collector; null when unobserved), work_item and session.
+                Filter by `project` slug and `alive`.
+    clean       Clean one session's working tree, by session `id` or `path`.
+                mode=build_output drops target/, node_modules and .venv and
+                stamps cleaned_at; mode=remove runs `git worktree remove` and
+                deletes the branch when merged. The engine refuses (409) a
+                tree a live or hibernated session uses, a dirty tree (always),
+                and an unmerged branch unless force (a person only; the branch
+                is then kept).
+
+options:
+  -h, --help    show this help message and exit
+
+$ vogt workspace list --help
+[exit 0]
+usage: vogt workspace list [-h] [--project PROJECT] [--alive | --no-alive]
+
+options:
+  -h, --help           show this help message and exit
+  --project PROJECT    Only workspaces of this project's sessions (slug).
+  --alive, --no-alive  true: only running sessions; false: only stopped or
+                       hibernated.
+
+$ vogt workspace clean --help
+[exit 0]
+usage: vogt workspace clean [-h] [--id ID] [--path PATH]
+                            --mode {build_output,remove}
+                            [--force | --no-force] --reason REASON
+
+options:
+  -h, --help            show this help message and exit
+  --id ID               The session whose workspace to clean (`ses_…` or
+                        engine UUID).
+  --path PATH           The workspace path, instead of `id`.
+  --mode {build_output,remove}
+                        `build_output`: drop target/, node_modules, .venv.
+                        `remove`: `git worktree remove` it, deleting the
+                        branch when merged.
+  --force, --no-force   Remove a worktree whose branch is unmerged (the branch
+                        is kept). A person only. Never removes a dirty tree or
+                        one a session uses.
+  --reason REASON
 
 $ vogt agent-cli --help
 [exit 0]
