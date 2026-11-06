@@ -584,13 +584,18 @@ pub enum CommentKind {
     Note,
     #[serde(rename = "handoff")]
     Handoff,
+    #[serde(rename = "verdict")]
+    Verdict,
+    #[serde(rename = "verification")]
+    Verification,
 }
 
 /// A remark on a work item, attributed to an actor.
 ///
-/// `kind` is `note` for an ordinary remark and `handoff` for the structured
-/// hand-off a fresh session starts from (design C11). `handoff` is present
-/// only on a hand-off comment.
+/// `kind` is `note` for an ordinary remark, `handoff` for the structured
+/// hand-off a fresh session starts from (design C11), `verdict` for a
+/// review verdict and `verification` for a check someone other than the
+/// worker ran. Each structured field set is present only on its own kind.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Comment {
@@ -605,6 +610,10 @@ pub struct Comment {
     pub kind: CommentKind,
     #[serde(default)]
     pub handoff: Option<HandoffFields>,
+    #[serde(default)]
+    pub verdict: Option<VerdictFields>,
+    #[serde(default)]
+    pub verification: Option<VerificationFields>,
 }
 
 /// One contradiction between a work item and its git evidence.
@@ -658,6 +667,68 @@ pub struct HandoffFields {
     #[serde(default)]
     #[schemars(schema_with = "optional_string")]
     pub session: Option<String>,
+}
+
+/// The structured half of a review verdict (WI-1319, design §2.2).
+///
+/// `verdict="blockers"` names at least one blocker. `reviewer_session` and
+/// `reviewer_started_by` are filled by the core from the acting session's
+/// record; values a caller supplies are ignored.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct VerdictFields {
+    pub head_sha: String,
+    #[serde(default)]
+    #[schemars(schema_with = "optional_string")]
+    pub base: Option<String>,
+    pub verdict: VerdictFieldsVerdict,
+    #[serde(default)]
+    #[schemars(extend("x-keep-default" = true))]
+    pub blockers: Vec<String>,
+    #[serde(default)]
+    #[schemars(extend("x-keep-default" = true))]
+    pub deployment_paths_covered: Vec<String>,
+    #[serde(default)]
+    #[schemars(schema_with = "optional_string")]
+    pub reviewer_session: Option<String>,
+    #[serde(default)]
+    pub reviewer_started_by: Option<VerdictFieldsReviewerStartedBy>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[schemars(inline)]
+pub enum VerdictFieldsVerdict {
+    #[serde(rename = "no_blockers")]
+    NoBlockers,
+    #[serde(rename = "blockers")]
+    Blockers,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[schemars(inline)]
+pub enum VerdictFieldsReviewerStartedBy {
+    #[serde(rename = "person")]
+    Person,
+    #[serde(rename = "oversight")]
+    Oversight,
+}
+
+/// The structured half of a verification (WI-1319, design §2.2).
+///
+/// `by` is filled by the core from the acting actor; a supplied value is
+/// ignored.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct VerificationFields {
+    #[serde(default)]
+    #[schemars(schema_with = "optional_string")]
+    pub head_sha: Option<String>,
+    pub lane: String,
+    pub what: String,
+    pub evidence: String,
+    #[serde(default)]
+    #[schemars(schema_with = "optional_string")]
+    pub by: Option<String>,
 }
 
 /// A permission dialog an agent CLI in the session is showing.
@@ -2850,6 +2921,10 @@ pub enum CommentParamsKind {
     Note,
     #[serde(rename = "handoff")]
     Handoff,
+    #[serde(rename = "verdict")]
+    Verdict,
+    #[serde(rename = "verification")]
+    Verification,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]

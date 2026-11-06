@@ -821,7 +821,10 @@ fn a_handoff_comment_on_an_upstream_item_is_refused() {
     );
     match refused {
         Err(VogtError::InvalidRequest(message)) => {
-            assert!(message.contains("hand-off"), "{message}");
+            assert!(
+                message.contains("a handoff comment is a local record"),
+                "{message}"
+            );
         }
         other => panic!("unexpected {other:?}"),
     }
