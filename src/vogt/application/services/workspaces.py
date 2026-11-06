@@ -12,15 +12,22 @@ collector has not observed is `merged: null`, never a guess.
 from __future__ import annotations
 
 from vogt.adapters.engine import EngineUnavailable
+from vogt.application import writes
 from vogt.application.context import AppContext
 from vogt.application.models import (
+    WorkspaceCleanParams,
+    WorkspaceCleanResult,
     WorkspaceListParams,
     WorkspaceListResult,
     WorkspaceRow,
 )
 from vogt.application.services.sessions import _engine
+from vogt.application.writes import audited_action
 from vogt.core.entities import Project
-from vogt.errors import NotFound
+from vogt.errors import CleanRefused, InvalidRequest, NotFound
+
+WORKSPACE_CLEAN = "workspace.clean"
+WORKSPACE_CLEANED_EVENT = "workspace.cleaned"
 
 
 def workspace_list(ctx: AppContext, params: WorkspaceListParams) -> WorkspaceListResult:
@@ -94,3 +101,77 @@ def _merged_branches(ctx: AppContext, project_id: str) -> dict[str, bool | None]
         ahead = obs.payload.get("ahead")
         merged[name] = ahead == 0 if isinstance(ahead, int) else None
     return merged
+
+
+def workspace_clean(
+    ctx: AppContext, params: WorkspaceCleanParams
+) -> WorkspaceCleanResult:
+    """Drop a workspace's build output, or remove its worktree (WI-1325).
+
+    The engine makes every safety check — no session in the tree, a clean
+    tree, a merged branch unless forced — and refuses with a 409 that names
+    the reason. Here: who may force, and the audit row.
+    """
+    reason = writes.validate_reason(params.reason)
+    if params.force and ctx.principal.kind == "agent":
+        # A forced removal throws away a worktree whose branch has not
+        # landed, so it is a person's call, as a grant decision is.
+        msg = (
+            "only a person forces a workspace removal, not an agent "
+            f"({ctx.principal.identity_ref}); ask a person to do it"
+        )
+        raise CleanRefused(msg)
+    if (params.id is None) == (params.path is None):
+        msg = "give exactly one of `id` (a session) or `path` (a workspace)"
+        raise InvalidRequest(msg)
+    engine = _engine(ctx)
+    path = params.path
+    if path is None:
+        path = _path_of_session(ctx, params.id or "")
+    done = engine.clean_workspace(
+        path=path, mode=params.mode, force=params.force, reason=reason
+    )
+    if done is None:
+        msg = (
+            "the session engine cannot clean workspaces yet (it has no "
+            "POST /api/workspaces/clean route); upgrade the engine"
+        )
+        raise EngineUnavailable(msg)
+    result = WorkspaceCleanResult(
+        path=str(done.get("path", path)),
+        mode=params.mode,
+        bytes_freed=int(done.get("bytes_freed", 0) or 0),
+        removed=bool(done.get("removed", False)),
+        branch_deleted=done.get("branch_deleted"),
+        cleaned_at=done.get("cleaned_at"),
+    )
+    audited_action(
+        ctx,
+        operation=WORKSPACE_CLEAN,
+        reason=reason,
+        entity_kind="workspace",
+        entity_id=result.path,
+        outcome={
+            "mode": result.mode,
+            "force": params.force,
+            "bytes_freed": result.bytes_freed,
+            "removed": result.removed,
+            "branch_deleted": result.branch_deleted,
+        },
+        event_kind=WORKSPACE_CLEANED_EVENT,
+    )
+    return result
+
+
+def _path_of_session(ctx: AppContext, ref: str) -> str:
+    """The workspace path of session `ref` (a `ses_…` id or engine UUID)."""
+    engine_id = ref
+    with ctx.declared.read() as view:
+        linked = view.session_by_id(ref) if ref.startswith("ses_") else None
+        if linked is not None and linked.engine_session_id:
+            engine_id = linked.engine_session_id
+    for row in _engine(ctx).list_workspaces() or []:
+        if row.session_id == engine_id:
+            return row.path
+    msg = f"session {ref!r} has no workspace"
+    raise NotFound(msg)

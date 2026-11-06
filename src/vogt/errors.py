@@ -117,6 +117,17 @@ class GrantRefused(VogtError):
     http_status = 403
 
 
+class CleanRefused(VogtError):
+    """An agent asked to force a workspace removal (WI-1325).
+
+    A forced removal drops a worktree whose branch has not landed, so it is
+    a person's call. Refused by who is asking, like a grant decision.
+    """
+
+    code = "clean_refused"
+    http_status = 403
+
+
 class ReportRefused(VogtError):
     """A session tried to post a report as another session (WI-2039).
 
