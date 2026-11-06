@@ -23,6 +23,7 @@ pub static STRIPS: &[(&str, &str)] = &[
     ("work.relate", "reason"),
     ("work.unrelate", "reason"),
     ("work.bind_branch", "reason"),
+    ("work.land", "reason"),
     ("work.comment", "body"),
     ("work.comment", "reason"),
     ("label.create", "name"),

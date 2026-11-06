@@ -226,6 +226,7 @@ pub fn service_for(name: &str) -> Option<ServiceFn> {
         "work.relate" => Some(crate::application::services::work::relate_op),
         "work.unrelate" => Some(crate::application::services::work::unrelate_op),
         "work.bind_branch" => Some(crate::application::services::work::bind_branch_op),
+        "work.land" => Some(crate::application::work_land::work_land_op),
         "work.adopt" => Some(crate::application::services::work::adopt_op),
         "board.list" => Some(crate::application::services::work::board_list_op),
         "project.register" => Some(crate::application::projects::register_op),
