@@ -161,20 +161,26 @@ fn after_fields(
 
 /// Pydantic `model_validator(mode="after")`s, run once every field passed.
 fn after_model(operation: &str, resolved: &Map<String, Value>) -> Result<(), String> {
-    // `CommentParams._handoff_matches_kind`.
+    // `CommentParams._fields_match_kind`.
     if operation == "work.comment" {
         let kind = resolved
             .get("kind")
             .and_then(Value::as_str)
             .unwrap_or("note");
-        let handoff = resolved
-            .get("handoff")
-            .is_some_and(|value| !value.is_null());
-        if kind == "handoff" && !handoff {
-            return Err("a hand-off comment requires handoff fields".to_string());
-        }
-        if kind == "note" && handoff {
-            return Err("handoff fields belong on a comment of kind handoff".to_string());
+        for (field, named) in [
+            ("handoff", "hand-off"),
+            ("verdict", "verdict"),
+            ("verification", "verification"),
+        ] {
+            let present = resolved.get(field).is_some_and(|value| !value.is_null());
+            if kind == field && !present {
+                return Err(format!("a {named} comment requires {field} fields"));
+            }
+            if kind != field && present {
+                return Err(format!(
+                    "{field} fields belong on a comment of kind {field}"
+                ));
+            }
         }
     }
     Ok(())
@@ -265,7 +271,9 @@ fn apply_object(
         // `WatchTriggerModel._fields_for_kind`. Pydantic reports the object
         // the caller sent, before defaults are filled, so the check reads
         // `given` rather than `resolved`.
-        if let Some(complaint) = watch_fields_for_kind(schema, &sent) {
+        if let Some(complaint) = watch_fields_for_kind(schema, &sent)
+            .or_else(|| verdict_blockers_named(schema, &resolved))
+        {
             let input = Value::Object(sent);
             problems.push(finish(
                 &pydantic(location, &format!("Value error, {complaint}")),
@@ -278,6 +286,20 @@ fn apply_object(
     } else {
         Err(problems)
     }
+}
+
+/// The complaint from `VerdictFields._blockers_named` (WI-1319), or none when
+/// this object is not that model or a `blockers` verdict names a blocker.
+fn verdict_blockers_named(schema: &Value, resolved: &Map<String, Value>) -> Option<&'static str> {
+    if schema.get("title").and_then(Value::as_str) != Some("VerdictFields") {
+        return None;
+    }
+    let blockers = resolved
+        .get("blockers")
+        .and_then(Value::as_array)
+        .is_some_and(|items| !items.is_empty());
+    (resolved.get("verdict").and_then(Value::as_str) == Some("blockers") && !blockers)
+        .then_some("a blockers verdict names at least one blocker")
 }
 
 /// The complaint from `WatchTriggerModel._fields_for_kind`, or none when this

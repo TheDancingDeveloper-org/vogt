@@ -820,6 +820,8 @@ mod tests {
             created_at: moment(),
             kind: kind.to_string(),
             handoff,
+            verdict: None,
+            verification: None,
         }
     }
 
