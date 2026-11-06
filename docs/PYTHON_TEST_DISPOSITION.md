@@ -151,6 +151,7 @@ pinned by the `application/resolve.rs` tests in the Rust core (WI-1058).
 | test_session_last_reply.py | ported | Transcript reply reads in `adapters/transcripts.rs`. |
 | test_session_outcomes.py | ported | `collectors/session_outcomes.rs`. |
 | test_session_rename_remove.py | ported | Rename and remove in `application/services/sessions.rs`. |
+| test_session_image_codex.py | retired | Pod image contract and Codex prerequisites. Session image packaging, not the core crate. |
 | test_session_reports.py | unported | Typed session reports are not yet in the Rust core. Deferred to WI-2588.
 | test_session_sweep.py | ported | Sweep ordering in `application/session_reads.rs`. |
 | test_session_tool_descriptions.py | ported | MCP tool description strings generated from `registry/operations.rs`. |
