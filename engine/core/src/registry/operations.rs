@@ -755,6 +755,14 @@ pub fn build_operations() -> Vec<Operation> {
             CliBinding::new(&["session", "changes"]),
         ),
         Operation::new(
+            "workspace.list",
+            "List every live or hibernated session's working tree: path, kind (worktree|checkout), branch, base_sha, size_bytes, alive, merged (branch tip in the default branch, per the git-local collector; null when unobserved), work_item and session. Filter by `project` slug and `alive`.",
+            Scope::Read,
+            false,
+            HttpRoute::new(HttpMethod::Get, "/workspaces"),
+            CliBinding::new(&["workspace", "list"]),
+        ),
+        Operation::new(
             "session.wait_any",
             "Wait for any of the named sessions instead of polling them: blocks (up to timeout_s, default 300, max 600; an oversight session's wait is at least 60 so it cannot become a poll loop) until one publishes a kind in `until` (default: ready, blocked, approval, exited, errored). Returns the delta with that session's digest, or `timeout`. Pass `cursor` (the previous `next_cursor`) so a replayed page is not waited on twice. `cursor=now` skips events already published and waits only for one that lands after the call starts; a timeout then returns that head as `next_cursor`. `ids` empty waits on every session.",
             Scope::Read,

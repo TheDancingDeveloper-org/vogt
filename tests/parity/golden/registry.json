@@ -53778,6 +53778,188 @@
       "exclusion_reason": null
     },
     {
+      "name": "workspace.list",
+      "summary": "List every live or hibernated session's working tree: path, kind (worktree|checkout), branch, base_sha, size_bytes, alive, merged (branch tip in the default branch, per the git-local collector; null when unobserved), work_item and session. Filter by `project` slug and `alive`.",
+      "scope": "read",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "GET",
+      "http_path": "/workspaces",
+      "mcp_tool": "workspace_list",
+      "cli_path": [
+        "workspace",
+        "list"
+      ],
+      "params_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "project": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Only workspaces of this project's sessions (slug).",
+            "title": "Project"
+          },
+          "alive": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "true: only running sessions; false: only stopped or hibernated.",
+            "title": "Alive"
+          }
+        },
+        "title": "WorkspaceListParams",
+        "type": "object"
+      },
+      "result_schema": {
+        "$defs": {
+          "WorkspaceRow": {
+            "description": "One session's working tree (WI-1340).",
+            "properties": {
+              "path": {
+                "title": "Path",
+                "type": "string"
+              },
+              "kind": {
+                "description": "`worktree` or `checkout`.",
+                "title": "Kind",
+                "type": "string"
+              },
+              "branch": {
+                "title": "Branch",
+                "type": "string"
+              },
+              "base_sha": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Base Sha"
+              },
+              "size_bytes": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Bytes under `path`; null until first measured.",
+                "title": "Size Bytes"
+              },
+              "cleaned_at": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "When `workspace.clean` last dropped its build output.",
+                "title": "Cleaned At"
+              },
+              "alive": {
+                "title": "Alive",
+                "type": "boolean"
+              },
+              "merged": {
+                "anyOf": [
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "The branch tip is in the project's default branch (git-local collector); null when the collector has not observed the branch.",
+                "title": "Merged"
+              },
+              "work_item": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Work Item"
+              },
+              "session": {
+                "description": "`ses_…` id, or the engine UUID when unlinked.",
+                "title": "Session",
+                "type": "string"
+              },
+              "project": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Project"
+              }
+            },
+            "required": [
+              "path",
+              "kind",
+              "branch",
+              "alive",
+              "session"
+            ],
+            "title": "WorkspaceRow",
+            "type": "object"
+          }
+        },
+        "additionalProperties": false,
+        "properties": {
+          "workspaces": {
+            "default": [],
+            "items": {
+              "$ref": "#/$defs/WorkspaceRow"
+            },
+            "title": "Workspaces",
+            "type": "array"
+          }
+        },
+        "title": "WorkspaceListResult",
+        "type": "object"
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
       "name": "session.wait_any",
       "summary": "Wait for any of the named sessions instead of polling them: blocks (up to timeout_s, default 300, max 600; an oversight session's wait is at least 60 so it cannot become a poll loop) until one publishes a kind in `until` (default: ready, blocked, approval, exited, errored). Returns the delta with that session's digest, or `timeout`. Pass `cursor` (the previous `next_cursor`) so a replayed page is not waited on twice. `cursor=now` skips events already published and waits only for one that lands after the call starts; a timeout then returns that head as `next_cursor`. `ids` empty waits on every session.",
       "scope": "read",
