@@ -446,6 +446,7 @@ SCRIPT: list[tuple[str, StepParams]] = [
     # History reads, driven against the same stand-in engine: parity
     # proves the three surfaces agree on the engine's canned answers.
     ("session.history_list", {}),
+    ("workspace.list", {}),
     ("session.search_output", {"q": "needle"}),
     # Runtime-pinned agent CLIs, against the same stand-in engine.
     ("agent_cli.list", {}),
@@ -1232,6 +1233,23 @@ def _stand_in_engine() -> EngineClient:
                     "activity": "idle",
                     "cwd": "/tmp",
                     "blocked": blocked,
+                }
+            ).encode()
+        if method == "GET" and path.endswith("/api/workspaces"):
+            return 200, json.dumps(
+                {
+                    "workspaces": [
+                        {
+                            "session_id": "eng-1",
+                            "alive": True,
+                            "size_bytes": 4096,
+                            "kind": "worktree",
+                            "path": "/w/wi-1",
+                            "repo_root": "/w/repo",
+                            "branch": "wi-1",
+                            "base_sha": "a" * 40,
+                        }
+                    ]
                 }
             ).encode()
         if method == "GET" and path.endswith("/api/sessions/changes"):

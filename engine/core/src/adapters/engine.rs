@@ -489,6 +489,28 @@ impl EngineClient {
     /// passes. `cursor` is a seq or `now`. The HTTP timeout is the wait plus a
     /// margin, so a wait that runs its course is answered, not cut off.
     /// `Ok(None)` from an engine that predates the route.
+    /// Every session's workspace block, with size and liveness (WI-1340).
+    ///
+    /// `None` on a 404 (an engine without the route).
+    pub fn list_workspaces(&self) -> Result<Option<Vec<EngineWorkspace>>, VogtError> {
+        let payload = self.call("/api/workspaces", "GET", None, true, None)?;
+        if !payload.is_object() {
+            return Ok(None);
+        }
+        Ok(Some(
+            payload
+                .get("workspaces")
+                .and_then(Value::as_array)
+                .map(|rows| {
+                    rows.iter()
+                        .filter(|row| row.is_object())
+                        .map(EngineWorkspace::from_payload)
+                        .collect()
+                })
+                .unwrap_or_default(),
+        ))
+    }
+
     pub fn wait_any(
         &self,
         ids: Option<&[String]>,
@@ -1644,6 +1666,54 @@ impl EngineChanges {
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
         }
+    }
+}
+
+/// One session's workspace block from `GET /api/workspaces` (WI-1340).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EngineWorkspace {
+    pub session_id: String,
+    pub alive: bool,
+    pub size_bytes: Option<i64>,
+    pub kind: String,
+    pub path: String,
+    pub repo_root: String,
+    pub branch: String,
+    pub base_sha: Option<String>,
+    pub base_ref: Option<String>,
+    pub cleaned_at: Option<String>,
+}
+
+impl EngineWorkspace {
+    fn from_payload(payload: &Value) -> Self {
+        let text = |name: &str| match payload.get(name) {
+            Some(Value::String(text)) => Some(text.clone()),
+            _ => None,
+        };
+        Self {
+            session_id: python_str(payload, "session_id", ""),
+            alive: payload.get("alive").is_some_and(python_truthy),
+            size_bytes: optional_int(payload.get("size_bytes")),
+            kind: python_str(payload, "kind", ""),
+            path: python_str(payload, "path", ""),
+            repo_root: python_str(payload, "repo_root", ""),
+            branch: python_str(payload, "branch", ""),
+            base_sha: text("base_sha"),
+            base_ref: text("base_ref"),
+            cleaned_at: text("cleaned_at"),
+        }
+    }
+}
+
+/// Python's `bool(value)` for a decoded JSON value.
+fn python_truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(flag) => *flag,
+        Value::Number(number) => number.as_f64().is_some_and(|n| n != 0.0),
+        Value::String(text) => !text.is_empty(),
+        Value::Array(items) => !items.is_empty(),
+        Value::Object(map) => !map.is_empty(),
     }
 }
 
