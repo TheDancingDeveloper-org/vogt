@@ -1737,7 +1737,7 @@ impl SessionRegistry {
     /// can connect immediately after spawn, before `create_inner` has copied
     /// the wake record's metadata onto the live session, so the persisted
     /// record is the authoritative fallback for a resumed wake.
-    pub fn pod_account_conversation(&self, id: Uuid) -> Option<(String, String)> {
+    pub fn pod_account_conversation(&self, id: Uuid) -> PodAccountConversation {
         pod_account_conversation_from(
             self.summary_of(id).as_ref(),
             self.records.get(&id).as_deref(),
@@ -3212,19 +3212,32 @@ fn latest_event_at(summary: &SessionSummary) -> String {
         .to_string()
 }
 
+/// The account and the conversation resolve separately, each falling back to
+/// the wake record: a session with an account but no conversation yet (an
+/// agent-task `claude`, OpenCode, stock Codex) must still be signed in
+/// (WI-3334), while a woken session resumes its conversation (WI-3158).
 fn pod_account_conversation_from(
     live: Option<&SessionSummary>,
     record: Option<&Record>,
-) -> Option<(String, String)> {
-    let pair = |account: Option<&String>, conversation: Option<&AgentConversation>| {
-        account
-            .cloned()
-            .zip(conversation.map(|conversation| conversation.id.clone()))
-    };
-    live.and_then(|summary| pair(summary.account.as_ref(), summary.conversation.as_ref()))
-        .or_else(|| {
-            record.and_then(|record| pair(record.account.as_ref(), record.conversation.as_ref()))
-        })
+) -> PodAccountConversation {
+    let account = live
+        .and_then(|summary| summary.account.clone())
+        .or_else(|| record.and_then(|record| record.account.clone()));
+    let conversation = live
+        .and_then(|summary| summary.conversation.as_ref())
+        .or_else(|| record.and_then(|record| record.conversation.as_ref()))
+        .map(|conversation| conversation.id.clone());
+    PodAccountConversation {
+        account,
+        conversation,
+    }
+}
+
+/// What a pod bootstrap seeds: the login and, when pinned, the conversation.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct PodAccountConversation {
+    pub account: Option<String>,
+    pub conversation: Option<String>,
 }
 
 fn parse_rfc3339(raw: &str) -> Option<time::OffsetDateTime> {
@@ -3669,7 +3682,10 @@ mod tests {
 
         assert_eq!(
             super::pod_account_conversation_from(None, Some(&record)),
-            Some(("acct2".into(), "conversation-id".into()))
+            super::PodAccountConversation {
+                account: Some("acct2".into()),
+                conversation: Some("conversation-id".into()),
+            }
         );
     }
 
@@ -3694,7 +3710,38 @@ mod tests {
 
         assert_eq!(
             super::pod_account_conversation_from(Some(&live), Some(&record)),
-            Some(("live-account".into(), "live-conversation".into()))
+            super::PodAccountConversation {
+                account: Some("live-account".into()),
+                conversation: Some("live-conversation".into()),
+            }
+        );
+    }
+
+    /// WI-3334 kept under WI-3158: a session holding an account with no
+    /// conversation pinned (an agent-task `claude`, OpenCode, stock Codex)
+    /// still gets its login, live or from the wake record.
+    #[test]
+    fn pod_bootstrap_signs_in_a_session_with_no_conversation() {
+        let mut record = crate::hibernation::Record::new(
+            uuid::Uuid::new_v4(),
+            "opencode".into(),
+            "2026-01-01T00:00:00Z".into(),
+        );
+        record.account = Some("acct-record".into());
+        let expected = |account: &str| super::PodAccountConversation {
+            account: Some(account.into()),
+            conversation: None,
+        };
+        assert_eq!(
+            super::pod_account_conversation_from(None, Some(&record)),
+            expected("acct-record")
+        );
+        let mut live = super::tests::aged(1, vogt_engine_contract::ActivityState::Idle);
+        live.account = Some("acct-live".into());
+        live.conversation = None;
+        assert_eq!(
+            super::pod_account_conversation_from(Some(&live), None),
+            expected("acct-live")
         );
     }
 
