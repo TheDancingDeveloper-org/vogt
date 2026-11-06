@@ -64,6 +64,9 @@ mkdir -p "$3"
 printf 'new\n' >"$3/a.txt"
 printf 'tracked.txt\n' >"$3/.gitignore"
 printf 'new-ignored\n' >"$3/tracked.txt"
+mkdir -p "$3/.graft" "$3/.vogt"
+printf 'graft state\n' >"$3/.graft/state"
+printf 'vogt state\n' >"$3/.vogt/state"
 SH
   cat >"$dir/bin/vogt-session-agent" <<'SH'
 #!/bin/sh
@@ -109,6 +112,7 @@ git -C "$w" log -1 -p | grep -q '^+new$' || fail "git view: tip patch"
 git -C "$w" log -1 -p | grep -q '^-old$' || fail "git view: tip patch removal"
 [[ $(git -C "$w" rev-list --count HEAD) == 2 ]] || fail "git view: expected baseline plus tip"
 [[ -z $(git -C "$w" status --porcelain) ]] || fail "git view: tree not clean"
+[[ -z $(git -C "$w" ls-files .graft .vogt) ]] || fail "git view: runtime state tracked"
 [[ -z $(git -C "$w" remote) ]] || fail "git view: a remote would allow a push"
 [[ $(<"$w/a.txt") == new ]] || fail "git view: files changed"
 grep -q '^session-entrypoint: step git-view$' <<<"$out" || fail "git-view step marker"
@@ -211,6 +215,8 @@ iw="$tmp/ignored/work"
 [[ $(git -C "$iw" show HEAD^:tracked.txt) == old-ignored ]] || fail "ignored-file git view: parent file missing"
 [[ $(git -C "$iw" show HEAD:tracked.txt) == new-ignored ]] || fail "ignored-file git view: tip file missing"
 [[ $(<"$iw/tracked.txt") == new-ignored ]] || fail "ignored-file git view: working tree changed"
+[[ -z $(git -C "$iw" ls-files .graft .vogt) ]] || fail "ignored-file git view: runtime state tracked"
+[[ -z $(git -C "$iw" status --porcelain) ]] || fail "ignored-file git view: tree not clean"
 
 # A pod's IP reaches the engine's allow-set a moment after start: refused
 # connections (curl exit 7) are retried, a 4xx is final.
