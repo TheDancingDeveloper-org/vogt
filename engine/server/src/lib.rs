@@ -66,6 +66,7 @@ pub mod session_cache;
 pub mod session_endpoints;
 pub mod session_scratch;
 pub mod sessions;
+pub mod source_provider;
 pub mod transcripts;
 pub mod vogt_core;
 pub mod vogt_tools;
