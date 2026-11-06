@@ -473,13 +473,19 @@ impl<'a> ForgePostureCollector<'a> {
     }
 
     pub fn collect(&self, project: &Project) -> Result<Vec<PendingObservation>, VogtError> {
-        self.collect_scheduled(project, None, &mut || crate::core::Moment::from_unix(0, 0))
+        self.collect_scheduled(
+            project,
+            None,
+            &PostureSchedule::default().into(),
+            &mut || crate::core::Moment::from_unix(0, 0),
+        )
     }
 
     pub fn collect_scheduled(
         &self,
         project: &Project,
         interval: Option<i64>,
+        schedule: &std::sync::Mutex<PostureSchedule>,
         now: &mut dyn FnMut() -> crate::core::Moment,
     ) -> Result<Vec<PendingObservation>, VogtError> {
         const MISSING: &str = "this forge does not expose repository update-automation \
@@ -493,7 +499,7 @@ posture, so it is not collected here — not that automation is off";
             |provider, repo| {
                 let timing = interval.map(|interval| (now(), interval));
                 if let Some((now, interval)) = timing {
-                    if !posture_schedule()
+                    if !schedule
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .due(&repo.slug(), now, interval)
@@ -503,7 +509,7 @@ posture, so it is not collected here — not that automation is off";
                 }
                 let posture = provider.posture(repo)?;
                 if let Some((now, _)) = timing {
-                    posture_schedule()
+                    schedule
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .mark(&repo.slug(), now);
@@ -844,21 +850,22 @@ mod tests {
         let mut project = Project::new("prj_posture", "posture", "Posture", "/tmp", now);
         project.repo_url = Some("https://github.com/watch-test/posture-retry".into());
         let collector = ForgePostureCollector::new(&directory);
+        let schedule = std::sync::Mutex::new(PostureSchedule::default());
         assert!(collector
-            .collect_scheduled(&project, Some(86400), &mut || now)
+            .collect_scheduled(&project, Some(86400), &schedule, &mut || now)
             .is_err());
         let found = collector
-            .collect_scheduled(&project, Some(86400), &mut || now)
+            .collect_scheduled(&project, Some(86400), &schedule, &mut || now)
             .unwrap();
         assert_eq!(found.len(), 2);
         let count = calls.load(Ordering::SeqCst);
         let found = collector
-            .collect_scheduled(&project, Some(86400), &mut || now)
+            .collect_scheduled(&project, Some(86400), &schedule, &mut || now)
             .unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(calls.load(Ordering::SeqCst), count);
         collector
-            .collect_scheduled(&project, Some(86400), &mut || now.plus_days(1))
+            .collect_scheduled(&project, Some(86400), &schedule, &mut || now.plus_days(1))
             .unwrap();
         assert!(calls.load(Ordering::SeqCst) > count);
     }
@@ -891,9 +898,10 @@ mod tests {
     }
 }
 
-/// Process-local successful-read timestamps, not observation change timestamps.
+/// Successful-read timestamps, not observation change timestamps. The sweep
+/// registry's posture collector owns one, so two engines never share a schedule.
 #[derive(Default)]
-struct PostureSchedule(std::collections::HashMap<String, crate::core::Moment>);
+pub struct PostureSchedule(std::collections::HashMap<String, crate::core::Moment>);
 impl PostureSchedule {
     fn due(&self, slug: &str, now: crate::core::Moment, interval: i64) -> bool {
         self.0
@@ -903,11 +911,6 @@ impl PostureSchedule {
     fn mark(&mut self, slug: &str, now: crate::core::Moment) {
         self.0.insert(slug.to_owned(), now);
     }
-}
-fn posture_schedule() -> &'static std::sync::Mutex<PostureSchedule> {
-    static SCHEDULE: std::sync::OnceLock<std::sync::Mutex<PostureSchedule>> =
-        std::sync::OnceLock::new();
-    SCHEDULE.get_or_init(Default::default)
 }
 
 #[cfg(test)]
