@@ -840,6 +840,7 @@ pub async fn run(config: Config) -> Result<(), AgentError> {
     let mut acked = 0u64;
     let mut backoff = Duration::from_millis(100);
     let mut first_output_logged = false;
+    let mut stopped = false;
     loop {
         // Request construction is a configuration error, not a transient socket
         // failure.  Return through the cleanup below rather than orphaning PTY.
@@ -903,8 +904,12 @@ pub async fn run(config: Config) -> Result<(), AgentError> {
                                     // with it. A failed kill used to drop the
                                     // stream; the engine re-sent the stop on every
                                     // reconnect, and the pod was never torn down.
+                                    // The flag, not this block's return, ends
+                                    // run(): returning here alone used to loop
+                                    // back and reconnect.
                                     Frame::Signal { signal } if signal == "kill" => {
-                                        let frame = stop_child(&mut child);
+                                        let frame = stop_child(&mut child).await;
+                                        stopped = true;
                                         let _ = send_frame(&mut sink, &frame).await;
                                         return Ok(());
                                     },
@@ -944,6 +949,9 @@ pub async fn run(config: Config) -> Result<(), AgentError> {
                 }
             }
         }.await;
+        if stopped {
+            return Ok(());
+        }
         if let Err(error) = &connection {
             // The engine refuses a session it no longer knows (it ended and its
             // credential was dropped): retrying cannot succeed.
@@ -964,32 +972,66 @@ pub async fn run(config: Config) -> Result<(), AgentError> {
     }
 }
 
+/// How long a stop waits for the killed CLI to be reaped before reporting
+/// the exit without a status.
+const STOP_REAP_WAIT: Duration = Duration::from_secs(2);
+
 /// Stop the CLI for an engine `kill` and say how it ended. Never fails: a
 /// kill the kernel or an LSM refuses (an AppArmor signal rule answers
 /// `EACCES`) is logged, then `SIGKILL` is tried by pid, and the caller exits
-/// anyway, which ends the container and everything in it.
-fn stop_child(child: &mut Option<PtyChild>) -> Frame {
-    let Some(c) = child.as_mut() else {
+/// anyway, which ends the container and everything in it. A CLI this agent
+/// killed reports 137 (128 + SIGKILL), as a shell would. The signal and the
+/// bounded reap run off the async workers.
+async fn stop_child(child: &mut Option<PtyChild>) -> Frame {
+    let Some(c) = child.take() else {
         return Frame::Exited { status: None };
     };
-    if let Err(error) = c.kill() {
-        tracing::warn!(%error, "session-agent: could not signal the CLI; trying SIGKILL, then exiting");
-        #[cfg(unix)]
-        if let Some(pid) = c.process_id() {
-            // SAFETY: a plain kill(2) on the child's pid; the child is not
-            // reaped yet (try_wait below reaps it), so the pid is still ours.
-            if unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) } != 0 {
-                let error = std::io::Error::last_os_error();
-                tracing::warn!(%error, pid, "session-agent: SIGKILL refused too; the container's exit ends the CLI");
-            }
-        }
-    }
-    let status = match c.try_wait() {
-        Ok(Some(status)) => Some(status.exit_code() as i32),
-        _ => None,
-    };
+    let status = tokio::task::spawn_blocking(move || stop_and_reap(c, STOP_REAP_WAIT))
+        .await
+        .unwrap_or(None);
     tracing::info!(?status, "session-agent: stopped on the engine's request");
     Frame::Exited { status }
+}
+
+fn stop_and_reap(mut c: PtyChild, wait: Duration) -> Option<i32> {
+    let killed = match c.kill() {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::warn!(%error, "session-agent: could not signal the CLI; trying SIGKILL, then exiting");
+            sigkill_by_pid(c.as_ref())
+        }
+    };
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        match c.try_wait() {
+            Ok(Some(status)) if killed && status.signal().is_some() => return Some(137),
+            Ok(Some(status)) => return Some(status.exit_code() as i32),
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            _ => return None,
+        }
+    }
+}
+
+#[cfg(unix)]
+fn sigkill_by_pid(c: &(dyn portable_pty::Child + Send)) -> bool {
+    let Some(pid) = c.process_id() else {
+        return false;
+    };
+    // SAFETY: a plain kill(2) on the child's pid; the child is not reaped
+    // yet (try_wait reaps it), so the pid is still ours.
+    if unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) } != 0 {
+        let error = std::io::Error::last_os_error();
+        tracing::warn!(%error, pid, "session-agent: SIGKILL refused too; the container's exit ends the CLI");
+        return false;
+    }
+    true
+}
+
+#[cfg(not(unix))]
+fn sigkill_by_pid(_: &(dyn portable_pty::Child + Send)) -> bool {
+    false
 }
 
 fn is_auth_refusal(error: &AgentError) -> bool {
@@ -1049,15 +1091,12 @@ mod tests {
     // WI-3319: a refused kill must still end the session, not fail the stream.
     #[test]
     fn a_refused_kill_still_reports_the_exit() {
-        let mut child: Option<PtyChild> = Some(Box::new(Unkillable));
-        assert!(matches!(
-            stop_child(&mut child),
+        assert_eq!(stop_and_reap(Box::new(Unkillable), Duration::ZERO), None);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        assert_eq!(
+            runtime.block_on(stop_child(&mut None)),
             Frame::Exited { status: None }
-        ));
-        assert!(matches!(
-            stop_child(&mut None),
-            Frame::Exited { status: None }
-        ));
+        );
     }
 
     #[test]
@@ -1079,11 +1118,74 @@ mod tests {
             claude: ClaudeLaunch::default(),
         };
         let (_reader, _writer, child, _master) = spawn_pty(&config).unwrap();
-        let mut child = Some(child);
-        assert!(matches!(
-            stop_child(&mut child),
-            Frame::Exited { status: Some(_) }
-        ));
+        // The reap waits for the exit, so no sleep races the kill.
+        assert_eq!(stop_and_reap(child, Duration::from_secs(30)), Some(137));
+    }
+
+    fn kill_config(engine_url: String) -> Config {
+        Config {
+            session_id: "s".into(),
+            engine_url,
+            token: "t".into(),
+            cli: "claude".into(),
+            command: Some(vec!["sleep".into(), "30".into()]),
+            cwd: None,
+            cols: 80,
+            rows: 24,
+            buffer_bytes: 1024,
+            claude_config_dir: None,
+            account: None,
+            conversation_id: None,
+            resume: false,
+            claude: ClaudeLaunch::default(),
+        }
+    }
+
+    // WI-3319 B1: a kill ends run() itself, even when the Exited frame cannot
+    // be sent. It used to end only the connection, so the agent reconnected.
+    #[tokio::test]
+    async fn a_kill_ends_run_even_when_exited_cannot_be_sent() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let accepts = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let counted = accepts.clone();
+        tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                if counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0 {
+                    // A reconnect: hold it open, as a live engine would.
+                    let socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                    tokio::spawn(async move {
+                        let _socket = socket;
+                        std::future::pending::<()>().await
+                    });
+                    continue;
+                }
+                let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                // Hello and Resume first, so the kill lands on a live stream.
+                for _ in 0..2 {
+                    socket.next().await.unwrap().unwrap();
+                }
+                let kill = serde_json::to_string(&Frame::Signal {
+                    signal: "kill".into(),
+                })
+                .unwrap();
+                socket.send(Message::Text(kill.into())).await.unwrap();
+                // Drop the socket unread, so the Exited send has nowhere to go.
+                let mut tcp = socket.into_inner();
+                let _ = tcp.shutdown().await;
+            }
+        });
+        let result = tokio::time::timeout(
+            Duration::from_secs(20),
+            run(kill_config(format!("http://{address}"))),
+        )
+        .await;
+        assert!(
+            matches!(result, Ok(Ok(()))),
+            "run() did not end: {result:?}"
+        );
+        assert_eq!(accepts.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[test]
