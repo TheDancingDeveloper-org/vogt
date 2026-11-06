@@ -743,7 +743,7 @@ mod diagnostics_tests {
     use crate::application::instance::{diagnostics_op, migrate_op, status_op};
     use crate::core::{ActorKind, Moment, Principal, SequentialIds, StepClock};
     use crate::errors::VogtError;
-    use crate::observability::{configure_logging, recent_problems};
+    use crate::observability::{configure_logging, in_isolated_test_process, recent_problems};
     use crate::storage::interface::{DeclaredStore, ObservedStore};
 
     fn principal() -> Principal {
@@ -852,6 +852,11 @@ mod diagnostics_tests {
 
     #[test]
     fn recent_problems_are_redacted_and_bounded() {
+        if !in_isolated_test_process(
+            "application::instance::diagnostics_tests::recent_problems_are_redacted_and_bounded",
+        ) {
+            return;
+        }
         configure_logging("info", "text");
         tracing::warn!(
             target: "vogt.diagnostics_test",
