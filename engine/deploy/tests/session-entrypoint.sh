@@ -50,12 +50,20 @@ while [ $# -gt 0 ]; do
   case "$1" in
     clone) break ;;
     log) printf '{"changesets":[{"id":"tip1","subject":"tip change (WI-1)"}],"next":"par1"}\n'; exit 0 ;;
-    diff) printf 'put file a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n'; exit 0 ;;
+    diff)
+      if [ "${DIFF_IGNORED:-0}" = 1 ]; then
+        printf 'put file tracked.txt\n--- a/tracked.txt\n+++ b/tracked.txt\n@@ -1 +1 @@\n-old-ignored\n+new-ignored\n'
+      else
+        printf 'put file a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n'
+      fi
+      exit 0 ;;
   esac
   shift
 done
 mkdir -p "$3"
 printf 'new\n' >"$3/a.txt"
+printf 'tracked.txt\n' >"$3/.gitignore"
+printf 'new-ignored\n' >"$3/tracked.txt"
 SH
   cat >"$dir/bin/vogt-session-agent" <<'SH'
 #!/bin/sh
@@ -194,6 +202,15 @@ out=$(run_case "$tmp/ocfg" VOGT_CLI=opencode OPENCODE_CONFIG="$OC" XDG_CONFIG_HO
 jq -e '.mcp.vogt.url=="https://e/mcp"' "$tmp/ocfg/xdg/opencode/opencode.json" >/dev/null || fail "opencode config content"
 [[ $(stat -c %a "$tmp/ocfg/xdg/opencode/opencode.json") == 600 ]] || fail "opencode config mode"
 [[ $(<"$tmp/no-graft-token/graft.token") == "$SESSION" ]] || fail "clone should fall back to the session token"
+
+# Force-tracked files can be ignored by the checkout's .gitignore. The git
+# view must still include them in both the parent and tip commits.
+run_case "$tmp/ignored" DIFF_IGNORED=1 >/dev/null 2>&1 || fail "ignored-file path"
+iw="$tmp/ignored/work"
+[[ $(git -C "$iw" log -1 --format=%s) == "tip change (WI-1)" ]] || fail "ignored-file git view: tip subject"
+[[ $(git -C "$iw" show HEAD^:tracked.txt) == old-ignored ]] || fail "ignored-file git view: parent file missing"
+[[ $(git -C "$iw" show HEAD:tracked.txt) == new-ignored ]] || fail "ignored-file git view: tip file missing"
+[[ $(<"$iw/tracked.txt") == new-ignored ]] || fail "ignored-file git view: working tree changed"
 
 # A pod's IP reaches the engine's allow-set a moment after start: refused
 # connections (curl exit 7) are retried, a 4xx is final.
