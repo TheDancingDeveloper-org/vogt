@@ -88,6 +88,7 @@ pub const DERIVED: &[&str] = &[
     "work.relate",
     "work.unrelate",
     "work.bind_branch",
+    "work.land",
     "work.comment",
     "backlog",
     "bugs",
@@ -546,6 +547,11 @@ pub fn derived_schemas() -> Vec<(&'static str, serde_json::Value, serde_json::Va
             "work.bind_branch",
             schema_of::<work::BindBranchParams>(),
             schema_of::<work::WorkResult>(),
+        ),
+        (
+            "work.land",
+            schema_of::<work::LandWorkParams>(),
+            schema_of::<work::LandWorkResult>(),
         ),
         (
             "work.comment",

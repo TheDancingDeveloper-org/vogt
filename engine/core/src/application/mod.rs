@@ -47,6 +47,9 @@ pub(crate) mod unchanged;
 pub mod upstream;
 pub mod usage;
 pub mod views;
+pub mod work_land;
+#[cfg(test)]
+mod work_land_test;
 #[cfg(test)]
 mod workspace_disk_test;
 pub mod workspaces;

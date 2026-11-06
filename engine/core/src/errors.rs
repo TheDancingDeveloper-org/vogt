@@ -23,6 +23,8 @@ pub enum VogtError {
     CleanRefused(String),
     /// A verdict or verification from someone not allowed to post it (WI-1319).
     CommentRefused(String),
+    /// A `work.land` the landing rule does not allow (WI-1328).
+    LandRefused(String),
     /// A session tried to post a report as another session (WI-2039).
     ReportRefused(String),
     /// An engine session names no person, and one is required (WI-983).
@@ -128,6 +130,7 @@ impl VogtError {
             | Self::GrantRefused(m)
             | Self::CleanRefused(m)
             | Self::CommentRefused(m)
+            | Self::LandRefused(m)
             | Self::ReportRefused(m)
             | Self::PersonRequired(m)
             | Self::EngineOnly(m)
@@ -185,6 +188,7 @@ impl VogtError {
             Self::GrantRefused(_) => "grant_refused",
             Self::CleanRefused(_) => "clean_refused",
             Self::CommentRefused(_) => "comment_refused",
+            Self::LandRefused(_) => "land_refused",
             Self::ReportRefused(_) => "report_refused",
             Self::PersonRequired(_) => "person_required",
             Self::EngineOnly(_) => "engine_only",
@@ -263,6 +267,7 @@ impl VogtError {
             | Self::GrantRefused(_)
             | Self::CleanRefused(_)
             | Self::CommentRefused(_)
+            | Self::LandRefused(_)
             | Self::ReportRefused(_)
             | Self::PersonRequired(_)
             | Self::EngineOnly(_) => 403,
@@ -411,6 +416,7 @@ pub fn error_table() -> &'static [(&'static str, u16)] {
         ("grant_refused", 403),
         ("clean_refused", 403),
         ("comment_refused", 403),
+        ("land_refused", 403),
         ("report_refused", 403),
         ("person_required", 403),
         ("engine_only", 403),
@@ -469,6 +475,7 @@ mod tests {
             "grant_refused" => VogtError::GrantRefused(message),
             "clean_refused" => VogtError::CleanRefused(message),
             "comment_refused" => VogtError::CommentRefused(message),
+            "land_refused" => VogtError::LandRefused(message),
             "report_refused" => VogtError::ReportRefused(message),
             "person_required" => VogtError::PersonRequired(message),
             "engine_only" => VogtError::EngineOnly(message),
@@ -573,7 +580,7 @@ mod tests {
 
     #[test]
     fn every_code_round_trips_with_its_status() {
-        assert_eq!(error_table().len(), 48);
+        assert_eq!(error_table().len(), 49);
         let mut seen = std::collections::BTreeSet::new();
         for (code, status) in error_table() {
             assert!(seen.insert(*code), "duplicate code {code}");

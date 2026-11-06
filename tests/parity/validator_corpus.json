@@ -18429,6 +18429,553 @@
   }
  },
  {
+  "op": "work.land",
+  "tag": "valid-minimal",
+  "params": {
+   "ref": "x",
+   "head_sha": "xxxxxxx",
+   "reason": "x"
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "ref": "x",
+    "head_sha": "xxxxxxx",
+    "reason": "x"
+   }
+  }
+ },
+ {
+  "op": "work.land",
+  "tag": "empty",
+  "params": {},
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for work.land:\n3 validation errors for LandWorkParams\nref\n  Field required [type=missing, input_value={}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/missing\nhead_sha\n  Field required [type=missing, input_value={}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/missing\nreason\n  Field required [type=missing, input_value={}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/missing",
+   "sent": "{}",
+   "errors": [
+    {
+     "loc": [
+      "ref"
+     ],
+     "type": "missing"
+    },
+    {
+     "loc": [
+      "head_sha"
+     ],
+     "type": "missing"
+    },
+    {
+     "loc": [
+      "reason"
+     ],
+     "type": "missing"
+    }
+   ]
+  }
+ },
+ {
+  "op": "work.land",
+  "tag": "extra-key",
+  "params": {
+   "ref": "x",
+   "head_sha": "xxxxxxx",
+   "reason": "x",
+   "zz_extra": 1
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for work.land:\n1 validation error for LandWorkParams\nzz_extra\n  Extra inputs are not permitted [type=extra_forbidden, input_value=1, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.13/v/extra_forbidden",
+   "sent": "{\"ref\": \"x\", \"head_sha\": \"xxxxxxx\", \"reason\": \"x\", \"zz_extra\": 1}",
+   "errors": [
+    {
+     "loc": [
+      "zz_extra"
+     ],
+     "type": "extra_forbidden"
+    }
+   ]
+  }
+ },
+ {
+  "op": "work.land",
+  "tag": "missing:ref",
+  "params": {
+   "head_sha": "xxxxxxx",
+   "reason": "x"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for work.land:\n1 validation error for LandWorkParams\nref\n  Field required [type=missing, input_value={'head_sha': 'xxxxxxx', 'reason': 'x'}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/missing",
+   "sent": "{\"head_sha\": \"xxxxxxx\", \"reason\": \"x\"}",
+   "errors": [
+    {
+     "loc": [
+      "ref"
+     ],
+     "type": "missing"
+    }
+   ]
+  }
+ },
+ {
+  "op": "work.land",
+  "tag": "missing:head_sha",
+  "params": {
+   "ref": "x",
+   "reason": "x"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for work.land:\n1 validation error for LandWorkParams\nhead_sha\n  Field required [type=missing, input_value={'ref': 'x', 'reason': 'x'}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/missing",
+   "sent": "{\"ref\": \"x\", \"reason\": \"x\"}",
+   "errors": [
+    {
+     "loc": [
+      "head_sha"
+     ],
+     "type": "missing"
+    }
+   ]
+  }
+ },
+ {
+  "op": "work.land",
+  "tag": "missing:reason",
+  "params": {
+   "ref": "x",
+   "head_sha": "xxxxxxx"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for work.land:\n1 validation error for LandWorkParams\nreason\n  Field required [type=missing, input_value={'ref': 'x', 'head_sha': 'xxxxxxx'}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/missing",
+   "sent": "{\"ref\": \"x\", \"head_sha\": \"xxxxxxx\"}",
+   "errors": [
+    {
+     "loc": [
+      "reason"
+     ],
+     "type": "missing"
+    }
+   ]
+  }
+ },
+ {
+  "op": "work.land",
+  "tag": "ref:null",
+  "params": {
+   "ref": null,
+   "head_sha": "xxxxxxx",
+   "reason": "x"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for work.land:\n1 validation error for LandWorkParams\nref\n  Input should be a valid string [type=string_type, input_value=None, input_type=NoneType]\n    For further information visit https://errors.pydantic.dev/2.13/v/string_type",
+   "sent": "{\"ref\": null, \"head_sha\": \"xxxxxxx\", \"reason\": \"x\"}",
+   "errors": [
+    {
+     "loc": [
+      "ref"
+     ],
+     "type": "string_type"
+    }
+   ]
+  }
+ },
+ {
+  "op": "work.land",
+  "tag": "ref:valid",
+  "params": {
+   "ref": "x",
+   "head_sha": "xxxxxxx",
+   "reason": "x"
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "ref": "x",
+    "head_sha": "xxxxxxx",
+    "reason": "x"
+   }
+  }
+ },
+ {
+  "op": "work.land",
+  "tag": "ref:int",
+  "params": {
+   "ref": 5,
+   "head_sha": "xxxxxxx",
+   "reason": "x"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for work.land:\n1 validation error for LandWorkParams\nref\n  Input should be a valid string [type=string_type, input_value=5, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.13/v/string_type",
+   "sent": "{\"ref\": 5, \"head_sha\": \"xxxxxxx\", \"reason\": \"x\"}",
+   "errors": [
+    {
+     "loc": [
+      "ref"
+     ],
+     "type": "string_type"
+    }
+   ]
+  }
+ },
+ {
+  "op": "work.land",
+  "tag": "ref:bool",
+  "params": {
+   "ref": true,
+   "head_sha": "xxxxxxx",
+   "reason": "x"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for work.land:\n1 validation error for LandWorkParams\nref\n  Input should be a valid string [type=string_type, input_value=True, input_type=bool]\n    For further information visit https://errors.pydantic.dev/2.13/v/string_type",
+   "sent": "{\"ref\": true, \"head_sha\": \"xxxxxxx\", \"reason\": \"x\"}",
+   "errors": [
+    {
+     "loc": [
+      "ref"
+     ],
+     "type": "string_type"
+    }
+   ]
+  }
+ },
+ {
+  "op": "work.land",
+  "tag": "ref:unicode",
+  "params": {
+   "ref": "é😀",
+   "head_sha": "xxxxxxx",
+   "reason": "x"
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "ref": "é😀",
+    "head_sha": "xxxxxxx",
+    "reason": "x"
+   }
+  }
+ },
+ {
+  "op": "work.land",
+  "tag": "head_sha:null",
+  "params": {
+   "ref": "x",
+   "head_sha": null,
+   "reason": "x"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for work.land:\n1 validation error for LandWorkParams\nhead_sha\n  Input should be a valid string [type=string_type, input_value=None, input_type=NoneType]\n    For further information visit https://errors.pydantic.dev/2.13/v/string_type",
+   "sent": "{\"ref\": \"x\", \"head_sha\": null, \"reason\": \"x\"}",
+   "errors": [
+    {
+     "loc": [
+      "head_sha"
+     ],
+     "type": "string_type"
+    }
+   ]
+  }
+ },
+ {
+  "op": "work.land",
+  "tag": "head_sha:valid",
+  "params": {
+   "ref": "x",
+   "head_sha": "xxxxxxx",
+   "reason": "x"
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "ref": "x",
+    "head_sha": "xxxxxxx",
+    "reason": "x"
+   }
+  }
+ },
+ {
+  "op": "work.land",
+  "tag": "head_sha:int",
+  "params": {
+   "ref": "x",
+   "head_sha": 5,
+   "reason": "x"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for work.land:\n1 validation error for LandWorkParams\nhead_sha\n  Input should be a valid string [type=string_type, input_value=5, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.13/v/string_type",
+   "sent": "{\"ref\": \"x\", \"head_sha\": 5, \"reason\": \"x\"}",
+   "errors": [
+    {
+     "loc": [
+      "head_sha"
+     ],
+     "type": "string_type"
+    }
+   ]
+  }
+ },
+ {
+  "op": "work.land",
+  "tag": "head_sha:bool",
+  "params": {
+   "ref": "x",
+   "head_sha": true,
+   "reason": "x"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for work.land:\n1 validation error for LandWorkParams\nhead_sha\n  Input should be a valid string [type=string_type, input_value=True, input_type=bool]\n    For further information visit https://errors.pydantic.dev/2.13/v/string_type",
+   "sent": "{\"ref\": \"x\", \"head_sha\": true, \"reason\": \"x\"}",
+   "errors": [
+    {
+     "loc": [
+      "head_sha"
+     ],
+     "type": "string_type"
+    }
+   ]
+  }
+ },
+ {
+  "op": "work.land",
+  "tag": "head_sha:minlen-1",
+  "params": {
+   "ref": "x",
+   "head_sha": "éééééé",
+   "reason": "x"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for work.land:\n1 validation error for LandWorkParams\nhead_sha\n  String should have at least 7 characters [type=string_too_short, input_value='éééééé', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/string_too_short",
+   "sent": "{\"ref\": \"x\", \"head_sha\": \"éééééé\", \"reason\": \"x\"}",
+   "errors": [
+    {
+     "loc": [
+      "head_sha"
+     ],
+     "type": "string_too_short"
+    }
+   ]
+  }
+ },
+ {
+  "op": "work.land",
+  "tag": "head_sha:ws",
+  "params": {
+   "ref": "x",
+   "head_sha": "       ",
+   "reason": "x"
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "ref": "x",
+    "head_sha": "       ",
+    "reason": "x"
+   }
+  }
+ },
+ {
+  "op": "work.land",
+  "tag": "head_sha:unicode",
+  "params": {
+   "ref": "x",
+   "head_sha": "é😀",
+   "reason": "x"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for work.land:\n1 validation error for LandWorkParams\nhead_sha\n  String should have at least 7 characters [type=string_too_short, input_value='é😀', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/string_too_short",
+   "sent": "{\"ref\": \"x\", \"head_sha\": \"é😀\", \"reason\": \"x\"}",
+   "errors": [
+    {
+     "loc": [
+      "head_sha"
+     ],
+     "type": "string_too_short"
+    }
+   ]
+  }
+ },
+ {
+  "op": "work.land",
+  "tag": "reason:null",
+  "params": {
+   "ref": "x",
+   "head_sha": "xxxxxxx",
+   "reason": null
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for work.land:\n1 validation error for LandWorkParams\nreason\n  Input should be a valid string [type=string_type, input_value=None, input_type=NoneType]\n    For further information visit https://errors.pydantic.dev/2.13/v/string_type",
+   "sent": "{\"ref\": \"x\", \"head_sha\": \"xxxxxxx\", \"reason\": null}",
+   "errors": [
+    {
+     "loc": [
+      "reason"
+     ],
+     "type": "string_type"
+    }
+   ]
+  }
+ },
+ {
+  "op": "work.land",
+  "tag": "reason:valid",
+  "params": {
+   "ref": "x",
+   "head_sha": "xxxxxxx",
+   "reason": "x"
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "ref": "x",
+    "head_sha": "xxxxxxx",
+    "reason": "x"
+   }
+  }
+ },
+ {
+  "op": "work.land",
+  "tag": "reason:int",
+  "params": {
+   "ref": "x",
+   "head_sha": "xxxxxxx",
+   "reason": 5
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for work.land:\n1 validation error for LandWorkParams\nreason\n  Input should be a valid string [type=string_type, input_value=5, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.13/v/string_type",
+   "sent": "{\"ref\": \"x\", \"head_sha\": \"xxxxxxx\", \"reason\": 5}",
+   "errors": [
+    {
+     "loc": [
+      "reason"
+     ],
+     "type": "string_type"
+    }
+   ]
+  }
+ },
+ {
+  "op": "work.land",
+  "tag": "reason:bool",
+  "params": {
+   "ref": "x",
+   "head_sha": "xxxxxxx",
+   "reason": true
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for work.land:\n1 validation error for LandWorkParams\nreason\n  Input should be a valid string [type=string_type, input_value=True, input_type=bool]\n    For further information visit https://errors.pydantic.dev/2.13/v/string_type",
+   "sent": "{\"ref\": \"x\", \"head_sha\": \"xxxxxxx\", \"reason\": true}",
+   "errors": [
+    {
+     "loc": [
+      "reason"
+     ],
+     "type": "string_type"
+    }
+   ]
+  }
+ },
+ {
+  "op": "work.land",
+  "tag": "reason:minlen-1",
+  "params": {
+   "ref": "x",
+   "head_sha": "xxxxxxx",
+   "reason": ""
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for work.land:\n1 validation error for LandWorkParams\nreason\n  String should have at least 1 character [type=string_too_short, input_value='', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/string_too_short",
+   "sent": "{\"ref\": \"x\", \"head_sha\": \"xxxxxxx\", \"reason\": \"\"}",
+   "errors": [
+    {
+     "loc": [
+      "reason"
+     ],
+     "type": "string_too_short"
+    }
+   ]
+  }
+ },
+ {
+  "op": "work.land",
+  "tag": "reason:ws",
+  "params": {
+   "ref": "x",
+   "head_sha": "xxxxxxx",
+   "reason": " "
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for work.land:\n1 validation error for LandWorkParams\nreason\n  String should have at least 1 character [type=string_too_short, input_value=' ', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/string_too_short",
+   "sent": "{\"ref\": \"x\", \"head_sha\": \"xxxxxxx\", \"reason\": \" \"}",
+   "errors": [
+    {
+     "loc": [
+      "reason"
+     ],
+     "type": "string_too_short"
+    }
+   ]
+  }
+ },
+ {
+  "op": "work.land",
+  "tag": "reason:unicode",
+  "params": {
+   "ref": "x",
+   "head_sha": "xxxxxxx",
+   "reason": "é😀"
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "ref": "x",
+    "head_sha": "xxxxxxx",
+    "reason": "é😀"
+   }
+  }
+ },
+ {
+  "op": "work.land",
+  "tag": "two-missing",
+  "params": {
+   "reason": "x"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for work.land:\n2 validation errors for LandWorkParams\nref\n  Field required [type=missing, input_value={'reason': 'x'}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/missing\nhead_sha\n  Field required [type=missing, input_value={'reason': 'x'}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/missing",
+   "sent": "{\"reason\": \"x\"}",
+   "errors": [
+    {
+     "loc": [
+      "ref"
+     ],
+     "type": "missing"
+    },
+    {
+     "loc": [
+      "head_sha"
+     ],
+     "type": "missing"
+    }
+   ]
+  }
+ },
+ {
   "op": "work.comment",
   "tag": "valid-minimal",
   "params": {
