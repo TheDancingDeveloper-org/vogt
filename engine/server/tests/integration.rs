@@ -17239,6 +17239,52 @@ mod pod_stream {
         assert_eq!(body["env"]["VOGT_GRAFT_LINE"], "rust-2");
     }
 
+    /// WI-3335: the engine's slim image ships no klaudia, so its own gitguard
+    /// check fails. A pod-backed Codex template still starts (the pod checks
+    /// its own filesystem at boot), while the same Codex on the local backend
+    /// is refused as before.
+    #[tokio::test]
+    async fn a_pod_codex_is_not_refused_by_the_engines_missing_hook() {
+        let template = |name: &str, backend: &str| SessionTemplate {
+            name: name.into(),
+            description: "codex".into(),
+            command: Some(vec!["codex".into()]),
+            cwd: None,
+            env: Vec::new(),
+            account: None,
+            default_name: None,
+            match_repo_names: Vec::new(),
+            match_path_prefixes: Vec::new(),
+            tags: Vec::new(),
+            backend: backend.into(),
+        };
+        let mut h = harness_cfg(
+            false,
+            Some(vec![
+                template("codex-pod", "pod"),
+                template("codex-local", "local"),
+            ]),
+            |cfg| {
+                cfg.agent_onboarding.codex_policy = Err(
+                    "gitguard hook program /usr/local/bin/klaudia cannot be inspected (No such file or directory (os error 2)); refusing to start a Codex session".into(),
+                );
+            },
+        )
+        .await;
+        let start = |name: &str| {
+            h.client
+                .post(format!("{}/api/sessions", h.base))
+                .json(&json!({ "name": "codex", "template": name }))
+                .send()
+        };
+        let pod = start("codex-pod").await.unwrap();
+        assert!(pod.status().is_success(), "{}", pod.text().await.unwrap());
+        let local = start("codex-local").await.unwrap();
+        assert_eq!(local.status(), StatusCode::BAD_REQUEST);
+        assert!(local.text().await.unwrap().contains("klaudia"));
+        let (_id, _token) = h.created.recv().await.expect("the pod is created");
+    }
+
     /// A vogt-core stand-in that mints `minted-for-<id>` at
     /// `POST /api/sessions/token`.
     async fn mock_core() -> String {

@@ -992,8 +992,20 @@ impl SessionRegistry {
         // instead of falling through to bypass (WI-1143). Claude and opencode
         // do not consult this field. A deployment with the file unset, or
         // `ENGINE_AGENT_CODEX_POLICY=off`, is `Ok` and launches.
+        // A pod-backed session runs Codex on the pod's filesystem, not this
+        // one: the session agent checks the pod's file and hook program at
+        // boot and refuses Codex there (WI-3335).
+        let pod_backed = self.cfg.pod_backends_enabled
+            && spec
+                .template
+                .as_deref()
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .and_then(|name| self.resolve_template(name).ok())
+                .is_some_and(|t| t.backend != "local");
         codex_policy_refusal(
             base_command.as_deref(),
+            pod_backed,
             &self.cfg.agent_onboarding.codex_policy,
         )?;
         // A wake replays the posture recorded at the first start. The
@@ -3354,11 +3366,16 @@ impl Drop for CutWorktree {
 /// `ENGINE_AGENT_CODEX_POLICY=off`) launches. Split out so the refusal is
 /// testable without spawning a PTY. The policy type is `std::result::Result`
 /// on purpose: this crate's `Result` alias is `Result<T, ApiError>`.
+///
+/// A pod-backed launch is not judged here (WI-3335): the policy was read off
+/// the engine's filesystem, and the pod's Codex loads the pod's own file. The
+/// session agent applies the same check in the pod, fail closed.
 fn codex_policy_refusal(
     command: Option<&[String]>,
+    pod_backed: bool,
     policy: &std::result::Result<Option<std::path::PathBuf>, String>,
 ) -> Result<()> {
-    if command.and_then(agent_cli::agent_name).as_deref() != Some("codex") {
+    if pod_backed || command.and_then(agent_cli::agent_name).as_deref() != Some("codex") {
         return Ok(());
     }
     match policy {
@@ -3442,7 +3459,8 @@ mod tests {
         let missing: std::result::Result<Option<std::path::PathBuf>, String> =
             Err("Codex driven-session policy /no/such/requirements.toml cannot be read".into());
         let codex = |cmd: &[&str]| cmd.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
-        let err = super::codex_policy_refusal(Some(&codex(&["codex"])), &missing).unwrap_err();
+        let err =
+            super::codex_policy_refusal(Some(&codex(&["codex"])), false, &missing).unwrap_err();
         assert!(
             matches!(&err, crate::error::ApiError::BadRequest(msg) if msg.contains("cannot be read")),
             "{err}"
@@ -3450,15 +3468,32 @@ mod tests {
         // The wrapper the protected template actually runs still names Codex.
         let wrapped = super::codex_policy_refusal(
             Some(&codex(&["vogt-agent-auth", "run", "--", "codex"])),
+            false,
             &missing,
         )
         .unwrap_err();
         assert!(matches!(wrapped, crate::error::ApiError::BadRequest(_)));
         // Claude and opencode do not consult the field, so the same error
         // does not refuse them. Unset (`Ok`) does not refuse Codex either.
-        assert!(super::codex_policy_refusal(Some(&codex(&["claude"])), &missing).is_ok());
-        assert!(super::codex_policy_refusal(Some(&codex(&["opencode"])), &missing).is_ok());
-        assert!(super::codex_policy_refusal(Some(&codex(&["codex"])), &Ok(None),).is_ok());
+        assert!(super::codex_policy_refusal(Some(&codex(&["claude"])), false, &missing).is_ok());
+        assert!(super::codex_policy_refusal(Some(&codex(&["opencode"])), false, &missing).is_ok());
+        assert!(super::codex_policy_refusal(Some(&codex(&["codex"])), false, &Ok(None)).is_ok());
+    }
+
+    /// The engine's filesystem is not the pod's (WI-3335): a slim engine
+    /// image has no klaudia, so judging a pod's Codex by it refused every pod
+    /// Codex launch. A pod launch is left to the pod's own check; a host
+    /// launch with the same policy error is still refused.
+    #[test]
+    fn a_pod_backed_codex_launch_is_not_judged_by_the_engines_files() {
+        let no_hook: std::result::Result<Option<std::path::PathBuf>, String> =
+            Err("gitguard hook program /usr/local/bin/klaudia cannot be inspected".into());
+        let codex = vec!["codex".to_string()];
+        assert!(super::codex_policy_refusal(Some(&codex), true, &no_hook).is_ok());
+        assert!(matches!(
+            super::codex_policy_refusal(Some(&codex), false, &no_hook),
+            Err(crate::error::ApiError::BadRequest(_))
+        ));
     }
 
     #[test]
