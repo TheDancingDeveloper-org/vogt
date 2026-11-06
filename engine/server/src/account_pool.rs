@@ -154,4 +154,31 @@ mod tests {
         lease.release();
         assert_eq!(pool.counts()["a"], 0);
     }
+
+    #[test]
+    fn three_accounts_spread_least_loaded_then_refuse_with_counts() {
+        let names = ["acct1", "acct2", "acct3"].map(String::from);
+        let pool = Arc::new(AccountPool::new(names, 2));
+        let mut leases: Vec<_> = (0..6).map(|_| pool.lease(None).unwrap()).collect();
+        let picked: Vec<_> = leases.iter().map(|l| l.account().unwrap()).collect();
+        assert_eq!(
+            picked,
+            ["acct1", "acct2", "acct3", "acct1", "acct2", "acct3"]
+        );
+        let full = pool.lease(None).unwrap_err();
+        assert_eq!(full.cap, 2);
+        assert!(full.counts.values().all(|&c| c == 2));
+        assert_eq!(full.counts.len(), 3);
+        // A pinned request to a full account is refused even with others free.
+        drop(leases.remove(1));
+        assert!(pool.lease(Some("acct1")).is_err());
+        assert_eq!(pool.lease(None).unwrap().account(), Some("acct2"));
+    }
+
+    #[test]
+    fn unknown_pinned_account_is_refused() {
+        let pool = AccountPool::new(["acct1".into()], 8);
+        assert!(pool.reserve(Some("nope")).is_err());
+        assert_eq!(pool.counts()["acct1"], 0);
+    }
 }
