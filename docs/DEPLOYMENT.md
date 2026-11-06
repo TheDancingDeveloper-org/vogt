@@ -1,5 +1,98 @@
 # Deploying Vogt
 
+## Kubernetes orchestrator (rust-2)
+
+This is the implemented `rust-2` shape, not a released-main Kubernetes
+promise. The [example manifest set](../deploy/examples/kubernetes/README.md)
+provides namespaces, service accounts, RBAC, quota, priority, network policy,
+PVC, configuration, Deployment and Service. Follow its preparation steps;
+replace every `REPLACE_*` input before admission validation. This documentation
+change is not a live deployment test.
+
+The single-replica engine Deployment runs the merged engine/core/PWA image.
+`VOGT_CORE_IMPL=rust` selects the Rust core; `python` remains the default.
+Use Recreate with a single writable state volume. Persist both core stores
+under `VOGT_DATA_DIR`, the configured engine `state_dir` (history, records,
+screens and token bookkeeping), and Claude account directories. Configure
+`ENGINE_AGENT_CLAUDE_ACCOUNTS` to paths on that PVC. Back up and restore-test
+these together; never commit account bundles or refresh tokens. The engine
+PVC is not a shared session workspace.
+
+Session pods use Restricted Pod Security, ResourceQuota and a PriorityClass
+chosen relative to other workloads. The engine Role grants only pod
+create/get/list/delete and Secret create in the session namespace. No Secret
+read, exec or attach permission is needed. Bootstrap Secrets have pod owner
+references for garbage collection. The session ServiceAccount has no grants
+or mounted API token. Read-only hostPath seeds require a separately reviewed
+admission exception; the cache-free example needs none.
+
+The example NetworkPolicy denies ingress and allows only DNS and the engine
+initially. Add narrow egress for graft, providers, approved MCP servers and
+package sources before starting a session. Verify your CNI enforces policy;
+standard NetworkPolicy cannot filter HTTPS hostnames without an egress proxy.
+Pods dial `ENGINE_POD_ENGINE_ENDPOINT`, not engine loopback. Prefer HTTPS;
+the example explicitly opts into internal Service HTTP, which requires an
+operator trust decision. Core-to-engine loopback inside the engine pod is a
+separate path. Pin both engine and session images by digest at a compatible
+revision and configure pull Secrets in each consuming namespace.
+
+### Pod settings inventory
+
+Source: `pod_backend.rs` and `config.rs`. `VOGT_ENGINE_POD_*` aliases are
+accepted; `ENGINE_POD_*` wins. Explicitly disable unused cache defaults as
+the example does: compiled defaults are not portable operator choices.
+
+| Setting | Meaning |
+|---|---|
+| `ENGINE_POD_BACKENDS_ENABLED` | Enable pods; also select `ENGINE_SESSION_BACKEND=pod` or a pod template. |
+| `ENGINE_POD_NAMESPACE` | Session namespace (default `vogt-sessions`). |
+| `ENGINE_POD_IMAGE` | Session image; pin by digest. |
+| `ENGINE_POD_SERVICE_ACCOUNT` | Session identity (default `vogt-session`). |
+| `ENGINE_POD_ENGINE_ID` | Stable unique ownership label per engine deployment. |
+| `ENGINE_POD_ENGINE_ENDPOINT` | Reachable engine URL; set explicitly instead of relying on agent-auth URL fallback. |
+| `ENGINE_POD_ALLOW_INSECURE_ENDPOINT` | Opt into HTTP; default false. |
+| `ENGINE_POD_IMAGE_PULL_SECRET` | Optional session-namespace pull Secret. |
+| `ENGINE_POD_GRAFT_REPO` | Repository to clone; choose explicitly. |
+| `ENGINE_POD_GRAFT_LINE` | Clone line; default `rust-2`. |
+| `ENGINE_POD_GRAFT_ENDPOINT` | Graft URL reachable from sessions. |
+| `ENGINE_POD_GRAFT_TOKEN_FILE` | Shared-token fallback file on engine; prefer minting. |
+| `ENGINE_POD_CLI` | Fallback CLI (default `codex`); agent templates select their CLI. |
+| `ENGINE_POD_EXTRA_CA_FILE` | Additional CA path in the session image; ensure it exists there. |
+| `ENGINE_POD_RESOURCE_REQUESTS` | Comma-separated quantities, e.g. `cpu=250m,memory=512Mi,ephemeral-storage=2Gi`. |
+| `ENGINE_POD_RESOURCE_LIMITS` | Same format for limits; align with quota. |
+| `ENGINE_POD_PRIORITY_CLASS` | PriorityClass name; empty disables. |
+| `ENGINE_POD_PREFERRED_NODES` | Comma-separated `NAME[:WEIGHT]`, weights 1–100. |
+| `ENGINE_POD_EXCLUDED_NODES` | Comma-separated forbidden nodes. |
+| `ENGINE_POD_TOLERATIONS` | JSON array of Kubernetes tolerations. |
+| `ENGINE_POD_TEMPLATE_POLICIES` | JSON map keyed by template: resource_requests, resource_limits, node_selector and affinity overrides. |
+| `ENGINE_POD_CACHE_PVC` | Read-only seed claim; empty disables. Writable tool caches use private emptyDir. |
+| `ENGINE_POD_CACHE_NODE` | Hard cache-node pin; empty allows normal scheduling. |
+| `ENGINE_POD_CACHE_ENV_CONFIG_MAP` | Cache environment ConfigMap; empty disables. |
+| `ENGINE_POD_CACHE_SECRET` | Cache environment Secret; empty disables. |
+| `ENGINE_POD_KACHE_CONFIG_MAP` | Kache configuration mount; empty disables. |
+| `ENGINE_POD_CACHE_PROVISIONER_URL` | Optional per-session cache credential provisioner. |
+| `ENGINE_POD_CACHE_PROVISIONER_TOKEN_FILE` | Provisioner credential file on the engine. |
+| `ENGINE_POD_CARGO_SEED_HOST_PATH` | Read-only Cargo host seed; admission and prefix validation apply. |
+| `ENGINE_POD_PNPM_SEED_HOST_PATH` | Read-only pnpm host seed; same constraints. |
+| `ENGINE_POD_SEED_ALLOWED_PREFIXES` | Comma-separated allowed host-seed prefixes. |
+| `ENGINE_POD_SCCACHE_ENDPOINT` | Optional validated sccache endpoint. |
+
+`ENGINE_GRAFT_MINT_TOKEN_FILE` is also needed for per-session graft minting;
+mount it only in the engine. See [session pod boot](ENGINE.md#session-pod-boot)
+for bootstrap, revocation and account write-back. There is no workspace
+configuration volume setting yet (WI-3374). Cache seeds (WI-3164/WI-3354)
+are not shared writable homes or workspace persistence.
+
+An engine restart currently loses pod stream credentials/cursor. The
+reconciler deletes surviving pods as orphans and restores records as
+hibernated (re-adoption: WI-3205). Hibernation flushes account/transcript
+state before teardown; wake starts a fresh clone. Land code first: account
+write-back is not a backup of unlanded files.
+
+Compose still supports local sessions on this line. What single-host Compose
+runs after removal of that backend remains open (roadmap §6); this chapter
+does not silently require all Compose operators to install Kubernetes.
+
 How to run the published Vogt stack somewhere that is not your laptop: what
 the images are, what must be configured before the stack starts, how to put
 it behind TLS, and how to keep the data safe across upgrades.
