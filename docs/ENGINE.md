@@ -1844,6 +1844,13 @@ warning and the rest are kept.
 
 #### Hibernation
 
+**Pod sessions:** the engine requests account/transcript write-back before
+teardown. An attached agent's unconfirmed flush refuses hibernation; an
+unattached agent retains only its last successful write-back. The engine
+keeps the record and screen; wake creates a new pod seeded with the saved
+conversation. This does not checkpoint `/work`: land code before hibernating.
+Engine restart does not re-adopt the running pod (WI-3205).
+
 An idle agent session holds a few hundred MiB in its CLI and its MCP
 servers. Its conversation is already on disk in the agent CLI's own
 transcript. Hibernating it stops the process tree and keeps the rest, so it
@@ -2138,6 +2145,10 @@ starts the successor itself with `session_start(from_handoff=WI-n)`.
 
 #### Resource use
 
+This `/proc` sampler measures local PTY trees, not processes in another pod.
+Absent pod samples are not zero usage. Kubernetes enforces pod requests and
+limits; use cluster metrics for consumption rather than engine-host RSS.
+
 Every 10 s the engine reads `/proc/*/stat` once and sums, for each live
 session, the subtree below its PTY child. The figures are resident memory,
 CPU used since the previous sample (in percent of one core, so a busy tree
@@ -2152,6 +2163,10 @@ sets `resources.over_threshold` on any session at or over it. The core's
 `session.list` takes `order: "rss"` to put the heaviest first.
 
 #### Worktree build output
+
+These settings clean local linked Git worktrees, not the pod's independent
+graft clone. Pod-private build/cache files disappear with the pod; read-only
+shared seeds do not preserve unfinished work.
 
 A finished worker's build output is what fills the host disk: `target/`,
 `node_modules` and `.venv` in a worktree nobody is using. Stopping or
@@ -2937,6 +2952,9 @@ vetted, so the engine assumes its agent can be talked into anything:
 
 ### File APIs
 
+These routes address the engine's `workspace_root`, even when the engine
+runs in Kubernetes. They do not browse the session pod's separate `/work`.
+
 Every path is relative to `workspace_root` and resolved against it by
 `workspace_path.rs`, which every filesystem route funnels through: `..`, an
 absolute path and a root component are rejected up front, and the canonicalised
@@ -2996,6 +3014,9 @@ contains `$HOME`, or contains `state_dir`.
   is capped at 500. Ordered by name-prefix match first, then shorter paths.
 
 ### Git APIs
+
+These routes address engine-workspace repositories, not pod clones. Pod boot
+builds a best-effort inspection-only Git view with no remote; land with graft.
 
 `repo` is a workspace-relative path; the handler walks upward from it to the
 nearest `.git`, stopping at `workspace_root` so it cannot adopt a repository
@@ -4265,6 +4286,10 @@ deployment.
 ---
 
 ## 7. Agent tasks
+
+Scheduling state stays in the engine. Each run uses its selected template:
+pod templates create pods; local templates start beside the engine. Durable
+task records do not persist a pod's workspace or live stream over restart.
 
 The engine's scheduler for long-lived or recurring agents — price monitors,
 recurring workspace checks, anything a person wants run on a clock rather

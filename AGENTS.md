@@ -17,6 +17,15 @@ depends on the engine.
 
 ## Start here
 
+On graft line `rust-2`, `engine/core` builds `vogt-core`.
+`VOGT_CORE_IMPL=python|rust` selects the core at startup (default `python`).
+Python remains the reference contract during the overlap. Pod templates run
+`engine/session-agent` in a separate Kubernetes pod; local templates still
+run a PTY beside the engine. A pod has its own graft clone, not the engine's
+shared workspace. Read the pod sections in `docs/ENGINE.md` before relying
+on host paths. Deliver through graft on this line, not the historical
+integration-branch instructions below (process reconciliation: WI-3377).
+
 - This file applies repository-wide. Before changing `engine/`, `web/`, or
   `mobile/`, also read `engine/AGENTS.md`; its more specific rules supplement
   this file. `CLAUDE.md` files are pointers, not a second source of rules.
