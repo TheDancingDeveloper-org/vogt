@@ -46,6 +46,27 @@ static RECENT: Mutex<Recent> = Mutex::new(Recent {
     capturing: false,
 });
 
+#[cfg(test)]
+pub(crate) fn in_isolated_test_process(test: &str) -> bool {
+    const MARKER: &str = "VOGT_ISOLATED_LOG_TEST";
+    if std::env::var(MARKER).as_deref() == Ok(test) {
+        return true;
+    }
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", test, "--nocapture"])
+        .env(MARKER, test)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "isolated test {test} failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"));
+    false
+}
+
 /// `logger("http")` is the `tracing` target modules should use.
 pub fn logger(area: &str) -> String {
     format!("{LOGGER_NAMESPACE}.{area}")
@@ -486,6 +507,11 @@ mod tests {
 
     #[test]
     fn recent_problems_are_bounded_and_ordered() {
+        if !in_isolated_test_process(
+            "observability::tests::recent_problems_are_bounded_and_ordered",
+        ) {
+            return;
+        }
         {
             let mut recent = RECENT.lock().unwrap();
             recent.lines.clear();
