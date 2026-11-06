@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub mod chat;
+pub mod source;
 pub use chat::*;
 
 /// What a session's terminal is doing.
