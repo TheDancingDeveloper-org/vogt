@@ -183,7 +183,7 @@ git_view() {
   gg() { graft --token-file "$graft_token_file" -C "$work_dir" "$@"; }
   gv init -q 2>/dev/null || return 0
   printf '.graft/\n.vogt/\n' >"$work_dir/.git/info/exclude"
-  gv add -A >/dev/null 2>&1 || return 0
+  gv add -A -f >/dev/null 2>&1 || return 0
   tree=$(gv write-tree 2>/dev/null) || return 0
   tip_json=$(gg --json log --limit 1 2>/dev/null) || tip_json=
   tip=$(printf '%s' "$tip_json" | jq -r '.changesets[0].id // empty' 2>/dev/null) || tip=
@@ -195,7 +195,7 @@ git_view() {
     # Undo the tip's patch on the files to get the parent's tree, commit it,
     # then commit the real tree on top.
     if (cd "$work_dir" && patch -R -E -p1 -s -f --no-backup-if-mismatch <"$tmp_dir/tip.patch" >/dev/null 2>&1) \
-       && gv add -A >/dev/null 2>&1 && ptree=$(gv write-tree 2>/dev/null) \
+       && gv add -A -f >/dev/null 2>&1 && ptree=$(gv write-tree 2>/dev/null) \
        && base=$(printf 'graft %s: before %s\n' "$VOGT_GRAFT_LINE" "$tip" | gv commit-tree "$ptree" 2>/dev/null) \
        && head=$(printf '%s\n\ngraft changeset %s\n' "$subject" "$tip" | gv commit-tree "$tree" -p "$base" 2>/dev/null); then
       :
