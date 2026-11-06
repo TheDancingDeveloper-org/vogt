@@ -463,6 +463,31 @@ pub struct BindBranchParams {
     #[schemars(length(min = 1))]
     pub reason: String,
 }
+/// Land a work item's reviewed branch onto its base (WI-1328).
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LandWorkParams {
+    /// Work item reference, e.g. WI-7.
+    pub r#ref: String,
+    /// The branch tip the review saw. The latest verdict must name this SHA, and the engine refuses when the branch has moved past it.
+    #[schemars(length(min = 7))]
+    pub head_sha: String,
+    #[schemars(length(min = 1))]
+    pub reason: String,
+}
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LandWorkResult {
+    /// The base branch's SHA before the land.
+    pub onto_before: String,
+    /// The base branch's SHA after the land.
+    pub onto_after: String,
+    /// The commits now on the base that were not before, oldest first.
+    #[serde(default)]
+    pub commits: Vec<String>,
+    /// Whether the branch was rebased onto the base before landing.
+    pub rebased: bool,
+}
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CommentParams {

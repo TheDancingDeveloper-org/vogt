@@ -21,6 +21,21 @@ verification from anyone but the worker. Others get `403 comment_refused`. `work
 (`newest`, the default, or `oldest`) so `comment_limit` keeps one end of the
 thread. The field list itself is the generated OpenAPI, not this page.
 
+`work.land` (`POST /api/work/land`: `ref`, `head_sha`, `reason`) lands an
+item's reviewed branch onto its project's `agent_policy.landing.base_branch`
+through the engine's `land` git op, as a fast-forward or a rebase (the
+landing rule's `merge_mode`), never a merge commit. The branch is the latest
+hand-off's. It is refused with `403 land_refused`, naming the rule, when the
+caller is neither a person nor an oversight session, when the project's
+`landing.merge_by` is not `oversight`, when no hand-off names a branch, or
+when the latest verdict is not `no_blockers` for exactly `head_sha`, is the
+worker's own, or comes from a session the store does not show as a `review`
+a person or oversight started for this item. The engine's own refusal (the
+branch moved, behind in fast-forward mode, forbidden text) comes back as it
+said it. A land posts a note, emits `work.landed`, and returns `onto_before`,
+`onto_after`, `commits` and `rebased`; every refusal is audited and emits
+`work.land_refused`.
+
 ## The two processes
 
 | Process | What it is | Port | Serves |

@@ -65,6 +65,9 @@ def spec_for(name: str, field: FieldInfo) -> ArgSpec:
             if isinstance(element, type) and issubclass(element, BaseModel)
             else str
         )
+    elif isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        # A structured flag (`--agent-policy`, `--handoff`) is a JSON object.
+        kind = json.loads
     elif annotation is bool:
         kind = bool
     elif annotation is int:
