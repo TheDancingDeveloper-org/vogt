@@ -69,6 +69,21 @@ Development happens on `main`; releases are `v*` tags.
 
 ## 3. System map
 
+On `rust-2`, `VOGT_CORE_IMPL=python` selects `vogt serve` (the default),
+while `rust` selects `vogt-core serve`. Both use the core endpoint and stores.
+This overlap gate is not a claim that the Rust-only swap has shipped.
+
+```text
+engine + selected core + embedded PWA (container or Kubernetes engine pod)
+  ├── local template -> local PTY
+  └── pod template -> session pod: graft clone + CLI + vogt-session-agent
+                        -> authenticated outbound stream to engine
+```
+
+Session pods do not share the engine filesystem. The engine retains records
+and accepted account/transcript write-back; pod deletion discards unpersisted
+workspace files. The single-container map below describes the local shape.
+
 One published port, one container, one sidecar:
 
 ```
@@ -170,7 +185,9 @@ write takes.
 ### 4.2 The engine (`engine/`)
 
 `engine/` is its own Cargo workspace: `server/` builds the `vogt-engine`
-binary and `contract/` holds the shared wire DTOs. One module per concern:
+binary and `contract/` holds the shared wire DTOs. `core/` builds `vogt-core`,
+the replacement core under parity testing. `session-agent/` owns the PTY
+inside a session pod and streams it to the engine. One module per concern:
 
 - **PTY sessions** (`pty.rs`, `sessions.rs`, `scrollback.rs`) — a
   server-owned PTY per session that survives every client disconnecting,

@@ -8,10 +8,9 @@ named `vogt-core` so it does not shadow `vogt` on a dev pod.
 
 ## Contributing
 
-- Pull requests target the long-lived branch `rust-core`, not `main`.
-  Check the branch out as its own worktree; do not do port work on `main`.
-- Rebase `rust-core` onto `origin/main` about weekly. The crate is additive,
-  so conflicts should be limited to the workspace member list and CI.
+- Work in a dedicated graft clone on line `rust-2`, not on `main`.
+  Commit, sync and land with graft; workers do not open pull requests.
+  Oversight owns integration with main; do not merge main into the line.
 - Acceptance for a chunk is the parity harness:
   `scripts/parity.py check --impl rust` (the harness arrives with the
   parity-framework work; until then, `cargo fmt`, `cargo clippy -D warnings`,
