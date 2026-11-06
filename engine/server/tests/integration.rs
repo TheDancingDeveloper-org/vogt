@@ -17382,6 +17382,98 @@ mod pod_stream {
         assert!(body.get("codex_config").is_none(), "{body}");
     }
 
+    /// WI-3334: a Claude pod on a leased account is handed its login with an
+    /// onboarded `.claude.json` (none is stored), and writes the bundle back
+    /// with the only credential it holds, its stream token.
+    #[tokio::test]
+    async fn a_claude_pod_gets_a_signed_in_bundle_and_can_write_it_back() {
+        let tmp = tempfile::tempdir().unwrap();
+        let acct = tmp.path().join("acct2");
+        std::fs::create_dir_all(&acct).unwrap();
+        std::fs::write(acct.join(".credentials.json"), br#"{"claudeAiOauth":{}}"#).unwrap();
+        let claude = SessionTemplate {
+            name: "pod".into(),
+            description: "claude pod".into(),
+            command: Some(vec!["claude".into()]),
+            cwd: None,
+            env: Vec::new(),
+            account: None,
+            default_name: None,
+            match_repo_names: Vec::new(),
+            match_path_prefixes: Vec::new(),
+            tags: Vec::new(),
+            backend: "pod".into(),
+        };
+        let dir = acct.clone();
+        let mut h = harness_cfg(false, Some(vec![claude]), move |cfg| {
+            cfg.agent_onboarding = vogt_engine_server::claude_config::Onboarding {
+                enabled: true,
+                default_dir: None,
+                settings_file: None,
+                opencode_config: None,
+                account_concurrency_cap: 8,
+                accounts: vogt_engine_server::claude_config::parse_accounts(Some(&format!(
+                    "acct2={}",
+                    dir.display()
+                ))),
+                codex_policy: Ok(None),
+            };
+        })
+        .await;
+        let id = h.start().await;
+        let (_, token) = h.created.recv().await.unwrap();
+        let body: Value = h
+            .bootstrap_as(id, &token, "claude")
+            .await
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(body["env"]["VOGT_SESSION_ACCOUNT"], "acct2", "{body}");
+        let bundle = body["bundle"].as_object().unwrap();
+        assert!(bundle.contains_key(".credentials.json"), "{body}");
+        let config = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            bundle[".claude.json"].as_str().unwrap(),
+        )
+        .unwrap();
+        let config: Value = serde_json::from_slice(&config).unwrap();
+        assert_eq!(config["hasCompletedOnboarding"], true);
+
+        let session_token = body["session_token"].as_str().unwrap();
+        let conversation = body["env"]["VOGT_SESSION_CONVERSATION_ID"]
+            .as_str()
+            .unwrap_or("");
+        let version = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+            - 1_000;
+        let res = reqwest::Client::new()
+            .post(format!(
+                "{}/api/agent-auth/store/bundle/bundle-file",
+                h.base
+            ))
+            .bearer_auth(session_token)
+            .json(&json!({
+                "account": "acct2",
+                "conversation_id": conversation,
+                "path": ".claude.json",
+                "kind": "config",
+                "bytes": base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    br#"{"hasCompletedOnboarding":true,"theme":"light"}"#,
+                ),
+                "version": version,
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert!(res.status().is_success(), "{}", res.status());
+        assert!(std::fs::read_to_string(acct.join(".claude.json"))
+            .unwrap()
+            .contains("light"));
+    }
+
     /// Without a core to mint from, a Claude pod still gets a config, with no
     /// servers, so `--strict-mcp-config` keeps the account's own set out.
     #[tokio::test]
