@@ -4811,6 +4811,10 @@ bootstrap refusal quotes the engine's one-line reason only). In order:
 8. `clone` — `graft --token-file <file> clone ...` into `VOGT_WORK_DIR`
    (default `/work`). A failure names the endpoint and graft's last stderr
    lines.
+   Afterwards `/work` is given a read-only git view (WI-3356; step
+   `git-view`, best effort): a baseline commit of the line's tree before its
+   tip changeset and the tip on top, with no remote, so `git log -1 -p`,
+   `git diff` and `git status` work. Commits and lands still go through `g`.
 9. `brief` — the brief is written to `<workdir>/.vogt/brief.md`
    (`VOGT_ADD_DIR`), and `VOGT_SESSION_CWD` and `VOGT_SESSION_BRIEF_FILE` are
    exported.

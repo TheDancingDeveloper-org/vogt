@@ -168,6 +168,50 @@ if ! graft --token-file "$graft_token_file" clone "$VOGT_GRAFT_REPO" "$work_dir"
   # graft's stderr names the endpoint and the refusal, never the token file's content.
   fail "g clone $VOGT_GRAFT_REPO --line $VOGT_GRAFT_LINE into $work_dir failed (GRAFT_ENDPOINT=${GRAFT_ENDPOINT:-unset}): $(tail -n3 "$tmp_dir/graft.err" | tr '\n' ' ' | cut -c1-400)"
 fi
+# WI-3356: give /work a read-only git view so `git log -1 -p`, `git diff` and
+# `git status` work in the pod (reviewers and most briefs assume git). graft
+# has no git export, so the view is built from the clone: a baseline commit of
+# the line's tree before its tip changeset, and the tip as the next commit, so
+# `git log -1 -p` shows the last landed change. No remote is configured, so
+# nothing can be pushed; commits and lands still go through `g`. Best effort: a
+# failure leaves a single commit of the cloned tree, or no git view, and never
+# stops the boot.
+git_view() {
+  command -v git >/dev/null 2>&1 || return 0
+  [ -e "$work_dir/.git" ] && return 0
+  gv() { git -C "$work_dir" -c user.name=graft -c user.email=graft@localhost -c core.hooksPath=/dev/null "$@"; }
+  gg() { graft --token-file "$graft_token_file" -C "$work_dir" "$@"; }
+  gv init -q 2>/dev/null || return 0
+  printf '.graft/\n.vogt/\n' >"$work_dir/.git/info/exclude"
+  gv add -A >/dev/null 2>&1 || return 0
+  tree=$(gv write-tree 2>/dev/null) || return 0
+  tip_json=$(gg --json log --limit 1 2>/dev/null) || tip_json=
+  tip=$(printf '%s' "$tip_json" | jq -r '.changesets[0].id // empty' 2>/dev/null) || tip=
+  parent=$(printf '%s' "$tip_json" | jq -r '.next // empty' 2>/dev/null) || parent=
+  subject=$(printf '%s' "$tip_json" | jq -r '.changesets[0].subject // empty' 2>/dev/null) || subject=
+  head=
+  if [ -n "$tip" ] && [ -n "$parent" ] && command -v patch >/dev/null 2>&1 \
+     && gg diff "$parent" "$tip" >"$tmp_dir/tip.patch" 2>/dev/null && [ -s "$tmp_dir/tip.patch" ]; then
+    # Undo the tip's patch on the files to get the parent's tree, commit it,
+    # then commit the real tree on top.
+    if (cd "$work_dir" && patch -R -E -p1 -s -f --no-backup-if-mismatch <"$tmp_dir/tip.patch" >/dev/null 2>&1) \
+       && gv add -A >/dev/null 2>&1 && ptree=$(gv write-tree 2>/dev/null) \
+       && base=$(printf 'graft %s: before %s\n' "$VOGT_GRAFT_LINE" "$tip" | gv commit-tree "$ptree" 2>/dev/null) \
+       && head=$(printf '%s\n\ngraft changeset %s\n' "$subject" "$tip" | gv commit-tree "$tree" -p "$base" 2>/dev/null); then
+      :
+    else
+      head=
+    fi
+  fi
+  if [ -z "$head" ]; then
+    head=$(printf 'graft %s at %s\n' "$VOGT_GRAFT_LINE" "${tip:-tip}" | gv commit-tree "$tree" 2>/dev/null) || return 0
+  fi
+  # Restore the files to the real tree whichever way the commits were built.
+  gv update-ref HEAD "$head" && gv reset -q --hard >/dev/null 2>&1 && gv clean -fdq >/dev/null 2>&1 || true
+  printf 'session-entrypoint: git view of %s ready (read-only; land with g)\n' "$work_dir" >&2
+}
+step=git-view; say git-view
+git_view || printf 'session-entrypoint: could not build a git view of %s; continuing\n' "$work_dir" >&2
 step=brief; say brief
 add_dir=${VOGT_ADD_DIR:-$work_dir/.vogt}; mkdir -p "$add_dir"; chmod 700 "$add_dir"
 jq -r '.brief // ""' "$response" >"$add_dir/brief.md"; chmod 600 "$add_dir/brief.md"
