@@ -27,7 +27,7 @@ settles a question in §6 updates this file in the same change.
 
 ## 1. At a glance
 
-| | Released (`main`, v0.7.27) | Integration line (`rust-2`) | Target |
+| | Released (`main`, v0.7.28) | Integration line (`rust-2`) | Target |
 |---|---|---|---|
 | **Core** | Python `vogt serve`. It is the product authority. | Rust `vogt-core` beside the Python core. `VOGT_CORE_IMPL` picks one; the default is `python`. | Rust core only. The Python core is removed. |
 | **Engine** | Rust `vogt-engine`: front door, sessions, agent tasks, assistant. | The same, plus a pod backend and an in-pod session agent. | The same. |
@@ -424,7 +424,7 @@ by sentence.
 | `README.md` | Current. | Near identical. |
 | `docs/ARCHITECTURE.md` | Current for the released product. | Identical to `main`, so it describes neither `vogt-core` nor pod sessions. |
 | `docs/ENGINE.md` | Current for local sessions. | Adds "Pod-backed sessions" and "Session pod boot"; otherwise behind `main` (649 lines). |
-| `docs/DEPLOYMENT.md` | Current (0.7.27). Compose only. | Adds `VOGT_CORE_IMPL` and the pod settings; version strings behind (0.7.22). Neither line has a Kubernetes chapter. |
+| `docs/DEPLOYMENT.md` | Current (0.7.28). Compose only. | Adds `VOGT_CORE_IMPL` and the pod settings; version strings behind (0.7.22). Neither line has a Kubernetes chapter. |
 | `docs/CONTRIBUTING.md`, `docs/ci.md` | Current. | Behind `main` (90 and 102 lines). |
 | `docs/AGENT_GUIDE.md`, `docs/API.md` | Current. | Behind `main` (178 and 100 lines). Not checked for what changes in a pod. |
 | `docs/USER_GUIDE.md`, `docs/CONFIG.md`, `docs/CUSTOMISATION.md` | Current. | Small differences. `CONFIG.md` is generated. |
