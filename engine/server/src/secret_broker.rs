@@ -382,6 +382,9 @@ pub struct SecretBroker {
     manifest: Vec<ManifestSecret>,
     /// `ENGINE_AGENT_AUTH_SECRETS_FILE`, re-read on every check and launch.
     manifest_file: Option<PathBuf>,
+    /// `ENGINE_LLM_PROVIDERS_FILE`: each registered provider's key is a
+    /// manifest entry too, re-read on every check and launch.
+    providers_file: Option<PathBuf>,
     /// Session id → SHA-256 of that session's broker token. The plaintext is
     /// handed to the child once and never stored.
     grants: DashMap<Uuid, [u8; 32]>,
@@ -472,6 +475,7 @@ impl SecretBroker {
             cfg.agent_auth_secrets.clone(),
         )
         .with_manifest_file(cfg.agent_auth_secrets_file.clone())
+        .with_providers_file(cfg.llm_providers_file.clone())
     }
 
     /// The three things the broker needs, and nothing else of the config.
@@ -481,6 +485,7 @@ impl SecretBroker {
             helper,
             manifest,
             manifest_file: None,
+            providers_file: None,
             grants: DashMap::new(),
             grant_projects: Vec::new(),
             session_grants: DashMap::new(),
@@ -493,25 +498,55 @@ impl SecretBroker {
         self
     }
 
+    /// Read the LLM provider registry from `path` at each use.
+    pub fn with_providers_file(mut self, path: Option<PathBuf>) -> Self {
+        self.providers_file = path;
+        self
+    }
+
+    /// The LLM providers registered now. A registry that cannot be used
+    /// registers nothing and is logged by path and reason (names only).
+    pub fn providers(&self) -> Vec<crate::llm_providers::Provider> {
+        let Some(path) = self.providers_file.as_deref() else {
+            return Vec::new();
+        };
+        crate::llm_providers::load(path).unwrap_or_else(|error| {
+            tracing::warn!(%error, "LLM provider registry ignored");
+            Vec::new()
+        })
+    }
+
     /// The manifest as it stands now: the deploy-time entries plus the
-    /// manifest file's. A file that cannot be used contributes nothing and
+    /// manifest file's, plus one entry per registered provider key. A file that cannot be used contributes nothing and
     /// is logged (path and parse error, which carry names, never values), so
     /// a bad live edit narrows sessions to the deploy-time manifest rather
     /// than stopping launches.
     pub fn manifest(&self) -> Vec<ManifestSecret> {
-        compose_manifest(&self.manifest, self.manifest_file.as_deref()).unwrap_or_else(|error| {
-            tracing::warn!(%error, "agent-auth manifest file ignored");
-            self.manifest.clone()
-        })
+        let mut entries = compose_manifest(&self.manifest, self.manifest_file.as_deref())
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, "agent-auth manifest file ignored");
+                self.manifest.clone()
+            });
+        for entry in crate::llm_providers::manifest_entries(&self.providers()) {
+            // A provider key never shadows a manifest line either.
+            if entries.iter().any(|known| known.var == entry.var) {
+                tracing::warn!(
+                    var = %entry.var,
+                    "LLM provider env_key is already a manifest entry; the manifest's line is kept"
+                );
+                continue;
+            }
+            entries.push(entry);
+        }
+        entries
     }
 
     /// The composed manifest text for the helper's `ENGINE_AGENT_AUTH_SECRETS`,
     /// or `None` when there is no manifest file, so a deployment without one
     /// hands the helper exactly the variable it set.
     pub fn live_manifest_text(&self) -> Option<String> {
-        self.manifest_file
-            .as_ref()
-            .map(|_| render_manifest(&self.manifest()))
+        (self.manifest_file.is_some() || self.providers_file.is_some())
+            .then(|| render_manifest(&self.manifest()))
     }
 
     /// Open more projects to approved grants than the manifest names.
@@ -655,7 +690,7 @@ impl SecretBroker {
     /// A configured manifest file counts even while empty: a session launched
     /// before a line is added can then fetch it once it is.
     pub fn enabled(&self) -> bool {
-        !self.manifest.is_empty() || self.manifest_file.is_some()
+        !self.manifest.is_empty() || self.manifest_file.is_some() || self.providers_file.is_some()
     }
 
     /// Mint a fresh token for `session`, replacing any earlier one, and return
@@ -1427,6 +1462,46 @@ mod tests {
             .unwrap_err()
             .contains("malformed"));
         assert_eq!(broker.manifest(), inline);
+    }
+
+    #[test]
+    fn a_registered_provider_key_is_policy_while_it_is_registered() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = dir.path().join("providers.toml");
+        let broker = broker_with("STACK proj stack\n", "127.0.0.1:8910")
+            .with_providers_file(Some(registry.clone()));
+        assert!(broker.enabled());
+        assert!(
+            broker.permitted("DS_KEY").is_none(),
+            "unregistered is refused"
+        );
+
+        std::fs::write(
+            &registry,
+            "[[provider]]\nname = \"ds\"\nbase_url = \"http://l/v1\"\nwire_api = \"chat\"\nenv_key = \"DS_KEY\"\nsecret_project = \"proj\"\nsecret_name = \"ds-secret\"\n",
+        )
+        .unwrap();
+        let entry = broker.permitted("DS_KEY").unwrap();
+        assert_eq!(entry.secret_name, "ds-secret");
+        assert_eq!(entry.policy, ManifestPolicy::Optional);
+        assert!(broker.permitted_write("DS_KEY").is_none(), "never writable");
+        assert!(broker
+            .live_manifest_text()
+            .unwrap()
+            .contains("DS_KEY proj ds-secret optional\n"));
+
+        // A provider key never shadows a manifest line.
+        std::fs::write(
+            &registry,
+            "[[provider]]\nname = \"ds\"\nbase_url = \"http://l/v1\"\nwire_api = \"chat\"\nenv_key = \"STACK\"\nsecret_project = \"other\"\nsecret_name = \"other\"\n",
+        )
+        .unwrap();
+        assert_eq!(broker.permitted("STACK").unwrap().secret_name, "stack");
+
+        // Unregistered again, refused again; a broken registry registers nothing.
+        std::fs::write(&registry, "not toml [").unwrap();
+        assert!(broker.providers().is_empty());
+        assert!(broker.permitted("DS_KEY").is_none());
     }
 
     #[test]

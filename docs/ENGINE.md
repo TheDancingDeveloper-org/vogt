@@ -4666,6 +4666,47 @@ credentials are unchanged. Both modes honour the file. In identity mode it
 is how a secret lands in the session's environment at launch, ready for a
 CLI that reads its key from an environment variable.
 
+**The LLM provider registry: a Codex provider without a restart (WI-3491).**
+`ENGINE_LLM_PROVIDERS_FILE` names a TOML registry that the engine re-reads at
+every session launch. Each entry is one `[[provider]]` table:
+
+```toml
+[[provider]]
+name = "deepseek"                        # the Codex model_providers key
+base_url = "http://litellm:4000/v1"
+wire_api = "chat"                        # or "responses"
+env_key = "HOMELAB_LITELLM_DEEPSEEK_KEY" # the variable Codex reads the key from
+secret_project = "<secrets-manager project id>"
+secret_name = "HOMELAB_LITELLM_DEEPSEEK_KEY"
+models = ["deepseek-chat"]               # informational
+```
+
+At each launch the registry does two things, and nothing else:
+
+- Each provider's `env_key` joins the agent-auth manifest as an `optional`
+  line (`env_key secret_project secret_name`). The helper resolves it into the
+  session, and the broker's policy covers it. A provider key never shadows a
+  manifest line, and a name in no manifest and no registry is still refused.
+- A Codex session gets one `model_providers.<name>` table per provider, as
+  `-c` overrides on its argv, so the shared `~/.codex/config.toml` is never
+  rewritten.
+
+Running sessions keep the providers and keys they launched with. Remove an
+entry and the next launch has neither. Every field is validated: a provider
+name is `[a-z0-9_-]`, a `base_url` is http(s), and `wire_api` is `chat` or
+`responses`. An unknown field such as `experimental_bearer_token`, two
+providers with one name or one `env_key`, or a field that would add a second
+manifest line all make the whole registry invalid. An invalid registry
+registers nothing and is logged. The file holds names and addresses, never a
+key. To add a provider live:
+
+1. Create the key, for example a LiteLLM virtual key, and store it in the
+   secrets manager.
+2. Append the `[[provider]]` table to the registry file, which sits on a
+   mount the stack does not recreate.
+3. Start a Codex session with `--model <model> -c model_provider=<name>`, or
+   point a template at it.
+
 **Opting out of the boundary: identity passthrough.** A deployment may
 decide the manifest boundary is not earning its keep and hand sessions the full
 secrets-manager identity instead. Setting `ENGINE_AGENT_AUTH_IDENTITY_PASSTHROUGH=1`
