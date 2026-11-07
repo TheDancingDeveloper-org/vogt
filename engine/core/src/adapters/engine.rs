@@ -14,6 +14,7 @@ use serde_json::{Map, Value};
 
 use crate::core::py_repr;
 use crate::errors::VogtError;
+use vogt_engine_contract::source::SourceDescriptor;
 
 pub const USER_AGENT: &str = "vogt";
 /// The default request timeout (`DEFAULT_TIMEOUT_SECONDS`).
@@ -163,6 +164,12 @@ impl EngineClient {
         }
         if let Some(worktree) = spec.worktree.as_ref().filter(|value| non_empty(value)) {
             body.insert("worktree".to_string(), worktree.clone());
+        }
+        if let Some(source) = &spec.source {
+            body.insert(
+                "source".to_string(),
+                serde_json::to_value(source).expect("source descriptor serialises"),
+            );
         }
         Ok(EngineSession::from_payload(&self.call(
             "/api/sessions",
@@ -1203,6 +1210,7 @@ pub struct CreateSession {
     pub budget: Option<Value>,
     /// A worktree to cut and start in. Sent only when non-empty.
     pub worktree: Option<Value>,
+    pub source: Option<SourceDescriptor>,
 }
 
 impl CreateSession {
@@ -1226,6 +1234,7 @@ impl CreateSession {
             policy: None,
             budget: None,
             worktree: None,
+            source: None,
         }
     }
 }
@@ -2608,6 +2617,24 @@ mod tests {
         let sent = &seen.lock().unwrap()[0];
         assert!(sent.contains(r#""policy":{"forbidden_text":["x"]}"#));
         assert!(sent.contains(r#""worktree":{"branch":"wi-1"}"#));
+    }
+
+    #[test]
+    fn create_session_sends_the_project_source_descriptor() {
+        let (seen, transport) = scripted(200, r#"{"id":"s","name":"n","cwd":"/proj"}"#);
+        let mut spec = CreateSession::new("n", "/proj");
+        spec.source = Some(SourceDescriptor {
+            location: vogt_engine_contract::source::SourceLocation::Graft {
+                endpoint: "http://graft.test".to_string(),
+                repo: "vogt".to_string(),
+            },
+            reference: "rust-2".to_string(),
+            landing: vogt_engine_contract::source::LandingMode::Line,
+        });
+        client(transport).create_session(&spec).unwrap();
+        assert!(seen.lock().unwrap()[0].contains(
+            r#""source":{"location":{"kind":"graft","endpoint":"http://graft.test","repo":"vogt"},"ref":"rust-2","landing":"line"}"#
+        ));
     }
 
     #[test]
