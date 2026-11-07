@@ -46,6 +46,7 @@ fn test_config() -> Config {
         codex_session_id: false,
         codex_approval_policy: "never".to_string(),
         agent_auth_secrets: vec![],
+        agent_auth_secrets_file: None,
         agent_grant_projects: vec![],
         // The synthetic agent CLI is registered as a session preset in the
         // *test* config — never the production defaults — so agent-task
@@ -16868,6 +16869,145 @@ async fn a_launch_with_the_secrets_manager_down_degrades_and_recovers_without_re
         &["granted=[ALPHA] alpha=[alpha-value]"],
     )
     .await;
+}
+
+/// WI-3491: a line added to `ENGINE_AGENT_AUTH_SECRETS_FILE` after the engine
+/// started is resolved by the next session launch — the real `agent-auth.sh`
+/// exports it — with no engine restart; a name in no manifest is refused.
+#[tokio::test]
+async fn a_manifest_line_added_after_start_reaches_the_next_launch() {
+    for tool in ["jq", "curl", "timeout"] {
+        if std::process::Command::new(tool)
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipping: the launch uses {tool}");
+            return;
+        }
+    }
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../deploy/agent-auth.sh")
+        .canonicalize()
+        .unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let bin = tmp.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let write_exec = |name: &str, body: &str| {
+        use std::os::unix::fs::PermissionsExt;
+        let path = bin.join(name);
+        std::fs::write(&path, body).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    write_exec("vogt-mcp-bootstrap", "#!/bin/sh\nexit 0\n");
+    write_exec("infisical", "#!/bin/sh\nprintf tok-123\n");
+    let api = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api_url = format!("http://{}", api.local_addr().unwrap());
+    tokio::spawn(async move {
+        let app = axum::Router::new().route(
+            "/api/v4/secrets",
+            axum::routing::get(|| async {
+                axum::Json(json!({ "secrets": [
+                    { "secretKey": "ALPHA", "secretValue": "alpha-value" },
+                    { "secretKey": "PROVIDER_KEY", "secretValue": "provider-value" }
+                ]}))
+            }),
+        );
+        axum::serve(api, app).await.unwrap()
+    });
+
+    let manifest_file = tmp.path().join("agent-auth-secrets");
+    let mut cfg = broker_config(&tmp, "ALPHA proj-a ALPHA\n");
+    // The real helper, so the launch is the one a deployment runs and the
+    // engine re-grants it the live manifest.
+    cfg.agent_auth_helper = script.clone();
+    cfg.agent_auth_secrets_file = Some(manifest_file.clone());
+    let (base, state, _h) = boot_with_state(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let start = |name: &'static str| {
+        let client = client.clone();
+        let base = base.clone();
+        let script = script.display().to_string();
+        let (path, api_url, bin) = (path.clone(), api_url.clone(), bin.clone());
+        async move {
+            client
+                .post(format!("{base}/api/sessions"))
+                .json(&json!({
+                    "name": name,
+                    "command": [script, "run", "--", "/bin/bash", "-c",
+                        "echo \"granted=[$AGENT_AUTH_GRANTED] provider=[${PROVIDER_KEY:-}] file=[${ENGINE_AGENT_AUTH_SECRETS_FILE:-}]\"; sleep 30"],
+                    // No manifest here: it is the engine's to hand over.
+                    "env": [
+                        ["PATH", path],
+                        ["VOGT_MCP_BOOTSTRAP", bin.join("vogt-mcp-bootstrap").display().to_string()],
+                        ["ENGINE_AGENT_AUTH_TIMEOUT", "5"],
+                        ["INFISICAL_API_URL", format!("{api_url}/api")],
+                        ["INFISICAL_CLIENT_ID", "id"],
+                        ["INFISICAL_CLIENT_SECRET", "secret"],
+                    ],
+                }))
+                .send()
+                .await
+                .unwrap()
+                .json::<Value>()
+                .await
+                .unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        }
+    };
+
+    // Before the line: the stack's manifest only.
+    let before = start("before-the-line").await;
+    live_output_containing(
+        &client,
+        &base,
+        &before,
+        &["granted=[ALPHA] provider=[] file=[]"],
+    )
+    .await;
+    let session: uuid::Uuid = before.parse().unwrap();
+    let token = state.sessions.secret_broker().issue(session);
+    let plain = reqwest::Client::new();
+    let fetch = |var: &str| format!("{base}/api/agent-auth/fetch/{var}");
+    let r = plain
+        .post(fetch("PROVIDER_KEY"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 403, "an unlisted name is refused");
+
+    // The operator adds a line; the same engine, no restart.
+    std::fs::write(&manifest_file, "PROVIDER_KEY proj-a PROVIDER_KEY\n").unwrap();
+    let after = start("after-the-line").await;
+    live_output_containing(
+        &client,
+        &base,
+        &after,
+        &["granted=[ALPHA PROVIDER_KEY] provider=[provider-value] file=[]"],
+    )
+    .await;
+    // And the broker's policy follows the file too.
+    let r = plain
+        .post(fetch("PROVIDER_KEY"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_ne!(r.status(), 403, "a listed name passes the manifest check");
+    let r = plain
+        .post(fetch("NEVER_LISTED"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 403);
 }
 
 // ---- Pod-backed sessions: the engine side of the session-agent stream ------

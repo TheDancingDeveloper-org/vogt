@@ -3129,6 +3129,7 @@ mod tests {
             codex_session_id: false,
             codex_approval_policy: "never".to_string(),
             agent_auth_secrets: vec![],
+            agent_auth_secrets_file: None,
             agent_grant_projects: vec![],
             session_templates: vec![],
             pod_backends_enabled: false,
