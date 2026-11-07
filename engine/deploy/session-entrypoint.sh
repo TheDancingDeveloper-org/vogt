@@ -195,7 +195,7 @@ git_view() {
   command -v git >/dev/null 2>&1 || return 0
   [ -e "$work_dir/.git" ] && return 0
   gv() { git -C "$work_dir" -c user.name=graft -c user.email=graft@localhost -c core.hooksPath=/dev/null "$@"; }
-  gg() { graft --token-file "$graft_token_file" -C "$work_dir" "$@"; }
+  gg() { graft --token-file "$source_token_file" -C "$work_dir" "$@"; }
   gv init -q 2>/dev/null || return 0
   printf '.graft/\n.vogt/\n' >"$work_dir/.git/info/exclude"
   gv add -A -f -- . ':(exclude).graft' ':(exclude).vogt' >/dev/null 2>&1 || return 0
