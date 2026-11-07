@@ -12,6 +12,7 @@ name = "vogt-core"
 path = "src/main.rs"
 
 [dependencies]
+vogt-engine-contract = { path = "../contract", version = "0.1.0" }
 axum = { version = "0.8", features = ["macros"] }
 futures-util = "0.3"
 axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
