@@ -1255,6 +1255,14 @@ impl SessionRegistry {
                 spec.command = Some(rewritten);
             }
         }
+        // WI-3491. The registered LLM providers, as this launch's own
+        // `model_providers`; their keys come through the manifest.
+        if let Some(command) = spec.command.as_deref() {
+            let providers = self.secret_broker.providers();
+            if let Some(rewritten) = agent_cli::with_codex_providers(command, &providers) {
+                spec.command = Some(rewritten);
+            }
+        }
         // WI-2038. The scope's charters ride in Codex's standing
         // instructions as well as in the brief, after the workspace guidance.
         if let (Some(command), Some(charter)) = (spec.command.as_deref(), spec.charter.as_deref()) {

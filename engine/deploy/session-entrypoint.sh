@@ -119,16 +119,20 @@ fi
 if [ "$VOGT_CLI" = codex ] && [ -n "$(jq -r '.codex_config // empty' "$response")" ]; then
   codex_home=${CODEX_HOME:-$HOME/.codex}; mkdir -p "$codex_home"; chmod 700 "$codex_home"
   codex_cfg="$codex_home/config.toml"
+  # The LLM providers the engine registered for this launch (WI-3491) replace
+  # any table of the same name: the merged file must not declare one twice.
+  codex_providers=$(jq -r '.codex_config' "$response" | sed -n 's/^\[model_providers\.\([a-z0-9_-]*\)\]$/\1/p' | paste -sd'|' -)
   if [ -f "$codex_cfg" ]; then
     # Drop earlier vogt/cadastre MCP server definitions, keep the rest. A table
     # header is compared with its spaces and quotes removed, so [mcp_servers."vogt"],
     # [ mcp_servers . 'vogt' ] and [mcp_servers.vogt.env] all match, as do
     # single-line dotted keys (mcp_servers.vogt.url = ... at the top level, vogt.url
     # = ... under [mcp_servers]). A multi-line value on such a dotted key is not split.
-    awk '
+    awk -v providers="$codex_providers" '
       /^[ \t]*\[\[?[^][]*\]\]?[ \t]*(#.*)?$/ {
         h = $0; sub(/[ \t]*#.*$/, "", h); gsub(/[ \t"\047]/, "", h)
         skip = (h ~ /^\[\[?mcp_servers\.(vogt|cadastre)(\.|\])/)
+        if (providers != "" && h ~ ("^\\[model_providers\\.(" providers ")(\\.|\\])")) skip = 1
         root = (h == "[mcp_servers]") ? 2 : 0
         if (skip) next
         print; next
