@@ -18429,8 +18429,9 @@ async fn a_manifest_line_added_after_start_reaches_the_next_launch() {
 }
 
 /// WI-3491: a provider registered after the engine started reaches the next
-/// host Codex launch, its table as a `-c` override and its key resolved by
-/// the real `agent-auth.sh`; removed, the next launch has neither.
+/// host Codex launch whose model it lists, as `-c model_provider` plus its
+/// table and its key resolved by the real `agent-auth.sh`; removed, the next
+/// launch has none of them.
 #[tokio::test]
 async fn a_registered_llm_provider_reaches_the_next_codex_launch_and_leaves_with_it() {
     for tool in ["jq", "curl", "timeout"] {
@@ -18461,7 +18462,7 @@ async fn a_registered_llm_provider_reaches_the_next_codex_launch_and_leaves_with
     // A stand-in Codex: says which provider overrides it got and its key.
     write_exec(
         "codex",
-        "#!/bin/sh\nprov=$(printf '%s\\n' \"$@\" | sed -n 's/^model_providers\\.\\([a-z]*\\)=.*/\\1/p' | tr '\\n' ,)\necho \"providers=[$prov] key=[${DS_KEY:-}]\"\nexec sleep 30\n",
+        "#!/bin/sh\nprov=$(printf '%s\\n' \"$@\" | sed -n 's/^model_providers\\.\\([a-z]*\\)=.*/\\1/p' | tr '\\n' ,)\nsel=$(printf '%s\\n' \"$@\" | sed -n 's/^model_provider=//p')\necho \"selected=[$sel] providers=[$prov] key=[${DS_KEY:-}]\"\nexec sleep 30\n",
     );
     let api = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let api_url = format!("http://{}", api.local_addr().unwrap());
@@ -18497,7 +18498,7 @@ async fn a_registered_llm_provider_reaches_the_next_codex_launch_and_leaves_with
                 .post(format!("{base}/api/sessions"))
                 .json(&json!({
                     "name": name,
-                    "command": [script, "run", "--", bin.join("codex").display().to_string()],
+                    "command": [script, "run", "--", bin.join("codex").display().to_string(), "-m", "ds-model"],
                     "env": [
                         ["PATH", path],
                         ["VOGT_MCP_BOOTSTRAP", bin.join("vogt-mcp-bootstrap").display().to_string()],
@@ -18521,13 +18522,25 @@ async fn a_registered_llm_provider_reaches_the_next_codex_launch_and_leaves_with
 
     std::fs::write(
         &registry,
-        "[[provider]]\nname = \"ds\"\nbase_url = \"http://litellm/v1\"\nwire_api = \"chat\"\nenv_key = \"DS_KEY\"\nsecret_project = \"proj-a\"\nsecret_name = \"ds-secret\"\n",
+        "[[provider]]\nname = \"ds\"\nbase_url = \"http://litellm/v1\"\nwire_api = \"chat\"\nenv_key = \"DS_KEY\"\nsecret_project = \"proj-a\"\nsecret_name = \"ds-secret\"\nmodels = [\"ds-model\"]\n",
     )
     .unwrap();
     let with = start("registered").await;
-    live_output_containing(&client, &base, &with, &["providers=[ds,] key=[ds-value]"]).await;
+    live_output_containing(
+        &client,
+        &base,
+        &with,
+        &["selected=[\"ds\"] providers=[ds,] key=[ds-value]"],
+    )
+    .await;
 
     std::fs::write(&registry, "").unwrap();
     let without = start("removed").await;
-    live_output_containing(&client, &base, &without, &["providers=[] key=[]"]).await;
+    live_output_containing(
+        &client,
+        &base,
+        &without,
+        &["selected=[] providers=[] key=[]"],
+    )
+    .await;
 }
