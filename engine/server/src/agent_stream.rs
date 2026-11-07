@@ -1415,12 +1415,9 @@ mod tests {
             req.source.as_ref().unwrap(),
             None,
         );
-        assert_eq!(
-            env["GRAFT_ENDPOINT"],
-            "http://graft-dev.graft-dev.svc:17888"
-        );
-        assert_eq!(env["GRAFT_LINE"], "rust-2");
-        assert_eq!(env["VOGT_GRAFT_LINE"], "rust-2");
+        assert_eq!(env["GRAFT_ENDPOINT"], "http://graft");
+        assert!(!env.contains_key("GRAFT_LINE"));
+        assert!(!env.contains_key("VOGT_GRAFT_LINE"));
         let git = SourceDescriptor {
             location: vogt_engine_contract::source::SourceLocation::Git {
                 url: "https://example.test/vogt.git".into(),
