@@ -227,6 +227,75 @@ pub fn parse_manifest(text: &str) -> Result<Vec<ManifestSecret>, String> {
     Ok(entries)
 }
 
+impl ManifestSecret {
+    /// This entry as one manifest line, in the grammar [`parse_manifest`]
+    /// reads — how a composed manifest is handed to the helper.
+    pub fn line(&self) -> String {
+        let mut flags = Vec::new();
+        match self.policy {
+            ManifestPolicy::Required => {}
+            ManifestPolicy::Optional => flags.push("optional"),
+            ManifestPolicy::OnDemand => flags.push("ondemand"),
+        }
+        if self.writable {
+            flags.push("writable");
+        }
+        let mut line = format!("{} {} {}", self.var, self.project_id, self.secret_name);
+        if !flags.is_empty() {
+            line.push(' ');
+            line.push_str(&flags.join(","));
+        }
+        line
+    }
+}
+
+/// The manifest as it stands now (WI-3491): the deploy-time entries plus the
+/// lines of `file`, read afresh on every call. A missing file adds nothing,
+/// so a deployment may name the path before it writes anything there. A VAR
+/// the file declares twice, or that the deploy-time manifest already
+/// declares, is an error: a live edit never silently shadows a stack line.
+pub fn compose_manifest(
+    inline: &[ManifestSecret],
+    file: Option<&std::path::Path>,
+) -> Result<Vec<ManifestSecret>, String> {
+    let mut entries = inline.to_vec();
+    let Some(path) = file else {
+        return Ok(entries);
+    };
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(entries),
+        Err(e) => {
+            return Err(format!(
+                "reading ENGINE_AGENT_AUTH_SECRETS_FILE ({}): {e}",
+                path.display()
+            ))
+        }
+    };
+    let added = parse_manifest(&text).map_err(|e| {
+        format!(
+            "in ENGINE_AGENT_AUTH_SECRETS_FILE ({}): {e}",
+            path.display()
+        )
+    })?;
+    for entry in added {
+        if entries.iter().any(|known| known.var == entry.var) {
+            return Err(format!(
+                "ENGINE_AGENT_AUTH_SECRETS_FILE ({}) declares {} again; each VAR is declared once across ENGINE_AGENT_AUTH_SECRETS and the file",
+                path.display(),
+                entry.var
+            ));
+        }
+        entries.push(entry);
+    }
+    Ok(entries)
+}
+
+/// [`ManifestSecret::line`] for every entry, one per line.
+pub fn render_manifest(entries: &[ManifestSecret]) -> String {
+    entries.iter().map(|entry| entry.line() + "\n").collect()
+}
+
 fn is_env_name(name: &str) -> bool {
     let mut chars = name.chars();
     matches!(chars.next(), Some(c) if c == '_' || c.is_ascii_alphabetic())
@@ -308,7 +377,11 @@ impl StoreOutcome {
 pub struct SecretBroker {
     bind: SocketAddr,
     helper: PathBuf,
+    /// The deploy-time entries, `ENGINE_AGENT_AUTH_SECRETS`. Policy is these
+    /// plus `manifest_file`, read live by [`Self::manifest`].
     manifest: Vec<ManifestSecret>,
+    /// `ENGINE_AGENT_AUTH_SECRETS_FILE`, re-read on every check and launch.
+    manifest_file: Option<PathBuf>,
     /// Session id → SHA-256 of that session's broker token. The plaintext is
     /// handed to the child once and never stored.
     grants: DashMap<Uuid, [u8; 32]>,
@@ -398,6 +471,7 @@ impl SecretBroker {
             cfg.agent_auth_helper.clone(),
             cfg.agent_auth_secrets.clone(),
         )
+        .with_manifest_file(cfg.agent_auth_secrets_file.clone())
     }
 
     /// The three things the broker needs, and nothing else of the config.
@@ -406,10 +480,38 @@ impl SecretBroker {
             bind,
             helper,
             manifest,
+            manifest_file: None,
             grants: DashMap::new(),
             grant_projects: Vec::new(),
             session_grants: DashMap::new(),
         }
+    }
+
+    /// Read the live part of the manifest from `path` at each use.
+    pub fn with_manifest_file(mut self, path: Option<PathBuf>) -> Self {
+        self.manifest_file = path;
+        self
+    }
+
+    /// The manifest as it stands now: the deploy-time entries plus the
+    /// manifest file's. A file that cannot be used contributes nothing and
+    /// is logged (path and parse error, which carry names, never values), so
+    /// a bad live edit narrows sessions to the deploy-time manifest rather
+    /// than stopping launches.
+    pub fn manifest(&self) -> Vec<ManifestSecret> {
+        compose_manifest(&self.manifest, self.manifest_file.as_deref()).unwrap_or_else(|error| {
+            tracing::warn!(%error, "agent-auth manifest file ignored");
+            self.manifest.clone()
+        })
+    }
+
+    /// The composed manifest text for the helper's `ENGINE_AGENT_AUTH_SECRETS`,
+    /// or `None` when there is no manifest file, so a deployment without one
+    /// hands the helper exactly the variable it set.
+    pub fn live_manifest_text(&self) -> Option<String> {
+        self.manifest_file
+            .as_ref()
+            .map(|_| render_manifest(&self.manifest()))
     }
 
     /// Open more projects to approved grants than the manifest names.
@@ -421,7 +523,7 @@ impl SecretBroker {
     /// Whether an approved grant may fetch from `project`: one the manifest
     /// already names, or one the deployment opened to grants.
     pub fn project_grantable(&self, project: &str) -> bool {
-        self.manifest.iter().any(|e| e.project_id == project)
+        self.manifest().iter().any(|e| e.project_id == project)
             || self.grant_projects.iter().any(|p| p == project)
     }
 
@@ -550,8 +652,10 @@ impl SecretBroker {
     /// Brokering exists only where a deployment declared something to broker.
     /// With an empty manifest the route answers 503 with that reason and no
     /// session is handed a token (absence is a reported state).
+    /// A configured manifest file counts even while empty: a session launched
+    /// before a line is added can then fetch it once it is.
     pub fn enabled(&self) -> bool {
-        !self.manifest.is_empty()
+        !self.manifest.is_empty() || self.manifest_file.is_some()
     }
 
     /// Mint a fresh token for `session`, replacing any earlier one, and return
@@ -595,7 +699,7 @@ impl SecretBroker {
 
     /// The manifest entry for `var`, if the deployment declared one.
     pub fn permitted(&self, var: &str) -> Option<ManifestSecret> {
-        self.manifest.iter().find(|entry| entry.var == var).cloned()
+        self.manifest().into_iter().find(|entry| entry.var == var)
     }
 
     /// The manifest entry for `var`, but only when the deployment flagged it
@@ -603,10 +707,9 @@ impl SecretBroker {
     /// name that is declared but not writable returns `None` here; the handler
     /// tells the two apart with `permitted` to give a distinct refusal.
     pub fn permitted_write(&self, var: &str) -> Option<ManifestSecret> {
-        self.manifest
-            .iter()
+        self.manifest()
+            .into_iter()
             .find(|entry| entry.var == var && entry.writable)
-            .cloned()
     }
 
     /// Where a session reaches this engine: loopback, on whatever port the
@@ -652,6 +755,9 @@ impl SecretBroker {
             .envs(pty::agent_auth_helper_env());
         if let Some(manifest) = manifest {
             cmd.env("ENGINE_AGENT_AUTH_SECRETS", manifest);
+        } else if let Some(live) = self.live_manifest_text() {
+            // The helper re-checks the manifest: give it the one in force now.
+            cmd.env("ENGINE_AGENT_AUTH_SECRETS", live);
         }
         cmd.stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
@@ -693,8 +799,11 @@ impl SecretBroker {
             .arg(&entry.var)
             .env_clear()
             .envs(pty::sanitized_child_env())
-            .envs(pty::agent_auth_helper_env())
-            .stdin(std::process::Stdio::piped())
+            .envs(pty::agent_auth_helper_env());
+        if let Some(live) = self.live_manifest_text() {
+            cmd.env("ENGINE_AGENT_AUTH_SECRETS", live);
+        }
+        cmd.stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
@@ -1261,6 +1370,69 @@ mod tests {
     fn empty_and_comment_only_manifests_declare_nothing() {
         assert!(parse_manifest("").unwrap().is_empty());
         assert!(parse_manifest("# nothing\n\n   \n").unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_rendered_manifest_parses_back_to_the_same_entries() {
+        let text = "A p a\nB p b optional\nC p c ondemand,writable\nD p d writable\n";
+        let entries = parse_manifest(text).unwrap();
+        assert_eq!(parse_manifest(&render_manifest(&entries)).unwrap(), entries);
+    }
+
+    #[test]
+    fn the_manifest_file_is_read_live_and_never_shadows_a_stack_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("manifest");
+        let inline = parse_manifest("STACK proj stack\n").unwrap();
+        let broker = SecretBroker::with(
+            "127.0.0.1:8910".parse().unwrap(),
+            PathBuf::from("/bin/false"),
+            inline.clone(),
+        )
+        .with_manifest_file(Some(file.clone()));
+
+        // No file yet: the stack's lines only, and the broker is still on so
+        // a session launched now can fetch a line added later.
+        assert!(broker.enabled());
+        assert_eq!(broker.manifest(), inline);
+        assert!(broker.permitted("LATER").is_none());
+
+        // A line added after the broker was built is policy at once.
+        std::fs::write(&file, "LATER proj later ondemand,writable\n").unwrap();
+        assert_eq!(broker.permitted("LATER").unwrap().secret_name, "later");
+        assert!(broker.permitted_write("LATER").is_some());
+        assert!(broker.project_grantable("proj"));
+        let text = broker.live_manifest_text().unwrap();
+        assert!(text.contains("STACK proj stack\n"), "{text}");
+        assert!(
+            text.contains("LATER proj later ondemand,writable\n"),
+            "{text}"
+        );
+
+        // Removed from the file: refused again.
+        std::fs::write(&file, "").unwrap();
+        assert!(broker.permitted("LATER").is_none());
+
+        // The file re-declaring a stack VAR is refused, and a refused file
+        // adds nothing: the stack's manifest stays in force.
+        std::fs::write(&file, "STACK other other\nEXTRA proj extra\n").unwrap();
+        let err = compose_manifest(&inline, Some(&file)).unwrap_err();
+        assert!(err.contains("declares STACK again"), "{err}");
+        assert_eq!(broker.manifest(), inline);
+        assert!(broker.permitted("EXTRA").is_none());
+
+        // So is a malformed line.
+        std::fs::write(&file, "BROKEN proj\n").unwrap();
+        assert!(compose_manifest(&inline, Some(&file))
+            .unwrap_err()
+            .contains("malformed"));
+        assert_eq!(broker.manifest(), inline);
+    }
+
+    #[test]
+    fn without_a_manifest_file_the_helper_keeps_the_engines_variable() {
+        let broker = broker_with("A proj a\n", "127.0.0.1:8910");
+        assert!(broker.live_manifest_text().is_none());
     }
 
     fn broker_with(manifest: &str, bind: &str) -> SecretBroker {
