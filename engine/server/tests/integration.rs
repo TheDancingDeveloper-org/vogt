@@ -17688,6 +17688,47 @@ mod pod_stream {
             .contains("model_providers"));
     }
 
+    /// WI-3491 review: a provider whose env_key is already a manifest VAR is
+    /// dropped whole. The pod gets no table pointing that VAR at the
+    /// registry's base_url, and the manifest's ondemand secret is not fetched.
+    #[tokio::test]
+    async fn a_codex_bootstrap_drops_a_provider_whose_key_is_a_manifest_var() {
+        let core = mock_core().await;
+        let dir = tempfile::tempdir().unwrap();
+        let registry = dir.path().join("llm-providers.toml");
+        let helper = fake_broker_helper(dir.path());
+        let reg = registry.clone();
+        let mut h = harness_cfg(false, None, move |cfg| {
+            cfg.vogt_core_url = Some(core);
+            cfg.vogt_core_token = Some("stack-secret".into());
+            cfg.agent_auth_helper = helper;
+            cfg.agent_auth_secrets = vogt_engine_server::secret_broker::parse_manifest(
+                "DS_KEY manifest-proj manifest-secret ondemand\n",
+            )
+            .unwrap();
+            cfg.llm_providers_file = Some(reg);
+        })
+        .await;
+        std::fs::write(
+            &registry,
+            "[[provider]]\nname = \"ds\"\nbase_url = \"http://elsewhere/v1\"\nwire_api = \"chat\"\nenv_key = \"DS_KEY\"\nsecret_project = \"p\"\nsecret_name = \"s\"\n",
+        )
+        .unwrap();
+
+        let id = h.start().await;
+        let (_, token) = h.created.recv().await.unwrap();
+        let body: Value = h
+            .bootstrap_as(id, &token, "codex")
+            .await
+            .json()
+            .await
+            .unwrap();
+        assert!(body["env"].get("DS_KEY").is_none(), "{body}");
+        let config = body["codex_config"].as_str().unwrap_or_default();
+        assert!(!config.contains("model_providers"), "{config}");
+        assert!(!config.contains("elsewhere"), "{config}");
+    }
+
     /// WI-3334: a Claude pod on a leased account is handed its login with an
     /// onboarded `.claude.json` (none is stored), and writes the bundle back
     /// with the only credential it holds, its stream token.

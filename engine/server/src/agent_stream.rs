@@ -806,8 +806,14 @@ pub async fn bootstrap(
         if !providers.is_empty() {
             let tables = crate::llm_providers::codex_config_tables(&providers);
             codex_config = Some(codex_config.unwrap_or_default() + "\n" + &tables);
-            for entry in crate::llm_providers::manifest_entries(&providers) {
-                let Some(entry) = broker.permitted(&entry.var) else {
+            for wanted in crate::llm_providers::manifest_entries(&providers) {
+                // Fetch only the registry's own secret: a permitted entry that
+                // names another project or secret is some other manifest line,
+                // whose policy this path must not bypass.
+                let Some(entry) = broker.permitted(&wanted.var).filter(|e| {
+                    e.project_id == wanted.project_id && e.secret_name == wanted.secret_name
+                }) else {
+                    tracing::warn!(session = %id, var = %wanted.var, "provider key is not the registry's entry; not resolved for pod launch");
                     continue;
                 };
                 match broker.fetch(&entry).await {

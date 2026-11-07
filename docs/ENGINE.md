@@ -4584,8 +4584,14 @@ At each launch the registry does two things, and nothing else:
 
 - Each provider's `env_key` joins the agent-auth manifest as an `optional`
   line (`env_key secret_project secret_name`). The helper resolves it into the
-  session, and the broker's policy covers it. A provider key never shadows a
-  manifest line, and a name in no manifest and no registry is still refused.
+  session, and the broker's policy covers it. A name in no manifest and no
+  registry is still refused. A provider whose `env_key` is already a VAR in
+  `ENGINE_AGENT_AUTH_SECRETS` or the manifest file is dropped whole: it gets
+  no Codex table and no key fetch, and is logged by provider and VAR name.
+  Otherwise its table would point that VAR, which holds the manifest's
+  secret, at the registry's `base_url`, and the pod fetch would bypass the
+  manifest line's `ondemand` or `writable` policy. A pod fetches a provider
+  key only when the live entry names the registry's own project and secret.
 - A Codex session gets one `model_providers.<name>` table per provider. A
   host launch gets them as `-c` overrides on its argv, so the shared
   `~/.codex/config.toml` is never rewritten. A pod gets them in the
@@ -4608,6 +4614,15 @@ key. To add a provider live:
    mount the stack does not recreate.
 3. Start a Codex session with `--model <model> -c model_provider=<name>`, or
    point a template at it. Host and pod sessions both pick it up.
+
+**Who may write these files.** The manifest file and the provider registry
+decide which secrets reach sessions and where a key is sent, so a session
+must never be able to edit them. Keep both owned by a user other than the
+session user (root, or the engine's own user when sessions run as another),
+and read-only to the session user, for example mode `0644` or `0640` with a
+group the session user is in. Do not keep them in a session's workspace, its
+home directory, or any directory the session user can write to, since a
+writable directory lets the file be replaced.
 
 **Opting out of the boundary: identity passthrough.** A deployment may
 decide the manifest boundary is not earning its keep and hand sessions the full
