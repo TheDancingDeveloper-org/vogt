@@ -699,6 +699,26 @@ pub fn with_codex_guidance(
     Some(out)
 }
 
+/// `command` with one `-c model_providers.<name>=…` override per registered
+/// LLM provider inserted right after the Codex binary (WI-3491), or `None`
+/// when it is not a Codex launch or nothing is registered. The shared
+/// `~/.codex/config.toml` is not touched, so the providers are this launch's.
+pub fn with_codex_providers(
+    command: &[String],
+    providers: &[crate::llm_providers::Provider],
+) -> Option<Vec<String>> {
+    if providers.is_empty() || agent_name(command).as_deref() != Some("codex") {
+        return None;
+    }
+    let (idx, _) = agent_binary(command);
+    let mut out = command.to_vec();
+    out.splice(
+        idx + 1..idx + 1,
+        crate::llm_providers::codex_overrides(providers),
+    );
+    Some(out)
+}
+
 /// Linux caps one argv entry at 128 KiB; a charter that would push Codex's
 /// `developer_instructions` past this stays in the brief alone.
 const MAX_CHARTER_ARG_BYTES: usize = 120 * 1024;
@@ -866,6 +886,25 @@ mod tests {
         assert!(body.contains("WS \"quoted\""));
         assert!(body.ends_with("## Charters\n\nNo brand names."));
         assert!(body.find("WS").unwrap() < body.find("No brand names.").unwrap());
+    }
+
+    #[test]
+    fn codex_providers_ride_after_the_wrapped_binary_and_only_on_codex() {
+        let providers = crate::llm_providers::parse(
+            "[[provider]]\nname = \"ds\"\nbase_url = \"http://l/v1\"\nwire_api = \"chat\"\nenv_key = \"DS_KEY\"\nsecret_project = \"p\"\nsecret_name = \"s\"\n",
+        )
+        .unwrap();
+        let wrapped: Vec<String> = ["vogt-agent-auth", "run", "--", "codex", "--model", "m"]
+            .map(String::from)
+            .to_vec();
+        let out = with_codex_providers(&wrapped, &providers).unwrap();
+        assert_eq!(&out[..4], &wrapped[..4]);
+        assert_eq!(out[4], "-c");
+        assert!(out[5].starts_with("model_providers.ds={"), "{}", out[5]);
+        assert_eq!(&out[6..], &wrapped[4..]);
+        let claude: Vec<String> = vec!["claude".into()];
+        assert!(with_codex_providers(&claude, &providers).is_none());
+        assert!(with_codex_providers(&wrapped, &[]).is_none());
     }
 
     #[test]
