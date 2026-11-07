@@ -2895,6 +2895,7 @@ struct Subject {
     name: String,
     brief: ComposedBrief,
     is_scratch: bool,
+    source: Option<vogt_engine_contract::source::SourceDescriptor>,
 }
 
 /// The project and work item a session opens on, and the directory it runs in.
@@ -3061,6 +3062,7 @@ where
         }
         None => brief::brief_for_project(&project.slug, session_id, Some(&project)),
     };
+    let source = project_source(&project);
     Ok(Subject {
         session_id: session_id.to_string(),
         project_id: project.id,
@@ -3071,6 +3073,59 @@ where
         name,
         brief,
         is_scratch: false,
+        source,
+    })
+}
+
+fn project_source(
+    project: &crate::core::Project,
+) -> Option<vogt_engine_contract::source::SourceDescriptor> {
+    #[derive(serde::Deserialize)]
+    struct Landing {
+        #[serde(default)]
+        source: Option<vogt_engine_contract::source::SourceDescriptor>,
+        #[serde(default)]
+        base_branch: String,
+        #[serde(default)]
+        worker_lands_by: String,
+    }
+    let landing: Option<Landing> = project
+        .agent_policy
+        .landing
+        .as_ref()
+        .and_then(|value| serde_json::from_value(value.clone()).ok());
+    if let Some(source) = landing.as_ref().and_then(|landing| landing.source.clone()) {
+        return Some(source);
+    }
+    let url = project.repo_url.as_deref()?.trim();
+    if url.is_empty() {
+        return None;
+    }
+    let (reference, mode) = landing
+        .map(|landing| {
+            let reference = if landing.base_branch.trim().is_empty() {
+                "main".to_string()
+            } else {
+                landing.base_branch
+            };
+            let mode = if landing.worker_lands_by == "open_pr" {
+                vogt_engine_contract::source::LandingMode::OpenPr
+            } else {
+                vogt_engine_contract::source::LandingMode::PushBranch
+            };
+            (reference, mode)
+        })
+        .unwrap_or((
+            "main".to_string(),
+            vogt_engine_contract::source::LandingMode::PushBranch,
+        ));
+    Some(vogt_engine_contract::source::SourceDescriptor {
+        location: vogt_engine_contract::source::SourceLocation::Git {
+            url: url.to_string(),
+            repo: url.to_string(),
+        },
+        reference,
+        landing: mode,
     })
 }
 
@@ -3369,6 +3424,7 @@ where
     spec.permission_mode = Some(params.permission_mode.clone());
     spec.role = params.role.clone();
     spec.work_item = subject.work_item_ref.clone();
+    spec.source = subject.source.clone();
     spec.autopilot = autopilot;
     spec.prompt = Some(brief_with_task(
         &subject.brief.text,
@@ -4876,10 +4932,51 @@ mod tests {
     use crate::with_ctx;
 
     use super::{
-        answers_as_person, hibernate, input, relayed_overseer, remove_session_op,
+        answers_as_person, hibernate, input, project_source, relayed_overseer, remove_session_op,
         rename_session_op, session_token_op, type_then_submit, wake, HibernateParams, InputParams,
         WakeParams,
     };
+
+    #[test]
+    fn project_source_defaults_a_repository_to_git_main() {
+        let now = Moment::from_unix(0, 0);
+        let mut project = Project::new("p", "vogt", "Vogt", "/work", now);
+        project.repo_url = Some("https://github.com/indexarr/vogt.git".to_string());
+
+        let source = project_source(&project).expect("repository has a source");
+        assert_eq!(source.kind(), vogt_engine_contract::source::SourceKind::Git);
+        assert_eq!(source.reference, "main");
+        assert_eq!(
+            source.landing,
+            vogt_engine_contract::source::LandingMode::PushBranch
+        );
+    }
+
+    #[test]
+    fn project_source_preserves_a_graft_descriptor_from_landing_policy() {
+        let now = Moment::from_unix(0, 0);
+        let mut project = Project::new("p", "vogt", "Vogt", "/work", now);
+        project.agent_policy.landing = Some(json!({
+            "base_branch": "main",
+            "worker_lands_by": "graft",
+            "source": {
+                "location": {"kind": "graft", "endpoint": "http://graft.test", "repo": "vogt"},
+                "ref": "rust-2",
+                "landing": "line"
+            }
+        }));
+
+        let source = project_source(&project).expect("landing policy has a source");
+        assert_eq!(
+            source.kind(),
+            vogt_engine_contract::source::SourceKind::Graft
+        );
+        assert_eq!(source.reference, "rust-2");
+        assert_eq!(
+            source.landing,
+            vogt_engine_contract::source::LandingMode::Line
+        );
+    }
 
     /// An engine that records every request and answers from `script`: each GET
     /// of a session pops the next payload, and a write echoes its own body so
