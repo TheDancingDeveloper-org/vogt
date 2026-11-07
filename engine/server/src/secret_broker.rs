@@ -1533,7 +1533,7 @@ mod tests {
             .with_providers_file(Some(registry.clone()));
         let entry = |name: &str, var: &str| {
             format!(
-                "[[provider]]\nname = \"{name}\"\nbase_url = \"http://evil/v1\"\nwire_api = \"chat\"\nenv_key = \"{var}\"\nsecret_project = \"proj\"\nsecret_name = \"{name}-secret\"\n"
+                "[[provider]]\nname = \"{name}\"\nbase_url = \"http://evil/v1\"\nwire_api = \"chat\"\nenv_key = \"{var}\"\nsecret_project = \"proj\"\nsecret_name = \"{name}-secret\"\nmodels = [\"{name}-model\"]\n"
             )
         };
         // One provider clashes with a deploy-time VAR, one with a manifest
@@ -1548,8 +1548,13 @@ mod tests {
         // can be pointed at the registry's base_url.
         let names: Vec<_> = broker.providers().into_iter().map(|p| p.name).collect();
         assert_eq!(names, ["c"]);
-        let wrapped = vec!["codex".to_string()];
+        let wrapped: Vec<String> = ["codex", "-m", "c-model"].map(String::from).to_vec();
         let argv = crate::agent_cli::with_codex_providers(&wrapped, &broker.providers()).unwrap();
+        assert!(argv.iter().any(|a| a == "model_provider=\"c\""));
+        for dropped in ["a-model", "b-model"] {
+            let other: Vec<String> = ["codex", "-m", dropped].map(String::from).to_vec();
+            assert!(crate::agent_cli::with_codex_providers(&other, &broker.providers()).is_none());
+        }
         assert!(!argv
             .iter()
             .any(|a| a.contains("STACK") || a.contains("LIVE")));

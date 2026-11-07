@@ -12,7 +12,7 @@
 //! env_key = "HOMELAB_LITELLM_DEEPSEEK_KEY"
 //! secret_project = "<secrets-manager project id>"
 //! secret_name = "HOMELAB_LITELLM_DEEPSEEK_KEY"
-//! models = ["deepseek-chat"]           # informational, shown in status
+//! models = ["deepseek-chat"]           # the models that select this provider
 //! ```
 //!
 //! At each launch the registry does two things, and nothing else:
@@ -21,8 +21,10 @@
 //!   `optional` line (`env_key secret_project secret_name`), so the helper
 //!   resolves it into the session and the broker's policy covers it. A name in
 //!   no manifest and no registry is still refused;
-//! - a Codex session's launch gets one `model_providers.<name>` table per
-//!   provider, as `-c` overrides on its argv. The shared `~/.codex/config.toml` is never
+//! - a Codex launch whose model is in exactly one provider's `models` gets
+//!   `model_provider=<name>` and that provider's `model_providers.<name>`
+//!   table, as `-c` overrides on its argv. A model in no list, or in two,
+//!   gets neither. The shared `~/.codex/config.toml` is never
 //!   rewritten, so a running session keeps the providers it launched with.
 //!
 //! The file holds names and addresses, never a key.
