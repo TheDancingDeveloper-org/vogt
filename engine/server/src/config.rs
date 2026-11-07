@@ -377,6 +377,12 @@ pub struct Config {
     /// broker off. A malformed line is a startup error, not a silent skip —
     /// the helper would refuse every session launch over it anyway.
     pub agent_auth_secrets: Vec<crate::secret_broker::ManifestSecret>,
+    /// `ENGINE_AGENT_AUTH_SECRETS_FILE`: a manifest file, same grammar, that
+    /// the engine re-reads at every session launch and broker call (WI-3491).
+    /// Its lines add to `agent_auth_secrets`, so a deployment adds a secret
+    /// for sessions by editing the file — no engine restart. A missing file
+    /// adds nothing; a malformed one adds nothing and is logged.
+    pub agent_auth_secrets_file: Option<std::path::PathBuf>,
     /// `ENGINE_AGENT_GRANT_PROJECTS`: secrets-manager projects, beyond the
     /// ones the manifest already names, that a person-approved grant may
     /// fetch from (WI-973). Space- or comma-separated project ids.
@@ -900,6 +906,13 @@ pub fn load(
             )));
         }
     };
+    // Not parsed here: the file is live, read at each launch, so a bad edit
+    // never stops the engine from booting.
+    let agent_auth_secrets_file = engine_env("ENGINE_AGENT_AUTH_SECRETS_FILE")
+        .ok()
+        .map(|path| path.trim().to_string())
+        .filter(|path| !path.is_empty())
+        .map(std::path::PathBuf::from);
 
     // A file wins over a bare value everywhere it appears: a deployment that
     // brokered the token into a file has gone to the trouble deliberately,
@@ -999,6 +1012,7 @@ pub fn load(
         codex_session_id,
         codex_approval_policy,
         agent_auth_secrets,
+        agent_auth_secrets_file,
         agent_grant_projects: engine_env("ENGINE_AGENT_GRANT_PROJECTS")
             .map(|text| {
                 text.split(|c: char| c == ',' || c.is_whitespace())

@@ -218,6 +218,7 @@ fn test_config(stub: &str) -> Config {
         codex_session_id: false,
         codex_approval_policy: "never".to_string(),
         agent_auth_secrets: vec![],
+        agent_auth_secrets_file: None,
         agent_grant_projects: vec![],
         session_templates: vec![],
         assistant_api_key: Some("sk-test".into()),

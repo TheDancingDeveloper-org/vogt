@@ -944,6 +944,10 @@ pub struct SpawnDefaults<'a> {
     /// The session's credential for the on-demand secret broker, or
     /// `None` when the deployment declares nothing to broker.
     pub secret_broker: Option<crate::secret_broker::BrokerGrant>,
+    /// The agent-auth manifest in force at this launch (WI-3491), handed to
+    /// the helper as `ENGINE_AGENT_AUTH_SECRETS` in place of the engine's
+    /// boot-time copy. `None` keeps the engine's own variable.
+    pub agent_auth_manifest: Option<String>,
     /// Called once the child has exited and its output is drained, after
     /// `SessionKilled` is published. The registry uses it to forget the
     /// hibernation record of a session that ended (rather than hibernated).
@@ -1190,6 +1194,9 @@ pub fn spawn(
     if spawning_agent_auth_helper {
         for (k, v) in agent_auth_helper_env() {
             cmd.env(k, v);
+        }
+        if let Some(manifest) = defaults.agent_auth_manifest.as_ref() {
+            cmd.env("ENGINE_AGENT_AUTH_SECRETS", manifest);
         }
     }
     // An opted-in deployment (ENGINE_AGENT_AUTH_IDENTITY_PASSTHROUGH) hands

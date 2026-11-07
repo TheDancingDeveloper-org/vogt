@@ -29,6 +29,11 @@
 #                                  `writable` lets a session *store* VAR through
 #                                  the broker (`store`/`set`, below), audited by
 #                                  name; it is orthogonal to the read policy.
+#   ENGINE_AGENT_AUTH_SECRETS_FILE  (engine-side, WI-3491) a manifest file the
+#                                  engine re-reads at every launch; it hands
+#                                  this helper the composed manifest as
+#                                  ENGINE_AGENT_AUTH_SECRETS, so the helper
+#                                  itself never reads the file
 #   ENGINE_AGENT_AUTH_GH_TOKEN_FROM  a VAR from the manifest to also export as
 #                                    GH_TOKEN (the git/gh default identity).
 #   ENGINE_AGENT_AUTH_PROBES       optional `check` probes, one per line:
@@ -887,7 +892,7 @@ load_agent_environment() {
     # The manifest, the secret-name breadcrumbs and the passthrough switch itself
     # are engine config the launched shell never needs — dropped in either mode.
     # The brokered agent tokens exported above are kept — that is the whole point.
-    unset ENGINE_AGENT_AUTH_SECRETS \
+    unset ENGINE_AGENT_AUTH_SECRETS ENGINE_AGENT_AUTH_SECRETS_FILE \
         ENGINE_AGENT_AUTH_GH_TOKEN_FROM ENGINE_AGENT_AUTH_TOKEN_PROJECT_ID \
         ENGINE_AGENT_AUTH_PROBES ENGINE_AGENT_AUTH_IDENTITY_PASSTHROUGH \
         ENGINE_AGENT_AUTH_VOGT_SECRET_NAME \
