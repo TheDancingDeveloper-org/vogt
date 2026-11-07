@@ -4534,6 +4534,37 @@ rather than fetching it ad hoc. Honest caveat: the strip is a boundary between
 environment via `/proc/1/environ`, so the identity is out of the manifest's
 reach, not off the machine.
 
+**A live manifest file: adding a secret without a restart (WI-3491).**
+`ENGINE_AGENT_AUTH_SECRETS` is engine environment, so a line added there
+reaches sessions only once the stack is recreated, which also ends every
+session in it. `ENGINE_AGENT_AUTH_SECRETS_FILE` names a file with the same line
+grammar (`VAR PROJECT_ID SECRET_NAME [flags]`) that the engine re-reads at
+**every session launch and every broker call**. Its lines add to
+`ENGINE_AGENT_AUTH_SECRETS`. At each launch the engine hands the helper the
+composed manifest, and the broker's fetch, store and grant checks use the
+same live set. To make a new secret, such as an LLM provider key, reachable
+from sessions:
+
+1. Store the secret in the secrets manager.
+2. Append `PROVIDER_KEY <project-id> <secret-name>` to the manifest file. The
+   file must sit on a mount the stack does not recreate, such as the engine's
+   state volume or a host bind mount, and is edited in place there.
+3. Start a session. It holds `PROVIDER_KEY` and lists it in
+   `AGENT_AUTH_GRANTED`. Sessions already running keep the environment they
+   launched with; an `ondemand` line is fetchable from them at once.
+
+Removing a line drops it from the next launches and refuses later broker
+fetches of it. A missing file adds nothing, so a stack may name the path
+before writing it. A file that cannot be used adds nothing and is logged with
+its path and the reason, which carry names and never values; the stack's own
+manifest stays in force. Unusable means unreadable, a malformed line, a VAR
+declared twice, or a VAR that `ENGINE_AGENT_AUTH_SECRETS` already declares:
+a live edit never shadows a stack line. A name in neither is refused, as
+before. Flags, auditing, the identity strip and the withheld engine
+credentials are unchanged. Both modes honour the file. In identity mode it
+is how a secret lands in the session's environment at launch, ready for a
+CLI that reads its key from an environment variable.
+
 **Opting out of the boundary: identity passthrough.** A deployment may
 decide the manifest boundary is not earning its keep and hand sessions the full
 secrets-manager identity instead. Setting `ENGINE_AGENT_AUTH_IDENTITY_PASSTHROUGH=1`
@@ -4548,7 +4579,8 @@ withheld: the engine's own `ENGINE_TOKEN`, the stack secret and the
 assistant/STT/TTS keys never reach a session in either mode. The trade-off is
 explicit: passthrough removes the containment the manifest was meant to
 provide, in exchange for dropping its friction (every new secret otherwise
-needs a deployment configuration edit and an engine restart). It is
+needs a manifest line: an engine restart for `ENGINE_AGENT_AUTH_SECRETS`, or a
+live edit of `ENGINE_AGENT_AUTH_SECRETS_FILE`). It is
 defensible precisely because of the same-uid caveat above — an agent that
 shares the engine's uid can already reach the identity off the host, so in
 such a deployment the manifest is cost without a boundary. **Default is
