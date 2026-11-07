@@ -4842,6 +4842,7 @@ dependencies = [
  "tracing-subscriber",
  "unicode-general-category",
  "ureq",
+ "vogt-engine-contract",
 ]
 
 [[package]]
