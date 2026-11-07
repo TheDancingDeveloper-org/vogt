@@ -20,6 +20,7 @@ use std::{
 use subtle::ConstantTimeEq;
 use tokio::sync::{mpsc, Mutex, Notify};
 use uuid::Uuid;
+use vogt_engine_contract::source::SourceDescriptor;
 use vogt_session_agent::Frame;
 const BOOTSTRAP_TTL: Duration = Duration::from_secs(300);
 const AGENT_OUTPUT_CHANNEL_CAPACITY: usize = 16;
@@ -54,6 +55,7 @@ pub struct AgentAuth {
     /// Per-session graft tokens minted at pod create, held until the pod's
     /// bootstrap request takes them (or the pod is withdrawn or forgotten).
     graft_tokens: Mutex<HashMap<Uuid, PendingGraft>>,
+    sources: Mutex<HashMap<Uuid, SourceDescriptor>>,
     sessions: Mutex<HashMap<Uuid, SessionCredential>>,
     links: std::sync::Mutex<HashMap<Uuid, mpsc::UnboundedSender<Frame>>>,
     pods: std::sync::Mutex<HashMap<Uuid, Arc<PodLink>>>,
@@ -335,8 +337,8 @@ impl Read for PodReader {
 #[derive(Debug, Deserialize)]
 pub struct BootstrapRequest {
     pub session_id: String,
-    pub graft_repo: String,
-    pub graft_line: String,
+    #[serde(default)]
+    pub source: Option<SourceDescriptor>,
     pub cli: String,
     #[serde(default)]
     pub extra_ca_file: Option<String>,
@@ -346,6 +348,8 @@ pub struct BootstrapResponse {
     pub session_token: String,
     pub bundle: serde_json::Value,
     pub env: serde_json::Value,
+    /// The project-owned source selected for this session.
+    pub source: vogt_engine_contract::source::SourceDescriptor,
     pub brief: String,
     /// Graft credential for the session's repo and line, delivered to the
     /// entrypoint as a 0600 file rather than an environment value. Absent
@@ -369,31 +373,32 @@ pub struct BootstrapResponse {
 }
 
 /// The contract env the bootstrap response carries (the same fields as the
-/// pod's spec.env), as strings. Graft's endpoint is engine config.
+/// pod's spec.env), as strings.
 fn bootstrap_env(
     engine: String,
-    graft_endpoint: Option<String>,
     id: Uuid,
-    req: &BootstrapRequest,
+    cli: &str,
+    source: &SourceDescriptor,
+    extra_ca_file: Option<&str>,
 ) -> serde_json::Map<String, serde_json::Value> {
     let mut env = serde_json::Map::new();
     for (name, value) in [
         ("VOGT_ENGINE_URL", engine),
         ("VOGT_SESSION_ID", id.to_string()),
-        ("VOGT_GRAFT_REPO", req.graft_repo.clone()),
-        ("VOGT_GRAFT_LINE", req.graft_line.clone()),
-        ("GRAFT_LINE", req.graft_line.clone()),
-        ("VOGT_CLI", req.cli.clone()),
+        ("VOGT_CLI", cli.to_owned()),
     ] {
         env.insert(name.into(), serde_json::Value::String(value));
     }
-    if let Some(endpoint) = graft_endpoint {
-        env.insert("GRAFT_ENDPOINT".into(), serde_json::Value::String(endpoint));
+    if let vogt_engine_contract::source::SourceLocation::Graft { endpoint, .. } = &source.location {
+        env.insert(
+            "GRAFT_ENDPOINT".into(),
+            serde_json::Value::String(endpoint.clone()),
+        );
     }
-    if let Some(path) = req.extra_ca_file.as_ref() {
+    if let Some(path) = extra_ca_file {
         env.insert(
             "VOGT_EXTRA_CA_FILE".into(),
-            serde_json::Value::String(path.clone()),
+            serde_json::Value::String(path.to_owned()),
         );
     }
     env
@@ -429,6 +434,14 @@ pub fn global() -> Arc<AgentAuth> {
 }
 
 impl AgentAuth {
+    pub async fn issue_source(&self, id: Uuid, source: SourceDescriptor) {
+        self.sources.lock().await.insert(id, source);
+    }
+
+    pub async fn take_source(&self, id: Uuid) -> Option<SourceDescriptor> {
+        self.sources.lock().await.remove(&id)
+    }
+
     pub async fn issue(&self, id: Uuid, token: &[u8]) {
         self.pending.lock().await.insert(
             id,
@@ -724,7 +737,7 @@ pub async fn bootstrap(
             return (
                 StatusCode::BAD_REQUEST,
                 format!(
-                    "bootstrap needs a JSON body {{session_id, graft_repo, graft_line, cli}} \
+                    "bootstrap needs a JSON body {{session_id, source, cli}} \
                      with Content-Type: application/json: {}",
                     e.body_text()
                 ),
@@ -765,7 +778,22 @@ pub async fn bootstrap(
         }
     };
     let engine_endpoint = cfg.engine_endpoint.clone();
-    let mut env = bootstrap_env(cfg.engine_endpoint, cfg.graft_endpoint, id, &req);
+    let Some(source) = state.agent_auth.take_source(id).await else {
+        return (StatusCode::BAD_REQUEST, "session source is unavailable").into_response();
+    };
+    let mut env = bootstrap_env(
+        cfg.engine_endpoint,
+        id,
+        &req.cli,
+        &source,
+        req.extra_ca_file.as_deref(),
+    );
+    env.insert(
+        "VOGT_SOURCE_JSON".into(),
+        serde_json::to_string(&source)
+            .expect("source serializes")
+            .into(),
+    );
     // A Claude session gets what a host-launched one does: its own core
     // credential and the engine's MCP endpoints (WI-3243). The credential
     // travels in the environment, never in the config file.
@@ -882,6 +910,7 @@ pub async fn bootstrap(
         session_token,
         bundle: serde_json::Value::Object(bundle),
         env: serde_json::Value::Object(env),
+        source,
         graft_token,
         mcp_config,
         codex_config,
@@ -1368,16 +1397,23 @@ mod tests {
     fn bootstrap_env_carries_the_graft_endpoint_and_line() {
         let req = BootstrapRequest {
             session_id: String::new(),
-            graft_repo: "vogt".into(),
-            graft_line: "rust-2".into(),
+            source: Some(SourceDescriptor {
+                location: vogt_engine_contract::source::SourceLocation::Graft {
+                    endpoint: "http://graft".into(),
+                    repo: "vogt".into(),
+                },
+                reference: "rust-2".into(),
+                landing: vogt_engine_contract::source::LandingMode::Line,
+            }),
             cli: "claude".into(),
             extra_ca_file: None,
         };
         let env = bootstrap_env(
             "http://engine".into(),
-            Some("http://graft-dev.graft-dev.svc:17888".into()),
             Uuid::nil(),
-            &req,
+            &req.cli,
+            req.source.as_ref().unwrap(),
+            None,
         );
         assert_eq!(
             env["GRAFT_ENDPOINT"],
@@ -1385,7 +1421,18 @@ mod tests {
         );
         assert_eq!(env["GRAFT_LINE"], "rust-2");
         assert_eq!(env["VOGT_GRAFT_LINE"], "rust-2");
-        assert!(!bootstrap_env("e".into(), None, Uuid::nil(), &req).contains_key("GRAFT_ENDPOINT"));
+        let git = SourceDescriptor {
+            location: vogt_engine_contract::source::SourceLocation::Git {
+                url: "https://example.test/vogt.git".into(),
+                repo: "example.test/vogt".into(),
+            },
+            reference: "main".into(),
+            landing: vogt_engine_contract::source::LandingMode::PushBranch,
+        };
+        assert!(
+            !bootstrap_env("e".into(), Uuid::nil(), "claude", &git, None)
+                .contains_key("GRAFT_ENDPOINT")
+        );
     }
 
     #[tokio::test]
