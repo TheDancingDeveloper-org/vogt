@@ -686,10 +686,45 @@ pub fn with_codex_guidance(
     Some(out)
 }
 
-/// `command` with one `-c model_providers.<name>=…` override per registered
-/// LLM provider inserted right after the Codex binary (WI-3491), or `None`
-/// when it is not a Codex launch or nothing is registered. The shared
-/// `~/.codex/config.toml` is not touched, so the providers are this launch's.
+/// The model a Codex argv asks for: the last `-m`, `--model`, `--model=` or
+/// `-c model=` after the Codex binary, or `None` when it names none.
+fn codex_model(command: &[String]) -> Option<String> {
+    let (idx, _) = agent_binary(command);
+    let args = &command[idx + 1..];
+    let mut model = None;
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        let next = args.get(i + 1).map(String::as_str);
+        match arg {
+            "-m" | "--model" => {
+                model = next.map(str::to_owned);
+                i += 1;
+            }
+            "-c" | "--config" => {
+                if let Some(value) = next.and_then(|v| v.strip_prefix("model=")) {
+                    model = Some(value.trim_matches('"').to_owned());
+                }
+                i += 1;
+            }
+            _ => {
+                if let Some(value) = arg.strip_prefix("--model=") {
+                    model = Some(value.to_owned());
+                }
+            }
+        }
+        i += 1;
+    }
+    model.filter(|m| !m.is_empty())
+}
+
+/// `command` with `-c model_provider=<name>` and that provider's
+/// `-c model_providers.<name>=…` table inserted right after the Codex binary
+/// (WI-3491), when the launch's model is listed by exactly one registered LLM
+/// provider. `None` when it is not a Codex launch, names no model, or the
+/// model is in no provider's `models`; a model two providers list is logged
+/// and left to Codex's default rather than guessed. The shared
+/// `~/.codex/config.toml` is not touched, so the provider is this launch's.
 pub fn with_codex_providers(
     command: &[String],
     providers: &[crate::llm_providers::Provider],
@@ -697,12 +732,37 @@ pub fn with_codex_providers(
     if providers.is_empty() || agent_name(command).as_deref() != Some("codex") {
         return None;
     }
+    let model = codex_model(command)?;
+    let matching: Vec<&crate::llm_providers::Provider> = providers
+        .iter()
+        .filter(|p| p.models.contains(&model))
+        .collect();
+    let provider = match matching.as_slice() {
+        [] => return None,
+        [one] => *one,
+        many => {
+            let names: Vec<&str> = many.iter().map(|p| p.name.as_str()).collect();
+            tracing::warn!(
+                model = %model,
+                providers = ?names,
+                "model listed by more than one LLM provider; launch keeps Codex's default provider"
+            );
+            return None;
+        }
+    };
     let (idx, _) = agent_binary(command);
     let mut out = command.to_vec();
-    out.splice(
-        idx + 1..idx + 1,
-        crate::llm_providers::codex_overrides(providers),
-    );
+    let mut overrides = vec![
+        "-c".to_string(),
+        format!(
+            "model_provider={}",
+            crate::codex_guidance::toml_basic_string(&provider.name)
+        ),
+    ];
+    overrides.extend(crate::llm_providers::codex_overrides(std::slice::from_ref(
+        provider,
+    )));
+    out.splice(idx + 1..idx + 1, overrides);
     Some(out)
 }
 
@@ -878,20 +938,53 @@ mod tests {
     #[test]
     fn codex_providers_ride_after_the_wrapped_binary_and_only_on_codex() {
         let providers = crate::llm_providers::parse(
-            "[[provider]]\nname = \"ds\"\nbase_url = \"http://l/v1\"\nwire_api = \"chat\"\nenv_key = \"DS_KEY\"\nsecret_project = \"p\"\nsecret_name = \"s\"\n",
+            "[[provider]]\nname = \"ds\"\nbase_url = \"http://l/v1\"\nwire_api = \"chat\"\nenv_key = \"DS_KEY\"\nsecret_project = \"p\"\nsecret_name = \"s\"\nmodels = [\"deepseek/deepseek-v4-flash\"]\n\
+             [[provider]]\nname = \"other\"\nbase_url = \"http://o/v1\"\nwire_api = \"chat\"\nenv_key = \"O_KEY\"\nsecret_project = \"p\"\nsecret_name = \"o\"\nmodels = [\"o-model\"]\n",
         )
         .unwrap();
-        let wrapped: Vec<String> = ["vogt-agent-auth", "run", "--", "codex", "--model", "m"]
-            .map(String::from)
-            .to_vec();
+        let wrapped: Vec<String> = [
+            "vogt-agent-auth",
+            "run",
+            "--",
+            "codex",
+            "-m",
+            "deepseek/deepseek-v4-flash",
+        ]
+        .map(String::from)
+        .to_vec();
         let out = with_codex_providers(&wrapped, &providers).unwrap();
         assert_eq!(&out[..4], &wrapped[..4]);
         assert_eq!(out[4], "-c");
-        assert!(out[5].starts_with("model_providers.ds={"), "{}", out[5]);
-        assert_eq!(&out[6..], &wrapped[4..]);
-        let claude: Vec<String> = vec!["claude".into()];
+        assert_eq!(out[5], "model_provider=\"ds\"");
+        assert_eq!(out[6], "-c");
+        assert!(out[7].starts_with("model_providers.ds={"), "{}", out[7]);
+        assert_eq!(&out[8..], &wrapped[4..]);
+        assert!(!out.iter().any(|a| a.contains("other")), "{out:?}");
+
+        // `--model` and `--model=` spell the same choice.
+        let long: Vec<String> = ["codex", "--model=o-model"].map(String::from).to_vec();
+        let out = with_codex_providers(&long, &providers).unwrap();
+        assert_eq!(out[2], "model_provider=\"other\"");
+
+        // An unknown model, or none, gets neither model_provider nor a table.
+        let unknown: Vec<String> = ["codex", "--model", "gpt-5"].map(String::from).to_vec();
+        assert!(with_codex_providers(&unknown, &providers).is_none());
+        let bare: Vec<String> = vec!["codex".into()];
+        assert!(with_codex_providers(&bare, &providers).is_none());
+        let claude: Vec<String> = ["claude", "-m", "o-model"].map(String::from).to_vec();
         assert!(with_codex_providers(&claude, &providers).is_none());
         assert!(with_codex_providers(&wrapped, &[]).is_none());
+    }
+
+    #[test]
+    fn codex_providers_refuse_a_model_two_providers_list() {
+        let providers = crate::llm_providers::parse(
+            "[[provider]]\nname = \"a\"\nbase_url = \"http://a/v1\"\nwire_api = \"chat\"\nenv_key = \"A_KEY\"\nsecret_project = \"p\"\nsecret_name = \"a\"\nmodels = [\"shared\"]\n\
+             [[provider]]\nname = \"b\"\nbase_url = \"http://b/v1\"\nwire_api = \"chat\"\nenv_key = \"B_KEY\"\nsecret_project = \"p\"\nsecret_name = \"b\"\nmodels = [\"shared\"]\n",
+        )
+        .unwrap();
+        let command: Vec<String> = ["codex", "-m", "shared"].map(String::from).to_vec();
+        assert!(with_codex_providers(&command, &providers).is_none());
     }
 
     #[test]
