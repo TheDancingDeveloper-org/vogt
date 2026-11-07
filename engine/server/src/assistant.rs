@@ -3129,6 +3129,7 @@ mod tests {
             codex_approval_policy: "never".to_string(),
             agent_auth_secrets: vec![],
             agent_auth_secrets_file: None,
+            llm_providers_file: None,
             agent_grant_projects: vec![],
             session_templates: vec![],
             assistant_api_key: None,

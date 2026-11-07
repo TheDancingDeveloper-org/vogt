@@ -47,6 +47,7 @@ fn test_config() -> Config {
         codex_approval_policy: "never".to_string(),
         agent_auth_secrets: vec![],
         agent_auth_secrets_file: None,
+        llm_providers_file: None,
         agent_grant_projects: vec![],
         // The synthetic agent CLI is registered as a session preset in the
         // *test* config — never the production defaults — so agent-task
@@ -18425,4 +18426,108 @@ async fn a_manifest_line_added_after_start_reaches_the_next_launch() {
         .await
         .unwrap();
     assert_eq!(r.status(), 403);
+}
+
+/// WI-3491: a provider registered after the engine started reaches the next
+/// host Codex launch, its table as a `-c` override and its key resolved by
+/// the real `agent-auth.sh`; removed, the next launch has neither.
+#[tokio::test]
+async fn a_registered_llm_provider_reaches_the_next_codex_launch_and_leaves_with_it() {
+    for tool in ["jq", "curl", "timeout"] {
+        if std::process::Command::new(tool)
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipping: the launch uses {tool}");
+            return;
+        }
+    }
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../deploy/agent-auth.sh")
+        .canonicalize()
+        .unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let bin = tmp.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let write_exec = |name: &str, body: &str| {
+        use std::os::unix::fs::PermissionsExt;
+        let path = bin.join(name);
+        std::fs::write(&path, body).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    write_exec("vogt-mcp-bootstrap", "#!/bin/sh\nexit 0\n");
+    write_exec("infisical", "#!/bin/sh\nprintf tok-123\n");
+    // A stand-in Codex: says which provider overrides it got and its key.
+    write_exec(
+        "codex",
+        "#!/bin/sh\nprov=$(printf '%s\\n' \"$@\" | sed -n 's/^model_providers\\.\\([a-z]*\\)=.*/\\1/p' | tr '\\n' ,)\necho \"providers=[$prov] key=[${DS_KEY:-}]\"\nexec sleep 30\n",
+    );
+    let api = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api_url = format!("http://{}", api.local_addr().unwrap());
+    tokio::spawn(async move {
+        let app = axum::Router::new().route(
+            "/api/v4/secrets",
+            axum::routing::get(|| async {
+                axum::Json(json!({ "secrets": [
+                    { "secretKey": "ds-secret", "secretValue": "ds-value" }
+                ]}))
+            }),
+        );
+        axum::serve(api, app).await.unwrap()
+    });
+
+    let registry = tmp.path().join("llm-providers.toml");
+    let mut cfg = broker_config(&tmp, "");
+    cfg.agent_auth_helper = script.clone();
+    cfg.llm_providers_file = Some(registry.clone());
+    let (base, _state, _h) = boot_with_state(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let start = |name: &'static str| {
+        let client = client.clone();
+        let base = base.clone();
+        let script = script.display().to_string();
+        let (path, api_url, bin) = (path.clone(), api_url.clone(), bin.clone());
+        async move {
+            client
+                .post(format!("{base}/api/sessions"))
+                .json(&json!({
+                    "name": name,
+                    "command": [script, "run", "--", bin.join("codex").display().to_string()],
+                    "env": [
+                        ["PATH", path],
+                        ["VOGT_MCP_BOOTSTRAP", bin.join("vogt-mcp-bootstrap").display().to_string()],
+                        ["ENGINE_AGENT_AUTH_TIMEOUT", "5"],
+                        ["INFISICAL_API_URL", format!("{api_url}/api")],
+                        ["INFISICAL_CLIENT_ID", "id"],
+                        ["INFISICAL_CLIENT_SECRET", "secret"],
+                    ],
+                }))
+                .send()
+                .await
+                .unwrap()
+                .json::<Value>()
+                .await
+                .unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        }
+    };
+
+    std::fs::write(
+        &registry,
+        "[[provider]]\nname = \"ds\"\nbase_url = \"http://litellm/v1\"\nwire_api = \"chat\"\nenv_key = \"DS_KEY\"\nsecret_project = \"proj-a\"\nsecret_name = \"ds-secret\"\n",
+    )
+    .unwrap();
+    let with = start("registered").await;
+    live_output_containing(&client, &base, &with, &["providers=[ds,] key=[ds-value]"]).await;
+
+    std::fs::write(&registry, "").unwrap();
+    let without = start("removed").await;
+    live_output_containing(&client, &base, &without, &["providers=[] key=[]"]).await;
 }
