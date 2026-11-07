@@ -427,6 +427,7 @@ impl SessionRegistry {
             let mut pod_uid = adopted_uid;
             if let Some(pod) = pod {
                 auth.issue(id, &token).await;
+                auth.issue_source(id, source.clone()).await;
                 // The pod's own graft token, minted before the pod exists so a
                 // failure leaves nothing to clean up but the bootstrap token.
                 let created = async {

@@ -886,13 +886,8 @@ fn pod_env(cfg: &PodConfig, source: &SourceDescriptor, id: Uuid) -> Vec<EnvVar> 
             ..Default::default()
         },
         EnvVar {
-            name: "VOGT_GRAFT_REPO".into(),
-            value: Some(source.location.repo().to_string()),
-            ..Default::default()
-        },
-        EnvVar {
-            name: "VOGT_GRAFT_LINE".into(),
-            value: Some(source.reference.clone()),
+            name: "VOGT_SOURCE_JSON".into(),
+            value: Some(serde_json::to_string(source).expect("source serializes")),
             ..Default::default()
         },
         EnvVar {

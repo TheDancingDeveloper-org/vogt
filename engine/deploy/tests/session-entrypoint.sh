@@ -36,8 +36,8 @@ graft=""; [ -z "${GRAFT_TOKEN:-}" ] || graft=$(printf ',"graft_token":"%s"' "$GR
 [ -z "${MCP_CONFIG:-}" ] || graft="$graft,\"mcp_config\":$MCP_CONFIG"
 [ -z "${CODEX_CONFIG:-}" ] || graft="$graft,\"codex_config\":$(printf %s "$CODEX_CONFIG" | jq -Rs .)"
 [ -z "${OPENCODE_CONFIG:-}" ] || graft="$graft,\"opencode_config\":$OPENCODE_CONFIG"
-printf '{"session_token":"%s"%s,"bundle":{"sub/.credentials.json":"%s"},"env":{"VOGT_SESSION_ID":"s1","VOGT_BOOTSTRAP_TOKEN":"%s","EXTRA":"yes"},"brief":"hello brief"}' \
-  "$(cat "$CASE_DIR/session")" "$graft" "$(printf bundle | base64)" "$(cat "$CASE_DIR/boot")"
+printf '{"session_token":"%s"%s,"source":%s,"bundle":{"sub/.credentials.json":"%s"},"env":{"VOGT_SESSION_ID":"s1","VOGT_BOOTSTRAP_TOKEN":"%s","EXTRA":"yes"},"brief":"hello brief"}' \
+  "$(cat "$CASE_DIR/session")" "$graft" "$SOURCE_JSON" "$(printf bundle | base64)" "$(cat "$CASE_DIR/boot")"
 SH
   cat >"$dir/bin/graft" <<'SH'
 #!/bin/sh
@@ -46,10 +46,16 @@ case " $* " in *" clone "*)
   printf '%s\n' "$*" >"$CASE_DIR/graft.args"
   if [ "$1" = --token-file ]; then cp "$2" "$CASE_DIR/graft.token"; fi ;;
 esac
+dest="$CASE_DIR/work"
+after_clone=0
 while [ $# -gt 0 ]; do
+  if [ "$after_clone" -gt 0 ]; then
+    after_clone=$((after_clone + 1))
+    if [ "$after_clone" = 3 ]; then dest=$1; break; fi
+  fi
   case "$1" in
-    clone) break ;;
-    log) printf '{"changesets":[{"id":"tip1","subject":"tip change (WI-1)"}],"next":"par1"}\n'; exit 0 ;;
+    clone) after_clone=1 ;;
+    log) printf '%s\n' '{"changesets":[{"id":"tip1","subject":"tip change (WI-1)"}],"next":"par1"}'; exit 0 ;;
     diff)
       if [ "${DIFF_IGNORED:-0}" = 1 ]; then
         printf 'put file tracked.txt\n--- a/tracked.txt\n+++ b/tracked.txt\n@@ -1 +1 @@\n-old-ignored\n+new-ignored\n'
@@ -60,13 +66,13 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
-mkdir -p "$3"
-printf 'new\n' >"$3/a.txt"
-printf 'tracked.txt\n' >"$3/.gitignore"
-printf 'new-ignored\n' >"$3/tracked.txt"
-mkdir -p "$3/.graft" "$3/.vogt"
-printf 'graft state\n' >"$3/.graft/state"
-printf 'vogt state\n' >"$3/.vogt/state"
+mkdir -p "$dest"
+printf 'new\n' >"$dest/a.txt"
+printf 'tracked.txt\n' >"$dest/.gitignore"
+printf 'new-ignored\n' >"$dest/tracked.txt"
+mkdir -p "$dest/.graft" "$dest/.vogt"
+printf 'graft state\n' >"$dest/.graft/state"
+printf 'vogt state\n' >"$dest/.vogt/state"
 SH
   cat >"$dir/bin/vogt-session-agent" <<'SH'
 #!/bin/sh
@@ -89,7 +95,8 @@ run_case() {
   [ -e "$dir/bootstrap-token" ] || printf %s "$BOOT" >"$dir/bootstrap-token"
   env -i PATH="$dir/bin:/usr/bin:/bin" HOME="$dir/home" TMPDIR="$dir/tmp" CASE_DIR="$dir" \
     VOGT_ENGINE_URL=http://engine VOGT_SESSION_ID=s1 VOGT_BOOTSTRAP_TOKEN_FILE="$dir/bootstrap-token" \
-    VOGT_GRAFT_REPO=vogt VOGT_GRAFT_LINE=rust-2 VOGT_CLI=claude \
+    SOURCE_JSON='{"location":{"kind":"graft","endpoint":"http://graft","repo":"vogt"},"ref":"rust-2","landing":"line"}' \
+    VOGT_SOURCE_JSON='{"location":{"kind":"graft","endpoint":"http://graft","repo":"vogt"},"ref":"rust-2","landing":"line"}' VOGT_CLI=claude \
     VOGT_WORK_DIR="$dir/work" VOGT_SESSION_TOKEN_FILE="$dir/run/session-token" \
     CLAUDE_CONFIG_DIR="$dir/claude" "$@" "$entry"
 }
@@ -98,7 +105,7 @@ run_case() {
 MCP='{"mcpServers":{"vogt":{"type":"http","url":"https://e/mcp","headers":{"Authorization":"Bearer ${VOGT_HTTP_TOKEN}"}}}}'
 out=$(run_case "$tmp/happy" VOGT_SESSION_COMMAND='["sleep","1"]' GRAFT_TOKEN=graft-secret-value MCP_CONFIG="$MCP" VOGT_EXTRA_CA_FILE=/etc/ca.pem VOGT_CLAUDE_SETTINGS_FILE=off 2>&1) || fail "happy path: $out"
 grep -q "agent:$tmp/happy/work:hello brief" <<<"$out" || fail "agent did not receive bootstrap state"
-jq -e '.session_id=="s1" and .graft_repo=="vogt" and .graft_line=="rust-2" and .cli=="claude"' \
+jq -e '.session_id=="s1" and .source.location.kind=="graft" and .source.location.repo=="vogt" and .source.ref=="rust-2" and .cli=="claude"' \
   "$tmp/happy/request.json" >/dev/null || fail "bootstrap request body"
 [[ $(stat -c %a "$tmp/happy/run/session-token") == 600 ]] || fail "token mode"
 [[ $(<"$tmp/happy/run/session-token") == "$SESSION" ]] || fail "token content"
@@ -120,7 +127,7 @@ grep -q '^session-entrypoint: step git-view$' <<<"$out" || fail "git-view step m
 ! grep -q "VOGT_BOOTSTRAP_TOKEN" "$tmp/happy/agent.env" || fail "bootstrap name re-exported"
 grep -q '^EXTRA=yes$' "$tmp/happy/agent.env" || fail "brokered env not exported"
 ! grep -Eq "$BOOT|$SESSION|graft-secret-value" <<<"$out" || fail "secret in output"
-for step in bootstrap session-token account-bundle brokered-env claude-config graft-token clone brief handoff; do
+for step in bootstrap session-token account-bundle brokered-env claude-config source-token clone brief handoff; do
   grep -q "^session-entrypoint: step $step$" <<<"$out" || fail "step marker $step"
 done
 grep -Eq '^vogt_session_boot_seconds [0-9]+$' <<<"$out" || fail "boot seconds metric"
