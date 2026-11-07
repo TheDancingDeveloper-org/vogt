@@ -853,6 +853,7 @@ impl SessionRegistry {
                 scrollback_bytes: self.cfg.scrollback_bytes,
                 activity_idle_after_ms: self.cfg.activity_idle_after_ms,
                 secret_broker: self.secret_broker.grant(id),
+                agent_auth_manifest: self.secret_broker.live_manifest_text(),
                 on_exit: Some(self.exit_hook()),
             },
             self.bus.clone(),
