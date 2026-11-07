@@ -11,7 +11,7 @@ fail() { printf 'session-entrypoint: %s failed: %s\n' "$step" "$1" >&2; exit 1; 
 say() { printf 'session-entrypoint: step %s\n' "$1" >&2; }
 need() { eval "value=\${$1:-}"; [ -n "$value" ] || fail "required environment variable $1 is not set"; }
 need VOGT_ENGINE_URL; need VOGT_SESSION_ID; need VOGT_BOOTSTRAP_TOKEN_FILE
-need VOGT_GRAFT_REPO; need VOGT_GRAFT_LINE; need VOGT_CLI
+need VOGT_SOURCE_JSON; need VOGT_CLI
 case "$VOGT_CLI" in claude|codex|opencode) ;; *) fail 'VOGT_CLI must be claude, codex or opencode' ;; esac
 # /cache is a per-pod emptyDir (WI-3242), so the directories the image creates
 # there are shadowed by it. Recreate the tool caches best-effort; each tool
@@ -29,9 +29,8 @@ bootstrap_token=$(cat "$VOGT_BOOTSTRAP_TOKEN_FILE")
 [ -n "$bootstrap_token" ] || fail "bootstrap token file $VOGT_BOOTSTRAP_TOKEN_FILE is empty"
 printf 'header = "Authorization: Bearer %s"\n' "$bootstrap_token" >"$auth"
 # shellcheck disable=SC2153 # VOGT_SESSION_ID is validated by need() above
-jq -n --arg session_id "$VOGT_SESSION_ID" --arg graft_repo "$VOGT_GRAFT_REPO" \
-  --arg graft_line "$VOGT_GRAFT_LINE" --arg cli "$VOGT_CLI" --arg extra_ca_file "${VOGT_EXTRA_CA_FILE:-}" \
-  '{session_id: $session_id, graft_repo: $graft_repo, graft_line: $graft_line, cli: $cli}
+jq -n --arg session_id "$VOGT_SESSION_ID" --arg cli "$VOGT_CLI" --argjson source "$VOGT_SOURCE_JSON" --arg extra_ca_file "${VOGT_EXTRA_CA_FILE:-}" \
+  '{session_id: $session_id, source: $source, cli: $cli}
    + (if $extra_ca_file == "" then {} else {extra_ca_file: $extra_ca_file} end)' >"$request"
 unset bootstrap_token VOGT_BOOTSTRAP_TOKEN_FILE
 url="${VOGT_ENGINE_URL%/}/api/agent-auth/bootstrap"
@@ -156,21 +155,33 @@ if [ "$VOGT_CLI" = opencode ] && jq -e '.opencode_config | type == "object"' "$r
   jq '.opencode_config' "$response" >"$oc_dir/opencode.json"; chmod 600 "$oc_dir/opencode.json"
   printf 'session-entrypoint: opencode posture: mcp-config\n' >&2
 fi
-step=graft-token; say graft-token
+source_kind=$(jq -r '.source.location.kind' "$response")
+source_repo=$(jq -r '.source.location.repo' "$response")
+source_ref=$(jq -r '.source.ref' "$response")
+VOGT_GRAFT_LINE=$source_ref
+step=source-token; say source-token
 # The graft credential (scoped to this repo and line) arrives as .graft_token
 # and is kept in a 0600 file; without one the session token is tried.
-graft_token_file=$token_file
+source_token_file=$token_file
 if [ -n "$(jq -r '.graft_token // empty' "$response")" ]; then
-  graft_token_file="${VOGT_GRAFT_TOKEN_FILE:-$(dirname "$token_file")/graft-token}"
-  jq -j '.graft_token' "$response" >"$graft_token_file"; chmod 600 "$graft_token_file"
-  export VOGT_GRAFT_TOKEN_FILE="$graft_token_file"
+  source_token_file="${VOGT_GRAFT_TOKEN_FILE:-$(dirname "$token_file")/graft-token}"
+  jq -j '.graft_token' "$response" >"$source_token_file"; chmod 600 "$source_token_file"
+  export VOGT_GRAFT_TOKEN_FILE="$source_token_file"
 fi
 step=clone; say clone
 work_dir=${VOGT_WORK_DIR:-/work}
 mkdir -p "$work_dir"
-if ! graft --token-file "$graft_token_file" clone "$VOGT_GRAFT_REPO" "$work_dir" --line "$VOGT_GRAFT_LINE" >/dev/null 2>"$tmp_dir/graft.err"; then
+if [ "$source_kind" = git ]; then
+  if ! git clone --branch "$source_ref" --single-branch "$source_repo" "$work_dir" >/dev/null 2>"$tmp_dir/git.err"; then
+    fail "git clone $source_repo into $work_dir failed: $(tail -n3 "$tmp_dir/git.err" | tr '\n' ' ' | cut -c1-400)"
+  fi
+elif [ "$source_kind" = graft ]; then
+if ! graft --token-file "$source_token_file" clone "$source_repo" "$work_dir" --line "$source_ref" >/dev/null 2>"$tmp_dir/graft.err"; then
   # graft's stderr names the endpoint and the refusal, never the token file's content.
-  fail "g clone $VOGT_GRAFT_REPO --line $VOGT_GRAFT_LINE into $work_dir failed (GRAFT_ENDPOINT=${GRAFT_ENDPOINT:-unset}): $(tail -n3 "$tmp_dir/graft.err" | tr '\n' ' ' | cut -c1-400)"
+  fail "g clone $source_repo --line $source_ref into $work_dir failed (GRAFT_ENDPOINT=${GRAFT_ENDPOINT:-unset}): $(tail -n3 "$tmp_dir/graft.err" | tr '\n' ' ' | cut -c1-400)"
+fi
+else
+  fail "unsupported source kind: $source_kind"
 fi
 # WI-3356: give /work a read-only git view so `git log -1 -p`, `git diff` and
 # `git status` work in the pod (reviewers and most briefs assume git). graft
