@@ -84,7 +84,7 @@ case "$server" in
         fi
         # Only this file may configure the client: drop the alternatives.
         unset K8S_AGENT_READONLY_KUBECONFIG KUBECONFIG KUBERNETES_MASTER
-        kubernetes-mcp-server --read-only --kubeconfig "$kubeconfig"
+        kubernetes-mcp-server --read-only --toolsets core --kubeconfig "$kubeconfig"
         ;;
     *)
         die "usage: vogt-readonly-mcp github|grafana|gitea|k8s"
