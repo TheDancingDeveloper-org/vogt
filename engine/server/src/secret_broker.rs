@@ -510,34 +510,52 @@ impl SecretBroker {
         let Some(path) = self.providers_file.as_deref() else {
             return Vec::new();
         };
-        crate::llm_providers::load(path).unwrap_or_else(|error| {
+        let registered = crate::llm_providers::load(path).unwrap_or_else(|error| {
             tracing::warn!(%error, "LLM provider registry ignored");
             Vec::new()
+        });
+        if registered.is_empty() {
+            return registered;
+        }
+        // A provider whose env_key is already a manifest VAR is dropped
+        // whole: no Codex table and no fetch. Its table would point that
+        // VAR, which holds the manifest's secret, at the registry's
+        // base_url, and fetching it would bypass the manifest line's policy.
+        let manifest = self.base_manifest();
+        registered
+            .into_iter()
+            .filter(|p| {
+                let clash = manifest.iter().any(|known| known.var == p.env_key);
+                if clash {
+                    tracing::warn!(
+                        provider = %p.name,
+                        var = %p.env_key,
+                        "LLM provider dropped: its env_key is already a manifest entry"
+                    );
+                }
+                !clash
+            })
+            .collect()
+    }
+
+    /// The deploy-time entries plus the manifest file's, without the
+    /// registry. A file that cannot be used contributes nothing and is logged
+    /// (path and parse error, which carry names, never values).
+    fn base_manifest(&self) -> Vec<ManifestSecret> {
+        compose_manifest(&self.manifest, self.manifest_file.as_deref()).unwrap_or_else(|error| {
+            tracing::warn!(%error, "agent-auth manifest file ignored");
+            self.manifest.clone()
         })
     }
 
     /// The manifest as it stands now: the deploy-time entries plus the
-    /// manifest file's, plus one entry per registered provider key. A file that cannot be used contributes nothing and
-    /// is logged (path and parse error, which carry names, never values), so
-    /// a bad live edit narrows sessions to the deploy-time manifest rather
-    /// than stopping launches.
+    /// manifest file's, plus one entry per registered provider key. A bad
+    /// live edit of the file narrows sessions to the deploy-time manifest
+    /// rather than stopping launches. A provider key never shadows a
+    /// manifest line: [`Self::providers`] has already dropped any clash.
     pub fn manifest(&self) -> Vec<ManifestSecret> {
-        let mut entries = compose_manifest(&self.manifest, self.manifest_file.as_deref())
-            .unwrap_or_else(|error| {
-                tracing::warn!(%error, "agent-auth manifest file ignored");
-                self.manifest.clone()
-            });
-        for entry in crate::llm_providers::manifest_entries(&self.providers()) {
-            // A provider key never shadows a manifest line either.
-            if entries.iter().any(|known| known.var == entry.var) {
-                tracing::warn!(
-                    var = %entry.var,
-                    "LLM provider env_key is already a manifest entry; the manifest's line is kept"
-                );
-                continue;
-            }
-            entries.push(entry);
-        }
+        let mut entries = self.base_manifest();
+        entries.extend(crate::llm_providers::manifest_entries(&self.providers()));
         entries
     }
 
@@ -1502,6 +1520,47 @@ mod tests {
         std::fs::write(&registry, "not toml [").unwrap();
         assert!(broker.providers().is_empty());
         assert!(broker.permitted("DS_KEY").is_none());
+    }
+
+    #[test]
+    fn a_provider_whose_env_key_is_a_manifest_var_is_dropped_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = dir.path().join("providers.toml");
+        let file = dir.path().join("manifest");
+        std::fs::write(&file, "LIVE proj live ondemand\n").unwrap();
+        let broker = broker_with("STACK proj stack ondemand\n", "127.0.0.1:8910")
+            .with_manifest_file(Some(file))
+            .with_providers_file(Some(registry.clone()));
+        let entry = |name: &str, var: &str| {
+            format!(
+                "[[provider]]\nname = \"{name}\"\nbase_url = \"http://evil/v1\"\nwire_api = \"chat\"\nenv_key = \"{var}\"\nsecret_project = \"proj\"\nsecret_name = \"{name}-secret\"\n"
+            )
+        };
+        // One provider clashes with a deploy-time VAR, one with a manifest
+        // file VAR, and one is clean.
+        std::fs::write(
+            &registry,
+            entry("a", "STACK") + &entry("b", "LIVE") + &entry("c", "C_KEY"),
+        )
+        .unwrap();
+
+        // The clashing providers are gone: no Codex table, so neither VAR
+        // can be pointed at the registry's base_url.
+        let names: Vec<_> = broker.providers().into_iter().map(|p| p.name).collect();
+        assert_eq!(names, ["c"]);
+        let wrapped = vec!["codex".to_string()];
+        let argv = crate::agent_cli::with_codex_providers(&wrapped, &broker.providers()).unwrap();
+        assert!(!argv
+            .iter()
+            .any(|a| a.contains("STACK") || a.contains("LIVE")));
+
+        // And the manifest's lines keep their own secret and policy.
+        for (var, secret) in [("STACK", "stack"), ("LIVE", "live")] {
+            let kept = broker.permitted(var).unwrap();
+            assert_eq!(kept.secret_name, secret);
+            assert_eq!(kept.policy, ManifestPolicy::OnDemand);
+        }
+        assert_eq!(broker.manifest().len(), 3);
     }
 
     #[test]
