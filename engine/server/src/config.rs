@@ -383,6 +383,11 @@ pub struct Config {
     /// for sessions by editing the file — no engine restart. A missing file
     /// adds nothing; a malformed one adds nothing and is logged.
     pub agent_auth_secrets_file: Option<std::path::PathBuf>,
+    /// `ENGINE_LLM_PROVIDERS_FILE`: the LLM provider registry, re-read at
+    /// every launch (WI-3491, see `llm_providers`). Each provider's key joins
+    /// the agent-auth manifest and a Codex session gets its `model_providers`
+    /// table, so a provider is added or removed with no restart.
+    pub llm_providers_file: Option<std::path::PathBuf>,
     /// `ENGINE_AGENT_GRANT_PROJECTS`: secrets-manager projects, beyond the
     /// ones the manifest already names, that a person-approved grant may
     /// fetch from (WI-973). Space- or comma-separated project ids.
@@ -908,6 +913,11 @@ pub fn load(
     };
     // Not parsed here: the file is live, read at each launch, so a bad edit
     // never stops the engine from booting.
+    let llm_providers_file = engine_env("ENGINE_LLM_PROVIDERS_FILE")
+        .ok()
+        .map(|path| path.trim().to_string())
+        .filter(|path| !path.is_empty())
+        .map(std::path::PathBuf::from);
     let agent_auth_secrets_file = engine_env("ENGINE_AGENT_AUTH_SECRETS_FILE")
         .ok()
         .map(|path| path.trim().to_string())
@@ -1013,6 +1023,7 @@ pub fn load(
         codex_approval_policy,
         agent_auth_secrets,
         agent_auth_secrets_file,
+        llm_providers_file,
         agent_grant_projects: engine_env("ENGINE_AGENT_GRANT_PROJECTS")
             .map(|text| {
                 text.split(|c: char| c == ',' || c.is_whitespace())

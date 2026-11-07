@@ -201,6 +201,17 @@ cfg="$tmp/codexq/home/.codex/config.toml"
 grep -q 'url = "https://e/mcp"' "$cfg" || fail "codex vogt table missing (quoted case)"
 { grep -q '^model = "x"' "$cfg" && grep -q 'keep.url' "$cfg" && grep -q 'other.one' "$cfg" && grep -q '^  "a",' "$cfg"; } || fail "codex config's own entries lost (quoted case)"
 [ "$(grep -c '^\[mcp_servers.vogt\]' "$cfg")" = 1 ] || fail "duplicate vogt table (quoted case)"
+# WI-3491: a registered LLM provider replaces a table of the same name; the
+# config's other providers stay, and no table is declared twice.
+mkdir -p "$tmp/codexprov/home/.codex"
+printf '[model_providers.deepseek]\nbase_url = "https://stale"\n\n[model_providers.mine]\nbase_url = "https://m"\n' >"$tmp/codexprov/home/.codex/config.toml"
+PROV_TOML="$CODEX_TOML"$'\n[model_providers.deepseek]\nname = "deepseek"\nbase_url = "https://new/v1"\nwire_api = "chat"\nenv_key = "DEEPSEEK_KEY"\n'
+out=$(run_case "$tmp/codexprov" VOGT_CLI=codex CODEX_CONFIG="$PROV_TOML" 2>&1) || fail "codex provider path: $out"
+cfg="$tmp/codexprov/home/.codex/config.toml"
+[ "$(grep -c '^\[model_providers.deepseek\]' "$cfg")" = 1 ] || fail "duplicate provider table"
+grep -q 'base_url = "https://new/v1"' "$cfg" || fail "provider table not replaced"
+! grep -q 'https://stale' "$cfg" || fail "stale provider table kept"
+grep -q '^\[model_providers.mine\]' "$cfg" || fail "config's own provider lost"
 OC='{"mcp":{"vogt":{"type":"remote","url":"https://e/mcp"}}}'
 out=$(run_case "$tmp/ocfg" VOGT_CLI=opencode OPENCODE_CONFIG="$OC" XDG_CONFIG_HOME="$tmp/ocfg/xdg" 2>&1) || fail "opencode path: $out"
 jq -e '.mcp.vogt.url=="https://e/mcp"' "$tmp/ocfg/xdg/opencode/opencode.json" >/dev/null || fail "opencode config content"

@@ -796,6 +796,32 @@ pub async fn bootstrap(
             }
         }
     }
+    // WI-3491: a Codex pod gets the registered LLM providers as it launches,
+    // as a host session does: their `model_providers` tables in its config and
+    // each provider's key, resolved now through the helper and the manifest.
+    // A key that cannot be resolved is left out and logged by name.
+    if req.cli == "codex" {
+        let broker = state.sessions.secret_broker();
+        let providers = broker.providers();
+        if !providers.is_empty() {
+            let tables = crate::llm_providers::codex_config_tables(&providers);
+            codex_config = Some(codex_config.unwrap_or_default() + "\n" + &tables);
+            for entry in crate::llm_providers::manifest_entries(&providers) {
+                let Some(entry) = broker.permitted(&entry.var) else {
+                    continue;
+                };
+                match broker.fetch(&entry).await {
+                    Ok(value) => {
+                        tracing::info!(session = %id, var = %entry.var, "provider key resolved for pod launch");
+                        env.insert(entry.var.clone(), serde_json::Value::String(value));
+                    }
+                    Err(error) => {
+                        tracing::warn!(session = %id, var = %entry.var, %error, "provider key not resolved for pod launch");
+                    }
+                }
+            }
+        }
+    }
     // A pod resumes from the account bundle the engine holds: the login, the
     // global config and, for a woken session, its conversation's transcript.
     let crate::sessions::PodAccountConversation {
