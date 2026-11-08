@@ -4437,6 +4437,15 @@ class StartSessionParams(Params):
             "Omitted means a plain shell, which does nothing until typed into."
         ),
     )
+    placement: Literal["host", "pod"] | None = Field(
+        default=None,
+        description=(
+            "Where to run the session: `host` uses the engine host, `pod` "
+            "uses its configured pod backend. Omitted uses the deployment's "
+            "template/default placement; the requested placement must be "
+            "available."
+        ),
+    )
     task: str | None = Field(
         default=None,
         description=(
@@ -5607,6 +5616,17 @@ class SessionListResult(Result):
             "sessions are in `sessions` only when `include_hidden` was set."
         ),
     )
+
+
+class SessionTemplateRow(Result):
+    name: str
+    agent: str | None = None
+    placement: str
+
+
+class SessionTemplateListResult(Result):
+    templates: list[SessionTemplateRow] = []
+    engine: str | None = None
 
 
 # -- session history ------------------------------------------------

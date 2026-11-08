@@ -113,6 +113,8 @@ from vogt.application.models import (
     SessionSummary,
     SessionSweepResult,
     SessionSweepRow,
+    SessionTemplateListResult,
+    SessionTemplateRow,
     SessionWaitAnyParams,
     SessionWaitAnyResult,
     SessionWaitParams,
@@ -316,6 +318,7 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
             engine,
             name=params.name or subject.default_name,
             template=params.template,
+            placement=params.placement,
             cwd=subject.cwd,
             env=_session_env(
                 ctx, session_id, credential.secret, work_item=subject.work_item_ref
@@ -681,6 +684,23 @@ def _attention_kept(attention: str, wanted: list[str] | None) -> bool:
         names.discard("needs_you")
         names.update(oversight.NEEDS_YOU)
     return attention in names
+
+
+def list_session_templates(
+    ctx: AppContext, params: object
+) -> SessionTemplateListResult:
+    del params
+    if ctx.engine is None:
+        return SessionTemplateListResult(
+            engine="no session engine is configured (VOGT_ENGINE_URL is unset)"
+        )
+    try:
+        rows = ctx.engine.list_session_templates()
+    except EngineUnavailable as exc:
+        return SessionTemplateListResult(engine=str(exc))
+    return SessionTemplateListResult(
+        templates=[SessionTemplateRow.model_validate(row) for row in rows]
+    )
 
 
 def list_sessions(ctx: AppContext, params: ListSessionsParams) -> SessionListResult:
@@ -4838,6 +4858,7 @@ def _start_on_engine(
     *,
     name: str,
     template: str | None,
+    placement: str | None = None,
     cwd: str,
     env: dict[str, str],
     brief: str,
@@ -4867,6 +4888,7 @@ def _start_on_engine(
         # this" reach the deployment's protected agent template rather than
         # an unwrapped binary.
         template=template,
+        placement=placement,
         cwd=cwd,
         env=env,
         # Passed through for the same reason: *how* a model id
@@ -5143,6 +5165,7 @@ __all__ = [
     "history_list",
     "keep_session_awake",
     "last_reply",
+    "list_session_templates",
     "list_sessions",
     "log_tail",
     "remove_session",

@@ -82,6 +82,11 @@ pub struct SessionSpec {
     /// command the deployment configured for it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template: Option<String>,
+    /// Where to run the session. `host` selects the local PTY backend and
+    /// `pod` selects the configured pod backend. Omitted preserves the
+    /// template/deployment default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -201,6 +206,15 @@ pub struct SessionSpec {
     /// sends that to refuse the default it would otherwise apply.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget: Option<SessionBudget>,
+}
+
+/// A deployment session template, safe to show to API callers without
+/// exposing its command or environment.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionTemplateSummary {
+    pub name: String,
+    pub agent: Option<String>,
+    pub placement: String,
 }
 
 /// Where a session's own git worktree comes from (WI-1298).
