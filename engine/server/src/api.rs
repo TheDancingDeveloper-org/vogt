@@ -34,7 +34,8 @@ pub struct LlmProviderRemoveRequest {
 
 pub async fn llm_providers(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::Value>> {
     let path = state.config.llm_providers_file.as_deref();
-    let providers = crate::llm_providers::statuses(path, &state.config.agent_auth_secrets)
+    let manifest = live_manifest(&state)?;
+    let providers = crate::llm_providers::statuses(path, &manifest)
         .map_err(crate::error::ApiError::Internal)?;
     Ok(Json(serde_json::json!({"providers": providers})))
 }
@@ -55,15 +56,33 @@ pub async fn llm_provider_set(
     let path = state.config.llm_providers_file.as_deref().ok_or_else(|| {
         crate::error::ApiError::BadRequest("ENGINE_LLM_PROVIDERS_FILE is not configured".into())
     })?;
-    crate::llm_providers::validate_against_manifest(&provider, &state.config.agent_auth_secrets)
+    let _guard = crate::llm_providers::registry_lock()
+        .lock()
+        .map_err(|_| crate::error::ApiError::Internal("provider registry lock poisoned".into()))?;
+    let manifest = live_manifest(&state)?;
+    crate::llm_providers::validate_provider_env_key(&provider)
         .map_err(crate::error::ApiError::BadRequest)?;
+    crate::llm_providers::validate_against_manifest(&provider, &manifest)
+        .map_err(crate::error::ApiError::BadRequest)?;
+    if !manifest.iter().any(|entry| {
+        entry.project_id == provider.secret_project && entry.secret_name == provider.secret_name
+    }) && !state
+        .config
+        .agent_grant_projects
+        .iter()
+        .any(|project| project == &provider.secret_project)
+    {
+        return Err(crate::error::ApiError::BadRequest(
+            "provider secret must reference an approved manifest or grant project".into(),
+        ));
+    }
     let mut providers =
         crate::llm_providers::load(path).map_err(crate::error::ApiError::BadRequest)?;
     providers.retain(|p| p.name != provider.name);
     providers.push(provider.clone());
     crate::llm_providers::validate_all(&providers).map_err(crate::error::ApiError::BadRequest)?;
     crate::llm_providers::write(path, &providers).map_err(crate::error::ApiError::Internal)?;
-    let status = crate::llm_providers::statuses(Some(path), &state.config.agent_auth_secrets)
+    let status = crate::llm_providers::statuses(Some(path), &live_manifest(&state)?)
         .map_err(crate::error::ApiError::Internal)?
         .into_iter()
         .find(|s| s.provider.name == provider.name)
@@ -78,6 +97,9 @@ pub async fn llm_provider_remove(
     let path = state.config.llm_providers_file.as_deref().ok_or_else(|| {
         crate::error::ApiError::BadRequest("ENGINE_LLM_PROVIDERS_FILE is not configured".into())
     })?;
+    let _guard = crate::llm_providers::registry_lock()
+        .lock()
+        .map_err(|_| crate::error::ApiError::Internal("provider registry lock poisoned".into()))?;
     let mut providers =
         crate::llm_providers::load(path).map_err(crate::error::ApiError::BadRequest)?;
     let before = providers.len();
@@ -88,6 +110,14 @@ pub async fn llm_provider_remove(
     Ok(Json(
         serde_json::json!({"name": request.name, "removed": before != providers.len()}),
     ))
+}
+
+fn live_manifest(state: &AppState) -> Result<Vec<crate::secret_broker::ManifestSecret>> {
+    crate::secret_broker::compose_manifest(
+        &state.config.agent_auth_secrets,
+        state.config.agent_auth_secrets_file.as_deref(),
+    )
+    .map_err(crate::error::ApiError::Internal)
 }
 
 #[derive(Debug, Deserialize)]
