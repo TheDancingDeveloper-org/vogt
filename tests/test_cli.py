@@ -28,19 +28,19 @@ def test_llm_provider_cli_commands_are_admin_scoped() -> None:
 
 
 @pytest.mark.parametrize(
-    "argv",
+    "argv, expected_exit_code",
     [
-        ["llm-provider", "list"],
-        [
+        (["llm-provider", "list"], EXIT_ERROR),
+        ([
             "llm-provider", "set", "--name", "x", "--base-url", "https://x",
             "--wire-api", "chat", "--env-key", "X", "--secret-project", "p",
             "--secret-name", "s", "--reason", "test",
-        ],
-        ["llm-provider", "remove", "--name", "x", "--reason", "test"],
+        ], EXIT_ERROR),
+        (["llm-provider", "remove", "--name", "x", "--reason", "test"], EXIT_ERROR),
     ],
 )
 def test_cli_entry_point_dispatches_each_admin_operation(
-    instance: AppContext, argv: list[str]
+    instance: AppContext, argv: list[str], expected_exit_code: int
 ) -> None:
     """Exercise the real CLI entry point, not the authorization helper.
 
@@ -49,7 +49,7 @@ def test_cli_entry_point_dispatches_each_admin_operation(
     ensures all three generated commands actually traverse the CLI adapter.
     """
     result = run(argv, context=instance)
-    assert result.exit_code in (EXIT_OK, EXIT_ERROR)
+    assert result.exit_code == expected_exit_code
 
 
 def test_registering_a_project_needs_a_reason(instance: AppContext) -> None:

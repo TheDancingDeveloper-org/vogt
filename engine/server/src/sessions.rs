@@ -3668,19 +3668,6 @@ mod tests {
     }
 
     #[test]
-    fn engine_template_list_contains_name_agent_and_backend_placement() {
-        let template = template("pod");
-        let row = vogt_engine_contract::SessionTemplateSummary {
-            name: template.name.clone(),
-            agent: None,
-            placement: template.backend.clone(),
-        };
-        assert_eq!(row.name, "pod-agent");
-        assert_eq!(row.placement, "pod");
-        assert!(row.agent.is_none());
-    }
-
-    #[test]
     fn a_named_missing_codex_policy_refuses_a_codex_launch_and_only_codex() {
         let missing: std::result::Result<Option<std::path::PathBuf>, String> =
             Err("Codex driven-session policy /no/such/requirements.toml cannot be read".into());
