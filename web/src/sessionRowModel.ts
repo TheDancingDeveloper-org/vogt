@@ -75,7 +75,7 @@ export function sessionResourceWord(s: SessionSummary): string | null {
  *  transcript (`session.list` → `running`, shown on the Oversight board). */
 export function sessionRuntimeHint(s: SessionSummary): string | null {
   const words = (s.command ?? "").split(/\s+/);
-  const agent = words.map((w) => w.split("/").pop() ?? "").find((w) => ["claude", "codex", "opencode", "klaudia"].includes(w));
+  const agent = words.map((w) => w.split("/").pop() ?? "").find((w) => ["claude", "codex", "opencode"].includes(w));
   const flag = words.findIndex((w) => w === "--model" || w === "-m");
   const model = flag >= 0 ? words[flag + 1] : words.find((w) => w.startsWith("--model="))?.slice(8);
   const parts = [

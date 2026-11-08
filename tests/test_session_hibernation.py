@@ -586,8 +586,8 @@ def test_a_claude_box_that_never_clears_is_reported_stuck(
 def test_a_session_with_no_readable_box_gets_one_enter(
     wired: AppContext, engine: Engine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """opencode and Klaudia draw no box Vogt can read: a second Enter there
-    could accept a dialog the screen parser missed."""
+    """opencode draws no box Vogt can read: a second Enter there could accept
+    a dialog the screen parser missed."""
     import vogt.application.services.sessions as sessions
 
     monkeypatch.setattr(sessions, "_CONFIRM_READS", 2)

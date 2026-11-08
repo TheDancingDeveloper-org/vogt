@@ -79,13 +79,13 @@ def test_claude_compaction_marker_counts_wherever_it_sits() -> None:
     assert result.turns == 1
 
 
-def test_klaudia_estimates_and_counts_its_own_compaction_marker() -> None:
+def test_an_agent_without_usage_estimates_and_counts_its_compaction_marker() -> None:
     body = "y" * (CHARS_PER_TOKEN * 10)
     lines = [
         _line({"type": "system", "subtype": "compact_boundary"}),
         _line({"type": "assistant", "message": {"content": body}}),
     ]
-    result = meter(lines, agent="klaudia")
+    result = meter(lines, agent="opencode")
     assert result.usage_measured is False
     assert result.compactions == 1
     assert result.turns == 1
@@ -113,7 +113,7 @@ def test_a_repeated_read_counts_once_per_path() -> None:
 
     result = meter(
         [read("/a.py"), read("/a.py"), read("/b.py"), read("/a.py")],
-        agent="klaudia",
+        agent="opencode",
     )
     assert result.reads_repeated == 1
     assert result.tool_result_bytes["Read"] == len("contents") * 4
@@ -148,7 +148,7 @@ def test_one_timestamped_turn_has_no_wall_clock() -> None:
     line = _line(
         {"type": "assistant", "timestamp": "2026-10-11T01:00:00Z", "message": {}}
     )
-    assert meter([line], agent="klaudia").wall_clock.count == 0
+    assert meter([line], agent="opencode").wall_clock.count == 0
 
 
 def test_claude_counts_a_turn_once_across_its_content_blocks() -> None:
@@ -184,7 +184,7 @@ def test_claude_counts_a_turn_once_across_its_content_blocks() -> None:
     assert result.wall_clock.count == 1
 
 
-def test_klaudia_compaction_is_a_system_subtype_and_resets_the_estimate() -> None:
+def test_a_system_subtype_compaction_resets_the_estimate() -> None:
     archived = "y" * (CHARS_PER_TOKEN * 100)
     live = "z" * (CHARS_PER_TOKEN * 10)
     lines = [
@@ -192,7 +192,7 @@ def test_klaudia_compaction_is_a_system_subtype_and_resets_the_estimate() -> Non
         _line({"type": "system", "subtype": "compact_boundary"}),
         _line({"type": "assistant", "message": {"content": live}}),
     ]
-    result = meter(lines, agent="klaudia")
+    result = meter(lines, agent="opencode")
     assert result.compactions == 1
     assert result.turns == 2
     live_only = sum(len(line) for line in lines[1:]) // CHARS_PER_TOKEN
@@ -242,7 +242,7 @@ def test_claude_tool_results_are_named_from_the_tool_use_id() -> None:
 def test_budget_line_states_what_is_known_and_omits_what_is_not() -> None:
     result = meter(
         [_line({"type": "assistant", "isCompactSummary": True, "message": {}})],
-        agent="klaudia",
+        agent="opencode",
     )
     assert result.budget_line(120, None) == "1/120 turns, 1 compaction"
     assert "ctx" not in result.budget_line(None, None)
@@ -301,9 +301,9 @@ _needs_fixtures = pytest.mark.skipif(
 def test_shared_fixtures_match_the_engine_port() -> None:
     """The numbers the Rust port asserts against the same files, literally."""
 
-    def reading(name: str) -> dict[str, object]:
+    def reading(name: str, agent: str | None = None) -> dict[str, object]:
         lines = (_FIXTURES / f"{name}.jsonl").read_text().splitlines()
-        result = meter(lines, agent=name)
+        result = meter(lines, agent=agent or name)
         return {
             "turns": result.turns,
             "context_tokens": result.context_tokens,
@@ -333,7 +333,7 @@ def test_shared_fixtures_match_the_engine_port() -> None:
         "usage_measured": True,
         "context_window_tokens": 0,
     }
-    assert reading("klaudia") == {
+    assert reading("estimated", "opencode") == {
         "turns": 2,
         "context_tokens": 67,
         "peak_context_tokens": 117,
@@ -364,8 +364,8 @@ def test_shared_unicode_fixture_counts_characters_as_python_does() -> None:
     """Non-ASCII text, a tool result with no content (the json.dumps length)
     and a half-millisecond mean: the cases a byte count, compact JSON or
     half-away-from-zero rounding in the engine port would get wrong."""
-    lines = (_FIXTURES / "klaudia_unicode.jsonl").read_text().splitlines()
-    result = meter(lines, agent="klaudia")
+    lines = (_FIXTURES / "unicode.jsonl").read_text().splitlines()
+    result = meter(lines, agent="opencode")
     assert result.turns == 3
     assert result.context_tokens == 127
     assert dict(result.tool_result_bytes) == {"Grep": 90, "Read": 10}

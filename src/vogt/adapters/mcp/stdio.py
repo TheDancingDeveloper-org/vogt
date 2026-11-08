@@ -247,12 +247,12 @@ def _without_nulls(value: object) -> object:
 def tool_success(payload: dict[str, Any]) -> dict[str, Any]:
     """structuredContent plus the same result as compact text (design C1).
 
-    The text is the whole result, never truncated: Klaudia (msp-klaudia
-    `internal/mcp/result.go`) shows the model the text and reads
-    structuredContent only when there is none, so a summary there would hide
-    the result. The saving is in the shape instead: no indentation and no
-    null-valued keys. structuredContent is the full result, nulls included, so
-    it matches CLI and REST. Errors stay text-only via `_tool_error`.
+    The text is the whole result, never truncated: a client shows the model
+    the text and reads structuredContent only when there is none, so a summary
+    there would hide the result. The saving is in the shape instead: no
+    indentation and no null-valued keys. structuredContent is the full result,
+    nulls included, so it matches CLI and REST. Errors stay text-only via
+    `_tool_error`.
     """
     text = json.dumps(_without_nulls(payload), separators=(",", ":"), default=str)
     return {

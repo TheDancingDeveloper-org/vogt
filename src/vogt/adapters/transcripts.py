@@ -3,9 +3,7 @@
 A driver reading another agent's terminal gets the visible screen
 (`session.screen`) or the raw output log, where replies are cut off,
 scrolled away or mangled by redraws. Claude Code and Codex already write
-every reply, whole, to a JSONL transcript per conversation, and so does
-Klaudia, in Claude Code's own line format under `~/.klaudia/sessions`
-(WI-950). This module
+every reply, whole, to a JSONL transcript per conversation. This module
 finds the transcript a session's conversation is in and reads its last
 assistant messages back (WI-872), and keeps a cheap one-line excerpt of the
 latest one for session lists (WI-876).
@@ -69,7 +67,7 @@ _CODEX_RESUME = re.compile(r"\bcodex\s+resume\s+'?([A-Za-z0-9_.-]+)")
 
 #: Agents whose transcripts are Claude Code's JSONL, filed per directory as
 #: `<root>/<claude_key(cwd)>/<conversation>.jsonl`.
-CLAUDE_FORMAT = frozenset({"claude", "klaudia"})
+CLAUDE_FORMAT = frozenset({"claude"})
 
 
 @dataclass(frozen=True)
@@ -95,8 +93,6 @@ class Reply:
 def agent_of(command: str | None, template: str | None) -> tuple[str, ...]:
     """Which transcript formats to look in, most likely first."""
     hint = f"{command or ''} {template or ''}".lower()
-    if "klaudia" in hint:
-        return ("klaudia",)
     if "codex" in hint:
         return ("codex",)
     if "claude" in hint:

@@ -34,7 +34,6 @@ def _decide(**overrides: object) -> cold_wake.Decision:
     [
         ("claude", None, "anthropic"),
         ("claude", "claude-opus-5-5", "anthropic"),
-        ("klaudia", "deepseek-chat", "deepseek"),
         ("codex", None, "openai"),
         ("codex", "gpt-5.6", "openai"),
         ("opencode", None, None),
@@ -57,7 +56,6 @@ def test_provider_of(agent: str, model: str | None, provider: str | None) -> Non
         ({"context_tokens": None}, "unmeasured"),
         ({"context_tokens": 99_999}, "small"),
         ({"context_tokens": 100_000}, "compact"),
-        ({"agent": "klaudia", "model": "deepseek-chat"}, "compact"),
     ],
 )
 def test_decide(overrides: dict[str, object], outcome: str) -> None:

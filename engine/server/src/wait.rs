@@ -74,7 +74,7 @@ async fn check(session: &Arc<Session>, until: WaitUntil) -> Result<Option<Outcom
     match session.activity() {
         ActivityState::AwaitingApproval => Ok(Some(Outcome::AwaitingApproval)),
         ActivityState::WaitingForInput => {
-            // A titled agent (Codex, Klaudia) reports `waiting-for-input` from
+            // A titled agent (Codex) reports `waiting-for-input` from
             // screen glyphs before its composer accepts a submit: a resumed
             // Codex reads that while the TUI is still redrawing, and an Enter
             // typed then sits in the composer (WI-1669). For those, ready is
@@ -112,7 +112,7 @@ fn concerns(event: &ServerEvent, id: uuid::Uuid) -> bool {
 /// An agent whose window title this engine reads, so its readiness is the
 /// screen's `ready` rather than the activity alone.
 fn titled(session: &Session) -> bool {
-    matches!(session.agent().as_deref(), Some("codex" | "klaudia"))
+    matches!(session.agent().as_deref(), Some("codex"))
 }
 
 /// Block until `session` reaches `until` (or needs a person, or exits), or
