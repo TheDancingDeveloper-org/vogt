@@ -993,9 +993,14 @@ pub fn session_source(
 ) -> std::result::Result<SourceDescriptor, String> {
     let source = match requested {
         Some(s) => s.clone(),
-        None => registry
-            .default_source()
-            .ok_or("the session names no source and the deployment configures no default")?,
+        None => {
+            tracing::warn!(
+                "session has no project source; using the deprecated deployment default"
+            );
+            registry
+                .default_source()
+                .ok_or("the session names no source and the deployment configures no default")?
+        }
     };
     let provider = registry
         .for_source(&source)
