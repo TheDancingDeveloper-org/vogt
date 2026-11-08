@@ -30,7 +30,7 @@ def test_llm_provider_cli_commands_are_admin_scoped() -> None:
 @pytest.mark.parametrize(
     "argv, expected_exit_code",
     [
-        (["llm-provider", "list"], EXIT_ERROR),
+        (["llm-provider", "list"], EXIT_OK),
         ([
             "llm-provider", "set", "--name", "x", "--base-url", "https://x",
             "--wire-api", "chat", "--env-key", "X", "--secret-project", "p",
@@ -40,7 +40,10 @@ def test_llm_provider_cli_commands_are_admin_scoped() -> None:
     ],
 )
 def test_cli_entry_point_dispatches_each_admin_operation(
-    instance: AppContext, argv: list[str], expected_exit_code: int
+    instance: AppContext,
+    argv: list[str],
+    expected_exit_code: int,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Exercise the real CLI entry point, not the authorization helper.
 
@@ -48,6 +51,7 @@ def test_cli_entry_point_dispatches_each_admin_operation(
     are the non-admin boundary covered by HTTP and MCP tests. This regression
     ensures all three generated commands actually traverse the CLI adapter.
     """
+    monkeypatch.setenv("VOGT_ENGINE_URL", "http://127.0.0.1:9")
     result = run(argv, context=instance)
     assert result.exit_code == expected_exit_code
 
