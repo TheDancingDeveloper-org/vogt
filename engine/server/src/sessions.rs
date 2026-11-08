@@ -1538,6 +1538,7 @@ impl SessionRegistry {
             Creating::Fresh(Origin::Api) => {
                 let mut record = Record::new(id, session.name(), session.created_at_rfc3339());
                 record.template = spec.template.clone();
+                record.placement = spec.placement.clone();
                 record.command = base_command;
                 // Only a directory the caller chose. The engine's default can
                 // sit outside the workspace (`~` on the pods), and a wake that
@@ -2416,7 +2417,7 @@ impl SessionRegistry {
             name: record.name.clone(),
             command,
             template,
-            placement: None,
+            placement: record.placement.clone(),
             // A record from before the line above names the default
             // directory itself; that too means "the default".
             cwd: record
@@ -3692,6 +3693,20 @@ mod tests {
         template.host_capable = true;
         assert!(validate_template_placement(&template, Some("host"), true).is_ok());
         assert!(validate_template_placement(&template, Some("pod"), true).is_ok());
+    }
+
+    #[test]
+    fn hibernation_record_keeps_explicit_placement_for_wake() {
+        let mut record = crate::hibernation::Record::new(
+            uuid::Uuid::new_v4(),
+            "claude".into(),
+            "2026-01-01T00:00:00Z".into(),
+        );
+        record.template = Some("Claude Code".into());
+        record.placement = Some("host".into());
+        let json = serde_json::to_string(&record).unwrap();
+        let restored: crate::hibernation::Record = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.placement.as_deref(), Some("host"));
     }
 
     #[test]
