@@ -408,7 +408,7 @@ fn default_profiles() -> BTreeMap<String, Profile> {
             budget_wall_clock_minutes: Some(90),
             worktree: true,
             repo_map: true,
-            ..profile("klaudia", "grok-4.7")
+            ..profile("claude", "sonnet")
         },
     );
     profiles.insert(
@@ -653,7 +653,7 @@ mod tests {
         for purpose in PURPOSES {
             assert!(settings.profile(purpose).is_some(), "{purpose}");
         }
-        assert_eq!(settings.profile("implement").unwrap().model, "grok-4.7");
+        assert_eq!(settings.profile("implement").unwrap().model, "sonnet");
         assert!(settings.profile("review").unwrap().read_only);
         assert!(!settings.profile("review").unwrap().autopilot);
         assert_eq!(settings.max_workers_per_overseer, 5);
@@ -669,7 +669,7 @@ mod tests {
         );
         let implement = resolve(&stored).profiles.remove("implement").unwrap();
         assert_eq!(implement.model, "sonnet");
-        assert_eq!(implement.template, "klaudia");
+        assert_eq!(implement.template, "claude");
         assert_eq!(implement.budget_turns, Some(120));
         assert!(implement.worktree);
     }

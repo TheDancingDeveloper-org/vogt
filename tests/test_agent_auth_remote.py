@@ -6,7 +6,6 @@ import json
 import subprocess
 from pathlib import Path
 
-
 SCRIPT = Path(__file__).resolve().parents[1] / "engine" / "deploy" / "agent-auth.sh"
 
 

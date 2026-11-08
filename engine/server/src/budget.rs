@@ -422,9 +422,8 @@ pub const COMPACT_FOCUS: &str = "Keep: open workers and their items, pending ope
 follow-ups, merge gates";
 
 /// The command that compacts an agent's own context, or `None` for an agent
-/// that has none to type. Codex must never be typed `/compact` (WI-1575): it
-/// would reach the model as a prompt. Klaudia's command is not confirmed, so it
-/// is not typed either.
+/// that has none to type. Codex and opencode must never be typed `/compact`
+/// (WI-1575): it would reach the model as a prompt.
 pub fn compact_command(agent: &str) -> Option<String> {
     match agent {
         "claude" => Some(format!("/compact {COMPACT_FOCUS}")),
@@ -1032,7 +1031,7 @@ mod tests {
         let line = compact_command("claude").unwrap();
         assert!(line.starts_with("/compact Keep: open workers and their items"));
         assert!(line.contains("merge gates"));
-        for agent in ["codex", "opencode", "klaudia", "bash"] {
+        for agent in ["codex", "opencode", "bash"] {
             assert_eq!(compact_command(agent), None, "{agent}");
         }
     }

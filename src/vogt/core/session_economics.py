@@ -13,9 +13,9 @@ Three agents, three shapes, one result:
   of its input, cache-read and cache-creation tokens is the live context
   size at that turn; `output_tokens` is what the turn added. Compaction is an
   entry with `isCompactSummary: true`.
-- **Klaudia** writes the same envelope but no usage. It marks a compaction
-  with a `compact_boundary` line. Context is estimated at 4 chars per token,
-  the figure its own compaction doc uses.
+- **An agent without usage** (opencode) writes the same envelope but no
+  usage, and may mark a compaction with a `compact_boundary` line. Context is
+  estimated at 4 chars per token.
 - **Codex** writes `turn_context` entries and carries tool results under
   `payload`. Its `event_msg` `token_count` events carry
   `info.last_token_usage.total_tokens` (what the window holds now; the
@@ -48,8 +48,7 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from itertools import pairwise
 
-#: Klaudia's own figure (docs/compaction.md in msp-klaudia): four characters
-#: of transcript per token when the agent records no usage.
+#: Four characters of transcript per token when the agent records no usage.
 CHARS_PER_TOKEN = 4
 
 _MILLISECOND = timedelta(milliseconds=1)
@@ -113,9 +112,9 @@ def meter(lines: Iterable[str], *, agent: str) -> SessionEconomics:
     """Reduce one transcript's JSONL lines to its economics.
 
     A line that is not JSON is skipped, as is a line with no `type`. Callers
-    pass the agent name (`claude`, `klaudia`, `codex`) so the reader knows
-    which shape to expect; an unknown agent is read as Claude's shape, which
-    is the one Klaudia also writes.
+    pass the agent name (`claude`, `codex`) so the reader knows which shape to
+    expect; an unknown agent is read as Claude's shape, which an agent without
+    usage also writes.
     """
     measured = agent == "claude"
     turn_ids: set[str] = set()
@@ -237,8 +236,8 @@ def meter(lines: Iterable[str], *, agent: str) -> SessionEconomics:
 
 
 def _is_compaction(entry: Mapping[str, object]) -> bool:
-    """Claude sets `isCompactSummary`; Klaudia writes a system line whose
-    subtype is `compact_boundary`."""
+    """Claude sets `isCompactSummary`; an agent without usage writes a system
+    line whose subtype is `compact_boundary`."""
     if entry.get("isCompactSummary") is True:
         return True
     if entry.get("subtype") == "compact_boundary":
@@ -347,11 +346,10 @@ def _count_tools(
 ) -> None:
     """Add one entry's tool results to the byte map and the read counts.
 
-    Claude and Klaudia nest results in `message.content`; Codex nests them
-    in `payload`. A result names its tool on the block or, in the real
-    Claude shape, only by `tool_use_id` pointing at an earlier `tool_use`.
-    A result that names nothing is ignored rather than lumped under a
-    made-up name.
+    Results are nested in `message.content`; Codex nests them in `payload`. A
+    result names its tool on the block or, in the real Claude shape, only by
+    `tool_use_id` pointing at an earlier `tool_use`. A result that names
+    nothing is ignored rather than lumped under a made-up name.
     """
     for block in _blocks(entry):
         if not isinstance(block, dict):
