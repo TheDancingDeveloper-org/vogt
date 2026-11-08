@@ -21,7 +21,9 @@ use kube::{
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use uuid::Uuid;
-use vogt_engine_contract::source::{LandingMode, SourceDescriptor, SourceLocation};
+use vogt_engine_contract::source::SourceDescriptor;
+#[cfg(test)]
+use vogt_engine_contract::source::{LandingMode, SourceLocation};
 
 /// What one session template changes about its pod. An unset field keeps the
 /// deployment default; a set resource map is merged over the default map key
@@ -89,24 +91,6 @@ pub struct PodConfig {
     /// ServiceAccount token); read on every call.
     #[serde(default)]
     pub cache_provisioner_token_file: Option<String>,
-    pub graft_repo: String,
-    pub graft_line: String,
-    /// Graft server the entrypoint clones from, passed to the pod as
-    /// `GRAFT_ENDPOINT`. It must be reachable from the session namespace.
-    #[serde(default)]
-    pub graft_endpoint: Option<String>,
-    /// File (a mounted secret) holding the graft token scoped to the session's
-    /// repo and line. The engine reads it at bootstrap and hands it to the
-    /// entrypoint; the value is never in config or the pod spec.
-    #[serde(default)]
-    pub graft_token_file: Option<String>,
-    /// File (a mounted secret) holding the engine's graft *mint* token
-    /// (`ENGINE_GRAFT_MINT_TOKEN_FILE`): a service-kind token that lets the
-    /// engine call `AdminService.MintToken` at pod create for a token of the
-    /// session's own. Never given to a pod. When set it replaces
-    /// `graft_token_file`, which is only the fallback (WI-3229).
-    #[serde(default)]
-    pub graft_mint_token_file: Option<String>,
     pub cli: String,
     pub extra_ca_file: Option<String>,
     pub priority_class: Option<String>,
@@ -467,12 +451,7 @@ impl Default for PodConfig {
             sccache_endpoint: None,
             cache_provisioner_url: None,
             cache_provisioner_token_file: None,
-            graft_repo: "vogt".into(),
-            graft_line: "rust-2".into(),
             cli: "codex".into(),
-            graft_endpoint: None,
-            graft_token_file: None,
-            graft_mint_token_file: None,
             extra_ca_file: None,
             priority_class: Some("vogt-session".into()),
             preferred_nodes: Vec::new(),
@@ -525,8 +504,6 @@ impl PodConfig {
         set("ENGINE_POD_NAMESPACE", &mut cfg.namespace);
         set("ENGINE_POD_IMAGE", &mut cfg.default_image);
         set("ENGINE_POD_SERVICE_ACCOUNT", &mut cfg.service_account);
-        set("ENGINE_POD_GRAFT_REPO", &mut cfg.graft_repo);
-        set("ENGINE_POD_GRAFT_LINE", &mut cfg.graft_line);
         set("ENGINE_POD_CLI", &mut cfg.cli);
         set_or_empty("ENGINE_POD_CACHE_PVC", &mut cfg.cache_pvc);
         set_or_empty("ENGINE_POD_CACHE_NODE", &mut cfg.cache_node);
@@ -554,12 +531,6 @@ impl PodConfig {
             })?;
         }
         optional("ENGINE_POD_IMAGE_PULL_SECRET", &mut cfg.image_pull_secret);
-        optional("ENGINE_POD_GRAFT_ENDPOINT", &mut cfg.graft_endpoint);
-        optional("ENGINE_POD_GRAFT_TOKEN_FILE", &mut cfg.graft_token_file);
-        optional(
-            "ENGINE_GRAFT_MINT_TOKEN_FILE",
-            &mut cfg.graft_mint_token_file,
-        );
         optional("ENGINE_POD_EXTRA_CA_FILE", &mut cfg.extra_ca_file);
         optional(
             "ENGINE_POD_CACHE_PROVISIONER_URL",
@@ -867,7 +838,12 @@ pub fn bootstrap_secret(
     }
 }
 
-fn pod_env(cfg: &PodConfig, source: &SourceDescriptor, id: Uuid) -> Vec<EnvVar> {
+fn pod_env(
+    cfg: &PodConfig,
+    source: &SourceDescriptor,
+    source_env: &[(String, String)],
+    id: Uuid,
+) -> Vec<EnvVar> {
     let mut env = vec![
         EnvVar {
             name: "VOGT_ENGINE_URL".into(),
@@ -896,13 +872,11 @@ fn pod_env(cfg: &PodConfig, source: &SourceDescriptor, id: Uuid) -> Vec<EnvVar> 
             ..Default::default()
         },
     ];
-    if let Some(endpoint) = &cfg.graft_endpoint {
-        env.push(EnvVar {
-            name: "GRAFT_ENDPOINT".into(),
-            value: Some(endpoint.clone()),
-            ..Default::default()
-        });
-    }
+    env.extend(source_env.iter().map(|(name, value)| EnvVar {
+        name: name.clone(),
+        value: Some(value.clone()),
+        ..Default::default()
+    }));
     if let Some(path) = &cfg.extra_ca_file {
         env.push(EnvVar {
             name: "VOGT_EXTRA_CA_FILE".into(),
@@ -1010,59 +984,33 @@ fn merge_resources(defaults: &ResourceMap, over: Option<&ResourceMap>) -> Resour
 }
 
 /// The source a pod-backed session checks out (WI-3369): the project's own
-/// descriptor when the session carries one, else the deployment's graft repo
-/// and line. The provider is picked from `registry` by the descriptor's kind;
-/// a source no pod can check out yet is refused before anything is created.
+/// descriptor when the session carries one, else the deployment's default.
+/// The provider is picked from `registry` by the descriptor's kind, and a
+/// source it cannot serve is refused before anything is created.
 pub fn session_source(
-    cfg: &PodConfig,
     requested: Option<&SourceDescriptor>,
     registry: &crate::source_provider::SourceRegistry,
 ) -> std::result::Result<SourceDescriptor, String> {
     let source = match requested {
         Some(s) => s.clone(),
-        None => SourceDescriptor {
-            location: SourceLocation::Graft {
-                endpoint: cfg.graft_endpoint.clone().unwrap_or_default(),
-                repo: cfg.graft_repo.clone(),
-            },
-            reference: cfg.graft_line.clone(),
-            landing: LandingMode::Line,
-        },
+        None => registry
+            .default_source()
+            .ok_or("the session names no source and the deployment configures no default")?,
     };
-    let SourceLocation::Graft { endpoint, repo } = &source.location else {
-        return Err(format!(
-            "project source {} is not a graft repository; pod sessions need a graft repo and line until git-only checkout lands",
-            source.location.repo()
-        ));
-    };
-    if repo.trim().is_empty() || source.reference.trim().is_empty() {
-        return Err("project source names no graft repo or line".into());
-    }
-    if [repo, &source.reference]
-        .iter()
-        .any(|v| v.starts_with('-') || v.chars().any(char::is_whitespace))
-    {
-        return Err("project source repo or line is not a valid name".into());
-    }
-    // One deployment, one graft server: the engine's minter and the pod's
-    // GRAFT_ENDPOINT are the deployment's, so a source on another server
-    // would be checked out with a token that server never issued.
-    if !endpoint.is_empty() && cfg.graft_endpoint.as_deref().is_some_and(|e| e != endpoint) {
-        return Err(format!(
-            "project source is on graft server {endpoint}, not this deployment's"
-        ));
-    }
-    registry
+    let provider = registry
         .for_source(&source)
         .map_err(|e| format!("project source cannot be served: {e}"))?;
+    provider.validate(&source).map_err(|e| e.to_string())?;
     Ok(source)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn pod_template(
     cfg: &PodConfig,
     template: &SessionTemplate,
     id: Uuid,
     source: &SourceDescriptor,
+    source_env: &[(String, String)],
     kind: &str,
     account: Option<&str>,
     command: &[String],
@@ -1081,7 +1029,7 @@ pub fn pod_template(
         .iter()
         .find_map(|(k, v)| (k == "VOGT_SESSION_IMAGE").then_some(v.as_str()))
         .unwrap_or(&cfg.default_image);
-    let mut env = pod_env(cfg, source, id);
+    let mut env = pod_env(cfg, source, source_env, id);
     env.extend(PRIVATE_CACHE_ENV.iter().map(|(name, value)| EnvVar {
         name: (*name).into(),
         value: Some((*value).into()),
@@ -1755,27 +1703,134 @@ impl SessionBackend for PodBackend {
 mod tests {
     use super::*;
 
-    fn graft_source(repo: &str, line: &str) -> SourceDescriptor {
+    fn project_source(repo: &str, reference: &str) -> SourceDescriptor {
         SourceDescriptor {
-            location: SourceLocation::Graft {
-                endpoint: String::new(),
+            location: SourceLocation::Git {
+                url: format!("https://example.test/o/{repo}.git"),
                 repo: repo.into(),
             },
-            reference: line.into(),
-            landing: LandingMode::Line,
+            reference: reference.into(),
+            landing: LandingMode::PushBranch,
         }
     }
 
-    fn default_source(cfg: &PodConfig) -> SourceDescriptor {
-        session_source(cfg, None, &registry()).unwrap()
+    /// A provider with a deployment default and checkout env, standing in
+    /// for whichever providers a deployment registers.
+    struct StubProvider;
+
+    impl crate::source_provider::SourceProvider for StubProvider {
+        fn kind(&self) -> vogt_engine_contract::source::SourceKind {
+            vogt_engine_contract::source::SourceKind::Git
+        }
+        fn validate(
+            &self,
+            source: &SourceDescriptor,
+        ) -> std::result::Result<(), crate::source_provider::SourceError> {
+            if source.location.repo().is_empty() || source.location.repo().starts_with('-') {
+                return Err(crate::source_provider::SourceError::InvalidSource(
+                    "bad repo".into(),
+                ));
+            }
+            Ok(())
+        }
+        fn default_source(&self) -> Option<SourceDescriptor> {
+            Some(project_source("vogt", "rust-2"))
+        }
+        fn pod_env(&self, source: &SourceDescriptor) -> Vec<(String, String)> {
+            vec![("STUB_SOURCE_REPO".into(), source.location.repo().into())]
+        }
+        fn checkout(
+            &self,
+            _: &SourceDescriptor,
+            _: &std::path::Path,
+            _: Option<&crate::source_provider::CredentialHandle>,
+        ) -> std::result::Result<(), crate::source_provider::SourceError> {
+            unimplemented!()
+        }
+        fn mint_credential<'a>(
+            &'a self,
+            _: &'a SourceDescriptor,
+            _: &'a crate::source_provider::CredentialRequest,
+        ) -> crate::source_provider::SourceFuture<'a, crate::source_provider::CredentialHandle>
+        {
+            unimplemented!()
+        }
+        fn revoke_credential<'a>(
+            &'a self,
+            _: &'a crate::source_provider::CredentialHandle,
+        ) -> crate::source_provider::SourceFuture<'a, ()> {
+            unimplemented!()
+        }
+        fn status(
+            &self,
+            _: &std::path::Path,
+        ) -> std::result::Result<
+            vogt_engine_contract::source::SourceStatus,
+            crate::source_provider::SourceError,
+        > {
+            unimplemented!()
+        }
+        fn diff(
+            &self,
+            _: &std::path::Path,
+        ) -> std::result::Result<String, crate::source_provider::SourceError> {
+            unimplemented!()
+        }
+        fn log(
+            &self,
+            _: &std::path::Path,
+            _: usize,
+        ) -> std::result::Result<
+            Vec<vogt_engine_contract::source::SourceLogEntry>,
+            crate::source_provider::SourceError,
+        > {
+            unimplemented!()
+        }
+        fn save_unlanded(
+            &self,
+            _: &std::path::Path,
+            _: &str,
+        ) -> std::result::Result<
+            vogt_engine_contract::source::SavedWork,
+            crate::source_provider::SourceError,
+        > {
+            unimplemented!()
+        }
+        fn land(
+            &self,
+            _: &SourceDescriptor,
+            _: &std::path::Path,
+            _: &crate::source_provider::LandRequest,
+        ) -> std::result::Result<
+            vogt_engine_contract::source::LandOutcome,
+            crate::source_provider::SourceError,
+        > {
+            unimplemented!()
+        }
+        fn report_landed(
+            &self,
+            _: &SourceDescriptor,
+            _: &str,
+        ) -> std::result::Result<
+            Vec<vogt_engine_contract::source::SourceLogEntry>,
+            crate::source_provider::SourceError,
+        > {
+            unimplemented!()
+        }
+    }
+
+    fn default_source(_cfg: &PodConfig) -> SourceDescriptor {
+        session_source(None, &registry()).unwrap()
+    }
+
+    fn source_env(source: &SourceDescriptor) -> Vec<(String, String)> {
+        use crate::source_provider::SourceProvider;
+        StubProvider.pod_env(source)
     }
 
     fn registry() -> crate::source_provider::SourceRegistry {
-        let mut r = crate::source_provider::SourceRegistry::with_defaults();
-        r.register(Arc::new(crate::graft_provider::GraftProvider::new(
-            "/nonexistent",
-            None,
-        )));
+        let mut r = crate::source_provider::SourceRegistry::default();
+        r.register(Arc::new(StubProvider));
         r
     }
 
@@ -1790,66 +1845,39 @@ mod tests {
     }
 
     #[test]
-    fn session_source_defaults_to_the_deployment_repo_and_line() {
-        let cfg = PodConfig::default();
-        let s = session_source(&cfg, None, &registry()).unwrap();
-        assert_eq!(s.location.repo(), cfg.graft_repo);
-        assert_eq!(s.reference, cfg.graft_line);
-        assert_eq!(s.kind(), vogt_engine_contract::source::SourceKind::Graft);
+    fn session_source_defaults_to_the_deployment_default() {
+        let s = session_source(None, &registry()).unwrap();
+        assert_eq!(s.location.repo(), "vogt");
+        assert_eq!(s.reference, "rust-2");
     }
 
     #[test]
     fn session_source_uses_the_project_source() {
-        let cfg = PodConfig::default();
-        let s = session_source(
-            &cfg,
-            Some(&graft_source("farmeggs", "backlog-1")),
-            &registry(),
-        )
-        .unwrap();
+        let s =
+            session_source(Some(&project_source("farmeggs", "backlog-1")), &registry()).unwrap();
         assert_eq!(s.location.repo(), "farmeggs");
         assert_eq!(s.reference, "backlog-1");
     }
 
     #[test]
-    fn session_source_refuses_a_git_only_project() {
-        let git = SourceDescriptor {
-            location: SourceLocation::Git {
-                url: "https://example.test/o/r.git".into(),
-                repo: "example.test/o/r".into(),
-            },
-            reference: "main".into(),
-            landing: LandingMode::PushBranch,
-        };
-        let err = session_source(&PodConfig::default(), Some(&git), &registry()).unwrap_err();
-        assert!(err.contains("not a graft repository"), "{err}");
+    fn session_source_serves_a_git_project_through_the_default_registry() {
+        let r = crate::source_provider::SourceRegistry::with_defaults();
+        let s = session_source(Some(&project_source("r", "main")), &r).unwrap();
+        assert_eq!(s.kind(), vogt_engine_contract::source::SourceKind::Git);
     }
 
     #[test]
-    fn session_source_refuses_bad_names_and_other_servers() {
-        let cfg = PodConfig {
-            graft_endpoint: Some("http://graft-dev:17888".into()),
-            ..Default::default()
-        };
-        for bad in [
-            graft_source("", "l"),
-            graft_source("r", ""),
-            graft_source("-r", "l"),
-        ] {
-            assert!(session_source(&cfg, Some(&bad), &registry()).is_err());
+    fn session_source_refuses_what_the_provider_refuses() {
+        for bad in [project_source("", "l"), project_source("-r", "l")] {
+            assert!(session_source(Some(&bad), &registry()).is_err());
         }
-        let mut elsewhere = graft_source("r", "l");
-        elsewhere.location = SourceLocation::Graft {
-            endpoint: "http://other:1".into(),
-            repo: "r".into(),
-        };
-        assert!(session_source(&cfg, Some(&elsewhere), &registry()).is_err());
     }
 
     #[test]
     fn session_source_refuses_a_provider_the_engine_lacks() {
-        let r = crate::source_provider::SourceRegistry::with_defaults();
-        assert!(session_source(&PodConfig::default(), None, &r).is_err());
+        let r = crate::source_provider::SourceRegistry::default();
+        assert!(session_source(Some(&project_source("r", "main")), &r).is_err());
+        assert!(session_source(None, &r).is_err());
     }
 
     #[test]
@@ -1869,30 +1897,25 @@ mod tests {
             account: None,
         };
         for (repo, line) in [("vogt", "rust-2"), ("farmeggs", "backlog-1")] {
-            let src = session_source(&cfg, Some(&graft_source(repo, line)), &registry()).unwrap();
-            let pod = pod_template(&cfg, &template, Uuid::nil(), &src, "session", None, &[]);
-            assert_eq!(env_value(&pod, "VOGT_GRAFT_REPO").as_deref(), Some(repo));
-            assert_eq!(env_value(&pod, "VOGT_GRAFT_LINE").as_deref(), Some(line));
+            let src = session_source(Some(&project_source(repo, line)), &registry()).unwrap();
+            let pod = pod_template(
+                &cfg,
+                &template,
+                Uuid::nil(),
+                &src,
+                &source_env(&src),
+                "session",
+                None,
+                &[],
+            );
+            let carried: SourceDescriptor =
+                serde_json::from_str(&env_value(&pod, "VOGT_SOURCE_JSON").unwrap()).unwrap();
+            assert_eq!(carried, src);
+            assert_eq!(env_value(&pod, "STUB_SOURCE_REPO").as_deref(), Some(repo));
             assert_eq!(
                 pod.metadata.labels.as_ref().unwrap().get("vogt.project"),
                 Some(&repo.to_string())
             );
-            let grant = crate::graft_mint::SessionGrant::new(
-                Uuid::nil(),
-                src.location.repo(),
-                &src.reference,
-                None,
-                None,
-            )
-            .unwrap();
-            let scopes = grant.scopes();
-            assert!(
-                scopes
-                    .iter()
-                    .all(|s| s.starts_with(&format!("repo:{repo}:"))),
-                "{scopes:?}"
-            );
-            assert!(scopes.contains(&format!("repo:{repo}:land:{line}")));
         }
     }
 
@@ -1950,7 +1973,8 @@ mod tests {
             &cfg,
             &template,
             id,
-            &graft_source("demo", "rust-2"),
+            &project_source("demo", "rust-2"),
+            &[],
             "agent",
             Some("acct"),
             &["bash".into()],
@@ -2023,8 +2047,7 @@ mod tests {
             "VOGT_ENGINE_URL",
             "VOGT_SESSION_ID",
             "VOGT_BOOTSTRAP_TOKEN_FILE",
-            "VOGT_GRAFT_REPO",
-            "VOGT_GRAFT_LINE",
+            "VOGT_SOURCE_JSON",
             "VOGT_CLI",
         ] {
             assert!(
@@ -2082,19 +2105,15 @@ mod tests {
     }
 
     #[test]
-    fn pod_env_passes_the_graft_endpoint_only_when_configured() {
-        let find = |cfg: &PodConfig| {
-            pod_env(cfg, &default_source(cfg), Uuid::nil())
-                .into_iter()
-                .find(|v| v.name == "GRAFT_ENDPOINT")
-                .and_then(|v| v.value)
-        };
-        assert_eq!(find(&PodConfig::default()), None);
-        let cfg = PodConfig {
-            graft_endpoint: Some("http://graft.example:17888".into()),
-            ..Default::default()
-        };
-        assert_eq!(find(&cfg).as_deref(), Some("http://graft.example:17888"));
+    fn pod_env_carries_the_providers_source_env() {
+        let cfg = PodConfig::default();
+        let src = default_source(&cfg);
+        let env = pod_env(&cfg, &src, &source_env(&src), Uuid::nil());
+        let stub = env.iter().find(|v| v.name == "STUB_SOURCE_REPO");
+        assert_eq!(stub.and_then(|v| v.value.as_deref()), Some("vogt"));
+        assert!(pod_env(&cfg, &src, &[], Uuid::nil())
+            .iter()
+            .all(|v| v.name != "STUB_SOURCE_REPO"));
     }
 
     #[test]
@@ -2103,7 +2122,7 @@ mod tests {
             extra_ca_file: Some("/etc/ssl/custom.pem".into()),
             ..Default::default()
         };
-        let env = pod_env(&cfg, &default_source(&cfg), Uuid::nil());
+        let env = pod_env(&cfg, &default_source(&cfg), &[], Uuid::nil());
         assert_eq!(
             env.iter()
                 .find(|v| v.name == "VOGT_EXTRA_CA_FILE")
@@ -2376,6 +2395,7 @@ mod tests {
                 &template,
                 Uuid::nil(),
                 &default_source(&cfg),
+                &[],
                 "session",
                 None,
                 command,
@@ -2431,7 +2451,8 @@ mod tests {
             &cfg,
             &template,
             Uuid::nil(),
-            &graft_source("demo", "rust-2"),
+            &project_source("demo", "rust-2"),
+            &[],
             "session",
             None,
             &[],
@@ -3015,6 +3036,7 @@ mod tests {
             &template,
             Uuid::nil(),
             &default_source(cfg),
+            &[],
             "session",
             None,
             &[],

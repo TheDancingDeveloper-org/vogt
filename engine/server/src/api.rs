@@ -279,8 +279,8 @@ fn require_role_authority(
     }
 }
 
-/// A session's source picks the graft repo and line the engine mints a land
-/// token for into the pod (WI-3369), so it comes from the project config
+/// A session's source picks the repo and ref the engine mints a scoped
+/// credential for into the pod (WI-3369), so it comes from the project config
 /// vogt-core holds and from nothing else. Only vogt-core (the stack secret,
 /// never `name`) may name one; any other caller that names a source is
 /// refused, so no session token, person or break-glass caller can point a
@@ -1856,14 +1856,14 @@ mod source_authority_tests {
         }
     }
 
-    fn graft(repo: &str, line: &str) -> SourceDescriptor {
+    fn project(repo: &str, reference: &str) -> SourceDescriptor {
         SourceDescriptor {
-            location: SourceLocation::Graft {
-                endpoint: String::new(),
+            location: SourceLocation::Git {
+                url: format!("https://example.test/o/{repo}.git"),
                 repo: repo.into(),
             },
-            reference: line.into(),
-            landing: LandingMode::Line,
+            reference: reference.into(),
+            landing: LandingMode::PushBranch,
         }
     }
 
@@ -1872,7 +1872,7 @@ mod source_authority_tests {
     /// where the land token is minted, so it gets no token for it.
     #[test]
     fn a_caller_other_than_vogt_core_cannot_name_a_source() {
-        let other = graft("someone-elses-repo", "main");
+        let other = project("someone-elses-repo", "main");
         for identity in [
             caller(false, false, false),
             caller(false, true, false),
@@ -1894,7 +1894,7 @@ mod source_authority_tests {
     /// default from anyone.
     #[test]
     fn vogt_core_names_the_projects_source_and_no_source_is_the_default() {
-        let own = graft("farmeggs", "backlog-1");
+        let own = project("farmeggs", "backlog-1");
         assert!(require_source_authority(Some(&caller(true, false, false)), Some(&own)).is_ok());
         assert!(require_source_authority(Some(&caller(false, false, false)), None).is_ok());
     }
