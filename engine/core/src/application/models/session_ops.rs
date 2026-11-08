@@ -151,7 +151,8 @@ pub struct SessionTemplateRow {
     #[serde(default)]
     #[schemars(schema_with = "optional_string")]
     pub agent: Option<String>,
-    pub placement: String,
+    pub placements: Vec<String>,
+    pub default_placement: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]

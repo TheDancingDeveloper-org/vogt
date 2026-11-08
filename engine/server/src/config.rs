@@ -129,7 +129,10 @@ impl SessionTemplate {
         let mut templates = Self::default_templates();
         for template in &mut templates {
             if template.backend == "local" {
-                template.host_capable = true;
+                // A local default is host-only. A pod default may opt into
+                // the host as well, preserving the built-in dual-placement
+                // contract.
+                template.host_capable = template.host_capable || backend == "pod";
                 template.backend = backend.to_string();
             }
         }
@@ -2502,6 +2505,14 @@ mod prefix_tests {
         };
         let cfg = load(Some(&cfg_path), None, None).unwrap();
         assert_eq!(backend_of(&cfg, "Claude Code (protected)"), "local");
+        assert!(
+            !cfg.session_templates
+                .iter()
+                .find(|t| t.name == "Claude Code (protected)")
+                .unwrap()
+                .host_capable,
+            "local defaults are host-only"
+        );
         unsafe {
             std::env::set_var("VOGT_ENGINE_SESSION_BACKEND", "pod");
             std::env::set_var("ENGINE_POD_BACKENDS_ENABLED", "true");
@@ -2515,6 +2526,14 @@ mod prefix_tests {
         ] {
             assert_eq!(backend_of(&cfg, name), "pod", "{name}");
         }
+        assert!(
+            cfg.session_templates
+                .iter()
+                .find(|t| t.name == "Claude Code (protected)")
+                .unwrap()
+                .host_capable,
+            "pod defaults are dual-placement"
+        );
         unsafe { std::env::set_var("ENGINE_SESSION_BACKEND", "local") };
         let cfg = load(Some(&cfg_path), None, None).unwrap();
         assert_eq!(backend_of(&cfg, "Claude Code (protected)"), "local");

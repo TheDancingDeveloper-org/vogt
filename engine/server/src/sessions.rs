@@ -2986,7 +2986,11 @@ impl SessionRegistry {
                 } else {
                     vec!["host".to_string()]
                 },
-                default_placement: template.backend.clone(),
+                default_placement: if template.backend == "pod" {
+                    "pod".to_string()
+                } else {
+                    "host".to_string()
+                },
             })
             .collect()
     }
