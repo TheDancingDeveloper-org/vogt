@@ -16,6 +16,81 @@ use vogt_engine_contract::{OkResponse, SessionDetail, SessionList, SessionScreen
 use crate::{app::AppState, error::Result, pty::SessionSpec};
 
 #[derive(Debug, Deserialize)]
+pub struct LlmProviderRequest {
+    pub name: String,
+    pub base_url: String,
+    pub wire_api: String,
+    pub env_key: String,
+    pub secret_project: String,
+    pub secret_name: String,
+    #[serde(default)]
+    pub models: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LlmProviderRemoveRequest {
+    pub name: String,
+}
+
+pub async fn llm_providers(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::Value>> {
+    let path = state.config.llm_providers_file.as_deref();
+    let providers = crate::llm_providers::statuses(path, &state.config.agent_auth_secrets)
+        .map_err(crate::error::ApiError::Internal)?;
+    Ok(Json(serde_json::json!({"providers": providers})))
+}
+
+pub async fn llm_provider_set(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<LlmProviderRequest>,
+) -> Result<Json<serde_json::Value>> {
+    let provider = crate::llm_providers::Provider {
+        name: request.name,
+        base_url: request.base_url,
+        wire_api: request.wire_api,
+        env_key: request.env_key,
+        secret_project: request.secret_project,
+        secret_name: request.secret_name,
+        models: request.models,
+    };
+    let path = state.config.llm_providers_file.as_deref().ok_or_else(|| {
+        crate::error::ApiError::BadRequest("ENGINE_LLM_PROVIDERS_FILE is not configured".into())
+    })?;
+    crate::llm_providers::validate_against_manifest(&provider, &state.config.agent_auth_secrets)
+        .map_err(crate::error::ApiError::BadRequest)?;
+    let mut providers =
+        crate::llm_providers::load(path).map_err(crate::error::ApiError::BadRequest)?;
+    providers.retain(|p| p.name != provider.name);
+    providers.push(provider.clone());
+    crate::llm_providers::validate_all(&providers).map_err(crate::error::ApiError::BadRequest)?;
+    crate::llm_providers::write(path, &providers).map_err(crate::error::ApiError::Internal)?;
+    let status = crate::llm_providers::statuses(Some(path), &state.config.agent_auth_secrets)
+        .map_err(crate::error::ApiError::Internal)?
+        .into_iter()
+        .find(|s| s.provider.name == provider.name)
+        .unwrap();
+    Ok(Json(serde_json::json!({"provider": status})))
+}
+
+pub async fn llm_provider_remove(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<LlmProviderRemoveRequest>,
+) -> Result<Json<serde_json::Value>> {
+    let path = state.config.llm_providers_file.as_deref().ok_or_else(|| {
+        crate::error::ApiError::BadRequest("ENGINE_LLM_PROVIDERS_FILE is not configured".into())
+    })?;
+    let mut providers =
+        crate::llm_providers::load(path).map_err(crate::error::ApiError::BadRequest)?;
+    let before = providers.len();
+    providers.retain(|p| p.name != request.name);
+    if before != providers.len() {
+        crate::llm_providers::write(path, &providers).map_err(crate::error::ApiError::Internal)?;
+    }
+    Ok(Json(
+        serde_json::json!({"name": request.name, "removed": before != providers.len()}),
+    ))
+}
+
+#[derive(Debug, Deserialize)]
 pub struct ListQuery {
     /// `hidden` returns the sessions the default list leaves out as well as
     /// the ones it shows (WI-1289). Anything else, including absent, is the
