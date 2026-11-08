@@ -2,8 +2,8 @@
 //!
 //! A provider checks out, inspects, saves and lands one kind of source. The
 //! registry picks one by the descriptor's kind, so session code never names a
-//! provider. Nothing calls this yet: session start still takes its existing
-//! path until the descriptor is carried through `session.start`.
+//! provider: pod session start validates the source, mints and revokes its
+//! credential, and sets the pod's environment through the registry.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -40,6 +40,36 @@ pub struct CredentialHandle {
     pub path: PathBuf,
 }
 
+/// Who a credential is for: one session, with the labels a provider may scope
+/// or time-limit it by.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CredentialRequest {
+    pub session: uuid::Uuid,
+    pub work_item: Option<String>,
+    pub budget: Option<vogt_engine_contract::SessionBudget>,
+}
+
+impl CredentialRequest {
+    pub fn for_session(session: uuid::Uuid) -> Self {
+        Self {
+            session,
+            work_item: None,
+            budget: None,
+        }
+    }
+}
+
+/// Read a credential file's value, trimmed; `None` when it is empty.
+pub fn read_credential(handle: &CredentialHandle) -> std::io::Result<Option<String>> {
+    let text = std::fs::read_to_string(&handle.path)?;
+    let value = text.trim();
+    Ok((!value.is_empty()).then(|| value.to_owned()))
+}
+
+/// A provider call that may wait on the network.
+pub type SourceFuture<'a, T> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, SourceError>> + Send + 'a>>;
+
 /// What to land and how.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LandRequest {
@@ -51,6 +81,39 @@ pub struct LandRequest {
 pub trait SourceProvider: Send + Sync {
     fn kind(&self) -> SourceKind;
 
+    /// Refuse a source this deployment cannot serve before anything is
+    /// created for it.
+    fn validate(&self, _source: &SourceDescriptor) -> Result<(), SourceError> {
+        Ok(())
+    }
+
+    /// The deployment's default source for this kind, if it configures one.
+    fn default_source(&self) -> Option<SourceDescriptor> {
+        None
+    }
+
+    /// Environment a pod checking out `source` needs (no secrets).
+    fn pod_env(&self, _source: &SourceDescriptor) -> Vec<(String, String)> {
+        Vec::new()
+    }
+
+    /// Whether this provider mints a credential per session. When it does, a
+    /// missing mint never falls back to the shared credential.
+    fn mints_credentials(&self) -> bool {
+        false
+    }
+
+    /// A deployment-wide credential handed out when none is minted.
+    fn shared_credential(&self) -> Option<CredentialHandle> {
+        None
+    }
+
+    /// The credential minted earlier for `session`, if one is still kept (an
+    /// engine restart adopting a pod revokes it through this).
+    fn held_credential(&self, _session: uuid::Uuid) -> Option<CredentialHandle> {
+        None
+    }
+
     /// Create a clean checkout of the source's ref at `dest`, which must be
     /// missing or empty.
     fn checkout(
@@ -60,13 +123,15 @@ pub trait SourceProvider: Send + Sync {
         credential: Option<&CredentialHandle>,
     ) -> Result<(), SourceError>;
 
-    fn mint_credential(
-        &self,
-        source: &SourceDescriptor,
-        session: &str,
-    ) -> Result<CredentialHandle, SourceError>;
+    /// Mint a credential scoped to the source for one session. Async: a
+    /// provider's mint service is a network call, made on the caller's task.
+    fn mint_credential<'a>(
+        &'a self,
+        source: &'a SourceDescriptor,
+        request: &'a CredentialRequest,
+    ) -> SourceFuture<'a, CredentialHandle>;
 
-    fn revoke_credential(&self, credential: &CredentialHandle) -> Result<(), SourceError>;
+    fn revoke_credential<'a>(&'a self, credential: &'a CredentialHandle) -> SourceFuture<'a, ()>;
 
     fn status(&self, checkout: &Path) -> Result<SourceStatus, SourceError>;
 
@@ -105,8 +170,32 @@ impl SourceRegistry {
         r
     }
 
+    /// The registry a deployment serves sessions from: git, plus every
+    /// built-in provider with its settings read from the environment. This is
+    /// the one place providers are named.
+    pub fn for_deployment(state_dir: &Path) -> Result<Self, SourceError> {
+        let mut r = Self::with_defaults();
+        r.register(Arc::new(
+            crate::graft_provider::GraftProvider::for_deployment(
+                state_dir,
+                crate::graft_provider::GraftSettings::from_env(),
+            )?,
+        ));
+        Ok(r)
+    }
+
     pub fn register(&mut self, provider: Arc<dyn SourceProvider>) {
         self.providers.insert(provider.kind(), provider);
+    }
+
+    /// The deployment's default source: the first registered provider that
+    /// configures one.
+    pub fn default_source(&self) -> Option<SourceDescriptor> {
+        let mut kinds: Vec<_> = self.providers.keys().copied().collect();
+        kinds.sort_by_key(|k| format!("{k:?}"));
+        kinds
+            .into_iter()
+            .find_map(|k| self.providers[&k].default_source())
     }
 
     pub fn for_source(
@@ -213,16 +302,16 @@ impl SourceProvider for GitProvider {
         .map(|_| ())
     }
 
-    fn mint_credential(
-        &self,
-        _source: &SourceDescriptor,
-        _session: &str,
-    ) -> Result<CredentialHandle, SourceError> {
-        Err(SourceError::Unsupported("git credential minting"))
+    fn mint_credential<'a>(
+        &'a self,
+        _source: &'a SourceDescriptor,
+        _request: &'a CredentialRequest,
+    ) -> SourceFuture<'a, CredentialHandle> {
+        Box::pin(async { Err(SourceError::Unsupported("git credential minting")) })
     }
 
-    fn revoke_credential(&self, _credential: &CredentialHandle) -> Result<(), SourceError> {
-        Err(SourceError::Unsupported("git credential revocation"))
+    fn revoke_credential<'a>(&'a self, _credential: &'a CredentialHandle) -> SourceFuture<'a, ()> {
+        Box::pin(async { Err(SourceError::Unsupported("git credential revocation")) })
     }
 
     fn status(&self, checkout: &Path) -> Result<SourceStatus, SourceError> {
@@ -404,11 +493,13 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn unwired_verbs_say_so() {
+    #[tokio::test]
+    async fn unwired_verbs_say_so() {
         let s = source(Path::new("/x"));
         assert!(matches!(
-            GitProvider.mint_credential(&s, "ses"),
+            GitProvider
+                .mint_credential(&s, &CredentialRequest::for_session(uuid::Uuid::nil()))
+                .await,
             Err(SourceError::Unsupported(_))
         ));
         let req = LandRequest {

@@ -52,10 +52,10 @@ the example does: compiled defaults are not portable operator choices.
 | `ENGINE_POD_ENGINE_ENDPOINT` | Reachable engine URL; set explicitly instead of relying on agent-auth URL fallback. |
 | `ENGINE_POD_ALLOW_INSECURE_ENDPOINT` | Opt into HTTP; default false. |
 | `ENGINE_POD_IMAGE_PULL_SECRET` | Optional session-namespace pull Secret. |
-| `ENGINE_POD_GRAFT_REPO` | Repository to clone; choose explicitly. |
-| `ENGINE_POD_GRAFT_LINE` | Clone line; default `rust-2`. |
-| `ENGINE_POD_GRAFT_ENDPOINT` | Graft URL reachable from sessions. |
-| `ENGINE_POD_GRAFT_TOKEN_FILE` | Shared-token fallback file on engine; prefer minting. |
+| `ENGINE_SOURCE_GRAFT_REPO` | Repository to clone; choose explicitly. |
+| `ENGINE_SOURCE_GRAFT_LINE` | Clone line; default `rust-2`. |
+| `ENGINE_SOURCE_GRAFT_ENDPOINT` | Graft URL reachable from sessions. |
+| `ENGINE_SOURCE_GRAFT_TOKEN_FILE` | Shared-token fallback file on engine; prefer minting. |
 | `ENGINE_POD_CLI` | Fallback CLI (default `codex`); agent templates select their CLI. |
 | `ENGINE_POD_EXTRA_CA_FILE` | Additional CA path in the session image; ensure it exists there. |
 | `ENGINE_POD_RESOURCE_REQUESTS` | Comma-separated quantities, e.g. `cpu=250m,memory=512Mi,ephemeral-storage=2Gi`. |
@@ -77,7 +77,11 @@ the example does: compiled defaults are not portable operator choices.
 | `ENGINE_POD_SEED_ALLOWED_PREFIXES` | Comma-separated allowed host-seed prefixes. |
 | `ENGINE_POD_SCCACHE_ENDPOINT` | Optional validated sccache endpoint. |
 
-`ENGINE_GRAFT_MINT_TOKEN_FILE` is also needed for per-session graft minting;
+The `ENGINE_SOURCE_GRAFT_*` names are the graft source provider's; the older
+`ENGINE_POD_GRAFT_*` and `ENGINE_GRAFT_MINT_TOKEN_FILE` names are read as
+aliases for one release, with a deprecation warning.
+
+`ENGINE_SOURCE_GRAFT_MINT_TOKEN_FILE` is also needed for per-session graft minting;
 mount it only in the engine. See [session pod boot](ENGINE.md#session-pod-boot)
 for bootstrap, revocation and account write-back. There is no workspace
 configuration volume setting yet (WI-3374). Cache seeds (WI-3164/WI-3354)

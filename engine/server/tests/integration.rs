@@ -17455,8 +17455,7 @@ mod pod_stream {
             "VOGT_ENGINE_URL",
             "VOGT_SESSION_ID",
             "VOGT_BOOTSTRAP_TOKEN_FILE",
-            "VOGT_GRAFT_REPO",
-            "VOGT_GRAFT_LINE",
+            "VOGT_SOURCE_JSON",
             "VOGT_CLI",
         ] {
             assert!(spec_env.contains_key(name), "pod spec.env lacks {name}");
@@ -17485,8 +17484,15 @@ mod pod_stream {
         );
         assert!(body["env"].get("VOGT_BOOTSTRAP_TOKEN").is_none());
         assert!(!body.to_string().contains(&token));
-        assert_eq!(body["env"]["VOGT_GRAFT_REPO"], "vogt");
-        assert_eq!(body["env"]["VOGT_GRAFT_LINE"], "rust-2");
+        // The pod spec and the bootstrap carry the same source descriptor:
+        // the deployment's default, as this session's project names none.
+        let spec_source: Value = serde_json::from_str(&spec_env["VOGT_SOURCE_JSON"]).unwrap();
+        let boot_source: Value =
+            serde_json::from_str(body["env"]["VOGT_SOURCE_JSON"].as_str().unwrap()).unwrap();
+        assert_eq!(spec_source, boot_source);
+        assert_eq!(body["source"], spec_source);
+        assert_eq!(spec_source["location"]["repo"], "vogt");
+        assert_eq!(spec_source["ref"], "rust-2");
     }
 
     /// WI-3335: the engine's slim image ships no klaudia, so its own gitguard
@@ -17972,8 +17978,10 @@ mod pod_stream {
             .env("VOGT_ENGINE_URL", &h.base)
             .env("VOGT_SESSION_ID", id.to_string())
             .env("VOGT_BOOTSTRAP_TOKEN_FILE", &bootstrap_file)
-            .env("VOGT_GRAFT_REPO", "vogt")
-            .env("VOGT_GRAFT_LINE", "rust-2")
+            .env(
+                "VOGT_SOURCE_JSON",
+                r#"{"location":{"kind":"graft","endpoint":"","repo":"vogt"},"ref":"rust-2","landing":"line"}"#,
+            )
             .env("VOGT_CLI", "claude")
             .env("VOGT_WORK_DIR", &work)
             .env("VOGT_SESSION_TOKEN_FILE", &token_file);
@@ -18005,20 +18013,24 @@ mod pod_stream {
         assert!(!env.contains("VOGT_BOOTSTRAP_TOKEN"));
         for want in [
             format!("VOGT_SESSION_ID={id}"),
-            "VOGT_GRAFT_REPO=vogt".into(),
-            "VOGT_GRAFT_LINE=rust-2".into(),
             "VOGT_CLI=claude".into(),
             format!("VOGT_SESSION_TOKEN_FILE={}", token_file.display()),
             format!("VOGT_SESSION_CWD={}", work.display()),
         ] {
             assert!(env.lines().any(|l| l == want), "agent env lacks {want}");
         }
+        assert!(
+            env.lines().any(|l| l.starts_with("VOGT_SOURCE_JSON=")),
+            "agent env lacks its source: {env}"
+        );
         assert!(work.join(".vogt/brief.md").exists());
 
-        // `graft` ran once, with the minted token file, on the requested line.
+        // `graft` cloned once, with the minted token file, on the requested
+        // line; any later calls only read the clone for its git view.
         let graft = std::fs::read_to_string(&graft_log).unwrap();
+        assert_eq!(graft.matches(" clone ").count(), 1, "{graft}");
         assert_eq!(
-            graft.trim(),
+            graft.lines().next().unwrap_or_default(),
             format!(
                 "--token-file {} clone vogt {} --line rust-2",
                 token_file.display(),
@@ -18651,6 +18663,15 @@ mod pod_stream {
         format!("http://{addr}")
     }
 
+    /// Serve the session's graft source through a provider that mints with
+    /// `minter`, its credentials kept under the engine's state dir.
+    fn install_minter(h: &Harness, minter: Arc<dyn GraftMinter>) {
+        let state_dir = h.state.sessions.state_dir().to_path_buf();
+        h.state.sessions.install_source_provider(Arc::new(
+            vogt_engine_server::graft_provider::GraftProvider::with_minter(&state_dir, minter),
+        ));
+    }
+
     /// The real gRPC minter, pointed at a fake graft, with a mint token file.
     async fn real_minter(graft: FakeGraft) -> (Arc<dyn GraftMinter>, tempfile::TempDir) {
         let url = serve_graft(graft).await;
@@ -18697,11 +18718,11 @@ mod pod_stream {
         let graft = FakeGraft::default();
         let (minter, _dir) = real_minter(graft.clone()).await;
         let mut h = harness(false).await;
-        h.state.sessions.set_graft_minter(minter);
+        install_minter(&h, minter);
         let id = h.start().await;
         let (_, boot) = h.created.recv().await.unwrap();
         let body: Value = h.bootstrap(id, &boot).await.json().await.unwrap();
-        let token = body["graft_token"].as_str().unwrap().to_string();
+        let token = body["source_token"].as_str().unwrap().to_string();
         assert_eq!(token, "fake-minted-1");
         // Minted with the engine's mint credential, for this session.
         {
@@ -18748,7 +18769,7 @@ mod pod_stream {
         graft.0.lock().unwrap().revoke_fails = Some(tonic::Code::Internal);
         let (minter, _dir) = real_minter(graft.clone()).await;
         let mut h = harness(false).await;
-        h.state.sessions.set_graft_minter(minter);
+        install_minter(&h, minter);
         let id = h.start().await;
         let _ = h.created.recv().await.unwrap();
 
@@ -18782,7 +18803,7 @@ mod pod_stream {
         let graft = FakeGraft::default();
         let (minter, _dir) = real_minter(graft.clone()).await;
         let h = harness(true).await;
-        h.state.sessions.set_graft_minter(minter);
+        install_minter(&h, minter);
         let _id = h.start().await;
         until("the revoke", || !graft.0.lock().unwrap().revokes.is_empty()).await;
         assert_eq!(graft.0.lock().unwrap().revokes[0].1, "fake-minted-1");
@@ -18839,7 +18860,7 @@ mod pod_stream {
         );
         let mut h = harness(false).await;
         let minter = FakeMinter::new(Ok(SECRET));
-        h.state.sessions.set_graft_minter(minter.clone());
+        install_minter(&h, minter.clone());
         let id = h
             .start_with(json!({
                 "work_item": "WI-3229",
@@ -18874,7 +18895,7 @@ mod pod_stream {
         let boot = h.bootstrap(id, &token).await;
         assert_eq!(boot.status(), StatusCode::OK);
         let body: Value = boot.json().await.unwrap();
-        assert_eq!(body["graft_token"], SECRET);
+        assert_eq!(body["source_token"], SECRET);
         assert!(!body["env"].to_string().contains(SECRET));
         assert!(!body["bundle"].to_string().contains(SECRET));
         assert_eq!(
@@ -18900,7 +18921,7 @@ mod pod_stream {
     async fn a_failed_mint_fails_the_pod_create_and_withdraws_the_bootstrap_token() {
         let mut h = harness(false).await;
         let minter = FakeMinter::new(Err("graft could not be reached to mint a session token"));
-        h.state.sessions.set_graft_minter(minter.clone());
+        install_minter(&h, minter.clone());
         let id = h.start().await;
         tokio::time::timeout(Duration::from_secs(10), async {
             while h.detail(id).await.summary.exit_code != Some(1) {
@@ -18909,7 +18930,18 @@ mod pod_stream {
         })
         .await
         .expect("a failed mint ends the session");
-        let out = String::from_utf8_lossy(&h.scrollback(id).await).into_owned();
+        // The exit code can land before the note reaches the scrollback.
+        let out = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let out = String::from_utf8_lossy(&h.scrollback(id).await).into_owned();
+                if !out.is_empty() {
+                    break out;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("the failed mint is reported in the session's output");
         assert!(out.contains("session pod could not be created"), "{out}");
         assert!(out.contains("graft could not be reached"), "{out}");
         assert_eq!(minter.grants.lock().unwrap().len(), 1);
@@ -18926,9 +18958,7 @@ mod pod_stream {
     #[tokio::test]
     async fn a_pod_create_that_fails_after_the_mint_leaves_no_token_behind() {
         let h = harness(true).await;
-        h.state
-            .sessions
-            .set_graft_minter(FakeMinter::new(Ok("minted-token")));
+        install_minter(&h, FakeMinter::new(Ok("minted-token")));
         let id = h.start().await;
         tokio::time::timeout(Duration::from_secs(10), async {
             while h.detail(id).await.summary.exit_code != Some(1) {
@@ -18953,14 +18983,14 @@ mod pod_stream {
         let id = h.start().await;
         let (_, token) = h.created.recv().await.unwrap();
         let body: Value = h.bootstrap(id, &token).await.json().await.unwrap();
-        assert!(body.get("graft_token").is_none(), "{body}");
+        assert!(body.get("source_token").is_none(), "{body}");
     }
 
     #[tokio::test]
     async fn the_revoke_hook_runs_when_the_session_ends() {
         let mut h = harness(false).await;
         let minter = FakeMinter::new(Ok("minted-token"));
-        h.state.sessions.set_graft_minter(minter.clone());
+        install_minter(&h, minter.clone());
         let id = h.start().await;
         let _ = h.created.recv().await.unwrap();
         let kill = h

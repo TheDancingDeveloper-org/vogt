@@ -45,16 +45,17 @@ struct SessionCredential {
     token: Vec<u8>,
 }
 #[derive(Debug, Clone)]
-struct PendingGraft {
-    token: crate::graft_mint::GraftToken,
+struct PendingCredential {
+    handle: crate::source_provider::CredentialHandle,
     expires: Instant,
 }
 #[derive(Debug, Default)]
 pub struct AgentAuth {
     pending: Mutex<HashMap<Uuid, Pending>>,
-    /// Per-session graft tokens minted at pod create, held until the pod's
-    /// bootstrap request takes them (or the pod is withdrawn or forgotten).
-    graft_tokens: Mutex<HashMap<Uuid, PendingGraft>>,
+    /// Per-session source credentials minted at pod create, held until the
+    /// pod's bootstrap request takes them (or the pod is withdrawn or
+    /// forgotten). Handles only: the value stays in the provider's file.
+    source_credentials: Mutex<HashMap<Uuid, PendingCredential>>,
     sources: Mutex<HashMap<Uuid, SourceDescriptor>>,
     sessions: Mutex<HashMap<Uuid, SessionCredential>>,
     links: std::sync::Mutex<HashMap<Uuid, mpsc::UnboundedSender<Frame>>>,
@@ -351,11 +352,11 @@ pub struct BootstrapResponse {
     /// The project-owned source selected for this session.
     pub source: vogt_engine_contract::source::SourceDescriptor,
     pub brief: String,
-    /// Graft credential for the session's repo and line, delivered to the
-    /// entrypoint as a 0600 file rather than an environment value. Absent
-    /// when the engine has none configured.
+    /// Credential for the session's source, from its provider, delivered to
+    /// the entrypoint as a 0600 file rather than an environment value. Absent
+    /// when the provider has none.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub graft_token: Option<String>,
+    pub source_token: Option<String>,
     /// The `--mcp-config` file a pod-backed Claude Code session is started
     /// with (WI-3243): the engine's MCP endpoints as Claude Code reads them.
     /// The bearer is an environment reference to `VOGT_HTTP_TOKEN`, which the
@@ -378,7 +379,7 @@ fn bootstrap_env(
     engine: String,
     id: Uuid,
     cli: &str,
-    source: &SourceDescriptor,
+    source_env: &[(String, String)],
     extra_ca_file: Option<&str>,
 ) -> serde_json::Map<String, serde_json::Value> {
     let mut env = serde_json::Map::new();
@@ -389,11 +390,8 @@ fn bootstrap_env(
     ] {
         env.insert(name.into(), serde_json::Value::String(value));
     }
-    if let vogt_engine_contract::source::SourceLocation::Graft { endpoint, .. } = &source.location {
-        env.insert(
-            "GRAFT_ENDPOINT".into(),
-            serde_json::Value::String(endpoint.clone()),
-        );
+    for (name, value) in source_env {
+        env.insert(name.clone(), serde_json::Value::String(value.clone()));
     }
     if let Some(path) = extra_ca_file {
         env.insert(
@@ -404,31 +402,27 @@ fn bootstrap_env(
     env
 }
 
-/// Read the configured graft token file. The path is engine config (a mounted
-/// secret); the token is never logged or stored.
-async fn read_graft_token(path: Option<&str>) -> std::io::Result<Option<String>> {
-    let Some(path) = path else { return Ok(None) };
-    let text = tokio::fs::read_to_string(path).await?;
-    let token = text.trim();
-    Ok((!token.is_empty()).then(|| token.to_owned()))
+/// The credential a pod's bootstrap response carries: the one its provider
+/// minted for it at create, else (a provider that mints none) the
+/// deployment's shared one. With minting on the shared credential is never
+/// handed out, even if a mint went missing: the pod then checks out with its
+/// session token and fails loudly, rather than quietly widening its access.
+fn resolve_source_token(
+    minted: Option<crate::source_provider::CredentialHandle>,
+    provider_mints: bool,
+    shared: Option<crate::source_provider::CredentialHandle>,
+) -> std::io::Result<Option<String>> {
+    let handle = match minted {
+        Some(handle) => handle,
+        None if provider_mints => return Ok(None),
+        None => match shared {
+            Some(handle) => handle,
+            None => return Ok(None),
+        },
+    };
+    crate::source_provider::read_credential(&handle)
 }
 
-/// The graft token a pod's bootstrap response carries: the one minted for it at
-/// create, else (no mint token configured) the shared one from
-/// `ENGINE_POD_GRAFT_TOKEN_FILE`. With a mint token configured the shared token
-/// is never handed out, even if a mint went missing: the pod then clones with
-/// its session token and fails loudly, rather than quietly widening its access.
-async fn resolve_graft_token(
-    minted: Option<crate::graft_mint::GraftToken>,
-    mint_configured: bool,
-    shared_file: Option<&str>,
-) -> std::io::Result<Option<String>> {
-    match minted {
-        Some(minted) => Ok(Some(minted.expose().to_owned())),
-        None if mint_configured => Ok(None),
-        None => read_graft_token(shared_file).await,
-    }
-}
 pub fn global() -> Arc<AgentAuth> {
     Arc::clone(AUTH.get_or_init(|| Arc::new(AgentAuth::default())))
 }
@@ -456,32 +450,39 @@ impl AgentAuth {
     /// `BOOTSTRAP_TTL`; this closes that window.
     pub async fn withdraw(&self, id: Uuid) {
         self.pending.lock().await.remove(&id);
-        self.graft_tokens.lock().await.remove(&id);
+        self.source_credentials.lock().await.remove(&id);
     }
     /// Whether a bootstrap credential is held for `id`: issued, and neither
     /// consumed nor withdrawn.
     pub async fn bootstrap_pending(&self, id: Uuid) -> bool {
         self.pending.lock().await.contains_key(&id)
     }
-    /// Hold the graft token minted for `id`'s pod until its bootstrap request
+    /// Hold the credential minted for `id`'s pod until its bootstrap request
     /// takes it. It lives as long as the bootstrap credential does; a pod that
     /// never boots leaves nothing behind past `BOOTSTRAP_TTL`.
-    pub async fn stash_graft_token(&self, id: Uuid, token: crate::graft_mint::GraftToken) {
+    pub async fn stash_source_credential(
+        &self,
+        id: Uuid,
+        handle: crate::source_provider::CredentialHandle,
+    ) {
         let now = Instant::now();
-        let mut held = self.graft_tokens.lock().await;
+        let mut held = self.source_credentials.lock().await;
         held.retain(|_, g| g.expires > now);
         held.insert(
             id,
-            PendingGraft {
-                token,
+            PendingCredential {
+                handle,
                 expires: now + BOOTSTRAP_TTL,
             },
         );
     }
-    /// Take (once) the graft token minted for `id`, if one is held and fresh.
-    pub(crate) async fn take_graft_token(&self, id: Uuid) -> Option<crate::graft_mint::GraftToken> {
-        let g = self.graft_tokens.lock().await.remove(&id)?;
-        (g.expires > Instant::now()).then_some(g.token)
+    /// Take (once) the credential minted for `id`, if one is held and fresh.
+    pub(crate) async fn take_source_credential(
+        &self,
+        id: Uuid,
+    ) -> Option<crate::source_provider::CredentialHandle> {
+        let g = self.source_credentials.lock().await.remove(&id)?;
+        (g.expires > Instant::now()).then_some(g.handle)
     }
     pub(crate) async fn consume(&self, id: Uuid, candidate: &[u8]) -> bool {
         let mut p = self.pending.lock().await;
@@ -625,7 +626,7 @@ impl AgentAuth {
         if let Ok(mut sessions) = self.sessions.try_lock() {
             sessions.remove(&id);
         }
-        if let Ok(mut held) = self.graft_tokens.try_lock() {
+        if let Ok(mut held) = self.source_credentials.try_lock() {
             held.remove(&id);
         }
     }
@@ -761,31 +762,37 @@ pub async fn bootstrap(
         Ok(cfg) => cfg,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
-    let graft_token = match resolve_graft_token(
-        state.agent_auth.take_graft_token(id).await,
-        cfg.graft_mint_token_file.is_some(),
-        cfg.graft_token_file.as_deref(),
-    )
-    .await
-    {
+    let engine_endpoint = cfg.engine_endpoint.clone();
+    let Some(source) = state.agent_auth.take_source(id).await else {
+        return (StatusCode::BAD_REQUEST, "session source is unavailable").into_response();
+    };
+    let provider = match state.sessions.source_registry().and_then(|r| {
+        r.for_source(&source)
+            .map_err(|e| crate::error::ApiError::Config(e.to_string()))
+    }) {
+        Ok(p) => p,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    let minted = state.agent_auth.take_source_credential(id).await;
+    let source_token = match resolve_source_token(
+        minted,
+        provider.mints_credentials(),
+        provider.shared_credential(),
+    ) {
         Ok(token) => token,
         Err(_) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "graft token file is configured but unreadable",
+                "the source credential is configured but unreadable",
             )
                 .into_response()
         }
-    };
-    let engine_endpoint = cfg.engine_endpoint.clone();
-    let Some(source) = state.agent_auth.take_source(id).await else {
-        return (StatusCode::BAD_REQUEST, "session source is unavailable").into_response();
     };
     let mut env = bootstrap_env(
         cfg.engine_endpoint,
         id,
         &req.cli,
-        &source,
+        &provider.pod_env(&source),
         req.extra_ca_file.as_deref(),
     );
     env.insert(
@@ -911,7 +918,7 @@ pub async fn bootstrap(
         bundle: serde_json::Value::Object(bundle),
         env: serde_json::Value::Object(env),
         source,
-        graft_token,
+        source_token,
         mcp_config,
         codex_config,
         opencode_config,
@@ -1394,111 +1401,86 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_env_carries_the_graft_endpoint_and_line() {
-        let req = BootstrapRequest {
-            session_id: String::new(),
-            source: Some(SourceDescriptor {
-                location: vogt_engine_contract::source::SourceLocation::Graft {
-                    endpoint: "http://graft".into(),
-                    repo: "vogt".into(),
-                },
-                reference: "rust-2".into(),
-                landing: vogt_engine_contract::source::LandingMode::Line,
-            }),
-            cli: "claude".into(),
-            extra_ca_file: None,
-        };
+    fn bootstrap_env_carries_the_providers_source_env() {
+        let source_env = vec![("SOURCE_ENDPOINT".to_string(), "http://src".to_string())];
         let env = bootstrap_env(
             "http://engine".into(),
             Uuid::nil(),
-            &req.cli,
-            req.source.as_ref().unwrap(),
+            "claude",
+            &source_env,
             None,
         );
-        assert_eq!(env["GRAFT_ENDPOINT"], "http://graft");
-        assert!(!env.contains_key("GRAFT_LINE"));
-        assert!(!env.contains_key("VOGT_GRAFT_LINE"));
-        let git = SourceDescriptor {
-            location: vogt_engine_contract::source::SourceLocation::Git {
-                url: "https://example.test/vogt.git".into(),
-                repo: "example.test/vogt".into(),
-            },
-            reference: "main".into(),
-            landing: vogt_engine_contract::source::LandingMode::PushBranch,
-        };
-        assert!(
-            !bootstrap_env("e".into(), Uuid::nil(), "claude", &git, None)
-                .contains_key("GRAFT_ENDPOINT")
-        );
+        assert_eq!(env["SOURCE_ENDPOINT"], "http://src");
+        assert_eq!(env["VOGT_CLI"], "claude");
+        let bare = bootstrap_env("e".into(), Uuid::nil(), "claude", &[], None);
+        assert!(!bare.contains_key("SOURCE_ENDPOINT"));
     }
 
-    #[tokio::test]
-    async fn the_minted_token_wins_and_the_shared_one_is_only_a_fallback() {
-        use crate::graft_mint::GraftToken;
+    #[test]
+    fn the_minted_credential_wins_and_the_shared_one_is_only_a_fallback() {
+        use crate::source_provider::CredentialHandle;
         let dir = tempfile::tempdir().unwrap();
-        let shared = dir.path().join("shared");
-        std::fs::write(&shared, "shared-token\n").unwrap();
-        let shared = shared.to_str();
-        let minted = || Some(GraftToken::new("minted-token"));
-        // A minted token is used whatever else is configured.
-        for mint_configured in [true, false] {
+        let file = |name: &str, value: &str| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, value).unwrap();
+            CredentialHandle { path }
+        };
+        let minted = file("minted", "minted-token\n");
+        let shared = file("shared", "shared-token\n");
+        // A minted credential is used whatever else is configured.
+        for mints in [true, false] {
             assert_eq!(
-                resolve_graft_token(minted(), mint_configured, shared)
-                    .await
+                resolve_source_token(Some(minted.clone()), mints, Some(shared.clone()))
                     .unwrap()
                     .as_deref(),
                 Some("minted-token")
             );
         }
-        // No mint token configured: the shared token is the fallback.
+        // A provider that mints none: the shared credential is the fallback.
         assert_eq!(
-            resolve_graft_token(None, false, shared)
-                .await
+            resolve_source_token(None, false, Some(shared.clone()))
                 .unwrap()
                 .as_deref(),
             Some("shared-token")
         );
-        assert_eq!(resolve_graft_token(None, false, None).await.unwrap(), None);
-        // A mint token is configured but nothing was minted for this pod: the
-        // shared token is not handed out in its place.
-        assert_eq!(resolve_graft_token(None, true, shared).await.unwrap(), None);
+        assert_eq!(resolve_source_token(None, false, None).unwrap(), None);
+        // The provider mints but nothing was minted for this pod: the shared
+        // credential is not handed out in its place.
+        assert_eq!(
+            resolve_source_token(None, true, Some(shared)).unwrap(),
+            None
+        );
+        // A configured file that is missing is an error, not silence.
+        let missing = CredentialHandle {
+            path: dir.path().join("missing"),
+        };
+        assert!(resolve_source_token(None, false, Some(missing)).is_err());
     }
 
     #[tokio::test]
-    async fn a_minted_graft_token_is_taken_once_and_withdrawn_with_the_bootstrap_token() {
-        use crate::graft_mint::GraftToken;
+    async fn a_minted_credential_is_taken_once_and_withdrawn_with_the_bootstrap_token() {
+        use crate::source_provider::CredentialHandle;
+        let h = |n: &str| CredentialHandle { path: n.into() };
         let auth = AgentAuth::default();
         let id = Uuid::new_v4();
         auth.issue(id, b"boot").await;
-        auth.stash_graft_token(id, GraftToken::new("g1")).await;
+        auth.stash_source_credential(id, h("/c1")).await;
         assert!(auth.bootstrap_pending(id).await);
-        assert_eq!(auth.take_graft_token(id).await.unwrap().expose(), "g1");
-        assert!(auth.take_graft_token(id).await.is_none(), "taken once");
+        assert_eq!(auth.take_source_credential(id).await, Some(h("/c1")));
+        assert!(
+            auth.take_source_credential(id).await.is_none(),
+            "taken once"
+        );
 
-        auth.stash_graft_token(id, GraftToken::new("g2")).await;
+        auth.stash_source_credential(id, h("/c2")).await;
         auth.withdraw(id).await;
         assert!(!auth.bootstrap_pending(id).await);
-        assert!(auth.take_graft_token(id).await.is_none());
+        assert!(auth.take_source_credential(id).await.is_none());
 
-        // Forgetting a pod drops a token that was never collected.
-        auth.stash_graft_token(id, GraftToken::new("g3")).await;
+        // Forgetting a pod drops a credential that was never collected.
+        auth.stash_source_credential(id, h("/c3")).await;
         auth.forget_pod(id);
-        assert!(auth.take_graft_token(id).await.is_none());
-    }
-
-    #[tokio::test]
-    async fn graft_token_is_read_from_the_configured_file_only() {
-        assert_eq!(read_graft_token(None).await.unwrap(), None);
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("graft-token");
-        std::fs::write(&path, "tok\n").unwrap();
-        assert_eq!(
-            read_graft_token(path.to_str()).await.unwrap().as_deref(),
-            Some("tok")
-        );
-        assert!(read_graft_token(dir.path().join("missing").to_str())
-            .await
-            .is_err());
+        assert!(auth.take_source_credential(id).await.is_none());
     }
 
     #[tokio::test]
