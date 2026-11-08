@@ -136,6 +136,7 @@ grep -Eq '^vogt_session_boot_seconds [0-9]+$' <<<"$out" || fail "boot seconds me
 [[ $(<"$tmp/happy/run/graft-token") == graft-secret-value ]] || fail "graft token content"
 [[ $(stat -c %a "$tmp/happy/run/graft-token") == 600 ]] || fail "graft token mode"
 [[ $(<"$tmp/happy/graft.token") == graft-secret-value ]] || fail "clone did not use the graft token"
+grep -q 'clone vogt '"$tmp/happy/work"' --line rust-2' "$tmp/happy/graft.args" || fail "default project clone scope"
 grep -q "^VOGT_GRAFT_TOKEN_FILE=$tmp/happy/run/graft-token$" "$tmp/happy/agent.env" || fail "graft token file not exported"
 ! grep -v '^GRAFT_TOKEN=' "$tmp/happy/agent.env" | grep -q 'graft-secret-value' || fail "graft token value reached the agent env"
 # A Claude session's MCP config lands in its own 0600 file beside the session
@@ -152,6 +153,15 @@ grep -q '^NODE_EXTRA_CA_CERTS=/etc/ca.pem$' "$tmp/happy/agent.env" || fail "extr
 grep -q '^session-entrypoint: claude posture: mcp-config policy-hook session-hook$' <<<"$out" || fail "posture line: $(grep 'claude posture' <<<"$out")"
 # The requested argv passes through to the session agent untouched.
 grep -q '^VOGT_SESSION_COMMAND=\["sleep","1"\]$' "$tmp/happy/agent.env" || fail "VOGT_SESSION_COMMAND not passed through"
+
+# A second project descriptor must reach the clone unchanged; the deployment
+# default above must not leak into a project-owned source.
+run_case "$tmp/other-project" \
+  SOURCE_JSON='{"location":{"kind":"graft","endpoint":"http://graft","repo":"farmeggs"},"ref":"backlog-1","landing":"line"}' \
+  VOGT_SOURCE_JSON='{"location":{"kind":"graft","endpoint":"http://graft","repo":"farmeggs"},"ref":"backlog-1","landing":"line"}' \
+  GRAFT_TOKEN=other-graft-token >/dev/null 2>&1 || fail "other-project path"
+grep -q 'clone farmeggs '"$tmp/other-project/work"' --line backlog-1' "$tmp/other-project/graft.args" || fail "project source clone scope"
+! grep -q 'clone vogt '"$tmp/other-project/work" "$tmp/other-project/graft.args" || fail "deployment repo leaked into project clone"
 
 # Without a graft token the session token is what graft clones with. An
 # engine that sends no MCP config leaves the session agent nothing to pass.
