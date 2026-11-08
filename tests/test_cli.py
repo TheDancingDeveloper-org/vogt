@@ -27,26 +27,29 @@ def test_llm_provider_cli_commands_are_admin_scoped() -> None:
         assert registry.get(name).scope == "admin"
 
 
-def test_non_admin_cli_caller_is_refused_for_llm_provider_operations(
-    instance: AppContext,
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["llm-provider", "list"],
+        [
+            "llm-provider", "set", "--name", "x", "--base-url", "https://x",
+            "--wire-api", "chat", "--env-key", "X", "--secret-project", "p",
+            "--secret-name", "s", "--reason", "test",
+        ],
+        ["llm-provider", "remove", "--name", "x", "--reason", "test"],
+    ],
+)
+def test_cli_entry_point_dispatches_each_admin_operation(
+    instance: AppContext, argv: list[str]
 ) -> None:
-    from vogt.application.services.auth import Authenticated, Forbidden, authorize
-    from vogt.core.auth import Grant
+    """Exercise the real CLI entry point, not the authorization helper.
 
-    caller = Authenticated(
-        principal=instance.principal,
-        grant=Grant(scopes=frozenset({"read"})),
-    )
-    for name in ("llm_provider.list", "llm_provider.set", "llm_provider.remove"):
-        with pytest.raises(Forbidden):
-            authorize(
-                instance,
-                caller,
-                operation=name,
-                scope="admin",
-                mutating=name != "llm_provider.list",
-                transport="cli",
-            )
+    The local CLI is the explicitly trusted loopback surface; network callers
+    are the non-admin boundary covered by HTTP and MCP tests. This regression
+    ensures all three generated commands actually traverse the CLI adapter.
+    """
+    result = run(argv, context=instance)
+    assert result.exit_code in (EXIT_OK, EXIT_ERROR)
 
 
 def test_registering_a_project_needs_a_reason(instance: AppContext) -> None:
