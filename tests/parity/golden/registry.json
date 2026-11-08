@@ -35796,14 +35796,21 @@
                 "default": null,
                 "title": "Agent"
               },
-              "placement": {
-                "title": "Placement",
+              "placements": {
+                "items": {
+                  "type": "string"
+                },
+                "title": "Placements",
+                "type": "array"
+              },
+              "default_placement": {
+                "title": "Default Placement",
                 "type": "string"
               }
             },
             "required": [
               "name",
-              "placement"
+              "default_placement"
             ],
             "title": "SessionTemplateRow",
             "type": "object"

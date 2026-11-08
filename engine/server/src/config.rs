@@ -85,6 +85,10 @@ pub struct SessionTemplate {
     /// Session execution backend. `local` is the existing PTY implementation.
     #[serde(default = "default_session_backend")]
     pub backend: String,
+    /// Built-in templates retain host support when their default is moved to
+    /// the pod backend. Custom templates remain constrained by `backend`.
+    #[serde(default)]
+    pub host_capable: bool,
 }
 
 fn default_session_backend() -> String {
@@ -125,6 +129,7 @@ impl SessionTemplate {
         let mut templates = Self::default_templates();
         for template in &mut templates {
             if template.backend == "local" {
+                template.host_capable = true;
                 template.backend = backend.to_string();
             }
         }
@@ -145,6 +150,7 @@ impl SessionTemplate {
                 tags: vec!["shell".to_string()],
                 account: None,
                 backend: default_session_backend(),
+                host_capable: false,
             },
             // Runs in a pod; refused unless pod backends are enabled. No
             // command, so the image's entrypoint boots the CLI.
@@ -160,6 +166,7 @@ impl SessionTemplate {
                 tags: vec!["pod".to_string()],
                 account: None,
                 backend: "pod".to_string(),
+                host_capable: false,
             },
             SessionTemplate {
                 name: "Node Dev".to_string(),
@@ -173,6 +180,7 @@ impl SessionTemplate {
                 tags: vec!["node".to_string(), "web".to_string()],
                 account: None,
                 backend: default_session_backend(),
+                host_capable: false,
             },
             SessionTemplate {
                 name: "Rust Build".to_string(),
@@ -186,6 +194,7 @@ impl SessionTemplate {
                 tags: vec!["rust".to_string()],
                 account: None,
                 backend: default_session_backend(),
+                host_capable: false,
             },
             // Agent CLIs, wrapped in the credential broker explicitly.
             // Automatic agent-auth wraps only sessions created *without* a
@@ -208,6 +217,7 @@ impl SessionTemplate {
                 tags: vec!["agent".to_string(), "claude".to_string()],
                 account: None,
                 backend: default_session_backend(),
+                host_capable: false,
             },
             SessionTemplate {
                 name: "Codex (protected)".to_string(),
@@ -226,6 +236,7 @@ impl SessionTemplate {
                 tags: vec!["agent".to_string(), "codex".to_string()],
                 account: None,
                 backend: default_session_backend(),
+                host_capable: false,
             },
             SessionTemplate {
                 name: "OpenCode (protected)".to_string(),
@@ -245,6 +256,7 @@ impl SessionTemplate {
                 tags: vec!["agent".to_string(), "opencode".to_string()],
                 account: None,
                 backend: default_session_backend(),
+                host_capable: false,
             },
             // Klaudia (WI-950): a Go coding agent with its own goal loop
             // (`/goal run`), driven in its TUI like the three above.
@@ -265,6 +277,7 @@ impl SessionTemplate {
                 tags: vec!["agent".to_string(), "klaudia".to_string()],
                 account: None,
                 backend: default_session_backend(),
+                host_capable: false,
             },
             SessionTemplate {
                 name: "Python Env".to_string(),
@@ -278,6 +291,7 @@ impl SessionTemplate {
                 tags: vec!["python".to_string()],
                 account: None,
                 backend: default_session_backend(),
+                host_capable: false,
             },
         ]
     }
