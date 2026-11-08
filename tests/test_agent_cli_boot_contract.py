@@ -841,7 +841,7 @@ def test_a_short_sha_is_not_a_release_pin(release_sandbox: ReleaseSandbox) -> No
 def test_a_stock_npm_codex_pin_is_refused_and_a_stale_one_dropped(
     release_sandbox: ReleaseSandbox,
 ) -> None:
-    # Stock Codex has no managed hooks, so gitguard would not run under it
+    # Stock Codex has no managed hooks, so the policy hook would not run under it
     # (WI-1146). A pin of the npm row is refused without a download, and a
     # `current` an older image left behind is removed.
     tools = release_sandbox.share / "agent-clis.tools"

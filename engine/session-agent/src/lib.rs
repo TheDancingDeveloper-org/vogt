@@ -814,7 +814,38 @@ pub fn launch_env(config: &Config) -> Vec<(&'static str, &'static str)> {
     }
 }
 
+/// Whether this launch starts Codex: the agent CLI, or an argv naming it.
+fn launches_codex(config: &Config) -> bool {
+    match &config.command {
+        None => config.cli == "codex",
+        Some(argv) => argv.iter().any(|arg| {
+            Path::new(arg)
+                .file_name()
+                .is_some_and(|name| name == "codex")
+        }),
+    }
+}
+
+/// Refuse a Codex launch whose managed policy hook this pod cannot enforce
+/// (WI-3335). The engine does not check a pod session's hook against its own
+/// filesystem, which is not the one Codex runs on; the pod checks its own,
+/// fail closed: no requirements file, one that does not wire the hook, or a
+/// hook program the session user could replace, and Codex does not start.
+pub fn codex_guard(config: &Config, system: &Path, hook_bin: &Path) -> Result<(), AgentError> {
+    if !launches_codex(config) {
+        return Ok(());
+    }
+    codex_policy::guarded(system, hook_bin, true)
+        .map(|_| ())
+        .map_err(AgentError::Pty)
+}
+
 pub fn spawn_pty(config: &Config) -> Result<PtyIo, AgentError> {
+    codex_guard(
+        config,
+        Path::new(codex_policy::CODEX_REQUIREMENTS_FILE),
+        Path::new(codex_policy::CODEX_POLICY_HOOK_BIN),
+    )?;
     let system = portable_pty::native_pty_system();
     let pair = system
         .openpty(PtySize {
@@ -1620,6 +1651,61 @@ mod tests {
         assert_eq!(command_line(&config).unwrap(), "codex");
         config.cli = "nope".into();
         assert!(command_line(&config).is_err());
+    }
+
+    /// WI-3335: the engine does not judge a pod's Codex by its own files, so
+    /// the pod does, fail closed, before Codex is spawned.
+    #[test]
+    fn a_pod_codex_without_an_enforceable_policy_hook_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let requirements = dir.path().join("requirements.toml");
+        let hook = dir.path().join("vogt-policy-hook");
+        let mut config = Config {
+            session_id: "s".into(),
+            engine_url: "http://127.0.0.1:1".into(),
+            token: "t".into(),
+            cli: "codex".into(),
+            command: None,
+            cwd: None,
+            cols: 80,
+            rows: 24,
+            buffer_bytes: 1024,
+            claude_config_dir: None,
+            account: None,
+            conversation_id: None,
+            resume: false,
+            claude: ClaudeLaunch::default(),
+        };
+        // No requirements file in the pod.
+        let err = codex_guard(&config, &requirements, &hook).unwrap_err();
+        assert!(err.to_string().contains("cannot be read"), "{err}");
+        // A file that does not wire the managed hook.
+        std::fs::write(&requirements, "[features]\nhooks = true\n").unwrap();
+        let err = codex_guard(&config, &requirements, &hook).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("does not wire the managed policy hook"),
+            "{err}"
+        );
+        // The shipped file, but the requirements and hook are both owned by
+        // the session user.
+        std::fs::write(
+            &requirements,
+            include_str!("../../deploy/driven-session-codex-requirements.toml"),
+        )
+        .unwrap();
+        std::fs::write(&hook, "#!/bin/sh\nexit 0\n").unwrap();
+        let err = codex_guard(&config, &requirements, &hook).unwrap_err();
+        assert!(err.to_string().contains("root-owned"), "{err}");
+        // An argv naming Codex is held to the same check.
+        config.cli = "claude".into();
+        config.command = Some(vec!["/usr/local/bin/codex".into()]);
+        assert!(codex_guard(&config, &requirements, &hook).is_err());
+        // Other CLIs never consult it.
+        config.command = None;
+        assert!(codex_guard(&config, &requirements, &hook).is_ok());
+        config.cli = "opencode".into();
+        assert!(codex_guard(&config, &requirements, &hook).is_ok());
     }
 
     #[test]
