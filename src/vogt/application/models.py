@@ -5882,6 +5882,52 @@ class AgentCliUpdateResult(Result):
     tools: list[AgentCliRow] = []
 
 
+class LlmProviderParams(Params):
+    pass
+
+
+class LlmProviderSetParams(Params):
+    name: str
+    base_url: str
+    wire_api: Literal["chat", "responses"] = "chat"
+    env_key: str
+    secret_project: str
+    secret_name: str
+    models: list[str] = []
+    reason: Reason
+
+
+class LlmProviderRemoveParams(Params):
+    name: str
+    reason: Reason
+
+
+class LlmProviderRow(Result):
+    name: str
+    base_url: str
+    wire_api: str
+    env_key: str
+    secret_project: str
+    secret_name: str
+    models: list[str] = []
+    state: str
+    detail: str | None = None
+
+
+class LlmProviderListResult(Result):
+    providers: list[LlmProviderRow] = []
+    engine: str | None = None
+
+
+class LlmProviderSetResult(Result):
+    provider: LlmProviderRow
+
+
+class LlmProviderRemoveResult(Result):
+    name: str
+    removed: bool
+
+
 class SearchOutputParams(Params):
     q: str = Field(
         description=(

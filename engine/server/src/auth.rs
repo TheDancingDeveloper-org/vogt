@@ -617,6 +617,9 @@ fn required_capability(method: &Method, path: &str) -> Option<TokenCapability> {
     if path.starts_with("/api/agent-clis/") && *method == Method::POST {
         return Some(TokenCapability::AgentClisWrite);
     }
+    if path == "/api/llm-providers" || path.starts_with("/api/llm-providers/") {
+        return Some(TokenCapability::AgentClisWrite);
+    }
     if (path == "/api/gui/launch" || path == "/api/gui/kill") && *method == Method::POST {
         return Some(TokenCapability::GuiControl);
     }

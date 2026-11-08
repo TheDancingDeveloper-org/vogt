@@ -74,6 +74,8 @@ pub static STRIPS: &[(&str, &str)] = &[
     ("session.report", "reason"),
     ("session.report_unblocked", "reason"),
     ("agent_cli.update", "reason"),
+    ("llm_provider.set", "reason"),
+    ("llm_provider.remove", "reason"),
     ("token.issue", "actor"),
     ("token.issue", "name"),
     ("token.issue", "scopes"),

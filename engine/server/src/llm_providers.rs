@@ -30,12 +30,12 @@
 
 use std::path::Path;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::secret_broker::{ManifestPolicy, ManifestSecret};
 
 /// One registered provider.
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Provider {
     pub name: String,
@@ -48,7 +48,7 @@ pub struct Provider {
     pub models: Vec<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct RegistryFile {
     #[serde(default)]
@@ -138,6 +138,96 @@ pub fn parse(text: &str) -> Result<Vec<Provider>, String> {
         }
     }
     Ok(file.provider)
+}
+
+/// Validate a single provider using the same rules as a registry file.
+pub fn validate(provider: &Provider) -> Result<(), String> {
+    let text = toml::to_string(&RegistryFile {
+        provider: vec![provider.clone()],
+    })
+    .map_err(|e| e.to_string())?;
+    parse(&text).map(|_| ())
+}
+
+/// Validate a provider against the deploy-time manifest. A registry provider
+/// may not shadow a manifest variable (including a secret declared by the
+/// deployment), because that would change which secret a session receives.
+pub fn validate_against_manifest(
+    provider: &Provider,
+    manifest: &[ManifestSecret],
+) -> Result<(), String> {
+    validate(provider)?;
+    if manifest.iter().any(|entry| entry.var == provider.env_key) {
+        return Err(format!(
+            "provider {}: env_key {} clashes with manifest VAR",
+            provider.name, provider.env_key
+        ));
+    }
+    Ok(())
+}
+
+/// Validate the complete registry before publishing it.
+pub fn validate_all(providers: &[Provider]) -> Result<(), String> {
+    let mut names = std::collections::HashSet::new();
+    for provider in providers {
+        validate(provider)?;
+        if !names.insert(&provider.name) {
+            return Err(format!("duplicate provider name {:?}", provider.name));
+        }
+    }
+    Ok(())
+}
+
+/// Replace the registry with a durable, secret-free TOML document.
+/// `rename` is the atomic publication point; a failed write leaves the old
+/// registry untouched.
+pub fn write(path: &Path, providers: &[Provider]) -> Result<(), String> {
+    let text = toml::to_string(&RegistryFile {
+        provider: providers.to_vec(),
+    })
+    .map_err(|e| format!("serialising provider registry: {e}"))?;
+    parse(&text).map_err(|e| format!("invalid provider registry: {e}"))?;
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)
+        .map_err(|e| format!("creating provider registry directory: {e}"))?;
+    let mut temp = tempfile::NamedTempFile::new_in(parent)
+        .map_err(|e| format!("creating provider registry temporary file: {e}"))?;
+    std::io::Write::write_all(&mut temp, text.as_bytes())
+        .map_err(|e| format!("writing provider registry temporary file: {e}"))?;
+    temp.as_file()
+        .sync_all()
+        .map_err(|e| format!("syncing provider registry temporary file: {e}"))?;
+    temp.persist(path)
+        .map_err(|e| format!("publishing provider registry: {}", e.error))?;
+    Ok(())
+}
+
+/// A provider's public status. Secret values are deliberately absent.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct ProviderStatus {
+    #[serde(flatten)]
+    pub provider: Provider,
+    pub state: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+pub fn statuses(
+    path: Option<&Path>,
+    manifest: &[ManifestSecret],
+) -> Result<Vec<ProviderStatus>, String> {
+    let providers = path.map(load).transpose()?.unwrap_or_default();
+    Ok(providers
+        .into_iter()
+        .map(|provider| {
+            let clash = manifest.iter().any(|entry| entry.var == provider.env_key);
+            ProviderStatus {
+                provider,
+                state: if clash { "dropped" } else { "active" },
+                detail: clash.then(|| "env_key clashes with manifest VAR".to_string()),
+            }
+        })
+        .collect())
 }
 
 fn is_provider_name(name: &str) -> bool {
@@ -307,5 +397,42 @@ models = ["deepseek-chat"]
         for text in refused {
             assert!(parse(&text).is_err(), "accepted: {text}");
         }
+    }
+
+    #[test]
+    fn registry_writes_are_atomic_and_status_never_contains_a_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested/providers.toml");
+        let providers = parse(DEEPSEEK).unwrap();
+        write(&path, &providers).unwrap();
+        assert_eq!(load(&path).unwrap(), providers);
+        let statuses = statuses(Some(&path), &[]).unwrap();
+        let json = serde_json::to_string(&statuses).unwrap();
+        assert!(json.contains("DEEPSEEK_KEY"));
+        assert!(!json.contains("token"));
+    }
+
+    #[test]
+    fn manifest_collision_is_rejected_and_reported_as_dropped() {
+        let provider = parse(DEEPSEEK).unwrap().remove(0);
+        let manifest = vec![ManifestSecret {
+            var: provider.env_key.clone(),
+            project_id: "deploy".into(),
+            secret_name: "deploy-secret".into(),
+            policy: ManifestPolicy::Required,
+            writable: false,
+        }];
+        assert!(validate_against_manifest(&provider, &manifest)
+            .unwrap_err()
+            .contains("clashes with manifest VAR"));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("providers.toml");
+        write(&path, &[provider]).unwrap();
+        let status = statuses(Some(&path), &manifest).unwrap().remove(0);
+        assert_eq!(status.state, "dropped");
+        assert_eq!(
+            status.detail.as_deref(),
+            Some("env_key clashes with manifest VAR")
+        );
     }
 }
