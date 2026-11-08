@@ -1,114 +1,6 @@
 use super::*;
 
 #[test]
-fn only_reads_of_the_chats_own_directory_and_inert_tools_run_free() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("notes.txt"), "x").unwrap();
-    let here = dir.path();
-    let free = |tool: &str, input: Value| classify(tool, &input, here) == ToolClass::Free;
-    assert!(free("Read", json!({"file_path": "notes.txt"})));
-    assert!(free(
-        "Read",
-        json!({"file_path": here.join("notes.txt").to_str().unwrap()})
-    ));
-    assert!(free("Glob", json!({"pattern": "**/*.md"})));
-    assert!(free("Grep", json!({"pattern": "TODO"})));
-    assert!(free(
-        "Read",
-        json!({"file_path": "notes.txt", "offset": 1, "limit": 5})
-    ));
-    assert!(free("ToolSearch", json!({"query": "anything"})));
-    assert!(free("TodoWrite", json!({})));
-    // Out of the directory, however it is spelled.
-    for path in [
-        "/proc/self/environ",
-        "../../chats.db",
-        "~/.ssh/id_rsa",
-        "sub/../../x",
-    ] {
-        assert!(!free("Read", json!({ "file_path": path })), "{path}");
-    }
-    assert!(!free("Glob", json!({"pattern": "/proc/*/environ"})));
-    assert!(!free("Grep", json!({"pattern": "x", "path": "/etc"})));
-    // Through a symlink that leaves it.
-    std::os::unix::fs::symlink("/etc", here.join("out")).unwrap();
-    assert!(!free("Read", json!({"file_path": "out/passwd"})));
-    // Anything that reaches the network or changes something asks.
-    for tool in [
-        "WebFetch",
-        "WebSearch",
-        "BrowserFetch",
-        "BrowserSearch",
-        "Bash",
-        "Edit",
-        "Write",
-        "Agent",
-    ] {
-        assert!(
-            !free(tool, json!({"url": "https://example.com", "query": "q"})),
-            "{tool}"
-        );
-    }
-    for tool in [
-        "mcp__vogt__work_get",
-        "mcp__github-ro__search_code",
-        "mcp__cadastre__lookup",
-    ] {
-        assert!(!free(tool, json!({})), "{tool}");
-    }
-}
-
-#[test]
-fn the_free_path_is_an_allowlist_and_anything_it_cannot_classify_asks() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("main.go"), "package main").unwrap();
-    let here = dir.path();
-    let free = |tool: &str, input: Value| classify(tool, &input, here) == ToolClass::Free;
-    // Klaudia's LSP tools name their path `file` (review round 2).
-    for tool in ["Hover", "Diagnostics", "DocumentSymbols"] {
-        if tool == "Hover" {
-            assert!(free(
-                tool,
-                json!({"file": "main.go", "line": 1, "character": 1})
-            ));
-        }
-        assert!(
-            !free(
-                tool,
-                json!({"file": "/proc/self/environ", "line": 1, "character": 1})
-            ),
-            "{tool}"
-        );
-        assert!(!free(tool, json!({"file": "/proc/self/environ"})), "{tool}");
-    }
-    assert!(free("Diagnostics", json!({"file": "main.go"})));
-    assert!(free("WorkspaceSymbol", json!({"query": "Pool"})));
-    assert!(!free(
-        "WorkspaceSymbol",
-        json!({"query": "Pool", "file": "/etc/passwd"})
-    ));
-    // An unknown tool with a path argument asks, whatever the path.
-    assert!(!free("ReadFile", json!({"file_path": "main.go"})));
-    assert!(!free("Peek", json!({"file": "main.go"})));
-    // An argument the table does not know asks, even beside a local path.
-    assert!(!free(
-        "Read",
-        json!({"file_path": "main.go", "follow": "/etc/passwd"})
-    ));
-    // A required path that is missing, empty or not a string asks.
-    assert!(!free("Read", json!({})));
-    assert!(!free("Read", json!({"file_path": ""})));
-    assert!(!free("Read", json!({"file_path": ["/etc/passwd"]})));
-    assert!(!free("Hover", json!({"line": 1})));
-    assert!(!free("Read", Value::Null));
-    // A Grep pattern is a regex, not a path; its `path` and `glob` are.
-    assert!(free("Grep", json!({"pattern": "^/etc/passwd", "-i": true})));
-    assert!(!free("Grep", json!({"pattern": "x", "glob": "/etc/*"})));
-    // Glob and Grep with no path search the working directory, the chat's.
-    assert!(free("Glob", json!({"pattern": "**/*.go"})));
-}
-
-#[test]
 fn redaction_masks_what_looks_like_a_credential() {
     let text = "401 from api: Authorization: Bearer abcdef0123456789 \
                 api_key=sk-live-1234567890abcdef token: \"zzzzzzzzzzzz\" \
@@ -141,11 +33,11 @@ fn redaction_masks_what_looks_like_a_credential() {
 
 #[test]
 fn a_wrapper_in_front_of_the_driver_is_dropped_for_a_chat() {
-    let argv: Vec<String> = ["vogt-agent-auth", "run", "--", "klaudia", "--x"]
+    let argv: Vec<String> = ["vogt-agent-auth", "run", "--", "codex", "--x"]
         .map(String::from)
         .to_vec();
-    assert_eq!(driver_of(&argv), ["klaudia", "--x"]);
-    let bare: Vec<String> = vec!["/opt/bin/klaudia".into()];
+    assert_eq!(driver_of(&argv), ["codex", "--x"]);
+    let bare: Vec<String> = vec!["/opt/bin/codex".into()];
     assert_eq!(driver_of(&bare), bare);
 }
 
@@ -175,25 +67,6 @@ fn an_orphaned_chat_process_group_is_ended_at_boot_and_a_reused_pid_is_not() {
 }
 
 #[test]
-fn the_hook_blocks_on_any_failure_and_outlives_the_engines_own_deadline() {
-    let config = hook_config(Duration::from_secs(600));
-    // Parses as the TOML Klaudia reads.
-    let parsed: toml::Value = toml::from_str(&config).unwrap();
-    let hook = &parsed["hooks"][0];
-    assert_eq!(hook["event"].as_str(), Some("PreToolUse"));
-    let command = hook["command"].as_str().unwrap();
-    // Exit 2 is Klaudia's "blocked"; any other failure would read as a
-    // broken hook and let the call through.
-    assert!(command.contains("exit 2"), "{command}");
-    assert!(command.contains("curl -sS -f"), "{command}");
-    assert!(command.contains("$VOGT_CHAT_GATE_URL"), "{command}");
-    // The engine answers at 600 s; curl gives up later, and Klaudia (which
-    // lets a timed-out hook's call through) later still.
-    assert!(command.contains("--max-time 660"), "{command}");
-    assert_eq!(hook["timeout"].as_str(), Some("720s"));
-}
-
-#[test]
 fn a_call_is_described_by_what_it_would_do() {
     assert_eq!(
         describe_call("Bash", &json!({"command": "make test"})),
@@ -218,33 +91,36 @@ fn a_call_is_described_by_what_it_would_do() {
 }
 
 #[test]
-fn the_launch_is_a_command_the_operator_names() {
+fn the_launch_is_a_codex_command_the_operator_names() {
     let enabled = ChatPolicy {
         enabled: true,
         ..Default::default()
     };
     let templates = crate::config::SessionTemplate::default_templates();
-    // No shipped template runs the stream-json driver any more.
-    assert!(resolve_launch(&enabled, &templates).is_none());
+    // The shipped Codex template runs the driver through the credential
+    // wrapper; the chat runs the driver itself.
+    let launch = resolve_codex(&enabled, &templates).unwrap();
+    assert_eq!(launch.template.as_deref(), Some("Codex (protected)"));
+    assert_eq!(launch.driver, ["codex"]);
 
     let named = ChatPolicy {
-        command: Some(vec!["/opt/bin/klaudia".into()]),
+        command: Some(vec!["/opt/bin/codex".into()]),
         ..enabled.clone()
     };
-    let launch = resolve_launch(&named, &templates).unwrap();
+    let launch = resolve_codex(&named, &templates).unwrap();
     assert_eq!(launch.template, None);
-    assert_eq!(launch.argv, ["/opt/bin/klaudia"]);
+    assert_eq!(launch.argv, ["/opt/bin/codex"]);
 
-    // Not the stream-json driver: the engine cannot speak its protocol, so no
-    // chats.
+    // The engine speaks only the Codex app-server protocol: anything else
+    // means no chats.
     let other = ChatPolicy {
         command: Some(vec!["claude".into()]),
         ..enabled.clone()
     };
-    assert!(resolve_launch(&other, &templates).is_none());
-    // Off, or no template that runs the driver: no chats.
-    assert!(resolve_launch(&ChatPolicy::default(), &templates).is_none());
-    assert!(resolve_launch(&enabled, &[]).is_none());
+    assert!(resolve_codex(&other, &templates).is_none());
+    // Off, or no template that runs Codex: no chats.
+    assert!(resolve_codex(&ChatPolicy::default(), &templates).is_none());
+    assert!(resolve_codex(&enabled, &[]).is_none());
 }
 
 #[test]
