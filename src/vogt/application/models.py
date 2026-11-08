@@ -6838,9 +6838,9 @@ class AgentActivitySummaryResult(Result):
 
 # -- quick chats (WI-1097) -----------------------------------------------------
 #
-# A chat is the engine's: a persistent text conversation with an agent CLI
-# driven over stream-json, kept in the engine's own store. These operations
-# reach it through the engine client, as the session operations do.
+# A chat is the engine's: a persistent text conversation with Codex, driven
+# over its app-server JSON-RPC protocol, kept in the engine's own store. These
+# operations reach it through the engine client, as the session operations do.
 
 CHAT_ID_DESCRIPTION = "The chat's id (a UUID, from chat.list or chat.create)."
 
@@ -6857,7 +6857,7 @@ class ChatApprovalView(Result):
     tool_name: str
     summary: str = Field(description="What the call would do: a command, a path.")
     source: str = Field(
-        description="`gate` (Vogt's pre-tool gate) or `driver` (the agent asked)."
+        description="`codex` (the app-server asked)."
     )
     status: str = Field(description="pending, allowed, denied or expired.")
     requested_at: str

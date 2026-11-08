@@ -97,8 +97,8 @@ pub struct AppState {
     /// installer that may move them. Always present; an image without the
     /// installer reports `installer_present: false` and refuses the POST.
     pub agent_clis: Arc<agent_clis::AgentCliRuntime>,
-    /// Quick chats (WI-1097), or `None` when they are off or no Klaudia
-    /// launch is configured; their routes then 404.
+    /// Quick chats (WI-1097), or `None` when they are off or no Codex launch
+    /// is configured; their routes then 404.
     pub chats: Option<Arc<ChatRuntime>>,
     /// Cached workspace tree sizes for `GET /api/workspaces` (WI-1340).
     pub workspace_sizes: Arc<crate::workspaces::WorkspaceSizes>,
@@ -562,10 +562,7 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         .route(api::POLICY_CHECK_ROUTE, post(api::policy_check))
         // A session's own approved grants (WI-973): the same caller and the
         // same per-session token.
-        .route(secret_broker::GRANTS_ROUTE, get(secret_broker::own_grants))
-        // A quick chat's approval gate (WI-1097): its own agent's hook, with
-        // the per-process token the engine gave that agent.
-        .route(chat_api::GATE_ROUTE, post(chat_api::gate));
+        .route(secret_broker::GRANTS_ROUTE, get(secret_broker::own_grants));
 
     // WS handles its own auth so query-param tokens work (browsers can't set
     // Authorization on a WebSocket handshake).
@@ -717,13 +714,6 @@ pub async fn serve_forever(cfg: Config) -> std::io::Result<()> {
     let (router, state) = router(cfg).await;
     let listener = tokio::net::TcpListener::bind(bind).await?;
     tracing::info!(addr = %bind, "vogt-engine listening");
-    if bind.port() == 0 {
-        // The configuration did not name the port, so a chat's gate URL
-        // could not either until now.
-        if let (Some(chats), Ok(addr)) = (state.chats.as_ref(), listener.local_addr()) {
-            chats.set_gate_base(format!("http://127.0.0.1:{}", addr.port()));
-        }
-    }
     if let Some(addr) = metrics_bind {
         crate::metrics::spawn_listener(addr);
     }

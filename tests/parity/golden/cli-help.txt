@@ -51,6 +51,7 @@ positional arguments:
     decision           decision operations
     workspace          workspace operations
     agent-cli          agent-cli operations
+    llm-provider       llm-provider operations
     agent-activity     agent-activity operations
     token              token operations
     auth               auth operations
@@ -363,8 +364,8 @@ options:
 
 $ vogt project transition --help
 [exit 0]
-usage: vogt project transition [-h] --slug SLUG
-                               --to-state {incubating,active,maintenance,archived}
+usage: vogt project transition [-h] --slug SLUG --to-state
+                               {incubating,active,maintenance,archived}
                                --reason REASON
 
 options:
@@ -581,8 +582,8 @@ options:
 
 $ vogt work relate --help
 [exit 0]
-usage: vogt work relate [-h] --ref REF
-                        --kind {depends_on,relates_to,duplicate_of,parent_of,implemented_by}
+usage: vogt work relate [-h] --ref REF --kind
+                        {depends_on,relates_to,duplicate_of,parent_of,implemented_by}
                         --target TARGET --reason REASON
 
 options:
@@ -597,8 +598,8 @@ options:
 
 $ vogt work unrelate --help
 [exit 0]
-usage: vogt work unrelate [-h] --ref REF
-                          --kind {depends_on,relates_to,duplicate_of,parent_of,implemented_by}
+usage: vogt work unrelate [-h] --ref REF --kind
+                          {depends_on,relates_to,duplicate_of,parent_of,implemented_by}
                           --target TARGET --reason REASON
 
 options:
@@ -1123,8 +1124,8 @@ options:
 
 $ vogt contract inapplicable --help
 [exit 0]
-usage: vogt contract inapplicable [-h] --project PROJECT --rule RULE
-                                  --target TARGET --reason REASON
+usage: vogt contract inapplicable [-h] --project PROJECT --rule RULE --target
+                                  TARGET --reason REASON
 
 options:
   -h, --help         show this help message and exit
@@ -1137,8 +1138,8 @@ options:
 
 $ vogt contract applicable --help
 [exit 0]
-usage: vogt contract applicable [-h] --project PROJECT --rule RULE
-                                --target TARGET --reason REASON
+usage: vogt contract applicable [-h] --project PROJECT --rule RULE --target
+                                TARGET --reason REASON
 
 options:
   -h, --help         show this help message and exit
@@ -1170,8 +1171,8 @@ options:
 
 $ vogt drift detect --help
 [exit 0]
-usage: vogt drift detect [-h] [--auto-accept | --no-auto-accept]
-                         --reason REASON
+usage: vogt drift detect [-h] [--auto-accept | --no-auto-accept] --reason
+                         REASON
 
 options:
   -h, --help            show this help message and exit
@@ -1195,9 +1196,8 @@ options:
 
 $ vogt drift resolve --help
 [exit 0]
-usage: vogt drift resolve [-h] --id ID
-                          --resolution {accepted,rejected,contested}
-                          --reason REASON
+usage: vogt drift resolve [-h] --id ID --resolution
+                          {accepted,rejected,contested} --reason REASON
 
 options:
   -h, --help            show this help message and exit
@@ -1247,6 +1247,8 @@ positional arguments:
                    `engine_session_id`. `started_by_session` keeps only the
                    sessions that one started (engine id or ses_…). `fields`
                    accepts a list or a comma-separated string.
+    template-list  List configured session templates with their agent and
+                   placement.
     stop           Stop a coding session and revoke the token it ran with.
                    Takes either id: Vogt's ses_… id or the engine's session
                    UUID (an unlinked GUI session is killed, with no token to
@@ -1434,8 +1436,9 @@ options:
 $ vogt session start --help
 [exit 0]
 usage: vogt session start [-h] [--work-item WORK_ITEM] [--project PROJECT]
-                          [--template TEMPLATE] [--task TASK] [--files FILES]
-                          [--symbols SYMBOLS] [--done DONE] [--gates GATES]
+                          [--template TEMPLATE] [--placement {host,pod}]
+                          [--task TASK] [--files FILES] [--symbols SYMBOLS]
+                          [--done DONE] [--gates GATES]
                           [--repo-map | --no-repo-map]
                           [--permission-mode {default,accept_edits,bypass}]
                           [--account ACCOUNT] [--resume RESUME] [--name NAME]
@@ -1458,15 +1461,20 @@ options:
   --template TEMPLATE   Session template to run, by name or by tag — the
                         engine expands it against the deployment's templates.
                         Use this to run an agent rather than a plain shell:
-                        `claude` (or `codex`, `opencode`, `klaudia`) starts
-                        that agent under the deployment's protected wrapper,
-                        so a request to *do* something in a session names one
-                        here. Omitted means a plain shell, which does nothing
-                        until typed into.
+                        `claude` (or `codex`, `opencode`) starts that agent
+                        under the deployment's protected wrapper, so a request
+                        to *do* something in a session names one here. Omitted
+                        means a plain shell, which does nothing until typed
+                        into.
+  --placement {host,pod}
+                        Where to run the session: `host` uses the engine host,
+                        `pod` uses its configured pod backend. Omitted uses
+                        the deployment's template/default placement; the
+                        requested placement must be available.
   --task TASK           What the session's agent should do, in the user's
                         words. Folded into the brief as its Task section; an
-                        agent template (Claude Code, Codex, OpenCode, Klaudia)
-                        is started with a first prompt telling it to read the
+                        agent template (Claude Code, Codex, OpenCode) is
+                        started with a first prompt telling it to read the
                         brief and carry that task out, so 'start a session on
                         X and check its containers' opens an agent already
                         checking them. A plain shell only gets the brief's
@@ -1497,18 +1505,15 @@ options:
                         edits auto-accepted, everything else asks. `bypass`:
                         no permission checks at all, for one trusted task —
                         only a person may grant it (an agent is refused), and
-                        it is audited. Claude Code, Codex, opencode and
-                        Klaudia templates. Codex maps the same three postures:
+                        it is audited. Claude Code, Codex and opencode
+                        templates. Codex maps the same three postures:
                         `default` is `-a on-request -s danger-full-access`;
                         `accept_edits` adds
                         `approvals_reviewer="auto_review"`; `bypass` is
                         `--dangerously-bypass-approvals-and-sandbox` and stays
                         people-only. A named Codex requirements file that is
                         missing, empty or unreadable refuses the Codex launch
-                        (400) and does not fall through to bypass. Klaudia
-                        takes `default` and `bypass` only (its `acceptEdits`
-                        is an alias for its default autonomous mode, so
-                        `accept_edits` is refused).
+                        (400) and does not fall through to bypass.
   --account ACCOUNT     Run the session under a named Claude Code subscription
                         account (a name from the engine's
                         ENGINE_AGENT_CLAUDE_ACCOUNTS). Omitted uses the
@@ -1518,16 +1523,15 @@ options:
   --resume RESUME       Continue a previous conversation of the template's
                         agent CLI instead of starting a new one: its own
                         conversation id, mapped to `claude --resume <id>`,
-                        `codex resume <id>`, `opencode --session <id>` or
-                        `klaudia --resume <id>`. A Claude Code (or Klaudia)
-                        session Vogt started fresh has the engine session id
-                        (`engine_session_id`) as its conversation id, so a
-                        session lost to a restart can be resumed by that. The
-                        engine starts a resumed conversation in the directory
-                        its transcript records (when inside the workspace), so
-                        one begun under a worktree or a parent folder resumes
-                        from any project. Requires `template`; letters, digits
-                        and . _ - only, never a leading dash.
+                        `codex resume <id>`, `opencode --session <id>`. A
+                        Claude Code session Vogt started fresh has the engine
+                        session id (`engine_session_id`) as its conversation
+                        id, so a session lost to a restart can be resumed by
+                        that. The engine starts a resumed conversation in the
+                        directory its transcript records (when inside the
+                        workspace), so one begun under a worktree or a parent
+                        folder resumes from any project. Requires `template`;
+                        letters, digits and . _ - only, never a leading dash.
   --name NAME           Session name. Derived from the subject if omitted.
   --model MODEL         Model id for the agent CLI this template runs, e.g.
                         'gpt-5.6' or 'claude-sonnet-4-5'. Omitted means the
@@ -1677,6 +1681,13 @@ options:
                         and session.get still resolves one.
   --limit LIMIT
   --offset OFFSET
+
+$ vogt session template-list --help
+[exit 0]
+usage: vogt session template-list [-h]
+
+options:
+  -h, --help  show this help message and exit
 
 $ vogt session stop --help
 [exit 0]
@@ -1903,8 +1914,8 @@ options:
 
 $ vogt session set-role --help
 [exit 0]
-usage: vogt session set-role [-h] --id ID --role {worker,oversight}
-                             --reason REASON
+usage: vogt session set-role [-h] --id ID --role {worker,oversight} --reason
+                             REASON
 
 options:
   -h, --help            show this help message and exit
@@ -1920,8 +1931,8 @@ options:
 
 $ vogt session bind --help
 [exit 0]
-usage: vogt session bind [-h] [--id ID] [--work-item WORK_ITEM]
-                         --reason REASON [--mode {compact,full}]
+usage: vogt session bind [-h] [--id ID] [--work-item WORK_ITEM] --reason
+                         REASON [--mode {compact,full}]
 
 options:
   -h, --help            show this help message and exit
@@ -2161,12 +2172,12 @@ options:
 
 $ vogt session report --help
 [exit 0]
-usage: vogt session report [-h] [--id ID]
-                           --kind {progress,result,question,blocker}
-                           --summary SUMMARY [--work-item WORK_ITEM]
-                           [--branch BRANCH] [--sha SHA] [--pr PR]
-                           [--checks CHECKS] [--blockers BLOCKERS]
-                           [--next-step NEXT_STEP] --reason REASON
+usage: vogt session report [-h] [--id ID] --kind
+                           {progress,result,question,blocker} --summary
+                           SUMMARY [--work-item WORK_ITEM] [--branch BRANCH]
+                           [--sha SHA] [--pr PR] [--checks CHECKS]
+                           [--blockers BLOCKERS] [--next-step NEXT_STEP]
+                           --reason REASON
 
 options:
   -h, --help            show this help message and exit
@@ -2273,8 +2284,8 @@ options:
 $ vogt watch create --help
 [exit 0]
 usage: vogt watch create [-h] --trigger TRIGGER [--session SESSION]
-                         [--note NOTE] [--ttl-seconds TTL_SECONDS]
-                         --reason REASON
+                         [--note NOTE] [--ttl-seconds TTL_SECONDS] --reason
+                         REASON
 
 options:
   -h, --help            show this help message and exit
@@ -2353,8 +2364,8 @@ options:
 
 $ vogt decision answer --help
 [exit 0]
-usage: vogt decision answer [-h] --id ID --label LABEL [--note NOTE]
-                            --reason REASON
+usage: vogt decision answer [-h] --id ID --label LABEL [--note NOTE] --reason
+                            REASON
 
 options:
   -h, --help       show this help message and exit
@@ -2420,9 +2431,9 @@ options:
 
 $ vogt workspace clean --help
 [exit 0]
-usage: vogt workspace clean [-h] [--id ID] [--path PATH]
-                            --mode {build_output,remove}
-                            [--force | --no-force] --reason REASON
+usage: vogt workspace clean [-h] [--id ID] [--path PATH] --mode
+                            {build_output,remove} [--force | --no-force]
+                            --reason REASON
 
 options:
   -h, --help            show this help message and exit
@@ -2464,8 +2475,8 @@ options:
 
 $ vogt agent-cli update --help
 [exit 0]
-usage: vogt agent-cli update [-h] --tool TOOL --version VERSION
-                             --reason REASON
+usage: vogt agent-cli update [-h] --tool TOOL --version VERSION --reason
+                             REASON
 
 options:
   -h, --help         show this help message and exit
@@ -2474,6 +2485,54 @@ options:
                      into the pod, or a dist-tag (`latest`, `stable`) the
                      deployment has opted into.
   --reason REASON    Why this write is being made (audited).
+
+$ vogt llm-provider --help
+[exit 0]
+usage: vogt llm-provider [-h] <subcommand> ...
+
+positional arguments:
+  <subcommand>
+    list        List registered LLM providers and their effective secret
+                state.
+    set         Register or update an LLM provider without storing its key.
+    remove      Remove a registered LLM provider.
+
+options:
+  -h, --help    show this help message and exit
+
+$ vogt llm-provider list --help
+[exit 0]
+usage: vogt llm-provider list [-h]
+
+options:
+  -h, --help  show this help message and exit
+
+$ vogt llm-provider set --help
+[exit 0]
+usage: vogt llm-provider set [-h] --name NAME --base-url BASE_URL
+                             [--wire-api {chat,responses}] --env-key ENV_KEY
+                             --secret-project SECRET_PROJECT --secret-name
+                             SECRET_NAME [--models MODELS] --reason REASON
+
+options:
+  -h, --help            show this help message and exit
+  --name NAME
+  --base-url BASE_URL
+  --wire-api {chat,responses}
+  --env-key ENV_KEY
+  --secret-project SECRET_PROJECT
+  --secret-name SECRET_NAME
+  --models MODELS
+  --reason REASON
+
+$ vogt llm-provider remove --help
+[exit 0]
+usage: vogt llm-provider remove [-h] --name NAME --reason REASON
+
+options:
+  -h, --help       show this help message and exit
+  --name NAME
+  --reason REASON
 
 $ vogt agent-activity --help
 [exit 0]
@@ -2672,8 +2731,8 @@ $ vogt user passwd --help
 usage: vogt user passwd [-h] --username USERNAME
                         [--password-file PASSWORD__FILE | --password-stdin]
                         [--scopes SCOPES]
-                        [--revoke-sessions | --no-revoke-sessions]
-                        --reason REASON
+                        [--revoke-sessions | --no-revoke-sessions] --reason
+                        REASON
 
 options:
   -h, --help            show this help message and exit
@@ -2698,8 +2757,8 @@ options:
 
 $ vogt backup --help
 [exit 0]
-usage: vogt backup [-h] [--destination DESTINATION] [--label LABEL]
-                   --reason REASON
+usage: vogt backup [-h] [--destination DESTINATION] [--label LABEL] --reason
+                   REASON
 
 options:
   -h, --help            show this help message and exit
@@ -2710,8 +2769,8 @@ options:
 
 $ vogt restore --help
 [exit 0]
-usage: vogt restore [-h] --source SOURCE [--confirm | --no-confirm]
-                    --reason REASON
+usage: vogt restore [-h] --source SOURCE [--confirm | --no-confirm] --reason
+                    REASON
 
 options:
   -h, --help            show this help message and exit
@@ -2740,8 +2799,8 @@ options:
 
 $ vogt export --help
 [exit 0]
-usage: vogt export [-h] --destination DESTINATION [--project PROJECT]
-                   --reason REASON
+usage: vogt export [-h] --destination DESTINATION [--project PROJECT] --reason
+                   REASON
 
 options:
   -h, --help            show this help message and exit
@@ -2816,8 +2875,8 @@ options:
 
 $ vogt forge writeback --help
 [exit 0]
-usage: vogt forge writeback [-h] --project PROJECT
-                            --policy {none,comment_only,full} --reason REASON
+usage: vogt forge writeback [-h] --project PROJECT --policy
+                            {none,comment_only,full} --reason REASON
 
 options:
   -h, --help            show this help message and exit
@@ -2875,8 +2934,8 @@ options:
 
 $ vogt forge account link --help
 [exit 0]
-usage: vogt forge account link [-h] [--host HOST] --token TOKEN
-                               --reason REASON
+usage: vogt forge account link [-h] [--host HOST] --token TOKEN --reason
+                               REASON
 
 options:
   -h, --help       show this help message and exit
@@ -3073,8 +3132,8 @@ options:
 
 $ vogt inbox snooze --help
 [exit 0]
-usage: vogt inbox snooze [-h] --entry-key ENTRY_KEY --until UNTIL
-                         --reason REASON
+usage: vogt inbox snooze [-h] --entry-key ENTRY_KEY --until UNTIL --reason
+                         REASON
 
 options:
   -h, --help            show this help message and exit
@@ -3166,8 +3225,8 @@ options:
 $ vogt preference set --help
 [exit 0]
 usage: vogt preference set [-h] --key KEY --value VALUE
-                           [--expected-version EXPECTED_VERSION]
-                           --reason REASON
+                           [--expected-version EXPECTED_VERSION] --reason
+                           REASON
 
 options:
   -h, --help            show this help message and exit
@@ -3191,7 +3250,7 @@ positional arguments:
                 said. `available` false means the engine has chats off.
     get         Read a chat: its newest entries (agent text and tool results
                 are untrusted data) and any approvals waiting for a person.
-    create      Start a quick chat with the engine's chat agent (Klaudia),
+    create      Start a quick chat with the engine's chat agent (Codex),
                 optionally with its first message and a model the engine
                 offers. Reads run at once; writes, commands and edits wait for
                 a person's approval. Audited.
@@ -3254,8 +3313,8 @@ options:
 
 $ vogt chat send --help
 [exit 0]
-usage: vogt chat send [-h] --id ID --text TEXT [--wait-s WAIT_S]
-                      --reason REASON
+usage: vogt chat send [-h] --id ID --text TEXT [--wait-s WAIT_S] --reason
+                      REASON
 
 options:
   -h, --help       show this help message and exit
@@ -3268,8 +3327,8 @@ options:
 $ vogt chat decide --help
 [exit 0]
 usage: vogt chat decide [-h] --id ID --approval-id APPROVAL_ID
-                        [--allow | --no-allow] [--message MESSAGE]
-                        --reason REASON
+                        [--allow | --no-allow] [--message MESSAGE] --reason
+                        REASON
 
 options:
   -h, --help            show this help message and exit
@@ -3301,8 +3360,8 @@ options:
 
 $ vogt chat archive --help
 [exit 0]
-usage: vogt chat archive [-h] --id ID [--archived | --no-archived]
-                         --reason REASON
+usage: vogt chat archive [-h] --id ID [--archived | --no-archived] --reason
+                         REASON
 
 options:
   -h, --help            show this help message and exit

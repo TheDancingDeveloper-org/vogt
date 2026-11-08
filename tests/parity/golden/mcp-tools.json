@@ -7690,7 +7690,7 @@
     },
     {
       "name": "chat_create",
-      "description": "Start a quick chat with the engine's chat agent (Klaudia), optionally with its first message and a model the engine offers. Reads run at once; writes, commands and edits wait for a person's approval. Audited.",
+      "description": "Start a quick chat with the engine's chat agent (Codex), optionally with its first message and a model the engine offers. Reads run at once; writes, commands and edits wait for a person's approval. Audited.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {

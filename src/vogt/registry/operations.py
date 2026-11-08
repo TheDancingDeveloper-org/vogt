@@ -2453,7 +2453,7 @@ def build_operations() -> list[Operation[Any, Any]]:
         Operation(
             name="chat.create",
             summary=(
-                "Start a quick chat with the engine's chat agent (Klaudia), "
+                "Start a quick chat with the engine's chat agent (Codex), "
                 "optionally with its first message and a model the engine "
                 "offers. Reads run at once; writes, commands and edits wait "
                 "for a person's approval. Audited."
