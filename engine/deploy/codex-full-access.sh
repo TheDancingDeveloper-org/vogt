@@ -19,22 +19,16 @@
 # that way either.
 set -euo pipefail
 
-# A runtime copy must be the fork (WI-1146). The fork is what reads the
-# gitguard hook in /etc/codex/requirements.toml; stock Codex ignores the hook
-# table and would run with nothing guarding the checkout. The installer writes
-# `source` (`<repository>@<commit>`) only for a fork release, so a prefix
-# without it — an npm copy an older image flipped to — is refused rather than
-# run. When the image's tools table is readable, the repository must be the
-# fork it names.
+# A runtime copy must be the fork (WI-1146). The installer writes `source`
+# (`<repository>@<commit>`) only for a fork release, so a prefix without it —
+# an npm copy an older image flipped to — is refused rather than run. When the
+# image's tools table is readable, the repository must be the fork it names.
 #
 # This is an accident guard, not a security boundary: `codex/current` and its
 # `source` file live under /opt/vogt/agent-clis, which the session user owns,
 # so a session can write a fork-shaped `source` beside any binary. It stops a
-# stale or mistaken pin (an npm copy an older image flipped to) from running
-# unguarded; it does not stop a session that sets out to. The gitguard hook
-# itself does not depend on this file: it runs the root-owned
-# /usr/local/bin/klaudia by absolute path, and the fork reads the root-owned
-# /etc/codex/requirements.toml (WI-1146).
+# stale or mistaken pin (an npm copy an older image flipped to) from running;
+# it does not stop a session that sets out to.
 prefix="${VOGT_AGENT_CLI_ROOT:-/opt/vogt/agent-clis}/codex/current"
 runtime="$prefix/bin/codex"
 if [[ -x "$runtime" ]]; then
@@ -43,7 +37,7 @@ if [[ -x "$runtime" ]]; then
         /usr/local/share/vogt/agent-clis.tools 2>/dev/null || true)"
     if [[ ! "$provenance" =~ ^[^@[:space:]]+@[0-9a-f]{40}$ ]] \
             || [[ -n "$fork" && "${provenance%@*}" != "$fork" ]]; then
-        echo "codex: refusing $runtime: it is not a Codex fork release (source '${provenance:-none}'), so the gitguard hook would not run. Pin VOGT_CODEX_SHA, or set it to 'image' and restart" >&2
+        echo "codex: refusing $runtime: it is not a Codex fork release (source '${provenance:-none}'). Pin VOGT_CODEX_SHA, or set it to 'image' and restart" >&2
         exit 78
     fi
     codex_real="$runtime"
