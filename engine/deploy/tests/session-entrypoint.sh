@@ -32,7 +32,7 @@ if [ -n "${REFUSE_FIRST:-}" ]; then
   [ "$n" -gt "$REFUSE_FIRST" ] || { echo "connection refused" >&2; exit 7; }
 fi
 [ "${BOOT_MODE:-ok}" != 401 ] || { echo unauthorized >&2; exit 22; }
-graft=""; [ -z "${GRAFT_TOKEN:-}" ] || graft=$(printf ',"graft_token":"%s"' "$GRAFT_TOKEN")
+graft=""; [ -z "${GRAFT_TOKEN:-}" ] || graft=$(printf ',"source_token":"%s"' "$GRAFT_TOKEN")
 [ -z "${MCP_CONFIG:-}" ] || graft="$graft,\"mcp_config\":$MCP_CONFIG"
 [ -z "${CODEX_CONFIG:-}" ] || graft="$graft,\"codex_config\":$(printf %s "$CODEX_CONFIG" | jq -Rs .)"
 [ -z "${OPENCODE_CONFIG:-}" ] || graft="$graft,\"opencode_config\":$OPENCODE_CONFIG"
