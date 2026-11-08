@@ -4851,18 +4851,19 @@ engine never deletes a Secret. Its Role in the sessions namespace therefore
 needs only `create` on `secrets` (no `get`, `list`, `watch`, `update` or
 `delete`). The pod spec also sets
 `VOGT_ENGINE_URL`, `VOGT_SESSION_ID`,
-`VOGT_GRAFT_REPO`, `VOGT_GRAFT_LINE`, `VOGT_CLI` (`claude` or `codex`) and,
-when configured, `GRAFT_ENDPOINT` and `VOGT_EXTRA_CA_FILE`.
+`VOGT_SOURCE_JSON` (the session's source descriptor), `VOGT_CLI` (`claude`
+or `codex`), the source provider's env (for graft, `GRAFT_ENDPOINT` when
+known) and, when configured, `VOGT_EXTRA_CA_FILE`.
 
-**Engine configuration** (`pod_backend.rs`):
+**Engine configuration** (`pod_backend.rs`; the graft rows are the graft source provider's, `graft_provider.rs`):
 
 | Variable | Effect |
 | --- | --- |
-| `ENGINE_POD_GRAFT_REPO` | graft repository the session clones, passed as `VOGT_GRAFT_REPO` |
-| `ENGINE_POD_GRAFT_LINE` | line it clones, passed as `VOGT_GRAFT_LINE` (default `rust-2`); the entrypoint runs `g clone <repo> <workdir> --line <line>`, so the working copy starts on that line |
-| `ENGINE_POD_GRAFT_ENDPOINT` | graft server URL, passed to the pod as `GRAFT_ENDPOINT`; it must be reachable from the session namespace |
-| `ENGINE_GRAFT_MINT_TOKEN_FILE` | file (a mounted secret, `0400`) holding the engine's graft *mint* token: a service-kind graft token (subject `vogt-engine`, scopes `repo:<repo>:read`, `:write`, `:drafts` and `:land:<line>`). Needs `ENGINE_POD_GRAFT_ENDPOINT`. When set, the engine mints a graft token per session pod (below) and never hands the mint token, or the shared token, to a pod. Read on every mint, so a rotation (the token expires; rotation is a re-mint) needs no restart |
-| `ENGINE_POD_GRAFT_TOKEN_FILE` | **fallback** when no mint token is configured: a file (a mounted secret) holding one graft token shared by every pod. The engine reads it when it answers the bootstrap request and returns it as `graft_token`, and logs a warning at each pod create. The value is never in config or the pod spec. Unset too, the entrypoint clones with the session token |
+| `ENGINE_SOURCE_GRAFT_REPO` (alias `ENGINE_POD_GRAFT_REPO`) | graft repository the session clones |
+| `ENGINE_SOURCE_GRAFT_LINE` (alias `ENGINE_POD_GRAFT_LINE`) | line it clones (default `rust-2`); the entrypoint runs `g clone <repo> <workdir> --line <line>`, so the working copy starts on that line |
+| `ENGINE_SOURCE_GRAFT_ENDPOINT` (alias `ENGINE_POD_GRAFT_ENDPOINT`) | graft server URL, passed to the pod as `GRAFT_ENDPOINT`; it must be reachable from the session namespace |
+| `ENGINE_SOURCE_GRAFT_MINT_TOKEN_FILE` (alias `ENGINE_GRAFT_MINT_TOKEN_FILE`) | file (a mounted secret, `0400`) holding the engine's graft *mint* token: a service-kind graft token (subject `vogt-engine`, scopes `repo:<repo>:read`, `:write`, `:drafts` and `:land:<line>`). Needs `ENGINE_SOURCE_GRAFT_ENDPOINT` (alias `ENGINE_POD_GRAFT_ENDPOINT`)`. When set, the engine mints a graft token per session pod (below) and never hands the mint token, or the shared token, to a pod. Read on every mint, so a rotation (the token expires; rotation is a re-mint) needs no restart |
+| `ENGINE_SOURCE_GRAFT_TOKEN_FILE` (alias `ENGINE_POD_GRAFT_TOKEN_FILE`) | **fallback** when no mint token is configured: a file (a mounted secret) holding one graft token shared by every pod. The engine reads it when it answers the bootstrap request and returns it as `source_token`, and logs a warning at each pod create. The value is never in config or the pod spec. Unset too, the entrypoint clones with the session token |
 
 **Per-session graft token** (`graft_mint.rs`). At pod create the engine calls
 graft's `AdminService.MintToken` (gRPC, `graft-protocol` 0.1, the mint token as

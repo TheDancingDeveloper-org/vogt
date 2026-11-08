@@ -160,12 +160,13 @@ source_repo=$(jq -r '.source.location.repo' "$response")
 source_ref=$(jq -r '.source.ref' "$response")
 VOGT_GRAFT_LINE=$source_ref
 step=source-token; say source-token
-# The graft credential (scoped to this repo and line) arrives as .graft_token
-# and is kept in a 0600 file; without one the session token is tried.
+# The source credential (scoped to this repo and ref) arrives as .source_token
+# (.graft_token from an engine one release older) and is kept in a 0600 file;
+# without one the session token is tried.
 source_token_file=$token_file
-if [ -n "$(jq -r '.graft_token // empty' "$response")" ]; then
+if [ -n "$(jq -r '.source_token // .graft_token // empty' "$response")" ]; then
   source_token_file="${VOGT_GRAFT_TOKEN_FILE:-$(dirname "$token_file")/graft-token}"
-  jq -j '.graft_token' "$response" >"$source_token_file"; chmod 600 "$source_token_file"
+  jq -j '.source_token // .graft_token' "$response" >"$source_token_file"; chmod 600 "$source_token_file"
   export VOGT_GRAFT_TOKEN_FILE="$source_token_file"
 fi
 step=clone; say clone
