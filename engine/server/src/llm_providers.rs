@@ -79,6 +79,7 @@ pub fn parse(text: &str) -> Result<Vec<Provider>, String> {
     let mut seen_names: Vec<&str> = Vec::new();
     let mut seen_keys: Vec<&str> = Vec::new();
     for p in &file.provider {
+        validate_provider_env_name(&p.name, &p.env_key)?;
         if !is_provider_name(&p.name) {
             return Err(format!(
                 "provider name {:?} must be 1-64 of a-z, 0-9, '-' or '_', starting with a letter or digit",
@@ -172,15 +173,23 @@ pub fn validate_against_manifest(
 /// an operator-controlled registry replace the engine's own credentials.
 pub fn validate_provider_env_key(provider: &Provider) -> Result<(), String> {
     validate(provider)?;
-    let key = provider.env_key.as_str();
+    validate_provider_env_name(&provider.name, &provider.env_key)
+}
+
+fn validate_provider_env_name(name: &str, key: &str) -> Result<(), String> {
     if key == "PATH"
         || key == "LD_PRELOAD"
+        || key == "LD_LIBRARY_PATH"
+        || key == "HOME"
+        || key == "GH_TOKEN"
+        || key == "NODE_OPTIONS"
         || key.starts_with("ENGINE_")
         || key.starts_with("VOGT_")
+        || key.starts_with("INFISICAL_")
     {
         return Err(format!(
             "provider {}: env_key {} is reserved by the engine",
-            provider.name, key
+            name, key
         ));
     }
     Ok(())
@@ -462,5 +471,26 @@ models = ["deepseek-chat"]
             status.detail.as_deref(),
             Some("env_key clashes with manifest VAR")
         );
+    }
+
+    #[test]
+    fn reserved_provider_environment_names_are_rejected_when_loaded() {
+        for key in [
+            "PATH",
+            "LD_PRELOAD",
+            "LD_LIBRARY_PATH",
+            "HOME",
+            "GH_TOKEN",
+            "NODE_OPTIONS",
+            "ENGINE_TOKEN",
+            "VOGT_TOKEN",
+            "INFISICAL_CLIENT_ID",
+        ] {
+            let text = DEEPSEEK.replace("DEEPSEEK_KEY", key);
+            assert!(
+                parse(&text).unwrap_err().contains("reserved"),
+                "accepted {key}"
+            );
+        }
     }
 }

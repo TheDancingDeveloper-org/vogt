@@ -64,14 +64,7 @@ pub async fn llm_provider_set(
         .map_err(crate::error::ApiError::BadRequest)?;
     crate::llm_providers::validate_against_manifest(&provider, &manifest)
         .map_err(crate::error::ApiError::BadRequest)?;
-    if !manifest.iter().any(|entry| {
-        entry.project_id == provider.secret_project && entry.secret_name == provider.secret_name
-    }) && !state
-        .config
-        .agent_grant_projects
-        .iter()
-        .any(|project| project == &provider.secret_project)
-    {
+    if !secret_reference_is_approved(&provider, &manifest, &state.config.agent_grant_projects) {
         return Err(crate::error::ApiError::BadRequest(
             "provider secret must reference an approved manifest or grant project".into(),
         ));
@@ -88,6 +81,18 @@ pub async fn llm_provider_set(
         .find(|s| s.provider.name == provider.name)
         .unwrap();
     Ok(Json(serde_json::json!({"provider": status})))
+}
+
+fn secret_reference_is_approved(
+    provider: &crate::llm_providers::Provider,
+    manifest: &[crate::secret_broker::ManifestSecret],
+    grant_projects: &[String],
+) -> bool {
+    manifest.iter().any(|entry| {
+        entry.project_id == provider.secret_project && entry.secret_name == provider.secret_name
+    }) || grant_projects
+        .iter()
+        .any(|project| project == &provider.secret_project)
 }
 
 pub async fn llm_provider_remove(
@@ -2010,5 +2015,54 @@ mod source_authority_tests {
         let own = project("farmeggs", "backlog-1");
         assert!(require_source_authority(Some(&caller(true, false, false)), Some(&own)).is_ok());
         assert!(require_source_authority(Some(&caller(false, false, false)), None).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod llm_provider_tests {
+    use super::secret_reference_is_approved;
+    use crate::llm_providers::Provider;
+    use crate::secret_broker::{ManifestPolicy, ManifestSecret};
+
+    fn provider() -> Provider {
+        Provider {
+            name: "test".into(),
+            base_url: "https://example.test".into(),
+            wire_api: "chat".into(),
+            env_key: "TEST_PROVIDER_KEY".into(),
+            secret_project: "approved-project".into(),
+            secret_name: "KEY".into(),
+            models: vec![],
+        }
+    }
+
+    fn manifest(project_id: &str, secret_name: &str) -> ManifestSecret {
+        ManifestSecret {
+            var: "OTHER_KEY".into(),
+            project_id: project_id.into(),
+            secret_name: secret_name.into(),
+            policy: ManifestPolicy::Optional,
+            writable: false,
+        }
+    }
+
+    #[test]
+    fn provider_secret_must_be_in_manifest_or_an_approved_grant_project() {
+        let p = provider();
+        assert!(secret_reference_is_approved(
+            &p,
+            &[manifest("approved-project", "KEY")],
+            &[]
+        ));
+        assert!(secret_reference_is_approved(
+            &p,
+            &[],
+            &["approved-project".into()]
+        ));
+        assert!(!secret_reference_is_approved(
+            &p,
+            &[],
+            &["other-project".into()]
+        ));
     }
 }

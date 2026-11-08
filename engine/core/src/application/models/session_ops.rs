@@ -48,6 +48,10 @@ pub struct StartSessionParams {
     #[serde(default)]
     #[schemars(schema_with = "optional_string")]
     pub template: Option<String>,
+    /// Where to run the session: `host` uses the engine host, `pod` uses its configured pod backend. Omitted uses the deployment's template/default placement; the requested placement must be available.
+    #[serde(default)]
+    #[schemars(schema_with = "optional_start_session_params_placement")]
+    pub placement: Option<StartSessionParamsPlacement>,
     /// What the session's agent should do, in the user's words. Folded into the brief as its Task section; an agent template (Claude Code, Codex, OpenCode, Klaudia) is started with a first prompt telling it to read the brief and carry that task out, so 'start a session on X and check its containers' opens an agent already checking them. A plain shell only gets the brief's path in VOGT_ENGINE_AGENT_TASK_PROMPT_FILE, so pair a task with `template` when it is something to carry out. Omitted on an agent start, the task is taken from `reason` (a leading `Task:` dropped); a `review` purpose gets a default review task.
     #[serde(default)]
     #[schemars(schema_with = "optional_string")]
@@ -127,6 +131,38 @@ pub struct StartSessionParams {
     /// `compact` (default) returns a few fields: enough to confirm the write without re-reading the whole record. `full` returns the complete result.
     #[serde(default = "default_write_result_mode")]
     pub mode: WriteResultMode,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum StartSessionParamsPlacement {
+    Host,
+    Pod,
+}
+
+fn optional_start_session_params_placement(_: &mut SchemaGenerator) -> Schema {
+    json_schema!({"anyOf":[{"enum":["host","pod"],"type":"string"},{"type":"null"}]})
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SessionTemplateRow {
+    pub name: String,
+    #[serde(default)]
+    #[schemars(schema_with = "optional_string")]
+    pub agent: Option<String>,
+    pub placement: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SessionTemplateListResult {
+    #[serde(default)]
+    #[schemars(extend("x-keep-default" = true))]
+    pub templates: Vec<SessionTemplateRow>,
+    #[serde(default)]
+    #[schemars(schema_with = "optional_string")]
+    pub engine: Option<String>,
 }
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
