@@ -1227,14 +1227,24 @@ def _stand_in_engine() -> EngineClient:
                 }
             ).encode()
         if method == "GET" and path.endswith("/api/session-templates"):
-            return 200, json.dumps([
-                {"name": "claude", "agent": "claude", "placement": "local"},
-                {"name": "pod-agent", "agent": "codex", "placement": "pod"},
-            ]).encode()
+            return 200, json.dumps(
+                [
+                    {"name": "claude", "agent": "claude", "placement": "local"},
+                    {"name": "pod-agent", "agent": "codex", "placement": "pod"},
+                ]
+            ).encode()
         if method == "GET" and path.endswith("/api/llm-providers"):
             return 200, b'{"providers":[]}'
         if method == "POST" and path.endswith("/api/llm-providers"):
-            return 200, json.dumps({"provider": {**spec, "wire_api": spec.get("wire_api", "chat"), "state": "active"}}).encode()
+            return 200, json.dumps(
+                {
+                    "provider": {
+                        **spec,
+                        "wire_api": spec.get("wire_api", "chat"),
+                        "state": "active",
+                    }
+                }
+            ).encode()
         if method == "POST" and path.endswith("/api/llm-providers/remove"):
             return 200, json.dumps({"name": spec.get("name"), "removed": True}).encode()
         if method == "PATCH" and "/api/sessions/eng-" in path:
