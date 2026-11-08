@@ -163,6 +163,42 @@ def test_a_read_token_cannot_write(authed: TestClient, secrets: dict[str, str]) 
     assert response.json()["error"]["code"] == "forbidden"
 
 
+@pytest.mark.parametrize(
+    ("method", "path", "payload"),
+    [
+        ("get", "/api/llm-providers", None),
+        (
+            "post",
+            "/api/llm-providers/set",
+            {
+                "name": "x",
+                "base_url": "https://x",
+                "env_key": "X",
+                "secret_project": "p",
+                "secret_name": "s",
+                "reason": WHY,
+            },
+        ),
+        ("post", "/api/llm-providers/remove", {"name": "x", "reason": WHY}),
+    ],
+)
+def test_non_admin_cannot_use_any_llm_provider_route(
+    authed: TestClient,
+    secrets: dict[str, str],
+    method: str,
+    path: str,
+    payload: dict[str, str] | None,
+) -> None:
+    response = authed.request(
+        method.upper(),
+        path,
+        json=payload,
+        headers={"Authorization": f"Bearer {secrets['write']}"},
+    )
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "forbidden"
+
+
 def test_a_write_token_writes(
     instance: AppContext, authed: TestClient, secrets: dict[str, str]
 ) -> None:
@@ -275,6 +311,41 @@ def test_calling_an_ungranted_tool_is_refused_and_recorded(
     with instance.declared.read() as view:
         denials = view.list_auth_decisions(decision="deny", limit=10)
     assert any(d.transport == "mcp-http" for d in denials)
+
+
+@pytest.mark.parametrize(
+    "name,arguments",
+    [
+        ("llm_provider_list", {}),
+        (
+            "llm_provider_set",
+            {
+                "name": "x",
+                "base_url": "https://x",
+                "env_key": "X",
+                "secret_project": "p",
+                "secret_name": "s",
+                "reason": WHY,
+            },
+        ),
+        ("llm_provider_remove", {"name": "x", "reason": WHY}),
+    ],
+)
+def test_non_admin_mcp_cannot_call_any_llm_provider_tool(
+    authed: TestClient,
+    secrets: dict[str, str],
+    name: str,
+    arguments: dict[str, object],
+) -> None:
+    response = _rpc(
+        authed,
+        "tools/call",
+        secrets["write"],
+        name=name,
+        arguments=arguments,
+    )
+    assert response["result"]["isError"] is True
+    assert "forbidden" in response["result"]["content"][0]["text"]
 
 
 def test_local_only_tools_are_not_callable_over_http(
