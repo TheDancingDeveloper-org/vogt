@@ -29,6 +29,7 @@
 //! The file holds names and addresses, never a key.
 
 use std::path::Path;
+use std::sync::{Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
 
@@ -164,6 +165,33 @@ pub fn validate_against_manifest(
         ));
     }
     Ok(())
+}
+
+/// Names which are owned by the engine/runtime and may not be supplied by a
+/// provider registry entry.  In particular, allowing ENGINE_* here would let
+/// an operator-controlled registry replace the engine's own credentials.
+pub fn validate_provider_env_key(provider: &Provider) -> Result<(), String> {
+    validate(provider)?;
+    let key = provider.env_key.as_str();
+    if key == "PATH"
+        || key == "LD_PRELOAD"
+        || key.starts_with("ENGINE_")
+        || key.starts_with("VOGT_")
+    {
+        return Err(format!(
+            "provider {}: env_key {} is reserved by the engine",
+            provider.name, key
+        ));
+    }
+    Ok(())
+}
+
+/// Serialise registry read/modify/write operations.  The rename in `write`
+/// is atomic, but without this lock concurrent updates can still lose one
+/// another's changes.
+pub fn registry_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
 }
 
 /// Validate the complete registry before publishing it.
