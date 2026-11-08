@@ -17,19 +17,32 @@ use vogt_engine_contract::source::{
 };
 
 use crate::graft_mint::{GraftMinter, GraftToken, SessionGrant};
-use crate::source_provider::{CredentialHandle, LandRequest, SourceError, SourceProvider};
+use crate::source_provider::{
+    CredentialHandle, CredentialRequest, LandRequest, SourceError, SourceFuture, SourceProvider,
+};
 
 /// The graft provider's deployment settings. The `ENGINE_SOURCE_GRAFT_*` names
 /// are current; the older `ENGINE_POD_GRAFT_*` / `ENGINE_GRAFT_MINT_TOKEN_FILE`
 /// names are read as aliases for one release, translated here only.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GraftSettings {
     pub endpoint: Option<String>,
     pub token_file: Option<String>,
     pub mint_token_file: Option<String>,
+    /// The deployment's default repo and line, for a session whose project
+    /// names no source.
+    pub repo: String,
+    pub line: String,
 }
 
-const SETTINGS: [(&str, &str); 3] = [
+const DEFAULT_REPO: &str = "vogt";
+const DEFAULT_LINE: &str = "rust-2";
+
+/// Where minted session credentials are kept under the engine's state dir.
+/// The name predates the provider; adopted pods' credentials are found here.
+const CREDENTIAL_DIR: &str = "pod-graft-tokens";
+
+const SETTINGS: [(&str, &str); 5] = [
     ("ENGINE_SOURCE_GRAFT_ENDPOINT", "ENGINE_POD_GRAFT_ENDPOINT"),
     (
         "ENGINE_SOURCE_GRAFT_TOKEN_FILE",
@@ -39,6 +52,8 @@ const SETTINGS: [(&str, &str); 3] = [
         "ENGINE_SOURCE_GRAFT_MINT_TOKEN_FILE",
         "ENGINE_GRAFT_MINT_TOKEN_FILE",
     ),
+    ("ENGINE_SOURCE_GRAFT_REPO", "ENGINE_POD_GRAFT_REPO"),
+    ("ENGINE_SOURCE_GRAFT_LINE", "ENGINE_POD_GRAFT_LINE"),
 ];
 
 impl GraftSettings {
@@ -63,6 +78,26 @@ impl GraftSettings {
             endpoint: values.next().flatten(),
             token_file: values.next().flatten(),
             mint_token_file: values.next().flatten(),
+            repo: values
+                .next()
+                .flatten()
+                .unwrap_or_else(|| DEFAULT_REPO.into()),
+            line: values
+                .next()
+                .flatten()
+                .unwrap_or_else(|| DEFAULT_LINE.into()),
+        }
+    }
+}
+
+impl Default for GraftSettings {
+    fn default() -> Self {
+        Self {
+            endpoint: None,
+            token_file: None,
+            mint_token_file: None,
+            repo: DEFAULT_REPO.into(),
+            line: DEFAULT_LINE.into(),
         }
     }
 }
@@ -73,6 +108,7 @@ pub struct GraftProvider {
     /// Where minted credentials are kept (mode 0600, one file per session).
     credential_dir: PathBuf,
     minter: Option<Arc<dyn GraftMinter>>,
+    settings: GraftSettings,
 }
 
 impl GraftProvider {
@@ -81,7 +117,44 @@ impl GraftProvider {
             binary: PathBuf::from("graft"),
             credential_dir: credential_dir.into(),
             minter,
+            settings: GraftSettings::default(),
         }
+    }
+
+    /// The provider for a deployment: its settings, credentials kept under
+    /// `state_dir`, minting through the gRPC mint service when a mint token is
+    /// configured.
+    pub fn for_deployment(state_dir: &Path, settings: GraftSettings) -> Result<Self, SourceError> {
+        let minter = match settings.mint_token_file.as_deref() {
+            None => None,
+            Some(file) => {
+                let endpoint = settings.endpoint.as_deref().ok_or_else(|| {
+                    SourceError::InvalidSource(
+                        "ENGINE_SOURCE_GRAFT_MINT_TOKEN_FILE needs ENGINE_SOURCE_GRAFT_ENDPOINT"
+                            .into(),
+                    )
+                })?;
+                let m: Arc<dyn GraftMinter> =
+                    Arc::new(crate::graft_mint::GrpcGraftMinter::new(endpoint, file));
+                Some(m)
+            }
+        };
+        Ok(Self::new(state_dir.join(CREDENTIAL_DIR), minter).with_settings(settings))
+    }
+
+    /// The provider over `state_dir` with an explicit minter (tests mint
+    /// without a graft server).
+    pub fn with_minter(state_dir: &Path, minter: Arc<dyn GraftMinter>) -> Self {
+        Self::new(state_dir.join(CREDENTIAL_DIR), Some(minter))
+    }
+
+    pub fn with_settings(mut self, settings: GraftSettings) -> Self {
+        self.settings = settings;
+        self
+    }
+
+    fn credential_path(&self, session: Uuid) -> PathBuf {
+        self.credential_dir.join(session.to_string())
     }
 
     /// Use another `graft` binary (tests use a fake).
@@ -164,25 +237,84 @@ fn log_entries(v: &Value) -> Vec<SourceLogEntry> {
         .collect()
 }
 
-/// Run an async mint call to completion from sync code, inside or outside a
-/// tokio runtime.
-fn block_on<T: Send>(fut: impl std::future::Future<Output = T> + Send) -> Result<T, SourceError> {
-    std::thread::scope(|s| {
-        s.spawn(|| {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map(|rt| rt.block_on(fut))
-        })
-        .join()
-    })
-    .map_err(|_| SourceError::Unavailable("mint task panicked".into()))?
-    .map_err(|_| SourceError::Unavailable("no runtime for the mint call".into()))
-}
-
 impl SourceProvider for GraftProvider {
     fn kind(&self) -> SourceKind {
         SourceKind::Graft
+    }
+
+    fn validate(&self, source: &SourceDescriptor) -> Result<(), SourceError> {
+        let SourceLocation::Graft { endpoint, repo } = &source.location else {
+            return Err(SourceError::InvalidSource("not a graft location".into()));
+        };
+        if repo.trim().is_empty() || source.reference.trim().is_empty() {
+            return Err(SourceError::InvalidSource(
+                "project source names no graft repo or line".into(),
+            ));
+        }
+        if [repo, &source.reference]
+            .iter()
+            .any(|v| v.starts_with('-') || v.chars().any(char::is_whitespace))
+        {
+            return Err(SourceError::InvalidSource(
+                "project source repo or line is not a valid name".into(),
+            ));
+        }
+        // One deployment, one graft server: the engine's minter and the pod's
+        // GRAFT_ENDPOINT are the deployment's, so a source on another server
+        // would be checked out with a token that server never issued.
+        if !endpoint.is_empty()
+            && self
+                .settings
+                .endpoint
+                .as_deref()
+                .is_some_and(|e| e != endpoint)
+        {
+            return Err(SourceError::InvalidSource(format!(
+                "project source is on graft server {endpoint}, not this deployment's"
+            )));
+        }
+        Ok(())
+    }
+
+    fn default_source(&self) -> Option<SourceDescriptor> {
+        Some(SourceDescriptor {
+            location: SourceLocation::Graft {
+                endpoint: self.settings.endpoint.clone().unwrap_or_default(),
+                repo: self.settings.repo.clone(),
+            },
+            reference: self.settings.line.clone(),
+            landing: vogt_engine_contract::source::LandingMode::Line,
+        })
+    }
+
+    /// `GRAFT_ENDPOINT`: the source's server, else the deployment's.
+    fn pod_env(&self, source: &SourceDescriptor) -> Vec<(String, String)> {
+        let from_source = match &source.location {
+            SourceLocation::Graft { endpoint, .. } if !endpoint.is_empty() => {
+                Some(endpoint.clone())
+            }
+            _ => None,
+        };
+        from_source
+            .or_else(|| self.settings.endpoint.clone())
+            .map(|e| vec![("GRAFT_ENDPOINT".to_string(), e)])
+            .unwrap_or_default()
+    }
+
+    fn mints_credentials(&self) -> bool {
+        self.minter.is_some()
+    }
+
+    fn shared_credential(&self) -> Option<CredentialHandle> {
+        self.settings
+            .token_file
+            .as_ref()
+            .map(|p| CredentialHandle { path: p.into() })
+    }
+
+    fn held_credential(&self, session: Uuid) -> Option<CredentialHandle> {
+        let path = self.credential_path(session);
+        path.is_file().then_some(CredentialHandle { path })
     }
 
     fn checkout(
@@ -214,44 +346,68 @@ impl SourceProvider for GraftProvider {
         .map(|_| ())
     }
 
-    fn mint_credential(
-        &self,
-        source: &SourceDescriptor,
-        session: &str,
-    ) -> Result<CredentialHandle, SourceError> {
-        let (_, repo) = location(source)?;
-        let minter = self.minter.as_ref().ok_or(SourceError::Unsupported(
-            "graft credential minting without a mint token",
-        ))?;
-        let id = Uuid::parse_str(session)
-            .map_err(|_| SourceError::InvalidSource("session is not a uuid".into()))?;
-        let grant = SessionGrant::new(id, repo, &source.reference, None, None)
+    fn mint_credential<'a>(
+        &'a self,
+        source: &'a SourceDescriptor,
+        request: &'a CredentialRequest,
+    ) -> SourceFuture<'a, CredentialHandle> {
+        Box::pin(async move {
+            let SourceLocation::Graft { repo, .. } = &source.location else {
+                return Err(SourceError::InvalidSource("not a graft location".into()));
+            };
+            let minter = self.minter.as_ref().ok_or(SourceError::Unsupported(
+                "graft credential minting without a mint token",
+            ))?;
+            let id = request.session;
+            let grant = SessionGrant::new(
+                id,
+                repo,
+                &source.reference,
+                request.work_item.as_deref(),
+                request.budget.as_ref(),
+            )
             .map_err(|e| SourceError::InvalidSource(e.to_string()))?;
-        let token = block_on(minter.mint(&grant))?.map_err(|_| SourceError::Unauthorized)?;
-        let path = self.credential_dir.join(id.to_string());
-        write_private(&self.credential_dir, &path, token.expose())
-            .map_err(|_| SourceError::Unavailable("cannot keep the credential".into()))?;
-        Ok(CredentialHandle { path })
+            // The mint service's error names what failed (unreachable,
+            // refused); it never carries a token.
+            let token = minter
+                .mint(&grant)
+                .await
+                .map_err(|e| SourceError::Unavailable(e.to_string()))?;
+            tracing::info!(
+                session = %id,
+                scopes = grant.scopes().len(),
+                ttl_s = grant.ttl_s,
+                "minted the session's graft token"
+            );
+            let path = self.credential_path(id);
+            write_private(&self.credential_dir, &path, token.expose())
+                .map_err(|_| SourceError::Unavailable("cannot keep the credential".into()))?;
+            Ok(CredentialHandle { path })
+        })
     }
 
-    fn revoke_credential(&self, credential: &CredentialHandle) -> Result<(), SourceError> {
-        let id = credential
-            .path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .and_then(|n| Uuid::parse_str(n).ok())
-            .ok_or_else(|| SourceError::InvalidSource("not a graft credential".into()))?;
-        let token = std::fs::read_to_string(&credential.path)
-            .ok()
-            .map(|t| GraftToken::new(t.trim()));
-        // The file goes whether or not revocation succeeds; the TTL is the
-        // backstop, as at session stop today.
-        let _ = std::fs::remove_file(&credential.path);
-        match (&self.minter, token) {
-            (Some(m), Some(t)) => block_on(m.revoke(id, &t))?
-                .map_err(|_| SourceError::Unavailable("revoke failed".into())),
-            _ => Ok(()),
-        }
+    fn revoke_credential<'a>(&'a self, credential: &'a CredentialHandle) -> SourceFuture<'a, ()> {
+        Box::pin(async move {
+            let id = credential
+                .path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|n| Uuid::parse_str(n).ok())
+                .ok_or_else(|| SourceError::InvalidSource("not a graft credential".into()))?;
+            let token = std::fs::read_to_string(&credential.path)
+                .ok()
+                .map(|t| GraftToken::new(t.trim()));
+            // The file goes whether or not revocation succeeds; the TTL is the
+            // backstop, as at session stop today.
+            let _ = std::fs::remove_file(&credential.path);
+            match (&self.minter, token) {
+                (Some(m), Some(t)) => m
+                    .revoke(id, &t)
+                    .await
+                    .map_err(|e| SourceError::Unavailable(e.to_string())),
+                _ => Ok(()),
+            }
+        })
     }
 
     fn status(&self, checkout: &Path) -> Result<SourceStatus, SourceError> {
@@ -530,13 +686,16 @@ mod tests {
         assert!(lines[2].ends_with("land"));
     }
 
-    #[test]
-    fn mint_keeps_a_private_file_and_revoke_withdraws_it() {
+    #[tokio::test]
+    async fn mint_keeps_a_private_file_and_revoke_withdraws_it() {
         let tmp = tempfile::tempdir().unwrap();
         let minter = Arc::new(FakeMinter::default());
         let p = GraftProvider::new(tmp.path().join("creds"), Some(minter.clone()));
         let id = Uuid::new_v4();
-        let h = p.mint_credential(&source(), &id.to_string()).unwrap();
+        let h = p
+            .mint_credential(&source(), &CredentialRequest::for_session(id))
+            .await
+            .unwrap();
         assert_eq!(std::fs::read_to_string(&h.path).unwrap(), "minted");
         #[cfg(unix)]
         {
@@ -550,7 +709,7 @@ mod tests {
             .unwrap()
             .contains(&"repo:vogt:land:rust-2".to_string()));
 
-        p.revoke_credential(&h).unwrap();
+        p.revoke_credential(&h).await.unwrap();
         assert!(!h.path.exists());
         assert_eq!(
             *minter.revoked.lock().unwrap(),
@@ -563,15 +722,17 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let p = GraftProvider::new(tmp.path(), Some(Arc::new(FakeMinter::default())));
         assert!(p
-            .mint_credential(&source(), &Uuid::new_v4().to_string())
+            .mint_credential(&source(), &CredentialRequest::for_session(Uuid::new_v4()))
+            .await
             .is_ok());
     }
 
-    #[test]
-    fn mint_without_a_minter_is_unsupported() {
+    #[tokio::test]
+    async fn mint_without_a_minter_is_unsupported() {
         let p = GraftProvider::new("/x", None);
         assert!(matches!(
-            p.mint_credential(&source(), &Uuid::new_v4().to_string()),
+            p.mint_credential(&source(), &CredentialRequest::for_session(Uuid::new_v4()))
+                .await,
             Err(SourceError::Unsupported(_))
         ));
     }
@@ -594,5 +755,111 @@ mod tests {
         assert_eq!(s.endpoint.as_deref(), Some("http://old"));
         assert_eq!(s.mint_token_file.as_deref(), Some("/new/mint"));
         assert_eq!(s.token_file, None);
+    }
+
+    fn deployment(endpoint: Option<&str>) -> GraftProvider {
+        GraftProvider::new("/nonexistent", None).with_settings(GraftSettings {
+            endpoint: endpoint.map(str::to_owned),
+            token_file: Some("/run/shared-token".into()),
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn the_default_source_is_the_deployments_repo_and_line() {
+        let s = GraftSettings::from_lookup(|k| match k {
+            "ENGINE_POD_GRAFT_REPO" => Some("farmeggs".into()),
+            "ENGINE_SOURCE_GRAFT_LINE" => Some("backlog-1".into()),
+            _ => None,
+        });
+        let d = GraftProvider::new("/x", None)
+            .with_settings(s)
+            .default_source()
+            .unwrap();
+        assert_eq!(d.kind(), SourceKind::Graft);
+        assert_eq!(d.location.repo(), "farmeggs");
+        assert_eq!(d.reference, "backlog-1");
+        let d = GraftProvider::new("/x", None).default_source().unwrap();
+        assert_eq!(
+            (d.location.repo(), d.reference.as_str()),
+            ("vogt", "rust-2")
+        );
+    }
+
+    #[test]
+    fn validate_refuses_bad_names_other_servers_and_git_sources() {
+        let p = deployment(Some("http://graft-dev:17888"));
+        let named = |repo: &str, line: &str, endpoint: &str| SourceDescriptor {
+            location: SourceLocation::Graft {
+                endpoint: endpoint.into(),
+                repo: repo.into(),
+            },
+            reference: line.into(),
+            landing: LandingMode::Line,
+        };
+        assert!(p.validate(&named("farmeggs", "backlog-1", "")).is_ok());
+        assert!(p
+            .validate(&named("r", "l", "http://graft-dev:17888"))
+            .is_ok());
+        for bad in [
+            named("", "l", ""),
+            named("r", "", ""),
+            named("-r", "l", ""),
+            named("r", "a b", ""),
+            named("r", "l", "http://other:1"),
+        ] {
+            assert!(p.validate(&bad).is_err(), "{bad:?}");
+        }
+        let git = SourceDescriptor {
+            location: SourceLocation::Git {
+                url: "https://example.test/o/r.git".into(),
+                repo: "r".into(),
+            },
+            reference: "main".into(),
+            landing: LandingMode::PushBranch,
+        };
+        assert!(p.validate(&git).is_err());
+    }
+
+    #[test]
+    fn pod_env_passes_the_endpoint_only_when_known() {
+        let mut s = source();
+        let env = |p: &GraftProvider, s: &SourceDescriptor| p.pod_env(s);
+        assert_eq!(
+            env(&deployment(None), &s),
+            vec![("GRAFT_ENDPOINT".into(), "http://graft.test:17888".into())]
+        );
+        s.location = SourceLocation::Graft {
+            endpoint: String::new(),
+            repo: "vogt".into(),
+        };
+        assert!(env(&deployment(None), &s).is_empty());
+        assert_eq!(
+            env(&deployment(Some("http://dep:1")), &s),
+            vec![("GRAFT_ENDPOINT".into(), "http://dep:1".into())]
+        );
+    }
+
+    #[tokio::test]
+    async fn shared_and_held_credentials_come_from_settings_and_the_kept_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = deployment(None);
+        assert!(!p.mints_credentials());
+        assert_eq!(
+            p.shared_credential().unwrap().path,
+            PathBuf::from("/run/shared-token")
+        );
+        let p = GraftProvider::with_minter(tmp.path(), Arc::new(FakeMinter::default()));
+        assert!(p.mints_credentials());
+        let id = Uuid::new_v4();
+        assert!(p.held_credential(id).is_none());
+        let h = p
+            .mint_credential(&source(), &CredentialRequest::for_session(id))
+            .await
+            .unwrap();
+        assert!(h.path.starts_with(tmp.path().join(CREDENTIAL_DIR)));
+        assert_eq!(p.held_credential(id), Some(h.clone()));
+        p.revoke_credential(&h).await.unwrap();
+        assert!(p.held_credential(id).is_none());
     }
 }

@@ -204,6 +204,28 @@ semantics:
 This item must not edit `pod_backend.rs` or `sessions.rs`; those are consumers
 of the seam in the implementation items that follow.
 
+## Engine session lifecycle (slice 4)
+
+Pod session start reaches the provider only through `SourceRegistry`:
+
+- `SourceRegistry::for_deployment` is the one place the built-in providers
+  are named and their settings read; sessions cache it.
+- `session_source` takes the project's descriptor, or the registry's
+  `default_source()`, and the provider's `validate` refuses what it cannot
+  serve before anything is created.
+- The pod spec and bootstrap env carry the provider's `pod_env(source)`.
+- When `mints_credentials()` is true the credential is minted at pod create
+  and kept by the provider as a 0600 file; the bootstrap response returns it
+  as `source_token` (the entrypoint still reads `graft_token` from an engine
+  one release older). Without minting, the provider's `shared_credential()`
+  is the fallback, never both.
+- Stop revokes the minted handle, or `held_credential(session)` for a pod an
+  engine restart adopted.
+
+The graft settings are `ENGINE_SOURCE_GRAFT_{ENDPOINT,TOKEN_FILE,
+MINT_TOKEN_FILE,REPO,LINE}`; `ENGINE_POD_GRAFT_*` and
+`ENGINE_GRAFT_MINT_TOKEN_FILE` are read as aliases for one release.
+
 ## Dependents
 
 - **WI-3369:** use the session project's descriptor for checkout, grant scope,

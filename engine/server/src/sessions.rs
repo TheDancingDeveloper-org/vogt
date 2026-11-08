@@ -119,9 +119,9 @@ pub struct SessionRegistry {
     /// Creates and removes pods for pod-backed templates. Unset until the
     /// first pod session (or a test) needs it.
     pod_launcher: parking_lot::Mutex<Option<Arc<dyn crate::pod_backend::PodLauncher>>>,
-    /// Mints each pod session's graft token. Built from
-    /// `ENGINE_GRAFT_MINT_TOKEN_FILE` on first use; tests install a fake.
-    graft_minter: parking_lot::Mutex<Option<Arc<dyn crate::graft_mint::GraftMinter>>>,
+    /// The source providers pod sessions are served from. Built from the
+    /// deployment's settings on first use; tests install providers.
+    source_registry: parking_lot::Mutex<Option<crate::source_provider::SourceRegistry>>,
     /// Stream halves rebuilt for pods an engine restart is adopting, taken by
     /// `spawn_pod_session` when the session over them is built.
     adopting: parking_lot::Mutex<std::collections::HashMap<Uuid, AdoptedPod>>,
@@ -220,7 +220,7 @@ impl SessionRegistry {
             minted: Arc::new(DashMap::new()),
             account_leases,
             pod_launcher: parking_lot::Mutex::new(None),
-            graft_minter: parking_lot::Mutex::new(None),
+            source_registry: parking_lot::Mutex::new(None),
             adopting: parking_lot::Mutex::new(std::collections::HashMap::new()),
         }
     }
@@ -230,47 +230,35 @@ impl SessionRegistry {
         *self.pod_launcher.lock() = Some(launcher);
     }
 
-    /// Replace the graft minter (tests mint without a graft server).
-    pub fn set_graft_minter(&self, minter: Arc<dyn crate::graft_mint::GraftMinter>) {
-        *self.graft_minter.lock() = Some(minter);
-    }
-
-    /// The minter for pod sessions: an installed one, else a gRPC client when
-    /// `ENGINE_GRAFT_MINT_TOKEN_FILE` is set, else `None` (the pod then gets
-    /// the shared `ENGINE_POD_GRAFT_TOKEN_FILE` token, if any).
-    fn graft_minter(
+    /// Install a source provider over the deployment's (tests mint without
+    /// a provider server).
+    pub fn install_source_provider(
         &self,
-        cfg: &crate::pod_backend::PodConfig,
-    ) -> Result<Option<Arc<dyn crate::graft_mint::GraftMinter>>> {
-        let mut slot = self.graft_minter.lock();
-        if let Some(minter) = slot.as_ref() {
-            return Ok(Some(Arc::clone(minter)));
-        }
-        let Some(file) = cfg.graft_mint_token_file.as_deref() else {
-            return Ok(None);
+        provider: Arc<dyn crate::source_provider::SourceProvider>,
+    ) {
+        let mut registry = match self.source_registry() {
+            Ok(r) => r,
+            Err(_) => crate::source_provider::SourceRegistry::with_defaults(),
         };
-        let endpoint = cfg.graft_endpoint.as_deref().ok_or_else(|| {
-            ApiError::Config("ENGINE_GRAFT_MINT_TOKEN_FILE needs ENGINE_POD_GRAFT_ENDPOINT".into())
-        })?;
-        let minter: Arc<dyn crate::graft_mint::GraftMinter> =
-            Arc::new(crate::graft_mint::GrpcGraftMinter::new(endpoint, file));
-        *slot = Some(Arc::clone(&minter));
-        Ok(Some(minter))
+        registry.register(provider);
+        *self.source_registry.lock() = Some(registry);
     }
 
-    /// The source providers this engine can serve pod sessions from: the
-    /// default git provider and graft, minting through `minter` when the
-    /// deployment holds a mint token.
-    fn source_registry(
-        &self,
-        minter: Option<Arc<dyn crate::graft_mint::GraftMinter>>,
-    ) -> crate::source_provider::SourceRegistry {
-        let mut registry = crate::source_provider::SourceRegistry::with_defaults();
-        registry.register(Arc::new(crate::graft_provider::GraftProvider::new(
-            graft_token_dir(&self.cfg.state_dir),
-            minter,
-        )));
-        registry
+    /// Where providers keep per-session state, such as minted credentials.
+    pub fn state_dir(&self) -> &std::path::Path {
+        &self.cfg.state_dir
+    }
+
+    /// The source providers this engine serves pod sessions from.
+    pub fn source_registry(&self) -> Result<crate::source_provider::SourceRegistry> {
+        let mut slot = self.source_registry.lock();
+        if let Some(r) = slot.as_ref() {
+            return Ok(r.clone());
+        }
+        let r = crate::source_provider::SourceRegistry::for_deployment(&self.cfg.state_dir)
+            .map_err(|e| ApiError::Config(e.to_string()))?;
+        *slot = Some(r.clone());
+        Ok(r)
     }
 
     /// Start the loop that settles the cluster's session pods against this
@@ -339,15 +327,14 @@ impl SessionRegistry {
         let auth = crate::agent_stream::global();
         let pod_config = self.pod_config()?;
         let launcher = self.pod_launcher()?;
-        let minter = self.graft_minter(&pod_config)?;
+        let registry = self.source_registry()?;
         // The project decides what the pod checks out (WI-3369); the
-        // deployment's repo and line are only the default.
-        let source = crate::pod_backend::session_source(
-            &pod_config,
-            spec.source.as_ref(),
-            &self.source_registry(minter.clone()),
-        )
-        .map_err(ApiError::BadRequest)?;
+        // deployment's default source is only the fallback.
+        let source = crate::pod_backend::session_source(spec.source.as_ref(), &registry)
+            .map_err(ApiError::BadRequest)?;
+        let provider = registry
+            .for_source(&source)
+            .map_err(|e| ApiError::BadRequest(e.to_string()))?;
         let (link, reader, adopted_uid, adopting) = match self.adopting.lock().remove(&id) {
             Some((link, reader, uid)) => (link, reader, uid, true),
             None => {
@@ -401,59 +388,44 @@ impl SessionRegistry {
                 template,
                 id,
                 &source,
+                &provider.pod_env(&source),
                 "session",
                 spec.account.as_deref(),
                 spec.command.as_deref().unwrap_or_default(),
             )
         });
-        let grant = pod
-            .is_some()
-            .then(|| {
-                crate::graft_mint::SessionGrant::new(
-                    id,
-                    source.location.repo(),
-                    &source.reference,
-                    spec.work_item.as_deref(),
-                    spec.budget.as_ref(),
-                )
-            })
-            .transpose();
-        let fallback_token_file = pod_config.graft_token_file.is_some();
+        let request = crate::source_provider::CredentialRequest {
+            session: id,
+            work_item: spec.work_item.clone(),
+            budget: spec.budget.clone(),
+        };
         tokio::spawn(async move {
             let auth = crate::agent_stream::global();
-            let mut revocable: Option<crate::graft_mint::GraftToken> = None;
+            let mut minted: Option<crate::source_provider::CredentialHandle> = None;
             // The uid of the pod this task owns: every delete names it, so a
             // late teardown cannot remove a later incarnation's pod.
             let mut pod_uid = adopted_uid;
             if let Some(pod) = pod {
                 auth.issue(id, &token).await;
                 auth.issue_source(id, source.clone()).await;
-                // The pod's own graft token, minted before the pod exists so a
-                // failure leaves nothing to clean up but the bootstrap token.
+                // The pod's own source credential, minted before the pod
+                // exists so a failure leaves nothing to clean up but the
+                // bootstrap token. The provider keeps it so the pod's teardown
+                // can revoke it, even after an engine restart adopted the pod.
                 let created = async {
-                    match (&minter, grant?) {
-                        (Some(minter), Some(grant)) => {
-                            let minted = minter.mint(&grant).await?;
-                            // Kept so the pod's teardown can revoke it, even
-                            // after an engine restart adopted the pod.
-                            if let Err(e) = keep_graft_token(&state_dir, id, &minted) {
-                                tracing::warn!(session = %id, error = %e, "could not keep the session's graft token; it will not be revoked at stop, only expire");
-                            }
-                            auth.stash_graft_token(id, minted.clone()).await;
-                            revocable = Some(minted);
-                            tracing::info!(
-                                session = %id,
-                                scopes = grant.scopes().len(),
-                                ttl_s = grant.ttl_s,
-                                "minted the session's graft token"
-                            );
-                        }
-                        _ if fallback_token_file => tracing::warn!(
+                    if provider.mints_credentials() {
+                        let handle = provider
+                            .mint_credential(&source, &request)
+                            .await
+                            .map_err(|e| ApiError::Internal(format!("source credential: {e}")))?;
+                        auth.stash_source_credential(id, handle.clone()).await;
+                        minted = Some(handle);
+                    } else if provider.shared_credential().is_some() {
+                        tracing::warn!(
                             session = %id,
-                            "no ENGINE_GRAFT_MINT_TOKEN_FILE: this pod gets the shared \
-                             ENGINE_POD_GRAFT_TOKEN_FILE graft token instead of one of its own"
-                        ),
-                        _ => {}
+                            "the source provider mints no per-session credential: \
+                             this pod gets the deployment's shared one"
+                        );
                     }
                     launcher.create(id, &token, pod).await
                 }
@@ -485,19 +457,19 @@ impl SessionRegistry {
             auth.forget_pod_if(id, &link);
             link.mark_torn_down();
             // Revoke-on-stop (WI-3235). After the teardown is marked, so a slow
-            // or failing graft never holds up a stop; the TTL is the backstop.
-            // A pod an engine restart adopted has its token in the state dir.
-            let held = revocable.or_else(|| read_graft_token(&state_dir, id));
-            remove_graft_token(&state_dir, id);
-            if let (Some(minter), Some(held)) = (&minter, held) {
-                match minter.revoke(id, &held).await {
+            // or failing provider never holds up a stop; the TTL is the
+            // backstop. A pod an engine restart adopted has its credential
+            // kept by the provider.
+            let held = minted.or_else(|| provider.held_credential(id));
+            if let Some(held) = held {
+                match provider.revoke_credential(&held).await {
                     Ok(()) => tracing::info!(
                         target: "vogt::audit", session_id = %id,
-                        "revoked the session's graft token"
+                        "revoked the session's source credential"
                     ),
                     Err(e) => tracing::warn!(
                         target: "vogt::audit", session_id = %id, error = %e,
-                        "could not revoke the session's graft token; it expires on its own"
+                        "could not revoke the session's source credential; it expires on its own"
                     ),
                 }
             }
@@ -3442,47 +3414,6 @@ fn pod_token_dir(state_dir: &std::path::Path) -> std::path::PathBuf {
     state_dir.join("pod-tokens")
 }
 
-/// A session's minted graft token, kept (mode 0600, beside the pod stream
-/// tokens, never in the hibernation record) from mint until its pod is torn
-/// down, so the revoke survives an engine restart.
-fn graft_token_dir(state_dir: &std::path::Path) -> std::path::PathBuf {
-    state_dir.join("pod-graft-tokens")
-}
-
-fn keep_graft_token(
-    state_dir: &std::path::Path,
-    id: Uuid,
-    token: &crate::graft_mint::GraftToken,
-) -> std::io::Result<()> {
-    use std::io::Write;
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-    let dir = graft_token_dir(state_dir);
-    std::fs::create_dir_all(&dir)?;
-    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(dir.join(id.to_string()))?;
-    file.write_all(token.expose().as_bytes())
-}
-
-fn read_graft_token(
-    state_dir: &std::path::Path,
-    id: Uuid,
-) -> Option<crate::graft_mint::GraftToken> {
-    std::fs::read_to_string(graft_token_dir(state_dir).join(id.to_string()))
-        .ok()
-        .map(|t| t.trim().to_string())
-        .filter(|t| !t.is_empty())
-        .map(crate::graft_mint::GraftToken::new)
-}
-
-fn remove_graft_token(state_dir: &std::path::Path, id: Uuid) {
-    let _ = std::fs::remove_file(graft_token_dir(state_dir).join(id.to_string()));
-}
-
 fn read_pod_token(state_dir: &std::path::Path, id: Uuid) -> Option<String> {
     std::fs::read_to_string(pod_token_dir(state_dir).join(id.to_string()))
         .ok()
@@ -3601,39 +3532,6 @@ fn wake_settings_file<'a>(
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn a_kept_graft_token_is_private_readable_and_removable() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().unwrap();
-        let id = uuid::Uuid::new_v4();
-        assert!(super::read_graft_token(dir.path(), id).is_none());
-        super::keep_graft_token(
-            dir.path(),
-            id,
-            &crate::graft_mint::GraftToken::new("kept-token"),
-        )
-        .unwrap();
-        let file = super::graft_token_dir(dir.path()).join(id.to_string());
-        assert_eq!(
-            std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
-        assert_eq!(
-            std::fs::metadata(super::graft_token_dir(dir.path()))
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
-            0o700
-        );
-        assert_eq!(
-            super::read_graft_token(dir.path(), id).unwrap().expose(),
-            "kept-token"
-        );
-        super::remove_graft_token(dir.path(), id);
-        assert!(super::read_graft_token(dir.path(), id).is_none());
-    }
-
     use super::normalize_session_name;
 
     #[test]
