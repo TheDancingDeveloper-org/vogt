@@ -3,18 +3,17 @@
 # command an agent is about to run breaks the project's policy (WI-1243).
 #
 #   vogt-policy-hook                 # the hook: read the payload on stdin
-#   vogt-policy-hook install-policy [settings.json] [config.toml]
+#   vogt-policy-hook install-policy [settings.json]
 #                                    # add the hook to Claude Code's user
-#                                    # settings and to Klaudia's config, once
-#                                    # (the entrypoint runs it)
+#                                    # settings, once (the entrypoint runs it)
 #
 # The hook only ever looks at commands that contain a `git` or `gh` word. A
 # command without one is allowed without a request, so a policy check can
 # never slow an ordinary tool call. With no broker credential to ask with it
 # also allows, because there is no session policy to enforce.
 #
-# A denial prints the engine's reason on stderr and exits 2, which both Claude
-# Code and Klaudia treat as "do not run the tool". The engine being
+# A denial prints the engine's reason on stderr and exits 2, which Claude Code
+# treats as "do not run the tool". The engine being
 # unreachable, answering anything but 2xx, or answering a body whose decision
 # is not exactly "allow" fails closed for those git and gh commands: a check
 # that cannot be read is a refusal, not a pass.
@@ -27,18 +26,16 @@ set -u
 
 event="${1:-check}"
 
-# Add the hook to Claude Code's user settings and to Klaudia's config, keeping
-# everything else in both files and adding nothing twice. A settings file that
-# is not a JSON object is left exactly as it was; Klaudia's block is marked, so
-# a second run replaces it rather than appending another.
+# Add the hook to Claude Code's user settings, keeping everything else in the
+# file and adding nothing twice. A settings file that is not a JSON object is
+# left exactly as it was.
 if [[ "$event" == "install-policy" ]]; then
     settings="${2:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json}"
-    klaudia="${3:-$HOME/.klaudia/config.toml}"
     self="$(readlink -f "$0")"
-    exec python3 - "$settings" "$klaudia" "$self" <<'PY'
+    exec python3 - "$settings" "$self" <<'PY'
 import json, os, sys, tempfile
 
-settings_path, klaudia_path, hook = sys.argv[1:]
+settings_path, hook = sys.argv[1:]
 
 try:
     with open(settings_path, encoding="utf-8") as fh:
@@ -72,39 +69,6 @@ if isinstance(settings, dict) and isinstance(settings.get("hooks", {}), dict):
         if os.path.exists(settings_path):
             os.chmod(tmp, os.stat(settings_path).st_mode & 0o777)
         os.replace(tmp, settings_path)
-
-begin, end = "# vogt-policy-hook (managed)", "# end vogt-policy-hook"
-block = "\n".join([
-    begin,
-    "[[hooks]]",
-    'event = "PreToolUse"',
-    'matcher = "Bash"',
-    f'command = "{hook}"',
-    'timeout = "10s"',
-    end,
-    "",
-])
-try:
-    with open(klaudia_path, encoding="utf-8") as fh:
-        text = fh.read()
-except FileNotFoundError:
-    text = ""
-start = text.find(begin)
-finish = text.find(end)
-if start != -1 and finish != -1 and finish > start:
-    finish = text.find("\n", finish + len(end))
-    text = text[:start] + text[finish + 1 if finish != -1 else len(text):]
-if text and not text.endswith("\n"):
-    text += "\n"
-text += block
-directory = os.path.dirname(os.path.abspath(klaudia_path))
-os.makedirs(directory, exist_ok=True)
-fd, tmp = tempfile.mkstemp(dir=directory, prefix=".config.toml.")
-with os.fdopen(fd, "w", encoding="utf-8") as fh:
-    fh.write(text)
-if os.path.exists(klaudia_path):
-    os.chmod(tmp, os.stat(klaudia_path).st_mode & 0o777)
-os.replace(tmp, klaudia_path)
 PY
 fi
 

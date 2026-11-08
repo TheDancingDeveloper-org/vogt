@@ -169,10 +169,10 @@ fi
 
 # The project's agent policy, refused at the tool call rather than only written
 # into the brief (WI-1243). Installed as a PreToolUse hook for Bash into Claude
-# Code's settings and into Klaudia's config, so a `git` or `gh` the agent is
-# about to run is checked against the session's policy. Best effort; opt out
-# with ENGINE_AGENT_POLICY_HOOK=0. opencode and codex have no such hook, so for
-# them the policy stays guidance in the brief.
+# Code's settings, so a `git` or `gh` the agent is about to run is checked
+# against the session's policy. Best effort; opt out with
+# ENGINE_AGENT_POLICY_HOOK=0. opencode and codex have no such hook, so for them
+# the policy stays guidance in the brief.
 if [[ "${ENGINE_AGENT_POLICY_HOOK:-1}" != "0" ]] \
         && [[ -x /usr/local/bin/vogt-policy-hook ]] \
         && command -v python3 >/dev/null 2>&1; then
