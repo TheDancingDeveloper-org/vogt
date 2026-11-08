@@ -93,6 +93,7 @@ ARG RUST_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-base/rust:1-bookworm
 # lives in the workflow rather than in this line, unlike the mirrored bases
 # above whose digests Renovate maintains here.
 ARG POD_BASE_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-pod-base:lean
+ARG ESTATE_IMAGE=${POD_BASE_IMAGE}
 ARG VOGT_SOURCE_REF=local
 ARG VOGT_SOURCE_SHA=0000000000000000000000000000000000000000
 ARG VOGT_PRODUCT_VERSION=local/dev
@@ -276,7 +277,7 @@ COPY --from=codex-gitguard-e2e-build /codex_gitguard_e2e /codex_gitguard_e2e
 #
 # The pod base hands this stage over as `root`, on purpose: this stage installs
 # into /usr/local before dropping to `sprooty` at the very end.
-FROM ${POD_BASE_IMAGE}
+FROM ${ESTATE_IMAGE}
 
 LABEL org.opencontainers.image.title="vogt-stack" \
       org.opencontainers.image.description="Vogt: core, session engine, PWA and agent CLIs in one container" \
