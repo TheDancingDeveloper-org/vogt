@@ -3,6 +3,8 @@
 # command an agent is about to run breaks the project's policy (WI-1243).
 #
 #   vogt-policy-hook                 # the hook: read the payload on stdin
+#   vogt-policy-hook codex           # the same check for a Codex managed hook:
+#                                    # translate Codex's tool_input, then ask
 #   vogt-policy-hook install-policy [settings.json]
 #                                    # add the hook to Claude Code's user
 #                                    # settings, once (the entrypoint runs it)
@@ -72,10 +74,64 @@ if isinstance(settings, dict) and isinstance(settings.get("hooks", {}), dict):
 PY
 fi
 
-input="$(head -c 65536)"
+limit=65536
+[[ "$event" == "codex" ]] && limit=1048576
+input="$(head -c "$limit")"
+raw="$input"
 
-# No git and no gh means nothing the policy can refuse, so do not ask.
-printf '%s' "$input" | grep -Eq '(^|[^[:alnum:]_])(git|gh)([^[:alnum:]_]|$)' || exit 0
+# Codex's managed hook sends Codex's tool_input shape, which is not the
+# engine's `{"tool_name": "Bash", "tool_input": {"command": "..."}}`. Translate
+# it here so both agents reach the same policy check. A payload this cannot
+# read is a refusal, not a pass: a check that cannot be asked must fail closed,
+# and it must fail closed before the git/gh shortcut can skip the translation.
+if [[ "$event" == "codex" ]]; then
+    input="$(printf '%s' "$input" | python3 -c 'import json, os, sys
+
+def die():
+    sys.exit(2)
+
+try:
+    payload = json.load(sys.stdin)
+except Exception:
+    die()
+if not isinstance(payload, dict):
+    die()
+tool = payload.get("tool_name") or ""
+if not isinstance(tool, str):
+    die()
+if tool not in ("Bash", "shell", "exec_command", "write_stdin"):
+    json.dump({"tool_name": tool}, sys.stdout)
+    sys.exit(0)
+ti = payload.get("tool_input")
+if ti is None:
+    ti = {}
+if not isinstance(ti, dict):
+    die()
+cmd = ti.get("command")
+if cmd is None:
+    cmd = ti.get("cmd")
+if cmd is None:
+    cmd = ti.get("input", "")
+if isinstance(cmd, list):
+    cmd = "\n".join(str(part) for part in cmd)
+if not isinstance(cmd, str):
+    die()
+cwd = ti.get("workdir") or payload.get("cwd") or ""
+if not isinstance(cwd, str):
+    cwd = ""
+base = payload.get("cwd") or ""
+if cwd and not os.path.isabs(cwd) and isinstance(base, str) and os.path.isabs(base):
+    cwd = os.path.join(base, cwd)
+json.dump({"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": cwd}, sys.stdout)')" || {
+        echo "vogt policy check unavailable; refusing git/gh write" >&2
+        exit 2
+    }
+fi
+
+# No git and no gh means nothing the policy can refuse, so do not ask. This
+# reads the raw payload, not the translation: a Codex command may be a JSON
+# array, and the translated string escapes the newlines that separate words.
+printf '%s' "$raw" | grep -Eq '(^|[^[:alnum:]_])(git|gh)([^[:alnum:]_]|$)' || exit 0
 
 url="${VOGT_ENGINE_BROKER_URL:-}"
 token="${VOGT_ENGINE_BROKER_TOKEN:-}"

@@ -24,7 +24,9 @@
 use std::path::{Path, PathBuf};
 
 pub use vogt_session_agent::codex_policy::check_codex_policy;
-use vogt_session_agent::codex_policy::{guarded, readable_policy};
+use vogt_session_agent::codex_policy::{guarded, readable_policy, CODEX_POLICY_HOOK_BIN};
+#[cfg(test)]
+use vogt_session_agent::codex_policy::{protected_hook_binary, CODEX_POLICY_HOOK};
 
 const KEYS: &[&str] = &[
     "hasTrustDialogAccepted",
@@ -214,17 +216,19 @@ pub fn codex_policy_from(value: Option<&str>) -> Result<Option<PathBuf>, String>
         value,
         Path::new(IMAGE_CODEX_POLICY),
         Path::new(CODEX_REQUIREMENTS_FILE),
+        true,
     )
 }
 
-/// [`codex_policy_from`] with the image and system paths given, so tests need
-/// neither root nor `/etc`.
+/// [`codex_policy_from`] with the image and system paths given, and the
+/// ownership check optional, so tests need neither root nor `/etc`.
 fn codex_policy_at(
     value: Option<&str>,
     image: &Path,
     system: &Path,
+    root_owned: bool,
 ) -> Result<Option<PathBuf>, String> {
-    let loaded = || guarded(system);
+    let loaded = || guarded(system, Path::new(CODEX_POLICY_HOOK_BIN), root_owned);
     match value.map(str::trim) {
         Some("off") => Ok(None),
         Some(path) if !path.is_empty() => {
@@ -233,7 +237,7 @@ fn codex_policy_at(
         }
         _ if system.exists() => loaded(),
         _ if image.exists() => Err(format!(
-            "{} is installed but {} is not, and Codex reads only the latter; refusing to start a Codex session without a valid managed policy",
+            "{} is installed but {} is not, and Codex reads only the latter; refusing to start a Codex session without the managed policy hook",
             image.display(),
             system.display()
         )),
@@ -1425,7 +1429,8 @@ mod driven_policy_tests {
     const SHIPPED_CODEX_POLICY: &str =
         include_str!("../../deploy/driven-session-codex-requirements.toml");
 
-    /// The resolver against a given system file and no image copy.
+    /// The resolver against a given system file, ownership unchecked, and no
+    /// image copy.
     fn policy_at(
         value: Option<&str>,
         system: &std::path::Path,
@@ -1434,6 +1439,7 @@ mod driven_policy_tests {
             value,
             std::path::Path::new("/nonexistent/image-requirements.toml"),
             system,
+            false,
         )
     }
 
@@ -1475,18 +1481,149 @@ mod driven_policy_tests {
         assert!(err.contains("cannot be read"), "{err}");
 
         // The image copy installed, the system file not: refused, not "off".
-        let err = super::codex_policy_at(None, &named, &missing).unwrap_err();
+        let err = super::codex_policy_at(None, &named, &missing, false).unwrap_err();
         assert!(err.contains("Codex reads only"), "{err}");
 
         // Unset with a system file that is not TOML: refused, even though
         // the image copy beside it is good.
         let (sys_dir, stale) = policy_file(b"not = [toml\n");
-        let err = super::codex_policy_at(None, &named, &stale).unwrap_err();
+        let err = super::codex_policy_at(None, &named, &stale, false).unwrap_err();
         assert!(err.contains("is invalid"), "{err}");
         let err = policy_at(Some(named.to_str().unwrap()), &stale).unwrap_err();
         assert!(err.contains("is invalid"), "{err}");
         std::fs::remove_dir_all(dir).ok();
         std::fs::remove_dir_all(sys_dir).ok();
+    }
+
+    /// A requirements file the session user could rewrite could drop the
+    /// managed hook. The resolver checks the file and its directory.
+    #[test]
+    fn a_codex_policy_the_session_can_rewrite_is_refused() {
+        let (dir, system) = policy_file(SHIPPED_CODEX_POLICY.as_bytes());
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("skipping: running as root, every temp file is root-owned");
+            std::fs::remove_dir_all(dir).ok();
+            return;
+        }
+        let err = super::codex_policy_at(None, std::path::Path::new("/nonexistent"), &system, true)
+            .unwrap_err();
+        assert!(err.contains("must be root-owned"), "{err}");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// The hook program must be a root-owned regular file: one the session
+    /// user owns (as every file a test can make is), a symlink, or a missing
+    /// path is refused (WI-1146).
+    #[test]
+    fn a_policy_hook_program_the_session_can_replace_is_refused() {
+        let dir = std::env::temp_dir().join(format!(
+            "vogt-policy-hook-bin-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let err = super::protected_hook_binary(&dir.join("missing")).unwrap_err();
+        assert!(err.contains("cannot be inspected"), "{err}");
+        let link = dir.join("hook-link");
+        std::os::unix::fs::symlink("/bin/sh", &link).unwrap();
+        let err = super::protected_hook_binary(&link).unwrap_err();
+        assert!(err.contains("a symlink"), "{err}");
+        if unsafe { libc::geteuid() } != 0 {
+            let own = dir.join("own-hook");
+            std::fs::write(&own, "#!/bin/sh\nexit 0\n").unwrap();
+            let err = super::protected_hook_binary(&own).unwrap_err();
+            assert!(err.contains("must be a root-owned regular file"), "{err}");
+        }
+        // A root-owned regular file in a root-owned directory passes.
+        if std::path::Path::new("/bin/sh").exists() {
+            let sh = std::fs::canonicalize("/bin/sh").unwrap();
+            super::protected_hook_binary(&sh).unwrap();
+        }
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn the_shipped_codex_policy_runs_the_root_owned_policy_hook() {
+        assert_eq!(
+            SHIPPED_CODEX_POLICY
+                .matches(&format!("command = \"{}\"", super::CODEX_POLICY_HOOK))
+                .count(),
+            2
+        );
+        assert!(super::CODEX_POLICY_HOOK.starts_with(&format!("{} ", super::CODEX_POLICY_HOOK_BIN)));
+    }
+
+    #[test]
+    fn the_shipped_codex_policy_wires_the_managed_policy_hook() {
+        super::check_codex_policy(SHIPPED_CODEX_POLICY).unwrap();
+    }
+
+    #[test]
+    fn a_codex_policy_without_a_fail_closed_hook_is_refused() {
+        // A comments-only file: Codex would run unguarded.
+        let (sys_dir, system) = policy_file(SHIPPED_CODEX_POLICY.as_bytes());
+        let (dir, path) = policy_file(b"# requirements\n");
+        let err = policy_at(Some(path.to_str().unwrap()), &system).unwrap_err();
+        assert!(
+            err.contains("does not wire the managed policy hook"),
+            "{err}"
+        );
+        std::fs::remove_dir_all(dir).ok();
+        std::fs::remove_dir_all(sys_dir).ok();
+
+        let check = super::check_codex_policy;
+        let without = |from: &str, to: &str| {
+            assert!(SHIPPED_CODEX_POLICY.contains(from), "{from}");
+            SHIPPED_CODEX_POLICY.replacen(from, to, 1)
+        };
+        // failClosed missing or false on either event.
+        assert!(check(&without("\nfailClosed = true", "\nfailClosed = false")).is_err());
+        assert!(check(&SHIPPED_CODEX_POLICY.replace("failClosed = true\n", "")).is_err());
+        // No SessionStart group: the managed hook layer is incomplete.
+        assert!(check(&without("[[hooks.SessionStart]]", "[[hooks.Stop]]")).is_err());
+        // A matcher that misses apply_patch, or one that is not a regex.
+        assert!(check(&SHIPPED_CODEX_POLICY.replace(
+            "^(Bash|shell|exec_command|write_stdin|apply_patch)$",
+            "^Bash$"
+        ))
+        .is_err());
+        assert!(check(&SHIPPED_CODEX_POLICY.replace(
+            "^(Bash|shell|exec_command|write_stdin|apply_patch)$",
+            "(Bash"
+        ))
+        .is_err());
+        // Another command.
+        assert!(check(&SHIPPED_CODEX_POLICY.replace(super::CODEX_POLICY_HOOK, "true")).is_err());
+        // The hook by bare name, or from a session-writable path (WI-1146):
+        // PATH lookup would let a session shadow it with a stub.
+        for shadowable in [
+            "vogt-policy-hook codex",
+            "/opt/vogt/agent-clis/bin/vogt-policy-hook codex",
+            "env vogt-policy-hook codex",
+        ] {
+            let err = check(&SHIPPED_CODEX_POLICY.replace(super::CODEX_POLICY_HOOK, shadowable))
+                .unwrap_err();
+            assert!(err.contains(super::CODEX_POLICY_HOOK), "{err}");
+        }
+        assert!(check("not = [toml").is_err());
+        // The hooks feature not pinned on: a session could disable it.
+        let err = check(&without("[features]\nhooks = true\n", "")).unwrap_err();
+        assert!(err.contains("[features] hooks = true"), "{err}");
+        assert!(check(&without(
+            "[features]\nhooks = true",
+            "[features]\nhooks = false"
+        ))
+        .is_err());
+        assert!(check(&without(
+            "[features]\nhooks = true",
+            "[features]\nhooks = \"true\""
+        ))
+        .is_err());
+        assert!(check(&without(
+            "[features]\nhooks = true",
+            "[features]\nother = true"
+        ))
+        .is_err());
     }
 
     #[test]
@@ -1496,7 +1633,10 @@ mod driven_policy_tests {
         // checked, above. Paths given so the test holds inside the image too.
         let none = std::path::Path::new("/nonexistent/requirements.toml");
         for value in [None, Some(""), Some("   ")] {
-            assert_eq!(super::codex_policy_at(value, none, none).unwrap(), None);
+            assert_eq!(
+                super::codex_policy_at(value, none, none, true).unwrap(),
+                None
+            );
         }
     }
 
