@@ -71,7 +71,7 @@ class _Broker:
 
 
 def run(
-    tmp_path: Path, payload: str, env: dict[str, str]
+    tmp_path: Path, payload: str, env: dict[str, str], mode: str | None = None
 ) -> subprocess.CompletedProcess[str]:
     # A scrubbed environment: the hook must not see this session's broker.
     full_env = {
@@ -79,8 +79,11 @@ def run(
         "HOME": str(tmp_path),
         **env,
     }
+    argv = ["bash", str(HOOK)]
+    if mode is not None:
+        argv.append(mode)
     return subprocess.run(
-        ["bash", str(HOOK)],
+        argv,
         input=payload,
         env=full_env,
         capture_output=True,
@@ -242,6 +245,104 @@ def test_a_pod_session_asks_with_its_stream_credential(tmp_path: Path) -> None:
             assert broker.authorizations == []
         finally:
             other.close()
+    finally:
+        broker.close()
+
+
+def test_codex_exec_command_is_translated_to_the_engine_request(
+    tmp_path: Path,
+) -> None:
+    """Codex sends `cmd`; the engine only reads `tool_input.command`."""
+    broker = _Broker(200, b'{"decision":"deny","reason":"no hard resets"}')
+    try:
+        denied = run(
+            tmp_path,
+            json.dumps(
+                {
+                    "session_id": "s",
+                    "cwd": "/work/repo",
+                    "hook_event_name": "PreToolUse",
+                    "tool_name": "Bash",
+                    "tool_input": {"cmd": "git reset --hard"},
+                }
+            ),
+            {"VOGT_ENGINE_BROKER_URL": broker.url, "VOGT_ENGINE_BROKER_TOKEN": "t"},
+            mode="codex",
+        )
+        assert denied.returncode == 2, denied.stderr
+        assert "no hard resets" in denied.stderr
+        sent = json.loads(broker.requests[-1])
+        assert sent == {
+            "tool_name": "Bash",
+            "tool_input": {"command": "git reset --hard"},
+            "cwd": "/work/repo",
+        }
+    finally:
+        broker.close()
+
+
+def test_codex_shell_array_is_one_command(tmp_path: Path) -> None:
+    """`shell` sends an argv array; the real command must still be judged."""
+    broker = _Broker(200, b'{"decision":"deny","reason":"no pushes"}')
+    try:
+        denied = run(
+            tmp_path,
+            json.dumps(
+                {
+                    "session_id": "s",
+                    "cwd": "/work/repo",
+                    "tool_name": "Bash",
+                    "tool_input": {
+                        "command": ["bash", "-lc", "git push origin main"],
+                        "workdir": "sub",
+                    },
+                }
+            ),
+            {"VOGT_ENGINE_BROKER_URL": broker.url, "VOGT_ENGINE_BROKER_TOKEN": "t"},
+            mode="codex",
+        )
+        assert denied.returncode == 2, denied.stderr
+        sent = json.loads(broker.requests[-1])
+        assert "git push origin main" in sent["tool_input"]["command"]
+        assert sent["cwd"] == "/work/repo/sub"
+    finally:
+        broker.close()
+
+
+def test_codex_apply_patch_is_allowed_without_a_request(tmp_path: Path) -> None:
+    broker = _Broker(500, b"")
+    try:
+        result = run(
+            tmp_path,
+            json.dumps(
+                {
+                    "session_id": "s",
+                    "tool_name": "apply_patch",
+                    "tool_input": {"command": "*** Begin Patch\n*** End Patch\n"},
+                }
+            ),
+            {"VOGT_ENGINE_BROKER_URL": broker.url, "VOGT_ENGINE_BROKER_TOKEN": "t"},
+            mode="codex",
+        )
+        assert result.returncode == 0, result.stderr
+        assert broker.requests == []
+    finally:
+        broker.close()
+
+
+def test_codex_unreadable_payload_fails_closed(tmp_path: Path) -> None:
+    """A translator that cannot read the tool call must not become a pass."""
+    broker = _Broker(200, b'{"decision":"allow"}')
+    try:
+        refused = run(
+            tmp_path,
+            "not json",
+            {"VOGT_ENGINE_BROKER_URL": broker.url, "VOGT_ENGINE_BROKER_TOKEN": "t"},
+            mode="codex",
+        )
+        assert refused.returncode == 2
+        assert "vogt policy check unavailable" in refused.stderr
+        assert broker.requests == []
     finally:
         broker.close()
 
