@@ -706,6 +706,7 @@ jobs:
             --set "*.args.VOGT_SOURCE_REF=${VOGT_SOURCE_REF}"
             --set "*.args.VOGT_SOURCE_SHA=${VOGT_SOURCE_SHA}"
             --set "*.args.VOGT_PRODUCT_VERSION=0.7.22"
+            --set "*.args.INSTALL_AI_CLIENTS=true"
           )
           # One label per line. A value is a url, a revision or a timestamp.
           while IFS= read -r pair || [ -n "$pair" ]; do
@@ -745,6 +746,16 @@ jobs:
           # nothing asserts is a default waiting to be forgotten, so
           # the published image is asked for the clients it is built to carry.
           docker run --rm --entrypoint vogt-verify-agent-clis "$CANDIDATE"
+          docker run --rm --entrypoint sh "$CANDIDATE" -ceu '
+            table=/usr/local/share/vogt/agent-clis.tools
+            while IFS="$(printf "\\t")" read -r tool source binary env_var kind; do
+              [ -n "$tool" ] && [ "${tool#\#}" = "$tool" ] || continue
+              command -v "$binary" >/dev/null || {
+                echo "agent CLI $tool is missing binary $binary from PATH" >&2
+                exit 1
+              }
+            done < "$table"
+          '
           for tool in claude codex; do
             docker run --rm --entrypoint "$tool" "$CANDIDATE" --version >/dev/null \
               || { echo "the stack image is missing $tool" >&2; exit 1; }
