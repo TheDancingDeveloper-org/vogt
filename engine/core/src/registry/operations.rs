@@ -523,6 +523,14 @@ pub fn build_operations() -> Vec<Operation> {
             CliBinding::new(&["session", "list"]),
         ),
         Operation::new(
+            "session.template_list",
+            "List configured session templates with their agent and placement.",
+            Scope::Read,
+            false,
+            HttpRoute::new(HttpMethod::Get, "/sessions/templates"),
+            CliBinding::new(&["session", "template-list"]),
+        ),
+        Operation::new(
             "session.stop",
             "Stop a coding session and revoke the token it ran with. Takes either id: Vogt's ses_\u{2026} id or the engine's session UUID (an unlinked GUI session is killed, with no token to revoke). The process is killed; its screen and log stay readable.",
             Scope::WorkWrite,
