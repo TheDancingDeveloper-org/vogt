@@ -111,6 +111,7 @@ pub const DERIVED: &[&str] = &[
     "drift.resolve",
     "session.start",
     "session.list",
+    "session.template_list",
     "session.stop",
     "session.input",
     "session.sweep",
@@ -665,6 +666,18 @@ pub fn derived_schemas() -> Vec<(&'static str, serde_json::Value, serde_json::Va
             "session.list",
             schema_of::<session_ops::ListSessionsParams>(),
             schema_of::<session_ops::SessionListResult>(),
+        ),
+        (
+            "session.template_list",
+            schema_of::<system::StatusParams>(),
+            json_schema!({
+                "type": "object",
+                "properties": {
+                    "templates": {"type": "array"},
+                    "engine": {"type": ["string", "null"]}
+                }
+            })
+            .into(),
         ),
         (
             "session.stop",
