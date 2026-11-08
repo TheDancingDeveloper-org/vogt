@@ -108,6 +108,9 @@ impl EngineClient {
         if let Some(template) = &spec.template {
             body.insert("template".to_string(), Value::String(template.clone()));
         }
+        if let Some(placement) = &spec.placement {
+            body.insert("placement".to_string(), Value::String(placement.clone()));
+        }
         if let Some(prompt) = &spec.prompt {
             body.insert("prompt".to_string(), Value::String(prompt.clone()));
         }
@@ -182,6 +185,11 @@ impl EngineClient {
 
     pub fn list_sessions(&self) -> Result<Vec<EngineSession>, VogtError> {
         Ok(self.list_sessions_counted(false)?.0)
+    }
+
+    pub fn list_session_templates(&self) -> Result<Vec<Value>, VogtError> {
+        let payload = self.call("/api/session-templates", "GET", None, false, None)?;
+        Ok(rows(&payload).cloned().collect())
     }
 
     /// The engine's sessions, and how many the default list hides (WI-1289).
@@ -1208,6 +1216,7 @@ pub struct CreateSession {
     pub cwd: String,
     pub command: Option<Vec<String>>,
     pub template: Option<String>,
+    pub placement: Option<String>,
     pub env: Option<Vec<(String, String)>>,
     pub prompt: Option<String>,
     pub model: Option<String>,
@@ -1238,6 +1247,7 @@ impl CreateSession {
             cwd: cwd.into(),
             command: None,
             template: None,
+            placement: None,
             env: None,
             prompt: None,
             model: None,

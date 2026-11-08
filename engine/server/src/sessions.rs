@@ -86,6 +86,31 @@ pub(crate) fn resolve_template_in<'a>(
     )))
 }
 
+fn validate_template_placement(
+    template: &crate::config::SessionTemplate,
+    placement: Option<&str>,
+    pod_backends_enabled: bool,
+) -> Result<()> {
+    match placement {
+        None => Ok(()),
+        Some("host") if template.backend != "local" => Err(ApiError::BadRequest(format!(
+            "template {:?} is pod-only and cannot run on the host",
+            template.name
+        ))),
+        Some("pod") if !pod_backends_enabled => Err(ApiError::BadRequest(
+            "requested placement \"pod\" is not available: pod backends are disabled".into(),
+        )),
+        Some("pod") if template.backend == "local" => Err(ApiError::BadRequest(format!(
+            "template {:?} is host-only and cannot run in a pod",
+            template.name
+        ))),
+        Some("host" | "pod") => Ok(()),
+        Some(other) => Err(ApiError::BadRequest(format!(
+            "invalid placement {other:?}; expected \"host\" or \"pod\""
+        ))),
+    }
+}
+
 pub struct SessionRegistry {
     cfg: Arc<Config>,
     bus: EventBus,
@@ -789,40 +814,11 @@ impl SessionRegistry {
                 .filter(|t| !t.is_empty())
             {
                 let template = self.resolve_template(name)?;
-                if let Some(placement) = spec.placement.as_deref() {
-                    let requested = match placement {
-                        "host" => {
-                            if template.backend != "local" {
-                                return Err(ApiError::BadRequest(format!(
-                                    "template {:?} is pod-only and cannot run on the host",
-                                    template.name
-                                )));
-                            }
-                            "local"
-                        }
-                        "pod" => {
-                            if !self.cfg.pod_backends_enabled {
-                                return Err(ApiError::BadRequest(
-                                    "requested placement \"pod\" is not available: pod backends are disabled"
-                                        .into(),
-                                ));
-                            }
-                            if template.backend == "local" {
-                                return Err(ApiError::BadRequest(format!(
-                                    "template {:?} is host-only and cannot run in a pod",
-                                    template.name
-                                )));
-                            }
-                            "pod"
-                        }
-                        other => {
-                            return Err(ApiError::BadRequest(format!(
-                                "invalid placement {other:?}; expected \"host\" or \"pod\""
-                            )))
-                        }
-                    };
-                    let _ = requested;
-                }
+                validate_template_placement(
+                    template,
+                    spec.placement.as_deref(),
+                    self.cfg.pod_backends_enabled,
+                )?;
                 if spec.account.is_none() {
                     spec.account = template.account.clone();
                 }
@@ -3608,7 +3604,27 @@ fn wake_settings_file<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_session_name;
+    use super::{normalize_session_name, validate_template_placement};
+    use crate::config::SessionTemplate;
+
+    #[test]
+    fn a_pod_only_template_cannot_be_forced_onto_the_host() {
+        let template = SessionTemplate {
+            name: "pod-agent".into(),
+            description: String::new(),
+            command: None,
+            cwd: None,
+            env: Vec::new(),
+            backend: "pod".into(),
+            account: None,
+            default_name: None,
+            match_repo_names: Vec::new(),
+            match_path_prefixes: Vec::new(),
+            tags: Vec::new(),
+        };
+        let error = validate_template_placement(&template, Some("host"), true).unwrap_err();
+        assert!(error.to_string().contains("pod-only"));
+    }
 
     #[test]
     fn a_named_missing_codex_policy_refuses_a_codex_launch_and_only_codex() {
