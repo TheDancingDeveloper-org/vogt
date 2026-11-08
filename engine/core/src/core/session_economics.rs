@@ -3,8 +3,9 @@
 //!
 //! Claude Code records `message.usage` on every assistant entry; the sum of
 //! its input, cache-read and cache-creation tokens is the live context at that
-//! turn. Klaudia writes the same envelope with no usage and marks compaction
-//! with a `compact_boundary` line. Codex carries tool results under `payload`.
+//! turn. An agent without usage (opencode, codex) has its context estimated,
+//! and may mark compaction with a `compact_boundary` line. Codex carries tool
+//! results under `payload`.
 //! Without usage, context is estimated at four characters per token over the
 //! history since the latest compaction. This takes text and returns numbers:
 //! it opens no file, asks no clock, and stores nothing.
@@ -16,8 +17,7 @@ use serde_json::{Map, Value};
 use crate::core::from_iso;
 use crate::decisions::python_json_dumps;
 
-/// Klaudia's own figure: four characters of transcript per token when the
-/// agent records no usage.
+/// Four characters of transcript per token when the agent records no usage.
 pub const CHARS_PER_TOKEN: i64 = 4;
 
 /// Tool names whose input names a file. A repeated value is a repeated read.
@@ -132,8 +132,8 @@ pub fn split_lines(text: &str) -> Vec<&str> {
 /// Reduce one transcript's JSONL lines to its economics.
 ///
 /// A line that is not a JSON object is skipped. `agent` names the shape to
-/// expect; an unknown agent is read as Claude's shape, which Klaudia also
-/// writes, but only `claude` counts as measured usage.
+/// expect; an unknown agent is read as Claude's shape, but only `claude`
+/// counts as measured usage.
 pub fn meter<'a>(lines: impl IntoIterator<Item = &'a str>, agent: &str) -> SessionEconomics {
     let measured = agent == "claude";
     let mut turn_ids: HashSet<String> = HashSet::new();
@@ -230,8 +230,8 @@ pub fn meter<'a>(lines: impl IntoIterator<Item = &'a str>, agent: &str) -> Sessi
     }
 }
 
-/// Claude sets `isCompactSummary`; Klaudia writes a line whose subtype is
-/// `compact_boundary`.
+/// Claude sets `isCompactSummary`; another agent may write a line whose
+/// subtype is `compact_boundary`.
 fn is_compaction(entry: &Map<String, Value>) -> bool {
     if entry.get("isCompactSummary") == Some(&Value::Bool(true)) {
         return true;
@@ -495,13 +495,13 @@ mod tests {
     }
 
     #[test]
-    fn compactions_reset_the_estimate_for_klaudia() {
+    fn compactions_reset_the_estimate_without_usage() {
         let before = json!({"type": "user", "message": {"content": "x".repeat(400)}});
         let boundary = json!({"type": "system", "subtype": "compact_boundary"});
         let after = json!({"type": "user", "message": {"content": "hi"}});
         let reading = metered(
             &[before.clone(), boundary.clone(), after.clone()],
-            "klaudia",
+            "opencode",
         );
         assert_eq!(reading.compactions, 1);
         let live = boundary.to_string().len() + after.to_string().len();
@@ -750,7 +750,7 @@ mod tests {
             }
         );
         assert_eq!(
-            fixture("klaudia", "klaudia"),
+            fixture("estimated", "opencode"),
             SessionEconomics {
                 turns: 2,
                 context_tokens: 67,
@@ -789,7 +789,7 @@ mod tests {
 
     #[test]
     fn shared_unicode_fixture_counts_characters_as_python_does() {
-        let reading = fixture("klaudia_unicode", "klaudia");
+        let reading = fixture("unicode", "opencode");
         assert_eq!(reading.turns, 3);
         assert_eq!(reading.context_tokens, 127);
         assert_eq!(

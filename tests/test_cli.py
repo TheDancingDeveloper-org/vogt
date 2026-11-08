@@ -31,11 +31,27 @@ def test_llm_provider_cli_commands_are_admin_scoped() -> None:
     "argv, expected_exit_code",
     [
         (["llm-provider", "list"], EXIT_OK),
-        ([
-            "llm-provider", "set", "--name", "x", "--base-url", "https://x",
-            "--wire-api", "chat", "--env-key", "X", "--secret-project", "p",
-            "--secret-name", "s", "--reason", "test",
-        ], EXIT_ERROR),
+        (
+            [
+                "llm-provider",
+                "set",
+                "--name",
+                "x",
+                "--base-url",
+                "https://x",
+                "--wire-api",
+                "chat",
+                "--env-key",
+                "X",
+                "--secret-project",
+                "p",
+                "--secret-name",
+                "s",
+                "--reason",
+                "test",
+            ],
+            EXIT_ERROR,
+        ),
         (["llm-provider", "remove", "--name", "x", "--reason", "test"], EXIT_ERROR),
     ],
 )

@@ -200,7 +200,7 @@ profile for that purpose fills `template`, `model`, `effort`, `budget`,
 
 | Purpose | Template | Model | Effort | Budget | Other |
 | --- | --- | --- | --- | --- | --- |
-| `implement` | klaudia | grok-4.7 | — | 120 turns, 90 min | worktree, repo map, autopilot |
+| `implement` | claude | sonnet | — | 120 turns, 90 min | worktree, repo map, autopilot |
 | `implement-careful` | claude | opus | low | 150 turns | autopilot |
 | `review` | claude | opus | low | 40 turns | no autopilot, a read-only hint in the brief |
 | `mechanical` | claude | haiku | — | 60 turns | autopilot |
@@ -593,14 +593,6 @@ When a session moves its own item to `review` or `done`, `work_transition`
 returns the same check and records any mismatch as a note on the item. The
 check never refuses anything. Facts it could not read are listed under
 `unchecked`, so an empty `mismatches` does not mean the claim was verified.
-
-**Klaudia owns its own loop.** `session_start(template="klaudia")` runs
-Klaudia in its TUI like the other agents (model, resume, permission posture
-and the brief work the same way). Klaudia iterates by itself toward a goal
-spec (`/goal run [N]` against `PRD.md` or `.klaudia/GOAL.md`, stopping at
-`<goal-complete/>` or the iteration cap), so a driver starts that loop once
-and then waits; it does not re-prompt between iterations. Two drivers of one
-loop would interleave prompts into the goal's own turns.
 
 #### Permission prompts: `awaiting-approval`
 
