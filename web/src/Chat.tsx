@@ -1,5 +1,5 @@
 /**
- * Quick chat (WI-1097): persistent text chats with an agent (Klaudia), kept
+ * Quick chat (WI-1097): persistent text chats with Codex, kept
  * forever and found again by search, with a model picker, approval cards for
  * anything that would change something, Stop, and "Continue in a session".
  *
@@ -464,7 +464,7 @@ export const Chat: Component<Props> = (props) => {
                   {(approval) => (
                     <div class="chat-approval" role="region" aria-label={`Approval: ${approval.tool_name}`}>
                       <div class="chat-approval__head">
-                        <strong>{approval.source === "driver" ? "The agent asks to change this machine" : "Allow this?"}</strong>
+                        <strong>{approval.source === "codex" ? "The agent asks to change this machine" : "Allow this?"}</strong>
                         <span class="chat-approval__tool">{approval.tool_name}</span>
                       </div>
                       <code class="chat-approval__summary">{approval.summary}</code>
