@@ -1,1 +1,72 @@
-# Managed Codex requirements; no external hooks.
+# Driven-session Codex requirements (WI-1143, WI-1146, WI-1356, WI-3755).
+#
+# Codex reads this path (`/etc/codex/requirements.toml`) with no flag, and no
+# other: the TUI, `exec` and app-server all load it. The engine checks that
+# this installed file is non-empty, wires the managed policy hook below, and
+# is root-owned and not writable by the session user, then lets Codex load it
+# (`claude_config.rs`, `codex_policy_from`).
+#
+# Shape: the Codex fork parses `[hooks]` here as
+# `ManagedHooksRequirementsToml` — the event tables flattened under `hooks`,
+# each a list of matcher groups with a `hooks` list of handlers
+# (codex-rs/config/src/hook_config.rs and the `[[hooks.PreToolUse]]` fixtures
+# in config_requirements.rs). Hooks from a requirements layer are managed:
+# trusted without a hash and always enabled.
+#
+# The hook runs `vogt-policy-hook codex`, the image's own root-owned policy
+# hook (engine/deploy/policy-hook.sh). It is the same check a Claude Code
+# session gets: the hook asks `POST /api/agent-auth/policy-check` whether the
+# shell command is allowed by the session's project policy, and refuses with
+# exit 2 when it is not. The `codex` argument translates Codex's `tool_input`
+# into the engine's request; it does not add or relax a rule. Running the hook
+# by absolute path also matters: PATH starts with /opt/vogt/agent-clis/bin,
+# which the session user owns, so a bare `vogt-policy-hook` could be a stub
+# that exits 0.
+#
+# `failClosed = true` makes a hook that crashes, times out or cannot be
+# started block the tool call instead of letting it run. The engine refuses a
+# Codex launch unless both commands are exactly this string and
+# /usr/local/bin/vogt-policy-hook is a root-owned regular file.
+#
+# What this guards, and what it does not: this is an ACCIDENT GUARD, not a
+# sandbox. It stops an agent that runs a forbidden git or gh command by
+# mistake, and it stops a session without root from switching the guard off by
+# editing this file, shadowing the hook on its PATH, or turning the hooks
+# feature off. It does NOT stop a determined session: the session user has
+# passwordless sudo in the pod and can rewrite this file, the hook or the
+# codex binary as root. Root ownership is a correctness check here, not a
+# security boundary.
+#
+# PreToolUse tool names the fork sends: `Bash` for shell, exec_command and
+# write_stdin; `apply_patch` (aliases Write/Edit) for patches; `write_stdin`
+# for the approval path of stdin writes. The matcher is a regex over them.
+#
+# Managed hooks run only while the `hooks` feature is on, and a session can
+# turn it off (`-c features.hooks=false`, `--disable hooks`, `[features]` in
+# $CODEX_HOME or a project `.codex/config.toml`, a nested `codex exec`). The
+# `[features]` table here is FeatureRequirementsToml: a pinned value wins over
+# every config layer and CLI override (core/src/config/managed_features.rs),
+# so the hook stays on.
+#
+# A Codex that cannot parse this file refuses to start; it does not run
+# without the hook.
+
+[features]
+hooks = true
+
+[[hooks.SessionStart]]
+
+[[hooks.SessionStart.hooks]]
+type = "command"
+command = "/usr/local/bin/vogt-policy-hook codex"
+timeout = 30
+failClosed = true
+
+[[hooks.PreToolUse]]
+matcher = "^(Bash|shell|exec_command|write_stdin|apply_patch)$"
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "/usr/local/bin/vogt-policy-hook codex"
+timeout = 30
+failClosed = true

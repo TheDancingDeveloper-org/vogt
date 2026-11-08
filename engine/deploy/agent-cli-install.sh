@@ -52,8 +52,8 @@
 # point and PATH lookup agree without a second copy of the bypass flags.
 #
 # A `codex` binary from any kind but `github-release` is refused (WI-1146):
-# stock npm Codex has no managed-hook table, so the gitguard hook in
-# /etc/codex/requirements.toml would not run under it. The `codex-npm` row
+# stock npm Codex has no managed-hook table, so the session policy hook
+# in /etc/codex/requirements.toml would not run under it. The `codex-npm` row
 # still names the package so a pin of it says why it is refused, and a refusal
 # also drops any `current` an older image left, so nothing stale stays active.
 #
@@ -464,7 +464,7 @@ main() {
             && [[ -n "$requested" && "$requested" != "image" ]]; then
         reset_to_image "$tool"
         write_manifest
-        die "$tool $requested is refused: only the Codex fork (kind github-release) runs managed hooks, and without them the gitguard hook in /etc/codex/requirements.toml does not run. Pin VOGT_CODEX_SHA instead" 64
+        die "$tool $requested is refused: only the Codex fork (kind github-release) runs managed hooks, and without them the session policy hook in /etc/codex/requirements.toml does not run. Pin VOGT_CODEX_SHA instead" 64
     fi
 
     # Resolve the request to an exact version, or to the image copy.

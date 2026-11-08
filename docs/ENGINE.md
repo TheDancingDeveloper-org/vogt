@@ -194,7 +194,7 @@ The helper scripts the image installs under `/usr/local/bin/vogt-*`:
 | `vogt-readonly-mcp` | `deploy/readonly-mcp.sh` | starts the GitHub, Grafana or Gitea/Forgejo MCP server in read-only mode with the session's token (§4) | optional — registered only when its token is present |
 | `git-forgejo` | `deploy/git-forgejo.sh` | git with a Gitea/Forgejo token header that cannot be word-split (§4) | optional |
 | `vogt-git-askpass` | `deploy/git-askpass.sh` | `GIT_ASKPASS` shim for brokered credentials | optional |
-| `codex` wrapper | `deploy/codex-full-access.sh` | runs the pinned Codex with `--no-daemon` (`daemon_auto_start` off), because the daemon would copy the binary out of the pin. It does **not** pass `--dangerously-bypass-approvals-and-sandbox` (WI-1143): the engine's posture flags name the sandbox (`-s danger-full-access` for default and accept-edits; bypass is the only posture that skips approvals and the sandbox, and only when a person asked). `--approve-for-me` is not used — it hard-wires workspace-write. The fork reads `/etc/codex/requirements.toml` with no flag (TUI, `exec` and app-server alike); the image copies `deploy/driven-session-codex-requirements.toml` there, root-owned `0644` in a root-owned `0755` directory, and a reference copy to `/usr/local/share/vogt/`. That file is a one-line comment: the gitguard hook and `[features] hooks = true` were removed with Klaudia (WI-3744). A runtime copy under `codex/current` runs only when its prefix records a fork release `source`; anything else exits 78 rather than run an unverified pin. That `source` file sits in the session-owned agent-CLI tree, so this check is an accident guard against a stale or mistaken pin, not a security boundary | only with `INSTALL_AI_CLIENTS` |
+| `codex` wrapper | `deploy/codex-full-access.sh` | runs the pinned Codex with `--no-daemon` (`daemon_auto_start` off), because the daemon would copy the binary out of the pin. It does **not** pass `--dangerously-bypass-approvals-and-sandbox` (WI-1143): the engine's posture flags name the sandbox (`-s danger-full-access` for default and accept-edits; bypass is the only posture that skips approvals and the sandbox, and only when a person asked). `--approve-for-me` is not used — it hard-wires workspace-write. The fork reads `/etc/codex/requirements.toml` with no flag (TUI, `exec` and app-server alike); the image copies `deploy/driven-session-codex-requirements.toml` there, root-owned `0644` in a root-owned `0755` directory, and a reference copy to `/usr/local/share/vogt/`. That file turns `[features] hooks` on and wires the fork's `SessionStart` and `PreToolUse` managed hooks to `/usr/local/bin/vogt-policy-hook codex` (WI-3755), the same project-policy check a Claude session installs as its `PreToolUse` hook. A runtime copy under `codex/current` runs only when its prefix records a fork release `source`; anything else exits 78 rather than run an unverified pin. That `source` file sits in the session-owned agent-CLI tree, so this check is an accident guard against a stale or mistaken pin, not a security boundary | only with `INSTALL_AI_CLIENTS` |
 | `vogt-agent-auth` | `deploy/agent-auth.sh` | reference `ENGINE_AGENT_AUTH_HELPER`: brokers service credentials from a secrets manager into a session (`check`, `run -- <cmd>`, `shell`, `fetch`, `store`), driven entirely by an env manifest with no baked addresses or secret names | **optional and pluggable** — one example helper; see §9 |
 
 Nothing in the engine itself depends on `agent-auth`: with
@@ -1225,8 +1225,12 @@ What is refused, and only for an agent session that carries a policy:
 A denial exits 2 with the reason on stderr and the command does not run. When
 the engine cannot be reached, or answers anything but 2xx, the hook fails
 closed for that `git` or `gh` command (`vogt policy check unavailable;
-refusing git/gh write`) and allows everything else. opencode and codex have no
-equivalent hook, so for them the policy stays guidance in the brief.
+refusing git/gh write`) and allows everything else. The same script is the
+Codex session's managed `SessionStart` and `PreToolUse` hook, run as
+`vogt-policy-hook codex`: that argument translates Codex's `tool_input` — a
+`command`, a `cmd`, or a `shell` argv array — into the engine's request before
+asking, and adds or relaxes no rule. opencode has no equivalent hook, so for it
+the policy stays guidance in the brief.
 
 This is a guardrail, not a boundary. The session runs as the same uid that
 owns the hook, so it can edit its own hook, and wrappers the parser does not
@@ -1666,13 +1670,20 @@ checks decide what it can finish on its own (WI-926; the design is
   The check runs once, at engine start. `off` is the only way a deployment
   that has the file starts Codex without that check. A failing check is `400`
   on every Codex launch, and the session does not fall through to bypass. The
-  shipped file is a one-line comment. It used to wire the gitguard managed
-  hook for the fork (`[[hooks.SessionStart]]`, `[[hooks.PreToolUse]]`,
-  `/usr/local/bin/klaudia hook gitguard`); that hook and its binary were
-  removed with Klaudia (WI-3744), so a Codex session now runs under the
-  engine's own posture flags and the person gate, with no destructive-git
-  guard. Claude and opencode launches are not blocked by a Codex policy
-  error.
+  shipped file pins `[features] hooks = true` and wires the fork's
+  `[[hooks.SessionStart]]` and `[[hooks.PreToolUse]]` managed hooks to
+  `/usr/local/bin/vogt-policy-hook codex` (WI-3755). That is the same
+  project-policy check a Claude session runs as its `PreToolUse` hook; the
+  `codex` argument only translates Codex's `tool_input` into the engine's
+  request and adds or relaxes no rule. The check also requires the exact
+  command, `failClosed = true` on both events, a matcher selecting `Bash` and
+  `apply_patch`, and a root-owned hook program at an absolute path, so a
+  missing, rewritten or PATH-shadowed guard refuses the Codex launch instead
+  of running unguarded. Like the Claude hook this is a guardrail against
+  running a forbidden `git` or `gh` command by mistake, not a sandbox.
+  Changing the file needs the engine image rebuilt: the entrypoint bakes the
+  repository copy into `/etc/codex/requirements.toml`. Claude and opencode
+  launches are not blocked by a Codex policy error.
   **Workspace guidance (WI-1357).** Codex reads no `CLAUDE.md`,
   `.claude/rules` or `.claude/skills`, and no `AGENTS.md` above its git
   root, so the engine (`server/src/codex_guidance.rs`) gathers the set
