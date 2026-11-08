@@ -93,17 +93,21 @@ fn validate_template_placement(
 ) -> Result<()> {
     match placement {
         None => Ok(()),
-        Some("host") if template.backend != "local" => Err(ApiError::BadRequest(format!(
-            "template {:?} is pod-only and cannot run on the host",
-            template.name
-        ))),
+        Some("host") if template.backend != "local" && !template.host_capable => {
+            Err(ApiError::BadRequest(format!(
+                "template {:?} is pod-only and cannot run on the host",
+                template.name
+            )))
+        }
         Some("pod") if !pod_backends_enabled => Err(ApiError::BadRequest(
             "requested placement \"pod\" is not available: pod backends are disabled".into(),
         )),
-        Some("pod") if template.backend == "local" => Err(ApiError::BadRequest(format!(
-            "template {:?} is host-only and cannot run in a pod",
-            template.name
-        ))),
+        Some("pod") if template.backend == "local" && !template.host_capable => {
+            Err(ApiError::BadRequest(format!(
+                "template {:?} is host-only and cannot run in a pod",
+                template.name
+            )))
+        }
         Some("host" | "pod") => Ok(()),
         Some(other) => Err(ApiError::BadRequest(format!(
             "invalid placement {other:?}; expected \"host\" or \"pod\""
@@ -2973,7 +2977,16 @@ impl SessionRegistry {
                     .command
                     .as_deref()
                     .and_then(crate::agent_cli::agent_name),
-                placement: template.backend.clone(),
+                placements: if template.backend == "pod" {
+                    if template.host_capable {
+                        vec!["host".to_string(), "pod".to_string()]
+                    } else {
+                        vec!["pod".to_string()]
+                    }
+                } else {
+                    vec!["host".to_string()]
+                },
+                default_placement: template.backend.clone(),
             })
             .collect()
     }
@@ -3627,6 +3640,7 @@ mod tests {
             cwd: None,
             env: Vec::new(),
             backend: "pod".into(),
+            host_capable: false,
             account: None,
             default_name: None,
             match_repo_names: Vec::new(),
@@ -3645,6 +3659,7 @@ mod tests {
             cwd: None,
             env: Vec::new(),
             backend: backend.into(),
+            host_capable: false,
             account: None,
             default_name: None,
             match_repo_names: Vec::new(),
@@ -3665,6 +3680,14 @@ mod tests {
         assert!(validate_template_placement(&template("pod"), Some("host"), true).is_err());
         assert!(validate_requested_placement(Some("pod"), false).is_err());
         assert!(validate_requested_placement(Some("sidecar"), true).is_err());
+    }
+
+    #[test]
+    fn dual_backend_template_allows_both_explicit_placements() {
+        let mut template = template("pod");
+        template.host_capable = true;
+        assert!(validate_template_placement(&template, Some("host"), true).is_ok());
+        assert!(validate_template_placement(&template, Some("pod"), true).is_ok());
     }
 
     #[test]
@@ -3916,6 +3939,7 @@ mod tests {
                 tags: vec!["claude".into()],
                 account: None,
                 backend: "local".to_string(),
+                host_capable: false,
             },
             SessionTemplate {
                 name: "Alpha Agent".into(),
@@ -3934,6 +3958,7 @@ mod tests {
                 tags: vec!["agent".into(), "claude".into()],
                 account: None,
                 backend: "local".to_string(),
+                host_capable: false,
             },
         ];
         assert_eq!(
