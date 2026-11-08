@@ -10,7 +10,7 @@ from vogt.core import dispatch
 def test_the_code_defaults_are_the_design_table() -> None:
     table = dispatch.resolve({})
     implement = table.profiles["implement"]
-    assert (implement.template, implement.model) == ("klaudia", "grok-4.7")
+    assert (implement.template, implement.model) == ("claude", "sonnet")
     assert (implement.budget_turns, implement.budget_wall_clock_minutes) == (120, 90)
     assert implement.worktree and implement.repo_map and implement.autopilot
     careful = table.profiles["implement-careful"]
@@ -43,7 +43,7 @@ def test_an_override_changes_only_the_field_it_names() -> None:
     table = dispatch.resolve({dispatch.PROFILES_KEY: {"implement": {"model": "x"}}})
     implement = table.profiles["implement"]
     assert implement.model == "x"
-    assert implement.template == "klaudia"
+    assert implement.template == "claude"
     assert implement.budget_turns == 120
     assert table.profiles["review"] == dispatch.DEFAULT_PROFILES["review"]
 
@@ -68,7 +68,7 @@ def test_a_stale_stored_value_falls_back_to_the_default() -> None:
             dispatch.MAX_WORKERS_KEY: {"value": "many"},
         }
     )
-    assert table.profiles["implement"].model == "grok-4.7"
+    assert table.profiles["implement"].model == "sonnet"
     assert table.max_workers_per_overseer == 5
 
 
@@ -109,7 +109,7 @@ def test_the_turn_budget_is_sized_by_the_model_it_runs() -> None:
     assert implement.turns_for("haiku") == 200
     assert implement.turns_for("claude-haiku-4-5-20251001") == 200
     assert implement.turns_for("sonnet-haikuish") == 120
-    assert implement.turns_for("grok-4.7") == 120
+    assert implement.turns_for("sonnet") == 120
     assert implement.turns_for(None) == 120
 
 

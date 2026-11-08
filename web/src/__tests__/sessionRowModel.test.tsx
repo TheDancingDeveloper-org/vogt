@@ -175,13 +175,13 @@ describe("a non-default permission posture (WI-1250)", () => {
     expect(permissionPostureLabel("default")).toBeNull();
     expect(permissionPostureLabel("bypass")).toBe("no permission checks");
     expect(permissionPostureLabel("accept-edits")).toBe("accept-edits");
-    const klaudia = session({
+    const opencode = session({
       id: "k",
-      command: "/usr/bin/klaudia --model test-model --dangerously-skip-permissions",
-      template: "klaudia",
+      command: "/usr/bin/opencode --model test-model --dangerously-skip-permissions",
+      template: "opencode",
     });
-    expect(sessionRuntimeHint({ ...klaudia, permission_mode: "bypass" })).toBe(
-      "template klaudia · klaudia · model test-model · permissions bypass",
+    expect(sessionRuntimeHint({ ...opencode, permission_mode: "bypass" })).toBe(
+      "template opencode · opencode · model test-model · permissions bypass",
     );
   });
 });

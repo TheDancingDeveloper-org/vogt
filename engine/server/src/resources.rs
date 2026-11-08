@@ -546,8 +546,8 @@ mod tests {
         let b = Uuid::new_v4();
         let labels_a = session_labels(
             a,
-            Some("klaudia".into()),
-            Some("klaudia".into()),
+            Some("claude".into()),
+            Some("claude".into()),
             Some("opus".into()),
             Some("vogt".into()),
         );
@@ -559,7 +559,7 @@ mod tests {
         let out = session_lines();
         assert!(
             out.contains(&format!(
-                "vogt_session_rss_bytes{{session=\"{a}\",template=\"klaudia\",agent=\"klaudia\",model=\"opus\",project=\"vogt\"}} 1073741824"
+                "vogt_session_rss_bytes{{session=\"{a}\",template=\"claude\",agent=\"claude\",model=\"opus\",project=\"vogt\"}} 1073741824"
             )),
             "{out}"
         );

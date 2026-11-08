@@ -475,8 +475,9 @@ fn accepted(schema: &Value) -> (Vec<String>, Vec<String>) {
 /// The text a successful tool call carries. Ports `tool_success`: the whole
 /// result, compact (`separators=(",", ":")`), with null-valued keys dropped at
 /// every depth and list items kept. `structuredContent` beside it is the full
-/// result, nulls included. Klaudia reads this text and only falls back to the
-/// structured body when the text is empty, so a summary here would hide it.
+/// result, nulls included. A stream-json chat driver reads this text and only
+/// falls back to the structured body when the text is empty, so a summary here
+/// would hide it.
 fn compact_text(value: &Value) -> String {
     // `separators=(",", ":")`. The second argument of `python_json_dumps` is
     // sort_keys, and that helper always writes the spaced separators the stores

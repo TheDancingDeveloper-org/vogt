@@ -101,8 +101,8 @@ pub fn strip_ansi(input: &[u8]) -> Vec<u8> {
 /// When a session's output last changed what its screen shows (WI-1090).
 ///
 /// Output recency is how `classify` tells a turn at work from one at rest,
-/// and output that repaints an identical frame fooled it: Klaudia's idle
-/// input box redraws its blinking cursor twice a second, so an idle Klaudia
+/// and output that repaints an identical frame fooled it: an agent's idle
+/// input box redraws its blinking cursor twice a second, so an idle session
 /// read `running` for ten hours and was never nudged. This clock moves only
 /// when the rendered screen (its text and title, see
 /// `screen::Terminal::fingerprint`) differs from the last time it was looked

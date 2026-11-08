@@ -533,7 +533,6 @@ fn default_session_roots() -> BTreeMap<String, PathBuf> {
     let mut roots = BTreeMap::new();
     roots.insert("claude".to_string(), PathBuf::from("~/.claude/projects"));
     roots.insert("codex".to_string(), PathBuf::from("~/.codex/sessions"));
-    roots.insert("klaudia".to_string(), PathBuf::from("~/.klaudia/sessions"));
     roots
 }
 
@@ -1122,7 +1121,7 @@ fn validate(config: &VogtConfig) -> Result<(), String> {
     let unknown: Vec<_> = config
         .session_transcript_roots
         .keys()
-        .filter(|key| *key != "claude" && *key != "codex" && *key != "klaudia")
+        .filter(|key| *key != "claude" && *key != "codex")
         .cloned()
         .collect();
     if !unknown.is_empty() {
@@ -1132,7 +1131,7 @@ fn validate(config: &VogtConfig) -> Result<(), String> {
             .collect::<Vec<_>>()
             .join(", ");
         return Err(format!(
-            "session transcript root keys must be 'claude', 'codex' or 'klaudia', not {listed}"
+            "session transcript root keys must be 'claude' or 'codex', not {listed}"
         ));
     }
     for (name, pattern) in &config.agent_activity_services {
@@ -1543,11 +1542,11 @@ const FIELD_CATALOGUE: &[FieldDoc] = &[
         name: "session_transcript_roots",
         env_var: "VOGT_SESSION_TRANSCRIPT_ROOTS",
         type_label: "map of string to path",
-        default_label: "`claude = \"~/.claude/projects\"`, `codex = \"~/.codex/sessions\"`, `klaudia = \"~/.klaudia/sessions\"`",
+        default_label: "`claude = \"~/.claude/projects\"`, `codex = \"~/.codex/sessions\"`",
         policy: DefaultPolicy::Behaviour,
-        description: "Where `session.last_reply` and the `last_reply_excerpt` in `session.list` look for a session's own agent transcript, by agent (`claude`, `codex`, `klaudia`). Read on request only — the last few assistant messages of the conversation a session runs, redacted — never indexed. The defaults are the agents' own directories under the home of the user the core runs as, which in the all-in-one stack is the user its sessions run as; a missing directory makes the reply honestly unavailable. An empty table turns both off.",
+        description: "Where `session.last_reply` and the `last_reply_excerpt` in `session.list` look for a session's own agent transcript, by agent (`claude`, `codex`). Read on request only — the last few assistant messages of the conversation a session runs, redacted — never indexed. The defaults are the agents' own directories under the home of the user the core runs as, which in the all-in-one stack is the user its sessions run as; a missing directory makes the reply honestly unavailable. An empty table turns both off.",
         kind: Kind::SessionRoots,
-        example: "{ claude = \"~/.claude/projects\", codex = \"~/.codex/sessions\", klaudia = \"~/.klaudia/sessions\" }",
+        example: "{ claude = \"~/.claude/projects\", codex = \"~/.codex/sessions\" }",
     },
     FieldDoc {
         name: "agent_activity_max_bytes_per_sweep",
@@ -2343,7 +2342,7 @@ mod tests {
             "session_transcript_roots".to_string(),
             serde_json::json!({"gemini": "/tmp"}),
         );
-        assert!(load_config(&overrides).unwrap_err().contains("klaudia"));
+        assert!(load_config(&overrides).unwrap_err().contains("gemini"));
 
         let mut overrides = Map::new();
         overrides.insert(

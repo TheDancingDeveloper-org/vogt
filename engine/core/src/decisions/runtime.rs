@@ -3,7 +3,7 @@
 // which it came from. None of them is a default the CLI might pick: an
 // unknown is absent, not a guess.
 
-const AGENTS: &[&str] = &["claude", "codex", "opencode", "klaudia"];
+const AGENTS: &[&str] = &["claude", "codex", "opencode"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandRuntime {
@@ -237,13 +237,13 @@ mod runtime_tests {
 
         let asked = resolve_runtime(
             Some("echo hi"),
-            Some("klaudia"),
+            Some("opencode"),
             None,
             None,
             Some("sonnet"),
             None,
         );
-        assert_eq!(asked.agent.as_deref(), Some("klaudia"));
+        assert_eq!(asked.agent.as_deref(), Some("opencode"));
         assert_eq!(asked.model.as_deref(), Some("sonnet"));
         assert_eq!(asked.model_basis, Some("asked"));
         assert_eq!(asked.effort, None);

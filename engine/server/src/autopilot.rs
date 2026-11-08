@@ -22,12 +22,7 @@
 //!   autopilot simply switched off (WI-1313).
 //!
 //! What is never nudged: a session blocked on a person (it said so; a person
-//! acts next), one at a permission dialog or mid-turn, a plain shell, and a
-//! Klaudia session whose own goal loop (`/goal run`) is driving it — two
-//! drivers of one loop would interleave prompts into its turns (WI-950). A
-//! Klaudia session working an ordinary task is an interactive turn like any
-//! other, and is nudged like one (WI-1090): it says it is in its goal loop in
-//! its title (`klaudia: goal-loop`) or, on older builds, in its status bar.
+//! acts next), one at a permission dialog or mid-turn, and a plain shell.
 //!
 //! Nor is a session whose model API refuses every turn (WI-1852): an agent
 //! whose provider answers a client error — `400 Invalid model name`, a
@@ -80,7 +75,7 @@ If no unblocked work is left, say so and end your reply with the autopilot done 
 line your brief describes.";
 
 /// Agents the engine knows how to re-drive at their prompt.
-pub const REDRIVEN: &[&str] = &["claude", "codex", "opencode", "klaudia"];
+pub const REDRIVEN: &[&str] = &["claude", "codex", "opencode"];
 
 /// Whether the visible screen ends with the agent saying it is done: a line,
 /// among the last ten that are not blank, that reads exactly the marker once
@@ -147,8 +142,6 @@ pub struct Seen {
     pub quiet_for: Duration,
     pub ready: bool,
     pub done: bool,
-    /// The agent's own loop is driving it (Klaudia's goal loop).
-    pub own_loop: bool,
     /// The screen ends on a model API client error ([`api_client_error`]).
     pub api_error: bool,
     pub nudges: u32,
@@ -162,7 +155,6 @@ pub fn decide(policy: &Policy, seen: Seen) -> Step {
         quiet_for,
         ready,
         done,
-        own_loop,
         api_error,
         nudges,
     } = seen;
@@ -170,7 +162,6 @@ pub fn decide(policy: &Policy, seen: Seen) -> Step {
         return Step::Done;
     }
     if blocked
-        || own_loop
         || !matches!(
             activity,
             ActivityState::Idle | ActivityState::WaitingForInput
@@ -255,8 +246,6 @@ pub async fn run_once(registry: &SessionRegistry, bus: &crate::events::EventBus,
         let Ok(view) = screen::session_screen(Arc::clone(&session), 0).await else {
             continue;
         };
-        let own_loop =
-            agent == "klaudia" && screen::klaudia_goal_loop(view.title.as_deref(), &view.lines);
         let api_error = api_client_error(&view.lines);
         let step = decide(
             policy,
@@ -266,7 +255,6 @@ pub async fn run_once(registry: &SessionRegistry, bus: &crate::events::EventBus,
                 quiet_for,
                 ready: view.ready,
                 done: says_done(&view.lines),
-                own_loop,
                 api_error: api_error.is_some(),
                 nudges: session.autopilot_nudges(),
             },
@@ -424,7 +412,6 @@ mod tests {
                     quiet_for,
                     ready,
                     done,
-                    own_loop: false,
                     api_error: false,
                     nudges,
                 },
@@ -483,98 +470,16 @@ mod tests {
         );
     }
 
-    /// WI-1090: Klaudia's screens, from readiness to the decision. An idle
-    /// Klaudia is nudged, by its title or (older builds) by its box; one at
-    /// work, at a permission ask or in its own goal loop is left alone.
-    #[test]
-    fn klaudia_is_nudged_at_its_prompt_and_never_in_its_goal_loop() {
-        use crate::screen::{is_ready, klaudia_frames as frames, klaudia_goal_loop};
-        let policy = Policy::default();
-        let quiet = policy.nudge_after + Duration::from_secs(1);
-        let step = |activity, lines: &[String], title: Option<&str>| {
-            decide(
-                &policy,
-                Seen {
-                    activity,
-                    blocked: false,
-                    quiet_for: quiet,
-                    ready: is_ready(activity, true, lines, Some("klaudia"), title),
-                    done: says_done(lines),
-                    own_loop: klaudia_goal_loop(title, lines),
-                    api_error: false,
-                    nudges: 0,
-                },
-            )
-        };
-        // Idle: an old build by its box, a new one by its title.
-        assert_eq!(
-            step(ActivityState::Idle, &frames::idle(), None),
-            Step::Nudge
-        );
-        assert_eq!(
-            step(ActivityState::Idle, &frames::idle(), Some("klaudia: ready")),
-            Step::Nudge
-        );
-        // Mid-turn: running, and its box does not make it ready even if the
-        // activity were to read idle.
-        assert_eq!(
-            step(ActivityState::Running, &frames::mid_turn(), None),
-            Step::Leave
-        );
-        assert_eq!(
-            step(ActivityState::Idle, &frames::mid_turn(), None),
-            Step::Leave
-        );
-        assert_eq!(
-            step(
-                ActivityState::Idle,
-                &frames::idle(),
-                Some("klaudia: working")
-            ),
-            Step::Leave
-        );
-        // A permission ask, by its caption or its title.
-        assert_eq!(
-            step(ActivityState::Idle, &frames::approval(), None),
-            Step::Leave
-        );
-        assert_eq!(
-            step(
-                ActivityState::Idle,
-                &frames::idle(),
-                Some("klaudia: awaiting approval")
-            ),
-            Step::Leave
-        );
-        // Its own goal loop, by its status bar or its title, even at rest.
-        assert_eq!(
-            step(ActivityState::Idle, &frames::goal_loop(), None),
-            Step::Leave
-        );
-        assert_eq!(
-            step(
-                ActivityState::Idle,
-                &frames::idle(),
-                Some("klaudia: goal-loop")
-            ),
-            Step::Leave
-        );
-        // And it is done when it says so, as any agent is.
-        let mut done = frames::idle();
-        done.insert(3, "AUTOPILOT: DONE".to_string());
-        assert_eq!(step(ActivityState::Idle, &done, None), Step::Done);
-    }
-
     /// WI-1852: a provider refusing every turn is reported, not nudged forever.
     #[test]
     fn a_repeated_model_api_client_error_is_refused_not_nudged() {
-        let klaudia = lines(&[
+        let refused = lines(&[
             "▣ Build · opus",
             "litellm.BadRequestError: Invalid model name passed in model=opus",
             "",
             "┃ > ",
         ]);
-        assert!(api_client_error(&klaudia).is_some());
+        assert!(api_client_error(&refused).is_some());
         let claude = lines(&["⏺ API Error: 400 {\"type\":\"error\"}", "│ > "]);
         assert!(api_client_error(&claude).unwrap().contains("400"));
         assert!(api_client_error(&lines(&["API Error: 429 rate limited"])).is_none());
@@ -589,7 +494,6 @@ mod tests {
             quiet_for: policy.nudge_after + Duration::from_secs(1),
             ready: true,
             done: false,
-            own_loop: false,
             api_error,
             nudges,
         };
