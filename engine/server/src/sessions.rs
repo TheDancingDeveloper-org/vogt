@@ -111,6 +111,31 @@ fn validate_template_placement(
     }
 }
 
+fn validate_requested_placement(placement: Option<&str>, pod_backends_enabled: bool) -> Result<()> {
+    match placement {
+        None | Some("host") => Ok(()),
+        Some("pod") if pod_backends_enabled => Ok(()),
+        Some("pod") => Err(ApiError::BadRequest(
+            "requested placement \"pod\" is not available: pod backends are disabled".into(),
+        )),
+        Some(other) => Err(ApiError::BadRequest(format!(
+            "invalid placement {other:?}; expected \"host\" or \"pod\""
+        ))),
+    }
+}
+
+fn validate_placement_template_requirement(
+    placement: Option<&str>,
+    template: Option<&str>,
+) -> Result<()> {
+    if placement == Some("pod") && template.is_none() {
+        return Err(ApiError::BadRequest(
+            "requested placement \"pod\" requires a pod-backed template".into(),
+        ));
+    }
+    Ok(())
+}
+
 pub struct SessionRegistry {
     cfg: Arc<Config>,
     bus: EventBus,
@@ -799,6 +824,11 @@ impl SessionRegistry {
         spec.name = normalize_session_name(&spec.name)?;
         spec.work_item = vogt_engine_contract::normalize_work_item(spec.work_item.as_deref())
             .map_err(ApiError::BadRequest)?;
+        validate_requested_placement(spec.placement.as_deref(), self.cfg.pod_backends_enabled)?;
+        validate_placement_template_requirement(
+            spec.placement.as_deref(),
+            spec.template.as_deref(),
+        )?;
         // Expand a template name into a command before anything downstream
         // reads `command`. Only when the caller gave no explicit command —
         // the GUI copies a template's command into the spec itself and sends
@@ -838,28 +868,6 @@ impl SessionRegistry {
                         env.extend(existing);
                     }
                     spec.env = Some(env);
-                }
-            }
-        }
-        if spec.placement.as_deref() == Some("pod") && spec.template.is_none() {
-            return Err(ApiError::BadRequest(
-                "requested placement \"pod\" requires a pod-backed template".into(),
-            ));
-        }
-        if let Some(placement) = spec.placement.as_deref() {
-            match placement {
-                "host" => {}
-                "pod" if self.cfg.pod_backends_enabled => {}
-                "pod" => {
-                    return Err(ApiError::BadRequest(
-                        "requested placement \"pod\" is not available: pod backends are disabled"
-                            .into(),
-                    ))
-                }
-                other => {
-                    return Err(ApiError::BadRequest(format!(
-                        "invalid placement {other:?}; expected \"host\" or \"pod\""
-                    )))
                 }
             }
         }
@@ -3604,7 +3612,10 @@ fn wake_settings_file<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_session_name, validate_template_placement};
+    use super::{
+        normalize_session_name, validate_placement_template_requirement,
+        validate_requested_placement, validate_template_placement,
+    };
     use crate::config::SessionTemplate;
 
     #[test]
@@ -3624,6 +3635,49 @@ mod tests {
         };
         let error = validate_template_placement(&template, Some("host"), true).unwrap_err();
         assert!(error.to_string().contains("pod-only"));
+    }
+
+    fn template(backend: &str) -> SessionTemplate {
+        SessionTemplate {
+            name: format!("{backend}-agent"),
+            description: String::new(),
+            command: None,
+            cwd: None,
+            env: Vec::new(),
+            backend: backend.into(),
+            account: None,
+            default_name: None,
+            match_repo_names: Vec::new(),
+            match_path_prefixes: Vec::new(),
+            tags: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn pod_placement_requires_a_template() {
+        let error = validate_placement_template_requirement(Some("pod"), None).unwrap_err();
+        assert!(error.to_string().contains("requires a pod-backed template"));
+    }
+
+    #[test]
+    fn placement_refusals_cover_host_templates_disabled_backends_and_bad_values() {
+        assert!(validate_template_placement(&template("local"), Some("pod"), true).is_err());
+        assert!(validate_template_placement(&template("pod"), Some("host"), true).is_err());
+        assert!(validate_requested_placement(Some("pod"), false).is_err());
+        assert!(validate_requested_placement(Some("sidecar"), true).is_err());
+    }
+
+    #[test]
+    fn engine_template_list_contains_name_agent_and_backend_placement() {
+        let template = template("pod");
+        let row = vogt_engine_contract::SessionTemplateSummary {
+            name: template.name.clone(),
+            agent: None,
+            placement: template.backend.clone(),
+        };
+        assert_eq!(row.name, "pod-agent");
+        assert_eq!(row.placement, "pod");
+        assert!(row.agent.is_none());
     }
 
     #[test]

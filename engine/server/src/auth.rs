@@ -728,6 +728,21 @@ fn refusal(
 mod tests {
     use super::*;
 
+    #[test]
+    fn every_llm_provider_route_requires_admin_capability() {
+        for (method, path) in [
+            (Method::GET, "/api/llm-providers"),
+            (Method::POST, "/api/llm-providers/set"),
+            (Method::POST, "/api/llm-providers/remove"),
+        ] {
+            assert_eq!(
+                required_capability(&method, path),
+                Some(TokenCapability::AgentClisWrite),
+                "{method} {path} must be admin-gated"
+            );
+        }
+    }
+
     fn scopes(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| s.to_string()).collect()
     }
