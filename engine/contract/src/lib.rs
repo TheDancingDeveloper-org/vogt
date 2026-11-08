@@ -214,7 +214,8 @@ pub struct SessionSpec {
 pub struct SessionTemplateSummary {
     pub name: String,
     pub agent: Option<String>,
-    pub placement: String,
+    pub placements: Vec<String>,
+    pub default_placement: String,
 }
 
 /// Where a session's own git worktree comes from (WI-1298).
