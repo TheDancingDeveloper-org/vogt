@@ -383,6 +383,7 @@ fn fake_agent_template() -> SessionTemplate {
         tags: vec!["agent".to_string(), "test".to_string()],
         account: None,
         backend: "local".to_string(),
+        host_capable: false,
     }
 }
 
@@ -10647,6 +10648,7 @@ fn conversation_sandbox() -> (tempfile::TempDir, Config, std::path::PathBuf) {
         tags: vec!["claude".to_string()],
         account: None,
         backend: "local".to_string(),
+        host_capable: false,
     });
     (tmp, cfg, stub)
 }
@@ -17274,6 +17276,7 @@ async fn session_template_list_uses_the_real_engine_route_and_summary() {
         cwd: None,
         env: vec![],
         backend: "pod".into(),
+        host_capable: false,
         account: None,
         default_name: None,
         match_repo_names: vec![],
@@ -17295,7 +17298,8 @@ async fn session_template_list_uses_the_real_engine_route_and_summary() {
         vec![json!({
             "name": "Pod Claude",
             "agent": "claude",
-            "placement": "pod"
+            "placements": ["pod"],
+            "default_placement": "pod"
         })]
     );
 }
@@ -17471,6 +17475,7 @@ mod pod_stream {
                 match_path_prefixes: Vec::new(),
                 tags: Vec::new(),
                 backend: "pod".into(),
+                host_capable: false,
             }]
         });
         let (base, state, guard) = boot_with_state(cfg).await;
@@ -17698,6 +17703,7 @@ mod pod_stream {
             match_path_prefixes: Vec::new(),
             tags: Vec::new(),
             backend: backend.into(),
+            host_capable: false,
         };
         let mut h = harness_cfg(
             false,
@@ -17941,6 +17947,7 @@ mod pod_stream {
             match_path_prefixes: Vec::new(),
             tags: Vec::new(),
             backend: "pod".into(),
+            host_capable: false,
         };
         let dir = acct.clone();
         let mut h = harness_cfg(false, Some(vec![claude]), move |cfg| {
@@ -19341,6 +19348,7 @@ mod pod_stream {
             match_path_prefixes: Vec::new(),
             tags: Vec::new(),
             backend: "pod".into(),
+            host_capable: false,
         }];
         let (base, state, guard) = boot_with_state(cfg).await;
         let (tx, created) = tokio::sync::mpsc::unbounded_channel();
