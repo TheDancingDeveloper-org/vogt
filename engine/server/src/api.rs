@@ -34,9 +34,14 @@ pub struct LlmProviderRemoveRequest {
 
 pub async fn llm_providers(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::Value>> {
     let path = state.config.llm_providers_file.as_deref();
-    let manifest = live_manifest(&state)?;
-    let providers = crate::llm_providers::statuses(path, &manifest)
-        .map_err(crate::error::ApiError::Internal)?;
+    let manifest = live_manifest(&state).map_err(|error| {
+        tracing::error!(%error, "failed to compose LLM provider manifest");
+        error
+    })?;
+    let providers = crate::llm_providers::statuses(path, &manifest).map_err(|error| {
+        tracing::error!(%error, "failed to read LLM provider registry");
+        crate::error::ApiError::Internal(error)
+    })?;
     Ok(Json(serde_json::json!({"providers": providers})))
 }
 
@@ -59,7 +64,10 @@ pub async fn llm_provider_set(
     let _guard = crate::llm_providers::registry_lock()
         .lock()
         .map_err(|_| crate::error::ApiError::Internal("provider registry lock poisoned".into()))?;
-    let manifest = live_manifest(&state)?;
+    let manifest = live_manifest(&state).map_err(|error| {
+        tracing::error!(%error, "failed to compose LLM provider manifest");
+        error
+    })?;
     crate::llm_providers::validate_provider_env_key(&provider)
         .map_err(crate::error::ApiError::BadRequest)?;
     crate::llm_providers::validate_against_manifest(&provider, &manifest)
@@ -74,12 +82,25 @@ pub async fn llm_provider_set(
     providers.retain(|p| p.name != provider.name);
     providers.push(provider.clone());
     crate::llm_providers::validate_all(&providers).map_err(crate::error::ApiError::BadRequest)?;
-    crate::llm_providers::write(path, &providers).map_err(crate::error::ApiError::Internal)?;
-    let status = crate::llm_providers::statuses(Some(path), &live_manifest(&state)?)
-        .map_err(crate::error::ApiError::Internal)?
+    crate::llm_providers::write(path, &providers).map_err(|error| {
+        tracing::error!(%error, "failed to write LLM provider registry");
+        crate::error::ApiError::Internal(error)
+    })?;
+    let status = crate::llm_providers::statuses(Some(path), &live_manifest(&state).map_err(|error| {
+        tracing::error!(%error, "failed to compose LLM provider manifest after update");
+        error
+    })?)
+        .map_err(|error| {
+            tracing::error!(%error, "failed to read LLM provider status after update");
+            crate::error::ApiError::Internal(error)
+        })?
         .into_iter()
         .find(|s| s.provider.name == provider.name)
-        .unwrap();
+        .ok_or_else(|| {
+            let error = format!("updated provider {} was missing from registry status", provider.name);
+            tracing::error!(%error, provider = %provider.name, "LLM provider status missing after update");
+            crate::error::ApiError::Internal(error)
+        })?;
     Ok(Json(serde_json::json!({"provider": status})))
 }
 
