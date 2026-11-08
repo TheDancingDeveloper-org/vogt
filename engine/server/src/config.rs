@@ -87,6 +87,8 @@ pub struct SessionTemplate {
     pub backend: String,
     /// Built-in templates retain host support when their default is moved to
     /// the pod backend. Custom templates remain constrained by `backend`.
+    /// Configuration may set this for a custom template as well; built-in
+    /// templates derive it when their default backend is moved to pods.
     #[serde(default)]
     pub host_capable: bool,
 }

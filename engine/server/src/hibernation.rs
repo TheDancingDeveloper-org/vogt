@@ -58,6 +58,11 @@ pub struct Record {
     pub created_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template: Option<String>,
+    /// The requested placement from the first start. An explicit placement
+    /// must survive hibernation so a wake does not silently move the session
+    /// to the template's current default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<String>,
     /// The command as the template expanded it, before the engine added
     /// model, resume, session-id or brief arguments: a wake adds its own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -217,6 +222,7 @@ impl Record {
             name,
             created_at,
             template: None,
+            placement: None,
             command: None,
             cwd: None,
             env: Vec::new(),
