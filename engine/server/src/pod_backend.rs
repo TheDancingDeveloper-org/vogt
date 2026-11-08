@@ -21,9 +21,9 @@ use kube::{
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use uuid::Uuid;
-use vogt_engine_contract::source::SourceDescriptor;
 #[cfg(test)]
-use vogt_engine_contract::source::{LandingMode, SourceLocation};
+use vogt_engine_contract::source::LandingMode;
+use vogt_engine_contract::source::{SourceDescriptor, SourceLocation};
 
 /// What one session template changes about its pod. An unset field keeps the
 /// deployment default; a set resource map is merged over the default map key
@@ -382,6 +382,37 @@ pub fn sanitize_engine_id(raw: &str) -> String {
         default_engine_id()
     } else {
         kept.to_string()
+    }
+}
+
+/// Make a project identity safe to use as a Kubernetes label value (at most
+/// 63 characters of `[A-Za-z0-9._-]`, starting and ending alphanumeric).
+/// Repository identities may contain URL punctuation, so replace anything
+/// outside the label alphabet rather than passing it through to the API.
+pub fn sanitize_project_label(raw: &str) -> String {
+    let kept: String = raw
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .take(63)
+        .collect();
+    let kept = kept.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+    if kept.is_empty() {
+        "project".into()
+    } else {
+        kept.to_string()
+    }
+}
+
+fn source_url(source: &SourceDescriptor) -> &str {
+    match &source.location {
+        SourceLocation::Git { url, .. } => url,
+        SourceLocation::Graft { endpoint, .. } => endpoint,
     }
 }
 /// The label selector for the pods this engine owns.
@@ -1023,7 +1054,10 @@ pub fn pod_template(
     let mut labels = BTreeMap::from([
         ("vogt.session".into(), id.to_string()),
         ("vogt.kind".into(), kind.into()),
-        ("vogt.project".into(), source.location.repo().into()),
+        (
+            "vogt.project".into(),
+            sanitize_project_label(source.location.repo()),
+        ),
         (ENGINE_LABEL.into(), cfg.engine_id.clone()),
     ]);
     if let Some(account) = account {
@@ -1200,6 +1234,10 @@ pub fn pod_template(
             name: Some(pod_name(id)),
             namespace: Some(cfg.namespace.clone()),
             labels: Some(labels),
+            annotations: Some(BTreeMap::from([(
+                "vogt.project-url".into(),
+                source_url(source).into(),
+            )])),
             ..Default::default()
         },
         spec: Some(PodSpec {
@@ -2107,6 +2145,75 @@ mod tests {
         );
         assert_eq!(secret.default_mode, Some(0o400));
         assert_eq!(secret.optional, Some(false));
+    }
+
+    #[test]
+    fn project_label_is_kubernetes_safe_and_url_is_an_annotation() {
+        let raw = "https://github.com/TheDancingDeveloper-org/vogt";
+        let safe = sanitize_project_label(raw);
+        assert!(safe.len() <= 63);
+        assert!(safe
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')));
+        assert!(safe.chars().next().unwrap().is_ascii_alphanumeric());
+        assert!(safe.chars().last().unwrap().is_ascii_alphanumeric());
+
+        let pod = pod_template(
+            &PodConfig::default(),
+            &SessionTemplate {
+                name: "pod".into(),
+                description: "pod".into(),
+                command: None,
+                cwd: None,
+                env: vec![],
+                default_name: None,
+                match_repo_names: vec![],
+                match_path_prefixes: vec![],
+                tags: vec![],
+                backend: "pod".into(),
+                account: None,
+            },
+            Uuid::nil(),
+            &SourceDescriptor {
+                location: SourceLocation::Git {
+                    url: raw.into(),
+                    repo: raw.into(),
+                },
+                reference: "main".into(),
+                landing: LandingMode::PushBranch,
+            },
+            &[],
+            "session",
+            None,
+            &[],
+        );
+        let metadata = pod.metadata;
+        let labels = metadata.labels.unwrap();
+        assert_eq!(labels["vogt.project"], safe);
+        assert!(labels.values().all(|value| {
+            value.len() <= 63
+                && value
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+                && value
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_alphanumeric())
+                && value
+                    .chars()
+                    .last()
+                    .is_some_and(|c| c.is_ascii_alphanumeric())
+        }));
+        assert_eq!(metadata.annotations.unwrap()["vogt.project-url"], raw);
+    }
+
+    #[test]
+    fn project_label_sanitizing_handles_long_and_odd_inputs() {
+        assert_eq!(sanitize_project_label("---...___"), "project");
+        let safe = sanitize_project_label(&"a".repeat(100));
+        assert_eq!(safe.len(), 63);
+        assert_eq!(safe, "a".repeat(63));
+        assert_eq!(sanitize_project_label("org/repo.git"), "org-repo.git");
     }
 
     #[test]
