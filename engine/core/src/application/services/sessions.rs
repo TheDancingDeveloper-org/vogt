@@ -98,6 +98,9 @@ pub fn stop_session_op(built: &Built, params: Value) -> Result<Value, VogtError>
 pub fn list_sessions_op(built: &Built, params: Value) -> Result<Value, VogtError> {
     dispatch!(built, list_sessions_json, params)
 }
+pub fn list_session_templates_op(built: &Built, params: Value) -> Result<Value, VogtError> {
+    dispatch!(built, list_session_templates_json, params)
+}
 pub fn sweep_sessions_op(built: &Built, params: Value) -> Result<Value, VogtError> {
     dispatch!(built, sweep_sessions_json, params)
 }
@@ -140,6 +143,7 @@ where
             work_item: optional_string(&params, "work_item")?,
             name: optional_string(&params, "name")?,
             template: optional_string(&params, "template")?,
+            placement: optional_string(&params, "placement")?,
             task: optional_string(&params, "task")?,
             reason: require_string(&params, "reason")?,
             model: optional_string(&params, "model")?,
@@ -167,6 +171,31 @@ where
                 .collect(),
         };
     Ok(serde_json::to_value(start_session(ctx, &parsed)?).expect("a session result serialises"))
+}
+
+fn list_session_templates_json<C, I>(
+    ctx: &AppContext<C, I>,
+    params: Value,
+) -> Result<Value, VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    if !params.is_object() {
+        return Err(VogtError::InvalidRequest(
+            "parameters must be an object".into(),
+        ));
+    }
+    let Some(engine) = ctx.engine.as_ref() else {
+        return Ok(
+            json!({"templates": [], "engine": "no session engine is configured (VOGT_ENGINE_URL is unset)"}),
+        );
+    };
+    match engine.list_session_templates() {
+        Ok(templates) => Ok(json!({"templates": templates})),
+        Err(VogtError::EngineUnavailable(error)) => Ok(json!({"templates": [], "engine": error})),
+        Err(error) => Err(error),
+    }
 }
 
 fn stop_session_json<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
@@ -443,6 +472,7 @@ pub struct StartSessionParams {
     pub work_item: Option<String>,
     pub name: Option<String>,
     pub template: Option<String>,
+    pub placement: Option<String>,
     pub task: Option<String>,
     pub reason: String,
     pub model: Option<String>,
@@ -3418,6 +3448,7 @@ where
     });
     let mut spec = CreateSession::new(subject.name.clone(), subject.cwd.clone());
     spec.template = params.template.clone();
+    spec.placement = params.placement.clone();
     spec.model = params.model.clone();
     spec.effort = params.effort.clone();
     spec.resume = params.resume.clone();
