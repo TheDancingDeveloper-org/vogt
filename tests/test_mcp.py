@@ -69,3 +69,9 @@ def test_calling_a_tool_returns_plain_data(surface: McpSurface) -> None:
 def test_calling_an_unknown_tool_is_an_error(surface: McpSurface) -> None:
     with pytest.raises(RegistryError, match="unknown MCP tool"):
         surface.call_tool("nope")
+
+
+def test_llm_provider_tools_require_admin_scope(surface: McpSurface) -> None:
+    tools = {tool.name: tool for tool in surface.list_tools()}
+    for name in ("llm_provider_list", "llm_provider_set", "llm_provider_remove"):
+        assert tools[name].scope == "admin"

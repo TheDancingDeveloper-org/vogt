@@ -19,6 +19,36 @@ def test_init_then_status_reports_revision_zero(context: AppContext) -> None:
     assert json.loads(result.stdout)["revision"] == 0
 
 
+def test_llm_provider_cli_commands_are_admin_scoped() -> None:
+    from vogt.registry import default_registry
+
+    registry = default_registry()
+    for name in ("llm_provider.list", "llm_provider.set", "llm_provider.remove"):
+        assert registry.get(name).scope == "admin"
+
+
+def test_non_admin_cli_caller_is_refused_for_llm_provider_operations(
+    instance: AppContext,
+) -> None:
+    from vogt.application.services.auth import Authenticated, Forbidden, authorize
+    from vogt.core.auth import Grant
+
+    caller = Authenticated(
+        principal=instance.principal,
+        grant=Grant(scopes=frozenset({"read"})),
+    )
+    for name in ("llm_provider.list", "llm_provider.set", "llm_provider.remove"):
+        with pytest.raises(Forbidden):
+            authorize(
+                instance,
+                caller,
+                operation=name,
+                scope="admin",
+                mutating=name != "llm_provider.list",
+                transport="cli",
+            )
+
+
 def test_registering_a_project_needs_a_reason(instance: AppContext) -> None:
     result = run(
         ["project", "register", "--name", "X", "--root-path", "/srv/x"],

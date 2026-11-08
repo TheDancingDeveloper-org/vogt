@@ -631,6 +631,7 @@ where
         work_item: None,
         name: (!row.name.is_empty()).then(|| row.name.clone()),
         template: link.template.clone(),
+        placement: None,
         task: Some(seed_task(&row.id, path)),
         reason: REASON.to_string(),
         model: link.model.clone(),

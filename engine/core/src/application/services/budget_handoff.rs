@@ -244,6 +244,7 @@ fn restart_params(
         work_item: None,
         name: None,
         template: link.template.clone(),
+        placement: None,
         task: Some(task),
         reason: format!("{REASON} ({n} of {cap})"),
         model: link.model.clone(),
