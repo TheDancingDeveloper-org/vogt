@@ -407,6 +407,11 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         .route("/api/agent-clis", get(agent_clis::list))
         .route("/api/agent-clis/{tool}", post(agent_clis::update))
         .route(
+            "/api/llm-providers",
+            get(api::llm_providers).post(api::llm_provider_set),
+        )
+        .route("/api/llm-providers/remove", post(api::llm_provider_remove))
+        .route(
             "/api/files",
             get(files::read_file)
                 .put(files::write_file)

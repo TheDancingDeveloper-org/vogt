@@ -147,6 +147,9 @@ pub const DERIVED: &[&str] = &[
     "session.report_unblocked",
     "agent_cli.list",
     "agent_cli.update",
+    "llm_provider.list",
+    "llm_provider.set",
+    "llm_provider.remove",
     "agent_activity.search",
     "agent_activity.summary",
     "session.history_list",
@@ -844,6 +847,21 @@ pub fn derived_schemas() -> Vec<(&'static str, serde_json::Value, serde_json::Va
             schema_of::<session_ops::AgentCliUpdateResult>(),
         ),
         (
+            "llm_provider.list",
+            schema_of::<LlmProviderParams>(),
+            schema_of::<LlmProviderListResult>(),
+        ),
+        (
+            "llm_provider.set",
+            schema_of::<LlmProviderSetParams>(),
+            schema_of::<LlmProviderSetResult>(),
+        ),
+        (
+            "llm_provider.remove",
+            schema_of::<LlmProviderRemoveParams>(),
+            schema_of::<LlmProviderRemoveResult>(),
+        ),
+        (
             "agent_activity.search",
             schema_of::<session_ops::AgentActivitySearchParams>(),
             schema_of::<session_ops::AgentActivitySearchResult>(),
@@ -1205,6 +1223,87 @@ fn not_configured() -> String {
 #[serde(deny_unknown_fields)]
 #[schemars(extend("properties" = {}))]
 pub struct InitParams {}
+
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
+#[schemars(schema_with = "empty_object")]
+pub struct LlmProviderParams {}
+
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
+#[schemars(deny_unknown_fields)]
+pub struct LlmProviderSetParams {
+    pub name: String,
+    pub base_url: String,
+    #[serde(default = "default_chat")]
+    #[schemars(schema_with = "wire_api_schema")]
+    pub wire_api: String,
+    pub env_key: String,
+    pub secret_project: String,
+    pub secret_name: String,
+    #[serde(default)]
+    #[schemars(default, extend("x-keep-default" = true))]
+    pub models: Vec<String>,
+    #[schemars(length(min = 1))]
+    pub reason: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
+#[schemars(deny_unknown_fields)]
+pub struct LlmProviderRemoveParams {
+    pub name: String,
+    #[schemars(length(min = 1))]
+    pub reason: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
+#[schemars(deny_unknown_fields)]
+pub struct LlmProviderRow {
+    pub name: String,
+    pub base_url: String,
+    pub wire_api: String,
+    pub env_key: String,
+    pub secret_project: String,
+    pub secret_name: String,
+    #[serde(default)]
+    #[schemars(default, extend("x-keep-default" = true))]
+    pub models: Vec<String>,
+    pub state: String,
+    #[serde(default)]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
+#[schemars(deny_unknown_fields)]
+pub struct LlmProviderListResult {
+    #[schemars(default, extend("x-keep-default" = true))]
+    pub providers: Vec<LlmProviderRow>,
+    #[serde(default)]
+    pub engine: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
+#[schemars(deny_unknown_fields)]
+pub struct LlmProviderSetResult {
+    pub provider: LlmProviderRow,
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
+#[schemars(deny_unknown_fields)]
+pub struct LlmProviderRemoveResult {
+    pub name: String,
+    pub removed: bool,
+}
+
+fn default_chat() -> String {
+    "chat".to_string()
+}
+
+fn empty_object(_: &mut SchemaGenerator) -> Schema {
+    json_schema!({"additionalProperties": false, "properties": {}, "type": "object"})
+}
+
+fn wire_api_schema(_: &mut SchemaGenerator) -> Schema {
+    json_schema!({"default": "chat", "enum": ["chat", "responses"], "type": "string"})
+}
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
