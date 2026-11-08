@@ -789,11 +789,34 @@ impl SessionRegistry {
                 .filter(|t| !t.is_empty())
             {
                 let template = self.resolve_template(name)?;
+                if let Some(placement) = spec.placement.as_deref() {
+                    let requested = match placement {
+                        "host" => "local",
+                        "pod" => {
+                            if !self.cfg.pod_backends_enabled {
+                                return Err(ApiError::BadRequest(
+                                    "requested placement \"pod\" is not available: pod backends are disabled"
+                                        .into(),
+                                ));
+                            }
+                            "pod"
+                        }
+                        other => {
+                            return Err(ApiError::BadRequest(format!(
+                                "invalid placement {other:?}; expected \"host\" or \"pod\""
+                            )))
+                        }
+                    };
+                    let _ = (template, requested);
+                }
                 if spec.account.is_none() {
                     spec.account = template.account.clone();
                 }
                 spec.command = template.command.clone();
-                if template.backend != "local" && !self.cfg.pod_backends_enabled {
+                if template.backend != "local"
+                    && !self.cfg.pod_backends_enabled
+                    && spec.placement.as_deref() != Some("host")
+                {
                     return Err(ApiError::BadRequest(format!(
                         "session backend {:?} is not implemented",
                         template.backend
@@ -805,6 +828,23 @@ impl SessionRegistry {
                         env.extend(existing);
                     }
                     spec.env = Some(env);
+                }
+            }
+        }
+        if let Some(placement) = spec.placement.as_deref() {
+            match placement {
+                "host" => {}
+                "pod" if self.cfg.pod_backends_enabled => {}
+                "pod" => {
+                    return Err(ApiError::BadRequest(
+                        "requested placement \"pod\" is not available: pod backends are disabled"
+                            .into(),
+                    ))
+                }
+                other => {
+                    return Err(ApiError::BadRequest(format!(
+                        "invalid placement {other:?}; expected \"host\" or \"pod\""
+                    )))
                 }
             }
         }
@@ -1363,7 +1403,8 @@ impl SessionRegistry {
                     .map(str::trim)
                     .filter(|t| !t.is_empty())
                     .and_then(|name| self.resolve_template(name).ok())
-                    .filter(|t| t.backend != "local")
+                    .filter(|t| spec.placement.as_deref() == Some("pod") || t.backend != "local")
+                    .filter(|_| spec.placement.as_deref() != Some("host"))
             })
             .flatten();
         let spawned = if let Some(template) = pod_template {
@@ -2348,6 +2389,7 @@ impl SessionRegistry {
             name: record.name.clone(),
             command,
             template,
+            placement: None,
             // A record from before the line above names the default
             // directory itself; that too means "the default".
             cwd: record
@@ -2896,6 +2938,21 @@ impl SessionRegistry {
     /// name is refused with the configured names, never started as a shell.
     fn resolve_template(&self, name: &str) -> Result<&crate::config::SessionTemplate> {
         resolve_template_in(&self.cfg.session_templates, name)
+    }
+
+    pub fn template_summaries(&self) -> Vec<vogt_engine_contract::SessionTemplateSummary> {
+        self.cfg
+            .session_templates
+            .iter()
+            .map(|template| vogt_engine_contract::SessionTemplateSummary {
+                name: template.name.clone(),
+                agent: template
+                    .command
+                    .as_deref()
+                    .and_then(crate::agent_cli::agent_name),
+                placement: template.backend.clone(),
+            })
+            .collect()
     }
 
     pub fn rename(&self, id: Uuid, new_name: String) -> Result<()> {
