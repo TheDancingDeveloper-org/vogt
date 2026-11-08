@@ -96,18 +96,10 @@ ARG POD_BASE_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-pod-base:lean
 ARG VOGT_SOURCE_REF=local
 ARG VOGT_SOURCE_SHA=0000000000000000000000000000000000000000
 ARG VOGT_PRODUCT_VERSION=local/dev
-# Off by default (prod). `.github/workflows/build.yml` passes
-# INSTALL_AI_CLIENTS=true when the ref is the `dev` branch — the branch that
-# also produces the `:dev` and `dev-<sha>` tags — to bake in codex + claude
-# for pre-prod trial. See AGENTS.md "Codex and Claude are deliberately not
-# installed by container bootstrap" for why prod stays opt-in/user-managed
-# for these two specifically.
-#
-# This comment used to name `.woodpecker/server.yml build-and-push-dev`. That
-# pipeline was retired in the move to Actions and nothing took over the build
-# arg, so the default stood and `vogt-dev` shipped with neither client.
-# A default is only safe while something is documented to override it — and
-# the something has to exist.
+# Off by default (prod). The published stack bake passes
+# INSTALL_AI_CLIENTS=true so dev images carry the pinned agent CLIs, while
+# production builds remain opt-in/user-managed. See AGENTS.md "Codex and
+# Claude are deliberately not installed by container bootstrap".
 ARG INSTALL_AI_CLIENTS=false
 # Flutter is dev-only, and is now the thing that separates the two published
 # variants of the pod base rather than a build arg here: `dev` is built
