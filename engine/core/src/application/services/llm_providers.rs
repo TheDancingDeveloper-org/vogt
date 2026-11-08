@@ -116,3 +116,78 @@ fn require(params: &Value, field: &str) -> Result<String, VogtError> {
         .map(str::to_owned)
         .ok_or_else(|| VogtError::InvalidRequest(format!("{field} is required")))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{remove_op, set_op};
+    use crate::application::context::Built;
+    use crate::application::services::sessions_test::{opened, script_with};
+    use crate::core::Moment;
+    use crate::storage::interface::{AuditQuery, DeclaredStore, ReadView};
+    use serde_json::json;
+    use std::sync::Arc;
+
+    #[test]
+    fn provider_writes_are_audited_and_published_with_the_caller_reason() {
+        let script = script_with(vec![
+            (200, r#"{"provider":{"name":"demo"}}"#.to_string()),
+            (200, r#"{"name":"demo","removed":true}"#.to_string()),
+        ]);
+        let built = opened(Some(Arc::clone(&script)));
+
+        set_op(
+            &built,
+            json!({
+                "name": "demo",
+                "base_url": "https://provider.example.test",
+                "env_key": "DEMO_KEY",
+                "secret_project": "project",
+                "secret_name": "key",
+                "reason": "register demo provider"
+            }),
+        )
+        .unwrap();
+        remove_op(
+            &built,
+            json!({"name":"demo", "reason":"retire demo provider"}),
+        )
+        .unwrap();
+
+        let Built::StepSequential(ctx) = &built else {
+            unreachable!()
+        };
+        let view = ctx.declared.read().unwrap();
+        let audits = view
+            .list_audit(&AuditQuery {
+                limit: 20,
+                offset: 0,
+                actor_id: None,
+                operation: None,
+                entity_id: None,
+                project_id: None,
+                since: Some(Moment::from_unix(0, 0)),
+                until: None,
+            })
+            .unwrap();
+        let provider_audits: Vec<_> = audits
+            .iter()
+            .filter(|audit| audit.entity_kind == "llm_provider")
+            .collect();
+        assert_eq!(provider_audits.len(), 2);
+        assert_eq!(provider_audits[0].operation, "llm_provider.remove");
+        assert_eq!(provider_audits[0].reason, "retire demo provider");
+        assert_eq!(provider_audits[1].operation, "llm_provider.set");
+        assert_eq!(provider_audits[1].reason, "register demo provider");
+
+        let events: Vec<_> = view
+            .list_events(0, 20, None)
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.entity_kind == "llm_provider")
+            .collect();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].kind, "llm_provider.updated");
+        assert_eq!(events[1].kind, "llm_provider.removed");
+        assert!(events.iter().all(|event| event.audit_id.is_some()));
+    }
+}
