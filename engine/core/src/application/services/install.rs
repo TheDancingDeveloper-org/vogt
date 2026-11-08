@@ -20,10 +20,10 @@ const INSTALL_BOOTSTRAPPED_EVENT: &str = "install.bootstrapped";
 const BOOTSTRAP_SCOPES: &[&str] = &["admin"];
 
 const API_WARNING: &str = "This is the only time the secret is shown. It is not \
-    stored and cannot be recovered — losing it means issuing another over the \
-    loopback surface.";
+    stored and cannot be recovered — losing it means issuing another with \
+    `vogt-core token issue` in the container.";
 const SESSION_WARNING: &str = "This is a browser session; sign in again with your \
-    password when it expires. API tokens for agents come from `vogt token issue`.";
+    password when it expires. API tokens for agents come from `vogt-core token issue`.";
 
 type SqliteWrite<'a, C, I> = WriteContext<'a, C, I, SqliteDeclaredStore<C, I>>;
 
@@ -66,8 +66,8 @@ fn install_bootstrap<C: Clock + 'static, I: IdFactory + 'static>(
     if !ctx.config.install_bootstrap_enabled {
         return Err(VogtError::InstallClosed(
             "install mode is disabled on this instance (install_bootstrap_enabled=false): \
-             create the first operator in the container with `vogt user create --scopes admin`, \
-             not over this endpoint."
+             create the first operator in the container with `vogt-core user create --scopes admin \
+             --password-stdin`, not over this endpoint."
                 .to_string(),
         ));
     }
@@ -156,7 +156,7 @@ fn bootstrap_recorded<C: Clock + 'static, I: IdFactory + 'static>(
             if txn.install_closed()? {
                 return Err(VogtError::InstallClosed(
                     "install mode is closed: this instance already has an operator. Sign in, \
-                     or create another login over the loopback surface with `vogt user create`."
+                     or create another login in the container with `vogt-core user create`."
                         .to_string(),
                 ));
             }
@@ -354,8 +354,8 @@ mod tests {
                 &refused,
                 VogtError::InstallClosed(message)
                     if message == "install mode is closed: this instance already has an operator. \
-                        Sign in, or create another login over the loopback surface with \
-                        `vogt user create`."
+                        Sign in, or create another login in the container with \
+                        `vogt-core user create`."
             ),
             "{refused}"
         );
@@ -396,7 +396,8 @@ mod tests {
                 VogtError::InstallClosed(message)
                     if message == "install mode is disabled on this instance \
                         (install_bootstrap_enabled=false): create the first operator in the \
-                        container with `vogt user create --scopes admin`, not over this endpoint."
+                        container with `vogt-core user create --scopes admin --password-stdin`, \
+                        not over this endpoint."
             ),
             "{refused}"
         );
@@ -435,6 +436,76 @@ mod tests {
             install_status_op(&built, json!({})).unwrap()["install_mode"],
             false
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// WI-3620: a token-only bootstrap closes the door with no person holding a
+    /// password. The local operator surface still recovers sign-in: create an
+    /// admin login, reset its password, issue a fresh token, and every step is
+    /// audited against the local principal.
+    #[test]
+    fn a_token_only_bootstrap_still_leaves_a_recovery_path() {
+        use crate::application::services::auth::{
+            create_user_op, issue_token_op, login_op, set_password_op,
+        };
+        let (dir, built) = fresh("recover");
+        install_bootstrap_op(
+            &built,
+            json!({"display_name": "Smoke", "token_name": "smoke"}),
+        )
+        .unwrap();
+        assert_eq!(
+            install_status_op(&built, json!({})).unwrap()["install_mode"],
+            false
+        );
+        let refused = install_bootstrap_op(
+            &built,
+            json!({"display_name": "Ada", "password": "a long passphrase"}),
+        )
+        .unwrap_err();
+        assert!(
+            refused.message().contains("vogt-core user create"),
+            "{refused}"
+        );
+
+        let created = create_user_op(
+            &built,
+            json!({"username": "ada", "scopes": "admin", "password": "first passphrase", "reason": "recover sign-in"}),
+        )
+        .unwrap();
+        assert_eq!(created["user"]["scopes"], json!(["admin"]));
+        set_password_op(
+            &built,
+            json!({"username": "ada", "password": "second passphrase", "reason": "reset"}),
+        )
+        .unwrap();
+        assert!(login_op(
+            &built,
+            json!({"username": "ada", "password": "first passphrase"})
+        )
+        .is_err());
+        let session = login_op(
+            &built,
+            json!({"username": "ada", "password": "second passphrase"}),
+        )
+        .unwrap();
+        assert!(session["secret"].as_str().unwrap().starts_with("vogt_"));
+        let issued = issue_token_op(
+            &built,
+            json!({"actor": "human:ada", "name": "recovered", "scopes": "admin", "reason": "recover api access"}),
+        )
+        .unwrap();
+        assert!(issued["secret"].as_str().unwrap().starts_with("vogt_"));
+
+        let audited = audit_pairs(&built);
+        for expected in ["user.create", "user.set_password", "token.issue"] {
+            assert!(
+                audited
+                    .iter()
+                    .any(|(operation, actor)| operation == expected && actor.starts_with("local:")),
+                "{audited:?}"
+            );
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
