@@ -5621,7 +5621,8 @@ class SessionListResult(Result):
 class SessionTemplateRow(Result):
     name: str
     agent: str | None = None
-    placement: str
+    placements: list[str] = Field(default_factory=list)
+    default_placement: str
 
 
 class SessionTemplateListResult(Result):
