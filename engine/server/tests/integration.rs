@@ -17115,6 +17115,142 @@ async fn a_registered_llm_provider_reaches_the_next_codex_launch_and_leaves_with
     live_output_containing(&client, &base, &without, &["providers=[] key=[]"]).await;
 }
 
+fn provider_request(name: &str, env_key: &str) -> Value {
+    json!({
+        "name": name,
+        "base_url": "https://provider.example.test/v1",
+        "wire_api": "chat",
+        "env_key": env_key,
+        "secret_project": "approved-project",
+        "secret_name": "PROVIDER_KEY",
+        "models": ["test-model"]
+    })
+}
+
+#[tokio::test]
+async fn llm_provider_handlers_write_and_remove_the_registry() {
+    let tmp = tempfile::tempdir().unwrap();
+    let registry = tmp.path().join("llm-providers.toml");
+    let mut cfg = test_config();
+    cfg.llm_providers_file = Some(registry.clone());
+    cfg.agent_auth_secrets = vogt_engine_server::secret_broker::parse_manifest(
+        "PROVIDER_KEY approved-project PROVIDER_KEY ondemand",
+    )
+    .unwrap();
+    let (base, _state, _guard) = boot_with_state(cfg).await;
+    let client = reqwest::Client::new();
+
+    let response = client
+        .post(format!("{base}/api/llm-providers"))
+        .headers(auth())
+        .json(&provider_request("test-provider", "TEST_PROVIDER_KEY"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let written = std::fs::read_to_string(&registry).unwrap();
+    assert!(written.contains("test-provider"));
+    assert!(written.contains("TEST_PROVIDER_KEY"));
+
+    let response = client
+        .post(format!("{base}/api/llm-providers/remove"))
+        .headers(auth())
+        .json(&json!({"name": "test-provider"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(!std::fs::read_to_string(&registry)
+        .unwrap()
+        .contains("test-provider"));
+}
+
+#[tokio::test]
+async fn llm_provider_handler_refuses_reserved_names_and_manifest_collisions() {
+    let tmp = tempfile::tempdir().unwrap();
+    let registry = tmp.path().join("llm-providers.toml");
+    let mut cfg = test_config();
+    cfg.llm_providers_file = Some(registry.clone());
+    cfg.agent_auth_secrets = vogt_engine_server::secret_broker::parse_manifest(
+        "MANIFEST_KEY approved-project PROVIDER_KEY ondemand",
+    )
+    .unwrap();
+    let (base, _state, _guard) = boot_with_state(cfg).await;
+    let client = reqwest::Client::new();
+
+    for request in [
+        provider_request("reserved", "HOME"),
+        provider_request("collision", "MANIFEST_KEY"),
+    ] {
+        let response = client
+            .post(format!("{base}/api/llm-providers"))
+            .headers(auth())
+            .json(&request)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+    assert!(!registry.exists());
+}
+
+#[tokio::test]
+async fn llm_provider_handlers_refuse_a_non_admin_identity() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cfg = test_config();
+    cfg.token = None;
+    cfg.vogt_core_url = Some(
+        stand_in_core_knowing(vec![(TEST_TOKEN, "agent:provider-test", vec!["sessions"])]).await,
+    );
+    cfg.vogt_core_token = Some("stack-secret-provider-test".to_string());
+    cfg.llm_providers_file = Some(tmp.path().join("llm-providers.toml"));
+    let (base, _state, _guard) = boot_with_state(cfg).await;
+    let response = reqwest::Client::new()
+        .post(format!("{base}/api/llm-providers"))
+        .headers(auth())
+        .json(&provider_request("not-admin", "TEST_PROVIDER_KEY"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn session_template_list_uses_the_real_engine_route_and_summary() {
+    let mut cfg = test_config();
+    cfg.session_templates = vec![SessionTemplate {
+        name: "Pod Claude".into(),
+        description: String::new(),
+        command: Some(vec!["claude".into()]),
+        cwd: None,
+        env: vec![],
+        backend: "pod".into(),
+        account: None,
+        default_name: None,
+        match_repo_names: vec![],
+        match_path_prefixes: vec![],
+        tags: vec![],
+    }];
+    cfg.pod_backends_enabled = true;
+    let (base, _state, _guard) = boot_with_state(cfg).await;
+    let response = reqwest::Client::new()
+        .get(format!("{base}/api/session-templates"))
+        .headers(auth())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let rows: Vec<Value> = response.json().await.unwrap();
+    assert_eq!(
+        rows,
+        vec![json!({
+            "name": "Pod Claude",
+            "agent": "claude",
+            "placement": "pod"
+        })]
+    );
+}
+
 // ---- Pod-backed sessions: the engine side of the session-agent stream ------
 //
 // The test plays the in-pod vogt-session-agent: it receives the bootstrap
