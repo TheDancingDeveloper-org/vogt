@@ -29,6 +29,7 @@ pub mod forge_writeback;
 pub mod freshness;
 pub mod history;
 pub mod install;
+pub mod llm_providers;
 pub mod native_migration;
 pub mod work;
 
