@@ -32473,6 +32473,23 @@
             "description": "Session template to run, by name or by tag — the engine expands it against the deployment's templates. Use this to run an agent rather than a plain shell: `claude` (or `codex`, `opencode`, `klaudia`) starts that agent under the deployment's protected wrapper, so a request to *do* something in a session names one here. Omitted means a plain shell, which does nothing until typed into.",
             "title": "Template"
           },
+          "placement": {
+            "anyOf": [
+              {
+                "enum": [
+                  "host",
+                  "pod"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Where to run the session: `host` uses the engine host, `pod` uses its configured pod backend. Omitted uses the deployment's template/default placement; the requested placement must be available.",
+            "title": "Placement"
+          },
           "task": {
             "anyOf": [
               {
@@ -35729,6 +35746,93 @@
           }
         },
         "title": "SessionListResult",
+        "type": "object"
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "session.template_list",
+      "summary": "List configured session templates with their agent and placement.",
+      "scope": "read",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "GET",
+      "http_path": "/sessions/templates",
+      "mcp_tool": "session_template_list",
+      "cli_path": [
+        "session",
+        "template-list"
+      ],
+      "params_schema": {
+        "additionalProperties": false,
+        "properties": {},
+        "title": "StatusParams",
+        "type": "object"
+      },
+      "result_schema": {
+        "$defs": {
+          "SessionTemplateRow": {
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "title": "Name",
+                "type": "string"
+              },
+              "agent": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Agent"
+              },
+              "placement": {
+                "title": "Placement",
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "placement"
+            ],
+            "title": "SessionTemplateRow",
+            "type": "object"
+          }
+        },
+        "additionalProperties": false,
+        "properties": {
+          "templates": {
+            "default": [],
+            "items": {
+              "$ref": "#/$defs/SessionTemplateRow"
+            },
+            "title": "Templates",
+            "type": "array"
+          },
+          "engine": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Engine"
+          }
+        },
+        "title": "SessionTemplateListResult",
         "type": "object"
       },
       "transports": [
