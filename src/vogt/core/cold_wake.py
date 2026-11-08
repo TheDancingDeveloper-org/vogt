@@ -23,10 +23,10 @@ from vogt.core.entities import Comment
 
 #: The agent CLIs a compacted wake can start fresh under a new conversation
 #: id. opencode mints its own id and is not resumed by id, so it is left out.
-COMPACTABLE_AGENTS = frozenset({"claude", "klaudia", "codex"})
+COMPACTABLE_AGENTS = frozenset({"claude", "codex"})
 
 #: The agent CLI's default provider, when the model name does not say.
-_AGENT_PROVIDER = {"claude": "anthropic", "klaudia": "anthropic", "codex": "openai"}
+_AGENT_PROVIDER = {"claude": "anthropic", "codex": "openai"}
 
 #: Model-name fragments that name a provider, checked in order.
 _MODEL_PROVIDER = (

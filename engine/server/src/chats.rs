@@ -515,9 +515,10 @@ fn resolve_named(
     }
     if let Some(argv) = policy.command.clone() {
         // A named command is the whole answer: it either is this agent, or
-        // chats for this agent are off. Falling through would launch Klaudia
-        // (or Codex) under a command the operator set to something else.
-        if crate::agent_cli::agent_name(&argv).as_deref() == Some(agent) {
+        // chats for this agent are off. Falling through would launch the
+        // stream-json driver (or Codex) under a command the operator set to
+        // something else.
+        if runs_driver(&argv, agent) {
             return Some(Launch {
                 driver: driver_of(&argv),
                 argv,
@@ -529,7 +530,7 @@ fn resolve_named(
     if let Some(name) = policy.template.as_deref() {
         if let Ok(template) = crate::sessions::resolve_template_in(templates, name) {
             if let Some(argv) = template.command.clone() {
-                if crate::agent_cli::agent_name(&argv).as_deref() == Some(agent) {
+                if runs_driver(&argv, agent) {
                     return Some(Launch {
                         driver: driver_of(&argv),
                         argv,
@@ -542,9 +543,7 @@ fn resolve_named(
     let template = templates.iter().find(|t| {
         t.command
             .as_deref()
-            .and_then(crate::agent_cli::agent_name)
-            .as_deref()
-            == Some(agent)
+            .is_some_and(|argv| runs_driver(argv, agent))
     })?;
     let argv = template.command.clone()?;
     Some(Launch {
@@ -552,6 +551,22 @@ fn resolve_named(
         argv,
         template: Some(template.name.clone()),
     })
+}
+
+/// Whether `argv` runs the chat driver named `driver`.
+///
+/// An engine-known agent CLI matches by name. The stream-json driver is not a
+/// shipped agent CLI — no template runs it — so it matches an operator-named
+/// command whose binary carries the protocol's name instead.
+fn runs_driver(argv: &[String], driver: &str) -> bool {
+    if crate::agent_cli::agent_name(argv).as_deref() == Some(driver) {
+        return true;
+    }
+    driver_of(argv)
+        .first()
+        .and_then(|binary| std::path::Path::new(binary).file_name())
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name == driver)
 }
 
 /// Klaudia launch, unchanged for a Klaudia-only deployment.
@@ -1429,19 +1444,24 @@ impl ChatRuntime {
                 "a turn is still running; wait for it to finish, or stop it, then promote".into(),
             ));
         }
+        // Only Codex chats carry a conversation a session can resume. The
+        // stream-json driver has no resume flag, so promoting one would hand
+        // the session a launch it cannot continue.
+        if record.driver != CODEX_DRIVER {
+            return Err(ApiError::Conflict(format!(
+                "a {} chat cannot be continued in a session: its driver has no resume. \
+                 Use a Codex chat to promote one",
+                record.driver
+            )));
+        }
         // One writer per transcript: the chat's process goes before the
         // session resumes the same conversation.
         self.stop_process(id, Duration::from_secs(10)).await;
-        let codex = record.driver == CODEX_DRIVER;
-        let launch = if codex {
-            self.codex.as_ref().ok_or_else(|| {
-                ApiError::BadGateway(
-                    "the Codex driver is not configured, so this chat cannot be promoted".into(),
-                )
-            })?
-        } else {
-            &self.launch
-        };
+        let launch = self.codex.as_ref().ok_or_else(|| {
+            ApiError::BadGateway(
+                "the Codex driver is not configured, so this chat cannot be promoted".into(),
+            )
+        })?;
         let template = req
             .template
             .clone()

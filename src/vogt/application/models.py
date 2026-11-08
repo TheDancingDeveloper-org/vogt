@@ -1108,7 +1108,7 @@ class SessionRuntime(Result):
 
     agent: str | None = Field(
         default=None,
-        description="claude / codex / opencode / klaudia, from the command.",
+        description="claude / codex / opencode, from the command.",
     )
     model: str | None = None
     model_basis: str | None = Field(
@@ -4431,7 +4431,7 @@ class StartSessionParams(Params):
         description=(
             "Session template to run, by name or by tag — the engine expands "
             "it against the deployment's templates. Use this to run an agent "
-            "rather than a plain shell: `claude` (or `codex`, `opencode`, `klaudia`) "
+            "rather than a plain shell: `claude` (or `codex`, `opencode`) "
             "starts that agent under the deployment's protected wrapper, so "
             "a request to *do* something in a session names one here. "
             "Omitted means a plain shell, which does nothing until typed into."
@@ -4451,7 +4451,7 @@ class StartSessionParams(Params):
         description=(
             "What the session's agent should do, in the user's words. Folded "
             "into the brief as its Task section; an agent template (Claude "
-            "Code, Codex, OpenCode, Klaudia) is started with a first prompt telling it "
+            "Code, Codex, OpenCode) is started with a first prompt telling it "
             "to read the brief and carry that task out, so 'start a session "
             "on X and check its containers' opens an agent already checking "
             "them. A plain shell only gets the brief's path in "
@@ -4503,16 +4503,14 @@ class StartSessionParams(Params):
             "`accept_edits`: file edits auto-accepted, everything else asks. "
             "`bypass`: no permission checks at all, for one trusted task — "
             "only a person may grant it (an agent is refused), and it is "
-            "audited. Claude Code, Codex, opencode and Klaudia templates. "
+            "audited. Claude Code, Codex and opencode templates. "
             "Codex maps the same three postures: `default` is "
             "`-a on-request -s danger-full-access`; `accept_edits` adds "
             '`approvals_reviewer="auto_review"`; `bypass` is '
             "`--dangerously-bypass-approvals-and-sandbox` and stays "
             "people-only. A named Codex requirements file that is missing, "
             "empty or unreadable refuses the Codex launch (400) and does not "
-            "fall through to bypass. Klaudia takes `default` and `bypass` "
-            "only (its `acceptEdits` is an alias for its default autonomous "
-            "mode, so `accept_edits` is refused)."
+            "fall through to bypass."
         ),
     )
     account: str | None = Field(
@@ -4532,8 +4530,8 @@ class StartSessionParams(Params):
             "Continue a previous conversation of the template's agent CLI "
             "instead of starting a new one: its own conversation id, mapped "
             "to `claude --resume <id>`, `codex resume <id>`, `opencode "
-            "--session <id>` or `klaudia --resume <id>`. A Claude Code (or "
-            "Klaudia) session Vogt started fresh has the engine session id "
+            "--session <id>`. A Claude Code session Vogt started fresh has "
+            "the engine session id "
             "(`engine_session_id`) as its conversation "
             "id, so a session lost to a restart can be resumed by that. "
             "The engine starts a resumed conversation in the directory its "
@@ -6421,7 +6419,7 @@ class SessionEconomicsResult(Result):
     Read from the same transcript `session.last_reply` finds, whole rather
     than tailed. `context_tokens` is the latest turn's window, not a sum.
     `usage_measured` is true only when that number came from recorded usage
-    (Claude Code); Klaudia and Codex are estimated at four characters per
+    (Claude Code); an agent without usage is estimated at four characters per
     token. `cost_usd` stays null: this product has no price table, and a zero
     would say the session was free. `commits` and `files_changed` stay null
     until a worktree is measured; zero would say the tree was clean.

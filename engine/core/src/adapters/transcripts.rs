@@ -34,7 +34,7 @@ pub const MAX_ENTRIES: usize = 20_000;
 const EXCERPTS_MAX: usize = 512;
 
 /// Agents whose transcripts are Claude Code's JSONL.
-const CLAUDE_FORMAT: &[&str] = &["claude", "klaudia"];
+const CLAUDE_FORMAT: &[&str] = &["claude"];
 
 /// Where a session's conversation is written.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,9 +85,7 @@ fn expand_user(path: &Path) -> PathBuf {
 /// Which transcript formats to look in, most likely first.
 pub fn agent_of(command: Option<&str>, template: Option<&str>) -> Vec<&'static str> {
     let hint = format!("{} {}", command.unwrap_or(""), template.unwrap_or("")).to_lowercase();
-    if hint.contains("klaudia") {
-        vec!["klaudia"]
-    } else if hint.contains("codex") {
+    if hint.contains("codex") {
         vec!["codex"]
     } else if hint.contains("claude") {
         vec!["claude"]
@@ -1403,64 +1401,6 @@ mod tests {
             runtime(&found),
             (Some("gpt-5.6".to_string()), Some("high".to_string()))
         );
-        let _ = fs::remove_dir_all(&base);
-    }
-
-    #[test]
-    fn a_klaudia_session_is_read_from_its_own_root() {
-        let base = temp();
-        let claude_root = base.join("claude");
-        let klaudia_root = base.join("klaudia");
-        write_claude(
-            &claude_root,
-            ENGINE_ID,
-            &[claude_line("m", "the wrong agent")],
-        );
-        let directory = klaudia_root.join(claude_key(ROOT_CWD));
-        fs::create_dir_all(&directory).unwrap();
-        let body = [
-            serde_json::json!({"type": "user", "message": {"content": [{"type": "text", "text": "go"}]}}),
-            serde_json::json!({"type": "assistant", "timestamp": "2026-10-06T09:52:00Z", "message": {"role": "assistant", "content": [{"type": "text", "text": "Iteration one done."}]}}),
-            serde_json::json!({"type": "assistant", "timestamp": "2026-10-06T09:53:00Z", "message": {"role": "assistant", "content": [{"type": "text", "text": format!("Pushed with {}.", secret())}]}}),
-        ]
-        .iter()
-        .map(|e| e.to_string())
-        .collect::<Vec<_>>()
-        .join("\n");
-        fs::write(
-            directory.join(format!("{ENGINE_ID}.jsonl")),
-            format!("{body}\n"),
-        )
-        .unwrap();
-        let mut roots = HashMap::new();
-        roots.insert("claude", claude_root.as_path());
-        roots.insert("klaudia", klaudia_root.as_path());
-        let found = find(
-            &roots,
-            ENGINE_ID,
-            Some(&format!(
-                "vogt-agent-auth run -- klaudia --model grok-4.7 --session-id {ENGINE_ID}"
-            )),
-            Some("klaudia"),
-            Some(ROOT_CWD),
-            None,
-            false,
-        )
-        .unwrap();
-        assert_eq!(
-            (found.agent.as_str(), found.basis.as_str()),
-            ("klaudia", "session-id")
-        );
-        let replies = last_replies(&found, 5);
-        assert_eq!(
-            replies
-                .iter()
-                .map(|r| r.text.split_whitespace().next().unwrap())
-                .collect::<Vec<_>>(),
-            ["Iteration", "Pushed"]
-        );
-        assert!(!replies.last().unwrap().text.contains(&secret()));
-        assert_eq!(runtime(&found), (None, None));
         let _ = fs::remove_dir_all(&base);
     }
 

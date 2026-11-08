@@ -556,7 +556,7 @@ pub struct StopRequest {
 /// An agent CLI and its own id for a conversation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentConversation {
-    /// `claude`, `codex`, `opencode` or `klaudia`.
+    /// `claude`, `codex` or `opencode`.
     pub agent: String,
     pub id: String,
 }
@@ -724,7 +724,7 @@ pub fn normalize_work_item(label: Option<&str>) -> Result<Option<String>, String
 /// session's.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConversationReport {
-    /// `claude`, `codex`, `opencode` or `klaudia`.
+    /// `claude`, `codex` or `opencode`.
     pub agent: String,
     pub id: String,
     /// The conversation ended: the CLI exited, or `/clear` left it.
