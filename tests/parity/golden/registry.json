@@ -57104,6 +57104,343 @@
       "exclusion_reason": null
     },
     {
+      "name": "llm_provider.list",
+      "summary": "List registered LLM providers and their effective secret state.",
+      "scope": "admin",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "GET",
+      "http_path": "/llm-providers",
+      "mcp_tool": "llm_provider_list",
+      "cli_path": [
+        "llm-provider",
+        "list"
+      ],
+      "params_schema": {
+        "additionalProperties": false,
+        "properties": {},
+        "title": "LlmProviderParams",
+        "type": "object"
+      },
+      "result_schema": {
+        "$defs": {
+          "LlmProviderRow": {
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "title": "Name",
+                "type": "string"
+              },
+              "base_url": {
+                "title": "Base Url",
+                "type": "string"
+              },
+              "wire_api": {
+                "title": "Wire Api",
+                "type": "string"
+              },
+              "env_key": {
+                "title": "Env Key",
+                "type": "string"
+              },
+              "secret_project": {
+                "title": "Secret Project",
+                "type": "string"
+              },
+              "secret_name": {
+                "title": "Secret Name",
+                "type": "string"
+              },
+              "models": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "title": "Models",
+                "type": "array"
+              },
+              "state": {
+                "title": "State",
+                "type": "string"
+              },
+              "detail": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Detail"
+              }
+            },
+            "required": [
+              "name",
+              "base_url",
+              "wire_api",
+              "env_key",
+              "secret_project",
+              "secret_name",
+              "state"
+            ],
+            "title": "LlmProviderRow",
+            "type": "object"
+          }
+        },
+        "additionalProperties": false,
+        "properties": {
+          "providers": {
+            "default": [],
+            "items": {
+              "$ref": "#/$defs/LlmProviderRow"
+            },
+            "title": "Providers",
+            "type": "array"
+          },
+          "engine": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Engine"
+          }
+        },
+        "title": "LlmProviderListResult",
+        "type": "object"
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "llm_provider.set",
+      "summary": "Register or update an LLM provider without storing its key.",
+      "scope": "admin",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/llm-providers/set",
+      "mcp_tool": "llm_provider_set",
+      "cli_path": [
+        "llm-provider",
+        "set"
+      ],
+      "params_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "base_url": {
+            "title": "Base Url",
+            "type": "string"
+          },
+          "wire_api": {
+            "default": "chat",
+            "enum": [
+              "chat",
+              "responses"
+            ],
+            "title": "Wire Api",
+            "type": "string"
+          },
+          "env_key": {
+            "title": "Env Key",
+            "type": "string"
+          },
+          "secret_project": {
+            "title": "Secret Project",
+            "type": "string"
+          },
+          "secret_name": {
+            "title": "Secret Name",
+            "type": "string"
+          },
+          "models": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Models",
+            "type": "array"
+          },
+          "reason": {
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "base_url",
+          "env_key",
+          "secret_project",
+          "secret_name",
+          "reason"
+        ],
+        "title": "LlmProviderSetParams",
+        "type": "object"
+      },
+      "result_schema": {
+        "$defs": {
+          "LlmProviderRow": {
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "title": "Name",
+                "type": "string"
+              },
+              "base_url": {
+                "title": "Base Url",
+                "type": "string"
+              },
+              "wire_api": {
+                "title": "Wire Api",
+                "type": "string"
+              },
+              "env_key": {
+                "title": "Env Key",
+                "type": "string"
+              },
+              "secret_project": {
+                "title": "Secret Project",
+                "type": "string"
+              },
+              "secret_name": {
+                "title": "Secret Name",
+                "type": "string"
+              },
+              "models": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "title": "Models",
+                "type": "array"
+              },
+              "state": {
+                "title": "State",
+                "type": "string"
+              },
+              "detail": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Detail"
+              }
+            },
+            "required": [
+              "name",
+              "base_url",
+              "wire_api",
+              "env_key",
+              "secret_project",
+              "secret_name",
+              "state"
+            ],
+            "title": "LlmProviderRow",
+            "type": "object"
+          }
+        },
+        "additionalProperties": false,
+        "properties": {
+          "provider": {
+            "$ref": "#/$defs/LlmProviderRow"
+          }
+        },
+        "required": [
+          "provider"
+        ],
+        "title": "LlmProviderSetResult",
+        "type": "object"
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "llm_provider.remove",
+      "summary": "Remove a registered LLM provider.",
+      "scope": "admin",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/llm-providers/remove",
+      "mcp_tool": "llm_provider_remove",
+      "cli_path": [
+        "llm-provider",
+        "remove"
+      ],
+      "params_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "reason": {
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "reason"
+        ],
+        "title": "LlmProviderRemoveParams",
+        "type": "object"
+      },
+      "result_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "removed": {
+            "title": "Removed",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "removed"
+        ],
+        "title": "LlmProviderRemoveResult",
+        "type": "object"
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
       "name": "agent_activity.search",
       "summary": "Search the tool calls agents made (from their transcripts, redacted): by text, service, tool, errors, time, project or session.",
       "scope": "read",

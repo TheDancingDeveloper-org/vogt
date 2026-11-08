@@ -459,6 +459,19 @@ SCRIPT: list[tuple[str, StepParams]] = [
         "agent_cli.update",
         {"tool": "claude-code", "version": "2.1.261", "reason": WHY},
     ),
+    ("llm_provider.list", {}),
+    (
+        "llm_provider.set",
+        {
+            "name": "parity-provider",
+            "base_url": "https://api.example.test/v1",
+            "env_key": "PARITY_PROVIDER_KEY",
+            "secret_project": "parity",
+            "secret_name": "provider-key",
+            "reason": WHY,
+        },
+    ),
+    ("llm_provider.remove", {"name": "parity-provider", "reason": WHY}),
     (
         "session.log_tail",
         {"id": "01000000-0000-0000-0000-000000000001"},
