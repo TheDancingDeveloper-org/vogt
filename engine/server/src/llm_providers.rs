@@ -206,10 +206,25 @@ pub fn registry_lock() -> &'static Mutex<()> {
 /// Validate the complete registry before publishing it.
 pub fn validate_all(providers: &[Provider]) -> Result<(), String> {
     let mut names = std::collections::HashSet::new();
+    let mut env_keys = std::collections::HashSet::new();
+    let mut secret_refs = std::collections::HashSet::new();
     for provider in providers {
         validate(provider)?;
         if !names.insert(&provider.name) {
             return Err(format!("duplicate provider name {:?}", provider.name));
+        }
+        if !env_keys.insert(&provider.env_key) {
+            return Err(format!(
+                "provider {}: env_key {} is already another provider's",
+                provider.name, provider.env_key
+            ));
+        }
+        let secret_ref = (&provider.secret_project, &provider.secret_name);
+        if !secret_refs.insert(secret_ref) {
+            return Err(format!(
+                "provider {}: secret reference {}/{} is already another provider's",
+                provider.name, provider.secret_project, provider.secret_name
+            ));
         }
     }
     Ok(())
