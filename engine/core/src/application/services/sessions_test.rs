@@ -140,7 +140,7 @@ pub(super) fn start_params(
 fn template_list_is_forwarded_to_the_engine() {
     let script = script_with(vec![(
         200,
-        r#"[{"name":"claude","agent":"claude-code","placement":"host"}]"#.to_string(),
+        r#"[{"name":"claude","agent":"claude-code","placements":["host"],"default_placement":"host"}]"#.to_string(),
     )]);
     let built = opened(Some(Arc::clone(&script)));
     let Built::StepSequential(_ctx) = &built else {
@@ -149,7 +149,8 @@ fn template_list_is_forwarded_to_the_engine() {
 
     let result = list_session_templates_op(&built, json!({})).unwrap();
     assert_eq!(result["templates"][0]["name"], "claude");
-    assert_eq!(result["templates"][0]["placement"], "host");
+    assert_eq!(result["templates"][0]["placements"], json!(["host"]));
+    assert_eq!(result["templates"][0]["default_placement"], "host");
     assert_eq!(
         script.seen.lock().unwrap()[0],
         "GET http://engine/api/session-templates "
