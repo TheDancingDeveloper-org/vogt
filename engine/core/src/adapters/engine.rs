@@ -1023,6 +1023,24 @@ impl EngineClient {
         })
     }
 
+    pub fn llm_providers(&self) -> Result<Value, VogtError> {
+        self.call("/api/llm-providers", "GET", None, false, None)
+    }
+
+    pub fn set_llm_provider(&self, payload: &Value) -> Result<Value, VogtError> {
+        self.call("/api/llm-providers", "POST", Some(payload), false, None)
+    }
+
+    pub fn remove_llm_provider(&self, name: &str) -> Result<Value, VogtError> {
+        self.call(
+            "/api/llm-providers/remove",
+            "POST",
+            Some(&serde_json::json!({"name": name})),
+            false,
+            None,
+        )
+    }
+
     /// Ask the engine to make `version` of `tool` current. Its refusals are
     /// mapped to Vogt's errors rather than flattened into "did not answer".
     pub fn update_agent_cli(&self, tool: &str, version: &str) -> Result<Value, VogtError> {
