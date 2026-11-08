@@ -26,6 +26,7 @@ from collections.abc import Mapping
 ENGINE_COUNTERPARTS: Mapping[str, str] = {
     "GET /api/sessions": "session.list",
     "POST /api/sessions": "session.start",
+    "GET /api/session-templates": "session.template_list",
     # The raw scrollback the GUI paints a terminal from; an agent reads the
     # rendered screen, or the log for more than one screen.
     "GET /api/sessions/{id}": "session.screen",
