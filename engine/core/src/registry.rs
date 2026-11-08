@@ -176,6 +176,9 @@ pub fn service_for(name: &str) -> Option<ServiceFn> {
         "session.start" => Some(crate::application::services::sessions::start_session_op),
         "session.stop" => Some(crate::application::services::sessions::stop_session_op),
         "session.list" => Some(crate::application::services::sessions::list_sessions_op),
+        "session.template_list" => {
+            Some(crate::application::services::sessions::list_session_templates_op)
+        }
         "session.sweep" => Some(crate::application::services::sessions::sweep_sessions_op),
         "session.log_tail" => Some(crate::application::services::sessions::log_tail_op),
         "session.input" => Some(crate::application::services::sessions::input_op),

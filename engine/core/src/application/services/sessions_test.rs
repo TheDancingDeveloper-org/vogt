@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex};
 
 use super::sessions::SessionBudget;
 use super::sessions::{
-    list_sessions, start_session, stop_session, ListSessionsParams, StartSessionParams,
-    StopSessionParams,
+    list_session_templates_op, list_sessions, start_session, stop_session, ListSessionsParams,
+    StartSessionParams, StopSessionParams,
 };
 use crate::adapters::engine::EngineClient;
 use crate::application::context::{build_context, Built};
@@ -116,6 +116,7 @@ pub(super) fn start_params(
         work_item: None,
         name: None,
         template: None,
+        placement: None,
         task: task.map(str::to_string),
         reason: reason.to_string(),
         model: None,
@@ -133,6 +134,46 @@ pub(super) fn start_params(
         cold_wake_opt_out: false,
         explicit_null: Vec::new(),
     }
+}
+
+#[test]
+fn template_list_is_forwarded_to_the_engine() {
+    let script = script_with(vec![(
+        200,
+        r#"[{"name":"claude","agent":"claude-code","placement":"host"}]"#.to_string(),
+    )]);
+    let built = opened(Some(Arc::clone(&script)));
+    let Built::StepSequential(_ctx) = &built else {
+        unreachable!()
+    };
+
+    let result = list_session_templates_op(&built, json!({})).unwrap();
+    assert_eq!(result["templates"][0]["name"], "claude");
+    assert_eq!(result["templates"][0]["placement"], "host");
+    assert_eq!(
+        script.seen.lock().unwrap()[0],
+        "GET http://engine/api/session-templates "
+    );
+}
+
+#[test]
+fn start_forwards_explicit_placement() {
+    let script = script_with(vec![(
+        200,
+        r#"{"id":"eng-placement","name":"beta","cwd":"/work/tree"}"#.to_string(),
+    )]);
+    let built = opened(Some(Arc::clone(&script)));
+    insert_project(&built, "beta");
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!()
+    };
+
+    let mut params = start_params(Some("beta"), None, "because");
+    params.template = Some("claude".to_string());
+    params.placement = Some("host".to_string());
+    start_session(ctx, &params).unwrap();
+    let asked = script.seen.lock().unwrap().join("\n");
+    assert!(asked.contains(r#""placement":"host""#), "{asked}");
 }
 
 pub(super) fn script_with(answers: Vec<(u16, String)>) -> Arc<Script> {
