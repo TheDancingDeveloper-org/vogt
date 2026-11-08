@@ -1,8 +1,8 @@
 """Quick chats (WI-1097), reached through the session engine.
 
-A chat is the engine's: a persistent text conversation with an agent CLI
-(Klaudia) driven over its stream-json protocol, stored in the engine's own
-state and kept until deleted. These use-cases are the MCP/CLI/REST face of
+A chat is the engine's: a persistent text conversation with Codex, driven
+over its app-server JSON-RPC protocol, stored in the engine's own state and
+kept until deleted. These use-cases are the MCP/CLI/REST face of
 the engine's `/api/chats` routes, so an agent can do what the PWA's Chat
 panel does — with one difference that is the point of the feature: only a
 person answers a chat's approvals (`chat.decide`), exactly as only a person
@@ -75,7 +75,7 @@ def _chat_id(raw: str) -> str:
 def _missing(chat_id: str) -> NotFound:
     return NotFound(
         f"the engine has no chat {chat_id}, or has chats turned off "
-        "(ENGINE_CHAT_ENABLED, or no Klaudia launch configured)"
+        "(ENGINE_CHAT_ENABLED, or no Codex launch configured)"
     )
 
 

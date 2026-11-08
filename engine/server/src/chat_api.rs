@@ -1,24 +1,20 @@
 //! HTTP surface for quick chats (WI-1097). Every route 404s when chats are
-//! not available (`ENGINE_CHAT_ENABLED=0`, or no Klaudia launch configured),
-//! so the feature is invisible unless it can work.
+//! not available (`ENGINE_CHAT_ENABLED=0`, or no Codex launch configured), so
+//! the feature is invisible unless it can work.
 //!
-//! All of them except the gate sit behind the bearer gate and need the
-//! `sessions` capability (`auth::required_capability`): a chat starts an
-//! agent and its transcript is a shared record, like a session's. The gate is
-//! outside it and authenticates the per-process token the engine gave the
-//! chat's own agent, as the secret broker does for a session.
+//! All of them sit behind the bearer gate and need the `sessions` capability
+//! (`auth::required_capability`): a chat starts an agent and its transcript is
+//! a shared record, like a session's.
 
 use std::{convert::Infallible, sync::Arc, time::Duration};
 
 use axum::{
     extract::{Path, Query, State},
-    http::HeaderMap,
     response::sse::{Event, KeepAlive, Sse},
     Extension, Json,
 };
 use futures_util::Stream;
 use serde::Deserialize;
-use serde_json::Value;
 use tokio_stream::{wrappers::BroadcastStream, StreamExt};
 use uuid::Uuid;
 use vogt_engine_contract::{
@@ -211,25 +207,4 @@ pub async fn events(
             .interval(Duration::from_secs(15))
             .text("ka"),
     ))
-}
-
-/// Path of the gate, which the chat's own hook calls.
-pub const GATE_ROUTE: &str = "/api/chats/{id}/gate";
-
-/// The `PreToolUse` hook's question. Answers the hook's JSON: `{}` lets the
-/// call run, `{"decision":"block","reason":…}` refuses it. Anything else the
-/// hook gets — a 401, a 404, a dropped connection — it turns into a block.
-pub async fn gate(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<Uuid>,
-    headers: HeaderMap,
-    Json(body): Json<Value>,
-) -> Result<Json<Value>> {
-    let runtime = runtime(&state)?;
-    let token = headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .unwrap_or("");
-    Ok(Json(runtime.gate(id, token, body).await?))
 }
