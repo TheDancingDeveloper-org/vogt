@@ -121,8 +121,8 @@ COPY --chown=root:root --chmod=0644 deploy/driven-session-codex-requirements.tom
 RUN set -eu; \
     . /usr/local/share/vogt/agent-versions.env; \
     case "$TARGETARCH" in \
-        amd64) target=x86_64-unknown-linux-musl; codex_sum="$VOGT_CODEX_SHA256_LINUX_AMD64"; go_sum="$VOGT_GO_SHA256_LINUX_AMD64" ;; \
-        arm64) target=aarch64-unknown-linux-musl; codex_sum="$VOGT_CODEX_SHA256_LINUX_ARM64"; go_sum="$VOGT_GO_SHA256_LINUX_ARM64" ;; \
+        amd64) target=x86_64-unknown-linux-musl; codex_sum="$VOGT_CODEX_SHA256_LINUX_AMD64" ;; \
+        arm64) target=aarch64-unknown-linux-musl; codex_sum="$VOGT_CODEX_SHA256_LINUX_ARM64" ;; \
         *) echo "unsupported architecture: $TARGETARCH" >&2; exit 1 ;; \
     esac; \
     if [ -n "$codex_sum" ]; then \
@@ -140,25 +140,7 @@ RUN set -eu; \
         /usr/local/bin/codex --version; \
     else \
         echo "no Codex release for $TARGETARCH; leaving the image copy unset" >&2; \
-    fi; \
-    curl -fsSL "https://go.dev/dl/go${VOGT_GO_VERSION}.linux-${TARGETARCH}.tar.gz" -o /tmp/go.tar.gz; \
-    echo "$go_sum  /tmp/go.tar.gz" | sha256sum -c -; \
-    tar -xzf /tmp/go.tar.gz -C /usr/local; \
-    export PATH="/usr/local/go/bin:$PATH"; \
-    git init -q /tmp/klaudia; \
-    git -C /tmp/klaudia fetch -q --depth 1 "$VOGT_KLAUDIA_SOURCE" "$VOGT_KLAUDIA_VERSION"; \
-    git -C /tmp/klaudia checkout -q --detach FETCH_HEAD; \
-    test "$(git -C /tmp/klaudia rev-parse HEAD)" = "$VOGT_KLAUDIA_VERSION"; \
-    (cd /tmp/klaudia && CGO_ENABLED=0 GOFLAGS=-mod=readonly \
-        GOMODCACHE=/tmp/gomod GOCACHE=/tmp/gocache \
-        go build -trimpath -o /usr/local/bin/klaudia ./cmd/klaudia); \
-    GOMODCACHE=/tmp/gomod go clean -modcache; \
-    rm -rf /tmp/klaudia /tmp/gomod /tmp/gocache /tmp/go.tar.gz /usr/local/go; \
-    chown root:root /usr/local/bin/klaudia /etc/codex; \
-    chmod 0755 /usr/local/bin/klaudia /etc/codex; \
-    test "$(stat -c '%u %a %F' /usr/local/bin/klaudia /usr/local/bin)" = "$(printf '0 755 regular file\n0 755 directory')"; \
-    test "$(stat -c '%u %a' /etc/codex /etc/codex/requirements.toml)" = "$(printf '0 755\n0 644')"; \
-    /usr/local/bin/klaudia --version
+    fi
 
 # The session user is uid/gid 1000. Ubuntu images may already ship a user at
 # 1000, which is removed so vogt owns the id. /run/vogt (the session token) and

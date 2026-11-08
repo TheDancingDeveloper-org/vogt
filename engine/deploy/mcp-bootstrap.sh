@@ -134,17 +134,6 @@ install_vogt_opencode() {
         -- "$VOGT_WRAPPER" >/dev/null
 }
 
-# Klaudia (WI-974) reads MCP servers only from its own `.mcp.json` and has no
-# `mcp add` to write one, so `vogt-klaudia-mcp` does it. Without this a Klaudia
-# session ran with no Vogt tools at all, though its token was valid.
-# Overridable only so the registration logic can be exercised outside the image.
-readonly KLAUDIA_MCP="${VOGT_KLAUDIA_MCP:-/usr/local/bin/vogt-klaudia-mcp}"
-
-install_vogt_klaudia() {
-    command -v klaudia >/dev/null 2>&1 || return 0
-    "$KLAUDIA_MCP" set vogt "$VOGT_WRAPPER"
-}
-
 # Optional read-only MCP servers (docs/ENGINE.md §4). Each is registered only
 # while this session holds its token, and unregistered when it does not, so a
 # deployment opts in by adding the token to its agent-auth manifest and opts
@@ -691,8 +680,8 @@ def _set_root(key: str, value: str, when: set[str | None]) -> None:
 _set_root("model_provider", "litellm", {None, "litellm", "theclawbay"})
 # Under the router, a model the catalog does not list cannot be served: a
 # leftover theclawbay default such as gpt-6-astra makes every model-less
-# `codex exec` (the codex-subagent child among them) fail (WI-1640). So the
-# default moves to grok unless it already names a catalog group.
+# `codex exec` fail (WI-1640). So the default moves to grok unless it already
+# names a catalog group.
 if _root_value("model_provider") == "litellm":
     _model = _root_value("model")
     if _model not in ROUTER_GROUPS:
@@ -807,15 +796,6 @@ readonly_opencode() {
     opencode mcp add "$name" -- "$READONLY_WRAPPER" "$arg" >/dev/null
 }
 
-readonly_klaudia() {
-    command -v klaudia >/dev/null 2>&1 || return 0
-    if [[ "$3" == "yes" ]]; then
-        "$KLAUDIA_MCP" set "$1" "$READONLY_WRAPPER" "$2"
-    else
-        "$KLAUDIA_MCP" remove "$1" "$READONLY_WRAPPER"
-    fi
-}
-
 install_readonly_servers() {
     local entry name arg bin required optional wanted
     for entry in "${READONLY_SERVERS[@]}"; do
@@ -835,143 +815,7 @@ install_readonly_servers() {
             || printf 'mcp-bootstrap: claude registration of %s failed\n' "$name" >&2
         readonly_opencode "$name" "$arg" "$wanted" \
             || printf 'mcp-bootstrap: opencode registration of %s failed\n' "$name" >&2
-        readonly_klaudia "$name" "$arg" "$wanted" \
-            || printf 'mcp-bootstrap: klaudia registration of %s failed\n' "$name" >&2
     done
-}
-
-# The browser and the isolated sub-agent (WI-1358). Both are stdio servers the
-# klaudia binary already serves — `klaudia mcp browser` (WI-1137) and
-# `klaudia mcp codex-subagent` (WI-1138) — and Codex is the CLI that has neither
-# of its own. Claude and Klaudia carry a browser inside the binary, so only
-# Codex's config is written here.
-#
-# Nothing secret goes in the file: the command and its arguments only. The
-# sub-agent's `--codex` must be the real binary, not `codex` on PATH — on a Vogt
-# pod that name is the full-access wrapper, which prepends
-# `--dangerously-bypass-approvals-and-sandbox` and so would hand every child an
-# unsandboxed shell (WI-1138). `--root` is this session's own working directory,
-# the one confinement the server applies when the engine has not cut a worktree.
-codex_klaudia_tools() {
-    local config="$1" lockdir klaudia
-    command -v codex >/dev/null 2>&1 || return 0
-    klaudia="$(command -v klaudia 2>/dev/null || true)"
-    [[ -n "$klaudia" ]] || return 0
-    lockdir="$(dirname "$config")"
-    mkdir -p "$lockdir"
-    (
-        flock 9
-        CODEX_CONFIG="$config" CODEX_KLAUDIA="$klaudia" CODEX_REAL="${CODEX_REAL:-/usr/local/libexec/codex-real}" CODEX_ROOT="$PWD" \
-            python3 - <<'PY'
-import os, sys, tempfile
-
-path = os.environ["CODEX_CONFIG"]
-klaudia = os.environ["CODEX_KLAUDIA"]
-real = os.environ["CODEX_REAL"]
-root = os.environ["CODEX_ROOT"]
-
-def approval_row(source: str) -> str:
-    # The table is replaced whole, so carry an operator's explicit mode
-    # (WI-1634) rather than resetting it to "approve" on the next start.
-    for row in source.splitlines():
-        head = row.split("#", 1)[0]
-        if head.split("=", 1)[0].strip() == "default_tools_approval_mode":
-            return row if row.endswith("\n") else row + "\n"
-    return 'default_tools_approval_mode = "approve"\n'
-
-def block(name: str, args: list[str], extra: str = "", mode: str = "") -> str:
-    rendered = ", ".join(f'"{arg}"' for arg in args)
-    # Pre-approved for driven sessions (WI-1634); the bundle below would add
-    # it anyway, so writing it here keeps reruns quiet. The key lives in the
-    # session's own config.toml, which the session can edit, so it is a
-    # convenience for autonomous work and not a security boundary.
-    return (
-        f"[mcp_servers.{name}]\n"
-        f'command = "{klaudia}"\n'
-        f"args = [{rendered}]\n"
-        f"{extra}"
-        f"{mode or 'default_tools_approval_mode = "approve"\n'}"
-    )
-
-wanted = {
-    "browser": block("browser", ["mcp", "browser"], "tool_timeout_sec = 60\n"),
-    # Codex starts a stdio server with a cleared environment (HOME, PATH and a
-    # few more) plus the names in env_vars. The child `codex exec` the
-    # sub-agent spawns authenticates to the same provider, whose env_key is
-    # HOMELAB_LITELLM_SESSION_KEY, so that name is passed through by name; the
-    # value never lands in the file (WI-1639).
-    "codex-subagent": block(
-        "codex-subagent",
-        ["mcp", "codex-subagent", "--codex", real, "--root", root],
-        'env_vars = ["HOMELAB_LITELLM_SESSION_KEY"]\n',
-    ),
-}
-
-try:
-    with open(path, encoding="utf-8") as fh:
-        text = fh.read()
-except FileNotFoundError:
-    text = ""
-except OSError as exc:
-    print(f"mcp-bootstrap: cannot read {path} ({exc}); left alone", file=sys.stderr)
-    sys.exit(1)
-
-if text.strip():
-    try:
-        import tomllib
-        tomllib.loads(text)
-    except tomllib.TOMLDecodeError as exc:
-        print(
-            f"mcp-bootstrap: {path} is not valid TOML ({exc}); left alone",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-lines = text.splitlines(keepends=True)
-kept: list[str] = []
-existing: dict[str, str] = {}
-index = 0
-while index < len(lines):
-    stripped = lines[index].strip()
-    header = next(
-        (name for name in wanted if stripped == f"[mcp_servers.{name}]"
-         or stripped.startswith(f"[mcp_servers.{name}].")),
-        None,
-    )
-    if header is not None:
-        index += 1
-        while index < len(lines) and not lines[index].lstrip().startswith("["):
-            if stripped == f"[mcp_servers.{header}]":
-                existing[header] = existing.get(header, "") + lines[index]
-            index += 1
-        continue
-    kept.append(lines[index])
-    index += 1
-
-for name, mode in existing.items():
-    current = wanted[name]
-    wanted[name] = current.replace(
-        'default_tools_approval_mode = "approve"\n', approval_row(mode), 1
-    )
-
-body = "".join(kept).rstrip("\n")
-addition = "\n\n".join(wanted[name] for name in ("browser", "codex-subagent"))
-new = f"{body}\n\n{addition}\n" if body else addition + "\n"
-if new == text:
-    sys.exit(0)
-directory = os.path.dirname(path) or "."
-fd, tmp = tempfile.mkstemp(prefix=".config.toml.", dir=directory)
-try:
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        fh.write(new)
-        fh.flush()
-        os.fsync(fh.fileno())
-    os.replace(tmp, path)
-except BaseException:
-    os.unlink(tmp)
-    raise
-PY
-    ) 9>"$lockdir/.config.toml.lock"
 }
 
 # The driven-session bundle (WI-1149). A Codex the engine starts is not an
@@ -1005,9 +849,9 @@ PY
 # prompt for that server only; requirements.toml cannot carry it, its
 # [mcp_servers] is an identity allowlist. The list mirrors what the Claude
 # driven-session policy lets a Claude session call without a person: vogt and
-# cadastre (the session's own scoped token decides what it may write), the
-# klaudia browser and isolated sub-agent, and the three read-only forge and
-# Grafana wrappers. komodo is deliberately absent, because its deploy_stack and
+# cadastre (the session's own scoped token decides what it may write) and the
+# three read-only forge and Grafana wrappers. komodo is deliberately absent,
+# because its deploy_stack and
 # write_stack_file mutate running stacks, and so is every server not named
 # here: those keep the person gate. A table an operator gave an explicit mode
 # keeps it, and a server nobody registered is not created. The key lives in the
@@ -1064,8 +908,6 @@ SCHEMA_SERVERS = ("vogt", "cadastre")
 APPROVED_SERVERS = (
     "vogt",
     "cadastre",
-    "codex-subagent",
-    "browser",
     "github-ro",
     "forgejo-ro",
     "grafana-ro",
@@ -1270,7 +1112,6 @@ install_vogt_bridge
 install_vogt_codex
 install_vogt_claude
 install_vogt_opencode
-install_vogt_klaudia || printf 'mcp-bootstrap: klaudia registration of vogt failed\n' >&2
 install_cadastre_claude || printf 'mcp-bootstrap: claude registration of cadastre failed\n' >&2
 install_cadastre_codex || printf 'mcp-bootstrap: codex registration of cadastre failed\n' >&2
 if command -v codex >/dev/null 2>&1; then
@@ -1280,8 +1121,6 @@ if command -v codex >/dev/null 2>&1; then
         || printf 'mcp-bootstrap: could not write the Codex auto-compact limit\n' >&2
     codex_litellm_provider "${CODEX_HOME:-$HOME/.codex}/config.toml" \
         || printf 'mcp-bootstrap: could not write the Codex LiteLLM provider\n' >&2
-    codex_klaudia_tools "${CODEX_HOME:-$HOME/.codex}/config.toml" \
-        || printf 'mcp-bootstrap: could not register the Codex browser and sub-agent\n' >&2
     codex_driven_session "${CODEX_HOME:-$HOME/.codex}/config.toml" \
         || printf 'mcp-bootstrap: could not write the Codex driven-session bundle\n' >&2
 fi
