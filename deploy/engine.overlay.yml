@@ -151,7 +151,6 @@ services:
       VOGT_CODEX_ACP_VERSION: "${VOGT_CODEX_ACP_VERSION:-}"
       VOGT_OPENCODE_VERSION: "${VOGT_OPENCODE_VERSION:-}"
       VOGT_GO_VERSION: "${VOGT_GO_VERSION:-}"
-      VOGT_KLAUDIA_VERSION: "${VOGT_KLAUDIA_VERSION:-}"
 
     secrets:
       - vogt_core_token

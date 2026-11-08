@@ -262,7 +262,7 @@ def test_structurally_invalid_messages_are_rejected(
 
 
 def test_a_success_carries_the_whole_result_as_compact_text() -> None:
-    """C1: the text is the full result (Klaudia reads only the text when
+    """C1: the text is the full result (a client reads only the text when
     there is any), compact and without null keys; structuredContent keeps
     the nulls so it matches CLI and REST."""
     payload = {

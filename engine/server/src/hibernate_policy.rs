@@ -17,8 +17,8 @@
 //! - a session that cannot be at all (no conversation to resume, an
 //!   agent-task run, exited) — `SessionRegistry::hibernate_refusal`;
 //! - one pinned with `keep_awake`;
-//! - one whose turn is running, or that shows a permission dialog (Klaudia's
-//!   own, which the engine reads from its title, included), or that drew
+//! - one whose turn is running, or that shows a permission dialog (read from
+//!   an agent's title included), or that drew
 //!   anything within the activity quiet window. Quiet time here is raw
 //!   output time, not the screen-change clock activity reads (WI-1090): an
 //!   agent animating only colours mid-turn must never look quiet to it;
@@ -76,7 +76,7 @@ impl Policy {
 const TICK: Duration = Duration::from_secs(60);
 
 /// Agent CLIs, as `/proc/<pid>/comm` names them.
-const AGENTS: &[&str] = &["claude", "codex", "opencode", "klaudia"];
+const AGENTS: &[&str] = &["claude", "codex", "opencode"];
 
 /// A shell below the agent is a tool call or a background job at work.
 const SHELLS: &[&str] = &["bash", "sh", "zsh", "dash", "fish", "ksh"];
@@ -132,15 +132,15 @@ pub fn exemption(registry: &SessionRegistry, session: &Session) -> Option<String
     if session.output_quiet_for() < session.idle_after() {
         return Some("output is still arriving".into());
     }
-    // Klaudia (WI-1090) and the WI-1127 Codex fork (WI-1145) say in the window
-    // title when a turn is running, and when they wait on a permission ask,
-    // question or plan approval — none of which are dialogs the engine
-    // recognises from the screen.
-    if matches!(session.agent().as_deref(), Some("klaudia" | "codex")) {
+    // The WI-1127 Codex fork (WI-1145) says in the window title when a turn is
+    // running, and when it waits on a permission ask, question or plan
+    // approval — none of which are dialogs the engine recognises from the
+    // screen.
+    if matches!(session.agent().as_deref(), Some("codex")) {
         use crate::screen::{agent_title, AgentTitle};
         match agent_title(session.title().as_deref()) {
-            Some((_, AgentTitle::Working)) => return Some("a turn is running".into()),
-            Some((_, AgentTitle::AwaitingApproval)) => {
+            Some(AgentTitle::Working) => return Some("a turn is running".into()),
+            Some(AgentTitle::AwaitingApproval) => {
                 return Some("a permission dialog is open".into())
             }
             _ => {}

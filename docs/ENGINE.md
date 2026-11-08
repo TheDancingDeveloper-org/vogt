@@ -137,10 +137,8 @@ asset `codex-<target>.tar.gz`, checked against the sha256 recorded beside the
 pin). The release is x86_64 only, so `VOGT_CODEX_SHA256_LINUX_ARM64` is empty
 and an arm64 image build leaves the Codex copy unset instead of failing. It
 also bakes `codex-acp` (WI-1595), the upstream `@agentclientprotocol/codex-acp`
-adapter pinned there as `VOGT_CODEX_ACP_VERSION`, and `klaudia` (WI-950), a Go coding agent no
-registry publishes, built with the image's Go from the commit pinned there
-(`VOGT_KLAUDIA_VERSION`, a full commit id of `VOGT_KLAUDIA_SOURCE`); it is off by default for a local build and on in
-the published image. The adapter is not a Codex of its own: it starts
+adapter pinned there as `VOGT_CODEX_ACP_VERSION`. The adapter is not a Codex
+of its own: it starts
 `codex app-server` and translates ACP into it, and the entrypoint exports
 `CODEX_PATH` at the baked fork binary (the runtime pin's `codex/current` when
 one is flipped, else `/usr/local/libexec/codex-real`) so it never falls back to
@@ -149,8 +147,8 @@ That baked copy is the baseline, and the version a
 running pod uses can be moved without a rebuild by the runtime pin described
 in [`DEPLOYMENT.md`](DEPLOYMENT.md) §3 (`VOGT_CLAUDE_CODE_VERSION` and
 friends, applied by `vogt-agent-cli-install` at container start). Stock npm
-Codex is not a runtime option (WI-1146): it has no managed hooks, so the
-gitguard hook would not run under it. `VOGT_CODEX_VERSION` still names
+Codex is not a runtime option (WI-1146): it has no managed hooks and is not
+the fork the wrapper requires. `VOGT_CODEX_VERSION` still names
 `@openai/codex` in the `codex-npm` row (kind `npm`), but the installer refuses
 a pin of it (exit 64) and drops any `current` an older image left, and the
 wrapper refuses a runtime copy whose prefix has no fork `source` line. Codex's row is kind `github-release`: a runtime
@@ -168,10 +166,7 @@ sha256s recorded beside it, unpacked to `/usr/local/go` and linked as
 for a newer toolchain fails by name rather than fetching one. It is a row of
 the same runtime-pin table (kind `go-dist`), so `VOGT_GO_VERSION` in the
 environment moves it at the next start without a rebuild, checked against
-the Go mirror's own release index. Klaudia's row is kind `go-src`: a runtime
-`VOGT_KLAUDIA_VERSION` is another full commit, fetched alone and built into
-the volume at start (`./cmd/klaudia`, CGO off), its `source` recorded in the
-prefix. `GO_VERSION` as a build argument must
+the Go mirror's own release index. `GO_VERSION` as a build argument must
 equal the pin: a build cannot verify a version it has no recorded checksum
 for.
 `POD_BASE_IMAGE` selects the pod base; CI passes it by digest.
@@ -197,10 +192,9 @@ The helper scripts the image installs under `/usr/local/bin/vogt-*`:
 | `vogt-mcp` | `deploy/vogt-mcp-auth.sh` | stdio bridge to Vogt's `/mcp` for clients that cannot take a bearer directly; uses the session's own token | optional |
 | `vogt-rust-analyzer-mcp` | `deploy/rust-analyzer-mcp.sh` | starts `rust-analyzer-mcp` anchored to the nearest `Cargo.toml` | optional |
 | `vogt-readonly-mcp` | `deploy/readonly-mcp.sh` | starts the GitHub, Grafana or Gitea/Forgejo MCP server in read-only mode with the session's token (§4) | optional — registered only when its token is present |
-| `vogt-klaudia-mcp` | `deploy/klaudia-mcp.sh` | `set [-e KEY=VALUE]…`/`remove` a stdio server in Klaudia's `.mcp.json` (`~/.klaudia`, or `KLAUDIA_CONFIG_DIR`), which Klaudia has no `mcp` command to write; `vogt-mcp-bootstrap` uses it, and a derivative image's bootstrap may (§4) | only with `klaudia` present |
 | `git-forgejo` | `deploy/git-forgejo.sh` | git with a Gitea/Forgejo token header that cannot be word-split (§4) | optional |
 | `vogt-git-askpass` | `deploy/git-askpass.sh` | `GIT_ASKPASS` shim for brokered credentials | optional |
-| `codex` wrapper | `deploy/codex-full-access.sh` | runs the pinned Codex with `--no-daemon` (`daemon_auto_start` off), because the daemon would copy the binary out of the pin. It does **not** pass `--dangerously-bypass-approvals-and-sandbox` (WI-1143): the engine's posture flags name the sandbox (`-s danger-full-access` for default and accept-edits; bypass is the only posture that skips approvals and the sandbox, and only when a person asked). `--approve-for-me` is not used — it hard-wires workspace-write. The fork reads `/etc/codex/requirements.toml` with no flag (TUI, `exec` and app-server alike); the image copies `deploy/driven-session-codex-requirements.toml` there, root-owned `0644` in a root-owned `0755` directory, and a reference copy to `/usr/local/share/vogt/`. That file pins `[features] hooks = true` and runs `/usr/local/bin/klaudia hook gitguard` (the image's root-owned build, by absolute path) fail-closed on `SessionStart` (baseline capture) and `PreToolUse` (matcher `Bash`, `shell`, `exec_command`, `write_stdin`, `apply_patch`; timeout 30 s), so a hook that fails, or a session with no baseline, blocks the tool call (WI-1146, WI-1356). A runtime copy under `codex/current` runs only when its prefix records a fork release `source`; anything else exits 78 rather than run without the hook. That `source` file sits in the session-owned agent-CLI tree, so this check is an accident guard against a stale or mistaken pin, not a security boundary | only with `INSTALL_AI_CLIENTS` |
+| `codex` wrapper | `deploy/codex-full-access.sh` | runs the pinned Codex with `--no-daemon` (`daemon_auto_start` off), because the daemon would copy the binary out of the pin. It does **not** pass `--dangerously-bypass-approvals-and-sandbox` (WI-1143): the engine's posture flags name the sandbox (`-s danger-full-access` for default and accept-edits; bypass is the only posture that skips approvals and the sandbox, and only when a person asked). `--approve-for-me` is not used — it hard-wires workspace-write. The fork reads `/etc/codex/requirements.toml` with no flag (TUI, `exec` and app-server alike); the image copies `deploy/driven-session-codex-requirements.toml` there, root-owned `0644` in a root-owned `0755` directory, and a reference copy to `/usr/local/share/vogt/`. That file is a one-line comment: the gitguard hook and `[features] hooks = true` were removed with Klaudia (WI-3744). A runtime copy under `codex/current` runs only when its prefix records a fork release `source`; anything else exits 78 rather than run an unverified pin. That `source` file sits in the session-owned agent-CLI tree, so this check is an accident guard against a stale or mistaken pin, not a security boundary | only with `INSTALL_AI_CLIENTS` |
 | `vogt-agent-auth` | `deploy/agent-auth.sh` | reference `ENGINE_AGENT_AUTH_HELPER`: brokers service credentials from a secrets manager into a session (`check`, `run -- <cmd>`, `shell`, `fetch`, `store`), driven entirely by an env manifest with no baked addresses or secret names | **optional and pluggable** — one example helper; see §9 |
 
 Nothing in the engine itself depends on `agent-auth`: with
@@ -371,8 +365,8 @@ it from a non-Rust directory.
 three third-party MCP servers at exact versions, each tarball checked against a
 sha256 recorded in `engine/Dockerfile` (a bump is an edit there):
 `github-mcp-server` 1.14.0, `mcp-grafana` 2.0.0 and `gitea-mcp` 1.8.0.
-`vogt-mcp-bootstrap` registers each one with Claude Code, Codex, opencode
-and Klaudia **only while the session holds its token**, and removes the
+`vogt-mcp-bootstrap` registers each one with Claude Code, Codex and opencode
+**only while the session holds its token**, and removes the
 registration when it does not (opencode excepted: it has no `mcp remove`, so
 its entry stays and the wrapper, finding no token, refuses to start), so a deployment turns one on by adding its token to the session's
 environment (normally a launch-time line in `ENGINE_AGENT_AUTH_SECRETS`, §9 —
@@ -386,7 +380,7 @@ does not register anything) and off by removing it.
 | `forgejo-ro` | `GITEA_HOST` + `GITEA_MCP_TOKEN` — a read-scoped token; works against Forgejo's Gitea-compatible API | `-r` and `GITEA_READONLY=true` (only read tools are offered), plus the token's scope |
 
 The registration stores `vogt-readonly-mcp <server>` and nothing else: no
-token value (Claude Code, opencode and Klaudia pass a stdio server the
+token value (Claude Code and opencode pass a stdio server the
 session's environment; Codex is told which variables to pass with `env_vars`) and no flag a session
 could edit. `vogt-readonly-mcp` (`deploy/readonly-mcp.sh`) renames the token
 to the variable the upstream server reads and sets the read-only switches on
@@ -422,27 +416,8 @@ writes are attributed to that session's actor rather than to a shared
 identity. The session exports the endpoint as `VOGT_URL` and
 `mcp-bootstrap.sh` registers it with every agent CLI in the image — Claude
 Code (`~/.claude.json`), Codex (`~/.codex/config.toml`), opencode (its user
-`opencode.json[c]`) and Klaudia (`~/.klaudia/.mcp.json`, through
-`vogt-klaudia-mcp`); `VOGT_MCP_URL` overrides the endpoint, and
+`opencode.json[c]`); `VOGT_MCP_URL` overrides the endpoint, and
 with neither set the bootstrap falls back to the front door on loopback.
-
-**Codex's browser and isolated sub-agent** (WI-1358). Codex has neither a
-browser nor a way to hand `spawn_agent` a working directory — that tool takes
-`message`, `output_schema`, `fork_turns` and a model, and nothing else, in the
-fork this image ships (`codex-cli 0.162.0+fork.86a742cdc`). When `klaudia` is on
-`PATH`, `vogt-mcp-bootstrap` writes two stdio servers into Codex's config:
-`[mcp_servers.browser]` runs `klaudia mcp browser` (WI-1137) with
-`tool_timeout_sec = 60`, and `[mcp_servers.codex-subagent]` runs
-`klaudia mcp codex-subagent` (WI-1138). The sub-agent's `--codex` is
-`/usr/local/libexec/codex-real` (`CODEX_REAL` overrides it), never `codex` on
-`PATH`, because that name is the full-access wrapper and a child spawned
-through it would run unsandboxed. `--root` is the session's own working
-directory, which is the confinement the server applies. The tables carry a
-command and arguments only — no token, no environment — and are replaced in
-place on the next launch. Claude and Klaudia keep their own browser and
-sub-agent, so nothing is registered for them. A fork change that adds a
-working directory to `spawn_agent` is what would retire the sub-agent server;
-it is not something this repository can do.
 
 **Codex's driven-session bundle** (WI-1149). The same bootstrap writes the keys
 a session the engine starts needs and an interactive CLI does not.
@@ -467,8 +442,8 @@ A driven Codex on a stack that sets `ENGINE_CODEX_APPROVAL_POLICY=on-request`
 stop at a permission prompt only a person may answer (WI-1634). The bundle
 therefore gives the estate's trusted servers `default_tools_approval_mode =
 "approve"`, the fork's per-server key that skips the prompt for that server
-only: `vogt`, `cadastre`, `codex-subagent`, `browser`, `github-ro`,
-`forgejo-ro` and `grafana-ro` (operator-approved 2026-10-15). This mirrors
+only: `vogt`, `cadastre`, `github-ro`, `forgejo-ro` and `grafana-ro`
+(operator-approved 2026-10-15). This mirrors
 what the Claude driven-session policy lets a Claude session call without a
 person. `komodo` is deliberately not on the list, since its `deploy_stack` and
 `write_stack_file` change running stacks, and neither is any other server:
@@ -480,8 +455,8 @@ key lives in the session's own `~/.codex/config.toml`, which the session can
 edit, so it is a convenience for autonomous work and not a security boundary;
 the engine's person gate (WI-1355) is the boundary.
 `/etc/codex/requirements.toml` cannot carry the setting (its
-`[mcp_servers]` is an identity allowlist), and it is unchanged: gitguard
-stays pinned and the bypass posture stays person-only.
+`[mcp_servers]` is an identity allowlist). The bypass posture stays
+person-only.
 
 Any further MCP server an agent should reach is registered by hand inside the
 session, the way the Rust LSP entry above shows.
@@ -969,7 +944,6 @@ engine turns them into that CLI's own flags (`agent_cli.rs`):
 
 **Codex's default model is the estate LiteLLM router** (WI-1147). The estate Codex fork speaks the Chat Completions wire as well as Responses (WI-1286), and grok returns tool calls only over chat, so `vogt-mcp-bootstrap` writes `[model_providers.litellm]` into `~/.codex/config.toml` (`${CODEX_HOME}` when set) with `base_url = "http://100.92.54.45:4000/v1"`, `wire_api = "chat"` and `env_key = "HOMELAB_LITELLM_SESSION_KEY"`. The key is that environment variable, exported by the agent-auth manifest (§9); the config never contains it. When `model` and `model_provider` are absent, or already name this bundle (`litellm`, or `theclawbay` with model `grok` / `grok-4.7`), bootstrap sets `model_provider = "litellm"` and `model = "grok"` — the router's `grok` group, not a pinned model id. grok has no entry in Codex's bundled model catalog, whose fallback metadata offers no apply_patch tool, so bootstrap also writes `vogt-model-catalog.json` beside the config — one entry per LiteLLM group that answers a chat completion with the session key (WI-1592): `grok`, `code`, `small`, `reasoning`, `vision`, `or-deepseek-flash`, `or-gemini-flash`, `or-glm-5-3`, and the DLab models whose plan serves them (`dlab-deepseek-v4-pro`, `dlab-deepseek-v4-1-flash`, `dlab-grok-4-5`, `dlab-grok-4-6`, `dlab-grok-4-7`, `dlab-gemini-3-8-flash`, `dlab-glm-5-3`, `dlab-glm-5-3-flash`, `dlab-glm-5-3-flashx`, `dlab-kimi-k3`), plus `premium` hidden from the picker. Each entry has `apply_patch_tool_type` `freeform` and omits `tool_mode` so code mode stays off. Priority is that order, so the fork's ascending sort keeps `grok` as the default. Not listed, because a completion does not succeed: `or-deepseek` (blocked on OpenRouter), `qwen3-coder`, `qwen3-8-27b` and `gpt-oss-120b` (they fail inside LiteLLM — a 408 or a hang; re-adding them is WI-1631), Bedrock (the router has no bedrock model — it needs a LiteLLM provider entry before Codex can offer it, and no credentials are added here), `dlab-gemini-3-1-pro-preview` and `dlab-gemini-3-6-flash` (not on the DLab plan), `dlab-claude-haiku-4-5` (unavailable), and the `gpt-6-*-free` aliases (auth error). Bootstrap sets `model_catalog_json` to that file. That key is set only when absent or when it already names this file; a catalog an operator chose is left alone, and so is the file. A session that passes `-m <id>` still overrides `model` for that process. `[model_providers.theclawbay]` is written as a fallback profile with no bearer token; a profile an operator already wrote under that name (one carrying `experimental_bearer_token`) is left untouched, as is any other provider and model an operator set. The rewrite uses the same flock and atomic rename as the read-only server tables, and a config that does not parse is left alone. The manifest line that exports `HOMELAB_LITELLM_SESSION_KEY` is an ops overlay change (Forgejo `indexarr/ops` pull 52), not part of this repository.
 | `opencode` | `--model <provider/id>` | *refused — it has no effort control* |
-| `klaudia` | `--model <id>` | *refused — it has no effort control* |
 
 Three rules, each written against a specific failure:
 
@@ -1003,7 +977,6 @@ previous conversation to continue instead of starting a new one:
 | `claude` | `--resume <id>` |
 | `codex` | `resume <id>` — a subcommand, so inserted straight after the binary, ahead of the template's own arguments and the model flags |
 | `opencode` | `--session <id>` |
-| `klaudia` | `--resume <id>` |
 
 It follows the same rules as `model`: refused (`400`) for a command with no
 mapping or the default shell, and validated before it becomes argv — letters,
@@ -1019,15 +992,7 @@ already show. A session lost to a redeploy is resumed with
 the id it resumed (no `--session-id` is added), and a command that carries
 arguments of its own after `claude` is not pinned, because Claude Code refuses
 `--session-id` next to a `--continue` or `--session-id` it already has.
-Klaudia (WI-950) is pinned the same way: a bare launch gets `--session-id
-<engine session id>` and a wake `--resume <id>`; with no engine id to give
-it, a fresh launch gets `--new-session`, because Klaudia's TUI otherwise
-resumes the newest conversation in its directory. Its brief pointer goes in with
-`--prompt-interactive=<text>`, never as a positional prompt: Klaudia reads a
-positional prompt as `-p` (answer once, then exit), so the session would end
-after its first turn. The pinned Klaudia must have that flag (msp-klaudia
-WI-953); a runtime pin to an older commit starts and refuses it. A bare
-Codex launch is pinned the same way — `--session-id <engine session id>` —
+A bare Codex launch is pinned the same way — `--session-id <engine session id>` —
 by default, because the image bakes the WI-1126 fork that accepts the flag
 (WI-1142, WI-1354). Set `VOGT_CODEX_SESSION_ID=false` only when the binary is
 stock npm Codex, which refuses an unknown flag and would not start; with the
@@ -1087,8 +1052,7 @@ conversation to the directory it ran in, and `claude --resume <id>` finds it
 only from there — often not a registered project root (a parent folder, a
 worktree). For `claude` and `codex`, the engine looks the id up in the
 transcript under `$HOME` (`~/.claude/projects/*/<id>.jsonl`,
-`~/.codex/sessions/**/rollout-*-<id>.jsonl`, or Klaudia's
-`~/.klaudia/sessions/*/<id>.jsonl`), reads the `cwd` it records, and
+`~/.codex/sessions/**/rollout-*-<id>.jsonl`), reads the `cwd` it records, and
 starts the session there instead of the requested `cwd` — but only when that
 directory exists inside `workspace_root`; otherwise the requested `cwd` is kept
 (`engine/server/src/transcripts.rs`). The session summary's `cwd` reports
@@ -1146,8 +1110,7 @@ starts (WI-1590), against the model the start will actually run — the
 purpose's dispatch profile, or the model the caller named — and a start on a
 forbidden model is refused with `policy_refused` rather than spawned. The
 rest stays unenforced: refusing `forbidden_text` and an agent's merge onto a
-production branch is still a follow-up, and Klaudia has no per-session
-settings flag to carry such a hook.
+production branch is still a follow-up.
 
 **Quiet defaults for Claude Code.** Engine sessions are often driven by
 another agent through `POST /api/sessions/:id/input`, and Claude Code's
@@ -1244,8 +1207,7 @@ refuse sends no policy, so its session spec is unchanged.
 
 The merged image's entrypoint installs `vogt-policy-hook`
 (`engine/deploy/policy-hook.sh`) as a `PreToolUse` hook for `Bash` into Claude
-Code's user settings and, as a marked block, into `~/.klaudia/config.toml`.
-`ENGINE_AGENT_POLICY_HOOK=0` skips both. A session pod's entrypoint installs
+Code's user settings. `ENGINE_AGENT_POLICY_HOOK=0` skips it. A session pod's entrypoint installs
 it for a Claude session too (below). Before a shell command runs, the hook
 asks `POST /api/agent-auth/policy-check` with the session's broker token (a
 pod session, which has none, presents its stream credential), which names the
@@ -1639,11 +1601,7 @@ checks decide what it can finish on its own (WI-926; the design is
 - **`account` on `POST /api/sessions`**: see [Claude accounts](#claude-accounts).
 - **`permission_mode` on `POST /api/sessions`**: `accept-edits` maps to
   `--permission-mode acceptEdits` (edits accepted, everything else asks).
-  `bypass` maps to `--dangerously-skip-permissions` (no checks). Klaudia
-  takes `bypass` the same way; its default posture is its own `autonomous`
-  mode (finish the task, ask before changing the machine) behind its host
-  guardrail, and `accept-edits` is `400` for it: Klaudia's `acceptEdits` is
-  only an alias for `autonomous`, so it would not mean what was asked. A
+  `bypass` maps to `--dangerously-skip-permissions` (no checks). A
   posture on a plain shell is `400`. The posture shows on the summary
   (`permission_mode`, absent for the default), is kept in the hibernation
   record, and is reapplied on wake. vogt-core grants `bypass` only to a
@@ -1699,69 +1657,22 @@ checks decide what it can finish on its own (WI-926; the design is
   a reference copy to
   `/usr/local/share/vogt/driven-session-codex-requirements.toml`. The engine
   judges the file Codex loads (WI-1146): `/etc/codex/requirements.toml` must
-  exist, be non-empty and wire the gitguard hook, and it and its directory
-  must be owned by root and not group- or world-writable, or a session could
-  rewrite it. `ENGINE_AGENT_CODEX_POLICY` names a deployment's own file; it is
-  checked the same way, and so is `/etc/codex/requirements.toml`, which a
-  deployment that points elsewhere still has to install. Empty checks
-  `/etc/codex/requirements.toml`; the image copy present without it is a
-  refusal, and neither present means the session starts with no policy (a
-  checkout, or a pod built before the file existed). The check runs once, at
-  engine start. `off` is the only way a deployment that has the file starts
-  Codex without that check. A failing check is `400` on every Codex launch,
-  and the session does not fall through to bypass. The shipped file (WI-1356) wires
-  the gitguard managed hook for the fork: `[[hooks.SessionStart]]` and
-  `[[hooks.PreToolUse]]` (matcher `Bash`, `shell`, `exec_command`,
-  `write_stdin`, `apply_patch`) run `/usr/local/bin/klaudia hook gitguard`
-  with `failClosed = true` (WI-1129), so a hook that fails blocks the tool
-  call. The program is named by absolute path, and the engine requires
-  exactly that command (WI-1146): a bare `klaudia` resolves through PATH,
-  whose first entry `/opt/vogt/agent-clis/bin` the session user owns, so a
-  session could put an `exit 0` stub there and pass every call. The engine
-  also requires `/usr/local/bin/klaudia` to be a root-owned regular file
-  (not a symlink) in a root-owned directory, with no group or world write;
-  the Dockerfile builds it root `0755` and asserts that. A runtime
-  `VOGT_KLAUDIA_VERSION` pin installs under the session-owned
-  `/opt/vogt/agent-clis` and changes the `klaudia` a session runs, never
-  the hook: gitguard always runs the image's build, from the commit
-  `engine/agent-versions.env` names, so moving gitguard to another Klaudia
-  is an image build.
-  On the fork `failClosed` acts only on `PreToolUse`: a `SessionStart` hook
-  that fails lets the session start with no baseline. That is still safe,
-  because gitguard's `PreToolUse` refuses every `Bash` and `apply_patch` call
-  for a session it holds no baseline for, so the session can run nothing
-  until a baseline exists.
-  The file also pins `[features] hooks = true`: the fork runs managed hooks
-  only while that feature is on, and the pin beats `-c features.hooks=false`,
-  `--disable hooks` and any `[features]` in `$CODEX_HOME` or a project
-  `.codex/config.toml`. The engine refuses a policy without the pin.
-  A table Codex cannot parse stops Codex at start-up; it does not run
-  unguarded. `server/tests/codex_gitguard_e2e.rs` runs the real fork against
-  the shipped file and a scripted model and proves `git stash`,
-  `git checkout -- .`, `git clean -f`, `git reset --hard` and
-  `git -C <other repo> restore` are refused while the session's own commit
-  lands, with no override and under each of those feature overrides; it
-  runs where `/etc/codex/requirements.toml` is the shipped file (set
-  `VOGT_CODEX_GITGUARD_E2E=1` to make a missing prerequisite fail). CI runs
-  it inside the stack image candidate (`build.yml`, `stack-image`, the
-  `codex-gitguard-e2e` Dockerfile target) before the image is pushed.
-  **gitguard is an accident guard, not a sandbox** (operator decision,
-  2026-10-15). It guarantees that an agent running destructive git by
-  mistake (`git stash`, `git checkout -- .`, `git reset --hard`,
-  `git clean -f`, `git restore`, including `git -C <other repo>`) cannot
-  discard work it did not make, and that a session without root cannot
-  switch the guard off: not by editing the requirements file or its
-  directory, not by shadowing `klaudia` on its PATH, not by turning the
-  hooks feature off. It does not stop a determined session. The session
-  user has passwordless sudo in the pod and the operator has kept it, so a
-  session can rewrite `/etc/codex/requirements.toml`,
-  `/usr/local/bin/klaudia` or the Codex binary as root. The ownership
-  checks above are correctness checks, not a security boundary.
-  The test also runs once with an `exit 0` `klaudia` stub first on PATH,
-  and the refusals still hold.
-  Destructive-git execpolicy prefix rules stay out: they are Starlark
-  (`prefix_rule`), not a requirements table. Claude and opencode launches
-  are not blocked by a Codex policy error.
+  be non-empty and parse as TOML. `ENGINE_AGENT_CODEX_POLICY` names a
+  deployment's own file; it is checked the same way, and so is
+  `/etc/codex/requirements.toml`, which a deployment that points elsewhere
+  still has to install. Empty checks `/etc/codex/requirements.toml`; the image
+  copy present without it is a refusal, and neither present means the session
+  starts with no policy (a checkout, or a pod built before the file existed).
+  The check runs once, at engine start. `off` is the only way a deployment
+  that has the file starts Codex without that check. A failing check is `400`
+  on every Codex launch, and the session does not fall through to bypass. The
+  shipped file is a one-line comment. It used to wire the gitguard managed
+  hook for the fork (`[[hooks.SessionStart]]`, `[[hooks.PreToolUse]]`,
+  `/usr/local/bin/klaudia hook gitguard`); that hook and its binary were
+  removed with Klaudia (WI-3744), so a Codex session now runs under the
+  engine's own posture flags and the person gate, with no destructive-git
+  guard. Claude and opencode launches are not blocked by a Codex policy
+  error.
   **Workspace guidance (WI-1357).** Codex reads no `CLAUDE.md`,
   `.claude/rules` or `.claude/skills`, and no `AGENTS.md` above its git
   root, so the engine (`server/src/codex_guidance.rs`) gathers the set
@@ -1931,7 +1842,7 @@ engine id (WI-912; the design is `docs/design/session-hibernation.md`).
   the original brief (capped at 32 KiB), all written to the brief file.
   After that, the record resumes the new conversation. vogt-core decides
   when to send it: `cold_wake_compaction` is on (it is off by default), the
-  session has not set `cold_wake_opt_out`, its agent is Claude, Klaudia or
+  session has not set `cold_wake_opt_out`, its agent is Claude or
   Codex, the session was hibernated longer than its provider's
   `cold_wake_ttl_seconds`, and the last `economics.context_tokens` reading
   is at least `cold_wake_threshold_tokens`. vogt-core builds the summary
@@ -2044,13 +1955,11 @@ stop: opencode ends a *run* at every natural stop of the model, and any
 agent may stop to announce its next step. So the engine re-drives it
 (`autopilot.rs`):
 
-- a Claude Code, Codex, opencode or Klaudia session on autopilot that is at
+- a Claude Code, Codex or opencode session on autopilot that is at
   its prompt (`ready`, below), not blocked on a person, and quiet for
   `ENGINE_AUTOPILOT_NUDGE_AFTER` (default `60s`) is sent a one-line "carry
   on" and Enter, logged as `event=autopilot.nudge`, and counted on the
-  summary as `autopilot_nudges`. A Klaudia session whose own goal loop is
-  driving it (`klaudia: goal-loop` in its title, or its status bar on older
-  builds) is left alone, since two drivers of one loop would interleave;
+  summary as `autopilot_nudges`.
 - a line reading `AUTOPILOT: DONE` among the last lines of its screen turns
   its autopilot off for good (`event=autopilot.done`), as does reaching
   `ENGINE_AUTOPILOT_MAX_NUDGES` (default 100; `event=autopilot.capped`).
@@ -2103,7 +2012,7 @@ nothing) and acts at two levels:
   must not be blocked, its agent must be one the engine re-drives, and the
   prompt must have been quiet for the nudge settle time. A turn or context
   limit, soft and hard, therefore acts only for the agents the engine re-drives
-  (claude, codex, opencode, klaudia); the wall clock acts for every session.
+  (claude, codex, opencode); the wall clock acts for every session.
 - **hard**, once, at the limit: the same change, then the session is hibernated
   with trigger `budget`. A turn, context or whole-session clock limit waits for
   the prompt first, so the stop lands at a turn boundary and never in the
@@ -2126,7 +2035,7 @@ before the tailer has published anything.
 **Holding autopilot for a due action (WI-1281).** Waiting for the prompt only
 works if the session is let reach it. An autopilot worker is re-prompted as
 soon as it settles there, so a turn limit that merely waited landed many turns
-late, or never (Klaudia workers ran 186–482 turns against a 120-turn budget).
+late, or never.
 While a soft warning or a waiting hard stop is due and the session is not at
 its prompt, the watcher holds it: autopilot does not nudge a held session, the
 turn in progress finishes, the session rests at its prompt, and the next tick
@@ -2158,7 +2067,7 @@ the soft line, once per climb and only at the prompt, the watcher types the
 agent's compact command and publishes a `budget` change at level `compact`:
 for Claude, `/compact Keep: open workers and their items, pending operator
 decisions, follow-ups, merge gates`. An agent with no compact command the
-engine types (Codex, WI-1575; Klaudia until its command is confirmed) gets
+engine types (Codex, WI-1575) gets
 the change at level `soft` and nothing typed. The latch re-arms when the
 economics show context under half the limit. A turn or clock limit on an
 overseer still hibernates it. `dispatch.context_budget` rotation (WI-3132) is
@@ -2371,8 +2280,8 @@ file cache, use cAdvisor's `container_memory_rss` and `container_memory_cache`.
 A live session that has reported a conversation is metered from its own
 transcript (WI-1245). Every `ENGINE_ECONOMICS_TICK_SECS` (15 s; `0` turns it
 off) the engine reads the new bytes of that transcript — Claude under
-`~/.claude/projects`, Klaudia under `~/.klaudia/sessions`, Codex under
-`~/.codex/sessions` — and folds them into the meter from
+`~/.claude/projects` and Codex under `~/.codex/sessions` — and folds them
+into the meter from
 [`session economics`](ARCHITECTURE.md). The running totals ride on the session
 summary as `economics` (turns, context, peak context, compactions, and whether
 token usage was measured), and the core's `session.list` digest prints them as
@@ -2970,7 +2879,7 @@ vetted, so the engine assumes its agent can be talked into anything:
 |---|---|---|
 | `ENGINE_CHAT_ENABLED` | `1` | `0` turns chats off |
 | `ENGINE_CHAT_DRIVER` | `klaudia` | `klaudia` (stream-json) or `codex` (app-server JSON-RPC). Anything else fails startup |
-| `ENGINE_CHAT_TEMPLATE` | first Klaudia template | the session template whose driver a chat runs, and that promotion uses |
+| `ENGINE_CHAT_TEMPLATE` | — | the session template whose driver a chat runs, and that promotion uses. No shipped template runs the stream-json driver, so with neither this nor `ENGINE_CHAT_COMMAND` set chats are unavailable |
 | `ENGINE_CHAT_COMMAND` | — | the driver command instead (words, or a JSON array) |
 | `ENGINE_CHAT_MODELS_JSON` | `[]` | `[{"id","label"}]` for the model picker; the first is a new chat's default; empty offers only the driver's own default |
 | `ENGINE_CHAT_PROVIDER_KEY` | — | the name of the provider-key variable the driver reads (its `apiKeyEnv`) |
@@ -4513,7 +4422,7 @@ service behind it is not there, and exactly which setting turns it on.
 | **Vogt core** | the front door, credential checks, the assistant's Vogt tools, the event follower | `VOGT_CORE_URL` + the stack secret, `VOGT_CORE_TOKEN` / `VOGT_CORE_TOKEN_FILE` — §3, §5 | The engine is bootable alone with a break-glass `ENGINE_TOKEN` (with neither it refuses to start): sessions work, `/readyz` stays ready, the Vogt routes answer `503` with a named reason. |
 | **FCM** (native push) | push to the Android shell | `ENGINE_FCM_SERVICE_ACCOUNT_FILE` (a path to the Firebase service-account JSON; `ENGINE_FCM_SERVICE_ACCOUNT_JSON`, the document inline, is also accepted but carries a private key in the environment and is warned about) | The FCM transport is disabled; browser web-push still works for any subscription. VAPID keys are generated and persisted under `state_dir`. |
 | **GUI streaming** | the GUI tab's live stream of launched processes | `GUI_STREAM_URL` (+ `START_SWAY=1`, and `GUI_STREAM_VERIFIED=1` once an operator has watched it work) | `/readyz` reports `gui: disabled` and the GUI surface's affordances are withdrawn with a stated reason. |
-| **Agent CLIs** (`codex`, `claude`, `opencode`, `klaudia`) | agents inside sessions | `INSTALL_AI_CLIENTS=true` at image build (on in the published image), or a user-managed install in the pod's home | Sessions are ordinary shells; the "(protected)" templates cannot start. |
+| **Agent CLIs** (`codex`, `claude`, `opencode`) | agents inside sessions | `INSTALL_AI_CLIENTS=true` at image build (on in the published image), or a user-managed install in the pod's home | Sessions are ordinary shells; the "(protected)" templates cannot start. |
 | **Agent service auth** | brokering third-party service credentials (GitHub and others) into a session from a secrets manager | `ENGINE_AUTO_AGENT_AUTH=1` + `ENGINE_AGENT_AUTH_HELPER` naming a helper (the bundled reference helper is auto-selected when its secrets manager's machine identity is present in the environment), configured through the env vars in `agent-auth.sh`'s header | Sessions run without those credentials pre-loaded; nothing in the engine depends on it. **The shipped helper is one pluggable example** — a data-driven reference implementation against one secrets manager; it bakes in no address, project or secret name and is driven by `ENGINE_AGENT_AUTH_SECRETS`/`_PROBES`. A deployment points the variable at a helper of its own that speaks the same subcommands (`check`, `run`, `shell`, `get`, `set`, `fetch`, `store`), or leaves it off. When it *is* on, a session gets exactly the manifest and never the machine identity — see the credential contract below. |
 
 **The agent-auth session credential contract.** A session launched under this
@@ -4826,11 +4735,10 @@ MCP, and the session engine itself — are in
 
 #### Session pod boot
 
-`engine/Dockerfile.pod` installs the same Codex fork release and Klaudia
-commit as the stack image, from `engine/agent-versions.env`, rather than
-stock npm Codex. The fork and its companion binaries are checksum-checked;
-Klaudia is built with the manifest's checksum-pinned Go toolchain. The shared
-managed requirements are installed at `/etc/codex/requirements.toml`, with
+`engine/Dockerfile.pod` installs the same Codex fork release as the stack
+image, from `engine/agent-versions.env`, rather than stock npm Codex. The fork
+and its companion binaries are checksum-checked. The shared managed
+requirements are installed at `/etc/codex/requirements.toml`, with
 root ownership and permissions checked at build time. The session agent
 checks the policy inside the pod before launching Codex. Architectures without
 a published fork checksum cannot run Codex; no stock fallback is installed.

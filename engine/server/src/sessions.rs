@@ -1246,7 +1246,7 @@ impl SessionRegistry {
         // (WI-1324). Taken once, at the first start: a wake reuses the
         // recorded block, because the baseline must not move to include what
         // the session itself has since changed. The two variables tell the
-        // agent's own guard (Klaudia) that the engine is guarding the tree.
+        // agent's own guard that the engine is guarding the tree.
         let workspace = match &creating {
             Creating::Wake(record) => record.workspace.clone(),
             Creating::Fresh(_) => {
@@ -1951,37 +1951,6 @@ impl SessionRegistry {
             if session.is_hibernating() || shutting_down.load(Ordering::Acquire) {
                 return;
             }
-            // A session that just stops, rather than hibernating, still leaves
-            // the next one a hand-off (C12). Hibernation writes its own, and
-            // this hook returns above so the two never both write.
-            if let Some(conversation) = session.conversation() {
-                // `git` inside the hand-off must not run on a tokio worker.
-                // This hook is invoked from the session's exit waiter, which
-                // is a tokio task when one is current (the credential revoke
-                // just below already depends on `try_current`).
-                let state_dir = state_dir.clone();
-                let id = session.id;
-                let agent = conversation.agent.clone();
-                let conversation_id = conversation.id.clone();
-                let cwd = session.cwd.clone();
-                let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-                let write = move || {
-                    crate::handoff::write_for(
-                        &state_dir,
-                        id,
-                        &agent,
-                        &conversation_id,
-                        &cwd,
-                        home.as_deref(),
-                    );
-                };
-                match tokio::runtime::Handle::try_current() {
-                    Ok(runtime) => {
-                        runtime.spawn_blocking(write);
-                    }
-                    Err(_) => write(),
-                }
-            }
             records.remove(&session.id);
             hibernation::remove(&state_dir, session.id);
             // The session's own credential ends with it (WI-926).
@@ -2150,20 +2119,6 @@ impl SessionRegistry {
         hibernation::write_screen(&self.cfg.state_dir, id, &screen)
             .and_then(|()| hibernation::write(&self.cfg.state_dir, &record))
             .map_err(|e| ApiError::Internal(format!("write the hibernation record: {e}")))?;
-        // Best-effort, and only for a Klaudia conversation: a missing summary
-        // or a directory that is not a checkout still leaves what it can, and
-        // a failure here must not stop the hibernation (C12). `git` runs off
-        // the runtime: at shutdown every session hibernates in turn.
-        let state_dir = self.cfg.state_dir.clone();
-        let handoff_record = record.clone();
-        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-        let joined = tokio::task::spawn_blocking(move || {
-            crate::handoff::write(&state_dir, &handoff_record, home.as_deref());
-        })
-        .await;
-        if let Err(e) = joined {
-            tracing::warn!(session = %id, error = %e, "the handoff write task failed");
-        }
         // Not observed here. A hibernation is not the end: a wake resumes the
         // session, and counting it now would count it again at every later
         // hibernation. The exit waiter skips a hibernating session, and the
@@ -2359,7 +2314,7 @@ impl SessionRegistry {
             .filter(|p| {
                 !p.is_empty()
                     && record.conversation.as_ref().is_some_and(|c| {
-                        matches!(c.agent.as_str(), "claude" | "klaudia")
+                        matches!(c.agent.as_str(), "claude")
                             || (c.agent == "codex" && self.cfg.codex_session_id)
                     })
             })
@@ -3378,13 +3333,63 @@ pub const FRESH_PROMPT_MAX: usize = 64 * 1024;
 /// How much of the original brief a compacting wake carries forward.
 const FRESH_BRIEF_CAP: usize = 32 * 1024;
 
+/// Porcelain lines kept in a fresh wake's git facts. The session directory is
+/// the main checkout, whose status can be the whole working tree.
+const GIT_STATUS_LINES: usize = 40;
+
+/// `branch`, `HEAD` and `status --porcelain` of `cwd`, or `None` when it is
+/// not a checkout. Blocking, and only the three fast read-only calls.
+///
+/// Every call passes `--no-optional-locks`: `status` otherwise takes
+/// `index.lock`, and the session directory is one a worker may be committing
+/// in at the same moment.
+fn git_facts(cwd: &str) -> Option<String> {
+    let capture = |args: &[&str]| -> Option<String> {
+        let out = std::process::Command::new("git")
+            .arg("--no-optional-locks")
+            .arg("-C")
+            .arg(cwd)
+            .args(args)
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        (!text.is_empty()).then_some(text)
+    };
+    if capture(&["rev-parse", "--is-inside-work-tree"]).as_deref() != Some("true") {
+        return None;
+    }
+    let mut lines = Vec::new();
+    if let Some(branch) = capture(&["rev-parse", "--abbrev-ref", "HEAD"]) {
+        lines.push(format!("branch: {branch}"));
+    }
+    if let Some(sha) = capture(&["rev-parse", "HEAD"]) {
+        lines.push(format!("head: {sha}"));
+    }
+    let status = capture(&["status", "--porcelain"]).unwrap_or_default();
+    if status.is_empty() {
+        lines.push("status: clean".to_string());
+    } else {
+        let status_lines: Vec<&str> = status.lines().collect();
+        lines.push("status:".to_string());
+        let shown = status_lines.len().min(GIT_STATUS_LINES);
+        lines.push(status_lines[..shown].join("\n"));
+        if status_lines.len() > shown {
+            lines.push(format!("… and {} more", status_lines.len() - shown));
+        }
+    }
+    Some(lines.join("\n"))
+}
+
 /// The first prompt of a compacting wake (WI-2037): vogt-core's summary, then
 /// the git facts of the session's directory, then the brief it was first
 /// started with. Read before the new prompt replaces that brief's file.
 fn fresh_wake_prompt(summary: &str, record: &Record) -> String {
     let mut out = summary.trim_end().to_string();
     out.push_str("\n\n## Git (session directory)\n\n");
-    match record.cwd.as_deref().and_then(crate::handoff::git_facts) {
+    match record.cwd.as_deref().and_then(git_facts) {
         Some(git) => out.push_str(git.trim()),
         None => out.push_str("(not a git checkout)"),
     }
@@ -3735,14 +3740,14 @@ mod tests {
         assert!(super::codex_policy_refusal(Some(&codex(&["codex"])), false, &Ok(None)).is_ok());
     }
 
-    /// The engine's filesystem is not the pod's (WI-3335): a slim engine
-    /// image has no klaudia, so judging a pod's Codex by it refused every pod
-    /// Codex launch. A pod launch is left to the pod's own check; a host
-    /// launch with the same policy error is still refused.
+    /// The engine's filesystem is not the pod's (WI-3335): judging a pod's
+    /// Codex by a policy file that only exists on the engine host refused
+    /// every pod Codex launch. A pod launch is left to the pod's own check; a
+    /// host launch with the same policy error is still refused.
     #[test]
     fn a_pod_backed_codex_launch_is_not_judged_by_the_engines_files() {
         let no_hook: std::result::Result<Option<std::path::PathBuf>, String> =
-            Err("gitguard hook program /usr/local/bin/klaudia cannot be inspected".into());
+            Err("Codex driven-session policy /opt/policy/requirements.toml cannot be read".into());
         let codex = vec!["codex".to_string()];
         assert!(super::codex_policy_refusal(Some(&codex), true, &no_hook).is_ok());
         assert!(matches!(

@@ -44,7 +44,7 @@ pub struct StartSessionParams {
     #[serde(default)]
     #[schemars(schema_with = "optional_string")]
     pub project: Option<String>,
-    /// Session template to run, by name or by tag — the engine expands it against the deployment's templates. Use this to run an agent rather than a plain shell: `claude` (or `codex`, `opencode`, `klaudia`) starts that agent under the deployment's protected wrapper, so a request to *do* something in a session names one here. Omitted means a plain shell, which does nothing until typed into.
+    /// Session template to run, by name or by tag — the engine expands it against the deployment's templates. Use this to run an agent rather than a plain shell: `claude` (or `codex`, `opencode`) starts that agent under the deployment's protected wrapper, so a request to *do* something in a session names one here. Omitted means a plain shell, which does nothing until typed into.
     #[serde(default)]
     #[schemars(schema_with = "optional_string")]
     pub template: Option<String>,
@@ -52,7 +52,7 @@ pub struct StartSessionParams {
     #[serde(default)]
     #[schemars(schema_with = "optional_start_session_params_placement")]
     pub placement: Option<StartSessionParamsPlacement>,
-    /// What the session's agent should do, in the user's words. Folded into the brief as its Task section; an agent template (Claude Code, Codex, OpenCode, Klaudia) is started with a first prompt telling it to read the brief and carry that task out, so 'start a session on X and check its containers' opens an agent already checking them. A plain shell only gets the brief's path in VOGT_ENGINE_AGENT_TASK_PROMPT_FILE, so pair a task with `template` when it is something to carry out. Omitted on an agent start, the task is taken from `reason` (a leading `Task:` dropped); a `review` purpose gets a default review task.
+    /// What the session's agent should do, in the user's words. Folded into the brief as its Task section; an agent template (Claude Code, Codex, OpenCode) is started with a first prompt telling it to read the brief and carry that task out, so 'start a session on X and check its containers' opens an agent already checking them. A plain shell only gets the brief's path in VOGT_ENGINE_AGENT_TASK_PROMPT_FILE, so pair a task with `template` when it is something to carry out. Omitted on an agent start, the task is taken from `reason` (a leading `Task:` dropped); a `review` purpose gets a default review task.
     #[serde(default)]
     #[schemars(schema_with = "optional_string")]
     pub task: Option<String>,
@@ -71,14 +71,14 @@ pub struct StartSessionParams {
     /// Include a two-level outline of the touch-point directories in the brief. Omitted means include one when touch points name files, and not otherwise. The outline is capped; it is a map, not a listing.
     #[serde(default)]
     pub repo_map: Option<bool>,
-    /// The agent's permission posture. `default`: Claude Code's own mode (auto) with the deployment's driven-session policy — routine safe work proceeds, prod-mutating, destructive, shared-resource and secret-exposing actions are denied. `accept_edits`: file edits auto-accepted, everything else asks. `bypass`: no permission checks at all, for one trusted task — only a person may grant it (an agent is refused), and it is audited. Claude Code, Codex, opencode and Klaudia templates. Codex maps the same three postures: `default` is `-a on-request -s danger-full-access`; `accept_edits` adds `approvals_reviewer="auto_review"`; `bypass` is `--dangerously-bypass-approvals-and-sandbox` and stays people-only. A named Codex requirements file that is missing, empty or unreadable refuses the Codex launch (400) and does not fall through to bypass. Klaudia takes `default` and `bypass` only (its `acceptEdits` is an alias for its default autonomous mode, so `accept_edits` is refused).
+    /// The agent's permission posture. `default`: Claude Code's own mode (auto) with the deployment's driven-session policy — routine safe work proceeds, prod-mutating, destructive, shared-resource and secret-exposing actions are denied. `accept_edits`: file edits auto-accepted, everything else asks. `bypass`: no permission checks at all, for one trusted task — only a person may grant it (an agent is refused), and it is audited. Claude Code, Codex and opencode templates. Codex maps the same three postures: `default` is `-a on-request -s danger-full-access`; `accept_edits` adds `approvals_reviewer="auto_review"`; `bypass` is `--dangerously-bypass-approvals-and-sandbox` and stays people-only. A named Codex requirements file that is missing, empty or unreadable refuses the Codex launch (400) and does not fall through to bypass.
     #[serde(default = "default_start_session_params_permission_mode")]
     pub permission_mode: StartSessionParamsPermissionMode,
     /// Run the session under a named Claude Code subscription account (a name from the engine's ENGINE_AGENT_CLAUDE_ACCOUNTS). Omitted uses the engine's default account. Claude Code templates only; an unknown name is refused, never started on the default login.
     #[serde(default)]
     #[schemars(schema_with = "optional_start_session_params_account")]
     pub account: Option<String>,
-    /// Continue a previous conversation of the template's agent CLI instead of starting a new one: its own conversation id, mapped to `claude --resume <id>`, `codex resume <id>`, `opencode --session <id>` or `klaudia --resume <id>`. A Claude Code (or Klaudia) session Vogt started fresh has the engine session id (`engine_session_id`) as its conversation id, so a session lost to a restart can be resumed by that. The engine starts a resumed conversation in the directory its transcript records (when inside the workspace), so one begun under a worktree or a parent folder resumes from any project. Requires `template`; letters, digits and . _ - only, never a leading dash.
+    /// Continue a previous conversation of the template's agent CLI instead of starting a new one: its own conversation id, mapped to `claude --resume <id>`, `codex resume <id>`, `opencode --session <id>`. A Claude Code session Vogt started fresh has the engine session id (`engine_session_id`) as its conversation id, so a session lost to a restart can be resumed by that. The engine starts a resumed conversation in the directory its transcript records (when inside the workspace), so one begun under a worktree or a parent folder resumes from any project. Requires `template`; letters, digits and . _ - only, never a leading dash.
     #[serde(default)]
     #[schemars(schema_with = "optional_start_session_params_resume")]
     pub resume: Option<String>,
@@ -151,6 +151,7 @@ pub struct SessionTemplateRow {
     #[serde(default)]
     #[schemars(schema_with = "optional_string")]
     pub agent: Option<String>,
+    #[serde(default)]
     pub placements: Vec<String>,
     pub default_placement: String,
 }
@@ -783,7 +784,7 @@ pub struct SessionEconomicsParams {
 /// Read from the same transcript `session.last_reply` finds, whole rather
 /// than tailed. `context_tokens` is the latest turn's window, not a sum.
 /// `usage_measured` is true only when that number came from recorded usage
-/// (Claude Code); Klaudia and Codex are estimated at four characters per
+/// (Claude Code); an agent without usage is estimated at four characters per
 /// token. `cost_usd` stays null: this product has no price table, and a zero
 /// would say the session was free. `commits` and `files_changed` stay null
 /// until a worktree is measured; zero would say the tree was clean.

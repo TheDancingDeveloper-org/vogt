@@ -698,7 +698,7 @@ def test_the_whole_session_clock_is_unset_unless_the_project_sets_it(
     default. A project's agent_policy turns it on for the default budget; the
     per-turn 90 minutes and the 120 turns stay as they are."""
     task = StartSessionParams(
-        project="vogt", template="klaudia", task="work the backlog", reason=WHY
+        project="vogt", template="claude", task="work the backlog", reason=WHY
     )
     start_session(wired, task)
     assert "session_wall_clock_minutes" not in engine.last_spec["budget"]
@@ -2555,8 +2555,8 @@ def test_purpose_implement_resolves_the_implement_profile(
         ),
     )
     spec = engine.last_spec
-    assert spec["template"] == "klaudia"
-    assert spec["model"] == "grok-4.7"
+    assert spec["template"] == "claude"
+    assert spec["model"] == "sonnet"
     assert "effort" not in spec
     assert spec["budget"] == {"turns": 120, "wall_clock_minutes": 90}
     assert spec["autopilot"] is True
@@ -2580,17 +2580,17 @@ def test_a_purpose_whose_model_the_project_forbids_is_refused(
     wired: AppContext, engine: StandInEngine
 ) -> None:
     """WI-1590: the review policy is a rule, not text in the brief. The
-    implement profile runs grok-4.7, and a project that forbids it gets no
+    implement profile runs sonnet, and a project that forbids it gets no
     session and no engine call."""
     update_project(
         wired,
         UpdateProjectParams(
             slug="vogt",
-            agent_policy=AgentPolicy(review=ReviewPolicy(never_models=["grok-4.7"])),
+            agent_policy=AgentPolicy(review=ReviewPolicy(never_models=["sonnet"])),
             reason=WHY,
         ),
     )
-    with pytest.raises(PolicyRefused, match=r"grok-4\.7"):
+    with pytest.raises(PolicyRefused, match=r"sonnet"):
         start_session(
             wired,
             StartSessionParams(
@@ -2623,13 +2623,13 @@ def test_naming_a_forbidden_model_is_refused_too(
 def test_forbidden_text_refuses_a_model_never_models_does_not_list(
     wired: AppContext, engine: StandInEngine
 ) -> None:
-    """WI-1590: `(?i)grok` is the project's rule even when never_models is
+    """WI-1590: `(?i)sonnet` is the project's rule even when never_models is
     empty, and it applies to the model the purpose filled in."""
     update_project(
         wired,
         UpdateProjectParams(
             slug="vogt",
-            agent_policy=AgentPolicy(forbidden_text=["(?i)grok"]),
+            agent_policy=AgentPolicy(forbidden_text=["(?i)sonnet"]),
             reason=WHY,
         ),
     )
@@ -2646,14 +2646,14 @@ def test_forbidden_text_refuses_a_model_never_models_does_not_list(
 def test_forbidden_text_refuses_a_model_the_caller_names(
     wired: AppContext, engine: StandInEngine
 ) -> None:
-    """Purpose plus an explicit model is the same check: naming grok-4.8
-    over the profile still matches `(?i)grok`."""
+    """Purpose plus an explicit model is the same check: naming
+    claude-opus-5-5 over the profile still matches `(?i)opus`."""
     update_project(
         wired,
         UpdateProjectParams(
             slug="vogt",
             agent_policy=AgentPolicy(
-                forbidden_text=["(?i)grok"],
+                forbidden_text=["(?i)opus"],
                 review=ReviewPolicy(never_models=["something-else"]),
             ),
             reason=WHY,
@@ -2665,7 +2665,7 @@ def test_forbidden_text_refuses_a_model_the_caller_names(
             StartSessionParams(
                 work_item="WI-1",
                 purpose="implement",
-                model="grok-4.8",
+                model="claude-opus-5-5",
                 reason=WHY,
             ),
         )
@@ -2716,27 +2716,12 @@ def test_claude_accepts_an_anthropic_model(
     assert engine.last_spec["model"] == "opus"
 
 
-def test_klaudia_may_run_a_model_claude_refuses(
-    wired: AppContext, engine: StandInEngine
-) -> None:
-    """The refusal is about Claude Code, not about the model. The implement
-    profile's own pairing — klaudia with grok-4.7 — keeps starting."""
-    start_session(
-        wired,
-        StartSessionParams(
-            work_item="WI-1", purpose="implement", task="fix it", reason=WHY
-        ),
-    )
-    assert engine.last_spec["template"] == "klaudia"
-    assert engine.last_spec["model"] == "grok-4.7"
-
-
 def test_a_claude_model_on_the_implement_profile_runs_claude_code(
     wired: AppContext, engine: StandInEngine
 ) -> None:
-    """WI-1852: `purpose=implement, model=opus` kept the profile's klaudia
-    template, and klaudia answered 400 "Invalid model name" on every turn.
-    The caller named a Claude model, so the agent follows it."""
+    """WI-1852: a caller naming a Claude model must move the agent to Claude
+    Code, not keep a profile template the model cannot run. The caller named
+    a Claude model, so the agent follows it."""
     result = start_session(
         wired,
         StartSessionParams(
@@ -2768,8 +2753,8 @@ def test_a_claude_alias_on_another_agent_template_is_refused(
     wired: AppContext, engine: StandInEngine
 ) -> None:
     """WI-1852: a bare alias only Claude Code resolves is refused up front
-    on klaudia, codex or opencode, rather than failing every turn."""
-    for template in ("klaudia", "codex", "opencode"):
+    on codex or opencode, rather than failing every turn."""
+    for template in ("codex", "opencode"):
         with pytest.raises(PolicyRefused, match="does not resolve"):
             start_session(
                 wired,
@@ -2777,17 +2762,6 @@ def test_a_claude_alias_on_another_agent_template_is_refused(
                     project="vogt", template=template, model="opus", reason=WHY
                 ),
             )
-    with pytest.raises(PolicyRefused, match="does not resolve"):
-        start_session(
-            wired,
-            StartSessionParams(
-                work_item="WI-1",
-                purpose="implement",
-                template="klaudia",
-                model="sonnet",
-                reason=WHY,
-            ),
-        )
     assert engine.sent == []
 
 
@@ -2818,7 +2792,7 @@ def test_a_project_with_no_review_policy_refuses_nothing(
             work_item="WI-1", purpose="implement", task="fix it", reason=WHY
         ),
     )
-    assert engine.last_spec["model"] == "grok-4.7"
+    assert engine.last_spec["model"] == "sonnet"
 
 
 def test_purpose_review_resolves_opus_low_forty_turns_read_only(
@@ -2844,11 +2818,14 @@ def test_an_explicit_param_wins_over_the_profile_and_is_audited(
     start_session(
         wired,
         StartSessionParams(
-            work_item="WI-1", purpose="implement", model="grok-4.8", reason=WHY
+            work_item="WI-1",
+            purpose="implement",
+            model="claude-opus-5-5",
+            reason=WHY,
         ),
     )
-    assert engine.last_spec["model"] == "grok-4.8"
-    assert engine.last_spec["template"] == "klaudia"
+    assert engine.last_spec["model"] == "claude-opus-5-5"
+    assert engine.last_spec["template"] == "claude"
     assert _last_started(wired)["overrides"] == ["model"]
 
 
@@ -2871,7 +2848,7 @@ def test_the_deployment_profile_preference_overrides_one_field(
         wired,
         PreferenceSetParams(
             key="dispatch.profiles",
-            value={"implement": {"model": "grok-4.8"}},
+            value={"implement": {"model": "claude-opus-5-5"}},
             reason=WHY,
         ),
     )
@@ -2879,8 +2856,8 @@ def test_the_deployment_profile_preference_overrides_one_field(
         wired, StartSessionParams(work_item="WI-1", purpose="implement", reason=WHY)
     )
     spec = engine.last_spec
-    assert spec["model"] == "grok-4.8"
-    assert spec["template"] == "klaudia"
+    assert spec["model"] == "claude-opus-5-5"
+    assert spec["template"] == "claude"
     assert spec["budget"] == {"turns": 120, "wall_clock_minutes": 90}
 
 
