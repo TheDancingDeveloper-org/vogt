@@ -2772,36 +2772,45 @@ WAV file and no microphone.
 
 ### Quick chat APIs
 
-A **quick chat** (WI-1097) is a persistent text conversation with an agent
-CLI, run without a terminal. The default agent is Klaudia, driven over its
-stream-json protocol (msp-klaudia `docs/embedding.md`): each message is a
-`user` line on its stdin, and its replies, tool calls and the `result` that
-ends a turn come back on stdout. `ENGINE_CHAT_DRIVER=codex` (WI-1148) uses
-the Codex app-server instead: JSON-RPC lines (`initialize`, then
-`thread/start` or `thread/resume` with the chat id as `threadId`, then
-`turn/start`). Codex approvals arrive as JSON-RPC requests and are answered
-on stdin; they do not use the Klaudia hook gate. A Codex chat writes a
-per-chat `CODEX_HOME` under `state_dir/chats/<id>/codex-home` (that process
-only; `CODEX_HOME` is not on the shared allowlist). Promotion of a Codex chat
-starts a terminal with `codex resume <chat id>` and no app-server flags.
-Klaudia stays the default and the fallback. The engine picks the conversation
-id, which is the chat's own id: `--session-id` on the first Klaudia launch
-and `--resume` on every later one. A
-chat's process is therefore disposable. It is stopped after
-`ENGINE_CHAT_IDLE_AFTER`, and on the next message it is relaunched with the
-whole conversation. Chats are kept for good in `state_dir/chats.db`. There is
-no retention sweep, and archiving only hides a chat from the default list.
+A **quick chat** (WI-1097) is a persistent text conversation with Codex, run
+without a terminal. Codex is the only chat driver (WI-3754 removed Klaudia):
+the engine launches `codex app-server --stdio` and speaks JSON-RPC on its
+stdin and stdout — `initialize`, then `thread/start` or `thread/resume` with
+the chat id as `threadId`, then `turn/start`; `turn/interrupt` stops a turn
+and `thread/settings/update` changes the model. Codex runs with
+`approvalPolicy = "on-request"`. Each approval request it sends
+(`item/commandExecution/requestApproval`, `item/fileChange/requestApproval`,
+`item/tool/requestUserInput`) becomes an approval card that only a person may
+answer, and is answered on stdin; an unanswered card is denied when
+`ENGINE_CHAT_APPROVAL_TIMEOUT` passes. The engine never auto-allows one. A
+chat writes a per-chat `CODEX_HOME` under
+`state_dir/chats/<id>/codex-home` (that process only; `CODEX_HOME` is not on
+the shared allowlist), whose `config.toml` points Codex at the estate
+LiteLLM provider and whose `vogt-model-catalog.json` is the model list the
+picker offers.
+
+The engine picks the conversation id, which is the chat's own id, so a
+chat's process is disposable. It is stopped after
+`ENGINE_CHAT_IDLE_AFTER`, and on the next message it is relaunched with
+`thread/resume` and the whole conversation. Promotion starts a terminal
+session from the chat's template with `resume: <chat id>` — `codex resume
+<chat id>` — and the session continues that conversation with its own
+credentials. Chats are kept for good in `state_dir/chats.db`. There is no
+retention sweep, and archiving only hides a chat from the default list.
 
 Every route needs the `sessions` capability, because a chat starts an agent
 and its transcript is a shared record. They all answer 404 when chats are off
-(`ENGINE_CHAT_ENABLED=0`, or no Klaudia launch configured), and `/api/config`
-advertises `chat: {drivers: [{name, label, models}]}` only when they are on.
-The core's `chat.*` operations are the MCP/CLI/REST counterparts.
+(`ENGINE_CHAT_ENABLED=0`, or no Codex launch configured), and `/api/config`
+advertises `chat: {drivers: [{name: "codex", label: "Codex", models}]}` only
+when they are on. The core's `chat.*` operations are the MCP/CLI/REST
+counterparts.
 
 - `GET /api/chats?q=&archived=false|true|all&limit=` -> `ChatSummary[]`, newest
   first. `q` is full-text search over titles and over what people and the
   agent said. Tool inputs and results are not indexed.
-- `POST /api/chats` `{title?, model?, message?, work_item?}` -> `ChatSendResult`.
+- `POST /api/chats` `{title?, driver?, model?, message?, work_item?}` ->
+  `ChatSendResult`. `driver` may only be `codex` (the default); any other
+  name is `400`.
 - `GET /api/chats/:id?tail=` -> `ChatDetail`, i.e. the summary plus `entries`
   (`user`, `assistant`, `tool-call`, `tool-result`, `notice`, `error`,
   `approval`) and `approvals` still pending.
@@ -2825,49 +2834,31 @@ The core's `chat.*` operations are the MCP/CLI/REST counterparts.
 - `GET /api/chats/:id/events`: an SSE stream of `ChatEvent` (`entry`,
   `progress`, `approval`, `chat`, `lagged`). `/api/events` also carries a
   thin `chat-changed {id}`.
-- `POST /api/chats/:id/gate` is **outside the bearer gate**. Only the chat's own
-  agent calls it (below), with the per-process token the engine gave that
-  agent.
-
 **What a chat's agent can do.** A chat reads pages and documents nobody
 vetted, so the engine assumes its agent can be talked into anything:
 
 - **Its environment holds no secrets.** The agent starts from a cleared
   environment plus an allowlist (`PATH`, `HOME`, locale, `TZ`, proxy and CA
-  variables), its gate's URL and token, and the one provider key that
-  `ENGINE_CHAT_PROVIDER_KEY` names. The engine resolves that key through the
-  agent-auth manifest's `get` when the deployment brokers it, or else from its
-  own environment. The template's credential wrapper is dropped, so a chat has
-  no Vogt token, no brokered service tokens and no secrets-manager identity.
-  **Its MCP servers therefore start without credentials. The POC has no MCP
-  in chats (decision D1 on WI-1097).**
-- **Only its own directory is free.** Each chat runs in
-  `state_dir/chats/<id>/`, whose `.klaudia/config.toml` (loaded with
-  `--trusted-project-config`) declares a `PreToolUse` hook. The hook posts
-  every tool call to the gate. The free path is an allowlist, and it fails
-  closed. A call runs at once only in two cases: it is a tool that touches
-  nothing outside the agent (`ToolSearch`, `TodoWrite` and the like), or it is
-  a read tool the engine knows argument by argument (`Read`, `Glob`, `Grep`
-  and the LSP tools, from Klaudia's own schemas) whose every argument is one
-  it knows and whose every path resolves, lexically and through symlinks,
-  inside that directory. An unknown tool, an unknown argument, or a missing
-  or non-string path is a card. **Everything else waits on an approval card
-  that a person answers.** That includes any read elsewhere (`/proc/self/environ`, the
-  engine's state, `~`), every web, browser and MCP call (**decision D2:
-  every web call is carded**), every command and every edit. A prompt
-  injection therefore cannot read something and send it out in one unseen
-  step, because each half is a card naming what it would do. Klaudia's own
-  `can_use_tool` asks (host changes) become cards too. `ask_user` and
-  `exit_plan` are answered "not supported in a chat".
-- **The gate fails closed where it can.** On any failure to get an answer, the
-  hook exits 2, which is Klaudia's "block". The engine denies a card at
-  `ENGINE_CHAT_APPROVAL_TIMEOUT`, which is before curl gives up and before the
-  hook's own timeout, after which Klaudia would let the call through. When
-  Klaudia asks whether the chat's hooks may run, the engine allows that only
-  for its own file, byte for byte as it wrote it. If a gated call succeeds
-  without the gate having seen exactly that call, the chat's agent is stopped
-  with an error. The gate is a driver's gate, not a sandbox. A command a person
-  allows runs unconfined, which is what WI-982's uid separation is for.
+  variables), and the one provider key that `ENGINE_CHAT_PROVIDER_KEY`
+  names. The engine resolves that key through the agent-auth manifest's
+  `get` when the deployment brokers it, or else from its own environment.
+  The template's credential wrapper is dropped, so a chat has no Vogt token,
+  no brokered service tokens and no secrets-manager identity. **Its MCP
+  servers therefore start without credentials. The POC has no MCP in chats
+  (decision D1 on WI-1097).**
+- **The approval card is Codex's own request.** The engine has no per-call
+  hook into the app-server: a tool call Codex runs without asking — a read
+  inside the chat's directory, or something its config allows — leaves no
+  card, and one it asks about waits on a person (decision D2). The card is
+  not a sandbox: a command a person allows runs unconfined, which is what
+  WI-982's uid separation is for. That uid separation, not this card, is the
+  boundary against an agent a person has let run.
+- **Failing to answer means no.** Nothing but a person's answer allows a
+  card: an unauthenticated caller gets `403 person required`, an unanswered
+  card is denied at `ENGINE_CHAT_APPROVAL_TIMEOUT`, and a chat stopped or
+  interrupted with cards pending drops them as denied. An agent that exits
+  with a card still pending is stopped with an error entry the sender can
+  retry.
 - **It is bounded.** Limits on chat processes:
   - at most `ENGINE_CHAT_MAX_PROCESSES` (4) at once, and
     `ENGINE_CHAT_MAX_PER_CREATOR` (2) per person; a launch first stops the least
@@ -2883,15 +2874,14 @@ vetted, so the engine assumes its agent can be talked into anything:
   they appear in no session list and never hibernate.
 - **What is kept** is text: what was said, tool calls (600 characters), tool
   results (4 000), approvals, notices and errors, with what looks like a
-  credential redacted. Klaudia's own JSONL transcript under
-  `~/.klaudia/sessions` is what `--resume` continues from.
+  credential redacted. Codex's own transcript under that chat's `CODEX_HOME`
+  is what `thread/resume` continues from.
 
 | Setting | Default | Meaning |
 |---|---|---|
 | `ENGINE_CHAT_ENABLED` | `1` | `0` turns chats off |
-| `ENGINE_CHAT_DRIVER` | `klaudia` | `klaudia` (stream-json) or `codex` (app-server JSON-RPC). Anything else fails startup |
-| `ENGINE_CHAT_TEMPLATE` | — | the session template whose driver a chat runs, and that promotion uses. No shipped template runs the stream-json driver, so with neither this nor `ENGINE_CHAT_COMMAND` set chats are unavailable |
-| `ENGINE_CHAT_COMMAND` | — | the driver command instead (words, or a JSON array) |
+| `ENGINE_CHAT_TEMPLATE` | the first template that runs Codex | the session template whose command launches a chat (only its binary is used: a chat always runs `codex app-server --stdio`), and that promotion uses. Unset, the first configured template that runs Codex |
+| `ENGINE_CHAT_COMMAND` | — | the Codex command instead (words, or a JSON array). A command that does not run Codex turns chats off, and is never replaced by a template |
 | `ENGINE_CHAT_MODELS_JSON` | `[]` | `[{"id","label"}]` for the model picker; the first is a new chat's default; empty offers only the driver's own default |
 | `ENGINE_CHAT_PROVIDER_KEY` | — | the name of the provider-key variable the driver reads (its `apiKeyEnv`) |
 | `ENGINE_CHAT_IDLE_AFTER` | `10m` | stop an idle chat's process |
@@ -4109,7 +4099,7 @@ can affect the forge; the same approval gate and core writeback policy apply.
 | `inbox.restore` | Confirmation-gated | Available after approval: Restore one archived or snoozed Inbox occurrence. |
 | `preference.get` | Operator-only | Unavailable: Per-person UI settings (saved filters); the assistant has no use for them. |
 | `preference.set` | Operator-only | Unavailable: Changes a person's saved UI settings; set them in the surface they belong to. |
-| `chat.list` | Operator-only | Unavailable: Quick chats are a separate agent (Klaudia) with its own transcript; the assistant is not a client of them. For the Chat panel and agents over MCP/CLI/REST. |
+| `chat.list` | Operator-only | Unavailable: Quick chats are a separate agent (Codex) with its own transcript; the assistant is not a client of them. For the Chat panel and agents over MCP/CLI/REST. |
 | `chat.get` | Operator-only | Unavailable: Reads a quick chat's transcript; for the Chat panel and agents over MCP/CLI/REST. |
 | `chat.create` | Operator-only | Unavailable: Starts another agent; the assistant starts sessions instead. |
 | `chat.send` | Operator-only | Unavailable: Talks to another agent; for the Chat panel and agents over MCP/CLI/REST. |

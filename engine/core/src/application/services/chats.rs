@@ -483,7 +483,7 @@ where
 
 fn missing_chat(chat_id: &str) -> VogtError {
     VogtError::NotFound(format!(
-        "the engine has no chat {chat_id}, or has chats turned off (ENGINE_CHAT_ENABLED, or no Klaudia launch configured)"
+        "the engine has no chat {chat_id}, or has chats turned off (ENGINE_CHAT_ENABLED, or no Codex launch configured)"
     ))
 }
 
@@ -680,7 +680,7 @@ mod tests {
         json!({
             "id": CHAT,
             "title": "Sydney",
-            "driver": "klaudia",
+            "driver": "codex",
             "model": "grok-4.7",
             "creator": "human:ada",
             "created_at": "2026-10-08T00:00:00Z",

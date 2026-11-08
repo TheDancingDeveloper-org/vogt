@@ -680,7 +680,7 @@ def _chat_body(chat_id: str, **over: Any) -> dict[str, Any]:
     body: dict[str, Any] = {
         "id": chat_id,
         "title": "parity",
-        "driver": "klaudia",
+        "driver": "codex",
         "creator": "local:parity",
         "created_at": "2026-01-01T00:00:00Z",
         "updated_at": "2026-01-01T00:00:00Z",
@@ -870,7 +870,7 @@ class _StandInHandler(BaseHTTPRequestHandler):
                     "id": parts[4],
                     "tool_name": "parity",
                     "summary": "parity",
-                    "source": "gate",
+                    "source": "codex",
                     "status": "allowed" if allow else "denied",
                     "requested_at": "2026-01-01T00:00:00Z",
                     "expires_at": "2026-01-01T00:10:00Z",

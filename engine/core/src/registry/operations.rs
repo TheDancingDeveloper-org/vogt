@@ -1211,7 +1211,7 @@ pub fn build_operations() -> Vec<Operation> {
         ),
         Operation::new(
             "chat.create",
-            "Start a quick chat with the engine's chat agent (Klaudia), optionally with its first message and a model the engine offers. Reads run at once; writes, commands and edits wait for a person's approval. Audited.",
+            "Start a quick chat with the engine's chat agent (Codex), optionally with its first message and a model the engine offers. Reads run at once; writes, commands and edits wait for a person's approval. Audited.",
             Scope::WorkWrite,
             true,
             HttpRoute::new(HttpMethod::Post, "/chats"),

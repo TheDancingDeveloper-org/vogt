@@ -1,23 +1,21 @@
-//! Quick chats (WI-1097): persistent text conversations with an agent CLI,
-//! driven over Klaudia's stream-json protocol or Codex's app-server JSON-RPC
-//! (`ENGINE_CHAT_DRIVER`, default `klaudia`) instead of a terminal.
+//! Quick chats (WI-1097): persistent text conversations with Codex, driven
+//! over its app-server JSON-RPC protocol instead of a terminal.
 //!
 //! ## Shape
 //!
 //! A chat is a row in [`ChatStore`] plus, while it is being talked to, one
-//! child process: Klaudia (the driver of the configured launch, by default
-//! the `Klaudia (protected)` template's, without its credential wrapper) with
-//! `--input-format stream-json --output-format stream-json`. Each message is
-//! a `user` line on its stdin; the agent's messages, tool calls and the
-//! `result` that ends a turn come back on stdout (msp-klaudia
-//! `docs/embedding.md`). No PTY, no screen-scraping, no activity heuristic.
+//! child process: Codex's app-server, from the configured command or the
+//! first session template that runs Codex, without its credential wrapper.
+//! A message is a `turn/start` request on its stdin; the agent's messages,
+//! tool calls and the notification that ends a turn come back on stdout. No
+//! PTY, no screen-scraping, no activity heuristic.
 //!
-//! Vogt picks the conversation id — the chat's own id — with `--session-id`
-//! on the first launch and `--resume` on every later one, so a process that
-//! was stopped for being idle, or lost to an engine restart, is relaunched on
-//! the next message with the whole conversation. Promotion hands the same id
-//! to a terminal session's `resume`, which continues it there, with the
-//! session's own (full) credentials.
+//! Vogt picks the conversation id — the chat's own id — with `thread/start`
+//! on the first launch and `thread/resume` on every later one, so a process
+//! that was stopped for being idle, or lost to an engine restart, is
+//! relaunched on the next message with the whole conversation. Promotion
+//! hands the same id to a terminal session's `resume`, which continues it
+//! there, with the session's own (full) credentials.
 //!
 //! ## What a chat's agent holds
 //!
@@ -25,46 +23,23 @@
 //! assumption that its agent can be talked into anything (review round 1):
 //!
 //! - **No secrets in its environment.** It starts from `env_clear()`, the
-//!   [`CHAT_ENV_ALLOWLIST`], its gate's URL and token, and the one provider
-//!   key [`ChatPolicy::provider_key`] names — no Vogt token, no brokered
-//!   service tokens, no secrets-manager identity. So its MCP servers start
-//!   without credentials: no MCP in chats (decision D1 on WI-1097).
-//! - **Only its own directory is free.** [`classify`] lets through reads of
-//!   the chat's scratch directory and tools that touch nothing; every other
-//!   read, every network call (web, browser, MCP — decision D2), every command
-//!   and edit waits for a person.
+//!   [`CHAT_ENV_ALLOWLIST`] and the one provider key
+//!   [`ChatPolicy::provider_key`] names — no Vogt token, no brokered service
+//!   tokens, no secrets-manager identity. So its MCP servers start without
+//!   credentials: no MCP in chats (decision D1 on WI-1097).
+//! - **Approvals are a person's decision** (decision D2). Codex runs with
+//!   `approvalPolicy = "on-request"`; each request it sends is held on an
+//!   approval card only a person can answer (the WI-983 rule), and denied
+//!   when [`ChatPolicy::approval_timeout`] passes. The engine never
+//!   auto-allows one.
 //! - **Bounded.** At most [`ChatPolicy::max_processes`] processes, and
 //!   [`ChatPolicy::max_per_creator`] per person, with an idle one stopped to
 //!   make room; a turn past [`ChatPolicy::turn_timeout`] is stopped; a tree
 //!   over [`ChatPolicy::max_rss_bytes`] is killed; a previous engine's
 //!   leftovers are ended at boot ([`sweep_orphans`]).
 //!
-//! ## The approval gate
-//!
-//! Klaudia's own permission modes cannot express that rule: `autonomous`
-//! runs project work without asking, and `plan` refuses MCP and the network,
-//! so a chat in it could not look anything up even with a person's leave.
-//! So the engine gates calls itself. Each chat runs in a directory of its own
-//! under `state_dir` whose `.klaudia/config.toml` (passed with
-//! `--trusted-project-config`) declares a `PreToolUse` hook that posts every
-//! tool call to `POST /api/chats/{id}/gate` with a per-process token. The
-//! engine answers at once for a free call and holds anything else on an
-//! approval card only a person can answer (the WI-983 rule), denying it when
-//! [`ChatPolicy::approval_timeout`] passes.
-//!
-//! A hook is not a sandbox, and Klaudia runs a project's hooks only once
-//! they are approved, so the gate is built to fail closed where it can:
-//!
-//! - the hook exits 2 (Klaudia's "block") on any failure to get an answer;
-//! - the engine answers before the hook's own timeout, after which Klaudia
-//!   would let the call through;
-//! - Klaudia asks the driver whether this chat's hooks may run; the engine
-//!   allows exactly its own file, byte for byte as it wrote it;
-//! - a successful result of a gated call the gate never saw stops the chat
-//!   with an error rather than carrying on ([`Live::gated`]).
-//!
-//! The gate is a driver's gate, not a boundary against an agent a person has
-//! let run commands; that is WI-982's uid separation.
+//! The approval card is not a sandbox against an agent a person has let run
+//! commands; that boundary is WI-982's uid separation.
 
 use std::{
     collections::HashMap,
@@ -82,7 +57,7 @@ use serde_json::{json, Value};
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     process::Command,
-    sync::{broadcast, mpsc, oneshot},
+    sync::{broadcast, mpsc},
 };
 use uuid::Uuid;
 use vogt_engine_contract::{
@@ -109,13 +84,13 @@ pub struct ChatPolicy {
     /// template. Words, or a JSON array.
     pub command: Option<Vec<String>>,
     /// `ENGINE_CHAT_TEMPLATE`: the session template whose command launches
-    /// the driver. Unset, the first configured template that runs Klaudia.
+    /// Codex. Unset, the first configured template that runs Codex.
     pub template: Option<String>,
     /// `ENGINE_CHAT_MODELS_JSON`: `[{"id","label"}]`, what the model picker
     /// offers. Empty offers only the driver's own default.
     pub models: Vec<ChatModel>,
     /// `ENGINE_CHAT_IDLE_AFTER` (10m): an idle chat's process exits after
-    /// this; the next message relaunches it with `--resume`.
+    /// this; the next message relaunches it with `thread/resume`.
     pub idle_after: Duration,
     /// `ENGINE_CHAT_APPROVAL_TIMEOUT` (10m): an approval nobody answers is
     /// denied after this.
@@ -137,10 +112,6 @@ pub struct ChatPolicy {
     /// `ENGINE_CHAT_MAX_RSS` (2GiB): a chat whose process tree's resident
     /// memory passes this is killed.
     pub max_rss_bytes: u64,
-    /// `ENGINE_CHAT_DRIVER`: which driver a new chat uses when the request
-    /// does not name one. `klaudia` (default) or `codex`. Klaudia stays
-    /// selectable either way.
-    pub driver: String,
 }
 
 impl Default for ChatPolicy {
@@ -157,7 +128,6 @@ impl Default for ChatPolicy {
             max_per_creator: 2,
             turn_timeout: Duration::from_secs(20 * 60),
             max_rss_bytes: 2 << 30,
-            driver: DRIVER.into(),
         }
     }
 }
@@ -197,18 +167,10 @@ impl ChatPolicy {
                 );
             }
         }
-        if self.driver != DRIVER && self.driver != CODEX_DRIVER {
-            return Err(format!(
-                "ENGINE_CHAT_DRIVER={:?} is not klaudia or codex",
-                self.driver
-            ));
-        }
         Ok(())
     }
 }
 
-/// Klaudia stream-json, the original driver. Still selectable.
-const DRIVER: &str = "klaudia";
 /// Codex app-server JSON-RPC (WI-1148).
 const CODEX_DRIVER: &str = "codex";
 const DEFAULT_TITLE: &str = "New chat";
@@ -218,239 +180,7 @@ const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 const RESULT_CHARS: usize = 4_000;
 /// What a tool call's input is shown as.
 const INPUT_CHARS: usize = 600;
-/// How long a driver-side approval counts for the gate that follows it, so
-/// one decision is asked once (Klaudia's host gate asks before its hooks run).
-const ALLOWED_REUSE: Duration = Duration::from_secs(120);
 const STDERR_TAIL: usize = 4 * 1024;
-
-/// The hook Klaudia runs before every tool call in a chat. Values come from
-/// the environment the engine gives the process, so the file is the same
-/// for every chat. `curl` failing in any way (refused, timed out, a non-2xx)
-/// exits 2, which Klaudia reads as "blocked" — any other non-zero status
-/// would read as a broken hook and let the call through.
-fn hook_config(approval_timeout: Duration) -> String {
-    let wait = approval_timeout.as_secs() + 60;
-    let hook_timeout = wait + 60;
-    format!(
-        r#"# Written by the Vogt engine for one quick chat (WI-1097). Regenerated at
-# every launch; edits are lost.
-[[hooks]]
-event = "PreToolUse"
-timeout = "{hook_timeout}s"
-command = '''curl -sS -f --max-time {wait} -X POST -H "Authorization: Bearer $VOGT_CHAT_GATE_TOKEN" -H 'Content-Type: application/json' --data-binary @- "$VOGT_CHAT_GATE_URL" || {{ echo 'Vogt could not reach the approval gate for this chat, so this call was refused.' >&2; exit 2; }}'''
-"#
-    )
-}
-
-/// What the gate does with a tool call.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ToolClass {
-    /// Runs without asking: a read of the chat's own scratch directory, or a
-    /// tool that touches nothing outside the agent.
-    Free,
-    /// Waits for a person.
-    Ask,
-}
-
-/// Tools that touch nothing outside the agent itself.
-const INERT: &[&str] = &[
-    "ToolSearch",
-    "TodoWrite",
-    "TaskGet",
-    "TaskList",
-    "Jobs",
-    "BashOutput",
-    "Skill",
-    "AskUserQuestion",
-    "ExitPlanMode",
-];
-
-/// How an argument of a read tool is treated.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Arg {
-    /// A path to a file or directory: it must resolve inside the chat's
-    /// directory.
-    Path,
-    /// A glob: its literal prefix must resolve inside the chat's directory.
-    Glob,
-    /// Not a path (an offset, a regex, a line number): no bearing on what
-    /// is read.
-    Other,
-}
-
-/// A read tool the gate understands argument by argument, from Klaudia's
-/// own schemas (msp-klaudia `internal/tools/{read,glob,grep,lsp_tools}.go`
-/// at 601e714).
-struct ReadTool {
-    name: &'static str,
-    args: &'static [(&'static str, Arg)],
-    /// The path argument that must be present. `None` where omitting every
-    /// path means the working directory, which is the chat's own.
-    required: Option<&'static str>,
-}
-
-const READ_TOOLS: &[ReadTool] = &[
-    ReadTool {
-        name: "Read",
-        args: &[
-            ("file_path", Arg::Path),
-            ("offset", Arg::Other),
-            ("limit", Arg::Other),
-        ],
-        required: Some("file_path"),
-    },
-    ReadTool {
-        name: "Glob",
-        args: &[("pattern", Arg::Glob), ("path", Arg::Path)],
-        required: None,
-    },
-    ReadTool {
-        name: "Grep",
-        args: &[
-            ("pattern", Arg::Other),
-            ("path", Arg::Path),
-            ("glob", Arg::Glob),
-            ("output_mode", Arg::Other),
-            ("-i", Arg::Other),
-            ("-n", Arg::Other),
-            ("multiline", Arg::Other),
-            ("type", Arg::Other),
-            ("-A", Arg::Other),
-            ("-B", Arg::Other),
-            ("-C", Arg::Other),
-            ("head_limit", Arg::Other),
-        ],
-        required: None,
-    },
-    ReadTool {
-        name: "Diagnostics",
-        args: &[("file", Arg::Path)],
-        required: Some("file"),
-    },
-    ReadTool {
-        name: "Hover",
-        args: &[
-            ("file", Arg::Path),
-            ("line", Arg::Other),
-            ("character", Arg::Other),
-        ],
-        required: Some("file"),
-    },
-    ReadTool {
-        name: "DocumentSymbols",
-        args: &[("file", Arg::Path)],
-        required: Some("file"),
-    },
-    ReadTool {
-        name: "WorkspaceSymbol",
-        args: &[("query", Arg::Other), ("file", Arg::Path)],
-        required: None,
-    },
-];
-
-/// Classify a tool call for the gate (WI-1097 review rounds 1 and 2).
-///
-/// Fail-closed by construction: a call runs free only when the tool is on an
-/// explicit allowlist — [`INERT`], or a [`READ_TOOLS`] entry whose every
-/// argument is one the table knows and whose every path argument is a string
-/// that resolves (lexically, then through symlinks) inside the chat's own
-/// directory. An unknown tool, an unknown argument, a missing required path
-/// or a path that is not a string is a card. So a read anywhere else — the
-/// process's own `/proc/self/environ`, the engine's state, another person's
-/// files — waits for a person, and so does every tool that reaches the
-/// network (web fetch and search, the browser, every MCP call: an argument
-/// sent to a server is data leaving the chat). A prompt injection in a page
-/// the chat was shown cannot read a secret and send it somewhere in one
-/// unseen step: each half is a card naming what it would do.
-pub fn classify(tool: &str, input: &Value, chat_dir: &Path) -> ToolClass {
-    if INERT.contains(&tool) {
-        return ToolClass::Free;
-    }
-    match READ_TOOLS.iter().find(|t| t.name == tool) {
-        Some(spec) if read_is_local(spec, input, chat_dir) => ToolClass::Free,
-        _ => ToolClass::Ask,
-    }
-}
-
-fn read_is_local(spec: &ReadTool, input: &Value, dir: &Path) -> bool {
-    let empty = serde_json::Map::new();
-    let fields = match input {
-        Value::Object(fields) => fields,
-        Value::Null => &empty,
-        _ => return false,
-    };
-    if let Some(required) = spec.required {
-        if !fields
-            .get(required)
-            .and_then(Value::as_str)
-            .is_some_and(|p| !p.trim().is_empty())
-        {
-            return false;
-        }
-    }
-    let root = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
-    fields.iter().all(|(key, value)| {
-        match spec
-            .args
-            .iter()
-            .find(|(name, _)| name == key)
-            .map(|(_, kind)| *kind)
-        {
-            // An argument the table does not know could name anything.
-            None => false,
-            Some(Arg::Other) => true,
-            Some(Arg::Path | Arg::Glob) => value.as_str().is_some_and(|raw| inside(raw, &root)),
-        }
-    })
-}
-
-fn inside(raw: &str, root: &Path) -> bool {
-    let raw = raw.trim();
-    if raw.is_empty() {
-        return true;
-    }
-    // `~` is the home directory, which is not the chat's.
-    if raw.starts_with('~') {
-        return false;
-    }
-    let joined = root.join(raw);
-    // Lexically first, so `..` cannot climb out of a path that does not
-    // exist yet; then through symlinks, for one that does.
-    let mut lexical = PathBuf::new();
-    for part in joined.components() {
-        match part {
-            std::path::Component::ParentDir => {
-                if !lexical.pop() {
-                    return false;
-                }
-            }
-            std::path::Component::CurDir => {}
-            other => lexical.push(other),
-        }
-    }
-    if !lexical.starts_with(root) {
-        return false;
-    }
-    // A glob is not a path; its literal prefix is what can be resolved.
-    let literal: PathBuf = lexical
-        .components()
-        .take_while(|c| {
-            !c.as_os_str()
-                .to_string_lossy()
-                .contains(['*', '?', '[', '{'])
-        })
-        .collect();
-    let mut probe = literal.as_path();
-    loop {
-        if let Ok(real) = std::fs::canonicalize(probe) {
-            return real.starts_with(root);
-        }
-        match probe.parent() {
-            Some(parent) if parent.starts_with(root) => probe = parent,
-            _ => return probe.starts_with(root),
-        }
-    }
-}
 
 /// How the driver is launched, resolved once at boot.
 #[derive(Debug, Clone)]
@@ -502,35 +232,32 @@ const CHAT_ENV_ALLOWLIST: &[&str] = &[
     "http_proxy",
     "https_proxy",
     "no_proxy",
-    "KLAUDIA_CONFIG_DIR",
 ];
 
-fn resolve_named(
+fn resolve_codex(
     policy: &ChatPolicy,
     templates: &[crate::config::SessionTemplate],
-    agent: &str,
 ) -> Option<Launch> {
     if !policy.enabled {
         return None;
     }
     if let Some(argv) = policy.command.clone() {
-        // A named command is the whole answer: it either is this agent, or
-        // chats for this agent are off. Falling through would launch the
-        // stream-json driver (or Codex) under a command the operator set to
-        // something else.
-        if runs_driver(&argv, agent) {
-            return Some(Launch {
-                driver: driver_of(&argv),
-                argv,
-                template: None,
-            });
+        // A named command is the whole answer: it either runs Codex, or
+        // chats are off. Falling through would launch a different agent
+        // under a command the operator set to something else.
+        if !runs_codex(&argv) {
+            return None;
         }
-        return None;
+        return Some(Launch {
+            driver: driver_of(&argv),
+            argv,
+            template: None,
+        });
     }
     if let Some(name) = policy.template.as_deref() {
         if let Ok(template) = crate::sessions::resolve_template_in(templates, name) {
             if let Some(argv) = template.command.clone() {
-                if runs_driver(&argv, agent) {
+                if runs_codex(&argv) {
                     return Some(Launch {
                         driver: driver_of(&argv),
                         argv,
@@ -540,11 +267,9 @@ fn resolve_named(
             }
         }
     }
-    let template = templates.iter().find(|t| {
-        t.command
-            .as_deref()
-            .is_some_and(|argv| runs_driver(argv, agent))
-    })?;
+    let template = templates
+        .iter()
+        .find(|t| t.command.as_deref().is_some_and(runs_codex))?;
     let argv = template.command.clone()?;
     Some(Launch {
         driver: driver_of(&argv),
@@ -553,43 +278,13 @@ fn resolve_named(
     })
 }
 
-/// Whether `argv` runs the chat driver named `driver`.
-///
-/// An engine-known agent CLI matches by name. The stream-json driver is not a
-/// shipped agent CLI — no template runs it — so it matches an operator-named
-/// command whose binary carries the protocol's name instead.
-fn runs_driver(argv: &[String], driver: &str) -> bool {
-    if crate::agent_cli::agent_name(argv).as_deref() == Some(driver) {
-        return true;
-    }
-    driver_of(argv)
-        .first()
-        .and_then(|binary| std::path::Path::new(binary).file_name())
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name == driver)
-}
-
-/// Klaudia launch, unchanged for a Klaudia-only deployment.
-fn resolve_launch(
-    policy: &ChatPolicy,
-    templates: &[crate::config::SessionTemplate],
-) -> Option<Launch> {
-    resolve_named(policy, templates, DRIVER)
-}
-
-fn resolve_codex(
-    policy: &ChatPolicy,
-    templates: &[crate::config::SessionTemplate],
-) -> Option<Launch> {
-    resolve_named(policy, templates, CODEX_DRIVER)
+/// Whether `argv` runs the Codex chat driver, wrapped or not.
+fn runs_codex(argv: &[String]) -> bool {
+    crate::agent_cli::agent_name(argv).as_deref() == Some(CODEX_DRIVER)
 }
 
 /// Who answers a pending approval, and how the answer gets back.
 enum Responder {
-    /// The hook is waiting on `POST /gate` for this.
-    Gate(oneshot::Sender<Option<String>>),
-    /// Klaudia asked with a `can_use_tool` control request.
-    Driver { request_id: String },
     /// Codex app-server asked with a JSON-RPC request id.
     Codex { request_id: String },
 }
@@ -598,18 +293,15 @@ struct Pending {
     approval: ChatApproval,
     responder: Responder,
     tool_name: String,
-    input: Value,
 }
 
 struct Proc {
     generation: u64,
     stdin: mpsc::UnboundedSender<String>,
-    gate_token: String,
     pid: Option<u32>,
-    /// The codex driver's thread is started (or resumed). Until it is, a
+    /// The app-server thread is started (or resumed). Until it is, a
     /// `turn/start` names a thread the app-server does not have and fails
-    /// with `thread not found`, so turns wait in `held` (WI-1641). Always
-    /// true for the stream-json driver.
+    /// with `thread not found`, so turns wait in `held` (WI-1641).
     thread_ready: bool,
     held: Vec<String>,
 }
@@ -620,15 +312,6 @@ struct Live {
     turns: u32,
     approvals: HashMap<String, Pending>,
     last_activity: Option<Instant>,
-    /// Gate decisions not yet matched to the tool result they were for.
-    gated: Vec<(String, Value)>,
-    /// Write-class calls the agent made, by `tool_use_id`, until their
-    /// result arrives: the tripwire's half of [`Live::gated`].
-    write_calls: HashMap<String, (String, Value)>,
-    /// Each tool call's name by `tool_use_id`, until its result arrives.
-    tool_names: HashMap<String, String>,
-    /// Driver-side approvals a person allowed, which the gate honours once.
-    allowed: Vec<(String, Value, Instant)>,
     /// The turn is being interrupted: its error result is a stop, not a fault.
     interrupting: bool,
     /// Who the chat is for, for the per-creator process cap.
@@ -663,34 +346,19 @@ pub struct ChatRuntime {
     bus: EventBus,
     sessions: Arc<SessionRegistry>,
     launch: Launch,
-    /// Present when a Codex template or command is configured. Absent, the
-    /// engine still drives Klaudia exactly as before.
-    codex: Option<Launch>,
     handles: DashMap<Uuid, Arc<ChatHandle>>,
     launching: tokio::sync::Mutex<()>,
     generation: AtomicU64,
-    gate_base: parking_lot::RwLock<String>,
-}
-
-/// The approval gate's verdict, as the hook prints it.
-pub fn gate_allow() -> Value {
-    json!({})
-}
-
-fn gate_block(reason: &str) -> Value {
-    json!({ "decision": "block", "reason": reason })
 }
 
 impl ChatRuntime {
-    /// `None` when chats are off or neither driver resolves.
+    /// `None` when chats are off or no Codex launch resolves.
     pub async fn from_config(
         cfg: Arc<Config>,
         bus: EventBus,
         sessions: Arc<SessionRegistry>,
     ) -> Option<Arc<Self>> {
-        let launch = resolve_launch(&cfg.chat, &cfg.session_templates);
-        let codex = resolve_codex(&cfg.chat, &cfg.session_templates);
-        let launch = launch.or_else(|| codex.clone())?;
+        let launch = resolve_codex(&cfg.chat, &cfg.session_templates)?;
         let store = match ChatStore::new(&cfg.state_dir).await {
             Ok(store) => store,
             Err(e) => {
@@ -698,13 +366,9 @@ impl ChatRuntime {
                 return None;
             }
         };
-        let gate_base = crate::sessions::engine_self_url(cfg.bind)
-            .unwrap_or_else(|| sessions.secret_broker().loopback_url());
         // A previous engine's chat processes have no reader now: end them.
         sweep_orphans(&cfg.state_dir.join("chats"));
-        Some(Self::with_parts(
-            cfg, store, bus, sessions, launch, codex, gate_base,
-        ))
+        Some(Self::with_parts(cfg, store, bus, sessions, launch))
     }
 
     fn with_parts(
@@ -713,8 +377,6 @@ impl ChatRuntime {
         bus: EventBus,
         sessions: Arc<SessionRegistry>,
         launch: Launch,
-        codex: Option<Launch>,
-        gate_base: String,
     ) -> Arc<Self> {
         let runtime = Arc::new(Self {
             cfg,
@@ -722,44 +384,23 @@ impl ChatRuntime {
             bus,
             sessions,
             launch,
-            codex,
             handles: DashMap::new(),
             launching: tokio::sync::Mutex::new(()),
             generation: AtomicU64::new(0),
-            gate_base: parking_lot::RwLock::new(gate_base),
         });
         runtime.spawn_reaper();
         runtime
     }
 
-    /// Where the gate is reached from inside a chat process. Set once the
-    /// server listens, for a server bound to port 0 whose port the
-    /// configuration does not name.
-    pub fn set_gate_base(&self, base: String) {
-        *self.gate_base.write() = base;
-    }
-
-    /// What `/api/config` advertises. Klaudia when that launch resolved; Codex
-    /// as well when a Codex template or command did.
+    /// What `/api/config` advertises: Codex, the only chat driver.
     pub fn info(&self) -> ChatConfigInfo {
-        let mut drivers = Vec::new();
-        if resolve_launch(&self.cfg.chat, &self.cfg.session_templates).is_some()
-            || self.codex.is_none()
-        {
-            drivers.push(ChatDriver {
-                name: DRIVER.into(),
-                label: "Klaudia".into(),
-                models: self.cfg.chat.models.clone(),
-            });
-        }
-        if self.codex.is_some() {
-            drivers.push(ChatDriver {
+        ChatConfigInfo {
+            drivers: vec![ChatDriver {
                 name: CODEX_DRIVER.into(),
                 label: "Codex".into(),
                 models: self.cfg.chat.models.clone(),
-            });
+            }],
         }
-        ChatConfigInfo { drivers }
     }
 
     fn handle(&self, id: Uuid) -> Arc<ChatHandle> {
@@ -865,22 +506,13 @@ impl ChatRuntime {
             .as_deref()
             .map(str::trim)
             .filter(|d| !d.is_empty())
-            .unwrap_or(self.cfg.chat.driver.as_str());
-        let driver = match requested {
-            DRIVER => DRIVER,
-            CODEX_DRIVER if self.codex.is_some() => CODEX_DRIVER,
-            CODEX_DRIVER => {
-                return Err(ApiError::BadRequest(
-                    "driver \"codex\" is not configured; no Codex template or command resolved"
-                        .into(),
-                ));
-            }
-            other => {
-                return Err(ApiError::BadRequest(format!(
-                    "driver {other:?} is not available; this engine drives chats with {DRIVER} or {CODEX_DRIVER}"
-                )));
-            }
-        };
+            .unwrap_or(CODEX_DRIVER);
+        if requested != CODEX_DRIVER {
+            return Err(ApiError::BadRequest(format!(
+                "driver {requested:?} is not available; this engine drives chats with {CODEX_DRIVER}"
+            )));
+        }
+        let driver = CODEX_DRIVER;
         let model = match req.model.as_deref() {
             Some(m) => self.validate_model(m)?,
             None => self.cfg.chat.models.first().map(|m| m.id.clone()),
@@ -1036,11 +668,7 @@ impl ChatRuntime {
                 return Err(e);
             }
         };
-        let line = if record.driver == CODEX_DRIVER {
-            crate::chat_codex::turn_start(&format!("turn-{}", Uuid::new_v4()), id, text)
-        } else {
-            json!({"type": "user", "message": {"role": "user", "content": text}}).to_string()
-        };
+        let line = crate::chat_codex::turn_start(&format!("turn-{}", Uuid::new_v4()), id, text);
         {
             let mut live = handle.live.lock();
             live.turns += 1;
@@ -1113,20 +741,11 @@ impl ChatRuntime {
             .get(&id)
             .and_then(|h| h.live.lock().proc.as_ref().map(|p| p.stdin.clone()));
         if let Some(stdin) = stdin {
-            let request = if record.driver == CODEX_DRIVER {
-                crate::chat_codex::settings_update(
-                    &format!("model-{}", Uuid::new_v4()),
-                    id,
-                    model.as_deref().unwrap_or("default"),
-                )
-            } else {
-                json!({
-                    "type": "control_request",
-                    "request_id": format!("model-{}", Uuid::new_v4()),
-                    "request": {"subtype": "set_model", "model": model.as_deref().unwrap_or("default")},
-                })
-                .to_string()
-            };
+            let request = crate::chat_codex::settings_update(
+                &format!("model-{}", Uuid::new_v4()),
+                id,
+                model.as_deref().unwrap_or("default"),
+            );
             let _ = stdin.send(request);
         }
         self.note(
@@ -1152,8 +771,7 @@ impl ChatRuntime {
                 return Ok(record.summary(live.state(), live.proc.is_some()));
             }
             live.interrupting = true;
-            // Klaudia cancels its own parked asks; a gate the hook is waiting
-            // on is denied here so the hook returns.
+            // A person's stop also answers any ask the turn was parked on.
             let gates: Vec<Pending> = live.approvals.drain().map(|(_, p)| p).collect();
             (live.proc.as_ref().map(|p| p.stdin.clone()), gates)
         };
@@ -1162,16 +780,8 @@ impl ChatRuntime {
                 .await;
         }
         if let Some(stdin) = stdin {
-            let request = if record.driver == CODEX_DRIVER {
-                crate::chat_codex::turn_interrupt(&format!("stop-{}", Uuid::new_v4()), id)
-            } else {
-                json!({
-                    "type": "control_request",
-                    "request_id": format!("stop-{}", Uuid::new_v4()),
-                    "request": {"subtype": "interrupt"},
-                })
-                .to_string()
-            };
+            let request =
+                crate::chat_codex::turn_interrupt(&format!("stop-{}", Uuid::new_v4()), id);
             let _ = stdin.send(request);
         }
         self.changed(id).await;
@@ -1237,41 +847,7 @@ impl ChatRuntime {
         let mut approval = pending.approval;
         approval.status = status.to_string();
         approval.decided_by = decided_by.clone();
-        let reason = message
-            .as_deref()
-            .map(str::trim)
-            .filter(|m| !m.is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(|| match status {
-                "expired" => "Nobody answered the approval in time, so this was not run.".into(),
-                _ => "A person denied this in Vogt.".into(),
-            });
         match pending.responder {
-            Responder::Gate(tx) => {
-                let _ = tx.send((!allow).then_some(reason));
-            }
-            Responder::Driver { request_id } => {
-                let response = if allow {
-                    json!({"behavior": "allow"})
-                } else {
-                    json!({"behavior": "deny", "message": reason})
-                };
-                let line = json!({
-                    "type": "control_response",
-                    "response": {"subtype": "success", "request_id": request_id, "response": response},
-                });
-                let stdin = handle.live.lock().proc.as_ref().map(|p| p.stdin.clone());
-                if let Some(stdin) = stdin {
-                    let _ = stdin.send(line.to_string());
-                }
-                if allow {
-                    handle.live.lock().allowed.push((
-                        pending.tool_name.clone(),
-                        pending.input.clone(),
-                        Instant::now(),
-                    ));
-                }
-            }
             Responder::Codex { request_id } => {
                 let line = crate::chat_codex::approval_decision(&request_id, allow);
                 let stdin = handle.live.lock().proc.as_ref().map(|p| p.stdin.clone());
@@ -1286,10 +862,19 @@ impl ChatRuntime {
             _ => "Not run (no answer)",
         };
         let who = decided_by.map(|d| format!(" by {d}")).unwrap_or_default();
+        let said = message
+            .as_deref()
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+            .map(|m| format!(" ({m})"))
+            .unwrap_or_default();
         self.note(
             id,
             "approval",
-            format!("{verb}{who}: {} — {}", approval.tool_name, approval.summary),
+            format!(
+                "{verb}{who}: {} — {}{said}",
+                approval.tool_name, approval.summary
+            ),
             false,
         )
         .await;
@@ -1298,82 +883,6 @@ impl ChatRuntime {
         });
         self.changed(id).await;
         approval
-    }
-
-    /// The hook's question: may this tool call run?
-    pub async fn gate(self: &Arc<Self>, id: Uuid, token: &str, body: Value) -> Result<Value> {
-        let handle = self
-            .handles
-            .get(&id)
-            .map(|h| Arc::clone(h.value()))
-            .ok_or(ApiError::Unauthorized)?;
-        {
-            let live = handle.live.lock();
-            let expected = live
-                .proc
-                .as_ref()
-                .map(|p| p.gate_token.as_str())
-                .unwrap_or("");
-            if expected.is_empty()
-                || !bool::from(subtle::ConstantTimeEq::ct_eq(
-                    expected.as_bytes(),
-                    token.as_bytes(),
-                ))
-            {
-                return Err(ApiError::Unauthorized);
-            }
-        }
-        let tool = body
-            .get("tool_name")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        let input = body.get("tool_input").cloned().unwrap_or(Value::Null);
-        if tool.is_empty() {
-            return Ok(gate_block(
-                "the approval gate was asked about a call with no tool name",
-            ));
-        }
-        if classify(&tool, &input, &self.chat_dir(id)) == ToolClass::Free {
-            return Ok(gate_allow());
-        }
-        {
-            let mut live = handle.live.lock();
-            live.allowed
-                .retain(|(_, _, at)| at.elapsed() < ALLOWED_REUSE);
-            if let Some(pos) = live
-                .allowed
-                .iter()
-                .position(|(name, value, _)| *name == tool && *value == input)
-            {
-                live.allowed.remove(pos);
-                live.gated.push((tool, input));
-                return Ok(gate_allow());
-            }
-        }
-        let (tx, rx) = oneshot::channel();
-        let approval = self
-            .raise(id, &tool, &input, Responder::Gate(tx), "gate")
-            .await;
-        let verdict = match tokio::time::timeout(self.cfg.chat.approval_timeout, rx).await {
-            Ok(Ok(verdict)) => verdict,
-            // Dropped: the chat stopped while it waited.
-            Ok(Err(_)) => Some("The chat stopped before this was answered.".into()),
-            Err(_) => {
-                let pending = handle.live.lock().approvals.remove(&approval.id);
-                if let Some(pending) = pending {
-                    let _ = self
-                        .resolve(id, pending, false, "expired", None, None)
-                        .await;
-                }
-                Some("Nobody answered the approval in time, so this was not run.".into())
-            }
-        };
-        handle.live.lock().gated.push((tool, input));
-        Ok(match verdict {
-            None => gate_allow(),
-            Some(reason) => gate_block(&reason),
-        })
     }
 
     async fn raise(
@@ -1402,7 +911,6 @@ impl ChatRuntime {
                 approval: approval.clone(),
                 responder,
                 tool_name: tool.to_string(),
-                input: input.clone(),
             },
         );
         self.note(
@@ -1444,24 +952,10 @@ impl ChatRuntime {
                 "a turn is still running; wait for it to finish, or stop it, then promote".into(),
             ));
         }
-        // Only Codex chats carry a conversation a session can resume. The
-        // stream-json driver has no resume flag, so promoting one would hand
-        // the session a launch it cannot continue.
-        if record.driver != CODEX_DRIVER {
-            return Err(ApiError::Conflict(format!(
-                "a {} chat cannot be continued in a session: its driver has no resume. \
-                 Use a Codex chat to promote one",
-                record.driver
-            )));
-        }
         // One writer per transcript: the chat's process goes before the
         // session resumes the same conversation.
         self.stop_process(id, Duration::from_secs(10)).await;
-        let launch = self.codex.as_ref().ok_or_else(|| {
-            ApiError::BadGateway(
-                "the Codex driver is not configured, so this chat cannot be promoted".into(),
-            )
-        })?;
+        let launch = &self.launch;
         let template = req
             .template
             .clone()
@@ -1525,65 +1019,24 @@ impl ChatRuntime {
         self.make_room(&record.creator).await?;
         let dir = self.chat_dir(id);
         std::fs::create_dir_all(&dir)?;
-        let codex = record.driver == CODEX_DRIVER;
-
-        let (argv, gate_token) = if codex {
-            let binary = self
-                .codex
-                .as_ref()
-                .and_then(|l| l.driver.first().cloned())
-                .ok_or_else(|| {
-                    ApiError::BadGateway(
-                        "the Codex driver is not configured, so this chat cannot start".into(),
-                    )
-                })?;
-            let home = dir.join("codex-home");
-            std::fs::create_dir_all(&home)?;
-            let key_name = self.cfg.chat.provider_key.as_deref().unwrap_or("");
-            std::fs::write(
-                home.join("config.toml"),
-                crate::chat_codex::home_config(key_name),
-            )?;
-            std::fs::write(
-                home.join("vogt-model-catalog.json"),
-                crate::chat_codex::model_catalog(),
-            )?;
-            (crate::chat_codex::app_server_argv(&binary), String::new())
-        } else {
-            std::fs::create_dir_all(dir.join(".klaudia"))?;
-            std::fs::write(
-                dir.join(".klaudia").join("config.toml"),
-                hook_config(self.cfg.chat.approval_timeout),
-            )?;
-            let mut argv = self.launch.driver.clone();
-            argv.extend(
-                [
-                    "--input-format",
-                    "stream-json",
-                    "--output-format",
-                    "stream-json",
-                    "--verbose",
-                    "--permission-mode",
-                    "autonomous",
-                    "--trusted-project-config",
-                ]
-                .map(str::to_string),
-            );
-            argv.push(format!(
-                "--ask-timeout={}s",
-                self.cfg.chat.approval_timeout.as_secs()
-            ));
-            if record.started {
-                argv.extend(["--resume".to_string(), id.to_string()]);
-            } else {
-                argv.extend(["--session-id".to_string(), id.to_string()]);
-            }
-            if let Some(model) = record.model.as_deref() {
-                argv.extend(["--model".to_string(), model.to_string()]);
-            }
-            let gate_token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
-            (argv, gate_token)
-        };
+        let binary = self
+            .launch
+            .driver
+            .first()
+            .cloned()
+            .ok_or_else(|| ApiError::BadGateway("the Codex launch is empty".into()))?;
+        let home = dir.join("codex-home");
+        std::fs::create_dir_all(&home)?;
+        let key_name = self.cfg.chat.provider_key.as_deref().unwrap_or("");
+        std::fs::write(
+            home.join("config.toml"),
+            crate::chat_codex::home_config(key_name),
+        )?;
+        std::fs::write(
+            home.join("vogt-model-catalog.json"),
+            crate::chat_codex::model_catalog(),
+        )?;
+        let argv = crate::chat_codex::app_server_argv(&binary);
 
         let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
         let mut cmd = Command::new(&argv[0]);
@@ -1596,7 +1049,7 @@ impl ChatRuntime {
             // Nothing of the engine's environment by default (WI-1097 review
             // round 1): a chat's agent reads untrusted pages, so what it could
             // be talked into reading out of `/proc/self/environ` is limited to
-            // the allowlist below, its gate token and its one provider key.
+            // the allowlist below and its one provider key.
             .env_clear();
         for (k, v) in std::env::vars_os() {
             if k.to_str().is_some_and(|k| CHAT_ENV_ALLOWLIST.contains(&k)) {
@@ -1608,15 +1061,8 @@ impl ChatRuntime {
         if let Some((name, value)) = self.provider_key().await {
             cmd.env(name, value);
         }
-        if codex {
-            // Per-chat home, this process only. Not on the shared allowlist.
-            cmd.env("CODEX_HOME", dir.join("codex-home"));
-        } else {
-            let base = self.gate_base.read().clone();
-            cmd.env("VOGT_CHAT_ID", id.to_string())
-                .env("VOGT_CHAT_GATE_URL", format!("{base}/api/chats/{id}/gate"))
-                .env("VOGT_CHAT_GATE_TOKEN", &gate_token);
-        }
+        // Per-chat home, this process only. Not on the shared allowlist.
+        cmd.env("CODEX_HOME", dir.join("codex-home"));
         #[cfg(unix)]
         cmd.process_group(0);
 
@@ -1643,9 +1089,8 @@ impl ChatRuntime {
             live.proc = Some(Proc {
                 generation,
                 stdin: tx.clone(),
-                gate_token,
                 pid,
-                thread_ready: !codex,
+                thread_ready: false,
                 held: Vec::new(),
             });
             live.creator = record.creator.clone();
@@ -1709,13 +1154,11 @@ impl ChatRuntime {
                 .on_exit(id, generation, status.and_then(|s| s.code()), stderr)
                 .await;
         });
-        if codex {
-            // Hold thread/start until initialize is answered. The fork gates a
-            // caller-chosen threadId on the experimentalApi capability declared
-            // there (WI-1632); sending it first is rejected, and the following
-            // turn/start then answers "thread not found".
-            let _ = tx.send(crate::chat_codex::initialize("init"));
-        }
+        // Hold thread/start until initialize is answered. The fork gates a
+        // caller-chosen threadId on the experimentalApi capability declared
+        // there (WI-1632); sending it first is rejected, and the following
+        // turn/start then answers "thread not found".
+        let _ = tx.send(crate::chat_codex::initialize("init"));
         Ok(tx)
     }
 
@@ -1813,304 +1256,7 @@ impl ChatRuntime {
         let Some(handle) = self.current(id, generation) else {
             return;
         };
-        if self
-            .record(id)
-            .await
-            .is_ok_and(|r| r.driver == CODEX_DRIVER)
-        {
-            self.on_codex_line(id, &handle, line).await;
-            return;
-        }
-        // Not JSON (a wrapper's banner): not part of the protocol.
-        let Ok(msg) = serde_json::from_str::<Value>(line) else {
-            return;
-        };
-        handle.live.lock().last_activity = Some(Instant::now());
-        match msg.get("type").and_then(Value::as_str).unwrap_or("") {
-            "system" if msg.get("subtype").and_then(Value::as_str) == Some("init") => {
-                if let Ok(mut record) = self.record(id).await {
-                    if !record.started {
-                        record.started = true;
-                        let _ = self.store.update_chat(&record).await;
-                    }
-                }
-            }
-            "assistant" => {
-                for block in content_blocks(&msg) {
-                    match block.get("type").and_then(Value::as_str) {
-                        Some("text") => {
-                            let text = block.get("text").and_then(Value::as_str).unwrap_or("");
-                            if !text.trim().is_empty() {
-                                let _ = self
-                                    .append(
-                                        id,
-                                        entry(
-                                            "assistant",
-                                            text.to_string(),
-                                            None,
-                                            None,
-                                            false,
-                                            false,
-                                            None,
-                                        ),
-                                    )
-                                    .await;
-                            }
-                        }
-                        Some("tool_use") => {
-                            let name = block
-                                .get("name")
-                                .and_then(Value::as_str)
-                                .unwrap_or("tool")
-                                .to_string();
-                            let use_id =
-                                block.get("id").and_then(Value::as_str).map(str::to_string);
-                            let input = block.get("input").cloned().unwrap_or(Value::Null);
-                            if let Some(use_id) = use_id.clone() {
-                                let mut live = handle.live.lock();
-                                live.tool_names.insert(use_id.clone(), name.clone());
-                                if classify(&name, &input, &self.chat_dir(id)) == ToolClass::Ask {
-                                    live.write_calls
-                                        .insert(use_id, (name.clone(), input.clone()));
-                                }
-                            }
-                            let _ = self
-                                .append(
-                                    id,
-                                    entry(
-                                        "tool-call",
-                                        describe_call(&name, &input),
-                                        Some(name),
-                                        use_id,
-                                        false,
-                                        false,
-                                        None,
-                                    ),
-                                )
-                                .await;
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            "user" => {
-                for block in content_blocks(&msg) {
-                    if block.get("type").and_then(Value::as_str) != Some("tool_result") {
-                        continue;
-                    }
-                    let use_id = block
-                        .get("tool_use_id")
-                        .and_then(Value::as_str)
-                        .map(str::to_string);
-                    let is_error = block
-                        .get("is_error")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false);
-                    let text = redact(&truncate_chars(
-                        &result_text(block.get("content")),
-                        RESULT_CHARS,
-                    ));
-                    let bypassed = use_id
-                        .as_deref()
-                        .is_some_and(|u| self.check_gated(&handle, u, is_error));
-                    let name = use_id
-                        .as_deref()
-                        .and_then(|u| handle.live.lock().tool_names.remove(u));
-                    let _ = self
-                        .append(
-                            id,
-                            entry(
-                                "tool-result",
-                                text,
-                                name,
-                                use_id.clone(),
-                                is_error,
-                                false,
-                                None,
-                            ),
-                        )
-                        .await;
-                    if bypassed {
-                        tracing::warn!(
-                            target: "vogt::audit",
-                            event = "chat.gate_bypassed",
-                            chat = %id,
-                            tool_use_id = use_id.as_deref().unwrap_or(""),
-                            "a write-class tool call ran without passing the approval gate; the chat was stopped"
-                        );
-                        self.note(
-                            id,
-                            "error",
-                            "A tool call that should have waited for approval ran without passing Vogt's approval gate, so this chat's agent was stopped. Check that Klaudia runs the chat's hooks before sending more.".into(),
-                            false,
-                        )
-                        .await;
-                        self.kill_process(id);
-                    }
-                }
-            }
-            "tool_progress" => {
-                let _ = handle.events.send(ChatEvent::Progress {
-                    tool_name: msg
-                        .get("tool_name")
-                        .and_then(Value::as_str)
-                        .map(str::to_string),
-                    text: msg
-                        .get("text")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string(),
-                });
-            }
-            "warning" | "notice" => {
-                let text = msg
-                    .get("content")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .trim()
-                    .to_string();
-                if !text.is_empty() {
-                    self.note(id, "notice", text, false).await;
-                }
-            }
-            "compaction" => {
-                self.note(
-                    id,
-                    "notice",
-                    "The conversation so far was summarised to fit the model.".into(),
-                    false,
-                )
-                .await;
-            }
-            "control_request" => self.on_control_request(id, &handle, &msg).await,
-            "control_response" => {
-                let response = msg.get("response").unwrap_or(&Value::Null);
-                if response.get("subtype").and_then(Value::as_str) == Some("error") {
-                    let error = response
-                        .get("error")
-                        .and_then(Value::as_str)
-                        .unwrap_or("refused");
-                    self.note(
-                        id,
-                        "notice",
-                        format!("The agent refused a request: {error}"),
-                        false,
-                    )
-                    .await;
-                }
-            }
-            "result" => self.on_result(id, &handle, &msg).await,
-            _ => {}
-        }
-    }
-
-    /// Whether the result for `use_id` is a write-class call that ran
-    /// although the gate never saw it.
-    fn check_gated(&self, handle: &ChatHandle, use_id: &str, is_error: bool) -> bool {
-        let mut live = handle.live.lock();
-        let Some((name, input)) = live.write_calls.remove(use_id) else {
-            return false;
-        };
-        let position = live
-            .gated
-            .iter()
-            // The exact call: a gated `Bash ls` must not stand in for an
-            // ungated `Bash rm`.
-            .position(|(n, v)| *n == name && *v == input);
-        match position {
-            Some(at) => {
-                live.gated.remove(at);
-                false
-            }
-            // Refused before the hook ran (Klaudia's own host gate, a bad
-            // argument): nothing ran, so nothing slipped past.
-            None => !is_error,
-        }
-    }
-
-    async fn on_control_request(self: &Arc<Self>, id: Uuid, handle: &ChatHandle, msg: &Value) {
-        let request_id = msg
-            .get("request_id")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        let request = msg.get("request").cloned().unwrap_or(Value::Null);
-        let stdin = handle.live.lock().proc.as_ref().map(|p| p.stdin.clone());
-        let reply = |response: Value| {
-            if let Some(stdin) = stdin.as_ref() {
-                let _ = stdin
-                    .send(json!({"type": "control_response", "response": response}).to_string());
-            }
-        };
-        match request.get("subtype").and_then(Value::as_str) {
-            Some("can_use_tool") => {
-                let tool = request
-                    .get("tool_name")
-                    .and_then(Value::as_str)
-                    .unwrap_or("tool")
-                    .to_string();
-                let own_hooks = tool == "Hooks"
-                    && request
-                        .pointer("/host_change/hooks")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false)
-                    && self.is_own_hook_file(id, &request);
-                if own_hooks {
-                    // The gate itself, which this engine wrote: run it.
-                    reply(
-                        json!({"subtype": "success", "request_id": request_id, "response": {"behavior": "allow"}}),
-                    );
-                    return;
-                }
-                let input = request
-                    .get("input")
-                    .cloned()
-                    .unwrap_or_else(|| request.get("host_change").cloned().unwrap_or(Value::Null));
-                self.raise(
-                    id,
-                    &tool,
-                    &input,
-                    Responder::Driver { request_id },
-                    "driver",
-                )
-                .await;
-            }
-            Some(other) => {
-                // `ask_user` / `exit_plan`: a chat has no way to put either to
-                // a person yet. An error reads as "cancelled" and the model
-                // carries on rather than guessing an answer.
-                reply(json!({
-                    "subtype": "error",
-                    "request_id": request_id,
-                    "error": format!("{other} is not supported in a Vogt chat; ask in your reply instead"),
-                }));
-            }
-            None => {}
-        }
-    }
-
-    /// Whether a hooks-approval ask names this chat's own config file.
-    fn is_own_hook_file(&self, id: Uuid, request: &Value) -> bool {
-        let own = self.chat_dir(id).join(".klaudia").join("config.toml");
-        let named: Vec<&str> = request
-            .pointer("/host_change/paths")
-            .and_then(Value::as_array)
-            .map(|paths| paths.iter().filter_map(Value::as_str).collect())
-            .unwrap_or_default();
-        let specifier = request.get("specifier").and_then(Value::as_str);
-        let same = |p: &str| {
-            let path = Path::new(p);
-            path == own
-                || std::fs::canonicalize(path).ok() == std::fs::canonicalize(&own).ok()
-                    && path.exists()
-        };
-        let named_ours = (!named.is_empty() && named.iter().all(|p| same(p)))
-            || (named.is_empty() && specifier.is_some_and(same));
-        // And still exactly what the engine wrote: an approved edit to the
-        // file must not get its new hooks waved through.
-        named_ours
-            && std::fs::read_to_string(&own).ok().as_deref()
-                == Some(hook_config(self.cfg.chat.approval_timeout).as_str())
+        self.on_codex_line(id, &handle, line).await;
     }
 
     /// Send the thread request the initialize handshake was holding (WI-1632).
@@ -2309,9 +1455,6 @@ impl ChatRuntime {
             let turns = live.turns;
             live.interrupting = false;
             live.turn_started = None;
-            live.write_calls.clear();
-            live.tool_names.clear();
-            live.gated.clear();
             let pending: Vec<Pending> = live.approvals.drain().map(|(_, p)| p).collect();
             (turns, pending)
         };
@@ -2600,26 +1743,6 @@ fn kill_group(pid: Option<u32>) {
     }
     #[cfg(not(unix))]
     let _ = pid;
-}
-
-fn content_blocks(msg: &Value) -> Vec<Value> {
-    match msg.pointer("/message/content") {
-        Some(Value::Array(blocks)) => blocks.clone(),
-        _ => Vec::new(),
-    }
-}
-
-fn result_text(content: Option<&Value>) -> String {
-    match content {
-        Some(Value::String(s)) => s.clone(),
-        Some(Value::Array(blocks)) => blocks
-            .iter()
-            .filter_map(|b| b.get("text").and_then(Value::as_str))
-            .collect::<Vec<_>>()
-            .join("\n"),
-        Some(other) if !other.is_null() => other.to_string(),
-        _ => String::new(),
-    }
 }
 
 /// A tool call as a person reads it: the command, the path, the query —

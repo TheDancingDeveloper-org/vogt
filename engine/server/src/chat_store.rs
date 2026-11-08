@@ -8,11 +8,10 @@
 //! nothing here deletes a row. Archiving only hides a chat from the default
 //! list.
 //!
-//! The agent CLI keeps its own transcript too (Klaudia's JSONL under
-//! `~/.klaudia/sessions`), and that is what `--resume` continues from. This
-//! is the readable, searchable copy Vogt shows: text, tool calls and their
-//! (truncated) results, approvals and errors, with a full-text index over all
-//! of it.
+//! Codex keeps its own thread in the chat's `CODEX_HOME`, and that is what
+//! `thread/resume` continues from. This is the readable, searchable copy Vogt
+//! shows: text, tool calls and their (truncated) results, approvals and
+//! errors, with a full-text index over all of it.
 
 use std::path::{Path, PathBuf};
 
@@ -398,7 +397,7 @@ mod tests {
         ChatRecord {
             id,
             title: title.into(),
-            driver: "klaudia".into(),
+            driver: "codex".into(),
             model: None,
             creator: "human:ada".into(),
             created_at: at.into(),

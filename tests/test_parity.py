@@ -1132,7 +1132,7 @@ def _stand_in_chat(method: str, path: str, spec: dict[str, Any]) -> object:
     chat = {
         "id": PARITY_CHAT,
         "title": "parity",
-        "driver": "klaudia",
+        "driver": "codex",
         "model": spec.get("model", "grok-4.7"),
         "creator": "human:parity",
         "created_at": "2026-10-08T00:00:00Z",
@@ -1157,7 +1157,7 @@ def _stand_in_chat(method: str, path: str, spec: dict[str, Any]) -> object:
             "id": path.rsplit("/", 1)[-1],
             "tool_name": "Bash",
             "summary": "make test",
-            "source": "gate",
+            "source": "codex",
             "status": "allowed" if spec.get("allow") else "denied",
             "requested_at": "2026-10-08T00:00:00Z",
             "expires_at": "2026-10-08T00:10:00Z",
