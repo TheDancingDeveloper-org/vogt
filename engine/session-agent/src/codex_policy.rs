@@ -32,7 +32,9 @@ const GUARDED_TOOLS: &[&str] = &["Bash", "apply_patch"];
 
 /// The requirements file at `system`, checked to wire the policy hook, and
 /// (with `root_owned`) checked, with the hook program at `hook_bin`, to be out
-/// of the session user's reach. `Err` refuses the Codex launch.
+/// of the session user's reach. A missing, empty, unreadable, or malformed
+/// file is an error: a Codex launch never proceeds without a valid managed
+/// policy. `Err` refuses the Codex launch.
 pub fn guarded(
     system: &Path,
     hook_bin: &Path,
@@ -107,8 +109,9 @@ pub fn protected_hook_binary(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Read the requirements file; `None` when it is absent, an error when it is
-/// present but empty-or-malformed, or when it does not wire the hook.
+/// Read the requirements file; an error when it is missing, empty, or
+/// unreadable, and also when it is present but malformed TOML or does not
+/// wire the managed policy hook.
 pub fn readable_policy(path: PathBuf) -> Result<Option<PathBuf>, String> {
     match std::fs::read(&path) {
         Ok(bytes) if !bytes.is_empty() => {

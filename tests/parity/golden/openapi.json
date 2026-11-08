@@ -7601,8 +7601,8 @@
         }
       },
       "post": {
-        "summary": "Start a quick chat with the engine's chat agent (Klaudia), optionally with its first message and a model the engine offers. Reads run at once; writes, commands and edits wait for a person's approval. Audited.",
-        "description": "Start a quick chat with the engine's chat agent (Klaudia), optionally with its first message and a model the engine offers. Reads run at once; writes, commands and edits wait for a person's approval. Audited.",
+        "summary": "Start a quick chat with the engine's chat agent (Codex), optionally with its first message and a model the engine offers. Reads run at once; writes, commands and edits wait for a person's approval. Audited.",
+        "description": "Start a quick chat with the engine's chat agent (Codex), optionally with its first message and a model the engine offers. Reads run at once; writes, commands and edits wait for a person's approval. Audited.",
         "operationId": "chat_create",
         "requestBody": {
           "required": true,
@@ -10306,7 +10306,7 @@
           "source": {
             "type": "string",
             "title": "Source",
-            "description": "`gate` (Vogt's pre-tool gate) or `driver` (the agent asked)."
+            "description": "`codex` (the app-server asked)."
           },
           "status": {
             "type": "string",
