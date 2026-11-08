@@ -8,8 +8,7 @@ use serde_json::Value;
 use time::OffsetDateTime;
 use vogt_engine_contract::{SessionEconomics, TurnTiming};
 
-/// Klaudia's own figure: four characters of transcript per token when the
-/// agent records no usage.
+/// Four characters of transcript per token when the agent records no usage.
 const CHARS_PER_TOKEN: i64 = 4;
 
 /// Tool names whose input names a file. A repeated value is a repeated read.
@@ -275,8 +274,8 @@ fn stamp_of(entry: &serde_json::Map<String, Value>) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Claude sets `isCompactSummary`; Klaudia writes a system line whose subtype
-/// is `compact_boundary`.
+/// Claude sets `isCompactSummary`; another agent may write a system line
+/// whose subtype is `compact_boundary`.
 fn is_compaction(entry: &serde_json::Map<String, Value>) -> bool {
     if entry.get("isCompactSummary").and_then(Value::as_bool) == Some(true) {
         return true;
@@ -435,8 +434,8 @@ fn remember_tools(
 
 /// Add one entry's tool results to the byte map and the read counts.
 ///
-/// Claude and Klaudia nest results in `message.content`; Codex nests them in
-/// `payload`. A result names its tool on the block or, in the real Claude
+/// Claude nests results in `message.content`; Codex nests them in `payload`.
+/// A result names its tool on the block or, in the real Claude
 /// shape, only by `tool_use_id` pointing at an earlier `tool_use`. A result
 /// that names nothing is ignored rather than lumped under a made-up name.
 fn count_tools(
@@ -703,9 +702,7 @@ fn read_tail(path: &Path, offset: u64) -> Option<(u64, Vec<u8>)> {
     Some((offset + read as u64, buf))
 }
 
-/// Where a reported conversation keeps its transcript, under `home`. A
-/// klaudia conversation is a session file under `~/.klaudia/sessions`, which
-/// the claude layout already names.
+/// Where a reported conversation keeps its transcript, under `home`.
 pub(crate) fn transcript_path(
     home: &Path,
     claude_dirs: &[PathBuf],
@@ -720,8 +717,6 @@ pub(crate) fn transcript_path(
     // it ran in, so each root is tried until one holds it.
     let roots = match conversation.agent.as_str() {
         "claude" => crate::transcripts::claude_roots(home, claude_dirs),
-        // Klaudia files Claude Code's layout under its own root (WI-950).
-        "klaudia" => vec![home.join(".klaudia/sessions")],
         "codex" => vec![home.join(".codex/sessions")],
         _ => return None,
     };
@@ -988,7 +983,7 @@ mod tests {
         }
     }
 
-    fn expected_klaudia() -> SessionEconomics {
+    fn expected_estimated() -> SessionEconomics {
         SessionEconomics {
             turns: 2,
             context_tokens: 67,
@@ -1040,12 +1035,12 @@ mod tests {
     }
 
     #[test]
-    fn klaudia_fixture_matches_python() {
+    fn estimated_fixture_matches_python() {
         let transcript = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/economics/klaudia.jsonl"
+            "/tests/fixtures/economics/estimated.jsonl"
         ));
-        assert_eq!(feed("klaudia", transcript), expected_klaudia());
+        assert_eq!(feed("opencode", transcript), expected_estimated());
     }
 
     #[test]
@@ -1080,10 +1075,10 @@ mod tests {
     #[test]
     fn unicode_fixture_matches_python() {
         let reading = feed(
-            "klaudia",
+            "opencode",
             include_str!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/tests/fixtures/economics/klaudia_unicode.jsonl"
+                "/tests/fixtures/economics/unicode.jsonl"
             )),
         );
         assert_eq!(reading.turns, 3);
@@ -1104,8 +1099,8 @@ mod tests {
             ("claude", "claude.jsonl"),
             ("claude", "claude_gap.jsonl"),
             ("codex", "codex.jsonl"),
-            ("klaudia", "klaudia.jsonl"),
-            ("klaudia", "klaudia_unicode.jsonl"),
+            ("opencode", "estimated.jsonl"),
+            ("opencode", "unicode.jsonl"),
         ];
         for (agent, name) in fixtures {
             let bytes = std::fs::read(format!(
@@ -1295,15 +1290,15 @@ mod tests {
         assert_eq!(reading.turns, 1);
     }
 
-    /// Python: test_klaudia_estimates_and_counts_its_own_compaction_marker
+    /// Python: test_an_agent_without_usage_estimates_and_counts_its_compaction_marker
     #[test]
-    fn klaudia_estimates_and_counts_its_own_compaction_marker() {
+    fn an_agent_without_usage_estimates_and_counts_its_compaction_marker() {
         let boundary = r#"{"type":"system","subtype":"compact_boundary"}"#;
         let body = format!(
             r#"{{"type":"assistant","message":{{"content":"{}"}}}}"#,
             "y".repeat(CHARS_PER_TOKEN as usize * 10)
         );
-        let reading = feed_all("klaudia", &[boundary, &body]);
+        let reading = feed_all("opencode", &[boundary, &body]);
         let total = (boundary.len() + body.len()) as i64;
         assert!(!reading.usage_measured);
         assert_eq!(reading.compactions, 1);
@@ -1321,7 +1316,7 @@ mod tests {
             )
         };
         let (a, b) = (read("/a.py"), read("/b.py"));
-        let reading = feed_all("klaudia", &[&a, &a, &b, &a]);
+        let reading = feed_all("opencode", &[&a, &a, &b, &a]);
         assert_eq!(reading.reads_repeated, 1);
         assert_eq!(reading.tool_result_bytes.get("Read"), Some(&(8 * 4)));
     }
@@ -1351,7 +1346,7 @@ mod tests {
     #[test]
     fn one_timestamped_turn_has_no_wall_clock() {
         let reading = feed_all(
-            "klaudia",
+            "opencode",
             &[r#"{"type":"assistant","timestamp":"2026-10-11T01:00:00Z","message":{}}"#],
         );
         assert_eq!(reading.wall_clock.count, 0);
@@ -1373,9 +1368,9 @@ mod tests {
         assert_eq!(reading.wall_clock.count, 1);
     }
 
-    /// Python: test_klaudia_compaction_is_a_system_subtype_and_resets_the_estimate
+    /// Python: test_compaction_by_system_subtype_resets_the_estimate
     #[test]
-    fn klaudia_compaction_is_a_system_subtype_and_resets_the_estimate() {
+    fn compaction_by_system_subtype_resets_the_estimate() {
         let archived = format!(
             r#"{{"type":"assistant","message":{{"content":"{}"}}}}"#,
             "y".repeat(CHARS_PER_TOKEN as usize * 100)
@@ -1385,7 +1380,7 @@ mod tests {
             "z".repeat(CHARS_PER_TOKEN as usize * 10)
         );
         let boundary = r#"{"type":"system","subtype":"compact_boundary"}"#;
-        let reading = feed_all("klaudia", &[&archived, boundary, &live]);
+        let reading = feed_all("opencode", &[&archived, boundary, &live]);
         assert_eq!(reading.compactions, 1);
         assert_eq!(reading.turns, 2);
         let live_only = (boundary.len() + live.len()) as i64 / CHARS_PER_TOKEN;

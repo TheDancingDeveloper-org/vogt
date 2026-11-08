@@ -218,15 +218,14 @@ fn a_call_is_described_by_what_it_would_do() {
 }
 
 #[test]
-fn the_launch_is_the_klaudia_template_unless_a_command_is_named() {
+fn the_launch_is_a_command_the_operator_names() {
     let enabled = ChatPolicy {
         enabled: true,
         ..Default::default()
     };
     let templates = crate::config::SessionTemplate::default_templates();
-    let launch = resolve_launch(&enabled, &templates).unwrap();
-    assert_eq!(launch.template.as_deref(), Some("Klaudia (protected)"));
-    assert_eq!(launch.argv, ["vogt-agent-auth", "run", "--", "klaudia"]);
+    // No shipped template runs the stream-json driver any more.
+    assert!(resolve_launch(&enabled, &templates).is_none());
 
     let named = ChatPolicy {
         command: Some(vec!["/opt/bin/klaudia".into()]),
@@ -236,13 +235,14 @@ fn the_launch_is_the_klaudia_template_unless_a_command_is_named() {
     assert_eq!(launch.template, None);
     assert_eq!(launch.argv, ["/opt/bin/klaudia"]);
 
-    // Not Klaudia: the engine cannot speak its protocol, so no chats.
+    // Not the stream-json driver: the engine cannot speak its protocol, so no
+    // chats.
     let other = ChatPolicy {
         command: Some(vec!["claude".into()]),
         ..enabled.clone()
     };
     assert!(resolve_launch(&other, &templates).is_none());
-    // Off, or no template that runs Klaudia: no chats.
+    // Off, or no template that runs the driver: no chats.
     assert!(resolve_launch(&ChatPolicy::default(), &templates).is_none());
     assert!(resolve_launch(&enabled, &[]).is_none());
 }

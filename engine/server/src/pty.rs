@@ -719,9 +719,9 @@ impl Session {
     ///
     /// When the rendered screen shows no dialog but the window title says the
     /// agent is awaiting approval, a synthetic permission dialog stands in
-    /// (WI-1145, and WI-1279 for Klaudia). It carries no options, so an answer
-    /// refuses before any key is written: the guard only needs to know a
-    /// person must decide, not which choice to press.
+    /// (WI-1145). It carries no options, so an answer refuses before any key
+    /// is written: the guard only needs to know a person must decide, not
+    /// which choice to press.
     pub fn current_dialog(&self) -> Option<crate::approval::Detected> {
         let (rendered, scrollback) = self.render_screen(crate::approval::SCROLLBACK_CONTEXT_LINES);
         crate::approval::detect(&rendered.lines, &scrollback)
@@ -1829,10 +1829,10 @@ fn wake_activity_watcher(session: &Session) {
 /// redraw of them is always recent output.
 const APPROVAL_SCAN_BYTES: usize = 4096;
 
-/// Whether the window title announces exactly this state, for either agent
-/// whose title this engine reads.
+/// Whether the window title announces exactly this state, for the agent whose
+/// title this engine reads.
 fn title_says(title: Option<&str>, state: crate::screen::AgentTitle) -> bool {
-    crate::screen::agent_title(title).is_some_and(|(_, found)| found == state)
+    crate::screen::agent_title(title).is_some_and(|found| found == state)
 }
 
 /// How an agent's window title revises the state the quiet window computed.
@@ -1868,11 +1868,11 @@ fn titled_activity(
 /// A permission dialog inferred from the window title alone, when the rendered
 /// screen showed none.
 ///
-/// The WI-1127 fork's `agent-state` title and Klaudia's `awaiting approval`
-/// both name a dialog the screen parser does not always see (WI-1145,
-/// WI-1279). It is a `permission`, which is what the person gate refuses an
-/// agent for, and it offers no options: answering it fails before any key is
-/// written into the PTY, so a title cannot be used to press a choice.
+/// The WI-1127 fork's `agent-state` title names a dialog the screen parser
+/// does not always see (WI-1145, WI-1279). It is a `permission`, which is what
+/// the person gate refuses an agent for, and it offers no options: answering
+/// it fails before any key is written into the PTY, so a title cannot be used
+/// to press a choice.
 fn title_approval_dialog(title: Option<&str>) -> Option<crate::approval::Detected> {
     title_says(title, crate::screen::AgentTitle::AwaitingApproval).then(|| {
         crate::approval::Detected {
@@ -1915,8 +1915,8 @@ fn compute_activity(session: &Arc<Session>) -> ActivityState {
     // before the screen has changed enough to move the change clock, so the
     // quiet window alone reads `idle` while the title says working. Only for
     // an agent whose title this engine reads, and never over a terminal state.
-    let titled = matches!(session.agent().as_deref(), Some("klaudia" | "codex"));
-    let screen_busy = crate::screen::klaudia_busy(&session.render_screen(0).0.lines);
+    let titled = matches!(session.agent().as_deref(), Some("codex"));
+    let screen_busy = crate::screen::screen_busy(&session.render_screen(0).0.lines);
     let state = titled_activity(state, titled, session.title().as_deref(), screen_busy);
     // A permission dialog overrides whatever the tail heuristics said: its
     // countdown keeps redrawing (so it reads `running`) and its menu ends in
@@ -1926,8 +1926,7 @@ fn compute_activity(session: &Arc<Session>) -> ActivityState {
     // answered and redrawn over is not reported from text lingering in the
     // tail. When the screen shows nothing but the title says the agent is
     // awaiting approval, the title stands in: the fork's `agent-state` title
-    // and Klaudia's `awaiting approval` both name dialogs the screen parser
-    // does not always recognise.
+    // names a dialog the screen parser does not always recognise.
     let detected = if crate::approval::mentions_approval(&strip_ansi(&tail)) {
         let (rendered, scrollback) =
             session.render_screen(crate::approval::SCROLLBACK_CONTEXT_LINES);
@@ -2010,8 +2009,8 @@ fn update_activity_if_changed(session: &Arc<Session>, new: ActivityState, bus: &
     };
     // A worker that finished a turn and rests at its prompt is ready, even
     // when the activity reads `idle` rather than `waiting-for-input`: Claude
-    // Code's boxed prompt rarely matches the waiting patterns, and Klaudia and
-    // Codex are forced to `idle` by their window title (WI-1519). `idle` itself
+    // Code's boxed prompt rarely matches the waiting patterns, and Codex is
+    // forced to `idle` by its window title (WI-1519). `idle` itself
     // stays out of the change feed — a session that went quiet mid-turn is not
     // ready — so readiness is its own event, and at most one of them per turn.
     // The render happens after the activity lock is dropped: reading the grid

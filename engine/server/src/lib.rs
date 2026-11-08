@@ -37,7 +37,6 @@ pub mod git;
 pub mod graft_mint;
 pub mod graft_provider;
 pub mod gui;
-pub mod handoff;
 pub mod hibernate_policy;
 pub mod hibernation;
 pub mod history;

@@ -361,67 +361,6 @@ def test_bootstrap_reads_existing_claude_registrations_without_the_cli(
     assert "mcp get vogt" in calls.read_text(encoding="utf-8")
 
 
-KLAUDIA_MCP = DEPLOY / "klaudia-mcp.sh"
-
-
-def klaudia_mcp(tmp_path: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["bash", str(KLAUDIA_MCP), *args],
-        env={
-            "PATH": f"/usr/bin{os.pathsep}/bin",
-            "HOME": str(tmp_path),
-            "KLAUDIA_CONFIG_DIR": str(tmp_path / "kl"),
-        },
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-
-@pytest.mark.skipif(shutil.which("python3") is None, reason="the helper is python3")
-def test_klaudia_mcp_upserts_and_removes_only_its_own_entry(tmp_path: Path) -> None:
-    """WI-974: Klaudia has no `mcp add`, so this helper is how its
-    `.mcp.json` is written. It must keep everything else in the file, and
-    `remove` must spare an entry somebody registered with another command."""
-    config = tmp_path / "kl" / ".mcp.json"
-    config.parent.mkdir()
-    config.write_text(
-        json.dumps({"theme": "x", "mcpServers": {"mine": {"command": "/bin/mine"}}}),
-        encoding="utf-8",
-    )
-    first = klaudia_mcp(tmp_path, "set", "github-ro", "/w", "github")
-    assert first.returncode == 0, first.stderr
-    assert first.stdout == "", "the bootstrap's stdout is an MCP transport"
-    data = json.loads(config.read_text(encoding="utf-8"))
-    assert data["theme"] == "x"
-    assert data["mcpServers"] == {
-        "mine": {"command": "/bin/mine"},
-        "github-ro": {"command": "/w", "args": ["github"]},
-    }
-
-    # Unchanged entry: the file is not rewritten.
-    before = config.stat().st_mtime_ns
-    assert klaudia_mcp(tmp_path, "set", "github-ro", "/w", "github").returncode == 0
-    assert config.stat().st_mtime_ns == before
-
-    assert klaudia_mcp(tmp_path, "remove", "mine", "/w").returncode == 0
-    assert klaudia_mcp(tmp_path, "remove", "github-ro", "/w").returncode == 0
-    data = json.loads(config.read_text(encoding="utf-8"))
-    assert data["mcpServers"] == {"mine": {"command": "/bin/mine"}}
-
-    with_env = klaudia_mcp(tmp_path, "set", "-e", "URL=http://k:1", "kom", "/k")
-    assert with_env.returncode == 0, with_env.stderr
-    data = json.loads(config.read_text(encoding="utf-8"))
-    assert data["mcpServers"]["kom"] == {"command": "/k", "env": {"URL": "http://k:1"}}
-    assert klaudia_mcp(tmp_path, "set", "-e", "NOVALUE", "kom", "/k").returncode == 2
-    assert klaudia_mcp(tmp_path, "remove", "kom").returncode == 2
-
-    config.write_text("{not json", encoding="utf-8")
-    broken = klaudia_mcp(tmp_path, "set", "vogt", "/v")
-    assert broken.returncode == 1
-    assert config.read_text(encoding="utf-8") == "{not json"
-
-
 OPENCODE_SHIM = """#!/usr/bin/env python3
 import json, os, sys
 log = os.path.join(os.environ["HOME"], "opencode-calls.json")
@@ -444,18 +383,15 @@ if args[:2] == ["mcp", "add"]:
 @pytest.mark.skipif(
     shutil.which("python3") is None, reason="the CLI stand-ins need python3"
 )
-def test_bootstrap_registers_vogt_and_readonly_servers_for_klaudia_and_opencode(
+def test_bootstrap_registers_vogt_and_readonly_servers_for_opencode(
     tmp_path: Path,
 ) -> None:
-    """WI-974/WI-975: a Klaudia session had no MCP servers at all, and an
-    opencode session none of the read-only ones, because the bootstrap only
-    knew Claude Code and Codex for them."""
+    """WI-975: an opencode session had none of the read-only servers, because
+    the bootstrap only knew Claude Code and Codex."""
     bindir = tmp_path / "bin"
     bindir.mkdir()
     (bindir / "opencode").write_text(OPENCODE_SHIM, encoding="utf-8")
-    (bindir / "klaudia").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    for name in ("opencode", "klaudia"):
-        (bindir / name).chmod(0o755)
+    (bindir / "opencode").chmod(0o755)
     for name in ("github-mcp-server", "mcp-grafana", "gitea-mcp"):
         (bindir / name).write_text("#!/bin/sh\n", encoding="utf-8")
         (bindir / name).chmod(0o755)
@@ -467,9 +403,7 @@ def test_bootstrap_registers_vogt_and_readonly_servers_for_klaudia_and_opencode(
         "HOME": str(tmp_path),
         "VOGT_SRC": str(tmp_path / "absent"),
         "VOGT_READONLY_MCP_WRAPPER": str(wrapper),
-        "VOGT_KLAUDIA_MCP": str(KLAUDIA_MCP),
     }
-    klaudia_config = tmp_path / ".klaudia" / ".mcp.json"
     opencode_calls = tmp_path / "opencode-calls.json"
 
     def bootstrap(extra: dict[str, str]) -> None:
@@ -487,11 +421,6 @@ def test_bootstrap_registers_vogt_and_readonly_servers_for_klaudia_and_opencode(
 
     tokens = {"GITHUB_MCP_TOKEN": "x"}
     bootstrap(tokens)
-    servers = json.loads(klaudia_config.read_text(encoding="utf-8"))["mcpServers"]
-    assert servers == {
-        "vogt": {"command": "/usr/local/bin/vogt-mcp"},
-        "github-ro": {"command": str(wrapper), "args": ["github"]},
-    }
     assert ["mcp", "add", "github-ro", "--", str(wrapper), "github"] in json.loads(
         opencode_calls.read_text(encoding="utf-8")
     )
@@ -501,10 +430,8 @@ def test_bootstrap_registers_vogt_and_readonly_servers_for_klaudia_and_opencode(
     bootstrap(tokens)
     assert not opencode_calls.exists(), opencode_calls.read_text(encoding="utf-8")
 
-    # The token is gone: Klaudia's entry goes with it.
+    # The token is gone: the read-only entry goes with it, and nothing fails.
     bootstrap({})
-    servers = json.loads(klaudia_config.read_text(encoding="utf-8"))["mcpServers"]
-    assert servers == {"vogt": {"command": "/usr/local/bin/vogt-mcp"}}
 
 
 def _codex_tables(text: str) -> dict[str, dict[str, Any]]:
@@ -843,64 +770,6 @@ def test_codex_litellm_provider_is_the_default_and_stores_no_secret(
     shutil.which("python3") is None or shutil.which("flock") is None,
     reason="the Codex config rewrite needs python3 and flock",
 )
-def test_codex_gets_the_browser_and_the_isolated_subagent(tmp_path: Path) -> None:
-    """WI-1358: a Codex session has no browser of its own and its spawn_agent
-    cannot take a working directory. The bootstrap registers the two stdio
-    servers the klaudia binary serves, and points the sub-agent at the real
-    codex binary rather than the full-access wrapper on PATH."""
-    import tomllib
-
-    bindir = tmp_path / "bin"
-    bindir.mkdir()
-    for name in ("codex", "klaudia"):
-        path = bindir / name
-        path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-        path.chmod(0o755)
-    proc = _codex_bootstrap(tmp_path, {})
-    assert proc.returncode == 0, proc.stderr
-    assert proc.stdout == "", "stdout is the MCP transport"
-
-    config = tmp_path / "codex" / "config.toml"
-    servers = _codex_tables(config.read_text(encoding="utf-8"))
-    assert servers["browser"]["command"] == str(bindir / "klaudia")
-    assert servers["browser"]["args"] == ["mcp", "browser"]
-    assert servers["browser"]["tool_timeout_sec"] == 60
-    sub = servers["codex-subagent"]
-    assert sub["command"] == str(bindir / "klaudia")
-    assert sub["args"] == [
-        "mcp",
-        "codex-subagent",
-        "--codex",
-        "/usr/local/libexec/codex-real",
-        "--root",
-        str(tmp_path),
-    ]
-    # The registration is a command and arguments, never a credential.
-    assert "env" not in sub and "bearer_token" not in sub
-    # The child codex exec needs the provider key, passed by name (WI-1639).
-    assert sub["env_vars"] == ["HOMELAB_LITELLM_SESSION_KEY"]
-
-    # A second run replaces the tables in place.
-    again = _codex_bootstrap(tmp_path, {})
-    assert again.returncode == 0, again.stderr
-    settled = tomllib.loads(config.read_text(encoding="utf-8"))["mcp_servers"]
-    assert settled["browser"] == servers["browser"]
-    assert config.read_text(encoding="utf-8").count("[mcp_servers.browser]") == 1
-
-    # No klaudia binary, no tables: nothing is written that cannot be run.
-    bindir.joinpath("klaudia").unlink()
-    config.write_text("[other]\nkept = true\n", encoding="utf-8")
-    absent = _codex_bootstrap(tmp_path, {})
-    assert absent.returncode == 0, absent.stderr
-    parsed = tomllib.loads(config.read_text(encoding="utf-8"))
-    assert "mcp_servers" not in parsed
-    assert parsed["other"] == {"kept": True}
-
-
-@pytest.mark.skipif(
-    shutil.which("python3") is None or shutil.which("flock") is None,
-    reason="the Codex config rewrite needs python3 and flock",
-)
 def test_driven_session_bundle_merges_and_raises_the_schema_cap(
     tmp_path: Path,
 ) -> None:
@@ -1021,8 +890,6 @@ def test_driven_session_pre_approves_only_the_trusted_servers(tmp_path: Path) ->
     trusted = (
         "vogt",
         "cadastre",
-        "codex-subagent",
-        "browser",
         "github-ro",
         "forgejo-ro",
         "grafana-ro",
@@ -1072,14 +939,14 @@ def test_driven_session_pre_approves_only_the_trusted_servers(tmp_path: Path) ->
     reason="the Codex config rewrite needs python3 and flock",
 )
 def test_owned_codex_tables_carry_the_approval_and_settle(tmp_path: Path) -> None:
-    """WI-1634: the read-only, browser and sub-agent writers replace their own
-    tables whole, so they write the approval row themselves; otherwise every
-    start would drop it and the bundle would add it back."""
+    """WI-1634: a read-only writer replaces its table whole, so it writes the
+    approval row itself; otherwise every start would drop it and the bundle
+    would add it back."""
     import tomllib
 
     bindir = tmp_path / "bin"
     bindir.mkdir()
-    for name in ("codex", "klaudia", "github-mcp-server"):
+    for name in ("codex", "github-mcp-server"):
         path = bindir / name
         path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         path.chmod(0o755)
@@ -1092,8 +959,7 @@ def test_owned_codex_tables_carry_the_approval_and_settle(tmp_path: Path) -> Non
     config = tmp_path / "codex" / "config.toml"
     first = config.read_text(encoding="utf-8")
     servers = tomllib.loads(first)["mcp_servers"]
-    for name in ("browser", "codex-subagent", "github-ro"):
-        assert servers[name]["default_tools_approval_mode"] == "approve", name
+    assert servers["github-ro"]["default_tools_approval_mode"] == "approve"
     again = _codex_bootstrap(tmp_path, extra)
     assert again.returncode == 0, again.stderr
     assert config.read_text(encoding="utf-8") == first
@@ -1155,36 +1021,6 @@ def test_readonly_writer_keeps_an_explicit_approval_mode(
     servers = tomllib.loads(config.read_text(encoding="utf-8"))["mcp_servers"]
     assert servers[server]["default_tools_approval_mode"] == "prompt"
     assert servers[server]["command"] == str(wrapper)
-
-
-@pytest.mark.skipif(
-    shutil.which("python3") is None or shutil.which("flock") is None,
-    reason="the Codex config rewrite needs python3 and flock",
-)
-@pytest.mark.parametrize("server", ("browser", "codex-subagent"))
-def test_klaudia_tools_writer_keeps_an_explicit_approval_mode(
-    tmp_path: Path, server: str
-) -> None:
-    """WI-1634: the browser and sub-agent writer likewise replaces its tables, so
-    an operator's mode on either one has to survive the rewrite."""
-    import tomllib
-
-    _shims(tmp_path, ("codex", "klaudia"))
-    config = tmp_path / "codex" / "config.toml"
-    config.parent.mkdir()
-    config.write_text(
-        f"[mcp_servers.{server}]\n"
-        'command = "klaudia"\n'
-        'default_tools_approval_mode = "prompt"\n',
-        encoding="utf-8",
-    )
-    proc = _codex_bootstrap(tmp_path, {})
-    assert proc.returncode == 0, proc.stderr
-    servers = tomllib.loads(config.read_text(encoding="utf-8"))["mcp_servers"]
-    assert servers[server]["default_tools_approval_mode"] == "prompt"
-    assert servers["browser"]["command"].endswith("/klaudia")
-    again = _codex_bootstrap(tmp_path, {})
-    assert again.returncode == 0, again.stderr
 
 
 @pytest.mark.skipif(

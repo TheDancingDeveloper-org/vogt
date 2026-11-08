@@ -2006,7 +2006,7 @@ async fn session_activity_becomes_idle_after_quiet_window() {
         .await;
 }
 
-/// WI-1090: Klaudia's idle input box repaints its blinking cursor faster
+/// WI-1090: an idle agent's input box repaints its blinking cursor faster
 /// than the quiet window, forever. Output that leaves the screen as it was
 /// is not activity, so the session settles to `idle` and its screen reads
 /// `ready`, while a TUI whose repaints do change the screen (a spinner)
@@ -2019,25 +2019,25 @@ async fn an_identical_repaint_is_not_activity_but_a_spinner_is() {
         .build()
         .unwrap();
     let dir = tempfile::tempdir().unwrap();
-    // Named `klaudia`, so the engine reads its screen by Klaudia's rules.
+    // Named `claude`, so the session has an agent whose prompt the engine reads.
     let fake = |name: &str, body: &str| {
         let sub = dir.path().join(name);
         std::fs::create_dir_all(&sub).unwrap();
-        let path = sub.join("klaudia");
+        let path = sub.join("claude");
         std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         path.to_string_lossy().into_owned()
     };
     // The idle frame: a footer, the input box, the status bar.
-    let frame = r"printf '\033[2J\033[H  done in 9m07s\r\n\342\225\255\342\224\200\342\224\200\342\225\256\r\n\342\224\202 \342\200\272 Ask Klaudia\342\200\246 \342\224\202\r\n\342\225\260\342\224\200\342\224\200\342\225\257\r\n  grok-4.7 \302\267 3 turns\r'";
+    let frame = r"printf '\033[2J\033[H  done in 9m07s\r\n\342\225\255\342\224\200\342\224\200\342\225\256\r\n\342\224\202 \342\200\272 Ask the model\342\200\246 \342\224\202\r\n\342\225\260\342\224\200\342\224\200\342\225\257\r\n  model-1 \302\267 3 turns\r'";
     // Then the blink: the cursor cell flips between reverse video and dim
     // every 80 ms, under the suite's 200 ms quiet window.
     let idle = fake(
         "idle",
         &format!(
             "{frame}\nn=0\nwhile :; do n=$((n+1)); if [ $((n%2)) = 0 ]; then a='\\033[7m'; else a='\\033[2m'; fi\n\
-             printf \"\\033[3;1H\\342\\224\\202 \\342\\200\\272 ${{a}}A\\033[0msk Klaudia\\342\\200\\246 \\342\\224\\202\\033[K\\033[5;1H\"; sleep 0.08; done"
+             printf \"\\033[3;1H\\342\\224\\202 \\342\\200\\272 ${{a}}A\\033[0msk the model\\342\\200\\246 \\342\\224\\202\\033[K\\033[5;1H\"; sleep 0.08; done"
         ),
     );
     let spinning = fake(
@@ -2053,7 +2053,7 @@ async fn an_identical_repaint_is_not_activity_but_a_spinner_is() {
         async move {
             let created: Value = client
                 .post(format!("{base}/api/sessions"))
-                .json(&json!({ "name": "klaudia-repaint", "command": [command] }))
+                .json(&json!({ "name": "repaint", "command": [command] }))
                 .send()
                 .await
                 .unwrap()
@@ -2088,7 +2088,7 @@ async fn an_identical_repaint_is_not_activity_but_a_spinner_is() {
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "a repainting idle Klaudia never settled: {view}"
+            "a repainting idle prompt never settled: {view}"
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     };
@@ -2096,7 +2096,7 @@ async fn an_identical_repaint_is_not_activity_but_a_spinner_is() {
         settled["lines"][2]
             .as_str()
             .unwrap()
-            .contains("Ask Klaudia"),
+            .contains("Ask the model"),
         "{settled}"
     );
     // It is still repainting: its output clock keeps moving while it reads idle.
@@ -9101,11 +9101,11 @@ async fn session_changes_are_sequenced_filtered_and_waited_on() {
 
 /// WI-1519: a worker that finished its turn and rests `idle` at its prompt is
 /// a `ready` change, not silence. Claude Code's boxed prompt rarely matches
-/// the waiting patterns, and Klaudia is forced to `idle` by its window title,
-/// so neither used to wake `wait-any` while `/wait?until=ready` did.
+/// the waiting patterns, so it used not to wake `wait-any` while
+/// `/wait?until=ready` did.
 #[tokio::test]
 async fn an_idle_prompt_is_one_ready_change_and_wait_any_agrees_with_wait() {
-    let (base, state, _h) = boot_with_state(test_config()).await;
+    let (base, _h) = boot().await;
     let client = reqwest::Client::builder()
         .default_headers(auth())
         .build()
@@ -9125,30 +9125,6 @@ async fn an_idle_prompt_is_one_ready_change_and_wait_any_agrees_with_wait() {
         }),
     )
     .await;
-
-    // Klaudia announces rest in the window title, which forces the activity to
-    // `idle` even while the screen keeps being drawn. The title only outranks
-    // output recency for a session the engine knows runs Klaudia, so the
-    // conversation is set on the live session rather than inferred from a shell
-    // command.
-    let titled = "printf 'thinking\\n'; sleep 0.4; printf '\\033]0;klaudia: ready\\007\\033[2J\\033[H\\n│ › Ask Klaudia │\\n╾──╼\\n'; sleep 30";
-    let klaudia = create_session_with(
-        &client,
-        &base,
-        json!({
-            "name": "idle-klaudia-title",
-            "command": ["/bin/sh", "-c", titled],
-        }),
-    )
-    .await;
-    state
-        .sessions
-        .get(Uuid::parse_str(&klaudia).unwrap())
-        .unwrap()
-        .set_conversation(Some(vogt_engine_contract::AgentConversation {
-            agent: "klaudia".to_string(),
-            id: "conv-1".to_string(),
-        }));
 
     // The `ready` rows for one session, polled until one appears.
     let ready_rows = |id: String| {
@@ -9180,54 +9156,48 @@ async fn an_idle_prompt_is_one_ready_change_and_wait_any_agrees_with_wait() {
         }
     };
 
-    for id in [&claude, &klaudia] {
-        let rows = ready_rows(id.clone()).await;
-        assert_eq!(rows.len(), 1, "one ready per turn for {id}: {rows:?}");
+    let rows = ready_rows(claude.clone()).await;
+    assert_eq!(rows.len(), 1, "one ready per turn: {rows:?}");
 
-        let seq = rows[0]["seq"].as_u64().unwrap();
-        let any: Value = client
-            .get(format!(
-                "{base}/api/sessions/wait-any?ids={id}&until=ready&cursor=0&timeout_s=5"
-            ))
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
-        assert_eq!(any["outcome"], "changed", "{id}: {any}");
-        assert_eq!(any["change"]["seq"].as_u64().unwrap(), seq);
+    let seq = rows[0]["seq"].as_u64().unwrap();
+    let any: Value = client
+        .get(format!(
+            "{base}/api/sessions/wait-any?ids={claude}&until=ready&cursor=0&timeout_s=5"
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(any["outcome"], "changed", "{any}");
+    assert_eq!(any["change"]["seq"].as_u64().unwrap(), seq);
 
-        let one: Value = client
-            .get(format!(
-                "{base}/api/sessions/{id}/wait?until=ready&timeout_s=5"
-            ))
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
-        assert_eq!(one["outcome"], "ready", "{id}: {one}");
-        assert_eq!(one["matched"], true, "{id}: {one}");
-    }
+    let one: Value = client
+        .get(format!(
+            "{base}/api/sessions/{claude}/wait?until=ready&timeout_s=5"
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(one["outcome"], "ready", "{one}");
+    assert_eq!(one["matched"], true, "{one}");
 
     // Still at the prompt a moment later: the quiet does not become a second
     // `ready`. (The brief's ten minutes is the same claim — one per turn,
     // reset only when the session goes running again.)
     tokio::time::sleep(Duration::from_secs(3)).await;
-    for id in [&claude, &klaudia] {
-        let rows = ready_rows(id.clone()).await;
-        assert_eq!(rows.len(), 1, "no ready storm for {id}: {rows:?}");
-    }
+    let rows = ready_rows(claude.clone()).await;
+    assert_eq!(rows.len(), 1, "no ready storm: {rows:?}");
 
-    for id in [claude, klaudia] {
-        client
-            .delete(format!("{base}/api/sessions/{id}"))
-            .send()
-            .await
-            .unwrap();
-    }
+    client
+        .delete(format!("{base}/api/sessions/{claude}"))
+        .send()
+        .await
+        .unwrap();
 }
 
 /// WI-1246: `Last-Event-ID` replays what the ring still holds, and the live
@@ -9889,65 +9859,6 @@ async fn a_sessions_budget_survives_hibernate_and_wake() {
     assert_eq!(woken["budget"]["turns"], 120);
     assert_eq!(woken["budget"]["wall_clock_minutes"], 90);
     assert!(woken["budget"].get("context_tokens").is_none());
-}
-
-/// Hibernating a Klaudia session leaves `<state_dir>/handoffs/<id>.md` (C12).
-/// The stub is named `klaudia`, which is what the engine keys the agent on;
-/// this temp directory is not a checkout and no summary is planted, so the
-/// file records both halves as absent.
-#[tokio::test]
-async fn hibernating_a_klaudia_session_leaves_a_handoff_file() {
-    let tmp = tempfile::tempdir().unwrap();
-    let mut cfg = test_config();
-    cfg.default_cwd = tmp.path().to_path_buf();
-    cfg.workspace_root = tmp.path().canonicalize().unwrap();
-    cfg.state_dir = tmp.path().join("state");
-    let bin = tmp.path().join("bin");
-    std::fs::create_dir_all(&bin).unwrap();
-    let stub = bin.join("klaudia");
-    std::fs::write(&stub, "#!/bin/sh\nprintf '> '\nexec sleep 300\n").unwrap();
-    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let state_dir = cfg.state_dir.clone();
-    let (base, _h) = boot_with_config(cfg).await;
-    let client = reqwest::Client::builder()
-        .default_headers(auth())
-        .build()
-        .unwrap();
-
-    let created: Value = client
-        .post(format!("{base}/api/sessions"))
-        .json(&json!({
-            "name": "klaudia handoff",
-            "command": [stub.to_string_lossy()],
-        }))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let id = created["id"].as_str().unwrap().to_string();
-    assert_eq!(created["conversation"]["agent"], "klaudia");
-    let _ = live_output_containing(&client, &base, &id, &["> "]).await;
-
-    let hibernated = client
-        .post(format!("{base}/api/sessions/{id}/hibernate"))
-        .json(&json!({ "reason": "handoff" }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(hibernated.status(), StatusCode::OK);
-
-    let handoff =
-        std::fs::read_to_string(state_dir.join("handoffs").join(format!("{id}.md"))).unwrap();
-    assert!(
-        handoff.contains(&format!("conversation: {id}")),
-        "{handoff}"
-    );
-    assert!(handoff.contains("(no summary)"), "{handoff}");
-    assert!(handoff.contains("## Git (session directory)"), "{handoff}");
-    assert!(handoff.contains("(not a git checkout)"), "{handoff}");
-    drop(tmp);
 }
 
 #[tokio::test]
@@ -10670,14 +10581,10 @@ async fn the_economics_tailer_reports_a_live_transcript_and_the_scrape_records_t
     let conversation = "6c1f0d2e-5b7a-4e1c-9f3d-2a8b7c6d5e4f";
     let transcript = tmp
         .path()
-        .join(".klaudia/sessions/cwd-key")
+        .join(".claude/projects/cwd-key")
         .join(format!("{conversation}.jsonl"));
     std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
-    std::fs::write(
-        &transcript,
-        include_str!("fixtures/economics/klaudia.jsonl"),
-    )
-    .unwrap();
+    std::fs::write(&transcript, include_str!("fixtures/economics/claude.jsonl")).unwrap();
 
     let (base, _guard) = boot_with_config(cfg).await;
     let client = reqwest::Client::builder()
@@ -10696,7 +10603,7 @@ async fn the_economics_tailer_reports_a_live_transcript_and_the_scrape_records_t
     let id = created["id"].as_str().unwrap().to_string();
     client
         .post(format!("{base}/api/sessions/{id}/conversation"))
-        .json(&json!({ "agent": "klaudia", "id": conversation }))
+        .json(&json!({ "agent": "claude", "id": conversation }))
         .send()
         .await
         .unwrap()
@@ -10715,10 +10622,10 @@ async fn the_economics_tailer_reports_a_live_transcript_and_the_scrape_records_t
         );
         tokio::time::sleep(Duration::from_millis(200)).await;
     };
-    assert_eq!(row["economics"]["context_tokens"], 67);
-    assert_eq!(row["economics"]["peak_context_tokens"], 117);
+    assert_eq!(row["economics"]["context_tokens"], 80);
+    assert_eq!(row["economics"]["peak_context_tokens"], 175);
     assert_eq!(row["economics"]["compactions"], 1);
-    assert_eq!(row["economics"]["usage_measured"], false);
+    assert_eq!(row["economics"]["usage_measured"], true);
 
     client
         .post(format!("{base}/api/sessions/{id}/kill"))
@@ -12057,17 +11964,13 @@ async fn a_permission_posture_reaches_the_agent_and_survives_a_wake() {
 
 /// WI-1250: hibernate then wake keeps the posture the session was started
 /// with, even when a later boot of the same state points the deployment at a
-/// different settings file. Covers Claude Code and Klaudia, a model, the
-/// brief's extra directory, and an oversight bypass that must neither escalate
-/// nor drop back to the default. A record written before the posture fields
-/// existed still wakes.
+/// different settings file. Covers an oversight and a worker session, a model,
+/// the brief's extra directory, and an oversight bypass that must neither
+/// escalate nor drop back to the default. A record written before the posture
+/// fields existed still wakes.
 #[tokio::test]
 async fn a_woken_session_keeps_the_posture_it_was_started_with() {
     let (tmp, mut cfg, claude) = hibernation_sandbox();
-    let bin = tmp.path().join("bin");
-    let klaudia = bin.join("klaudia");
-    std::fs::copy(&claude, &klaudia).unwrap();
-    std::fs::set_permissions(&klaudia, std::fs::Permissions::from_mode(0o755)).unwrap();
     let policy = tmp.path().join("policy.json");
     let replacement = tmp.path().join("replacement.json");
     std::fs::write(&policy, br#"{"autoMode":{"allow":["$defaults"]}}"#).unwrap();
@@ -12107,23 +12010,18 @@ async fn a_woken_session_keeps_the_posture_it_was_started_with() {
         }
     };
     let claude_id = start("claude oversight", &claude, "oversight").await;
-    let klaudia_id = start("klaudia worker", &klaudia, "worker").await;
+    let worker_id = start("claude worker", &claude, "worker").await;
 
-    for id in [&claude_id, &klaudia_id] {
+    for id in [&claude_id, &worker_id] {
         let printed = live_output_containing(&client, &base, id, &["helper=["]).await;
         assert!(
             printed.contains("arg=[--dangerously-skip-permissions]"),
             "{printed:?}"
         );
-        if id == &claude_id {
-            assert!(
-                printed.contains(&format!("arg=[--settings={}]", policy.display())),
-                "{printed:?}"
-            );
-        } else {
-            // Klaudia has no `--settings` flag and refuses to start with one.
-            assert!(!printed.contains("arg=[--settings="), "{printed:?}");
-        }
+        assert!(
+            printed.contains(&format!("arg=[--settings={}]", policy.display())),
+            "{printed:?}"
+        );
         assert!(
             printed.contains("arg=[--model]\r\narg=[test-model]"),
             "{printed:?}"
@@ -12150,14 +12048,12 @@ async fn a_woken_session_keeps_the_posture_it_was_started_with() {
         .build()
         .unwrap();
     let brief_dir = state_dir.join("agent-task-prompts").join("sessions");
-    for (id, role) in [(&claude_id, "oversight"), (&klaudia_id, "worker")] {
+    for (id, role) in [(&claude_id, "oversight"), (&worker_id, "worker")] {
         let stored =
             std::fs::read_to_string(state_dir.join("sessions").join(format!("{id}.json"))).unwrap();
-        // Only what the first launch carried is recorded: Klaudia takes no
-        // `--settings`, so its record names none (WI-2252).
-        assert_eq!(
+        // Only what the first launch carried is recorded (WI-2252).
+        assert!(
             stored.contains(&format!("\"{}\"", policy.display())),
-            role == "oversight",
             "the record keeps the original policy it launched with: {stored}"
         );
         assert!(
@@ -12193,17 +12089,10 @@ async fn a_woken_session_keeps_the_posture_it_was_started_with() {
             tail.contains("--dangerously-skip-permissions"),
             "bypass is neither dropped nor widened: {tail:?}"
         );
-        if role == "oversight" {
-            assert!(
-                tail.contains(&format!("arg=[--settings={}]", policy.display())),
-                "the recorded policy, not the deployment's current one: {tail:?}"
-            );
-        } else {
-            assert!(
-                !tail.contains("arg=[--settings="),
-                "klaudia never gets --settings: {tail:?}"
-            );
-        }
+        assert!(
+            tail.contains(&format!("arg=[--settings={}]", policy.display())),
+            "the recorded policy, not the deployment's current one: {tail:?}"
+        );
         assert!(
             !tail.contains(&format!("arg=[--settings={}]", replacement.display())),
             "the replacement policy must not be applied: {tail:?}"
@@ -12225,7 +12114,7 @@ async fn a_woken_session_keeps_the_posture_it_was_started_with() {
         .await
         .unwrap();
     client
-        .post(format!("{base}/api/sessions/{klaudia_id}/hibernate"))
+        .post(format!("{base}/api/sessions/{worker_id}/hibernate"))
         .send()
         .await
         .unwrap();
@@ -15242,13 +15131,77 @@ async fn driver_asks_go_to_a_person_its_own_hooks_do_not_and_errors_are_retryabl
 }
 
 #[tokio::test]
-async fn a_promoted_chat_continues_in_a_session_and_takes_no_more_messages() {
+async fn a_stream_json_chat_cannot_be_promoted_into_a_session() {
     let Some((base, client, _state, guard, _bin)) = boot_chats().await else {
         return;
     };
     let created: Value = client
         .post(format!("{base}/api/chats"))
         .json(&json!({ "message": "plan the fix" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["chat"]["id"].as_str().unwrap().to_string();
+    wait_chat_idle(&client, &base, &id).await;
+    // The stream-json driver has no resume, so a session could not continue
+    // this conversation; the chat says so instead of starting one it cannot
+    // carry on (WI-3744).
+    let refused = client
+        .post(format!("{base}/api/chats/{id}/promote"))
+        .json(&json!({ "name": "fix it" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::CONFLICT);
+    let body: Value = refused.json().await.unwrap();
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("resume"),
+        "{body}"
+    );
+    drop(guard);
+}
+
+#[tokio::test]
+async fn a_promoted_codex_chat_continues_in_a_session_and_takes_no_more_messages() {
+    if std::process::Command::new("python3")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("skipping: the stand-in app-server is written in python3");
+        return;
+    }
+    let bin = tempfile::tempdir().unwrap();
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/fake-codex-app-server.py")
+        .canonicalize()
+        .unwrap();
+    let driver = bin.path().join("codex");
+    std::os::unix::fs::symlink(&fixture, &driver).unwrap();
+    let cfg = Config {
+        chat: vogt_engine_server::chats::ChatPolicy {
+            enabled: true,
+            command: Some(vec![driver.to_string_lossy().into_owned()]),
+            approval_timeout: Duration::from_secs(10),
+            ..Default::default()
+        },
+        session_templates: vec![],
+        ..test_config()
+    };
+    let (base, _state, guard) = boot_with_state(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let created: Value = client
+        .post(format!("{base}/api/chats"))
+        .json(&json!({ "driver": "codex", "message": "plan the fix" }))
         .send()
         .await
         .unwrap()
@@ -15274,7 +15227,7 @@ async fn a_promoted_chat_continues_in_a_session_and_takes_no_more_messages() {
         id.as_str(),
         "{promoted}"
     );
-    assert_eq!(promoted["session"]["conversation"]["agent"], "klaudia");
+    assert_eq!(promoted["session"]["conversation"]["agent"], "codex");
     assert!(
         promoted["chat"]["live"] == false,
         "the chat's own process is gone"
@@ -16106,24 +16059,24 @@ async fn a_worktree_outside_the_workspace_is_refused_before_it_is_cut() {
     }
 }
 
-/// A stand-in Klaudia that takes its next turn from a file rather than the
+/// A stand-in Claude that takes its next turn from a file rather than the
 /// PTY: each line appended to `turns.feed` starts one turn. An agent that
 /// prompts itself leaves no person-input stamp, and writing the PTY from the
 /// test would — the engine's own token counts as a person, which resets the
 /// idle clock the budget stop waits on.
-fn file_fed_klaudia(dir: &std::path::Path) -> std::path::PathBuf {
+fn file_fed_claude(dir: &std::path::Path) -> std::path::PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let bin = dir.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
-    let stub = bin.join("klaudia");
+    let stub = bin.join("claude");
     std::fs::write(dir.join("turns.feed"), "").unwrap();
     std::fs::write(
         &stub,
         format!(
             r#"#!/usr/bin/env bash
 ready() {{
-  printf '\033]0;klaudia: ready\007\033[2J\033[H'
-  printf '╭──────────────────────╮\r\n│ › Ask Klaudia…       │\r\n╰──────────────────────╯\r\n  grok · stand-in\r\n'
+  printf '\033]0;claude: ready\007\033[2J\033[H'
+  printf '╭──────────────────────╮\r\n│ › Ask the model…     │\r\n╰──────────────────────╯\r\n  model · stand-in\r\n'
 }}
 ready
 n=0
@@ -16132,7 +16085,7 @@ while true; do
   lines=$(wc -l < '{feed}')
   if [ "$lines" -gt "$seen" ]; then
     seen=$lines
-    printf '\033]0;klaudia: working\007'
+    printf '\033]0;claude: working\007'
     printf '  ⣟  thinking…  (esc to interrupt)\r\n'; sleep 0.3
     n=$((n+1))
     printf '{{"type":"assistant","timestamp":"2026-10-13T00:%02d:00Z","message":{{"content":"turn %s"}}}}\n' "$n" "$n" >> "$(cat '{at}')"
@@ -16152,32 +16105,31 @@ done
     stub
 }
 
-/// A stand-in Klaudia TUI for the budget tests (WI-1281). It announces its
-/// state in the window title the way Klaudia does, draws its idle input box at
-/// rest, and per line of input runs one turn: about 1.5 s of `(esc to
+/// A stand-in Claude TUI for the budget tests (WI-1281). It draws its idle
+/// input box at rest, and per line of input runs one turn: about 1.5 s of `(esc to
 /// interrupt)` spinner output (so the engine reads it running), then one
 /// assistant line appended to the transcript named in `transcript_at` and a
 /// line to `turns.log`. Nothing types into it but autopilot.
-fn fake_klaudia_tui(dir: &std::path::Path) -> std::path::PathBuf {
+fn fake_claude_tui(dir: &std::path::Path) -> std::path::PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let bin = dir.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
-    let stub = bin.join("klaudia");
+    let stub = bin.join("claude");
     std::fs::write(
         &stub,
         format!(
             r#"#!/usr/bin/env bash
 ready() {{
-  printf '\033]0;klaudia: ready\007\033[2J\033[H'
-  printf '╭──────────────────────╮\r\n│ › Ask Klaudia…       │\r\n╰──────────────────────╯\r\n  grok · stand-in\r\n'
+  printf '\033]0;claude: ready\007\033[2J\033[H'
+  printf '╭──────────────────────╮\r\n│ › Ask the model…     │\r\n╰──────────────────────╯\r\n  model · stand-in\r\n'
 }}
 ready
 n=0
 while IFS= read -r _; do
-  printf '\033]0;klaudia: working\007'
+  printf '\033]0;claude: working\007'
   for _ in 1 2 3 4 5 6; do printf '  ⣟  thinking…  (esc to interrupt)\r\n'; sleep 0.25; done
   n=$((n+1))
-  printf '{{"type":"assistant","timestamp":"2026-10-13T00:%02d:00Z","message":{{"content":"turn %s"}}}}\n' "$n" "$n" >> "$(cat '{at}')"
+  printf '{{"type":"assistant","timestamp":"2026-10-13T00:%02d:00Z","message":{{"usage":{{"input_tokens":200,"output_tokens":5}},"content":"turn %s"}}}}\n' "$n" "$n" >> "$(cat '{at}')"
   echo "$n" >> '{log}'
   ready
 done
@@ -16192,7 +16144,7 @@ done
 }
 
 /// A config for the budget tests: the economics tailer reads the sandbox's
-/// `.klaudia`, autopilot re-prompts quickly, and the budget watcher ticks
+/// `.claude`, autopilot re-prompts quickly, and the budget watcher ticks
 /// slower than autopilot — the race an autopilot worker won in production,
 /// where it was re-prompted before the watcher ever saw it at rest.
 fn budget_sandbox(dir: &std::path::Path) -> Config {
@@ -16211,7 +16163,7 @@ fn budget_sandbox(dir: &std::path::Path) -> Config {
         tick: Duration::from_millis(1_000),
         enabled: true,
     };
-    std::fs::create_dir_all(dir.join(".klaudia/sessions/k")).unwrap();
+    std::fs::create_dir_all(dir.join(".claude/projects/k")).unwrap();
     cfg
 }
 
@@ -16237,16 +16189,16 @@ fn turns_run(dir: &std::path::Path) -> usize {
         .count()
 }
 
-/// WI-1281: a Klaudia autopilot session is hibernated with trigger `budget`
+/// WI-1281: a Claude autopilot session is hibernated with trigger `budget`
 /// at its turn limit, at a turn boundary, and not many turns later. Before,
 /// autopilot re-prompted it each time it reached its prompt, and the watcher,
 /// which waits for the prompt, rarely saw it there.
 #[tokio::test]
-async fn a_klaudia_autopilot_session_hibernates_at_its_turn_budget() {
+async fn a_claude_autopilot_session_hibernates_at_its_turn_budget() {
     const LIMIT: usize = 3;
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
-    let stub = fake_klaudia_tui(dir);
+    let stub = fake_claude_tui(dir);
     let (base, _h) = boot_with_config(budget_sandbox(dir)).await;
     let client = reqwest::Client::builder()
         .default_headers(auth())
@@ -16255,7 +16207,7 @@ async fn a_klaudia_autopilot_session_hibernates_at_its_turn_budget() {
     let created: Value = client
         .post(format!("{base}/api/sessions"))
         .json(&json!({
-            "name": "klaudia on a budget",
+            "name": "claude on a budget",
             "command": [stub.to_string_lossy()],
             "autopilot": true,
             "budget": { "turns": LIMIT, "wall_clock_minutes": 90 },
@@ -16267,7 +16219,7 @@ async fn a_klaudia_autopilot_session_hibernates_at_its_turn_budget() {
         .await
         .unwrap();
     let id = created["id"].as_str().unwrap().to_string();
-    assert_eq!(created["conversation"]["agent"], "klaudia", "{created}");
+    assert_eq!(created["conversation"]["agent"], "claude", "{created}");
     let conversation = created["conversation"]["id"].as_str().unwrap();
     // The whole-session clock is not set unless asked for.
     assert!(created["budget"]
@@ -16275,7 +16227,7 @@ async fn a_klaudia_autopilot_session_hibernates_at_its_turn_budget() {
         .is_none());
     std::fs::write(
         dir.join("transcript_at"),
-        dir.join(format!(".klaudia/sessions/k/{conversation}.jsonl"))
+        dir.join(format!(".claude/projects/k/{conversation}.jsonl"))
             .display()
             .to_string(),
     )
@@ -16294,19 +16246,19 @@ async fn a_klaudia_autopilot_session_hibernates_at_its_turn_budget() {
     );
     // Hibernated at the prompt, never mid-turn: every turn that began ended.
     let transcript =
-        std::fs::read_to_string(dir.join(format!(".klaudia/sessions/k/{conversation}.jsonl")))
+        std::fs::read_to_string(dir.join(format!(".claude/projects/k/{conversation}.jsonl")))
             .unwrap();
     assert_eq!(transcript.lines().count(), turns);
 }
 
-/// WI-1522: an overseer over its context limit is never hibernated for it.
-/// Klaudia has no compact command the engine types, so it gets the change and
-/// nothing typed; the same limit on a worker hibernates (the test above).
+/// WI-1522: an overseer over its context limit is never hibernated for it; the
+/// engine types its compact command instead. The same limit on a worker
+/// hibernates (the test above).
 #[tokio::test]
 async fn an_overseer_over_its_context_limit_is_not_hibernated() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
-    let stub = fake_klaudia_tui(dir);
+    let stub = fake_claude_tui(dir);
     let (base, _h) = boot_with_config(budget_sandbox(dir)).await;
     let client = reqwest::Client::builder()
         .default_headers(auth())
@@ -16332,7 +16284,7 @@ async fn an_overseer_over_its_context_limit_is_not_hibernated() {
     let conversation = created["conversation"]["id"].as_str().unwrap();
     std::fs::write(
         dir.join("transcript_at"),
-        dir.join(format!(".klaudia/sessions/k/{conversation}.jsonl"))
+        dir.join(format!(".claude/projects/k/{conversation}.jsonl"))
             .display()
             .to_string(),
     )
@@ -16365,7 +16317,7 @@ async fn a_blocked_report_does_not_outrun_the_turn_budget() {
     const LIMIT: usize = 3;
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
-    let stub = file_fed_klaudia(dir);
+    let stub = file_fed_claude(dir);
     let (base, _h) = boot_with_config(budget_sandbox(dir)).await;
     let client = reqwest::Client::builder()
         .default_headers(auth())
@@ -16374,7 +16326,7 @@ async fn a_blocked_report_does_not_outrun_the_turn_budget() {
     let created: Value = client
         .post(format!("{base}/api/sessions"))
         .json(&json!({
-            "name": "klaudia reporting itself blocked",
+            "name": "claude reporting itself blocked",
             "command": [stub.to_string_lossy()],
             "autopilot": true,
             "budget": { "turns": LIMIT, "wall_clock_minutes": 90 },
@@ -16389,7 +16341,7 @@ async fn a_blocked_report_does_not_outrun_the_turn_budget() {
     let conversation = created["conversation"]["id"].as_str().unwrap();
     std::fs::write(
         dir.join("transcript_at"),
-        dir.join(format!(".klaudia/sessions/k/{conversation}.jsonl"))
+        dir.join(format!(".claude/projects/k/{conversation}.jsonl"))
             .display()
             .to_string(),
     )
@@ -16455,16 +16407,16 @@ async fn a_blocked_report_does_not_outrun_the_turn_budget() {
 /// boundary once the total passes the minute. The record it leaves carries
 /// the total, so the next wake would resume from there.
 #[tokio::test]
-async fn a_klaudia_session_clock_survives_a_wake_and_hibernates_at_its_limit() {
+async fn a_claude_session_clock_survives_a_wake_and_hibernates_at_its_limit() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
-    let stub = fake_klaudia_tui(dir);
+    let stub = fake_claude_tui(dir);
     let cfg = budget_sandbox(dir);
     let id = uuid::Uuid::new_v4();
     let conversation = uuid::Uuid::new_v4();
     std::fs::write(
         dir.join("transcript_at"),
-        dir.join(format!(".klaudia/sessions/k/{conversation}.jsonl"))
+        dir.join(format!(".claude/projects/k/{conversation}.jsonl"))
             .display()
             .to_string(),
     )
@@ -16476,11 +16428,11 @@ async fn a_klaudia_session_clock_survives_a_wake_and_hibernates_at_its_limit() {
         serde_json::to_vec(&json!({
             "version": 1,
             "id": id,
-            "name": "klaudia on the clock",
+            "name": "claude on the clock",
             "created_at": "2026-10-13T00:00:00Z",
             "command": [stub.to_string_lossy()],
             "cwd": dir,
-            "conversation": { "agent": "klaudia", "id": conversation },
+            "conversation": { "agent": "claude", "id": conversation },
             "autopilot": true,
             "budget": { "wall_clock_minutes": 90, "session_wall_clock_minutes": 1 },
             "budget_session_secs": 55,
@@ -17712,12 +17664,11 @@ mod pod_stream {
         assert_eq!(spec_source["ref"], "rust-2");
     }
 
-    /// WI-3335: the engine's slim image ships no klaudia, so its own gitguard
-    /// check fails. A pod-backed Codex template still starts (the pod checks
-    /// its own filesystem at boot), while the same Codex on the local backend
-    /// is refused as before.
+    /// WI-3335: a deployment with an invalid managed Codex policy refuses a
+    /// local Codex launch, while a pod-backed Codex template still starts (the
+    /// pod checks its own filesystem at boot).
     #[tokio::test]
-    async fn a_pod_codex_is_not_refused_by_the_engines_missing_hook() {
+    async fn a_pod_codex_is_not_refused_by_the_engines_policy_check() {
         let template = |name: &str, backend: &str| SessionTemplate {
             name: name.into(),
             description: "codex".into(),
@@ -17740,7 +17691,7 @@ mod pod_stream {
             ]),
             |cfg| {
                 cfg.agent_onboarding.codex_policy = Err(
-                    "gitguard hook program /usr/local/bin/klaudia cannot be inspected (No such file or directory (os error 2)); refusing to start a Codex session".into(),
+                    "Codex driven-session policy /etc/codex/requirements.toml is invalid (not TOML: expected `=`); refusing to start a Codex session".into(),
                 );
             },
         )
@@ -17755,7 +17706,11 @@ mod pod_stream {
         assert!(pod.status().is_success(), "{}", pod.text().await.unwrap());
         let local = start("codex-local").await.unwrap();
         assert_eq!(local.status(), StatusCode::BAD_REQUEST);
-        assert!(local.text().await.unwrap().contains("klaudia"));
+        assert!(local
+            .text()
+            .await
+            .unwrap()
+            .contains("refusing to start a Codex session"));
         let (_id, _token) = h.created.recv().await.expect("the pod is created");
     }
 

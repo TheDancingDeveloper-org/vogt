@@ -24,7 +24,7 @@ fn the_code_defaults_are_the_design_table() {
     let implement = &t.profiles["implement"];
     assert_eq!(
         (implement.template.as_str(), implement.model.as_str()),
-        ("klaudia", "grok-4.7")
+        ("claude", "sonnet")
     );
     assert_eq!(
         (implement.budget_turns, implement.budget_wall_clock_minutes),
@@ -77,7 +77,7 @@ fn an_override_changes_only_the_field_it_names() {
     let t = table(&[(PROFILES_KEY, json!({"implement": {"model": "x"}}))]);
     let implement = &t.profiles["implement"];
     assert_eq!(implement.model, "x");
-    assert_eq!(implement.template, "klaudia");
+    assert_eq!(implement.template, "claude");
     assert_eq!(implement.budget_turns, Some(120));
     assert_eq!(t.profiles["review"], table(&[]).profiles["review"]);
 }
@@ -100,7 +100,7 @@ fn a_stale_stored_value_falls_back_to_the_default() {
         (PROFILES_KEY, json!({"implement": {"model": 7}, "gone": {}})),
         (MAX_WORKERS_KEY, json!({"value": "many"})),
     ]);
-    assert_eq!(t.profiles["implement"].model, "grok-4.7");
+    assert_eq!(t.profiles["implement"].model, "sonnet");
     assert!(!t.profiles.contains_key("gone"));
     assert_eq!(t.max_workers_per_overseer, 5);
 }
