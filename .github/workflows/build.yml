@@ -607,11 +607,22 @@ jobs:
       contents: read
       packages: write
 
+  estate-base:
+    name: the Vogt estate base is in GHCR
+    needs: pod-base
+    if: github.ref != 'refs/heads/rust-core'
+    uses: ./.github/workflows/estate-base.yml
+    with:
+      pod_base_image: ${{ needs.pod-base.outputs.image }}
+    permissions:
+      contents: read
+      packages: write
+
   stack-image:
     name: build and publish the merged image
     # `needs: pod-base` supplies the toolchain base it now builds `FROM`. The
     # core-image job is not a dependency: the stack builds its own vogt-core.
-    needs: [base-images, pod-base]
+    needs: [base-images, pod-base, estate-base]
     runs-on: [self-hosted, publish]
     timeout-minutes: 60
     permissions:
@@ -683,6 +694,7 @@ jobs:
         id: push
         env:
           POD_BASE_IMAGE: ${{ needs.pod-base.outputs.image }}
+          ESTATE_IMAGE: ${{ needs.estate-base.outputs.image }}
           VOGT_SOURCE_REF: ${{ github.ref_name }}
           VOGT_SOURCE_SHA: ${{ github.sha }}
           # metadata-action's `labels` output is newline-separated key=value
@@ -703,6 +715,7 @@ jobs:
             # buildx refuses a local write without an explicit entitlement.
             --allow "fs.write=${E2E_DIR}"
             --set "*.args.POD_BASE_IMAGE=${POD_BASE_IMAGE}"
+            --set "*.args.ESTATE_IMAGE=${ESTATE_IMAGE}"
             --set "*.args.VOGT_SOURCE_REF=${VOGT_SOURCE_REF}"
             --set "*.args.VOGT_SOURCE_SHA=${VOGT_SOURCE_SHA}"
             --set "*.args.VOGT_PRODUCT_VERSION=0.7.22"
@@ -833,9 +846,20 @@ jobs:
       contents: read
       packages: write
 
+  estate-base-workbench:
+    name: the workbench estate base is in GHCR
+    needs: pod-base-workbench
+    if: github.ref != 'refs/heads/rust-core'
+    uses: ./.github/workflows/estate-base.yml
+    with:
+      pod_base_image: ${{ needs.pod-base-workbench.outputs.image }}
+    permissions:
+      contents: read
+      packages: write
+
   stack-workbench-image:
     name: build and publish the workbench stack image
-    needs: [base-images, pod-base-workbench]
+    needs: [base-images, pod-base-workbench, estate-base-workbench]
     runs-on: [self-hosted, publish]
     timeout-minutes: 60
     permissions:
@@ -879,6 +903,7 @@ jobs:
         id: push
         env:
           POD_BASE_IMAGE: ${{ needs.pod-base-workbench.outputs.image }}
+          ESTATE_IMAGE: ${{ needs.estate-base-workbench.outputs.image }}
           VOGT_SOURCE_REF: ${{ github.ref_name }}
           VOGT_SOURCE_SHA: ${{ github.sha }}
           LABELS: ${{ steps.meta.outputs.labels }}
@@ -890,6 +915,7 @@ jobs:
             --file .github/workbench-bake.hcl
             --metadata-file "$META_FILE"
             --set "*.args.POD_BASE_IMAGE=${POD_BASE_IMAGE}"
+            --set "*.args.ESTATE_IMAGE=${ESTATE_IMAGE}"
             --set "*.args.VOGT_SOURCE_REF=${VOGT_SOURCE_REF}"
             --set "*.args.VOGT_SOURCE_SHA=${VOGT_SOURCE_SHA}"
             --set "*.args.VOGT_PRODUCT_VERSION=0.7.22"

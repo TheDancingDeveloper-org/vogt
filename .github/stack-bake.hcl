@@ -22,6 +22,10 @@ variable "POD_BASE_IMAGE" {
   default = ""
 }
 
+variable "ESTATE_IMAGE" {
+  default = ""
+}
+
 variable "VOGT_SOURCE_REF" {
   default = ""
 }
@@ -39,6 +43,7 @@ target "stack" {
   dockerfile = "engine/Dockerfile"
   args = {
     POD_BASE_IMAGE       = POD_BASE_IMAGE
+    ESTATE_IMAGE         = ESTATE_IMAGE
     VOGT_SOURCE_REF      = VOGT_SOURCE_REF
     VOGT_SOURCE_SHA      = VOGT_SOURCE_SHA
     VOGT_PRODUCT_VERSION = VOGT_PRODUCT_VERSION
@@ -64,6 +69,7 @@ target "gitguard" {
   target     = "codex-gitguard-e2e"
   args = {
     POD_BASE_IMAGE       = POD_BASE_IMAGE
+    ESTATE_IMAGE         = ESTATE_IMAGE
     VOGT_SOURCE_REF      = VOGT_SOURCE_REF
     VOGT_SOURCE_SHA      = VOGT_SOURCE_SHA
     VOGT_PRODUCT_VERSION = VOGT_PRODUCT_VERSION
