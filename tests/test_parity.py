@@ -1229,8 +1229,18 @@ def _stand_in_engine() -> EngineClient:
         if method == "GET" and path.endswith("/api/session-templates"):
             return 200, json.dumps(
                 [
-                    {"name": "claude", "agent": "claude", "placement": "local"},
-                    {"name": "pod-agent", "agent": "codex", "placement": "pod"},
+                    {
+                        "name": "claude",
+                        "agent": "claude",
+                        "placements": ["host"],
+                        "default_placement": "host",
+                    },
+                    {
+                        "name": "pod-agent",
+                        "agent": "codex",
+                        "placements": ["pod"],
+                        "default_placement": "pod",
+                    },
                 ]
             ).encode()
         if method == "GET" and path.endswith("/api/llm-providers"):
