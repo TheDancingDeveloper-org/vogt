@@ -323,6 +323,7 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
             "/api/sessions",
             get(api::list_sessions).post(api::create_session),
         )
+        .route("/api/session-templates", get(api::list_session_templates))
         // Literal paths before `/{id}`, or axum captures "changes" and
         // "wait-any" as session ids.
         .route("/api/sessions/changes", get(api::session_changes))

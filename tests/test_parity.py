@@ -442,6 +442,7 @@ SCRIPT: list[tuple[str, StepParams]] = [
         {"project": "parity-project", "reason": WHY},
     ),
     ("session.list", {}),
+    ("session.template_list", {}),
     ("session.sweep", {"screen_lines": 4}),
     # History reads, driven against the same stand-in engine: parity
     # proves the three surfaces agree on the engine's canned answers.
