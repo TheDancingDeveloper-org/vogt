@@ -105,6 +105,11 @@ from vogt.application.services.lifecycle import (
     import_instance,
     restore,
 )
+from vogt.application.services.llm_providers import (
+    llm_provider_list,
+    llm_provider_remove,
+    llm_provider_set,
+)
 from vogt.application.services.notifications import list_notifications
 from vogt.application.services.observed_first import (
     adopt,
@@ -288,6 +293,9 @@ __all__ = [
     "list_work",
     "list_workflows",
     "list_write_backs",
+    "llm_provider_list",
+    "llm_provider_remove",
+    "llm_provider_set",
     "log_tail",
     "login",
     "logout",

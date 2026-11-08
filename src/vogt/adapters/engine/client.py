@@ -1704,6 +1704,20 @@ class EngineClient:
         payload = json.loads(text) if text else {}
         return payload if isinstance(payload, dict) else {}
 
+    def llm_providers(self) -> dict[str, Any]:
+        payload = self._call("/api/llm-providers")
+        return payload if isinstance(payload, dict) else {}
+
+    def set_llm_provider(self, payload: dict[str, Any]) -> dict[str, Any]:
+        result = self._call("/api/llm-providers", method="POST", payload=payload)
+        return result if isinstance(result, dict) else {}
+
+    def remove_llm_provider(self, name: str) -> dict[str, Any]:
+        result = self._call(
+            "/api/llm-providers/remove", method="POST", payload={"name": name}
+        )
+        return result if isinstance(result, dict) else {}
+
     def _call(
         self,
         path: str,
