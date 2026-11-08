@@ -253,14 +253,10 @@ def test_install_policy_is_idempotent(tmp_path: Path) -> None:
         json.dumps({"hooks": {"SessionStart": [{"hooks": []}]}}),
         encoding="utf-8",
     )
-    klaudia = tmp_path / ".klaudia" / "config.toml"
-    klaudia.parent.mkdir()
-    klaudia.write_text('model = "kept"\n', encoding="utf-8")
-
     env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(tmp_path)}
     for _ in range(2):
         proc = subprocess.run(
-            ["bash", str(HOOK), "install-policy", str(settings), str(klaudia)],
+            ["bash", str(HOOK), "install-policy", str(settings)],
             env=env,
             capture_output=True,
             text=True,
@@ -274,9 +270,3 @@ def test_install_policy_is_idempotent(tmp_path: Path) -> None:
     assert groups[0]["matcher"] == "Bash"
     assert groups[0]["hooks"][0]["command"].endswith("policy-hook.sh")
     assert installed["hooks"]["SessionStart"] == [{"hooks": []}]
-
-    text = klaudia.read_text(encoding="utf-8")
-    assert text.startswith('model = "kept"\n')
-    assert text.count("# vogt-policy-hook (managed)") == 1
-    assert text.count("[[hooks]]") == 1
-    assert 'command = "' in text and "policy-hook.sh" in text

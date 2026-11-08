@@ -129,8 +129,8 @@ class ProfileOverride(BaseModel):
 #: to restate a whole profile.
 DEFAULT_PROFILES: dict[Purpose, Profile] = {
     "implement": Profile(
-        template="klaudia",
-        model="grok-4.7",
+        template="claude",
+        model="sonnet",
         budget_turns=120,
         budget_turns_by_model={"haiku": 200},
         budget_wall_clock_minutes=90,

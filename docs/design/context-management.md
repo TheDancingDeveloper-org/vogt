@@ -190,8 +190,7 @@ xs on top of WI-996.)
   hibernates the session with `trigger=budget` and emits a `budget` change
   (C2) so the overseer, or the engine itself when `autosplit=true`, starts a
   successor from the hand-off (C11) with the same work item and a fresh
-  context. Klaudia sessions get the same line (it reads prompts typed at
-  the TUI; WI-1011 is already closed).
+  context.
 - The nudge text and thresholds live in engine config, not in briefs.
 - A session whose turn exceeds the per-turn wall-clock cap with no file
   change (the grok "looping" signature) is treated as `hard`.
@@ -223,12 +222,11 @@ xs on top of WI-996.)
 **C10. Driver and model choice as profiles (engine config + core, size s).**
 
 Implement WI-956 slice 5 with these profiles. They record the operator's
-rules of 2026-10-07 to 2026-10-10. Klaudia is only used with grok in this
-deployment; Claude models run through Claude Code.
+rules of 2026-10-07 to 2026-10-10. Claude models run through Claude Code.
 
 | Profile | Template + model | Context | Budget | Use for |
 | --- | --- | --- | --- | --- |
-| `implement` | klaudia + grok-4.7 | 128k (never 48k) | 120 turns | one item, exact touch points, fresh worktree |
+| `implement` | claude + sonnet | 200k | 120 turns | one item, exact touch points, fresh worktree |
 | `implement-careful` | claude + Opus | 1M | 150 turns | security boundaries, prod-touching, anything grok failed twice |
 | `review` | claude + Fable | 1M | 40 turns | PR and design review; input is a diff plus the hand-off, never the worker's transcript |
 | `oversight` | claude + Opus (Fable for design) | 1M | none; checkpoints (C5) | drives sessions; MCP-heavy, so never grok (WI-1030) |
@@ -245,12 +243,8 @@ blocks are injected.
   `work_comment` takes only `body`, `models.py:1718-1721`) with fields:
   `branch`, `head_sha`, `base`, `done[]`, `remaining[]`, `touch_points[]`,
   `gates_run[]`, `blockers[]`, `session`. Free text is allowed under it.
-- The engine also writes `state_dir/handoffs/<uuid>.md`: for Klaudia it is
-  the latest `summary.md` plus the git facts; for Claude it is produced by
-  a `PreCompact` and `SessionEnd` hook (the hook plumbing exists,
-  `engine/deploy/claude-session-hook.sh`, only `SessionStart`/`SessionEnd`
-  today) that reads `transcript_path` and posts a summary through
-  `/api/agent-auth/conversation`'s sibling route.
+- The engine no longer writes a `state_dir/handoffs/<uuid>.md` file: the
+  hand-off work-item comment is the artefact a successor starts from.
 - `work_get` returns the newest comments first (fix `declared.py:784`),
   with `comment_order` for the old behaviour, and the brief includes the
   latest `handoff` comment verbatim as its own section.
@@ -280,8 +274,7 @@ blocks are injected.
   and applies the checkable parts: a Claude `PreToolUse` hook on `Bash`
   refuses `git commit`/`git push`/`gh pr create|merge` whose message or
   branch matches `forbidden_text`, and refuses `gh pr merge` on a
-  `merge_deploys_prod` project unless the caller is a person. Klaudia has a
-  `hooks.json`; the same check ships as a Klaudia hook. opencode gets a
+  `merge_deploys_prod` project unless the caller is a person. opencode gets a
   pattern deny.
 - The current msp-agent rule becomes one row: `forbidden_text: ["(?i)grok"]`.
 
@@ -308,9 +301,9 @@ classifier prose.
 **C16. Session economics, recorded by the engine (engine + core + MCP + ops, size m).**
 
 - The engine tails each agent's own transcript (it already resolves the
-  path for Claude, Codex and Klaudia, `engine/server/src/transcripts.rs`)
+  path for Claude, Codex and opencode, `engine/server/src/transcripts.rs`)
   and keeps per session: `turns` (assistant entries), `context_tokens`
-  (Claude: usage sum; Klaudia and Codex: 4 chars/token estimate of the live
+  (Claude: usage sum; Codex and opencode: 4 chars/token estimate of the live
   history), `peak_context_tokens`, `compactions`, `tool_result_bytes` by
   tool name, `reads_repeated` (same path read more than once), `wall_clock`
   per turn (max and mean), `commits` and `files_changed` on the worktree,
@@ -332,7 +325,7 @@ classifier prose.
 | 1 | C1 digest rows, filters, half-size transport | m | core, MCP, engine (fields) | none; immediate 10 to 25x cut on sweep and list |
 | 2 | C16 session economics | m | engine, core, ops scrape | none; feeds everything below |
 | 3 | C8 + C13 policy-composed briefs and project policy | m | core, engine hooks | none |
-| 4 | C11 hand-off schema, newest-first comments, hand-off file | m | core, engine hook | C13 for the policy check on commit |
+| 4 | C11 hand-off schema, newest-first comments | m | core, engine hook | C13 for the policy check on commit |
 | 5 | C7 budgets and auto-split | l | engine, core | C16, C11 |
 | 6 | C2 session_changes and wait_any | l | engine, core | WI-956 slice 2 for `me` |
 | 7 | C3 per-session digest | m | engine, core | C16 |
@@ -357,7 +350,7 @@ All five decided 2026-10-11 as recommended (operator: "Accept all recommendation
 3. **Policy hooks** (C13): DECIDED refuse for `forbidden_text` and
    `merge_deploys_prod` (unless a person), brief-only for the rest.
 4. **MCP result size** (C1): DECIDED `structuredContent` plus a one-line
-   text summary. WI-1241 verifies on dev that Klaudia and opencode read
+   text summary. WI-1241 verifies on dev that opencode reads
    `structuredContent` before it lands.
 5. **Comment ordering** (C11): DECIDED newest-first by default on
    `work_get` and in briefs, with `comment_order=oldest` for the old

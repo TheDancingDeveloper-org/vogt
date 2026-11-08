@@ -858,7 +858,7 @@ pub struct SessionResources {
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SessionRuntime {
-    /// claude / codex / opencode / klaudia, from the command.
+    /// claude / codex / opencode, from the command.
     #[serde(default)]
     #[schemars(schema_with = "optional_string")]
     pub agent: Option<String>,

@@ -4645,9 +4645,9 @@ def _resolve_purpose(
         and _CLAUDE_MODEL.match(params.model)
         and _resolved_template_tag(profile.template) != "claude"
     ):
-        # A Claude model on the profile's other agent never runs: klaudia
-        # answers `opus` with 400 "Invalid model name" on every turn
-        # (WI-1852). The caller named the model, so the agent follows it.
+        # A Claude model on the profile's other agent never runs: that agent
+        # refuses every turn with an invalid-model error (WI-1852). The caller
+        # named the model, so the agent follows it.
         supplied["template"] = "claude"
     filled = {field: value for field, value in supplied.items() if field not in given}
     overrides = tuple(field for field in _PROFILE_FIELDS if field in given)
@@ -4663,7 +4663,7 @@ _CLAUDE_MODEL = re.compile(r"^(claude-.+|opus|sonnet|haiku|fable)$")
 #: The bare aliases among those: names only Claude Code resolves.
 _CLAUDE_ALIAS = re.compile(r"^(opus|sonnet|haiku|fable)$")
 #: Agent templates that are not Claude Code.
-_NON_CLAUDE_AGENTS = ("codex", "opencode", "klaudia")
+_NON_CLAUDE_AGENTS = ("codex", "opencode")
 
 
 def _resolved_template_tag(template: str | None) -> str | None:
@@ -4674,15 +4674,15 @@ def _resolved_template_tag(template: str | None) -> str | None:
     and `Claude Code (protected)` is the same template by name. The core never
     sees the deployment's template list, so the resolution mirrored here is
     the built-in set those names come from: a name or tag of `claude`,
-    `codex`, `opencode` or `klaudia`, compared case-insensitively the way the
-    engine compares them. A name that names none of them is not an agent
+    `codex` or `opencode`, compared case-insensitively the way the engine
+    compares them. A name that names none of them is not an agent
     template and is returned as given, lower-cased, so a deployment's own
     template still has a stable id to judge.
     """
     if template is None:
         return None
     folded = template.strip().lower()
-    for agent in ("claude", "codex", "opencode", "klaudia"):
+    for agent in ("claude", "codex", "opencode"):
         if folded == agent or folded.endswith(f"({agent})"):
             return agent
     # The built-in template's own name, "Claude Code (protected)": the engine

@@ -14,12 +14,12 @@ use serde_json::{json, Map, Value};
 use super::{Comment, Moment};
 
 /// The agent CLIs a compacted wake can start fresh under a new conversation id.
-const COMPACTABLE_AGENTS: [&str; 3] = ["claude", "klaudia", "codex"];
+const COMPACTABLE_AGENTS: [&str; 2] = ["claude", "codex"];
 
 /// The agent CLI's default provider, when the model name does not say.
 fn agent_provider(agent: &str) -> Option<&'static str> {
     match agent {
-        "claude" | "klaudia" => Some("anthropic"),
+        "claude" => Some("anthropic"),
         "codex" => Some("openai"),
         _ => None,
     }
