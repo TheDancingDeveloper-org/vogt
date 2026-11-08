@@ -1,10 +1,9 @@
-//! Quick chat (WI-1097): a persistent text conversation with an agent CLI
-//! driven over Klaudia's stream-json protocol, or Codex's app-server JSON-RPC
-//! when `ENGINE_CHAT_DRIVER=codex` (WI-1148), rather than in a terminal.
+//! Quick chat (WI-1097): a persistent text conversation with Codex, driven
+//! over its app-server JSON-RPC protocol rather than in a terminal.
 //!
 //! A chat is not a session. It has no PTY, no scrollback and no activity
-//! heuristic: the agent says when a turn ends (`result`), asks for approval
-//! in-band, and is relaunched with `--resume` when the next message arrives
+//! heuristic: the agent says when a turn ends (`turn/completed`), asks for
+//! approval in-band, and resumes its thread when the next message arrives
 //! after its process was stopped for being idle. Chats are kept until a
 //! person deletes the engine's state; archiving only hides one from the
 //! default list.
@@ -15,7 +14,7 @@ use uuid::Uuid;
 /// One model a chat may run, as the deployment configured it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatModel {
-    /// The id the driver is asked for (`--model` / `set_model`).
+    /// The model id the thread is opened and updated with.
     pub id: String,
     /// What the picker shows.
     pub label: String,
@@ -24,7 +23,7 @@ pub struct ChatModel {
 /// A program that can drive a chat, and the models it offers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatDriver {
-    /// `klaudia` (stream-json) or `codex` (app-server JSON-RPC).
+    /// The driver this engine speaks: `codex` (app-server JSON-RPC).
     pub name: String,
     pub label: String,
     /// Empty means the picker offers only the driver's own default model.
@@ -59,7 +58,7 @@ pub struct ChatApproval {
     pub tool_name: String,
     /// A short, readable rendering of what the tool would do.
     pub summary: String,
-    /// `gate` (Vogt's own pre-tool gate) or `driver` (the agent CLI asked).
+    /// `codex` (the app-server asked).
     pub source: String,
     /// `pending`, `allowed`, `denied` or `expired`.
     pub status: String,
@@ -140,7 +139,7 @@ pub struct ChatDetail {
 pub struct ChatCreateRequest {
     #[serde(default)]
     pub title: Option<String>,
-    /// Defaults to the first configured driver.
+    /// Defaults to `codex`, the only driver.
     #[serde(default)]
     pub driver: Option<String>,
     #[serde(default)]

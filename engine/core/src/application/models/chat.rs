@@ -77,7 +77,7 @@ pub struct ChatApprovalView {
     pub tool_name: String,
     /// What the call would do: a command, a path.
     pub summary: String,
-    /// `gate` (Vogt's pre-tool gate) or `driver` (the agent asked).
+    /// `codex` (the app-server asked).
     pub source: String,
     /// pending, allowed, denied or expired.
     pub status: String,

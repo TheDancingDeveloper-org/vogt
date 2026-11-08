@@ -6188,8 +6188,8 @@ for (const mouseTracking of [false, true]) {
 const CHAT_CONFIG = {
   chat: {
     drivers: [{
-      name: "klaudia",
-      label: "Klaudia",
+      name: "codex",
+      label: "Codex",
       models: [
         { id: "grok-4.7", label: "Grok 4.7" },
         { id: "deepseek-v4-pro", label: "DeepSeek V4 Pro" },
@@ -6217,7 +6217,7 @@ async function installChatApi(page: Page) {
     if (text.startsWith("run:")) {
       say("tool-call", text.slice(4), { tool_name: "Bash" });
       state.approvals = [{
-        id: "a1", tool_name: "Bash", summary: text.slice(4), source: "gate", status: "pending",
+        id: "a1", tool_name: "Bash", summary: text.slice(4), source: "codex", status: "pending",
         requested_at: "2026-10-08T09:00:00Z", expires_at: "2026-10-08T09:10:00Z",
       }];
       state.chat = { ...state.chat, state: "awaiting-approval" };
@@ -6238,7 +6238,7 @@ async function installChatApi(page: Page) {
     }
     if (path === "/api/chats" && method === "POST") {
       state.chat = {
-        id: chatId, title: String(body.message ?? "New chat"), driver: "klaudia",
+        id: chatId, title: String(body.message ?? "New chat"), driver: "codex",
         model: body.model ?? "grok-4.7", creator: "human:ada",
         created_at: "2026-10-08T09:00:00Z", updated_at: "2026-10-08T09:00:00Z",
         archived: false, state: "idle", live: true, message_count: 0,

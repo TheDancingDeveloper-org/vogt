@@ -41,7 +41,7 @@ CHAT = "0c0c0c0c-0000-4000-8000-000000000001"
 SUMMARY = {
     "id": CHAT,
     "title": "Sydney",
-    "driver": "klaudia",
+    "driver": "codex",
     "model": "grok-4.7",
     "creator": "human:ada",
     "created_at": "2026-10-08T00:00:00Z",
