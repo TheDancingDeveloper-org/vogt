@@ -5,7 +5,7 @@
 //! was asked for and audits that decision; how a model id reaches a running
 //! process is `claude --model`, `codex -m`, or `opencode --model`, and which
 //! of those exist is a property of this pod's image rather than of the estate
-//! (`klaudia --model` too, since WI-950).
+//!
 //! The same goes for the other things a launch can carry: a previous
 //! conversation to resume, and the first prompt that points the agent at the
 //! brief the engine wrote for it.
@@ -48,7 +48,7 @@ const MAX_VALUE_LEN: usize = 128;
 ///
 /// Kept as data rather than scattered through `create`, so the answer to
 /// "which agent CLIs can be asked for a model" is one readable list.
-const KNOWN: &[&str] = &["claude", "codex", "opencode", "klaudia"];
+const KNOWN: &[&str] = &["claude", "codex", "opencode"];
 
 /// Environment every engine-launched Claude Code session gets, *before* the
 /// template's and the caller's own (which therefore still win).
@@ -84,7 +84,7 @@ pub struct LaunchRequest<'a> {
     /// Where the session's brief will be written, when it has one. The agent
     /// is told to read it as its first prompt.
     pub brief_file: Option<&'a Path>,
-    /// The engine's id for the session. A fresh, bare Claude Code, Klaudia or
+    /// The engine's id for the session. A fresh, bare Claude Code or
     /// fork-Codex launch uses it as the conversation id, so the conversation
     /// can later be resumed by the id every session and history listing
     /// already shows. Codex is pinned when
@@ -96,14 +96,12 @@ pub struct LaunchRequest<'a> {
     /// Stock npm Codex refuses an unknown flag, so a deployment that pins
     /// that binary sets it false and the launch is left unpinned.
     pub codex_session_id: bool,
-    /// `default` / `accept-edits` / `bypass` (WI-926). Klaudia takes
-    /// `default` and `bypass` only. Codex takes all three (WI-1143); its
+    /// `default` / `accept-edits` / `bypass` (WI-926). Codex takes all three (WI-1143); its
     /// sandbox is `danger-full-access` because the pod cannot create the user
     /// namespace `workspace-write` needs.
     pub permission_mode: Option<&'a str>,
     /// The deployment's driven-session settings (an `autoMode` policy) to
-    /// hand Claude Code with `--settings`, when it has one. Klaudia has no
-    /// `--settings` flag (msp-klaudia #57), so it never receives this.
+    /// hand Claude Code with `--settings`, when it has one.
     pub settings_file: Option<&'a Path>,
     /// Extra directories the agent may read, as `--add-dir`. A fresh Claude
     /// launch derives this from the brief's parent; a wake passes the
@@ -171,9 +169,7 @@ pub fn opencode_posture(mode: Option<&str>, policy: Option<&str>) -> Option<Stri
 }
 
 /// A permission posture a session may be started with, as Claude Code's
-/// flags — which Klaudia shares (its legacy `acceptEdits` mode is the same
-/// "file edits yes, everything else asks", and `--dangerously-skip-permissions`
-/// its bypass). `None` is the default posture: no flag at all.
+/// flags for Claude Code. `None` is the default posture: no flag at all.
 pub fn permission_flags(mode: Option<&str>) -> Result<Option<Vec<String>>> {
     match mode.map(str::trim).filter(|m| !m.is_empty()) {
         None | Some("default") => Ok(None),
@@ -345,7 +341,7 @@ pub fn launch(command: Option<&[String]>, req: &LaunchRequest<'_>) -> Result<Lau
             return Err(ApiError::BadRequest(
                 "a session with no command runs the default shell, which has no \
                  model to choose or conversation to resume; start it with an \
-                 agent template (Claude Code, Codex, OpenCode or Klaudia)"
+                 agent template (Claude Code, Codex, OpenCode)"
                     .into(),
             ));
         }
@@ -364,33 +360,6 @@ pub fn launch(command: Option<&[String]>, req: &LaunchRequest<'_>) -> Result<Lau
         }
         return Ok(Launch::default());
     }
-    if binary == "klaudia"
-        && matches!(
-            req.permission_mode.map(str::trim),
-            Some("accept-edits") | Some("accept_edits")
-        )
-    {
-        // Klaudia has no accept-edits mode: its `acceptEdits` is now an alias
-        // for `autonomous` (its default — finish the task, ask only before
-        // changing the machine), which is looser than "edits yes, everything
-        // else asks". A posture applied as a different one is the failure
-        // the Codex refusal above exists against, so it is refused by name.
-        return Err(ApiError::BadRequest(
-            "klaudia has no accept-edits posture (its acceptEdits is an alias \
-             for its default autonomous mode); start it with the default \
-             posture, or ask a person for bypass"
-                .into(),
-        ));
-    }
-    if binary == "klaudia" && effort.is_some() {
-        // Named rather than dropped, as for opencode: Klaudia takes a model
-        // and has no reasoning-effort flag.
-        return Err(ApiError::BadRequest(
-            "klaudia takes a model but has no reasoning-effort control; ask \
-             for a model alone, or use Claude Code or Codex for an effort level"
-                .into(),
-        ));
-    }
     if binary == "opencode" && effort.is_some() {
         // Named rather than dropped: OpenCode takes a model and has no effort
         // control, and a session that ignored the second half of the request
@@ -402,9 +371,9 @@ pub fn launch(command: Option<&[String]>, req: &LaunchRequest<'_>) -> Result<Lau
         ));
     }
     // Whether the command is the bare agent — nothing of the template's own
-    // after the binary. Only then is Claude Code's (or Klaudia's)
-    // conversation id pinned: a command that already carries `--continue` or
-    // a `--session-id` of its own would be refused with ours added.
+    // after the binary. Only then is the conversation id pinned: a command
+    // that already carries `--continue` or a `--session-id` of its own would
+    // be refused with ours added.
     let bare = binary_idx + 1 == command.len();
     let prompt = req.brief_file.map(brief_instruction);
 
@@ -555,48 +524,6 @@ pub fn launch(command: Option<&[String]>, req: &LaunchRequest<'_>) -> Result<Lau
                 env.push(("OPENCODE_CONFIG_CONTENT".to_string(), config));
             }
         }
-        "klaudia" => {
-            // Klaudia (WI-950) takes Claude Code's launch flags. Its TUI
-            // auto-resumes the newest conversation in the directory unless
-            // told otherwise, so a fresh launch always names one: the
-            // engine's id when the command is bare (so a wake resumes it by
-            // the id the session already shows), else `--new-session`.
-            if let Some(model) = model {
-                rewritten.extend(["--model".to_string(), model.to_string()]);
-            }
-            if let Some(id) = resume {
-                rewritten.extend(["--resume".to_string(), id.to_string()]);
-            } else if let (true, Some(id)) = (bare, req.session_id) {
-                rewritten.extend(["--session-id".to_string(), id.to_string()]);
-            } else if bare {
-                rewritten.push("--new-session".to_string());
-            }
-            if let Some(flags) = permission {
-                rewritten.extend(flags);
-            }
-            // The same extra directories Claude Code is handed (WI-1250):
-            // without them a woken Klaudia session could not re-read a brief
-            // that lives outside its working directory. Never `--settings`:
-            // Klaudia has no such flag and refuses to start with one.
-            let mut dirs: Vec<&Path> = req.add_dirs.iter().map(PathBuf::as_path).collect();
-            if dirs.is_empty() {
-                if let Some(dir) = req.brief_file.and_then(Path::parent) {
-                    dirs.push(dir);
-                }
-            }
-            for dir in dirs {
-                rewritten.push(format!("--add-dir={}", dir.display()));
-            }
-            // Never positional: Klaudia reads a positional prompt as `-p`
-            // (answer and exit), so a session started that way did one turn
-            // and ended. `--prompt-interactive` opens the TUI and submits it
-            // as the first message (msp-klaudia WI-953), and the session
-            // stays for the next turn. `=` form, so the brief pointer can
-            // never be read as a flag.
-            if let Some(prompt) = prompt {
-                rewritten.push(format!("--prompt-interactive={prompt}"));
-            }
-        }
         _ => unreachable!("checked against KNOWN above"),
     }
     let command = (rewritten.len() != command.len()).then_some(rewritten);
@@ -616,7 +543,7 @@ pub fn agent_name(command: &[String]) -> Option<String> {
 /// The agent conversation a session started with `command` runs, when its
 /// id is known before the CLI says anything: the one it resumes, or — for a
 /// bare launch [`launch`] pins with `--session-id` — the engine's own id for
-/// the session. Claude Code and Klaudia are always pinned that way. Codex is
+/// the session. Claude Code is always pinned that way. Codex is
 /// pinned when `codex_session_id` is set (the WI-1126 fork the image bakes, on
 /// by default); stock Codex (`codex_session_id` false) and OpenCode mint their
 /// own id, and guessing one could continue somebody else's conversation.
@@ -639,8 +566,7 @@ pub fn conversation(
             id: id.to_string(),
         });
     }
-    let pinned = matches!(binary.as_str(), "claude" | "klaudia")
-        || (binary.as_str() == "codex" && codex_session_id);
+    let pinned = binary == "claude" || (binary.as_str() == "codex" && codex_session_id);
     (pinned && binary_idx + 1 == command.len()).then(|| vogt_engine_contract::AgentConversation {
         agent: binary,
         id: session_id.to_string(),
@@ -1822,175 +1748,6 @@ mod permission_tests {
                 "-c",
                 "tui.animations=false"
             ])
-        );
-    }
-
-    #[test]
-    fn klaudia_takes_claude_codes_flags_and_pins_the_engine_id() {
-        let id = Uuid::new_v4();
-        let brief = Path::new("/state/sessions/x.md");
-        let out = launch(
-            Some(&cmd(&["vogt-agent-auth", "run", "--", "klaudia"])),
-            &LaunchRequest {
-                model: Some("grok-4.7"),
-                brief_file: Some(brief),
-                session_id: Some(id),
-                ..LaunchRequest::bare()
-            },
-        )
-        .unwrap();
-        let command = out.command.unwrap();
-        assert_eq!(
-            command[..8],
-            cmd(&[
-                "vogt-agent-auth",
-                "run",
-                "--",
-                "klaudia",
-                "--model",
-                "grok-4.7",
-                "--session-id",
-                &id.to_string(),
-            ])
-        );
-        // The default posture is Klaudia's own: no flag.
-        assert!(!command.iter().any(|a| a.starts_with("--permission-mode")));
-        // The brief pointer goes to the TUI as its first message, never as
-        // the positional prompt Klaudia would answer headless and exit on.
-        assert_eq!(
-            command.last().unwrap(),
-            &format!("--prompt-interactive={}", brief_instruction(brief))
-        );
-        assert!(
-            !command.contains(&brief_instruction(brief)),
-            "a positional prompt makes Klaudia one-shot"
-        );
-        // None of Claude Code's own environment or settings: they are
-        // Claude Code's, and Klaudia would ignore or misread them.
-        assert!(out.env.is_empty());
-        assert!(!command.iter().any(|a| a.starts_with("--settings")));
-    }
-
-    #[test]
-    fn klaudia_never_takes_settings_even_when_the_deployment_has_one() {
-        // Klaudia has no `--settings` flag (msp-klaudia #57). A deployment
-        // policy that Claude Code would receive must not be handed to it.
-        let out = launch(
-            Some(&cmd(&["klaudia"])),
-            &LaunchRequest {
-                settings_file: Some(Path::new("/state/policy.json")),
-                brief_file: Some(Path::new("/state/sessions/x.md")),
-                ..LaunchRequest::bare()
-            },
-        )
-        .unwrap()
-        .command
-        .unwrap();
-        assert!(!out.iter().any(|a| a.starts_with("--settings")));
-        assert!(out.iter().any(|a| a.starts_with("--add-dir=")));
-    }
-
-    #[test]
-    fn klaudia_resumes_by_id_and_a_fresh_one_never_picks_up_another() {
-        let out = launch(
-            Some(&cmd(&["klaudia"])),
-            &LaunchRequest {
-                resume: Some("72d33a6b-bed4-4229-8f35-ac6bbcf960f5"),
-                session_id: Some(Uuid::new_v4()),
-                ..LaunchRequest::bare()
-            },
-        )
-        .unwrap()
-        .command
-        .unwrap();
-        assert_eq!(
-            out,
-            cmd(&[
-                "klaudia",
-                "--resume",
-                "72d33a6b-bed4-4229-8f35-ac6bbcf960f5"
-            ])
-        );
-        // Without an engine id (a caller that has none), the TUI would
-        // otherwise resume whatever ran last in the directory.
-        let out = launch(
-            Some(&cmd(&["klaudia"])),
-            &LaunchRequest {
-                model: Some("opus"),
-                ..LaunchRequest::bare()
-            },
-        )
-        .unwrap()
-        .command
-        .unwrap();
-        assert_eq!(out, cmd(&["klaudia", "--model", "opus", "--new-session"]));
-    }
-
-    #[test]
-    fn klaudia_bypass_is_its_skip_flag_and_effort_is_refused() {
-        let out = launch(
-            Some(&cmd(&["klaudia"])),
-            &LaunchRequest {
-                permission_mode: Some("bypass"),
-                session_id: Some(Uuid::nil()),
-                ..LaunchRequest::bare()
-            },
-        )
-        .unwrap()
-        .command
-        .unwrap();
-        assert!(out.contains(&"--dangerously-skip-permissions".to_string()));
-        // Klaudia has no `--settings` flag and refuses to start with one, so
-        // the deployment's settings file never reaches its argv (WI-1250).
-        let settings = Path::new("/state/driven-settings.json");
-        let dirs = [PathBuf::from("/state/agent-task-prompts/sessions")];
-        let out = launch(
-            Some(&cmd(&["klaudia"])),
-            &LaunchRequest {
-                settings_file: Some(settings),
-                add_dirs: &dirs,
-                session_id: Some(Uuid::nil()),
-                ..LaunchRequest::bare()
-            },
-        )
-        .unwrap()
-        .command
-        .unwrap();
-        assert!(!out.iter().any(|a| a.starts_with("--settings")), "{out:?}");
-        assert!(
-            out.contains(&"--add-dir=/state/agent-task-prompts/sessions".to_string()),
-            "{out:?}"
-        );
-        let refused = launch(
-            Some(&cmd(&["klaudia"])),
-            &LaunchRequest {
-                effort: Some("high"),
-                ..LaunchRequest::bare()
-            },
-        )
-        .unwrap_err();
-        assert!(refused.to_string().contains("klaudia"), "{refused}");
-        // accept-edits would silently become Klaudia's autonomous mode.
-        let refused = launch(
-            Some(&cmd(&["klaudia"])),
-            &LaunchRequest {
-                permission_mode: Some("accept-edits"),
-                ..LaunchRequest::bare()
-            },
-        )
-        .unwrap_err();
-        assert!(refused.to_string().contains("accept-edits"), "{refused}");
-    }
-
-    #[test]
-    fn a_bare_klaudia_launch_runs_the_engines_conversation() {
-        let id = Uuid::new_v4();
-        let conversation = conversation(Some(&cmd(&["klaudia"])), None, id, false).unwrap();
-        assert_eq!(conversation.agent, "klaudia");
-        assert_eq!(conversation.id, id.to_string());
-        assert_eq!(
-            agent_name(&cmd(&["vogt-agent-auth", "run", "--", "klaudia"])).as_deref(),
-            Some("klaudia")
         );
     }
 

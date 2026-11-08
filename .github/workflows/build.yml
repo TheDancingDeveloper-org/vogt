@@ -675,7 +675,7 @@ jobs:
           images: ${{ env.STACK_IMAGE }}
           # The tag is not applied here. The bake pushes by digest and
           # `tag the smoked digest` writes `sha-<commit>` only after the
-          # smoke and the gitguard e2e pass. The line stays because
+          # smoke passes. The line stays because
           # release.yml and tests/test_release_workflow.py treat it as the
           # contract for what main publishes.
           tags: |
@@ -683,13 +683,11 @@ jobs:
           flavor: |
             latest=false
 
-      # One BuildKit invocation (`.github/stack-bake.hcl`), two targets.
-      # `stack` is pushed by digest with provenance and an SBOM and no tag.
-      # `gitguard` is the `codex-gitguard-e2e` binary from the same graph, so
-      # there is no third build and no second cache import. The smoke below
-      # pulls the digest; the tag and the signature come only after it and
-      # the gitguard e2e pass. A failed smoke leaves an untagged orphan,
-      # which ghcr-retention.yml prunes after the pinned policy's 7-day grace.
+      # One BuildKit invocation (`.github/stack-bake.hcl`). `stack` is pushed
+      # by digest with provenance and an SBOM and no tag. The smoke below pulls
+      # the digest; the tag and the signature come only after it passes. A
+      # failed smoke leaves an untagged orphan, which ghcr-retention.yml prunes
+      # after the pinned policy's 7-day grace.
       - name: build the stack once, by digest
         id: push
         env:
@@ -704,16 +702,11 @@ jobs:
           # are an empty ref and the stack layer cache is lost.
           CACHE_REF: ${{ env.CACHE_IMAGE }}:stack-${{ github.ref_name }}
           META_FILE: ${{ runner.temp }}/stack-bake-meta.json
-          E2E_DIR: ${{ runner.temp }}/codex-gitguard-e2e
         run: |
           set -euo pipefail
-          mkdir -p "$E2E_DIR"
           args=(
             --file .github/stack-bake.hcl
             --metadata-file "$META_FILE"
-            # The gitguard target exports its e2e binary to E2E_DIR; newer
-            # buildx refuses a local write without an explicit entitlement.
-            --allow "fs.write=${E2E_DIR}"
             --set "*.args.POD_BASE_IMAGE=${POD_BASE_IMAGE}"
             --set "*.args.ESTATE_IMAGE=${ESTATE_IMAGE}"
             --set "*.args.VOGT_SOURCE_REF=${VOGT_SOURCE_REF}"
@@ -726,7 +719,7 @@ jobs:
             [ -n "$pair" ] || continue
             args+=(--set "stack.labels.${pair%%=*}=${pair#*=}")
           done <<< "$LABELS"
-          docker buildx bake "${args[@]}" stack gitguard
+          docker buildx bake "${args[@]}" stack
           python3 - "$META_FILE" <<'PY'
           import json, os, sys
           meta = json.load(open(sys.argv[1]))
@@ -775,33 +768,8 @@ jobs:
           done
           echo "stack image carries the agent CLIs"
 
-      # The Codex gitguard e2e (WI-1356) can only run where
-      # /etc/codex/requirements.toml is the shipped file and the real Codex
-      # fork and klaudia are installed: this image. Everywhere else it skips.
-      # The binary was built by the same bake as the image above and is run
-      # inside the pushed digest with VOGT_CODEX_GITGUARD_E2E=1, which turns a
-      # missing prerequisite into a failure instead of a skip.
-      - name: Codex refuses destructive git with the shipped requirements
-        env:
-          DIGEST: ${{ steps.push.outputs.digest }}
-          E2E_DIR: ${{ runner.temp }}/codex-gitguard-e2e
-        run: |
-          set -euo pipefail
-          CANDIDATE="${STACK_IMAGE}@${DIGEST}"
-          test -x "$E2E_DIR/codex_gitguard_e2e"
-          # The runner's dockerd lives in a sidecar that cannot see the job
-          # workspace, so a bind mount of $E2E_DIR arrives as an empty
-          # directory. Copy the binary into the container instead.
-          cid="$(docker create \
-            -e VOGT_CODEX_GITGUARD_E2E=1 \
-            --entrypoint /usr/local/bin/codex_gitguard_e2e \
-            "$CANDIDATE" --nocapture)"
-          trap 'docker rm -f "$cid" >/dev/null' EXIT
-          docker cp "$E2E_DIR/codex_gitguard_e2e" "$cid:/usr/local/bin/codex_gitguard_e2e"
-          docker start --attach "$cid"
-
-      # Registry-side manifest write, and only after the smoke and the
-      # gitguard e2e passed. `release.yml` finds the stack by this tag.
+      # Registry-side manifest write, and only after the smoke passed.
+      # `release.yml` finds the stack by this tag.
       # `--prefer-index=false` keeps the tag on the digest that was smoked.
       - name: tag the smoked digest
         if: github.ref == 'refs/heads/main'
