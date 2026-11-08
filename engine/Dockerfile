@@ -239,28 +239,6 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     && cp target/release/vogt-core /usr/local/bin/vogt-core \
     && strip /usr/local/bin/vogt-engine /usr/local/bin/vogt-core
 
-# ─── Test-only: the Codex gitguard e2e binary (WI-1356) ─────────────────────
-# Not part of the shipped image; nothing below copies from it. `build.yml`
-# builds this target, then runs the binary inside the stack image, where
-# /etc/codex/requirements.toml is the shipped file and the real Codex fork
-# and klaudia are installed — the only place the e2e can execute.
-FROM server-build AS codex-gitguard-e2e-build
-COPY engine/deploy/driven-session-codex-requirements.toml ./deploy/driven-session-codex-requirements.toml
-COPY engine/server/tests/codex_gitguard_e2e.rs ./server/tests/codex_gitguard_e2e.rs
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/app/engine/target \
-    cargo test --release -p vogt-engine-server --test codex_gitguard_e2e --no-run --message-format=json \
-      | sed -n 's/.*"executable":"\([^"]*codex_gitguard_e2e[^"]*\)".*/\1/p' \
-      | xargs -I{} cp {} /codex_gitguard_e2e \
-    && test -x /codex_gitguard_e2e
-
-# Only the test binary leaves the build: build.yml exports this target with
-# `type=local`, and exporting server-build itself (toolchain, sources) stalled
-# the publish runner for over half an hour.
-FROM scratch AS codex-gitguard-e2e
-COPY --from=codex-gitguard-e2e-build /codex_gitguard_e2e /codex_gitguard_e2e
-
 # ─── Stage 3: the shipped image ─────────────────────────────────────────────
 #
 # Everything this stage used to install itself now lives in
@@ -341,7 +319,6 @@ ARG CODEX_SHA
 ARG CODEX_ACP_VERSION
 ARG CLAUDE_CODE_VERSION
 ARG OPENCODE_VERSION
-ARG KLAUDIA_VERSION
 # --prefix=/usr/local (not the ambient $NPM_CONFIG_PREFIX, which points at
 # /home/sprooty/.npm-global) so these survive the runtime /home/sprooty bind
 # mount — same reasoning as the system pnpm install in the base. The dev pod is
@@ -363,8 +340,7 @@ COPY engine/deploy/driven-session-opencode.json /usr/local/share/vogt/driven-ses
 # /etc/codex/requirements.toml and no other path — the TUI, `exec` and
 # app-server (quick chat) all load it through the same config builder — and
 # the engine checks that file before a Codex launch. The share copy is a
-# reference. The file wires the gitguard managed hook fail-closed and pins
-# the hooks feature on (WI-1356) — see the file. It and /etc/codex are
+# reference. The file is managed by the image. It and /etc/codex are
 # root-owned and not writable by the session user, which the engine also
 # checks: a session that could rewrite them could drop the hook. Do not add a
 # flag Codex does not have.
@@ -407,12 +383,11 @@ RUN set -eu; \
     claude_code_version="${CLAUDE_CODE_VERSION:-${VOGT_CLAUDE_CODE_VERSION}}"; \
     opencode_version="${OPENCODE_VERSION:-${VOGT_OPENCODE_VERSION}}"; \
     go_version="$(go version | sed -n 's/^go version go\([^ ]*\) .*/\1/p')"; \
-    klaudia_version="${KLAUDIA_VERSION:-${VOGT_KLAUDIA_VERSION}}"; \
-    printf 'codex=%s\ncodex-acp=%s\nclaude-code=%s\nopencode=%s\ngo=%s\nklaudia=%s\n' \
-        "$codex_sha" "$codex_acp_version" "$claude_code_version" "$opencode_version" "$go_version" "$klaudia_version" \
+    printf 'codex=%s\ncodex-acp=%s\nclaude-code=%s\nopencode=%s\ngo=%s\n' \
+        "$codex_sha" "$codex_acp_version" "$claude_code_version" "$opencode_version" "$go_version" \
         > /usr/local/share/vogt/agent-versions.resolved; \
-    printf 'codex\t%s\tcodex\tVOGT_CODEX_SHA\tgithub-release\ncodex-acp\t@agentclientprotocol/codex-acp\tcodex-acp\tVOGT_CODEX_ACP_VERSION\tnpm\ncodex-npm\t@openai/codex\tcodex\tVOGT_CODEX_VERSION\tnpm\nclaude-code\t@anthropic-ai/claude-code\tclaude\tVOGT_CLAUDE_CODE_VERSION\tnpm\nopencode\topencode-ai\topencode\tVOGT_OPENCODE_VERSION\tnpm\ngo\thttps://go.dev/dl\tgo\tVOGT_GO_VERSION\tgo-dist\nklaudia\t%s\tklaudia\tVOGT_KLAUDIA_VERSION\tgo-src\n' \
-        "$VOGT_CODEX_SOURCE" "$VOGT_KLAUDIA_SOURCE" \
+    printf 'codex\t%s\tcodex\tVOGT_CODEX_SHA\tgithub-release\ncodex-acp\t@agentclientprotocol/codex-acp\tcodex-acp\tVOGT_CODEX_ACP_VERSION\tnpm\ncodex-npm\t@openai/codex\tcodex\tVOGT_CODEX_VERSION\tnpm\nclaude-code\t@anthropic-ai/claude-code\tclaude\tVOGT_CLAUDE_CODE_VERSION\tnpm\nopencode\topencode-ai\topencode\tVOGT_OPENCODE_VERSION\tnpm\ngo\thttps://go.dev/dl\tgo\tVOGT_GO_VERSION\tgo-dist\n' \
+        "$VOGT_CODEX_SOURCE" \
         > /usr/local/share/vogt/agent-clis.tools; \
     pkgs=""; \
     if [ "$INSTALL_AI_CLIENTS" = "true" ]; then \
@@ -476,37 +451,6 @@ RUN set -eu; \
         ln -sfn /usr/local/bin/codex-full-access /usr/local/bin/codex; \
         /usr/local/libexec/codex-real --version; \
         fi; \
-    fi
-
-# Klaudia (WI-950), built from the pinned commit with the pinned Go: no
-# registry publishes it. Its own layer, so a Klaudia pin moves without
-# reinstalling the npm CLIs above. Only that commit is fetched, the build
-# must reproduce it exactly (`-mod=readonly`, `-trimpath`, CGO off), and the
-# module and build caches are dropped so the image carries the binary alone.
-# This copy is also the gitguard hook program: /etc/codex/requirements.toml
-# runs `/usr/local/bin/klaudia hook gitguard` by absolute path, so it must stay
-# a root-owned 0755 regular file in a root-owned directory (asserted below,
-# and checked by the engine before a Codex launch). A runtime
-# `VOGT_KLAUDIA_VERSION` pin lands under the session-owned /opt/vogt/agent-clis
-# and is never what the hook runs (WI-1146).
-RUN set -eu; \
-    if [ "$INSTALL_AI_CLIENTS" = "true" ]; then \
-        . /usr/local/share/vogt/agent-versions.env; \
-        klaudia_version="${KLAUDIA_VERSION:-${VOGT_KLAUDIA_VERSION}}"; \
-        git init -q /tmp/klaudia; \
-        git -C /tmp/klaudia fetch -q --depth 1 "$VOGT_KLAUDIA_SOURCE" "$klaudia_version"; \
-        git -C /tmp/klaudia checkout -q --detach FETCH_HEAD; \
-        test "$(git -C /tmp/klaudia rev-parse HEAD)" = "$klaudia_version"; \
-        (cd /tmp/klaudia && CGO_ENABLED=0 GOFLAGS=-mod=readonly \
-            GOMODCACHE=/tmp/gomod GOCACHE=/tmp/gocache \
-            go build -trimpath -o /usr/local/bin/klaudia ./cmd/klaudia); \
-        GOMODCACHE=/tmp/gomod go clean -modcache; \
-        rm -rf /tmp/klaudia /tmp/gomod /tmp/gocache; \
-        chown root:root /usr/local/bin/klaudia; \
-        chmod 0755 /usr/local/bin/klaudia; \
-        test "$(stat -c '%u %a %F' /usr/local/bin/klaudia /usr/local/bin)" \
-            = "$(printf '0 755 regular file\n0 755 directory')"; \
-        /usr/local/bin/klaudia --version; \
     fi
 
 # The pin above is the contract, so the CLI must not undo it at runtime.
@@ -668,7 +612,6 @@ COPY engine/deploy/mcp-bootstrap.sh /usr/local/bin/vogt-mcp-bootstrap
 COPY engine/deploy/git-askpass.sh /usr/local/bin/vogt-git-askpass
 COPY engine/deploy/rust-analyzer-mcp.sh /usr/local/bin/vogt-rust-analyzer-mcp
 COPY engine/deploy/readonly-mcp.sh /usr/local/bin/vogt-readonly-mcp
-COPY engine/deploy/klaudia-mcp.sh /usr/local/bin/vogt-klaudia-mcp
 COPY engine/deploy/claude-profile.sh /usr/local/bin/claude-profile
 COPY engine/deploy/git-forgejo.sh /usr/local/bin/git-forgejo
 COPY engine/deploy/claude-session-hook.sh /usr/local/bin/vogt-claude-session-hook
@@ -685,7 +628,6 @@ RUN chmod +x \
     /usr/local/bin/vogt-git-askpass \
     /usr/local/bin/vogt-rust-analyzer-mcp \
     /usr/local/bin/vogt-readonly-mcp \
-    /usr/local/bin/vogt-klaudia-mcp \
     /usr/local/bin/claude-profile \
     /usr/local/bin/vogt-claude-session-hook \
     /usr/local/bin/vogt-cargo-cache \
