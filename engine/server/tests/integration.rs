@@ -17195,6 +17195,55 @@ async fn llm_provider_handler_refuses_reserved_names_and_manifest_collisions() {
 }
 
 #[tokio::test]
+async fn llm_provider_handler_returns_bad_request_for_registry_collisions() {
+    let tmp = tempfile::tempdir().unwrap();
+    let registry = tmp.path().join("llm-providers.toml");
+    let mut cfg = test_config();
+    cfg.llm_providers_file = Some(registry);
+    cfg.agent_auth_secrets = vogt_engine_server::secret_broker::parse_manifest(
+        "PROVIDER_KEY approved-project PROVIDER_KEY ondemand",
+    )
+    .unwrap();
+    let (base, _state, _guard) = boot_with_state(cfg).await;
+    let client = reqwest::Client::new();
+
+    let first = client
+        .post(format!("{base}/api/llm-providers"))
+        .headers(auth())
+        .json(&provider_request("first", "FIRST_PROVIDER_KEY"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+
+    for (name, request) in [
+        (
+            "same-key",
+            provider_request("same-key", "FIRST_PROVIDER_KEY"),
+        ),
+        (
+            "same-secret",
+            provider_request("same-secret", "SECOND_PROVIDER_KEY"),
+        ),
+    ] {
+        let response = client
+            .post(format!("{base}/api/llm-providers"))
+            .headers(auth())
+            .json(&request)
+            .send()
+            .await
+            .unwrap();
+        let status = response.status();
+        let body: Value = response.json().await.unwrap();
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{name}: {body}");
+        assert!(body["error"]
+            .as_str()
+            .unwrap()
+            .contains("already another provider"));
+    }
+}
+
+#[tokio::test]
 async fn llm_provider_handlers_refuse_a_non_admin_identity() {
     let tmp = tempfile::tempdir().unwrap();
     let mut cfg = test_config();
