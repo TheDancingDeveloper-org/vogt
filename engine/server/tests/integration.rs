@@ -17276,7 +17276,7 @@ async fn session_template_list_uses_the_real_engine_route_and_summary() {
         cwd: None,
         env: vec![],
         backend: "pod".into(),
-        host_capable: false,
+        host_capable: true,
         account: None,
         default_name: None,
         match_repo_names: vec![],
@@ -17298,10 +17298,37 @@ async fn session_template_list_uses_the_real_engine_route_and_summary() {
         vec![json!({
             "name": "Pod Claude",
             "agent": "claude",
-            "placements": ["pod"],
+            "placements": ["host", "pod"],
             "default_placement": "pod"
         })]
     );
+}
+
+#[tokio::test]
+async fn a_host_placement_overrides_a_pod_template_default() {
+    let mut h = pod_stream::harness_cfg(false, None, |_| {}).await;
+    let id = h
+        .start_body(json!({
+            "name": "host-session",
+            "template": "pod",
+            "placement": "host"
+        }))
+        .await;
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), h.created.recv())
+            .await
+            .is_err(),
+        "host placement unexpectedly created a pod"
+    );
+    h.state.sessions.remove(id).unwrap();
+}
+
+#[tokio::test]
+async fn an_omitted_placement_follows_the_template_backend() {
+    let mut h = pod_stream::harness(false).await;
+    let id = h.start().await;
+    let (_created, _token) = h.created.recv().await.expect("the pod is created");
+    h.state.sessions.remove(id).unwrap();
 }
 
 // ---- Pod-backed sessions: the engine side of the session-agent stream ------
@@ -17434,16 +17461,16 @@ mod pod_stream {
         }
     }
 
-    struct Harness {
-        base: String,
-        state: Arc<AppState>,
+    pub(super) struct Harness {
+        pub(super) base: String,
+        pub(super) state: Arc<AppState>,
         client: reqwest::Client,
         launcher: Arc<FakeLauncher>,
-        created: tokio::sync::mpsc::UnboundedReceiver<(Uuid, Vec<u8>)>,
+        pub(super) created: tokio::sync::mpsc::UnboundedReceiver<(Uuid, Vec<u8>)>,
         _guard: ServerGuard,
     }
 
-    async fn harness(fail: bool) -> Harness {
+    pub(super) async fn harness(fail: bool) -> Harness {
         harness_with(fail, None).await
     }
 
@@ -17454,7 +17481,7 @@ mod pod_stream {
     }
 
     /// [`harness_with`], with `tweak` applied to the engine's config first.
-    async fn harness_cfg(
+    pub(super) async fn harness_cfg(
         fail: bool,
         templates: Option<Vec<SessionTemplate>>,
         tweak: impl FnOnce(&mut vogt_engine_server::config::Config),
@@ -17475,7 +17502,7 @@ mod pod_stream {
                 match_path_prefixes: Vec::new(),
                 tags: Vec::new(),
                 backend: "pod".into(),
-                host_capable: false,
+                host_capable: true,
             }]
         });
         let (base, state, guard) = boot_with_state(cfg).await;
@@ -17497,12 +17524,12 @@ mod pod_stream {
     }
 
     impl Harness {
-        async fn start(&self) -> Uuid {
+        pub(super) async fn start(&self) -> Uuid {
             self.start_body(json!({ "name": "pod-session", "template": "pod" }))
                 .await
         }
 
-        async fn start_body(&self, body: Value) -> Uuid {
+        pub(super) async fn start_body(&self, body: Value) -> Uuid {
             let created: Value = self
                 .client
                 .post(format!("{}/api/sessions", self.base))
