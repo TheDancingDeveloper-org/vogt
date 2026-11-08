@@ -1465,6 +1465,7 @@ impl AgentTaskRegistry {
             name: session_name.clone(),
             command: Some(command),
             template: None,
+            placement: None,
             cwd: task.cwd.clone(),
             env: Some(env),
             // A task run has already written its own prompt file above, with
