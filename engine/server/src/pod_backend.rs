@@ -1937,6 +1937,7 @@ mod tests {
             match_path_prefixes: vec![],
             tags: vec![],
             backend: "pod".into(),
+            host_capable: false,
             account: None,
         };
         for (repo, line) in [("vogt", "rust-2"), ("farmeggs", "backlog-1")] {
@@ -2009,6 +2010,7 @@ mod tests {
             match_path_prefixes: vec![],
             tags: vec![],
             backend: "pod".into(),
+            host_capable: false,
             account: None,
         };
         let id = Uuid::nil();
@@ -2171,6 +2173,7 @@ mod tests {
                 match_path_prefixes: vec![],
                 tags: vec![],
                 backend: "pod".into(),
+                host_capable: false,
                 account: None,
             },
             Uuid::nil(),
@@ -2499,6 +2502,7 @@ mod tests {
             match_path_prefixes: vec![],
             tags: vec![],
             backend: "pod".into(),
+            host_capable: false,
             account: None,
         };
         let env_of = |command: &[String]| {
@@ -2557,6 +2561,7 @@ mod tests {
             match_path_prefixes: vec![],
             tags: vec![],
             backend: "pod".into(),
+            host_capable: false,
             account: None,
         };
         let pod = pod_template(
@@ -3141,6 +3146,7 @@ mod tests {
             match_path_prefixes: vec![],
             tags: vec![],
             backend: "pod".into(),
+            host_capable: false,
             account: None,
         };
         pod_template(
