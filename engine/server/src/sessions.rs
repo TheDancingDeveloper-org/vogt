@@ -791,13 +791,27 @@ impl SessionRegistry {
                 let template = self.resolve_template(name)?;
                 if let Some(placement) = spec.placement.as_deref() {
                     let requested = match placement {
-                        "host" => "local",
+                        "host" => {
+                            if template.backend != "local" {
+                                return Err(ApiError::BadRequest(format!(
+                                    "template {:?} is pod-only and cannot run on the host",
+                                    template.name
+                                )));
+                            }
+                            "local"
+                        }
                         "pod" => {
                             if !self.cfg.pod_backends_enabled {
                                 return Err(ApiError::BadRequest(
                                     "requested placement \"pod\" is not available: pod backends are disabled"
                                         .into(),
                                 ));
+                            }
+                            if template.backend == "local" {
+                                return Err(ApiError::BadRequest(format!(
+                                    "template {:?} is host-only and cannot run in a pod",
+                                    template.name
+                                )));
                             }
                             "pod"
                         }
@@ -807,7 +821,7 @@ impl SessionRegistry {
                             )))
                         }
                     };
-                    let _ = (template, requested);
+                    let _ = requested;
                 }
                 if spec.account.is_none() {
                     spec.account = template.account.clone();
@@ -830,6 +844,11 @@ impl SessionRegistry {
                     spec.env = Some(env);
                 }
             }
+        }
+        if spec.placement.as_deref() == Some("pod") && spec.template.is_none() {
+            return Err(ApiError::BadRequest(
+                "requested placement \"pod\" requires a pod-backed template".into(),
+            ));
         }
         if let Some(placement) = spec.placement.as_deref() {
             match placement {
