@@ -799,6 +799,7 @@ class EngineClient:
         name: str,
         command: list[str] | None = None,
         template: str | None = None,
+        placement: str | None = None,
         cwd: str,
         env: dict[str, str] | None = None,
         prompt: str | None = None,
@@ -833,6 +834,8 @@ class EngineClient:
             # (a `vogt-agent-auth run -- claude` wrapper, say) is that
             # deployment's configuration and not Vogt's to spell out.
             spec["template"] = template
+        if placement:
+            spec["placement"] = placement
         if prompt:
             # The engine writes this to a file on its own state directory and
             # tells the child where it is. Vogt sends the text rather
@@ -928,6 +931,14 @@ class EngineClient:
         return (
             [EngineSession.from_payload(row) for row in rows if isinstance(row, dict)],
             count,
+        )
+
+    def list_session_templates(self) -> list[dict[str, Any]]:
+        payload = self._call("/api/session-templates")
+        return (
+            [row for row in payload if isinstance(row, dict)]
+            if isinstance(payload, list)
+            else []
         )
 
     def sweep_sessions(self, *, screen_lines: int = 8) -> list[EngineSweepEntry] | None:
