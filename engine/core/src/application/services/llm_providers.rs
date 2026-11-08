@@ -50,7 +50,15 @@ where
     C: Clock + 'static,
     I: IdFactory + 'static,
 {
-    let (params, reason) = args;
+    let (mut params, reason) = args;
+    // The Python model supplies the public default.  The Rust core must do
+    // the same before forwarding to the engine, whose wire request requires
+    // this field.
+    if let Value::Object(object) = &mut params {
+        object
+            .entry("wire_api".to_string())
+            .or_insert_with(|| Value::String("chat".to_string()));
+    }
     let engine = ctx
         .engine
         .as_ref()
