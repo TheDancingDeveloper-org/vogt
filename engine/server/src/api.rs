@@ -31,6 +31,14 @@ pub async fn list_sessions(
     Json(state.sessions.list(include_hidden))
 }
 
+/// `GET /api/session-templates` — the configured templates without commands
+/// or environment values.
+pub async fn list_session_templates(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<vogt_engine_contract::SessionTemplateSummary>>> {
+    Ok(Json(state.sessions.template_summaries()))
+}
+
 #[derive(Debug, Deserialize)]
 pub struct WaitQuery {
     /// `ready` (default), `exited` or `any-change` (`any_change` accepted).
