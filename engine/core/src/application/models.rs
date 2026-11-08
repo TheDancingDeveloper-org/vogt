@@ -670,14 +670,7 @@ pub fn derived_schemas() -> Vec<(&'static str, serde_json::Value, serde_json::Va
         (
             "session.template_list",
             schema_of::<system::StatusParams>(),
-            json_schema!({
-                "type": "object",
-                "properties": {
-                    "templates": {"type": "array"},
-                    "engine": {"type": ["string", "null"]}
-                }
-            })
-            .into(),
+            schema_of::<session_ops::SessionTemplateListResult>(),
         ),
         (
             "session.stop",
