@@ -1310,6 +1310,15 @@ impl SessionRegistry {
                 .as_deref()
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|| self.cfg.default_cwd.clone());
+            let cwd = if pod_backed && agent_cli::agent_name(command).as_deref() == Some("codex") {
+                // The engine's cwd is a host path. The pod entrypoint checks
+                // out into the session-agent's shared default instead, so
+                // build the host-side launch metadata with the pod's real
+                // cwd rather than an unusable host path.
+                std::path::PathBuf::from(vogt_session_agent::DEFAULT_WORK_DIR)
+            } else {
+                cwd
+            };
             if let Some(rewritten) = agent_cli::with_codex_trust(command, &cwd) {
                 spec.command = Some(rewritten);
             }
