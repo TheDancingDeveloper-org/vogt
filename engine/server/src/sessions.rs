@@ -93,10 +93,22 @@ fn validate_template_placement(
 ) -> Result<()> {
     match placement {
         None => Ok(()),
-        Some("host") if !template.supports_host() => Err(ApiError::BadRequest(format!(
-            "template {:?} is pod-only and cannot run on the host",
-            template.name
-        ))),
+        Some("host") if !template.supports_host() => {
+            let agent = template
+                .command
+                .as_deref()
+                .and_then(crate::agent_cli::agent_name);
+            if agent.as_deref() == Some("codex") {
+                Err(ApiError::BadRequest(
+                    "Codex runs in a session pod; placement=host is not supported".into(),
+                ))
+            } else {
+                Err(ApiError::BadRequest(format!(
+                    "template {:?} is pod-only and cannot run on the host",
+                    template.name
+                )))
+            }
+        }
         Some("pod") if !pod_backends_enabled => Err(ApiError::BadRequest(
             "requested placement \"pod\" is not available: pod backends are disabled".into(),
         )),
@@ -3736,6 +3748,32 @@ mod tests {
     fn placement_refusals_cover_host_templates_disabled_backends_and_bad_values() {
         assert!(validate_template_placement(&template("local"), Some("pod"), true).is_err());
         assert!(validate_template_placement(&template("pod"), Some("host"), true).is_err());
+
+        let codex = SessionTemplate {
+            name: "Codex (protected)".into(),
+            description: String::new(),
+            command: Some(vec![
+                "vogt-agent-auth".into(),
+                "run".into(),
+                "--".into(),
+                "codex".into(),
+            ]),
+            cwd: None,
+            env: Vec::new(),
+            backend: "pod".into(),
+            host_capable: false,
+            pod_capable: false,
+            account: None,
+            default_name: None,
+            match_repo_names: Vec::new(),
+            match_path_prefixes: Vec::new(),
+            tags: vec!["agent".into(), "codex".into()],
+        };
+        let error = validate_template_placement(&codex, Some("host"), true).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("Codex runs in a session pod; placement=host is not supported"));
+        assert!(validate_template_placement(&codex, Some("pod"), true).is_ok());
         assert!(validate_requested_placement(Some("pod"), false).is_err());
         assert!(validate_requested_placement(Some("sidecar"), true).is_err());
     }
