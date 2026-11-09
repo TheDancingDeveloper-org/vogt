@@ -450,16 +450,13 @@ mod tests {
         let session_token = auth.session_token(id).await.unwrap();
         link.ingest(0, b"hello").unwrap();
         let mut kube = MockKube::with(vec![pod(id, terminated("Failed", 137, "OOMKilled"))]);
-        kube.log = Some(
-            format!(
-                "session-entrypoint: step clone\n\
+        kube.log = Some(format!(
+            "session-entrypoint: step clone\n\
                  session agent failed: no such file\n\
                  Authorization: Bearer bearer-secret-123456\n\
                  token=source-secret-123456\n\
                  session={session_token}\n"
-            )
-            .into(),
-        );
+        ));
 
         let report = sweep(&kube, &auth, &cfg()).await.unwrap();
 
