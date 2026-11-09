@@ -4514,7 +4514,12 @@ At each launch the registry does two things, and nothing else:
   different from that manifest VAR. The secret reference remains exclusive to
   one provider, and an `env_key` that collides with a manifest VAR is refused;
   this permits separate approved secrets to back separate temporary providers
-  without letting a provider shadow deployment-owned environment variables.
+  without letting a provider shadow deployment-owned environment variables. A
+  reference that no manifest line or grant project approves is refused with
+  the provider name and the exact `project_id`/`secret_name` it rejected: the
+  project id must be the one in this instance's mounted manifest, which can
+  differ from the id another deployment or secret-store listing records for
+  the same secret name.
 - A Codex session gets one `model_providers.<name>` table per provider. A
   host launch gets them as `-c` overrides on its argv, so the shared
   `~/.codex/config.toml` is never rewritten. A pod gets them in the
