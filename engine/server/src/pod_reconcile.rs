@@ -20,7 +20,7 @@ use crate::{
     error::Result,
     pod_backend::{
         pod_exit_code, pod_fatal_waiting_reason, pod_is_ours, pod_phase, pod_reason,
-        session_id_from_pod, PodConfig, PodLauncher,
+        session_id_from_pod, PodConfig, PodLauncher, LOG_TAIL_LINES,
     },
 };
 use k8s_openapi::api::core::v1::Pod;
@@ -98,6 +98,40 @@ fn end_session(link: &PodLink, code: i32, note: &str) {
     link.finish(code);
 }
 
+/// Bytes of container log one failed-session note keeps, so fifty long lines
+/// cannot turn the note into a wall of text.
+const LOG_NOTE_BYTES: usize = 8 * 1024;
+
+/// The tail of a failed pod's container log, or `None` when there is none to
+/// show. The pod's status only ever says "Error" for a container that exited
+/// without a message; the log is where the reason actually is.
+async fn failed_log_tail(launcher: &dyn PodLauncher, id: Uuid) -> Option<String> {
+    match launcher.log_tail(id).await {
+        Ok(tail) => {
+            let tail = tail.trim_end();
+            if tail.trim().is_empty() {
+                return None;
+            }
+            let mut start = tail.len().saturating_sub(LOG_NOTE_BYTES);
+            while !tail.is_char_boundary(start) {
+                start += 1;
+            }
+            // Start at a line boundary so the first line is whole.
+            if start > 0 {
+                start = tail[start..]
+                    .find('\n')
+                    .map(|i| start + i + 1)
+                    .unwrap_or(start);
+            }
+            Some(tail[start..].to_string())
+        }
+        Err(e) => {
+            tracing::debug!(session = %id, error = %e, "reading a failed pod's log failed");
+            None
+        }
+    }
+}
+
 fn pod_age(pod: &Pod) -> Option<Duration> {
     let created = pod.metadata.creation_timestamp.as_ref()?;
     (k8s_openapi::chrono::Utc::now() - created.0).to_std().ok()
@@ -130,6 +164,16 @@ pub async fn sweep(launcher: &dyn PodLauncher, auth: &AgentAuth, cfg: &PodConfig
             Verdict::End { code, note } => {
                 if let Some(link) = link.as_deref() {
                     tracing::warn!(session = %id, code, %note, "ending a session whose pod died");
+                    let note = if code != 0 {
+                        match failed_log_tail(launcher, id).await {
+                            Some(tail) => format!(
+                                "{note}\n--- container log (last {LOG_TAIL_LINES} lines) ---\n{tail}"
+                            ),
+                            None => note,
+                        }
+                    } else {
+                        note
+                    };
                     end_session(link, code, &note);
                     report.ended.push(id);
                 }
@@ -206,6 +250,9 @@ mod tests {
         pods: Mutex<Vec<Pod>>,
         deleted: Mutex<Vec<(Uuid, Option<String>)>>,
         list_fails: bool,
+        /// What the session container's log returns; `None` fails like an
+        /// unavailable log stream (a pending pod, an API error).
+        log: Option<String>,
     }
     impl MockKube {
         fn with(pods: Vec<Pod>) -> Self {
@@ -213,6 +260,7 @@ mod tests {
                 pods: Mutex::new(pods),
                 deleted: Mutex::new(Vec::new()),
                 list_fails: false,
+                log: None,
             }
         }
     }
@@ -235,6 +283,13 @@ mod tests {
                     return Err(crate::error::ApiError::Internal("api down".into()));
                 }
                 Ok(self.pods.lock().unwrap().clone())
+            })
+        }
+        fn log_tail(&self, _: Uuid) -> crate::pod_backend::LogFuture<'_> {
+            Box::pin(async move {
+                self.log
+                    .clone()
+                    .ok_or_else(|| crate::error::ApiError::Internal("no log".into()))
             })
         }
     }
@@ -384,9 +439,14 @@ mod tests {
     async fn a_session_whose_pod_died_without_exited_ends_with_the_reason() {
         let id = Uuid::new_v4();
         let auth = AgentAuth::default();
-        let (link, _reader) = auth.register_pod(id);
+        let (link, mut reader) = auth.register_pod(id);
         link.ingest(0, b"hello").unwrap();
-        let kube = MockKube::with(vec![pod(id, terminated("Failed", 137, "OOMKilled"))]);
+        let mut kube = MockKube::with(vec![pod(id, terminated("Failed", 137, "OOMKilled"))]);
+        kube.log = Some(
+            "session-entrypoint: step clone\n\
+                         session agent failed: no such file\n"
+                .into(),
+        );
 
         let report = sweep(&kube, &auth, &cfg()).await.unwrap();
 
@@ -396,6 +456,29 @@ mod tests {
         assert_eq!(link.wait_exit(), 137);
         // The reason was appended after the bytes already received.
         assert!(link.next_offset() > 5);
+        // The container's own tail is in the note: a status of "Error" alone
+        // is not a diagnosis (WI-3762).
+        let mut output = String::new();
+        std::io::Read::read_to_string(&mut reader, &mut output).unwrap();
+        assert!(output.contains("session pod failed: OOMKilled"));
+        assert!(output.contains("--- container log (last 50 lines) ---"));
+        assert!(output.contains("session agent failed: no such file"));
+    }
+
+    #[tokio::test]
+    async fn an_unavailable_log_leaves_the_status_reason_alone() {
+        let id = Uuid::new_v4();
+        let auth = AgentAuth::default();
+        let (_link, mut reader) = auth.register_pod(id);
+        let kube = MockKube::with(vec![pod(id, terminated("Failed", 1, "Error"))]);
+
+        let report = sweep(&kube, &auth, &cfg()).await.unwrap();
+
+        assert_eq!(report.ended, vec![id]);
+        let mut output = String::new();
+        std::io::Read::read_to_string(&mut reader, &mut output).unwrap();
+        assert!(output.contains("session pod failed: Error"));
+        assert!(!output.contains("--- container log"));
     }
 
     #[tokio::test]

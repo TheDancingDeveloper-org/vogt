@@ -93,21 +93,17 @@ fn validate_template_placement(
 ) -> Result<()> {
     match placement {
         None => Ok(()),
-        Some("host") if template.backend != "local" && !template.host_capable => {
-            Err(ApiError::BadRequest(format!(
-                "template {:?} is pod-only and cannot run on the host",
-                template.name
-            )))
-        }
+        Some("host") if !template.supports_host() => Err(ApiError::BadRequest(format!(
+            "template {:?} is pod-only and cannot run on the host",
+            template.name
+        ))),
         Some("pod") if !pod_backends_enabled => Err(ApiError::BadRequest(
             "requested placement \"pod\" is not available: pod backends are disabled".into(),
         )),
-        Some("pod") if template.backend == "local" && !template.host_capable => {
-            Err(ApiError::BadRequest(format!(
-                "template {:?} is host-only and cannot run in a pod",
-                template.name
-            )))
-        }
+        Some("pod") if !template.supports_pod() => Err(ApiError::BadRequest(format!(
+            "template {:?} is host-only and cannot run in a pod",
+            template.name
+        ))),
         Some("host" | "pod") => Ok(()),
         Some(other) => Err(ApiError::BadRequest(format!(
             "invalid placement {other:?}; expected \"host\" or \"pod\""
@@ -833,6 +829,25 @@ impl SessionRegistry {
             spec.placement.as_deref(),
             spec.template.as_deref(),
         )?;
+        // A named template's placement is checked even when the caller copied
+        // the template's command into the spec (the GUI does): placement is a
+        // property of the template, not of who filled in the argv. Resolve
+        // only when a placement was asked for, so a stale template name in a
+        // spec that carries its own command keeps working as before.
+        if spec.placement.is_some() {
+            if let Some(name) = spec
+                .template
+                .as_deref()
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+            {
+                validate_template_placement(
+                    self.resolve_template(name)?,
+                    spec.placement.as_deref(),
+                    self.cfg.pod_backends_enabled,
+                )?;
+            }
+        }
         // Expand a template name into a command before anything downstream
         // reads `command`. Only when the caller gave no explicit command —
         // the GUI copies a template's command into the spec itself and sends
@@ -848,11 +863,6 @@ impl SessionRegistry {
                 .filter(|t| !t.is_empty())
             {
                 let template = self.resolve_template(name)?;
-                validate_template_placement(
-                    template,
-                    spec.placement.as_deref(),
-                    self.cfg.pod_backends_enabled,
-                )?;
                 if spec.account.is_none() {
                     spec.account = template.account.clone();
                 }
@@ -1065,13 +1075,7 @@ impl SessionRegistry {
         // one: the session agent checks the pod's file and hook program at
         // boot and refuses Codex there (WI-3335).
         let pod_backed = self.cfg.pod_backends_enabled
-            && spec
-                .template
-                .as_deref()
-                .map(str::trim)
-                .filter(|t| !t.is_empty())
-                .and_then(|name| self.resolve_template(name).ok())
-                .is_some_and(|t| t.backend != "local");
+            && self.runs_in_pod(spec.template.as_deref(), spec.placement.as_deref());
         codex_policy_refusal(
             base_command.as_deref(),
             pod_backed,
@@ -1430,8 +1434,11 @@ impl SessionRegistry {
                     .map(str::trim)
                     .filter(|t| !t.is_empty())
                     .and_then(|name| self.resolve_template(name).ok())
-                    .filter(|t| spec.placement.as_deref() == Some("pod") || t.backend != "local")
-                    .filter(|_| spec.placement.as_deref() != Some("host"))
+                    .filter(|t| match spec.placement.as_deref() {
+                        Some("pod") => t.supports_pod(),
+                        Some("host") => false,
+                        _ => t.backend != "local",
+                    })
             })
             .flatten();
         let spawned = if let Some(template) = pod_template {
@@ -2923,6 +2930,24 @@ impl SessionRegistry {
         resolve_template_in(&self.cfg.session_templates, name)
     }
 
+    /// Whether a start runs in a pod: an explicit placement decides, and
+    /// otherwise only a pod-default template does. A pod-capable template
+    /// whose default is the host stays on the host unless the caller asks
+    /// for a pod, so its default never moved (WI-3762).
+    fn runs_in_pod(&self, template: Option<&str>, placement: Option<&str>) -> bool {
+        let template = || {
+            template
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .and_then(|name| self.resolve_template(name).ok())
+        };
+        match placement {
+            Some("pod") => template().is_some_and(|t| t.supports_pod()),
+            Some("host") => false,
+            _ => template().is_some_and(|t| t.backend != "local"),
+        }
+    }
+
     pub fn template_summaries(&self) -> Vec<vogt_engine_contract::SessionTemplateSummary> {
         self.cfg
             .session_templates
@@ -2933,14 +2958,11 @@ impl SessionRegistry {
                     .command
                     .as_deref()
                     .and_then(crate::agent_cli::agent_name),
-                placements: if template.backend == "pod" {
-                    if template.host_capable {
-                        vec!["host".to_string(), "pod".to_string()]
-                    } else {
-                        vec!["pod".to_string()]
-                    }
-                } else {
-                    vec!["host".to_string()]
+                placements: match (template.supports_host(), template.supports_pod()) {
+                    (true, true) => vec!["host".to_string(), "pod".to_string()],
+                    (true, false) => vec!["host".to_string()],
+                    (false, true) => vec!["pod".to_string()],
+                    (false, false) => Vec::new(),
                 },
                 default_placement: if template.backend == "pod" {
                     "pod".to_string()
@@ -3651,6 +3673,7 @@ mod tests {
             env: Vec::new(),
             backend: "pod".into(),
             host_capable: false,
+            pod_capable: false,
             account: None,
             default_name: None,
             match_repo_names: Vec::new(),
@@ -3670,6 +3693,7 @@ mod tests {
             env: Vec::new(),
             backend: backend.into(),
             host_capable: false,
+            pod_capable: false,
             account: None,
             default_name: None,
             match_repo_names: Vec::new(),
@@ -3698,6 +3722,15 @@ mod tests {
         template.host_capable = true;
         assert!(validate_template_placement(&template, Some("host"), true).is_ok());
         assert!(validate_template_placement(&template, Some("pod"), true).is_ok());
+    }
+
+    #[test]
+    fn a_host_default_pod_capable_template_allows_a_pod_without_moving_its_default() {
+        let mut template = template("local");
+        template.pod_capable = true;
+        assert!(validate_template_placement(&template, Some("pod"), true).is_ok());
+        assert!(validate_template_placement(&template, Some("host"), true).is_ok());
+        assert!(validate_template_placement(&template, None, true).is_ok());
     }
 
     #[test]
@@ -3964,6 +3997,7 @@ mod tests {
                 account: None,
                 backend: "local".to_string(),
                 host_capable: false,
+                pod_capable: false,
             },
             SessionTemplate {
                 name: "Alpha Agent".into(),
@@ -3983,6 +4017,7 @@ mod tests {
                 account: None,
                 backend: "local".to_string(),
                 host_capable: false,
+                pod_capable: false,
             },
         ];
         assert_eq!(
