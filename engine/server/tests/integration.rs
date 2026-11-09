@@ -18386,6 +18386,49 @@ mod pod_stream {
         }
     }
 
+    /// The argv a shell line runs, one word per line: `set --` applies the
+    /// line's own quoting, so the test reads the same argv Codex would.
+    fn shell_argv(line: &str) -> Vec<String> {
+        let out = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(format!("set -- {line}; printf '%s\\n' \"$@\""))
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        String::from_utf8(out.stdout)
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// The `rollout-*-<conversation>.jsonl` under `root/sessions`, wherever
+    /// the agent put its date directories.
+    fn find_rollout(root: &std::path::Path, conversation: &str) -> Option<std::path::PathBuf> {
+        let suffix = format!("-{conversation}.jsonl");
+        fn walk(dir: &std::path::Path, suffix: &str, depth: usize) -> Option<std::path::PathBuf> {
+            if depth == 0 {
+                return None;
+            }
+            for entry in std::fs::read_dir(dir).ok()? {
+                let path = entry.ok()?.path();
+                if path.is_dir() {
+                    if let Some(found) = walk(&path, suffix, depth - 1) {
+                        return Some(found);
+                    }
+                } else if path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("rollout-") && name.ends_with(suffix))
+                {
+                    return Some(path);
+                }
+            }
+            None
+        }
+        walk(&root.join("sessions"), &suffix, 6)
+    }
+
     /// WI-3869: a pod Codex's rollout, shipped by the real
     /// `vogt-session-agent` at the path contract, lands under the engine's
     /// Codex home, and `session.last_reply` on a real `vogt-core` returns the
@@ -18435,11 +18478,13 @@ mod pod_stream {
             .to_string();
         assert_eq!(conversation, id.to_string());
 
-        // What the pod's Codex writes when the assistant answers.
-        let date = OffsetDateTime::now_utc().date();
-        let (year, month, day) = (date.year(), u8::from(date.month()), date.day());
-        let reply = "PONG from the pod's Codex";
-        let record = json!({
+        // The launch line the pod's session agent really generates, and the
+        // argv Codex sees. The stand-in below names its rollout from that same
+        // argv, as Codex does — the old test planted a file under a name it
+        // already believed in, so it passed while the launch line carried no
+        // conversation at all (WI-3873).
+        let reply = "PONG from the pod Codex";
+        let record = serde_json::to_string(&json!({
             "timestamp": "2026-11-09T00:00:00Z",
             "type": "response_item",
             "payload": {
@@ -18447,50 +18492,89 @@ mod pod_stream {
                 "role": "assistant",
                 "content": [{"type": "output_text", "text": reply}],
             },
-        });
-        let relative = format!(
-            "sessions/{year:04}/{month:02}/{day:02}/rollout-{year:04}-{month:02}-{day:02}T00-00-00-{conversation}.jsonl"
-        );
-        let rollout = pod_home.join(&relative);
-        std::fs::create_dir_all(rollout.parent().unwrap()).unwrap();
-        std::fs::write(&rollout, format!("{record}\n")).unwrap();
-
-        // The in-pod uploader for real: this session has no Claude root and no
-        // account, and its rollout must still travel at the contract path.
-        // `run` is not `Send`, so drive it and the assertions together on this
-        // task rather than spawning it.
-        let uploader = vogt_session_agent::run(vogt_session_agent::Config {
+        }))
+        .unwrap();
+        let mut agent = vogt_session_agent::Config {
             session_id: id.to_string(),
             engine_url: h.base.clone(),
-            token: session_token,
+            token: String::new(),
             cli: "codex".into(),
-            command: Some(vec!["/bin/sh".into(), "-c".into(), "sleep 2".into()]),
-            cwd: Some(pod.path().to_string_lossy().into_owned()),
+            command: None,
+            cwd: Some("/work".into()),
             cols: 120,
             rows: 40,
             buffer_bytes: 64 * 1024,
             claude_config_dir: None,
-            codex_home: Some(pod_home),
+            codex_home: Some(pod_home.clone()),
             permission_mode: None,
             codex_approval_policy: "never".into(),
             account: None,
             conversation_id: Some(conversation.clone()),
             resume: false,
             claude: vogt_session_agent::ClaudeLaunch::default(),
-        });
+        };
+        let line = vogt_session_agent::command_line(&agent).expect("a Codex launch line");
+        let mut argv = shell_argv(&line);
+        assert_eq!(argv.first().map(String::as_str), Some("codex"), "{line}");
+        let pinned = argv
+            .windows(2)
+            .find(|pair| pair[0] == "--session-id")
+            .map(|pair| pair[1].clone())
+            .expect("the generated line pins the conversation");
+        assert_eq!(pinned, conversation, "{line}");
+
+        use std::os::unix::fs::PermissionsExt;
+        let standin = pod.path().join("codex-standin");
+        std::fs::write(
+            &standin,
+            format!(
+                r#"#!/bin/sh
+set -eu
+home='{home}'
+id=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --session-id|resume) id="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+[ -n "$id" ] || exit 64
+day="$(date -u +%Y/%m/%d)"
+mkdir -p "$home/sessions/$day"
+name="rollout-$(date -u +%Y-%m-%dT%H-%M-%S)-$id.jsonl"
+printf '%s\n' '{record}' > "$home/sessions/$day/$name"
+sleep 2
+"#,
+                home = pod_home.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&standin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        argv[0] = standin.to_string_lossy().into_owned();
+        agent.command = Some(argv);
+        agent.cwd = Some(pod.path().to_string_lossy().into_owned());
+        agent.token = session_token;
+
+        // The in-pod uploader for real: this session has no Claude root and no
+        // account, and its rollout must still travel at the contract path.
+        // `run` is not `Send`, so drive it and the assertions together on this
+        // task rather than spawning it.
+        let uploader = vogt_session_agent::run(agent);
         let observe = async {
-            // The engine writes it under its own Codex home, at the same date
-            // path.
-            let landed = engine_home.path().join(&relative);
+            // The engine writes it under its own Codex home, under whatever
+            // date directory the stand-in chose.
             let deadline = std::time::Instant::now() + Duration::from_secs(10);
-            while !landed.is_file() {
+            let landed = loop {
+                if let Some(path) = find_rollout(engine_root.as_path(), &conversation) {
+                    break path;
+                }
                 assert!(
                     std::time::Instant::now() < deadline,
-                    "the pod's rollout never reached the engine at {}",
-                    landed.display()
+                    "the pod's rollout never reached the engine under {}",
+                    engine_root.display()
                 );
                 tokio::time::sleep(Duration::from_millis(25)).await;
-            }
+            };
             assert!(std::fs::read_to_string(&landed).unwrap().contains(reply));
 
             let core = boot_codex_core(&h.base, &engine_home.path().join("sessions")).await;
@@ -18509,6 +18593,65 @@ mod pod_stream {
         };
         let (uploaded, ()) = tokio::join!(uploader, observe);
         uploaded.expect("the session-agent ships the rollout and exits");
+    }
+
+    /// WI-3873: a Codex session has no Claude account (the engine refuses one
+    /// for a non-Claude CLI), yet a wake must still seed the conversation's
+    /// rollout and set `VOGT_SESSION_RESUME=1`; otherwise the woken pod starts
+    /// a fresh conversation and the transcript is lost.
+    #[tokio::test]
+    async fn a_codex_bootstrap_seeds_its_rollout_without_an_account() {
+        let engine_home = tempfile::tempdir().unwrap();
+        let stored = engine_home.path().to_path_buf();
+        let template = SessionTemplate {
+            name: "pod".into(),
+            description: "pod-backed Codex".into(),
+            command: Some(vec!["codex".into()]),
+            cwd: None,
+            env: Vec::new(),
+            account: None,
+            default_name: None,
+            match_repo_names: Vec::new(),
+            match_path_prefixes: Vec::new(),
+            tags: Vec::new(),
+            backend: "pod".into(),
+            host_capable: false,
+            pod_capable: false,
+        };
+        let mut h = harness_cfg(false, Some(vec![template]), move |cfg| {
+            cfg.codex_session_id = true;
+            cfg.codex_transcript_root = Some(stored);
+        })
+        .await;
+        let id = h.start().await;
+        let (_, token) = h.created.recv().await.unwrap();
+
+        // What a previous pod's write-back left in the engine's Codex home.
+        let conversation = id.to_string();
+        let transcript = b"{\"type\":\"session\"}\n";
+        let relative =
+            format!("sessions/2026/11/09/rollout-2026-11-09T00-00-00-{conversation}.jsonl");
+        let rollout = engine_home.path().join(&relative);
+        std::fs::create_dir_all(rollout.parent().unwrap()).unwrap();
+        std::fs::write(&rollout, transcript).unwrap();
+
+        let body: Value = h
+            .bootstrap_as(id, &token, "codex")
+            .await
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(body["env"]["VOGT_SESSION_CONVERSATION_ID"], conversation);
+        assert_eq!(body["env"]["VOGT_SESSION_RESUME"], "1", "{body}");
+        let seeded = body["bundle"][&relative]
+            .as_str()
+            .expect("the rollout is seeded into the woken pod");
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(seeded)
+                .unwrap(),
+            transcript
+        );
     }
 
     /// WI-3355: the bootstrap response carries the session's brief, not its

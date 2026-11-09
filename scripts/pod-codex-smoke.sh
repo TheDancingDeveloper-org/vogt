@@ -36,6 +36,9 @@
 #   POD_CODEX_APPROVAL_POLICY  Codex approval policy (default `never`)
 #   POD_CODEX_TASK             prompt typed into the session
 #   POD_CODEX_TIMEOUT          seconds to wait for the tool result (default 180)
+#   POD_CODEX_CONVERSATION     conversation id the launch line pins; the
+#                              rollout the pod writes must carry it (default
+#                              pod-codex-smoke)
 #
 # Needs docker, cargo and uv (the screen is parsed with pyte). This is a
 # developer/acceptance harness, not a CI job: it calls a real model.
@@ -59,6 +62,7 @@ POD_CODEX_WIRE_API="${POD_CODEX_WIRE_API:-chat}"
 POD_CODEX_ENV_KEY="${POD_CODEX_ENV_KEY:-POD_CODEX_API_KEY}"
 POD_CODEX_TASK="${POD_CODEX_TASK:-Run the shell command echo PONG and reply with exactly its output.}"
 POD_CODEX_TIMEOUT="${POD_CODEX_TIMEOUT:-180}"
+POD_CODEX_CONVERSATION="${POD_CODEX_CONVERSATION:-pod-codex-smoke}"
 
 # Docker gets the key by name, never in argv. `--env-file` keeps it out of the
 # command line and out of this transcript.
@@ -84,6 +88,8 @@ line="$(VOGT_SESSION_ID=pod-codex-smoke \
   VOGT_SESSION_TOKEN_FILE="$token_file" \
   VOGT_CLI=codex \
   VOGT_SESSION_CWD=/work \
+  VOGT_SESSION_CONVERSATION_ID="$POD_CODEX_CONVERSATION" \
+  VOGT_SESSION_RESUME=0 \
   VOGT_PERMISSION_MODE="${POD_CODEX_PERMISSION_MODE:-}" \
   VOGT_CODEX_APPROVAL_POLICY="${POD_CODEX_APPROVAL_POLICY:-}" \
   cargo run --quiet --manifest-path engine/Cargo.toml -p vogt-session-agent \
@@ -97,9 +103,22 @@ case "$line" in
   *"'-s' 'danger-full-access'"*|*"-s danger-full-access"*|*"--dangerously-bypass-approvals-and-sandbox"*) ;;
   *) die "the generated line carries no Codex sandbox posture: $line" ;;
 esac
+# WI-3873: a line without the pinned conversation lets Codex name its rollout
+# after its own uuid, and the write-back this smoke then checks would never
+# find it.
+case "$line" in
+  *"--session-id $POD_CODEX_CONVERSATION"*|*"--session-id '$POD_CODEX_CONVERSATION'"*) ;;
+  *) die "the generated line does not pin the conversation: $line" ;;
+esac
+
+# The pod's Codex home on the host, so the rollout it writes after the turn
+# can be inspected once the container is gone.
+POD_CODEX_HOME="$(mktemp -d)"
+chmod 0777 "$POD_CODEX_HOME"
 
 export POD_CODEX_LINE="$line"
-export POD_CODEX_TASK POD_CODEX_TIMEOUT POD_CODEX_PROVIDER
+export POD_CODEX_TASK POD_CODEX_TIMEOUT POD_CODEX_PROVIDER POD_CODEX_HOME
+export POD_CODEX_CONVERSATION
 export POD_CODEX_MODEL POD_CODEX_BASE_URL POD_CODEX_WIRE_API POD_CODEX_ENV_KEY
 export POD_CODEX_ENV_FILE="${POD_CODEX_ENV_FILE:-}"
 
@@ -151,7 +170,7 @@ cmd = [
     "-e", "TERM=xterm-256color",
     "-e", "POD_CODEX_LINE=" + line,
     "--tmpfs", "/work:rw,exec,mode=0755,uid=1000,gid=1000",
-    "--tmpfs", "/home/vogt/.codex:rw,exec,mode=0755,uid=1000,gid=1000",
+    "-v", os.environ["POD_CODEX_HOME"] + ":/home/vogt/.codex",
     "--entrypoint", "/bin/bash", "-w", "/work",
     *pod_env_args, image, "-lc", inner,
 ]
@@ -223,4 +242,8 @@ if not answer or bwrap or approval:
     sys.exit(1)
 PY
 
-echo "pod-codex-smoke: PASS — the generated line ran a shell tool call in the pod image with no bwrap error and no approval menu"
+rollout="$(find "$POD_CODEX_HOME/sessions" -type f \
+  -name "rollout-*-${POD_CODEX_CONVERSATION}.jsonl" -print -quit 2>/dev/null || true)"
+[ -n "$rollout" ] || die "no rollout-*-${POD_CODEX_CONVERSATION}.jsonl under the pod's CODEX_HOME"
+echo "pod-codex-smoke: rollout: ${rollout#"$POD_CODEX_HOME"/}"
+echo "pod-codex-smoke: PASS — the generated line ran a shell tool call in the pod image with no bwrap error and no approval menu, and Codex named its rollout for ${POD_CODEX_CONVERSATION}"
