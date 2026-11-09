@@ -1762,6 +1762,52 @@ fn date_part(value: &str, width: usize, min: u32, max: u32) -> Option<u32> {
         .filter(|n| (min..=max).contains(n))
 }
 
+/// A denied bundle-file gate: the status to return and its fixed reason.
+#[derive(Clone, Copy, Debug)]
+struct BundleGateDenial {
+    status: StatusCode,
+    reason: &'static str,
+}
+
+/// The account a bundle-file write is attributed to. A Codex rollout belongs
+/// to the conversation, not an account, so its writeback may name no account
+/// (WI-3867). Everything else stays bound to the account this session holds.
+fn bundle_account<'a>(
+    summary_account: Option<&'a str>,
+    payload_account: &'a str,
+    kind: BundleFileKind,
+    path: &str,
+) -> Result<&'a str, BundleGateDenial> {
+    let codex_transcript =
+        kind == BundleFileKind::Transcript && transcript_layout(path) == TranscriptLayout::Codex;
+    match summary_account {
+        Some(account) if account == payload_account => Ok(account),
+        _ if codex_transcript && payload_account.is_empty() => Ok(payload_account),
+        _ => Err(BundleGateDenial {
+            status: StatusCode::FORBIDDEN,
+            reason: "bundle-file account is not owned by this session",
+        }),
+    }
+}
+
+/// A transcript belongs to the session's conversation. The login and the
+/// global config belong to the account, so a session with no conversation
+/// pinned yet may still write them back (WI-3334).
+fn bundle_conversation<'a>(
+    owned: Option<&'a str>,
+    kind: BundleFileKind,
+    payload_conversation: &'a str,
+) -> Result<&'a str, BundleGateDenial> {
+    match owned {
+        Some(id) if id == payload_conversation => Ok(id),
+        None if kind != BundleFileKind::Transcript && payload_conversation.is_empty() => Ok(""),
+        _ => Err(BundleGateDenial {
+            status: StatusCode::FORBIDDEN,
+            reason: "bundle-file conversation is not owned by this session",
+        }),
+    }
+}
+
 /// Store a file from the Claude account bundle. The request carries base64 so
 /// JSON remains safe for credentials and JSONL alike; neither the payload nor
 /// its decoded contents are logged.
@@ -1833,38 +1879,19 @@ pub async fn store_bundle_file(
     let Some(summary) = state.sessions.summary_of(session_id) else {
         return ApiError::Unauthorized.into_response();
     };
-    // A Codex rollout belongs to the conversation, not an account, so its
-    // writeback may name no account (WI-3867). Everything else stays bound to
-    // the account this session holds.
-    let codex_transcript = payload.kind == BundleFileKind::Transcript
-        && transcript_layout(&payload.path) == TranscriptLayout::Codex;
-    let account = match summary.account.as_deref() {
-        Some(account) if account == payload.account => account,
-        _ if codex_transcript && payload.account.is_empty() => payload.account.as_str(),
-        _ => {
-            return refusal(
-                StatusCode::FORBIDDEN,
-                "bundle-file account is not owned by this session",
-            )
-        }
+    let account = match bundle_account(
+        summary.account.as_deref(),
+        &payload.account,
+        payload.kind,
+        &payload.path,
+    ) {
+        Ok(account) => account,
+        Err(denial) => return refusal(denial.status, denial.reason),
     };
-    // A transcript belongs to the session's conversation. The login and the
-    // global config belong to the account, so a session with no conversation
-    // pinned yet may still write them back (WI-3334).
     let owned = summary.conversation.as_ref().map(|c| c.id.as_str());
-    let conversation = match owned {
-        Some(id) if id == payload.conversation_id => id,
-        None if payload.kind != BundleFileKind::Transcript
-            && payload.conversation_id.is_empty() =>
-        {
-            ""
-        }
-        _ => {
-            return refusal(
-                StatusCode::FORBIDDEN,
-                "bundle-file conversation is not owned by this session",
-            )
-        }
+    let conversation = match bundle_conversation(owned, payload.kind, &payload.conversation_id) {
+        Ok(conversation) => conversation,
+        Err(denial) => return refusal(denial.status, denial.reason),
     };
     let bytes =
         match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, payload.bytes) {
@@ -3427,6 +3454,122 @@ mod tests {
         assert!(
             !home.path().join("sessions").exists(),
             "a refused path wrote something"
+        );
+    }
+
+    fn forbidden(result: Result<&str, BundleGateDenial>) -> StatusCode {
+        result.expect_err("the write was accepted").status
+    }
+
+    #[test]
+    fn an_empty_account_cannot_write_a_claude_transcript() {
+        // (a) Only a Codex rollout may name no account; a Claude-layout
+        // transcript still belongs to the account this session holds.
+        assert_eq!(
+            forbidden(bundle_account(
+                Some("acct"),
+                "",
+                BundleFileKind::Transcript,
+                "projects/work/conv.jsonl",
+            )),
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    #[test]
+    fn an_empty_account_cannot_write_credentials_or_config() {
+        // (b) The login and global config always belong to an account.
+        for path in [".credentials.json", ".claude.json"] {
+            let kind = if path == ".credentials.json" {
+                BundleFileKind::Credentials
+            } else {
+                BundleFileKind::Config
+            };
+            assert_eq!(
+                forbidden(bundle_account(Some("acct"), "", kind, path)),
+                StatusCode::FORBIDDEN,
+                "{path} was accepted with no account"
+            );
+        }
+    }
+
+    #[test]
+    fn a_codex_rollout_with_a_foreign_account_is_refused() {
+        // (c) The empty-account exception does not admit someone else's.
+        for summary_account in [Some("acct"), None] {
+            assert_eq!(
+                forbidden(bundle_account(
+                    summary_account,
+                    "other",
+                    BundleFileKind::Transcript,
+                    CODEX_ROLLOUT,
+                )),
+                StatusCode::FORBIDDEN,
+                "a foreign account was accepted from {summary_account:?}"
+            );
+        }
+        // And the one accepted empty-account case stays accepted.
+        assert_eq!(
+            bundle_account(Some("acct"), "", BundleFileKind::Transcript, CODEX_ROLLOUT).unwrap(),
+            ""
+        );
+    }
+
+    #[test]
+    fn a_codex_rollout_for_another_conversation_is_refused() {
+        // (d) A rollout belongs to a conversation, and a session may only
+        // write its own.
+        assert_eq!(
+            forbidden(bundle_conversation(
+                Some("conv"),
+                BundleFileKind::Transcript,
+                "other",
+            )),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            forbidden(bundle_conversation(
+                None,
+                BundleFileKind::Transcript,
+                "conv",
+            )),
+            StatusCode::FORBIDDEN,
+            "a transcript with no pinned conversation was accepted"
+        );
+        assert!(!codex_rollout_path(
+            "conv",
+            "sessions/2026/11/09/rollout-x-other.jsonl"
+        ));
+    }
+
+    #[test]
+    fn a_claude_transcript_from_a_foreign_account_is_refused() {
+        // (e) The Codex exception did not loosen Claude's account gate.
+        assert_eq!(
+            forbidden(bundle_account(
+                Some("acct"),
+                "other",
+                BundleFileKind::Transcript,
+                "projects/work/conv.jsonl",
+            )),
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    #[test]
+    fn an_account_write_without_a_conversation_stays_allowed() {
+        // The WI-3334 behaviour the new gate must preserve.
+        assert_eq!(
+            bundle_conversation(None, BundleFileKind::Credentials, "").unwrap(),
+            ""
+        );
+        assert_eq!(
+            forbidden(bundle_conversation(
+                None,
+                BundleFileKind::Credentials,
+                "conv",
+            )),
+            StatusCode::FORBIDDEN
         );
     }
 
