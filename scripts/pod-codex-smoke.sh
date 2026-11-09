@@ -14,8 +14,10 @@
 # It generates the line with the session agent's own `command_line` (through
 # `engine/session-agent/examples/print_command_line.rs`) and then drives that
 # line under a PTY in the image with the pod's security context: uid 1000,
-# `--cap-drop ALL`, `no-new-privileges`, a git checkout at `/work`, and a
-# `~/.codex/config.toml` carrying a provider as the bootstrap supplies one.
+# `--cap-drop ALL`, `no-new-privileges`, a read-only root filesystem with the
+# same writable emptyDir paths the pod gets (`/home/vogt`, `/tmp`, `/work`,
+# `/run/vogt`), a git checkout at `/work`, and a `~/.codex/config.toml`
+# carrying a provider as the bootstrap supplies one.
 # The model is asked to run `echo PONG`; the screen must show the tool result,
 # no `bwrap` error and no approval menu.
 #
@@ -175,6 +177,12 @@ exec sh -lc "$POD_CODEX_LINE"
 cmd = [
     "docker", "run", "--rm", "-it", "--user", "1000:1000",
     "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+    # The pod's read-only root: only the paths the engine mounts as emptyDir
+    # are writable here too, so a launch that needs another path fails here.
+    "--read-only",
+    "--tmpfs", "/home/vogt:rw,mode=0755,uid=1000,gid=1000",
+    "--tmpfs", "/tmp:rw,mode=1777",
+    "--tmpfs", "/run/vogt:rw,mode=0700,uid=1000,gid=1000",
     "-e", "TERM=xterm-256color",
     "-e", "POD_CODEX_LINE=" + line,
     "--tmpfs", "/work:rw,exec,mode=0755,uid=1000,gid=1000",
