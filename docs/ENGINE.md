@@ -3316,8 +3316,14 @@ A pod template whose command names an agent CLI (`claude`, `codex` or
 `opencode`, bare or behind `vogt-agent-auth run --`) sets the pod's
 `VOGT_CLI` to that CLI and passes no argv. The session agent builds the
 command line, with the driven-session policy, the MCP set and the
-conversation. Any other command runs as given (`VOGT_SESSION_COMMAND`), and no
-command uses `ENGINE_POD_CLI` (default `codex`).
+conversation. For Codex it also applies the posture the engine carries in
+`VOGT_PERMISSION_MODE` and `VOGT_CODEX_APPROVAL_POLICY` through the same
+`codex_permission_flags` a host launch uses: every posture names
+`-s danger-full-access`, because a pod cannot create the user namespace
+`workspace-write` needs, and the default posture pins `-a never` so a driven
+worker does not stop at an approval menu (WI-3864). Any other command runs as
+given (`VOGT_SESSION_COMMAND`), and no command uses `ENGINE_POD_CLI` (default
+`codex`).
 
 Engines can share the namespace (dev and prod, or an old process during a
 rollout), so ownership is explicit:
@@ -4785,7 +4791,11 @@ needs only `create` on `secrets` (no `get`, `list`, `watch`, `update` or
 `VOGT_ENGINE_URL`, `VOGT_SESSION_ID`,
 `VOGT_SOURCE_JSON` (the session's source descriptor), `VOGT_CLI` (`claude`
 or `codex`), the source provider's env (for graft, `GRAFT_ENDPOINT` when
-known) and, when configured, `VOGT_EXTRA_CA_FILE`.
+known) and, when configured, `VOGT_EXTRA_CA_FILE`. Every pod also gets
+`VOGT_CODEX_APPROVAL_POLICY` (the engine's validated
+`ENGINE_CODEX_APPROVAL_POLICY`, `never` by default) and, for a posture other
+than the default, `VOGT_PERMISSION_MODE`; the session agent feeds both to the
+same `codex_permission_flags` the host launch uses (WI-3864).
 
 **Engine configuration** (`pod_backend.rs`; the graft rows are the graft source provider's, `graft_provider.rs`):
 
