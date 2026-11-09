@@ -3335,14 +3335,25 @@ as a path inside that clone: the engine resolves it against the checkout's git
 top level and sends the pod-side path as `VOGT_WORK_DIR` in the bootstrap
 response. A `cwd` outside any checkout is refused with a 400 naming `cwd`, and
 so is a `worktree`, which the pod would have to cut itself. The caller's extra
-environment travels in the same bootstrap response, never in the pod spec, and
-the entrypoint exports it for the agent process. A name the engine or the pod
-owns — `VOGT_*`, `PATH`, `HOME`, or a credential-shaped name — is refused with
-a 400 naming it, rather than shadowed or silently dropped; Vogt's own
-session-contract names (`VOGT_HTTP_TOKEN`, `VOGT_SESSION_ID`, `VOGT_WORK_ITEM`,
-`VOGT_URL`, `VOGT_ENGINE_URL`, `CLAUDE_CONFIG_DIR`, `VOGT_SESSION_IMAGE`) are
-skipped: vogt-core sends them on every start, and the engine sets its own
-value where the pod needs one rather than carrying a caller's.
+environment travels in the same bootstrap response, never in the pod spec, but
+in its own `agent_env` object rather than `env`: the entrypoint exports `env`
+before it clones, and a caller's `GRAFT_ENDPOINT` there would receive the
+minted source token. `agent_env` is applied only at the agent's final `exec`,
+after the clone and the git view, and a name the engine already set keeps the
+engine's value. A name the agent must not take from a caller is refused with a
+400 naming it: `VOGT_*`, `GRAFT_*`, `GIT_*`, `LD_*`, `BASH_ENV`, `ENV`,
+`NODE_OPTIONS`, `PYTHON*`, `PERL5*`, `RUBYOPT`, `*_PROXY`/`*_proxy`, `PATH`,
+`HOME`, `SHELL`, `IFS`, `CDPATH`, `PS4`, `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, and
+every credential-shaped name. So is a name that is not `[A-Z_][A-Z0-9_]*` and
+a value carrying NUL, newline or tab (the entrypoint reads one TSV row per
+variable). Vogt's own session-contract names (`VOGT_HTTP_TOKEN`,
+`VOGT_SESSION_ID`, `VOGT_WORK_ITEM`, `VOGT_URL`, `VOGT_ENGINE_URL`,
+`CLAUDE_CONFIG_DIR`, `VOGT_SESSION_IMAGE`) are skipped, not refused: vogt-core
+sends them on every start, and the engine sets its own value where the pod
+needs one rather than carrying a caller's. A wake, or an engine restart
+adopting a running pod, replays a record validated when its session started,
+so a field that no longer passes (a checkout since removed, say) is left out
+instead of refusing the wake.
 
 Engines can share the namespace (dev and prod, or an old process during a
 rollout), so ownership is explicit:

@@ -179,16 +179,24 @@ fn validate_pod_placement_fields(worktree: bool) -> Result<()> {
 }
 
 /// The extra environment a pod can carry from the session spec (WI-3883). The
-/// bootstrap response hands it to the entrypoint, which exports it for the
-/// agent process, so it never enters the Kubernetes object.
+/// bootstrap response hands it to the entrypoint as `agent_env`, which applies
+/// it only at the final `exec` of the agent — after the clone and every step
+/// that uses a credential — so it never enters the Kubernetes object and can
+/// never steer `graft clone` (WI-3883 review: a caller could otherwise set
+/// `GRAFT_ENDPOINT` and receive the minted source token).
 ///
-/// Names the engine or the pod owns are reserved: `VOGT_*` (the engine sets
-/// those itself), `PATH` and `HOME`, and credential-shaped names (the session
-/// already carries its own credentials). A caller naming one is refused
-/// rather than shadowed. Vogt's session-contract variables are skipped, not
-/// refused: vogt-core sends them on every start, and the engine sets its own
-/// value where the pod needs one (the launch's `VOGT_WORK_DIR` above all)
-/// rather than carrying a caller's.
+/// A name is refused, and named, when the agent itself must not receive it:
+/// the engine's own prefixes (`VOGT_*`, `GRAFT_*`, `GIT_*`), loader and
+/// interpreter hooks (`LD_*`, `BASH_ENV`, `ENV`, `NODE_OPTIONS`, `PYTHON*`,
+/// `PERL5_*`, `RUBYOPT`), proxy variables, the shell's own `PATH`, `HOME`,
+/// `SHELL`, `IFS`, `CDPATH`, `PS4`, the agents' config homes, and every
+/// credential-shaped name (the session already carries its own credentials).
+/// A name that is not `[A-Z_][A-Z0-9_]*`, or a value carrying NUL, newline or
+/// tab, is refused too: the value travels as a TSV row the entrypoint reads.
+/// Vogt's session-contract variables are skipped, not refused: vogt-core
+/// sends them on every start, and the engine sets its own value where the pod
+/// needs one (the launch's `VOGT_WORK_DIR` above all) rather than carrying a
+/// caller's.
 fn pod_carry_env(env: &[(String, String)]) -> Result<Vec<(String, String)>> {
     let mut carried = Vec::new();
     for (name, value) in env {
@@ -198,22 +206,78 @@ fn pod_carry_env(env: &[(String, String)]) -> Result<Vec<(String, String)>> {
         let mut chars = name.chars();
         let valid = chars
             .next()
-            .is_some_and(|c| c == '_' || c.is_ascii_alphabetic())
-            && chars.all(|c| c == '_' || c.is_ascii_alphanumeric());
+            .is_some_and(|c| c == '_' || c.is_ascii_uppercase())
+            && chars.all(|c| c == '_' || c.is_ascii_uppercase() || c.is_ascii_digit());
         if !valid {
             return Err(ApiError::BadRequest(format!(
-                "placement \"pod\" cannot carry env {name:?}: not an environment name"
+                "placement \"pod\" cannot carry env {name:?}: not an uppercase environment name ([A-Z_][A-Z0-9_]*)"
             )));
         }
-        if name.starts_with("VOGT_") || name == "PATH" || name == "HOME" || pty::is_secret_env(name)
+        if reserved_pod_env_name(name) {
+            return Err(ApiError::BadRequest(format!(
+                "placement \"pod\" reserves env {name:?}: the engine, the pod or the agent owns it"
+            )));
+        }
+        if value
+            .chars()
+            .any(|c| matches!(c, '\0' | '\n' | '\r' | '\t'))
         {
             return Err(ApiError::BadRequest(format!(
-                "placement \"pod\" reserves env {name:?}: the engine or the pod sets it, so a caller value would be shadowed"
+                "placement \"pod\" cannot carry env {name:?}: its value contains a NUL, newline or tab"
             )));
         }
         carried.push((name.clone(), value.clone()));
     }
     Ok(carried)
+}
+
+/// A name the pod's agent must never take from a caller (WI-3883 review). The
+/// prefixes cover the engine's own contract, the source credentials graft and
+/// git read, the dynamic loader, and Python's and Perl's import paths; the
+/// exact names are process settings whose value a session owner could use to
+/// run their own code or move a credential lookup.
+fn reserved_pod_env_name(name: &str) -> bool {
+    const EXACT: &[&str] = &[
+        "PATH",
+        "HOME",
+        "SHELL",
+        "IFS",
+        "CDPATH",
+        "PS4",
+        "BASH_ENV",
+        "ENV",
+        "NODE_OPTIONS",
+        "RUBYOPT",
+        "CODEX_HOME",
+        "CLAUDE_CONFIG_DIR",
+    ];
+    const PREFIXES: &[&str] = &["VOGT_", "GRAFT_", "GIT_", "LD_", "PYTHON", "PERL5"];
+    EXACT.contains(&name)
+        || PREFIXES.iter().any(|prefix| name.starts_with(prefix))
+        || name.ends_with("_PROXY")
+        || name.ends_with("_proxy")
+        || pty::is_secret_env(name)
+}
+
+/// The same carry, for a record a wake or an engine restart replays: that
+/// record was validated when its session started, so a value that no longer
+/// passes today (say, a since-removed checkout, or a name this release
+/// tightened) is left out instead of refusing the wake. Dropping is the old
+/// behaviour a pod had for every caller field, and a wake must not fail for a
+/// start that already happened.
+fn pod_carry_recorded(
+    env: &[(String, String)],
+    cwd: Option<&str>,
+) -> (Vec<(String, String)>, Option<String>) {
+    let carried = env
+        .iter()
+        .filter_map(|(name, value)| {
+            pod_carry_env(&[(name.clone(), value.clone())])
+                .ok()
+                .and_then(|mut one| one.pop())
+        })
+        .collect();
+    (carried, cwd.and_then(|dir| pod_work_dir(dir).ok()))
 }
 
 /// The pod-side working directory for a requested `cwd` (WI-3883): its place
@@ -1201,9 +1265,21 @@ impl SessionRegistry {
             validate_pod_placement_fields(worktree.is_some())?;
         }
         let pod_launch = if pod_backed {
+            // A wake (or an engine restart adopting a pod) replays a record
+            // whose cwd and env were validated when the session started, so
+            // it must not refuse now: a checkout removed since, or a name
+            // this release tightened, drops that one field instead (WI-3883
+            // review). A fresh start validates strictly and refuses.
+            let (agent_env, work_dir) = match recorded {
+                Some(_) => pod_carry_recorded(&base_env, spec.cwd.as_deref()),
+                None => (
+                    pod_carry_env(&base_env)?,
+                    spec.cwd.as_deref().map(pod_work_dir).transpose()?,
+                ),
+            };
             Some(crate::agent_stream::PodLaunch {
-                env: pod_carry_env(&base_env)?,
-                work_dir: spec.cwd.as_deref().map(pod_work_dir).transpose()?,
+                agent_env,
+                work_dir,
             })
         } else {
             None
@@ -3826,7 +3902,7 @@ fn wake_settings_file<'a>(
 #[cfg(test)]
 mod tests {
     use super::{
-        normalize_session_name, pod_carry_env, validate_codex_placement,
+        normalize_session_name, pod_carry_env, pod_carry_recorded, validate_codex_placement,
         validate_placement_template_requirement, validate_pod_placement_fields,
         validate_requested_placement, validate_template_placement,
     };
@@ -3903,10 +3979,46 @@ mod tests {
             "GH_TOKEN",
             "1BAD",
             "BAD-NAME",
+            "lowercase",
+            "GRAFT_ENDPOINT",
+            "GIT_DIR",
+            "LD_PRELOAD",
+            "BASH_ENV",
+            "NODE_OPTIONS",
+            "PYTHONPATH",
+            "PERL5LIB",
+            "RUBYOPT",
+            "HTTPS_PROXY",
+            "CODEX_HOME",
+            "SHELL",
+            "IFS",
         ] {
             let error = pod_carry_env(&[(name.to_string(), "x".to_string())]).unwrap_err();
             assert!(error.to_string().contains(name), "{name}: {error}");
         }
+        for value in ["a\nb", "a\tb", "a\0b"] {
+            let error =
+                pod_carry_env(&[("CARGO_BUILD_JOBS".to_string(), value.to_string())]).unwrap_err();
+            assert!(error.to_string().contains("newline"), "{value:?}: {error}");
+            assert!(error.to_string().contains("CARGO_BUILD_JOBS"), "{error}");
+        }
+    }
+
+    #[test]
+    fn a_recorded_launch_drops_what_it_cannot_carry_instead_of_refusing() {
+        // A wake replays what a start already validated: a name this release
+        // tightened, or a checkout since removed, is left out, not a 400.
+        let env = vec![
+            ("CARGO_BUILD_JOBS".to_string(), "4".to_string()),
+            ("GRAFT_ENDPOINT".to_string(), "http://old".to_string()),
+        ];
+        assert_eq!(
+            pod_carry_recorded(&env, Some("/no/such/checkout")),
+            (
+                vec![("CARGO_BUILD_JOBS".to_string(), "4".to_string())],
+                None
+            )
+        );
     }
 
     #[test]
