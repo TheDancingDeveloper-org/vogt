@@ -820,16 +820,20 @@ pub fn command_line(config: &Config) -> Result<String, AgentError> {
         }
         // No `--add-dir`: Codex's effective sandbox refuses extra writable
         // roots and exits. The PTY already starts in the session cwd, which
-        // is the workspace root Codex uses. The explicit trust setting keeps
-        // a fresh pod from stopping at Codex's interactive folder-trust
-        // screen before it can read its brief.
+        // is the workspace root Codex uses. The explicit trust setting and
+        // skip-git-repo-check keep a fresh pod from stopping at Codex's
+        // interactive folder-trust screen before it can read its brief. The
+        // pod's git view is deliberately not a writable checkout.
         "codex" => {
             let cwd = config.cwd.as_deref().unwrap_or(DEFAULT_WORK_DIR);
             let setting = format!(
                 "projects.{}.trust_level=\"trusted\"",
                 toml_basic_string(cwd)
             );
-            Ok(format!("codex -c {}", sh_quote(Path::new(&setting))))
+            Ok(format!(
+                "codex -c {} --skip-git-repo-check",
+                sh_quote(Path::new(&setting))
+            ))
         }
         "opencode" => Ok("opencode".into()),
         _ => Err(AgentError::Pty(
@@ -1684,7 +1688,7 @@ mod tests {
         config.cli = "codex".into();
         assert_eq!(
             command_line(&config).unwrap(),
-            r#"codex -c 'projects."/work".trust_level="trusted"'"#
+            r#"codex -c 'projects."/work".trust_level="trusted"' --skip-git-repo-check"#
         );
         config.cli = "nope".into();
         assert!(command_line(&config).is_err());
