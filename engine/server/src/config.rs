@@ -91,6 +91,11 @@ pub struct SessionTemplate {
     /// templates derive it when their default backend is moved to pods.
     #[serde(default)]
     pub host_capable: bool,
+    /// The mirror of `host_capable`: a host-default template that may also
+    /// run in a pod when a caller asks for `placement=pod`. Its default stays
+    /// the host, so adding this changes no existing start.
+    #[serde(default)]
+    pub pod_capable: bool,
 }
 
 fn default_session_backend() -> String {
@@ -126,6 +131,18 @@ fn default_templates_backend(pod_backends_enabled: bool) -> Result<String> {
 }
 
 impl SessionTemplate {
+    /// Whether this template may run in a pod: pod is either its default or
+    /// an opt-in the deployment (or caller) stated.
+    pub fn supports_pod(&self) -> bool {
+        self.backend == "pod" || self.pod_capable
+    }
+
+    /// Whether this template may run on the host: host is either its default
+    /// or an opt-in.
+    pub fn supports_host(&self) -> bool {
+        self.backend != "pod" || self.host_capable
+    }
+
     /// The built-in templates with every `local` one moved to `backend`.
     pub fn default_templates_on(backend: &str) -> Vec<Self> {
         let mut templates = Self::default_templates();
@@ -156,6 +173,7 @@ impl SessionTemplate {
                 account: None,
                 backend: default_session_backend(),
                 host_capable: false,
+                pod_capable: false,
             },
             // Runs in a pod; refused unless pod backends are enabled. No
             // command, so the image's entrypoint boots the CLI.
@@ -172,6 +190,7 @@ impl SessionTemplate {
                 account: None,
                 backend: "pod".to_string(),
                 host_capable: false,
+                pod_capable: false,
             },
             SessionTemplate {
                 name: "Node Dev".to_string(),
@@ -186,6 +205,7 @@ impl SessionTemplate {
                 account: None,
                 backend: default_session_backend(),
                 host_capable: false,
+                pod_capable: false,
             },
             SessionTemplate {
                 name: "Rust Build".to_string(),
@@ -200,6 +220,7 @@ impl SessionTemplate {
                 account: None,
                 backend: default_session_backend(),
                 host_capable: false,
+                pod_capable: false,
             },
             // Agent CLIs, wrapped in the credential broker explicitly.
             // Automatic agent-auth wraps only sessions created *without* a
@@ -223,6 +244,7 @@ impl SessionTemplate {
                 account: None,
                 backend: default_session_backend(),
                 host_capable: false,
+                pod_capable: false,
             },
             SessionTemplate {
                 name: "Codex (protected)".to_string(),
@@ -242,6 +264,11 @@ impl SessionTemplate {
                 account: None,
                 backend: default_session_backend(),
                 host_capable: false,
+                // Codex (protected) is the one built-in agent template that
+                // runs in a pod on request while its default stays the host
+                // (WI-3675, WI-3762): the pod image bakes the same driven
+                // policy and the session agent starts the CLI itself.
+                pod_capable: true,
             },
             SessionTemplate {
                 name: "OpenCode (protected)".to_string(),
@@ -262,6 +289,7 @@ impl SessionTemplate {
                 account: None,
                 backend: default_session_backend(),
                 host_capable: false,
+                pod_capable: false,
             },
             SessionTemplate {
                 name: "Python Env".to_string(),
@@ -276,6 +304,7 @@ impl SessionTemplate {
                 account: None,
                 backend: default_session_backend(),
                 host_capable: false,
+                pod_capable: false,
             },
         ]
     }
@@ -2488,6 +2517,21 @@ mod prefix_tests {
                 .host_capable,
             "local defaults are host-only"
         );
+        // WI-3762: Codex (protected) keeps the host default and opts into a
+        // pod on request; the other agent templates stay host-only.
+        let codex = cfg
+            .session_templates
+            .iter()
+            .find(|t| t.name == "Codex (protected)")
+            .unwrap();
+        assert_eq!(codex.backend, "local", "its default placement is unchanged");
+        assert!(codex.supports_pod() && codex.supports_host());
+        let claude = cfg
+            .session_templates
+            .iter()
+            .find(|t| t.name == "Claude Code (protected)")
+            .unwrap();
+        assert!(!claude.supports_pod(), "only Codex opted in");
         unsafe {
             std::env::set_var("VOGT_ENGINE_SESSION_BACKEND", "pod");
             std::env::set_var("ENGINE_POD_BACKENDS_ENABLED", "true");
