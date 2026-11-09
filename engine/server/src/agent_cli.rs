@@ -625,6 +625,34 @@ pub fn with_codex_guidance(
     Some(out)
 }
 
+/// `command` with Codex's project trust override for the session cwd inserted
+/// right after the Codex binary (WI-3815), or `None` when it is not a Codex
+/// launch or already carries the override. Pod sessions start in `/work`,
+/// which is a freshly-created checkout from Codex's point of view; without
+/// this non-interactive override Codex opens its folder-trust screen and a
+/// driven session exits before it can read its brief. The same explicit
+/// override is safe for host sessions and avoids editing a shared config.
+pub fn with_codex_trust(command: &[String], cwd: &Path) -> Option<Vec<String>> {
+    if agent_name(command).as_deref() != Some("codex") {
+        return None;
+    }
+    let key = crate::codex_guidance::toml_basic_string(&cwd.to_string_lossy());
+    let prefix = format!("projects.{key}.trust_level=");
+    if command.iter().any(|arg| arg.starts_with(&prefix)) {
+        return None;
+    }
+    let (idx, _) = agent_binary(command);
+    let mut out = command.to_vec();
+    out.splice(
+        idx + 1..idx + 1,
+        [
+            "-c".to_string(),
+            format!("projects.{key}.trust_level=\"trusted\""),
+        ],
+    );
+    Some(out)
+}
+
 /// `command` with one `-c model_providers.<name>=…` override per registered
 /// LLM provider inserted right after the Codex binary (WI-3491), or `None`
 /// when it is not a Codex launch or nothing is registered. The shared
@@ -785,6 +813,22 @@ mod tests {
         assert!(with_codex_guidance(&out, &repo, Some(&home)).is_none());
         let claude = vec!["claude".to_string()];
         assert!(with_codex_guidance(&claude, &repo, Some(&home)).is_none());
+    }
+
+    #[test]
+    fn codex_trust_is_an_explicit_cwd_override() {
+        let command: Vec<String> = ["vogt-agent-auth", "run", "--", "codex"]
+            .map(String::from)
+            .to_vec();
+        let cwd = Path::new("/work");
+        let out = with_codex_trust(&command, cwd).unwrap();
+        assert_eq!(&out[..4], &command[..4]);
+        assert_eq!(
+            &out[4..6],
+            ["-c", "projects.\"/work\".trust_level=\"trusted\""]
+        );
+        assert!(with_codex_trust(&out, cwd).is_none());
+        assert!(with_codex_trust(&["claude".to_string()], cwd).is_none());
     }
 
     fn instructions(arg: &str) -> String {
