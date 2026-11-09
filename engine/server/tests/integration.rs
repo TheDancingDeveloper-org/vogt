@@ -19601,25 +19601,20 @@ mod pod_stream {
         let minter = FakeMinter::new(Err("graft could not be reached to mint a session token"));
         install_minter(&h, minter.clone());
         let id = h.start().await;
-        tokio::time::timeout(Duration::from_secs(10), async {
-            while h.detail(id).await.summary.exit_code != Some(1) {
-                tokio::time::sleep(Duration::from_millis(25)).await;
-            }
-        })
-        .await
-        .expect("a failed mint ends the session");
-        // The exit code can land before the note reaches the scrollback.
-        let out = tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                let out = String::from_utf8_lossy(&h.scrollback(id).await).into_owned();
-                if !out.is_empty() {
-                    break out;
-                }
-                tokio::time::sleep(Duration::from_millis(25)).await;
-            }
-        })
-        .await
-        .expect("the failed mint is reported in the session's output");
+        // The exit code can land before the note reaches the scrollback, and
+        // the note can arrive in more than one chunk. Poll for the text itself,
+        // not for a non-empty scrollback (WI-3289, the same race as WI-3286).
+        let sid = id.to_string();
+        let out = super::session_output_after_exit(
+            &h.client,
+            &h.base,
+            &sid,
+            &[
+                "session pod could not be created",
+                "graft could not be reached",
+            ],
+        )
+        .await;
         assert!(out.contains("session pod could not be created"), "{out}");
         assert!(out.contains("graft could not be reached"), "{out}");
         assert_eq!(minter.grants.lock().unwrap().len(), 1);
@@ -19692,14 +19687,17 @@ mod pod_stream {
     async fn a_pod_that_cannot_be_created_ends_the_session() {
         let h = harness(true).await;
         let id = h.start().await;
-        tokio::time::timeout(Duration::from_secs(10), async {
-            while h.detail(id).await.summary.exit_code != Some(1) {
-                tokio::time::sleep(Duration::from_millis(25)).await;
-            }
-        })
-        .await
-        .expect("a failed pod creation ends the session");
-        let out = String::from_utf8_lossy(&h.scrollback(id).await).into_owned();
+        // A failed create reports the same way as a failed mint: the exit
+        // code can be visible before the note is, so wait for the text
+        // (WI-3289).
+        let sid = id.to_string();
+        let out = super::session_output_after_exit(
+            &h.client,
+            &h.base,
+            &sid,
+            &["session pod could not be created"],
+        )
+        .await;
         assert!(out.contains("session pod could not be created"), "{out}");
     }
 
