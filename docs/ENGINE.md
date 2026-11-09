@@ -4678,7 +4678,12 @@ refresh on the account. `.claude.json` writes must carry a `version` (the
 file's mtime in ms, no more than ten minutes ahead of the engine's clock) that
 is newer than the last accepted one, which is persisted beside the file
 (`.claude.json.version`) so the check survives a restart. Transcripts are
-append-only deltas at an expected offset. Every refusal is audited on
+append-only deltas at an expected offset. Claude keeps its account path
+(`projects/…`); a Codex rollout is the contract path
+`sessions/<YYYY>/<MM>/<DD>/rollout-…-<conversation>.jsonl` under
+`ENGINE_CODEX_TRANSCRIPT_ROOT` (default `$CODEX_HOME`, else `$HOME/.codex`),
+and its write-back may name an empty account because the rollout belongs to
+the conversation. Every refusal is audited on
 `vogt::audit` by session id, account, file and reason, and an accepted write by
 name and byte length. Never a value.
 
