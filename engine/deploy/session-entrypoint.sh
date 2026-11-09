@@ -29,8 +29,9 @@ bootstrap_token=$(cat "$VOGT_BOOTSTRAP_TOKEN_FILE")
 [ -n "$bootstrap_token" ] || fail "bootstrap token file $VOGT_BOOTSTRAP_TOKEN_FILE is empty"
 printf 'header = "Authorization: Bearer %s"\n' "$bootstrap_token" >"$auth"
 # shellcheck disable=SC2153 # VOGT_SESSION_ID is validated by need() above
-jq -n --arg session_id "$VOGT_SESSION_ID" --arg cli "$VOGT_CLI" --argjson source "$VOGT_SOURCE_JSON" --arg extra_ca_file "${VOGT_EXTRA_CA_FILE:-}" \
+jq -n --arg session_id "$VOGT_SESSION_ID" --arg cli "$VOGT_CLI" --arg model "${VOGT_MODEL:-}" --argjson source "$VOGT_SOURCE_JSON" --arg extra_ca_file "${VOGT_EXTRA_CA_FILE:-}" \
   '{session_id: $session_id, source: $source, cli: $cli}
+   + (if $model == "" then {} else {model: $model} end)
    + (if $extra_ca_file == "" then {} else {extra_ca_file: $extra_ca_file} end)' >"$request"
 unset bootstrap_token VOGT_BOOTSTRAP_TOKEN_FILE
 url="${VOGT_ENGINE_URL%/}/api/agent-auth/bootstrap"
