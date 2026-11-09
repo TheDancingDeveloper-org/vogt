@@ -60,10 +60,14 @@ jq -r '.session_token' "$response" >"$token_file"; chmod 600 "$token_file"; expo
 step=account-bundle; say account-bundle
 CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR:-$HOME/.claude-account}; export CLAUDE_CONFIG_DIR
 mkdir -p "$CLAUDE_CONFIG_DIR"; chmod 700 "$CLAUDE_CONFIG_DIR"
+codex_home=${CODEX_HOME:-$HOME/.codex}
 jq -r '.bundle // {} | to_entries[] | [.key, .value] | @tsv' "$response" >"$tmp_dir/bundle.tsv"
 while IFS="$(printf '\t')" read -r path encoded; do
   case "$path" in ''|/*|../*|*/../*|*/..) fail 'bootstrap returned an unsafe bundle path' ;; esac
-  dest="$CLAUDE_CONFIG_DIR/$path"; mkdir -p "$(dirname "$dest")"; chmod 700 "$(dirname "$dest")"
+  # A Codex rollout travels at its path contract under Codex's own home; every
+  # other bundle file is Claude's (WI-3868).
+  case "$path" in sessions/*) dest="$codex_home/$path" ;; *) dest="$CLAUDE_CONFIG_DIR/$path" ;; esac
+  mkdir -p "$(dirname "$dest")"; chmod 700 "$(dirname "$dest")"
   printf '%s' "$encoded" | base64 -d >"$dest" || fail 'bootstrap returned invalid bundle data'; chmod 600 "$dest"
 done <"$tmp_dir/bundle.tsv"
 step=brokered-env; say brokered-env
@@ -117,7 +121,7 @@ fi
 # environment variable, so no credential is written. An existing config keeps
 # its own settings: the engine's servers replace only the tables it owns.
 if [ "$VOGT_CLI" = codex ] && [ -n "$(jq -r '.codex_config // empty' "$response")" ]; then
-  codex_home=${CODEX_HOME:-$HOME/.codex}; mkdir -p "$codex_home"; chmod 700 "$codex_home"
+  mkdir -p "$codex_home"; chmod 700 "$codex_home"
   codex_cfg="$codex_home/config.toml"
   # The LLM providers the engine registered for this launch (WI-3491) replace
   # any table of the same name: the merged file must not declare one twice.

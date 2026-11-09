@@ -36,8 +36,9 @@ graft=""; [ -z "${GRAFT_TOKEN:-}" ] || graft=$(printf ',"source_token":"%s"' "$G
 [ -z "${MCP_CONFIG:-}" ] || graft="$graft,\"mcp_config\":$MCP_CONFIG"
 [ -z "${CODEX_CONFIG:-}" ] || graft="$graft,\"codex_config\":$(printf %s "$CODEX_CONFIG" | jq -Rs .)"
 [ -z "${OPENCODE_CONFIG:-}" ] || graft="$graft,\"opencode_config\":$OPENCODE_CONFIG"
-printf '{"session_token":"%s"%s,"source":%s,"bundle":{"sub/.credentials.json":"%s"},"env":{"VOGT_SESSION_ID":"s1","VOGT_BOOTSTRAP_TOKEN":"%s","EXTRA":"yes"},"brief":"hello brief"}' \
-  "$(cat "$CASE_DIR/session")" "$graft" "$SOURCE_JSON" "$(printf bundle | base64)" "$(cat "$CASE_DIR/boot")"
+bundle=${BUNDLE_JSON:-"{\"sub/.credentials.json\":\"$(printf bundle | base64)\"}"}
+printf '{"session_token":"%s"%s,"source":%s,"bundle":%s,"env":{"VOGT_SESSION_ID":"s1","VOGT_BOOTSTRAP_TOKEN":"%s","EXTRA":"yes"},"brief":"hello brief"}' \
+  "$(cat "$CASE_DIR/session")" "$graft" "$SOURCE_JSON" "$bundle" "$(cat "$CASE_DIR/boot")"
 SH
   cat >"$dir/bin/graft" <<'SH'
 #!/bin/sh
@@ -177,6 +178,18 @@ posture=$(run_case "$tmp/posture2" VOGT_CLAUDE_SETTINGS_FILE="$tmp/policy.json" 
 run_case "$tmp/codex" VOGT_CLI=codex MCP_CONFIG="$MCP" >/dev/null 2>&1 || fail "codex path"
 [ ! -e "$tmp/codex/vogt-policy-hook.calls" ] || fail "claude hooks installed for codex"
 [ ! -e "$tmp/codex/run/mcp.json" ] || fail "mcp config written for codex"
+# WI-3868: a Codex rollout in the bundle is restored under the pod's Codex
+# home at its path contract; other bundle files stay Claude's.
+CODEX_BUNDLE='{"sessions/2026/11/09/rollout-2026-11-09T00-00-00-s1.jsonl":"'"$(printf rollout | base64)"'","sub/.credentials.json":"'"$(printf bundle | base64)"'"}'
+out=$(run_case "$tmp/codexbundle" VOGT_CLI=codex BUNDLE_JSON="$CODEX_BUNDLE" 2>&1) || fail "codex bundle path: $out"
+rolled="$tmp/codexbundle/home/.codex/sessions/2026/11/09/rollout-2026-11-09T00-00-00-s1.jsonl"
+[[ $(<"$rolled") == rollout ]] || fail "codex rollout not restored under CODEX_HOME"
+[[ $(stat -c %a "$rolled") == 600 ]] || fail "codex rollout mode"
+[ ! -e "$tmp/codexbundle/claude/sessions" ] || fail "codex rollout written under the Claude directory"
+[[ $(<"$tmp/codexbundle/claude/sub/.credentials.json") == bundle ]] || fail "claude bundle file not restored"
+out=$(run_case "$tmp/codexhome" VOGT_CLI=codex CODEX_HOME="$tmp/codexhome/codex" BUNDLE_JSON="$CODEX_BUNDLE" 2>&1) || fail "explicit CODEX_HOME path: $out"
+[[ $(<"$tmp/codexhome/codex/sessions/2026/11/09/rollout-2026-11-09T00-00-00-s1.jsonl") == rollout ]] || fail "codex rollout not restored under CODEX_HOME from the environment"
+[ ! -e "$tmp/codexhome/home/.codex/sessions" ] || fail "codex rollout written under the default home"
 # WI-3161: Codex gets the engine's MCP servers in $CODEX_HOME/config.toml,
 # replacing only the tables the engine owns; opencode gets opencode.json.
 # shellcheck disable=SC2016
