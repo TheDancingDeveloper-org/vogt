@@ -441,6 +441,7 @@ impl SessionRegistry {
                 &provider.pod_env(&source),
                 "session",
                 spec.account.as_deref(),
+                spec.model.as_deref(),
                 spec.command.as_deref().unwrap_or_default(),
             )
         });
