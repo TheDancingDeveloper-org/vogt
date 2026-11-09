@@ -148,6 +148,63 @@ fn validate_placement_template_requirement(
     Ok(())
 }
 
+/// Environment names a session spec carries for the engine's own reasons or
+/// for Vogt's session contract, never as a caller asking the pod for a value
+/// it cannot carry: the agent's core credential and id (WI-926), a named
+/// Claude account's config directory, a pod template's image choice, and the
+/// variables vogt-core puts on every start (`adapters/engine/client.py`).
+const SESSION_CONTRACT_ENV: &[&str] = &[
+    "VOGT_HTTP_TOKEN",
+    "VOGT_SESSION_ID",
+    "VOGT_WORK_ITEM",
+    "VOGT_URL",
+    "VOGT_ENGINE_URL",
+    "CLAUDE_CONFIG_DIR",
+    "VOGT_SESSION_IMAGE",
+];
+
+/// Fields a session pod cannot honour (WI-3883): it checks out the project's
+/// source at its own path and builds its environment from the source
+/// provider, so a caller's `worktree`, `cwd` and extra `env` would be
+/// dropped. Starting anyway would open the session somewhere the caller did
+/// not ask for, so they are refused and the field is named instead.
+///
+/// A deployment that moves a template's default to pods is the deployment's
+/// choice, and vogt-core names a `cwd` and its session-contract `env` on
+/// every start. Only a caller that asked for `placement=pod` itself is told
+/// those are dropped; refusing them for a template default would refuse
+/// every session on a pod-only deployment.
+fn validate_pod_placement_fields(
+    explicit_pod: bool,
+    cwd: Option<&str>,
+    worktree: bool,
+    env: Option<&[(String, String)]>,
+) -> Result<()> {
+    if worktree {
+        return Err(ApiError::BadRequest(
+            "placement \"pod\" does not support worktree: the pod checks out the project's source itself".into(),
+        ));
+    }
+    if !explicit_pod {
+        return Ok(());
+    }
+    if let Some(dir) = cwd {
+        return Err(ApiError::BadRequest(format!(
+            "placement \"pod\" does not support cwd {dir:?}: the pod works in the project's source checkout"
+        )));
+    }
+    if let Some((name, _)) = env
+        .unwrap_or_default()
+        .iter()
+        .find(|(name, _)| !SESSION_CONTRACT_ENV.contains(&name.as_str()))
+    {
+        return Err(ApiError::BadRequest(format!(
+            "placement \"pod\" does not support env {name:?}: the pod takes its environment from the source provider"
+        )));
+    }
+    Ok(())
+}
+
 pub struct SessionRegistry {
     cfg: Arc<Config>,
     bus: EventBus,
@@ -1016,6 +1073,9 @@ impl SessionRegistry {
         // conversation would move `cwd` to its transcript's directory, which
         // is not the checkout the caller named, so the two are refused
         // together rather than cut from somewhere unasked.
+        // What the caller asked for, before a resume or a worktree moves it:
+        // the pod placement refusal below names the field the request names.
+        let requested_cwd = spec.cwd.clone();
         let worktree = spec.worktree.take();
         if worktree.is_some() && spec.resume.as_deref().is_some_and(|r| !r.trim().is_empty()) {
             return Err(ApiError::BadRequest(
@@ -1092,6 +1152,18 @@ impl SessionRegistry {
         // boot and refuses Codex there (WI-3335).
         let pod_backed = self.cfg.pod_backends_enabled
             && self.runs_in_pod(spec.template.as_deref(), spec.placement.as_deref());
+        // A field a session pod cannot honour is refused on the start that
+        // asks for it, rather than silently dropped (WI-3883). A wake replays
+        // engine state rather than a request, so its recorded values are left
+        // alone.
+        if pod_backed && matches!(&creating, Creating::Fresh(_)) {
+            validate_pod_placement_fields(
+                spec.placement.as_deref() == Some("pod"),
+                requested_cwd.as_deref(),
+                worktree.is_some(),
+                spec.env.as_deref(),
+            )?;
+        }
         // Placement is now effective: an omitted placement uses the template
         // or backend default, which is host for local/raw launches. Codex is
         // pod-only even when the caller did not spell out `placement=host`.
@@ -3711,7 +3783,7 @@ fn wake_settings_file<'a>(
 mod tests {
     use super::{
         normalize_session_name, validate_codex_placement, validate_placement_template_requirement,
-        validate_requested_placement, validate_template_placement,
+        validate_pod_placement_fields, validate_requested_placement, validate_template_placement,
     };
     use crate::config::SessionTemplate;
 
@@ -3758,6 +3830,40 @@ mod tests {
     fn pod_placement_requires_a_template() {
         let error = validate_placement_template_requirement(Some("pod"), None).unwrap_err();
         assert!(error.to_string().contains("requires a pod-backed template"));
+    }
+
+    #[test]
+    fn pod_placement_refuses_the_fields_a_pod_would_drop() {
+        let contract = vec![
+            ("VOGT_HTTP_TOKEN".to_string(), "t".to_string()),
+            ("VOGT_SESSION_ID".to_string(), "s".to_string()),
+            ("VOGT_WORK_ITEM".to_string(), "WI-1".to_string()),
+        ];
+        // A worktree is refused whichever way the pod default was chosen.
+        let error = validate_pod_placement_fields(false, None, true, Some(&contract)).unwrap_err();
+        assert!(error.to_string().contains("worktree"), "{error}");
+        // Explicit pod placement also refuses cwd and env, naming each.
+        let error =
+            validate_pod_placement_fields(true, Some("/checkout"), false, None).unwrap_err();
+        assert!(error.to_string().contains("cwd"), "{error}");
+        let mut env = contract.clone();
+        env.push(("FOO".into(), "bar".into()));
+        let error = validate_pod_placement_fields(true, None, false, Some(&env)).unwrap_err();
+        assert!(
+            error.to_string().contains("env") && error.to_string().contains("FOO"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn pod_placement_accepts_the_session_contract_and_a_template_default() {
+        let env = vec![
+            ("VOGT_HTTP_TOKEN".to_string(), "t".to_string()),
+            ("VOGT_SESSION_ID".to_string(), "s".to_string()),
+            ("VOGT_SESSION_IMAGE".to_string(), "img".to_string()),
+        ];
+        assert!(validate_pod_placement_fields(false, Some("/checkout"), false, Some(&env)).is_ok());
+        assert!(validate_pod_placement_fields(true, None, false, Some(&env)).is_ok());
     }
 
     #[test]
