@@ -98,7 +98,7 @@ run_case() {
     VOGT_ENGINE_URL=http://engine VOGT_SESSION_ID=s1 VOGT_BOOTSTRAP_TOKEN_FILE="$dir/bootstrap-token" \
     SOURCE_JSON='{"location":{"kind":"graft","endpoint":"http://graft","repo":"vogt"},"ref":"rust-2","landing":"line"}' \
     VOGT_SOURCE_JSON='{"location":{"kind":"graft","endpoint":"http://graft","repo":"vogt"},"ref":"rust-2","landing":"line"}' VOGT_CLI=claude \
-    VOGT_WORK_DIR="$dir/work" VOGT_SESSION_TOKEN_FILE="$dir/run/session-token" \
+    VOGT_CLONE_DIR="$dir/work" VOGT_WORK_DIR="$dir/work" VOGT_SESSION_TOKEN_FILE="$dir/run/session-token" \
     CLAUDE_CONFIG_DIR="$dir/claude" "$@" "$entry"
 }
 
@@ -163,6 +163,13 @@ run_case "$tmp/other-project" \
   GRAFT_TOKEN=other-graft-token >/dev/null 2>&1 || fail "other-project path"
 grep -q 'clone farmeggs '"$tmp/other-project/work"' --line backlog-1' "$tmp/other-project/graft.args" || fail "project source clone scope"
 ! grep -q 'clone vogt '"$tmp/other-project/work" "$tmp/other-project/graft.args" || fail "deployment repo leaked into project clone"
+
+# WI-3883: a cwd inside the clone runs the agent there, while the clone itself
+# stays at the root the bootstrap response names.
+mkdir -p "$tmp/subdir/work/engine"
+run_case "$tmp/subdir" VOGT_WORK_DIR="$tmp/subdir/work/engine" >/dev/null 2>&1 || fail "subdir cwd path"
+grep -q 'clone vogt '"$tmp/subdir/work"' --line rust-2' "$tmp/subdir/graft.args" || fail "subdir cwd moved the clone"
+grep -q "^VOGT_SESSION_CWD=$tmp/subdir/work/engine$" "$tmp/subdir/agent.env" || fail "agent cwd not the requested subdirectory"
 
 # Without a graft token the session token is what graft clones with. An
 # engine that sends no MCP config leaves the session agent nothing to pass.
