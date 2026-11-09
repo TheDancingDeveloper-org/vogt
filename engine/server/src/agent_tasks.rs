@@ -5180,6 +5180,7 @@ mod tests {
             agent_auth_helper: "/usr/local/bin/vogt-agent-auth".into(),
             codex_session_id: false,
             codex_approval_policy: "never".to_string(),
+            codex_transcript_root: None,
             agent_auth_secrets: vec![],
             agent_auth_secrets_file: None,
             llm_providers_file: None,
