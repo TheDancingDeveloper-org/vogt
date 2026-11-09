@@ -16995,13 +16995,17 @@ async fn a_registered_llm_provider_reaches_the_next_codex_launch_and_leaves_with
 }
 
 fn provider_request(name: &str, env_key: &str) -> Value {
+    provider_request_with_secret(name, env_key, "PROVIDER_KEY")
+}
+
+fn provider_request_with_secret(name: &str, env_key: &str, secret_name: &str) -> Value {
     json!({
         "name": name,
         "base_url": "https://provider.example.test/v1",
         "wire_api": "chat",
         "env_key": env_key,
         "secret_project": "approved-project",
-        "secret_name": "PROVIDER_KEY",
+        "secret_name": secret_name,
         "models": ["test-model"]
     })
 }
@@ -17120,6 +17124,142 @@ async fn llm_provider_handler_returns_bad_request_for_registry_collisions() {
             .unwrap()
             .contains("already another provider"));
     }
+}
+
+#[tokio::test]
+async fn llm_provider_handler_registers_distinct_approved_manifest_secrets() {
+    let tmp = tempfile::tempdir().unwrap();
+    let registry = tmp.path().join("llm-providers.toml");
+    let mut cfg = test_config();
+    cfg.llm_providers_file = Some(registry.clone());
+    cfg.agent_auth_secrets = vogt_engine_server::secret_broker::parse_manifest(
+        "FIRST_KEY approved-project FIRST_SECRET ondemand\nSECOND_KEY approved-project SECOND_SECRET ondemand",
+    )
+    .unwrap();
+    let (base, _state, _guard) = boot_with_state(cfg).await;
+    let client = reqwest::Client::new();
+
+    let first = client
+        .post(format!("{base}/api/llm-providers"))
+        .headers(auth())
+        .json(&provider_request_with_secret(
+            "first",
+            "FIRST_PROVIDER_KEY",
+            "FIRST_SECRET",
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+
+    // The second provider may use another approved manifest secret while its
+    // env_key remains its own namespace.  The manifest VARs are deliberately
+    // different from both provider env_keys: a provider must not shadow a
+    // deployment-owned variable.
+    let second = client
+        .post(format!("{base}/api/llm-providers"))
+        .headers(auth())
+        .json(&provider_request_with_secret(
+            "second",
+            "SECOND_PROVIDER_KEY",
+            "SECOND_SECRET",
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(second.status(), StatusCode::OK);
+
+    let listed: Value = client
+        .get(format!("{base}/api/llm-providers"))
+        .headers(auth())
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(listed["providers"].as_array().unwrap().len(), 2);
+    assert!(listed["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|provider| provider["state"] == "active"));
+
+    let removed = client
+        .post(format!("{base}/api/llm-providers/remove"))
+        .headers(auth())
+        .json(&json!({"name": "second"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(removed.status(), StatusCode::OK);
+    assert_eq!(
+        removed.json::<Value>().await.unwrap()["removed"],
+        Value::Bool(true)
+    );
+}
+
+#[tokio::test]
+async fn llm_provider_handler_refuses_unlisted_and_shared_manifest_secrets() {
+    let tmp = tempfile::tempdir().unwrap();
+    let registry = tmp.path().join("llm-providers.toml");
+    let mut cfg = test_config();
+    cfg.llm_providers_file = Some(registry);
+    cfg.agent_auth_secrets = vogt_engine_server::secret_broker::parse_manifest(
+        "FIRST_KEY approved-project FIRST_SECRET ondemand\nSECOND_KEY approved-project SECOND_SECRET ondemand",
+    )
+    .unwrap();
+    let (base, _state, _guard) = boot_with_state(cfg).await;
+    let client = reqwest::Client::new();
+
+    let first = client
+        .post(format!("{base}/api/llm-providers"))
+        .headers(auth())
+        .json(&provider_request_with_secret(
+            "first",
+            "FIRST_PROVIDER_KEY",
+            "FIRST_SECRET",
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+
+    let shared = client
+        .post(format!("{base}/api/llm-providers"))
+        .headers(auth())
+        .json(&provider_request_with_secret(
+            "shared",
+            "SHARED_PROVIDER_KEY",
+            "FIRST_SECRET",
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(shared.status(), StatusCode::BAD_REQUEST);
+    assert!(shared
+        .text()
+        .await
+        .unwrap()
+        .contains("already another provider"));
+
+    let unlisted = client
+        .post(format!("{base}/api/llm-providers"))
+        .headers(auth())
+        .json(&provider_request_with_secret(
+            "unlisted",
+            "UNLISTED_PROVIDER_KEY",
+            "NOT_IN_MANIFEST",
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unlisted.status(), StatusCode::BAD_REQUEST);
+    assert!(unlisted
+        .text()
+        .await
+        .unwrap()
+        .contains("approved manifest or grant project"));
 }
 
 #[tokio::test]
