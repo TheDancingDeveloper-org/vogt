@@ -4692,6 +4692,9 @@ and its write-back may name an empty account because the rollout belongs to
 the conversation. Every refusal is audited on
 `vogt::audit` by session id, account, file and reason, and an accepted write by
 name and byte length. Never a value.
+A deployment that serves `session.last_reply` for a pod Codex points
+`VOGT_SESSION_TRANSCRIPT_ROOTS["codex"]` at that `$CODEX_HOME/sessions` — the
+engine's own root, where the write-back lands, not any one pod's.
 
 **Approved actions (WI-2331, design only).** A proposed extension of the
 grant pattern from credentials to engine-executed, person-approved
