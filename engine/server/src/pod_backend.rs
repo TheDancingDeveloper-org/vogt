@@ -912,6 +912,13 @@ fn pod_env(
             value: Some(cfg.cli.clone()),
             ..Default::default()
         },
+        // Keep the entrypoint's checkout location and the session-agent's
+        // launch defaults sourced from one pod-side constant.
+        EnvVar {
+            name: "VOGT_WORK_DIR".into(),
+            value: Some(vogt_session_agent::DEFAULT_WORK_DIR.into()),
+            ..Default::default()
+        },
     ];
     if let Some(url) = &cfg.mcp_url {
         env.push(EnvVar {
