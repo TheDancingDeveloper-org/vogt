@@ -3320,7 +3320,9 @@ A pod template whose command names an agent CLI (`claude`, `codex` or
 `opencode`, bare or behind `vogt-agent-auth run --`) sets the pod's
 `VOGT_CLI` to that CLI and passes no argv. The session agent builds the
 command line, with the driven-session policy, the MCP set and the
-conversation. For Codex it also applies the posture the engine carries in
+conversation. For Claude Code it applies the model, effort and posture through
+the same `claude_args`/`claude_permission_flags` a host launch uses (WI-3881),
+so the two argv cannot drift. For Codex it also applies the posture the engine carries in
 `VOGT_PERMISSION_MODE` and `VOGT_CODEX_APPROVAL_POLICY` through the same
 `codex_permission_flags` a host launch uses: every posture names
 `-s danger-full-access`, because a pod cannot create the user namespace
@@ -4831,11 +4833,13 @@ or `codex`), `VOGT_CLONE_DIR` (the clone root, `/work`) and
 `VOGT_WORK_DIR` (the work directory, replaced through the bootstrap response
 when the caller's `cwd` is inside the checkout), the source provider's env
 (for graft, `GRAFT_ENDPOINT` when known) and, when configured,
-`VOGT_EXTRA_CA_FILE`. Every pod also gets
+`VOGT_EXTRA_CA_FILE`, and a requested model and effort as `VOGT_MODEL` and
+`VOGT_EFFORT` (WI-3881). Every pod also gets
 `VOGT_CODEX_APPROVAL_POLICY` (the engine's validated
 `ENGINE_CODEX_APPROVAL_POLICY`, `never` by default) and, for a posture other
 than the default, `VOGT_PERMISSION_MODE`; the session agent feeds both to the
-same `codex_permission_flags` the host launch uses (WI-3864).
+same `codex_permission_flags` the host launch uses (WI-3864), and the model,
+effort and posture to the shared `claude_args` (WI-3881).
 
 The container's root filesystem is read-only (`readOnlyRootFilesystem: true`)
 on top of the existing uid/gid 1000, no-privilege-escalation and dropped
