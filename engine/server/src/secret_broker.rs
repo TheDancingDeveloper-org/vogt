@@ -444,6 +444,10 @@ pub struct SecretBroker {
     bundle: DashMap<(String, String), Vec<u8>>,
     bundle_versions: DashMap<(String, String), u64>,
     account_dirs: HashMap<String, PathBuf>,
+    /// The Codex home a pod Codex rollout is written under, when configured.
+    /// Codex keeps every conversation under one home, so this is not an
+    /// account directory (WI-3867).
+    codex_home: Option<PathBuf>,
     /// Serialises compare-and-replace operations for one account bundle. The
     /// credentials expiry check and its write must be one critical section.
     account_locks: DashMap<String, Arc<Mutex<()>>>,
@@ -537,6 +541,7 @@ impl SecretBroker {
         )
         .with_manifest_file(cfg.agent_auth_secrets_file.clone())
         .with_providers_file(cfg.llm_providers_file.clone())
+        .with_codex_home(cfg.codex_transcript_root.clone())
     }
 
     /// The three things the broker needs, and nothing else of the config.
@@ -553,6 +558,7 @@ impl SecretBroker {
             bundle: DashMap::new(),
             bundle_versions: DashMap::new(),
             account_dirs: HashMap::new(),
+            codex_home: None,
             account_locks: DashMap::new(),
             credential_max_lifetime: credential_max_lifetime_from_env(),
             credential_writes: DashMap::new(),
@@ -567,6 +573,13 @@ impl SecretBroker {
 
     pub fn with_account_dirs(mut self, dirs: HashMap<String, PathBuf>) -> Self {
         self.account_dirs = dirs;
+        self
+    }
+
+    /// Store pod Codex rollouts under `home` (WI-3867). `None` leaves Codex
+    /// writeback off; a deployment resolves its default in `config::load`.
+    pub fn with_codex_home(mut self, home: Option<PathBuf>) -> Self {
+        self.codex_home = home;
         self
     }
 
@@ -1130,21 +1143,12 @@ impl SecretBroker {
 
     /// The files a pod for `account` is seeded with: the account's login and
     /// global config, plus the transcript of `conversation` when the engine
-    /// holds one (a woken session resumes from it). Paths are relative to the
-    /// account directory. Nothing is followed through a symlink, and a file
-    /// over the bundle size cap is left out rather than truncated.
+    /// holds one (a woken session resumes from it). A Codex rollout is kept
+    /// under the configured Codex home and is returned as the contract path
+    /// `sessions/…` (WI-3867); the rest are relative to the account directory.
+    /// Nothing is followed through a symlink, and a file over the bundle size
+    /// cap is left out rather than truncated.
     pub fn bundle_snapshot(&self, account: &str, conversation: &str) -> Vec<(String, Vec<u8>)> {
-        let Some(root) = self.account_dirs.get(account).map(FsPath::new) else {
-            return Vec::new();
-        };
-        let account_lock = self
-            .account_locks
-            .entry(account.to_string())
-            .or_insert_with(|| Arc::new(Mutex::new(())))
-            .clone();
-        let Ok(_guard) = account_lock.lock() else {
-            return Vec::new();
-        };
         let read = |path: &FsPath| {
             let meta = std::fs::symlink_metadata(path).ok()?;
             (meta.file_type().is_file() && meta.len() as usize <= MAX_BUNDLE_SNAPSHOT_FILE_BYTES)
@@ -1152,32 +1156,56 @@ impl SecretBroker {
                 .flatten()
         };
         let mut files = Vec::new();
-        for name in [".credentials.json", ".claude.json"] {
-            if let Some(bytes) = read(&root.join(name)) {
-                files.push((name.to_string(), bytes));
+        if let Some(root) = self.account_dirs.get(account).map(FsPath::new) {
+            let account_lock = self
+                .account_locks
+                .entry(account.to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .clone();
+            let Ok(_guard) = account_lock.lock() else {
+                return files;
+            };
+            for name in [".credentials.json", ".claude.json"] {
+                if let Some(bytes) = read(&root.join(name)) {
+                    files.push((name.to_string(), bytes));
+                }
+            }
+            if !conversation.is_empty() && !conversation.contains(['/', '\\']) {
+                let wanted = format!("{conversation}.jsonl");
+                let mut dirs = vec![root.join("projects")];
+                while let Some(dir) = dirs.pop() {
+                    let Ok(entries) = std::fs::read_dir(&dir) else {
+                        continue;
+                    };
+                    for entry in entries.flatten() {
+                        let Ok(kind) = entry.file_type() else {
+                            continue;
+                        };
+                        if kind.is_dir() {
+                            dirs.push(entry.path());
+                        } else if kind.is_file() && entry.file_name() == wanted.as_str() {
+                            if let (Some(bytes), Ok(relative)) =
+                                (read(&entry.path()), entry.path().strip_prefix(root))
+                            {
+                                files.push((relative.to_string_lossy().into_owned(), bytes));
+                            }
+                        }
+                    }
+                }
             }
         }
+        // A Codex rollout belongs to the conversation, not an account: Codex
+        // keeps one home for every session, and the writeback's account is
+        // allowed to be empty (WI-3867).
         if conversation.is_empty() || conversation.contains(['/', '\\']) {
             return files;
         }
-        let wanted = format!("{conversation}.jsonl");
-        let mut dirs = vec![root.join("projects")];
-        while let Some(dir) = dirs.pop() {
-            let Ok(entries) = std::fs::read_dir(&dir) else {
-                continue;
-            };
-            for entry in entries.flatten() {
-                let Ok(kind) = entry.file_type() else {
-                    continue;
-                };
-                if kind.is_dir() {
-                    dirs.push(entry.path());
-                } else if kind.is_file() && entry.file_name() == wanted.as_str() {
-                    if let (Some(bytes), Ok(relative)) =
-                        (read(&entry.path()), entry.path().strip_prefix(root))
-                    {
-                        files.push((relative.to_string_lossy().into_owned(), bytes));
-                    }
+        if let Some(home) = self.codex_home.as_deref() {
+            if let Some(path) =
+                crate::transcripts::codex_transcript(&home.join("sessions"), conversation)
+            {
+                if let (Some(bytes), Ok(relative)) = (read(&path), path.strip_prefix(home)) {
+                    files.push((relative.to_string_lossy().into_owned(), bytes));
                 }
             }
         }
@@ -1200,19 +1228,32 @@ impl SecretBroker {
         if bytes.len() > MAX_TRANSCRIPT_DELTA_BYTES {
             return Err(BundleRefusal::TooLarge);
         }
-        if !name.ends_with(&format!("/{conversation}.jsonl"))
-            && name != format!("{conversation}.jsonl")
-        {
-            return Err(BundleRefusal::ConversationScope);
-        }
-        let root = self
-            .account_dirs
-            .get(account)
-            .map(FsPath::new)
-            .ok_or(BundleRefusal::Storage)?;
+        let (root, lock_key) = match transcript_layout(name) {
+            TranscriptLayout::Claude => {
+                if !claude_transcript_path(conversation, name) {
+                    return Err(BundleRefusal::ConversationScope);
+                }
+                (
+                    self.account_dirs
+                        .get(account)
+                        .map(FsPath::new)
+                        .ok_or(BundleRefusal::Storage)?,
+                    account.to_string(),
+                )
+            }
+            TranscriptLayout::Codex => {
+                if !codex_rollout_path(conversation, name) {
+                    return Err(BundleRefusal::ConversationScope);
+                }
+                (
+                    self.codex_home.as_deref().ok_or(BundleRefusal::Storage)?,
+                    "\0codex".to_string(),
+                )
+            }
+        };
         let account_lock = self
             .account_locks
-            .entry(account.to_string())
+            .entry(lock_key)
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone();
         let _account_guard = account_lock.lock().map_err(|_| BundleRefusal::Storage)?;
@@ -1650,6 +1691,77 @@ fn ensure_bundle_path(root: &FsPath, relative: &FsPath) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Which home a transcript bundle path belongs to. Codex's contract path
+/// starts with `sessions/`; every other path is Claude's account bundle
+/// (`projects/…`). The first component decides, so a malformed Codex path is
+/// refused rather than written into an account directory.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TranscriptLayout {
+    Claude,
+    Codex,
+}
+
+fn transcript_layout(name: &str) -> TranscriptLayout {
+    if name.split('/').next() == Some("sessions") {
+        TranscriptLayout::Codex
+    } else {
+        TranscriptLayout::Claude
+    }
+}
+
+/// Claude's bundle path: `<conversation>.jsonl`, optionally under a
+/// `projects/` directory. Kept exactly as the account bundle has always
+/// accepted it; `append_transcript` and `store_bundle_file` share it.
+fn claude_transcript_path(conversation: &str, name: &str) -> bool {
+    name.ends_with(&format!("/{conversation}.jsonl")) || name == format!("{conversation}.jsonl")
+}
+
+/// The Codex rollout contract path (WI-3867):
+/// `sessions/<YYYY>/<MM>/<DD>/rollout-<…>-<conversation>.jsonl`.
+///
+/// Every component is a normal path component — no empty, `.` or `..` part and
+/// no backslash — and the date is four/two/two digits in range. The filename
+/// must carry a non-empty stamp before the conversation suffix.
+fn codex_rollout_path(conversation: &str, name: &str) -> bool {
+    if name.contains('\\')
+        || conversation.is_empty()
+        || conversation == "."
+        || conversation == ".."
+        || conversation.contains(['/', '\\'])
+    {
+        return false;
+    }
+    let parts: Vec<&str> = name.split('/').collect();
+    let [prefix, year, month, day, file] = parts.as_slice() else {
+        return false;
+    };
+    if *prefix != "sessions" || !digits(year, 4) {
+        return false;
+    }
+    if date_part(month, 2, 1, 12).is_none() || date_part(day, 2, 1, 31).is_none() {
+        return false;
+    }
+    let suffix = format!("-{conversation}.jsonl");
+    file.starts_with("rollout-")
+        && file.len() > "rollout-".len() + suffix.len()
+        && file.ends_with(&suffix)
+}
+
+fn digits(value: &str, width: usize) -> bool {
+    value.len() == width && value.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// `value` must be `width` digits within `min..=max`.
+fn date_part(value: &str, width: usize, min: u32, max: u32) -> Option<u32> {
+    if value.len() != width || !value.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    value
+        .parse::<u32>()
+        .ok()
+        .filter(|n| (min..=max).contains(n))
+}
+
 /// Store a file from the Claude account bundle. The request carries base64 so
 /// JSON remains safe for credentials and JSONL alike; neither the payload nor
 /// its decoded contents are logged.
@@ -1721,11 +1833,20 @@ pub async fn store_bundle_file(
     let Some(summary) = state.sessions.summary_of(session_id) else {
         return ApiError::Unauthorized.into_response();
     };
-    let Some(account) = summary.account.as_deref().filter(|v| *v == payload.account) else {
-        return refusal(
-            StatusCode::FORBIDDEN,
-            "bundle-file account is not owned by this session",
-        );
+    // A Codex rollout belongs to the conversation, not an account, so its
+    // writeback may name no account (WI-3867). Everything else stays bound to
+    // the account this session holds.
+    let codex_transcript = payload.kind == BundleFileKind::Transcript
+        && transcript_layout(&payload.path) == TranscriptLayout::Codex;
+    let account = match summary.account.as_deref() {
+        Some(account) if account == payload.account => account,
+        _ if codex_transcript && payload.account.is_empty() => payload.account.as_str(),
+        _ => {
+            return refusal(
+                StatusCode::FORBIDDEN,
+                "bundle-file account is not owned by this session",
+            )
+        }
     };
     // A transcript belongs to the session's conversation. The login and the
     // global config belong to the account, so a session with no conversation
@@ -1758,10 +1879,13 @@ pub async fn store_bundle_file(
     let valid_path = match payload.kind {
         BundleFileKind::Credentials => payload.path == ".credentials.json",
         BundleFileKind::Config => payload.path == ".claude.json",
-        BundleFileKind::Transcript => {
-            payload.path.starts_with("projects/")
-                && payload.path.ends_with(&format!("/{}.jsonl", conversation))
-        }
+        BundleFileKind::Transcript => match transcript_layout(&payload.path) {
+            TranscriptLayout::Claude => {
+                payload.path.starts_with("projects/")
+                    && payload.path.ends_with(&format!("/{conversation}.jsonl"))
+            }
+            TranscriptLayout::Codex => codex_rollout_path(conversation, &payload.path),
+        },
     };
     if !valid_path {
         return refusal(
@@ -3227,6 +3351,109 @@ mod tests {
             broker.store_bundle_file("acct", TRANSCRIPT, BundleFileKind::Transcript, b"x", None),
             Err(BundleRefusal::TranscriptNeedsOffset)
         ));
+    }
+
+    const CODEX_ROLLOUT: &str = "sessions/2026/11/09/rollout-2026-11-09T21-00-00-conv.jsonl";
+
+    fn codex_broker(home: &FsPath) -> SecretBroker {
+        broker_with("", "127.0.0.1:1").with_codex_home(Some(home.to_path_buf()))
+    }
+
+    #[test]
+    fn a_codex_rollout_lands_under_the_codex_home() {
+        let home = tempfile::tempdir().unwrap();
+        let broker = codex_broker(home.path());
+        // An account is not required: the rollout belongs to the conversation.
+        assert_eq!(
+            broker
+                .append_transcript("", "conv", CODEX_ROLLOUT, 0, b"one\n")
+                .unwrap(),
+            4
+        );
+        assert_eq!(
+            broker
+                .append_transcript("", "conv", CODEX_ROLLOUT, 4, b"two\n")
+                .unwrap(),
+            8
+        );
+        assert_eq!(
+            std::fs::read(home.path().join(CODEX_ROLLOUT)).unwrap(),
+            b"one\ntwo\n"
+        );
+        assert_eq!(
+            broker.bundle_snapshot("", "conv"),
+            vec![(CODEX_ROLLOUT.to_string(), b"one\ntwo\n".to_vec())]
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode =
+                |path: &FsPath| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode(&home.path().join("sessions")), 0o700);
+            assert_eq!(mode(&home.path().join(CODEX_ROLLOUT)), 0o600);
+        }
+    }
+
+    #[test]
+    fn codex_paths_outside_the_contract_are_refused() {
+        let home = tempfile::tempdir().unwrap();
+        let broker = codex_broker(home.path());
+        for path in [
+            // Traversal, in the date and in the filename.
+            "sessions/2026/11/09/../rollout-x-conv.jsonl",
+            "sessions/../../11/09/rollout-x-conv.jsonl",
+            "sessions/2026/11/09/../conv.jsonl",
+            "sessions/2026/11/09/rollout-x\\-conv.jsonl",
+            // The wrong conversation, and a filename that is not a rollout.
+            "sessions/2026/11/09/rollout-x-other.jsonl",
+            "sessions/2026/11/09/conv.jsonl",
+            "sessions/2026/11/09/rollout-conv.jsonl",
+            // The wrong prefix, so it must not fall into the account bundle.
+            "threads/2026/11/09/rollout-x-conv.jsonl",
+            "projects/2026/11/09/rollout-x-conv.jsonl",
+            // A date that is not the contract's four/two/two digits.
+            "sessions/26/11/09/rollout-x-conv.jsonl",
+            "sessions/2026/13/09/rollout-x-conv.jsonl",
+            "sessions/2026/11/32/rollout-x-conv.jsonl",
+        ] {
+            assert!(
+                matches!(
+                    broker.append_transcript("", "conv", path, 0, b"x"),
+                    Err(BundleRefusal::ConversationScope)
+                ),
+                "{path} was not refused"
+            );
+        }
+        assert!(
+            !home.path().join("sessions").exists(),
+            "a refused path wrote something"
+        );
+    }
+
+    #[test]
+    fn codex_writeback_without_a_codex_home_is_refused() {
+        let broker = broker_with("", "127.0.0.1:1");
+        assert!(matches!(
+            broker.append_transcript("", "conv", CODEX_ROLLOUT, 0, b"x"),
+            Err(BundleRefusal::Storage)
+        ));
+    }
+
+    #[test]
+    fn the_bundle_snapshot_returns_only_the_conversations_newest_codex_rollout() {
+        let home = tempfile::tempdir().unwrap();
+        let broker = codex_broker(home.path());
+        let old = "sessions/2026/11/08/rollout-2026-11-08T09-00-00-conv.jsonl";
+        let new = CODEX_ROLLOUT;
+        std::fs::create_dir_all(home.path().join("sessions/2026/11/08")).unwrap();
+        std::fs::write(home.path().join(old), b"old\n").unwrap();
+        broker
+            .append_transcript("", "conv", new, 0, b"new\n")
+            .unwrap();
+        assert_eq!(
+            broker.bundle_snapshot("", "conv"),
+            vec![(new.to_string(), b"new\n".to_vec())]
+        );
     }
 
     #[cfg(unix)]
