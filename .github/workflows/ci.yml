@@ -707,7 +707,7 @@ jobs:
             touch web/dist/.placeholder
           fi
 
-      - name: ripgrep and git are present
+      - name: git, ripgrep and shellcheck are present
         # Runs after a failed step too, so one round reports every failure.
         if: always() && !cancelled() && needs.changes.outputs.rust == 'true'
         run: |
@@ -717,9 +717,13 @@ jobs:
           # *test* dependencies, not merely runtime ones. The engine's
           # pipeline apt-installed them into its Rust container for exactly
           # this reason; the self-hosted image makes no promise about either.
+          # `shellcheck` is the lint half of the deploy-script step below:
+          # `bigmem` has it, this pool does not promise it, and a required
+          # check must not go red over a missing tool (WI-3888).
           missing=""
           command -v git >/dev/null || missing="$missing git"
           command -v rg >/dev/null || missing="$missing ripgrep"
+          command -v shellcheck >/dev/null || missing="$missing shellcheck"
           if [ -n "$missing" ]; then
             echo "installing:$missing"
             # Runners differ: some execute as root with no sudoers entry
@@ -735,13 +739,15 @@ jobs:
               sudo apt-get install -y --no-install-recommends $missing
             else
               echo "cannot install$missing: not root and no sudo." >&2
-              echo "The engine's tests shell out to both; a runner image" >&2
-              echo "without them cannot run this job." >&2
+              echo "The engine's tests shell out to git and rg, and the" >&2
+              echo "deploy scripts need shellcheck; a runner image without" >&2
+              echo "them cannot run this job." >&2
               exit 1
             fi
           fi
           git --version
           rg --version
+          shellcheck --version
 
       # The entrypoint contract test drives `engine/deploy/session-entrypoint.sh`
       # with a fake curl, graft and agent. `rust-core.yml` runs it, but a PR
