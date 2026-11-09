@@ -97,14 +97,48 @@ pub fn transcript_path(root: &Path, conversation: &str) -> Option<PathBuf> {
 /// unbounded walk.
 const CODEX_ROLLOUT_MAX_DEPTH: usize = 5;
 
+/// Whether `file` is Codex's rollout for `conversation`. Codex names it
+/// `rollout-<timestamp>-<conversation>.jsonl`; the `rollout-` prefix keeps an
+/// unrelated file with the same suffix out.
+fn is_codex_rollout_name(file: &str, conversation: &str) -> bool {
+    !conversation.is_empty()
+        && !conversation.contains(['/', '\\'])
+        && file.starts_with("rollout-")
+        && file.ends_with(&format!("-{conversation}.jsonl"))
+}
+
+/// Whether `name` is the transcript bundle path for `conversation`, in either
+/// agent's layout: Claude's `<conversation>.jsonl`, anywhere under its account
+/// bundle, or Codex's `sessions/<date>/rollout-<timestamp>-<conversation>.jsonl`.
+/// The engine asks this of a restored bundle to decide whether the pod can
+/// resume; the pod asks it of `$CODEX_HOME/sessions` to find the rollout it
+/// writes back, so the two cannot disagree about the name (WI-3873).
+pub fn is_conversation_transcript(name: &str, conversation: &str) -> bool {
+    if conversation.is_empty()
+        || conversation == "."
+        || conversation == ".."
+        || conversation.contains(['/', '\\'])
+    {
+        return false;
+    }
+    // The first component selects the layout, as the bundle contract does:
+    // `sessions/…` is Codex's rollout tree, everything else is Claude's
+    // account bundle. A plain `<conversation>.jsonl` under `sessions/` is not
+    // a Codex rollout and must not make the engine claim it can resume.
+    let file = name.rsplit('/').next().unwrap_or(name);
+    if name.split('/').next() == Some("sessions") {
+        is_codex_rollout_name(file, conversation)
+    } else {
+        file == format!("{conversation}.jsonl")
+    }
+}
+
 /// The session's own Codex rollout under `<home>/sessions`, found without
-/// following symlinks. The file is `rollout-<timestamp>-<conversation>.jsonl`;
-/// the `rollout-` prefix keeps an unrelated file with the same suffix out.
+/// following symlinks. The file is `rollout-<timestamp>-<conversation>.jsonl`.
 pub fn codex_transcript_path(home: &Path, conversation: &str) -> Option<PathBuf> {
-    if conversation.is_empty() || conversation.contains('/') || conversation.contains('\\') {
+    if conversation.is_empty() || conversation.contains(['/', '\\']) {
         return None;
     }
-    let suffix = format!("-{conversation}.jsonl");
     walkdir::WalkDir::new(home.join("sessions"))
         .follow_links(false)
         .max_depth(CODEX_ROLLOUT_MAX_DEPTH)
@@ -112,7 +146,7 @@ pub fn codex_transcript_path(home: &Path, conversation: &str) -> Option<PathBuf>
         .filter_map(Result::ok)
         .find(|entry| {
             let name = entry.file_name().to_string_lossy();
-            entry.file_type().is_file() && name.starts_with("rollout-") && name.ends_with(&suffix)
+            entry.file_type().is_file() && is_codex_rollout_name(&name, conversation)
         })
         .map(walkdir::DirEntry::into_path)
 }
@@ -916,12 +950,13 @@ pub fn codex_permission_flags(
     }
 }
 
-/// The shell line that starts the CLI. A Claude conversation is pinned to the
-/// engine's conversation id (`--session-id`), or resumed from the transcript
-/// the engine seeded (`--resume`), so the transcript this agent writes back is
-/// the one a later wake resumes. Claude Code also gets the driven-session
-/// policy and the engine's MCP set when the pod has them (WI-3243), so a pod
-/// session has the permission posture a host session has.
+/// The shell line that starts the CLI. A conversation is pinned to the
+/// engine's conversation id (`--session-id` for Claude and Codex) or resumed
+/// from the transcript the engine seeded (`--resume` for Claude, `codex
+/// resume <id>` for Codex), so the transcript this agent writes back is the
+/// one a later wake resumes (WI-3873). Claude Code also gets the
+/// driven-session policy and the engine's MCP set when the pod has them
+/// (WI-3243), so a pod session has the permission posture a host session has.
 pub fn command_line(config: &Config) -> Result<String, AgentError> {
     let conversation = config.conversation_id.as_deref().filter(|id| {
         id.chars()
@@ -976,7 +1011,18 @@ pub fn command_line(config: &Config) -> Result<String, AgentError> {
                 "projects={{{}={{trust_level=\"trusted\"}}}}",
                 toml_basic_string(cwd)
             );
-            let mut line = format!("codex -c {}", sh_quote(Path::new(&setting)));
+            // The host launcher's order (`agent_cli::launch`): `resume` is a
+            // subcommand, so it goes straight after the binary and ahead of
+            // every option; a fresh launch is pinned the same way Claude is.
+            // Without this Codex names its rollout after its own uuid, and the
+            // engine can neither write back nor resume the conversation.
+            let mut line = String::from("codex");
+            match (conversation, config.resume) {
+                (Some(id), true) => line.push_str(&format!(" resume {id}")),
+                (Some(id), false) => line.push_str(&format!(" --session-id {id}")),
+                (None, _) => {}
+            }
+            line.push_str(&format!(" -c {}", sh_quote(Path::new(&setting))));
             let mode = Some(config.permission_mode.as_deref().unwrap_or("default"));
             if let Some(flags) = codex_permission_flags(mode, false, &config.codex_approval_policy)
                 .map_err(AgentError::Pty)?
@@ -1810,6 +1856,103 @@ mod tests {
         );
     }
 
+    /// WI-3873: Codex, like Claude, must be told the engine's conversation id
+    /// at launch. Without it Codex writes `rollout-<ts>-<its own uuid>.jsonl`,
+    /// nothing matches `codex_transcript_path`, and wake starts fresh.
+    #[test]
+    fn codex_is_pinned_to_or_resumes_the_engine_conversation() {
+        let mut config = claude_config(ClaudeLaunch::default(), false);
+        config.cli = "codex".into();
+        assert!(
+            command_line(&config)
+                .unwrap()
+                .starts_with("codex --session-id abc-123 "),
+            "{}",
+            command_line(&config).unwrap()
+        );
+        config.resume = true;
+        assert!(
+            command_line(&config)
+                .unwrap()
+                .starts_with("codex resume abc-123 "),
+            "{}",
+            command_line(&config).unwrap()
+        );
+        // An id that is not plain never reaches the shell line.
+        config.resume = false;
+        config.conversation_id = Some("x; rm -rf /".into());
+        assert!(
+            !command_line(&config).unwrap().contains("--session-id"),
+            "{}",
+            command_line(&config).unwrap()
+        );
+    }
+
+    /// WI-3873: the rollout name comes from the launch line, not from a file
+    /// the test planted under a name it already believed in. The generated
+    /// argv names the conversation; Codex names its rollout from that same
+    /// argv, and `codex_transcript_path` finds it.
+    #[test]
+    fn a_codex_rollout_is_named_from_the_generated_launch_line() {
+        let config = {
+            let mut config = claude_config(ClaudeLaunch::default(), false);
+            config.cli = "codex".into();
+            config.cwd = Some("/work".into());
+            config.conversation_id = Some("conv-from-line".into());
+            config
+        };
+        let argv = argv_of_cli("codex", &command_line(&config).unwrap());
+        let pinned = argv
+            .windows(2)
+            .find(|pair| pair[0] == "--session-id")
+            .map(|pair| pair[1].clone())
+            .expect("a fresh Codex launch names the conversation");
+        assert_eq!(pinned, "conv-from-line");
+
+        // What Codex writes: its own date and timestamp, the id from argv.
+        let dir = tempfile::tempdir().unwrap();
+        let relative = format!("sessions/2026/11/09/rollout-2026-11-09T00-00-00-{pinned}.jsonl");
+        let rollout = dir.path().join(&relative);
+        std::fs::create_dir_all(rollout.parent().unwrap()).unwrap();
+        std::fs::write(&rollout, b"{\"type\":\"session\"}\n").unwrap();
+        assert!(is_codex_rollout_name(
+            rollout.file_name().unwrap().to_str().unwrap(),
+            &pinned
+        ));
+        assert!(is_conversation_transcript(&relative, &pinned));
+        assert_eq!(codex_transcript_path(dir.path(), &pinned), Some(rollout));
+    }
+
+    #[test]
+    fn a_conversation_transcript_is_claude_or_codex_shaped() {
+        // Claude: any depth under the account root, or a bare file name.
+        assert!(is_conversation_transcript(
+            "projects/work/conv.jsonl",
+            "conv"
+        ));
+        assert!(is_conversation_transcript("conv.jsonl", "conv"));
+        // Codex: the rollout contract path.
+        assert!(is_conversation_transcript(
+            "sessions/2026/11/09/rollout-2026-11-09T00-00-00-conv.jsonl",
+            "conv"
+        ));
+        // Another conversation, a non-rollout file with the same suffix, and
+        // an id that could walk out of the tree are all refused.
+        assert!(!is_conversation_transcript(
+            "sessions/2026/11/09/rollout-x-other.jsonl",
+            "conv"
+        ));
+        assert!(!is_conversation_transcript(
+            "sessions/2026/11/09/conv.jsonl",
+            "conv"
+        ));
+        assert!(!is_conversation_transcript("projects/../conv.jsonl", ".."));
+        assert!(!is_conversation_transcript(
+            "projects/conv.jsonl",
+            "../conv"
+        ));
+    }
+
     /// The argv `name` sees when the shell runs `line`, one word per line.
     fn argv_of_cli(name: &str, line: &str) -> Vec<String> {
         let out = std::process::Command::new("/bin/sh")
@@ -1989,6 +2132,8 @@ mod tests {
         assert_eq!(
             argv,
             [
+                "--session-id",
+                "abc-123",
                 "-c",
                 r#"projects={"/work"={trust_level="trusted"}}"#,
                 "-a",
@@ -2002,7 +2147,7 @@ mod tests {
         config.permission_mode = Some("accept-edits".into());
         let argv = argv_of_cli("codex", &command_line(&config).unwrap());
         assert_eq!(
-            &argv[2..],
+            &argv[4..],
             [
                 "-a",
                 "never",
@@ -2086,11 +2231,15 @@ mod tests {
     #[test]
     fn the_pod_codex_line_parses_with_the_real_codex() {
         let Some(codex) = real_codex() else { return };
-        let config = Config {
+        let mut config = Config {
             cli: "codex".into(),
             cwd: Some("/work".into()),
             ..claude_config(ClaudeLaunch::default(), false)
         };
+        let line = command_line(&config).unwrap();
+        assert!(codex_parses(&codex, &line), "codex refused: {line}");
+        // A wake is `codex resume <id>` with the same options after it.
+        config.resume = true;
         let line = command_line(&config).unwrap();
         assert!(codex_parses(&codex, &line), "codex refused: {line}");
         assert!(!codex_parses(&codex, "codex --skip-git-repo-check"));

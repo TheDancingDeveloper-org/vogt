@@ -729,6 +729,13 @@ fn with_onboarding_config(mut files: Vec<(String, Vec<u8>)>) -> Vec<(String, Vec
     files
 }
 
+/// Whether a restored bundle path is `conversation`'s transcript, in either
+/// agent's layout. The predicate is the session agent's, so the engine and the
+/// pod that writes the rollout agree on the name (WI-3873).
+fn resumes_conversation(path: &str, conversation: &str) -> bool {
+    vogt_session_agent::is_conversation_transcript(path, conversation)
+}
+
 pub async fn bootstrap(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -878,16 +885,26 @@ pub async fn bootstrap(
     let mut resume = false;
     // The login travels whenever the session holds an account: an agent-task
     // session has no conversation pinned yet, but still needs to be signed in
-    // (WI-3334).
-    if let Some(account) = account.as_deref() {
+    // (WI-3334). A Codex session never holds a Claude account (the engine
+    // refuses one for a non-Claude CLI), but its rollout belongs to the
+    // conversation, not an account: snapshot it with an empty account or a
+    // wake would seed nothing and start fresh (WI-3873).
+    let snapshot_account = account
+        .as_deref()
+        .or_else(|| (req.cli == "codex").then_some(""));
+    if let Some(account) = snapshot_account {
         let files = state
             .sessions
             .secret_broker()
             .bundle_snapshot(account, conversation.as_deref().unwrap_or(""));
         for (path, bytes) in with_onboarding_config(files) {
+            // Claude keeps `<conversation>.jsonl`; a Codex rollout is
+            // `rollout-<stamp>-<conversation>.jsonl`. Both must count, or a
+            // woken Codex pod starts a fresh conversation and loses its
+            // transcript (WI-3873).
             resume |= conversation
                 .as_deref()
-                .is_some_and(|c| path.ends_with(&format!("/{c}.jsonl")));
+                .is_some_and(|c| resumes_conversation(&path, c));
             bundle.insert(
                 path,
                 serde_json::Value::String(base64::Engine::encode(
@@ -1644,5 +1661,26 @@ mod tests {
         reader.read_to_end(&mut all).unwrap();
         assert_eq!(all, b"abcdef");
         assert_eq!(link.wait_exit(), 3);
+    }
+
+    /// WI-3873: a restored bundle resumes the agent only when it carries the
+    /// conversation's transcript. Claude's layout predates the pod Codex
+    /// rollout; both must count.
+    #[test]
+    fn a_restored_bundle_resumes_either_agent_layout() {
+        assert!(resumes_conversation("projects/work/conv.jsonl", "conv"));
+        assert!(resumes_conversation("conv.jsonl", "conv"));
+        assert!(resumes_conversation(
+            "sessions/2026/11/09/rollout-2026-11-09T00-00-00-conv.jsonl",
+            "conv"
+        ));
+        assert!(!resumes_conversation(
+            "sessions/2026/11/09/rollout-2026-11-09T00-00-00-other.jsonl",
+            "conv"
+        ));
+        assert!(!resumes_conversation(
+            "sessions/2026/11/09/conv.jsonl",
+            "conv"
+        ));
     }
 }
