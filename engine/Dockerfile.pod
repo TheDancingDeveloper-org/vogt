@@ -2,8 +2,11 @@
 # Layered session images. The default target is base; rust and mobile are
 # additive targets selected by the project image mapping.
 
-ARG UBUNTU_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-base/ubuntu:26.04
-ARG RUST_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-base/rust:1-bookworm
+# Both bases are pinned by the digest of the mirrored manifest list, so a
+# rebuild of this file cannot silently pick up a newer upstream image. Renovate
+# tracks the tag and updates the digest.
+ARG UBUNTU_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-base/ubuntu:26.04@sha256:6a06111c3b0a8600feadb270aec771dc239bf407b25625f93f44ab00e11f4d3c
+ARG RUST_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-base/rust:1-bookworm@sha256:e6f2cff35d0f309acf8433b4f05878ed77092602c5065cc81801177da0bb3a9c
 ARG NODE_VERSION=22.14.0
 ARG PNPM_VERSION=10.12.4
 ARG UV_VERSION=0.7.12
