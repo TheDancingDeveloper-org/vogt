@@ -17991,7 +17991,9 @@ mod pod_stream {
 
     /// WI-3883: a pod started from a template's own pod default (no explicit
     /// placement) carries the caller's extra environment to the agent through
-    /// the bootstrap response, never through the pod spec.
+    /// the bootstrap response's `agent_env`, never through the pod spec and
+    /// never through the response's own `env` (which the entrypoint exports
+    /// before it clones).
     #[tokio::test]
     async fn a_pod_session_carries_extra_env_through_the_bootstrap_response() {
         let mut h = harness(false).await;
@@ -18016,8 +18018,16 @@ mod pod_stream {
             "a caller env value must not land in the pod spec"
         );
         let body: Value = h.bootstrap(id, &token).await.json().await.unwrap();
-        assert_eq!(body["env"]["CARGO_BUILD_JOBS"], "4");
-        assert_eq!(body["env"]["RUST_LOG"], "info");
+        assert_eq!(body["agent_env"]["CARGO_BUILD_JOBS"], "4");
+        assert_eq!(body["agent_env"]["RUST_LOG"], "info");
+        assert!(
+            body["env"].get("CARGO_BUILD_JOBS").is_none(),
+            "a caller value must not be in the env the entrypoint exports before cloning: {body}"
+        );
+        assert!(
+            body["env"].get("RUST_LOG").is_none(),
+            "a caller value must not be in the env the entrypoint exports before cloning: {body}"
+        );
     }
 
     /// WI-3883: a cwd inside the project's checkout becomes the pod's work
@@ -18105,6 +18115,63 @@ mod pod_stream {
                 .is_err(),
             "a refused start must not create a pod"
         );
+    }
+
+    /// WI-3883 review: names that would hijack the agent's own process (or,
+    /// before the split into `agent_env`, the entrypoint's clone step) are
+    /// refused by name: a caller's `GRAFT_ENDPOINT` would otherwise receive
+    /// the minted source token, and `LD_PRELOAD` would run caller code.
+    #[tokio::test]
+    async fn a_pod_session_refuses_hostile_env_names_and_names_the_field() {
+        let h = harness(false).await;
+        for (name, value) in [
+            ("GRAFT_ENDPOINT", "http://attacker.invalid"),
+            ("LD_PRELOAD", "/tmp/evil.so"),
+            ("BASH_ENV", "/tmp/evil.sh"),
+            ("NODE_OPTIONS", "--require /tmp/evil.js"),
+            ("PYTHONPATH", "/tmp"),
+            ("HTTPS_PROXY", "http://attacker.invalid"),
+        ] {
+            let response = h
+                .client
+                .post(format!("{}/api/sessions", h.base))
+                .json(&json!({
+                    "name": "pod-env-hostile",
+                    "template": "pod",
+                    "env": [[name, value]],
+                }))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{name}");
+            let body = response.text().await.unwrap();
+            assert!(body.contains(name), "the refusal names {name}: {body}");
+            assert!(body.contains("reserves env"), "{name}: {body}");
+        }
+    }
+
+    /// WI-3883 review: a value carrying a newline (or tab, or NUL) would break
+    /// the entrypoint's one-row-per-variable hand-off, so it is refused.
+    #[tokio::test]
+    async fn a_pod_session_refuses_an_env_value_that_breaks_its_row() {
+        let h = harness(false).await;
+        for value in ["a\nb", "a\tb", "a\0b"] {
+            let response = h
+                .client
+                .post(format!("{}/api/sessions", h.base))
+                .json(&json!({
+                    "name": "pod-env-row",
+                    "template": "pod",
+                    "env": [["CARGO_BUILD_JOBS", value]],
+                }))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{value:?}");
+            let body = response.text().await.unwrap();
+            assert!(body.contains("CARGO_BUILD_JOBS"), "{body}");
+            assert!(body.contains("NUL, newline or tab"), "{body}");
+        }
     }
 
     /// WI-3335: a deployment with an invalid managed Codex policy refuses a
@@ -18928,7 +18995,16 @@ sleep 2
     async fn real_entrypoint_bootstraps_against_the_real_route() {
         use std::os::unix::fs::PermissionsExt;
         let mut h = harness(false).await;
-        let id = h.start().await;
+        // WI-3883 review: a caller's own variable must reach the agent and
+        // must not be exported into the shell that clones with the minted
+        // source token.
+        let id = h
+            .start_body(json!({
+                "name": "pod-entrypoint-env",
+                "template": "pod",
+                "env": [["CARGO_BUILD_JOBS", "4"]],
+            }))
+            .await;
         let (_, token) = h.created.recv().await.unwrap();
         let token = String::from_utf8_lossy(&token).into_owned();
 
@@ -18941,12 +19017,14 @@ sleep 2
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         };
         let graft_log = tmp.path().join("graft.args");
+        let graft_env = tmp.path().join("graft.env");
         let agent_log = tmp.path().join("agent.env");
         script(
             "graft",
             &format!(
-                "printf '%s\\n' \"$*\" >>{g}\nwhile [ \"$1\" != clone ]; do shift; done\nmkdir -p \"$3\"",
-                g = graft_log.display()
+                "printf '%s\\n' \"$*\" >>{g}\ncase \" $* \" in *\" clone \"*) env >{e} ;; esac\nwhile [ \"$1\" != clone ]; do shift; done\nmkdir -p \"$3\"",
+                g = graft_log.display(),
+                e = graft_env.display()
             ),
         );
         std::os::unix::fs::symlink(bin.join("graft"), bin.join("g")).unwrap();
@@ -18981,6 +19059,7 @@ sleep 2
                 r#"{"location":{"kind":"graft","endpoint":"","repo":"vogt"},"ref":"rust-2","landing":"line"}"#,
             )
             .env("VOGT_CLI", "claude")
+            .env("VOGT_CLONE_DIR", &work)
             .env("VOGT_WORK_DIR", &work)
             .env("VOGT_SESSION_TOKEN_FILE", &token_file);
             tokio::task::spawn_blocking(move || cmd.output().unwrap())
@@ -19020,6 +19099,19 @@ sleep 2
         assert!(
             env.lines().any(|l| l.starts_with("VOGT_SOURCE_JSON=")),
             "agent env lacks its source: {env}"
+        );
+        // The caller's own variable applies to the agent's process only: the
+        // clone (which spends the source token) ran without it.
+        assert!(
+            env.lines().any(|l| l == "CARGO_BUILD_JOBS=4"),
+            "agent env lacks the caller's variable: {env}"
+        );
+        let graft_env = std::fs::read_to_string(&graft_env).unwrap();
+        assert!(
+            !graft_env
+                .lines()
+                .any(|l| l.starts_with("CARGO_BUILD_JOBS=")),
+            "the caller's env was exported before the clone: {graft_env}"
         );
         assert!(work.join(".vogt/brief.md").exists());
 

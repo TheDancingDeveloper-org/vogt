@@ -37,7 +37,7 @@ graft=""; [ -z "${GRAFT_TOKEN:-}" ] || graft=$(printf ',"source_token":"%s"' "$G
 [ -z "${CODEX_CONFIG:-}" ] || graft="$graft,\"codex_config\":$(printf %s "$CODEX_CONFIG" | jq -Rs .)"
 [ -z "${OPENCODE_CONFIG:-}" ] || graft="$graft,\"opencode_config\":$OPENCODE_CONFIG"
 bundle=${BUNDLE_JSON:-"{\"sub/.credentials.json\":\"$(printf bundle | base64)\"}"}
-printf '{"session_token":"%s"%s,"source":%s,"bundle":%s,"env":{"VOGT_SESSION_ID":"s1","VOGT_BOOTSTRAP_TOKEN":"%s","EXTRA":"yes"},"brief":"hello brief"}' \
+printf '{"session_token":"%s"%s,"source":%s,"bundle":%s,"env":{"VOGT_SESSION_ID":"s1","VOGT_BOOTSTRAP_TOKEN":"%s"},"agent_env":{"EXTRA":"yes","VOGT_SESSION_ID":"caller"},"brief":"hello brief"}' \
   "$(cat "$CASE_DIR/session")" "$graft" "$SOURCE_JSON" "$bundle" "$(cat "$CASE_DIR/boot")"
 SH
   cat >"$dir/bin/graft" <<'SH'
@@ -45,6 +45,9 @@ SH
 [ "${CLONE_FAIL:-0}" = 0 ] || exit 9
 case " $* " in *" clone "*)
   printf '%s\n' "$*" >"$CASE_DIR/graft.args"
+  # What the clone step's shell sees: the caller's own environment must not
+  # be in it yet (WI-3883 review: GRAFT_ENDPOINT would steal the token).
+  env >"$CASE_DIR/graft.env"
   if [ "$1" = --token-file ]; then cp "$2" "$CASE_DIR/graft.token"; fi ;;
 esac
 dest="$CASE_DIR/work"
@@ -126,7 +129,13 @@ git -C "$w" log -1 -p | grep -q '^-old$' || fail "git view: tip patch removal"
 grep -q '^session-entrypoint: step git-view$' <<<"$out" || fail "git-view step marker"
 ! grep -q "$BOOT" "$tmp/happy/agent.env" || fail "bootstrap token reached the agent"
 ! grep -q "VOGT_BOOTSTRAP_TOKEN" "$tmp/happy/agent.env" || fail "bootstrap name re-exported"
-grep -q '^EXTRA=yes$' "$tmp/happy/agent.env" || fail "brokered env not exported"
+grep -q '^EXTRA=yes$' "$tmp/happy/agent.env" || fail "caller env did not reach the agent"
+# WI-3883 review: the caller's env is applied at the agent's exec only, so the
+# clone step's shell does not see it; and the engine's own value wins.
+[ -e "$tmp/happy/graft.env" ] || fail "clone step recorded no env"
+! grep -q '^EXTRA=' "$tmp/happy/graft.env" || fail "caller env reached the clone step"
+grep -q '^VOGT_SESSION_ID=s1$' "$tmp/happy/agent.env" || fail "engine env did not win over the caller's"
+! grep -q '^VOGT_SESSION_ID=caller$' "$tmp/happy/agent.env" || fail "caller env overrode the engine's"
 ! grep -Eq "$BOOT|$SESSION|graft-secret-value" <<<"$out" || fail "secret in output"
 for step in bootstrap session-token account-bundle brokered-env claude-config source-token clone brief handoff; do
   grep -q "^session-entrypoint: step $step$" <<<"$out" || fail "step marker $step"
