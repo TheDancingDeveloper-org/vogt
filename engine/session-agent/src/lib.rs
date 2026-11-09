@@ -92,6 +92,31 @@ pub fn transcript_path(root: &Path, conversation: &str) -> Option<PathBuf> {
         .map(walkdir::DirEntry::into_path)
 }
 
+/// How deep a Codex rollout may sit below `<home>/sessions`. Codex writes
+/// `sessions/<yyyy>/<mm>/<dd>/<rollout>` (depth 4); one spare level, never an
+/// unbounded walk.
+const CODEX_ROLLOUT_MAX_DEPTH: usize = 5;
+
+/// The session's own Codex rollout under `<home>/sessions`, found without
+/// following symlinks. The file is `rollout-<timestamp>-<conversation>.jsonl`;
+/// the `rollout-` prefix keeps an unrelated file with the same suffix out.
+pub fn codex_transcript_path(home: &Path, conversation: &str) -> Option<PathBuf> {
+    if conversation.is_empty() || conversation.contains('/') || conversation.contains('\\') {
+        return None;
+    }
+    let suffix = format!("-{conversation}.jsonl");
+    walkdir::WalkDir::new(home.join("sessions"))
+        .follow_links(false)
+        .max_depth(CODEX_ROLLOUT_MAX_DEPTH)
+        .into_iter()
+        .filter_map(Result::ok)
+        .find(|entry| {
+            let name = entry.file_name().to_string_lossy();
+            entry.file_type().is_file() && name.starts_with("rollout-") && name.ends_with(&suffix)
+        })
+        .map(walkdir::DirEntry::into_path)
+}
+
 /// The largest transcript delta in one request; the engine refuses more.
 pub const TRANSCRIPT_DELTA_BYTES: usize = 512 * 1024;
 /// Resyncs tolerated in one flush before it gives up until the next debounce.
@@ -313,6 +338,9 @@ pub struct Config {
     pub rows: u16,
     pub buffer_bytes: usize,
     pub claude_config_dir: Option<PathBuf>,
+    /// Where Codex keeps its session rollouts (`$CODEX_HOME`, else
+    /// `$HOME/.codex`); a Codex pod has no Claude directory at all.
+    pub codex_home: Option<PathBuf>,
     pub account: Option<String>,
     pub conversation_id: Option<String>,
     /// Resume the conversation from the transcript the engine seeded into the
@@ -459,6 +487,11 @@ impl Config {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(DEFAULT_BUFFER_BYTES),
             claude_config_dir: std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from),
+            codex_home: std::env::var_os("CODEX_HOME")
+                .map(PathBuf::from)
+                .or_else(|| {
+                    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex"))
+                }),
             account: std::env::var("VOGT_SESSION_ACCOUNT").ok(),
             conversation_id: std::env::var("VOGT_SESSION_CONVERSATION_ID")
                 .ok()
@@ -543,22 +576,28 @@ fn http_client(tls: Arc<rustls::ClientConfig>) -> Result<reqwest::Client, AgentE
 /// the conversation transcript could not be stored, so a caller that must not
 /// lose it (hibernation) can tell. A file the engine refuses with a status
 /// (credentials no newer than the stored ones, say) is final and not retried;
-/// a transport failure is retried on the next flush.
+/// a transport failure is retried on the next flush. Claude's account files
+/// need a Claude root and account; a Codex pod has neither and still ships its
+/// rollout.
 async fn flush_bundle(
     config: &Config,
     tls: &Arc<rustls::ClientConfig>,
     seen: &mut std::collections::HashMap<PathBuf, [u8; 32]>,
     offsets: &mut std::collections::HashMap<PathBuf, u64>,
 ) -> bool {
-    let (Some(root), Some(account)) = (
+    // The login and global config are the Claude account's and are written
+    // back with or without a conversation (WI-3334).
+    let claude = match (
         config.claude_config_dir.as_deref(),
         config.account.as_deref(),
-    ) else {
-        return true;
+    ) {
+        (Some(root), Some(account)) => Some((root, account)),
+        _ => None,
     };
-    // The login and global config are the account's and are written back with
-    // or without a conversation; only a transcript needs one (WI-3334).
     let conversation = config.conversation_id.as_deref().unwrap_or("");
+    if claude.is_none() && (conversation.is_empty() || config.codex_home.is_none()) {
+        return true;
+    }
     // The broker token is a credential and must only ever go to the engine.
     // In particular, do not let ambient HTTP(S)_PROXY redirect this request.
     let Ok(client) = http_client(tls.clone()) else {
@@ -567,49 +606,67 @@ async fn flush_bundle(
     let mut transcript_ok = true;
     let mut url = config.engine_url.clone();
     url.push_str("/api/agent-auth/store/bundle/bundle-file");
-    for file in bundle_files(root) {
-        let marker = bundle_marker(&file.bytes);
-        if seen.get(&file.path).copied() == Some(marker) {
-            continue;
-        }
-        let kind = match file.kind {
-            BundleFileKind::Credentials => "credentials",
-            BundleFileKind::Config => "config",
-            BundleFileKind::Transcript => continue,
-        };
-        let mut body = serde_json::json!({"account": account, "conversation_id": conversation, "path": file.path.strip_prefix(root).unwrap_or(&file.path).to_string_lossy(), "kind": kind, "bytes": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &file.bytes)});
-        if file.kind == BundleFileKind::Config {
-            // The engine orders `.claude.json` writes by this and refuses one
-            // without it: the file's own modification time, in milliseconds.
-            match file_version(&file.path) {
-                Some(version) => body["version"] = serde_json::json!(version),
-                None => continue,
+    if let Some((root, account)) = claude {
+        for file in bundle_files(root) {
+            let marker = bundle_marker(&file.bytes);
+            if seen.get(&file.path).copied() == Some(marker) {
+                continue;
             }
-        }
-        // A reply the engine will give again for the same bytes is final. A
-        // rate limit or a server fault is not: the file is tried again on the
-        // next flush.
-        if let Ok(reply) = client
-            .post(&url)
-            .bearer_auth(&config.token)
-            .json(&body)
-            .send()
-            .await
-        {
-            let status = reply.status();
-            if !(status.as_u16() == 429 || status.is_server_error()) {
-                seen.insert(file.path, marker);
+            let kind = match file.kind {
+                BundleFileKind::Credentials => "credentials",
+                BundleFileKind::Config => "config",
+                BundleFileKind::Transcript => continue,
+            };
+            let mut body = serde_json::json!({"account": account, "conversation_id": conversation, "path": file.path.strip_prefix(root).unwrap_or(&file.path).to_string_lossy(), "kind": kind, "bytes": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &file.bytes)});
+            if file.kind == BundleFileKind::Config {
+                // The engine orders `.claude.json` writes by this and refuses
+                // one without it: the file's own modification time, in
+                // milliseconds.
+                match file_version(&file.path) {
+                    Some(version) => body["version"] = serde_json::json!(version),
+                    None => continue,
+                }
+            }
+            // A reply the engine will give again for the same bytes is final.
+            // A rate limit or a server fault is not: the file is tried again
+            // on the next flush.
+            if let Ok(reply) = client
+                .post(&url)
+                .bearer_auth(&config.token)
+                .json(&body)
+                .send()
+                .await
+            {
+                let status = reply.status();
+                if !(status.as_u16() == 429 || status.is_server_error()) {
+                    seen.insert(file.path, marker);
+                }
             }
         }
     }
-    if let Some(path) = (!conversation.is_empty())
-        .then(|| transcript_path(root, conversation))
-        .flatten()
-    {
+    // A Claude transcript lives under `CLAUDE_CONFIG_DIR/projects`; a Codex
+    // pod's rollout lives under `$CODEX_HOME/sessions`. Both travel as
+    // append-only deltas and share the path contract.
+    let codex_transcript = || {
+        config
+            .codex_home
+            .as_deref()
+            .and_then(|home| codex_transcript_path(home, conversation).map(|path| (path, home, "")))
+    };
+    let transcript = if conversation.is_empty() {
+        None
+    } else {
+        claude
+            .and_then(|(root, account)| {
+                transcript_path(root, conversation).map(|path| (path, root, account))
+            })
+            .or_else(codex_transcript)
+    };
+    if let Some((path, base, account)) = transcript {
         // Caught up when the delta is empty; any send failure leaves it behind.
         let mut caught_up = false;
         let relative = path
-            .strip_prefix(root)
+            .strip_prefix(base)
             .unwrap_or(&path)
             .to_string_lossy()
             .into_owned();
@@ -1242,6 +1299,7 @@ mod tests {
             rows: 24,
             buffer_bytes: 1024,
             claude_config_dir: None,
+            codex_home: None,
             account: None,
             conversation_id: None,
             resume: false,
@@ -1264,6 +1322,7 @@ mod tests {
             rows: 24,
             buffer_bytes: 1024,
             claude_config_dir: None,
+            codex_home: None,
             account: None,
             conversation_id: None,
             resume: false,
@@ -1483,6 +1542,108 @@ mod tests {
         );
     }
 
+    /// A fake engine for bundle POSTs only: each request body is recorded and
+    /// answered 200 with the offset after the bytes it carried.
+    async fn record_bundle_posts() -> (String, Arc<std::sync::Mutex<Vec<serde_json::Value>>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let bodies = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let record = bodies.clone();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let record = record.clone();
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 8192];
+                    let (header_end, length) = loop {
+                        let n = stream.read(&mut chunk).await.unwrap_or(0);
+                        if n == 0 {
+                            return;
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                        if let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                            let head = String::from_utf8_lossy(&buf[..end]).to_lowercase();
+                            let length = head
+                                .lines()
+                                .find_map(|l| l.strip_prefix("content-length:"))
+                                .map(|v| v.trim().parse::<usize>().unwrap())
+                                .unwrap_or(0);
+                            break (end + 4, length);
+                        }
+                    };
+                    while buf.len() < header_end + length {
+                        let n = stream.read(&mut chunk).await.unwrap_or(0);
+                        if n == 0 {
+                            return;
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                    }
+                    let body: serde_json::Value =
+                        serde_json::from_slice(&buf[header_end..header_end + length]).unwrap();
+                    let sent = body["bytes"]
+                        .as_str()
+                        .map(|bytes| {
+                            base64::Engine::decode(
+                                &base64::engine::general_purpose::STANDARD,
+                                bytes,
+                            )
+                            .unwrap()
+                            .len()
+                        })
+                        .unwrap_or(0);
+                    let next = body["offset"].as_u64().unwrap_or(0) + sent as u64;
+                    record.lock().unwrap().push(body);
+                    let reply = format!("{{\"ok\":true,\"offset\":{next}}}");
+                    let _ = stream
+                        .write_all(
+                            format!(
+                                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{reply}",
+                                reply.len()
+                            )
+                            .as_bytes(),
+                        )
+                        .await;
+                });
+            }
+        });
+        (format!("http://{address}"), bodies)
+    }
+
+    // WI-3868: a Codex pod has no Claude root or account; its own rollout must
+    // still travel as a transcript delta at the path contract.
+    #[tokio::test]
+    async fn a_codex_only_config_flushes_the_rollout_at_its_contract_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let relative = "sessions/2026/11/09/rollout-2026-11-09T00-00-00-conv1.jsonl";
+        let rollout = dir.path().join(relative);
+        std::fs::create_dir_all(rollout.parent().unwrap()).unwrap();
+        let content = b"{\"type\":\"session\"}\n";
+        std::fs::write(&rollout, content).unwrap();
+        let (url, bodies) = record_bundle_posts().await;
+        let mut config = kill_config(url);
+        config.claude_config_dir = None;
+        config.account = None;
+        config.conversation_id = Some("conv1".into());
+        config.codex_home = Some(dir.path().to_path_buf());
+        let tls = tls_config().unwrap();
+        let mut seen = std::collections::HashMap::new();
+        let mut offsets = std::collections::HashMap::new();
+        assert!(flush_bundle(&config, &tls, &mut seen, &mut offsets).await);
+        let bodies = bodies.lock().unwrap();
+        assert_eq!(bodies.len(), 1, "expected one delta: {bodies:?}");
+        assert_eq!(bodies[0]["kind"], "transcript");
+        assert_eq!(bodies[0]["account"], "");
+        assert_eq!(bodies[0]["conversation_id"], "conv1");
+        assert_eq!(bodies[0]["path"], relative);
+        let bytes = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            bodies[0]["bytes"].as_str().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(bytes, content);
+    }
+
     #[test]
     fn resize_changes_the_pty_size() {
         let config = Config {
@@ -1496,6 +1657,7 @@ mod tests {
             rows: 24,
             buffer_bytes: 1024,
             claude_config_dir: None,
+            codex_home: None,
             account: None,
             conversation_id: None,
             resume: false,
@@ -1523,6 +1685,7 @@ mod tests {
             rows: 24,
             buffer_bytes: 1024,
             claude_config_dir: None,
+            codex_home: None,
             account: None,
             conversation_id: Some("abc-123".into()),
             resume: false,
@@ -1572,6 +1735,7 @@ mod tests {
             rows: 24,
             buffer_bytes: 1024,
             claude_config_dir: None,
+            codex_home: None,
             account: None,
             conversation_id: Some("abc-123".into()),
             resume: false,
@@ -1614,6 +1778,7 @@ mod tests {
             rows: 24,
             buffer_bytes: 1024,
             claude_config_dir: None,
+            codex_home: None,
             account: None,
             conversation_id: Some("abc-123".into()),
             resume,
@@ -1677,6 +1842,7 @@ mod tests {
             rows: 24,
             buffer_bytes: 1024,
             claude_config_dir: None,
+            codex_home: None,
             account: None,
             conversation_id: None,
             resume: false,
@@ -1768,6 +1934,7 @@ mod tests {
             rows: 24,
             buffer_bytes: 1024,
             claude_config_dir: None,
+            codex_home: None,
             account: None,
             conversation_id: None,
             resume: false,
@@ -1818,6 +1985,7 @@ mod tests {
             rows: 24,
             buffer_bytes: 1024,
             claude_config_dir: None,
+            codex_home: None,
             account: None,
             conversation_id: None,
             resume: false,
@@ -1902,6 +2070,7 @@ mod tests {
             rows: 24,
             buffer_bytes: 1024,
             claude_config_dir: None,
+            codex_home: None,
             account: None,
             conversation_id: None,
             resume: false,
@@ -2043,6 +2212,42 @@ mod tests {
         std::fs::write(dir.path().join("projects/work/conv.jsonl"), b"x").unwrap();
         assert!(transcript_path(dir.path(), "conv").is_some());
         assert!(transcript_path(dir.path(), "../conv").is_none());
+    }
+
+    #[test]
+    fn a_codex_transcript_is_found_without_following_links() {
+        let dir = tempfile::tempdir().unwrap();
+        let rollout = dir
+            .path()
+            .join("sessions/2026/11/09/rollout-2026-11-09T00-00-00-conv.jsonl");
+        assert!(codex_transcript_path(dir.path(), "conv").is_none());
+        std::fs::create_dir_all(rollout.parent().unwrap()).unwrap();
+        std::fs::write(&rollout, b"x").unwrap();
+        assert_eq!(
+            codex_transcript_path(dir.path(), "conv"),
+            Some(rollout.clone())
+        );
+        // Another conversation's rollout, and a file that is not a rollout,
+        // are not this conversation's transcript.
+        assert!(codex_transcript_path(dir.path(), "other").is_none());
+        std::fs::write(rollout.parent().unwrap().join("conv.jsonl"), b"x").unwrap();
+        assert_eq!(
+            codex_transcript_path(dir.path(), "conv"),
+            Some(rollout.clone())
+        );
+        // A conversation id cannot walk out of the sessions tree.
+        assert!(codex_transcript_path(dir.path(), "../conv").is_none());
+        // The walk is bounded: a rollout buried too deep is not found.
+        let deep = dir
+            .path()
+            .join("sessions/a/b/c/d/e/f/rollout-2026-11-09T00-00-00-deep.jsonl");
+        std::fs::create_dir_all(deep.parent().unwrap()).unwrap();
+        std::fs::write(&deep, b"x").unwrap();
+        assert!(codex_transcript_path(dir.path(), "deep").is_none());
+        // A symlink pointing at the rollout is not the rollout.
+        std::fs::rename(&rollout, dir.path().join("real.jsonl")).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("real.jsonl"), &rollout).unwrap();
+        assert!(codex_transcript_path(dir.path(), "conv").is_none());
     }
 
     #[test]
