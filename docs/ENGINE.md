@@ -4837,6 +4837,20 @@ when the caller's `cwd` is inside the checkout), the source provider's env
 than the default, `VOGT_PERMISSION_MODE`; the session agent feeds both to the
 same `codex_permission_flags` the host launch uses (WI-3864).
 
+The container's root filesystem is read-only (`readOnlyRootFilesystem: true`)
+on top of the existing uid/gid 1000, no-privilege-escalation and dropped
+capabilities. Every path the entrypoint or an agent writes to is a per-pod
+`emptyDir`, never shared storage: `/home/vogt` (and with it the default
+`CODEX_HOME`, `CLAUDE_CONFIG_DIR` and `XDG_CONFIG_HOME`), `/tmp`, `/work` (the
+clone and work tree) and `/run/vogt` (the runtime token and MCP files). The
+tool caches keep their own private `emptyDir` at `/cache` (WI-3242). The spec
+also sets `activeDeadlineSeconds`: a template's
+`active_deadline_seconds` policy wins, else the deployment's
+`ENGINE_POD_SESSION_DEADLINE_SECONDS` (default 12 h; `0` leaves it unset). A
+pod the kubelet stops at that deadline ends its session with the distinct
+reason `hit its active deadline: …` from the reconciler, not the generic
+failure note.
+
 **Engine configuration** (`pod_backend.rs`; the graft rows are the graft source provider's, `graft_provider.rs`):
 
 | Variable | Effect |
