@@ -189,6 +189,22 @@ def test_a_manifest_the_active_copy_does_not_match_is_fatal(sandbox: Sandbox) ->
     assert "expected pin 7.7.7" in checked.stderr
 
 
+def test_a_manifest_row_with_no_copy_anywhere_is_fatal(sandbox: Sandbox) -> None:
+    """A row in the resolved manifest says the image carries that tool. When
+    it carries neither an image copy nor a runtime `current`, the manifest is
+    lying — the shape the vogt-dev image had (WI-3761) — and the pod refuses
+    to boot rather than start sessions whose CLI is a missing command."""
+    (sandbox.image_bin / "tool").unlink()
+    checked = sandbox.verify()
+    assert checked.returncode == 78
+    assert "neither the image copy" in checked.stderr
+
+    # A runtime pin satisfies the same row, so the check is about having *a*
+    # managed copy, not about the image specifically.
+    assert sandbox.install(PINNED).returncode == 0
+    assert sandbox.verify().returncode == 0
+
+
 def test_a_persisted_home_shadow_is_quarantined_and_the_pod_boots(
     sandbox: Sandbox,
 ) -> None:
@@ -336,6 +352,40 @@ def test_image_installs_claude_code_beside_codex_acp() -> None:
     smoke = block.split("npm install -g", 1)[1]
     assert "/usr/local/bin/claude --version" in smoke
     assert "/usr/local/bin/codex-acp --version" in smoke
+
+
+def test_the_baked_manifest_only_names_clis_the_image_carries() -> None:
+    """The resolved manifest is what the runtime installer trusts when it
+    decides an image copy exists (WI-3761). It was written unconditionally, so
+    a build with INSTALL_AI_CLIENTS off declared `codex=<sha>` with no binary
+    behind it, and the installer skipped the download. Each optional row must
+    now be guarded by the binary being on disk."""
+    dockerfile = (REPO_ROOT / "engine" / "Dockerfile").read_text(encoding="utf-8")
+    block = dockerfile.split(
+        "manifest=/usr/local/share/vogt/agent-versions.resolved", 1
+    )[1]
+    manifest_run = block.split("# The pin above is the contract", 1)[0]
+    assert ': > "$manifest"' in manifest_run, "an absent tool must not inherit a row"
+    assert 'if [ "$INSTALL_AI_CLIENTS" = "true" ]' in manifest_run, (
+        "the pod base's unpinned opencode is not the managed pin"
+    )
+    for binary in (
+        "/usr/local/libexec/codex-real",
+        "/usr/local/bin/codex-acp",
+        "/usr/local/bin/claude",
+        "/usr/local/bin/opencode",
+    ):
+        assert f"if [ -x {binary} ]" in manifest_run, binary
+    assert "codex-acp=%s\\nclaude-code=%s" not in dockerfile, (
+        "the unconditional manifest row is back"
+    )
+    # ...and the copy the row now waits for is really installed, under the
+    # same arg, so a build that asks for the CLIs gets Codex.
+    assert (
+        'install -m 0755 "/tmp/${target}/codex" /usr/local/libexec/codex-real'
+        in dockerfile
+    )
+    assert "ln -sfn /usr/local/bin/codex-full-access /usr/local/bin/codex" in dockerfile
 
 
 def test_codex_acp_whose_version_lies_is_not_made_current(
@@ -713,7 +763,16 @@ class ReleaseSandbox:
         self.share = base / "share"
         self.releases = base / "releases"
         self.bin = base / "bin"
-        for path in (self.root, self.share, self.releases, self.bin):
+        self.image_bin = base / "imagebin"
+        self.image_libexec = base / "libexec"
+        for path in (
+            self.root,
+            self.share,
+            self.releases,
+            self.bin,
+            self.image_bin,
+            self.image_libexec,
+        ):
             path.mkdir(parents=True)
         (self.share / "agent-versions.resolved").write_text(
             f"codex={FORK_SHA}\n", encoding="utf-8"
@@ -742,6 +801,22 @@ class ReleaseSandbox:
             encoding="utf-8",
         )
         curl.chmod(0o755)
+        self.with_image_copy()
+
+    def with_image_copy(self) -> None:
+        """Give the image a real copy: the wrapper on PATH *and* the release
+        in libexec. `/usr/local/bin/codex` alone is not the release."""
+        wrapper = self.image_bin / "codex"
+        wrapper.write_text("#!/bin/sh\necho baked\n", encoding="utf-8")
+        wrapper.chmod(0o755)
+        real = self.image_libexec / "codex-real"
+        real.write_text("#!/bin/sh\necho baked\n", encoding="utf-8")
+        real.chmod(0o755)
+
+    def drop_image_copy(self) -> None:
+        """The state a build with INSTALL_AI_CLIENTS off used to leave: a
+        manifest row for a CLI the image never installed."""
+        (self.image_libexec / "codex-real").unlink()
 
     def publish(self, sha: str, member: bytes, *, sums: str | None = None) -> None:
         import hashlib
@@ -777,6 +852,8 @@ class ReleaseSandbox:
                     self.share / "agent-versions.resolved"
                 ),
                 "VOGT_AGENT_CLI_TOOLS": str(self.share / "agent-clis.tools"),
+                "VOGT_AGENT_CLI_IMAGE_BIN": str(self.image_bin),
+                "VOGT_AGENT_CLI_IMAGE_LIBEXEC": str(self.image_libexec),
                 "VOGT_CODEX_SHA": FORK_SHA,
             }
         )
@@ -836,6 +913,37 @@ def test_a_short_sha_is_not_a_release_pin(release_sandbox: ReleaseSandbox) -> No
     refused = release_sandbox.install(FORK_SHA[:12])
     assert refused.returncode == 64
     assert "full commit" in refused.stderr
+
+
+def test_a_baked_sha_without_an_image_copy_is_installed_not_claimed(
+    release_sandbox: ReleaseSandbox,
+) -> None:
+    """The manifest is the image's claim, not proof. An image built with
+    INSTALL_AI_CLIENTS off declared `codex=<sha>` while carrying no binary;
+    the installer answered "image copy is current", skipped the download, and
+    the session died on a missing command (WI-3761). With the copy absent it
+    must install the requested version and flip `current` to it."""
+    release_sandbox.drop_image_copy()
+    release_sandbox.publish(FORK_SHA, b"#!/bin/sh\necho runtime\n")
+    installed = release_sandbox.install(FORK_SHA)
+    assert installed.returncode == 0, installed.stderr
+    assert "image copy" not in installed.stderr
+    assert "is absent; installing it" in installed.stderr
+    assert release_sandbox.current() == FORK_SHA
+    assert (release_sandbox.root / "codex" / FORK_SHA / "bin" / "codex").exists()
+
+
+def test_an_image_with_no_copy_and_no_request_is_honest(
+    release_sandbox: ReleaseSandbox,
+) -> None:
+    """`image` (what the entrypoint asks for when no pin is set) on an image
+    that carries nothing says so instead of claiming an image copy."""
+    release_sandbox.drop_image_copy()
+    (release_sandbox.share / "agent-versions.resolved").write_text("", encoding="utf-8")
+    resolved = release_sandbox.install("image")
+    assert resolved.returncode == 0, resolved.stderr
+    assert "carries no copy" in resolved.stderr
+    assert release_sandbox.current() is None
 
 
 def test_a_stock_npm_codex_pin_is_refused_and_a_stale_one_dropped(

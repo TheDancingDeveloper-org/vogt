@@ -26,6 +26,33 @@ unset _vogt_endpoint
 readonly VOGT_WRAPPER="/usr/local/bin/vogt-mcp"
 readonly VOGT_SRC="${VOGT_SRC:-$HOME/Working/Active/apps/vogt}"
 
+# An optional agent client's state directory is created only when this uid can
+# create it. This script runs from `vogt-agent-auth run` on every launch, under
+# `set -euo pipefail`, for whichever agent (or non-agent payload) the session
+# is starting. One client's home can be unwritable — a vogt-dev engine
+# container has no XDG_DATA_HOME, and `~/.local/share` is a root-owned parent
+# the kubelet made for the state mount, so opencode's own
+# `mkdir ~/.local/share/opencode` returns EACCES. That costs that client's
+# registration, never the launch.
+optional_dir() {
+    local dir="$1" what="$2"
+    [[ -d "$dir" ]] && return 0
+    if mkdir -p "$dir" 2>/dev/null; then
+        return 0
+    fi
+    printf 'mcp-bootstrap: %s is not writable (%s); skipping\n' "$what" "$dir" >&2
+    return 1
+}
+
+# Run one optional client step. A failure in a client this session is not
+# starting is reported, and the next step still runs.
+optional_step() {
+    local what="$1"
+    shift
+    "$@" || printf 'mcp-bootstrap: %s failed; continuing\n' "$what" >&2
+    return 0
+}
+
 # Whether Claude Code already runs `name` with `command` (and `arg`, when
 # given), read straight from its config (WI-927). `claude mcp get` answers the
 # same question but starts node and health-checks the server, ~0.7 s a call,
@@ -114,13 +141,21 @@ install_vogt_claude() {
 
 install_vogt_opencode() {
     command -v opencode >/dev/null 2>&1 || return 0
+    local config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
+    # opencode keeps its registration under XDG_CONFIG_HOME but its database
+    # under XDG_DATA_HOME (a Bun default of ~/.local/share). Create both when
+    # this uid can, and skip this client when it cannot: the session may be
+    # starting Codex, and opencode's own mkdir must not abort that launch.
+    optional_dir "$config_dir" "opencode config directory" || return 0
+    optional_dir "${XDG_DATA_HOME:-$HOME/.local/share}/opencode" \
+        "opencode data directory" || return 0
     # Reconcile the COMMAND, not mere name-presence (same stale-launcher bug as
     # the claude branch). opencode has no `mcp remove`, but `mcp add` upserts,
     # so re-adding overwrites a stale command with the current wrapper. Skip only
     # when the current wrapper is already the registered command.
     if rg -qF "$VOGT_WRAPPER" \
-        "${XDG_CONFIG_HOME:-$HOME/.config}/opencode/opencode.json" \
-        "${XDG_CONFIG_HOME:-$HOME/.config}/opencode/opencode.jsonc" \
+        "$config_dir/opencode.json" \
+        "$config_dir/opencode.jsonc" \
         "$PWD/opencode.json" \
         "$PWD/opencode.jsonc" 2>/dev/null; then
         return 0
@@ -131,7 +166,8 @@ install_vogt_opencode() {
     # the session's own `VOGT_URL`, the one value that knows where this session's
     # Vogt is. The wrapper reads it at spawn instead.
     opencode mcp add vogt \
-        -- "$VOGT_WRAPPER" >/dev/null
+        -- "$VOGT_WRAPPER" >/dev/null \
+        || printf 'mcp-bootstrap: opencode registration of vogt failed\n' >&2
 }
 
 # Optional read-only MCP servers (docs/ENGINE.md §4). Each is registered only
@@ -179,7 +215,7 @@ readonly_wanted() {
 readonly_codex_write() {
     local config="$1" name="$2" arg="$3" vars="$4" lockdir
     lockdir="$(dirname "$config")"
-    mkdir -p "$lockdir"
+    optional_dir "$lockdir" "Codex config directory" || return 0
     (
         flock 9
         CODEX_CONFIG="$config" CODEX_SERVER="$name" CODEX_ARG="$arg" \
@@ -273,7 +309,7 @@ PY
 codex_disable_daemon() {
     local config="$1" lockdir
     lockdir="$(dirname "$config")"
-    mkdir -p "$lockdir"
+    optional_dir "$lockdir" "Codex config directory" || return 0
     (
         flock 9
         CODEX_CONFIG="$config" python3 - <<'PY'
@@ -374,7 +410,7 @@ PY
 codex_auto_compact() {
     local config="$1" lockdir
     lockdir="$(dirname "$config")"
-    mkdir -p "$lockdir"
+    optional_dir "$lockdir" "Codex config directory" || return 0
     (
         flock 9
         CODEX_CONFIG="$config" \
@@ -473,7 +509,7 @@ PY
 codex_litellm_provider() {
     local config="$1" lockdir
     lockdir="$(dirname "$config")"
-    mkdir -p "$lockdir"
+    optional_dir "$lockdir" "Codex config directory" || return 0
     (
         flock 9
         CODEX_CONFIG="$config" python3 - <<'PY'
@@ -786,6 +822,9 @@ readonly_opencode() {
     # never a credential (WI-975).
     [[ "$3" == "yes" ]] || return 0
     config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
+    optional_dir "$config_dir" "opencode config directory" || return 0
+    optional_dir "${XDG_DATA_HOME:-$HOME/.local/share}/opencode" \
+        "opencode data directory" || return 0
     # opencode passes a local server the session's own environment, so the
     # registration carries no `--env`. `mcp add` upserts, so a present name
     # that does not yet run the wrapper is simply overwritten.
@@ -863,7 +902,7 @@ readonly CODEX_SCHEMA_MAX_BYTES="${CODEX_SCHEMA_MAX_BYTES:-200000}"
 codex_driven_session() {
     local config="$1" lockdir skills
     lockdir="$(dirname "$config")"
-    mkdir -p "$lockdir"
+    optional_dir "$lockdir" "Codex config directory" || return 0
     skills="${CODEX_SKILLS_LINK:-$HOME/.agents/skills}"
     if [[ -d "$PWD/.claude/skills" ]]; then
         _codex_link_skills "$skills" "$PWD/.claude/skills"
@@ -1054,7 +1093,7 @@ PY
 _codex_link_skills() {
     local link="$1" target="$2"
     [[ -e "$link" || -L "$link" ]] && return 0
-    mkdir -p "$(dirname "$link")"
+    optional_dir "$(dirname "$link")" "Codex skills directory" || return 0
     ln -s "$target" "$link" 2>/dev/null || true
 }
 
@@ -1108,10 +1147,10 @@ install_cadastre_codex() {
 
 # Vogt registrations are best-effort: a failure here must not cost an agent its
 # git/gh credentials.
-install_vogt_bridge
-install_vogt_codex
-install_vogt_claude
-install_vogt_opencode
+optional_step "Vogt bridge" install_vogt_bridge
+optional_step "Codex Vogt registration" install_vogt_codex
+optional_step "Claude Vogt registration" install_vogt_claude
+optional_step "opencode Vogt registration" install_vogt_opencode
 install_cadastre_claude || printf 'mcp-bootstrap: claude registration of cadastre failed\n' >&2
 install_cadastre_codex || printf 'mcp-bootstrap: codex registration of cadastre failed\n' >&2
 if command -v codex >/dev/null 2>&1; then

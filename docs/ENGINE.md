@@ -143,6 +143,13 @@ of its own: it starts
 `CODEX_PATH` at the baked fork binary (the runtime pin's `codex/current` when
 one is flipped, else `/usr/local/libexec/codex-real`) so it never falls back to
 the older `@openai/codex` its package bundles. An explicit `CODEX_PATH` wins.
+`/usr/local/share/vogt/agent-versions.resolved` records only the tools the
+build actually put on disk: it is written after the installs and guarded per
+binary, so an image built without `INSTALL_AI_CLIENTS=true` (or an arm64 build
+with no Codex release) declares no CLI rather than naming one it lacks. The
+runtime installer treats a declared version as an image copy it can switch
+back to without a download; an image that over-claimed made a host session
+skip the install and die on a missing `codex` (WI-3761).
 That baked copy is the baseline, and the version a
 running pod uses can be moved without a rebuild by the runtime pin described
 in [`DEPLOYMENT.md`](DEPLOYMENT.md) §3 (`VOGT_CLAUDE_CODE_VERSION` and
@@ -4423,7 +4430,7 @@ service behind it is not there, and exactly which setting turns it on.
 | **Vogt core** | the front door, credential checks, the assistant's Vogt tools, the event follower | `VOGT_CORE_URL` + the stack secret, `VOGT_CORE_TOKEN` / `VOGT_CORE_TOKEN_FILE` — §3, §5 | The engine is bootable alone with a break-glass `ENGINE_TOKEN` (with neither it refuses to start): sessions work, `/readyz` stays ready, the Vogt routes answer `503` with a named reason. |
 | **FCM** (native push) | push to the Android shell | `ENGINE_FCM_SERVICE_ACCOUNT_FILE` (a path to the Firebase service-account JSON; `ENGINE_FCM_SERVICE_ACCOUNT_JSON`, the document inline, is also accepted but carries a private key in the environment and is warned about) | The FCM transport is disabled; browser web-push still works for any subscription. VAPID keys are generated and persisted under `state_dir`. |
 | **GUI streaming** | the GUI tab's live stream of launched processes | `GUI_STREAM_URL` (+ `START_SWAY=1`, and `GUI_STREAM_VERIFIED=1` once an operator has watched it work) | `/readyz` reports `gui: disabled` and the GUI surface's affordances are withdrawn with a stated reason. |
-| **Agent CLIs** (`codex`, `claude`, `opencode`) | agents inside sessions | `INSTALL_AI_CLIENTS=true` at image build (on in the published image), or a user-managed install in the pod's home | Sessions are ordinary shells; the "(protected)" templates cannot start. |
+| **Agent CLIs** (`codex`, `claude`, `opencode`) | agents inside sessions | `INSTALL_AI_CLIENTS=true` at image build (on in the published stack image; a dev image built from a checkout must pass it too — `vogt-dev` did not, WI-3761), or a user-managed install in the pod's home | Sessions are ordinary shells; the "(protected)" templates cannot start. A resolved-manifest row whose copy is missing fails the boot check instead of starting sessions that die. |
 | **Agent service auth** | brokering third-party service credentials (GitHub and others) into a session from a secrets manager | `ENGINE_AUTO_AGENT_AUTH=1` + `ENGINE_AGENT_AUTH_HELPER` naming a helper (the bundled reference helper is auto-selected when its secrets manager's machine identity is present in the environment), configured through the env vars in `agent-auth.sh`'s header | Sessions run without those credentials pre-loaded; nothing in the engine depends on it. **The shipped helper is one pluggable example** — a data-driven reference implementation against one secrets manager; it bakes in no address, project or secret name and is driven by `ENGINE_AGENT_AUTH_SECRETS`/`_PROBES`. A deployment points the variable at a helper of its own that speaks the same subcommands (`check`, `run`, `shell`, `get`, `set`, `fetch`, `store`), or leaves it off. When it *is* on, a session gets exactly the manifest and never the machine identity — see the credential contract below. |
 
 **The agent-auth session credential contract.** A session launched under this
