@@ -33,6 +33,7 @@ manifest="$root/manifest"
 # Where the image's copies live and where a persisted home would put a stray
 # one. Overridable so the script can be exercised outside the image.
 image_bin="${VOGT_AGENT_CLI_IMAGE_BIN:-/usr/local/bin}"
+image_libexec="${VOGT_AGENT_CLI_IMAGE_LIBEXEC:-/usr/local/libexec}"
 home_bin="${VOGT_AGENT_CLI_HOME_BIN:-${HOME:-/nonexistent}/.npm-global/bin}"
 tools_table="${VOGT_AGENT_CLI_TOOLS:-/usr/local/share/vogt/agent-clis.tools}"
 [[ -r "$versions" || -r "$manifest" ]] || exit 0
@@ -71,6 +72,18 @@ active_prefix() {
         readlink -f "$current"
     else
         dirname "$image_bin"
+    fi
+}
+
+# Where the image's own copy of a tool lives. `/usr/local/bin/codex` is the
+# full-access wrapper, which the image copies in whether or not the fork
+# release was installed, so a github-release row is looked for in libexec.
+image_copy_path() {
+    local tool="$1" binary="$2" kind="$3"
+    if [[ "$kind" == "github-release" ]]; then
+        printf '%s/%s-real' "$image_libexec" "$binary"
+    else
+        printf '%s/%s' "$image_bin" "$binary"
     fi
 }
 
@@ -158,11 +171,21 @@ check_go_src() {
 if [[ -r "$tools_table" ]]; then
     while IFS=$'\t' read -r tool package binary _ kind; do
         [[ -n "$tool" && "$tool" != \#* ]] || continue
+        # A row in the resolved manifest is a promise that the image carries
+        # that tool. When neither the image copy nor a runtime `current` is
+        # there, the promise is false: the build never installed it (WI-3761),
+        # and a session that trusts the manifest finds no binary. Refuse to
+        # boot rather than start sessions that die.
+        expected="$(expected_version "$tool")"
+        copy="$(image_copy_path "$tool" "$binary" "${kind:-npm}")"
+        if [[ -n "$expected" && ! -e "$copy" && ! -e "$root/$tool/current/bin/$binary" ]]; then
+            report "$tool is pinned to $expected but neither the image copy $copy nor a runtime current is present"
+        fi
         check_tool "$binary" "$tool" "$image_bin/$binary" "$home_bin/$binary"
         case "${kind:-npm}" in
-            npm) check_package "$package" "$(expected_version "$tool")" "$tool" "$binary" ;;
-            go-dist) check_go_dist "$(expected_version "$tool")" "$tool" "$binary" ;;
-            go-src|github-release) check_go_src "$(expected_version "$tool")" "$tool" ;;
+            npm) check_package "$package" "$expected" "$tool" "$binary" ;;
+            go-dist) check_go_dist "$expected" "$tool" "$binary" ;;
+            go-src|github-release) check_go_src "$expected" "$tool" ;;
         esac
     done < "$tools_table"
 else

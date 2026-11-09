@@ -133,6 +133,9 @@ vogt-core on loopback -> the engine.
 
 `codex` and `claude` are baked into the published image
 (`INSTALL_AI_CLIENTS=true` in the release build; a from-source build chooses).
+`/usr/local/share/vogt/agent-versions.resolved` lists only the CLIs the build
+actually installed — a build that does not pass the arg carries none and
+declares none (WI-3761).
 The system `codex` launcher disables Codex's nested approvals and sandbox,
 because the pod is the isolation boundary. The `opencode` CLI is bundled in
 every image.
