@@ -397,6 +397,12 @@ pub struct Config {
     /// needs instead of stopping for a person to approve each one; set
     /// `on-request` to restore per-command prompts.
     pub codex_approval_policy: String,
+    /// The Codex home whose `sessions/<YYYY>/<MM>/<DD>/rollout-…-<conversation>.jsonl`
+    /// rollouts a pod Codex session writes back are stored under (WI-3867), so
+    /// `session_last_reply` finds them by conversation id as it does for a host
+    /// session. `ENGINE_CODEX_TRANSCRIPT_ROOT`, else `$CODEX_HOME`, else
+    /// `$HOME/.codex`. `None` turns the path off (no home could be resolved).
+    pub codex_transcript_root: Option<std::path::PathBuf>,
     /// `ENGINE_AGENT_AUTH_SECRETS`, parsed: what a deployment declared for
     /// sessions, and therefore the policy the on-demand secret broker
     /// enforces. Empty when nothing is declared, which turns the
@@ -677,6 +683,7 @@ struct FileConfig {
     agent_auth_helper: Option<String>,
     codex_session_id: Option<bool>,
     codex_approval_policy: Option<String>,
+    codex_transcript_root: Option<String>,
     session_templates: Option<Vec<SessionTemplate>>,
     pod_backends_enabled: Option<bool>,
     assistant_api_key: Option<String>,
@@ -858,6 +865,19 @@ pub fn load(
             .as_deref()
             .or(from_file.codex_approval_policy.as_deref()),
     )?;
+
+    let codex_transcript_root = engine_env("ENGINE_CODEX_TRANSCRIPT_ROOT")
+        .ok()
+        .map(|path| path.trim().to_string())
+        .filter(|path| !path.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            from_file
+                .codex_transcript_root
+                .map(std::path::PathBuf::from)
+        })
+        .or_else(|| std::env::var_os("CODEX_HOME").map(std::path::PathBuf::from))
+        .or_else(|| dirs_home().map(|home| home.join(".codex")));
 
     let auto_agent_auth = match engine_env("ENGINE_AUTO_AGENT_AUTH") {
         Ok(v) => Some(parse_bool_env("ENGINE_AUTO_AGENT_AUTH", &v)?),
@@ -1047,6 +1067,7 @@ pub fn load(
         agent_auth_helper,
         codex_session_id,
         codex_approval_policy,
+        codex_transcript_root,
         agent_auth_secrets,
         agent_auth_secrets_file,
         llm_providers_file,
