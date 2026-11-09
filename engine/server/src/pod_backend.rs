@@ -1163,6 +1163,7 @@ pub fn pod_template(
     kind: &str,
     account: Option<&str>,
     model: Option<&str>,
+    effort: Option<&str>,
     permission_mode: Option<&str>,
     codex_approval_policy: &str,
     command: &[String],
@@ -1196,6 +1197,16 @@ pub fn pod_template(
         env.push(EnvVar {
             name: "VOGT_MODEL".into(),
             value: Some(model.into()),
+            ..Default::default()
+        });
+    }
+    // The session agent builds the pod's Claude line itself (WI-3881), so the
+    // effort the engine validated has to travel with the pod the same way the
+    // model does.
+    if let Some(effort) = effort {
+        env.push(EnvVar {
+            name: "VOGT_EFFORT".into(),
+            value: Some(effort.into()),
             ..Default::default()
         });
     }
@@ -2141,6 +2152,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 vogt_session_agent::CODEX_APPROVAL_DEFAULT,
                 &[],
             );
@@ -2215,6 +2227,7 @@ mod tests {
             &[],
             "agent",
             Some("acct"),
+            None,
             None,
             None,
             vogt_session_agent::CODEX_APPROVAL_DEFAULT,
@@ -2400,6 +2413,7 @@ mod tests {
             },
             &[],
             "session",
+            None,
             None,
             None,
             None,
@@ -2811,6 +2825,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 vogt_session_agent::CODEX_APPROVAL_DEFAULT,
                 command,
             );
@@ -2842,9 +2857,9 @@ mod tests {
         assert_eq!(env["VOGT_SESSION_COMMAND"], r#"["bash","-l"]"#);
     }
 
-    /// WI-3864: the pod's session agent builds the Codex line, so the posture
-    /// the engine validated has to reach it in the env. The default posture is
-    /// left out so the pod's own default applies.
+    /// WI-3864, WI-3881: the pod's session agent builds the agent line itself,
+    /// so the launch inputs the engine validated have to reach it in the env.
+    /// The default posture is left out so the pod's own default applies.
     #[test]
     fn a_pod_carries_the_codex_posture_the_engine_validated() {
         let cfg = PodConfig::default();
@@ -2863,46 +2878,57 @@ mod tests {
             pod_capable: false,
             account: None,
         };
-        let env_of = |mode: Option<&str>, approval: &str| {
-            let pod = pod_template(
-                &cfg,
-                &template,
-                Uuid::nil(),
-                &default_source(&cfg),
-                &[],
-                "session",
-                None,
-                None,
-                mode,
-                approval,
-                &[
-                    "vogt-agent-auth".into(),
-                    "run".into(),
-                    "--".into(),
-                    "codex".into(),
-                ],
-            );
-            pod.spec.unwrap().containers[0]
-                .env
-                .clone()
-                .unwrap()
-                .into_iter()
-                .map(|e| (e.name, e.value.unwrap_or_default()))
-                .collect::<BTreeMap<_, _>>()
-        };
+        let env_of =
+            |model: Option<&str>, effort: Option<&str>, mode: Option<&str>, approval: &str| {
+                let pod = pod_template(
+                    &cfg,
+                    &template,
+                    Uuid::nil(),
+                    &default_source(&cfg),
+                    &[],
+                    "session",
+                    None,
+                    model,
+                    effort,
+                    mode,
+                    approval,
+                    &[
+                        "vogt-agent-auth".into(),
+                        "run".into(),
+                        "--".into(),
+                        "codex".into(),
+                    ],
+                );
+                pod.spec.unwrap().containers[0]
+                    .env
+                    .clone()
+                    .unwrap()
+                    .into_iter()
+                    .map(|e| (e.name, e.value.unwrap_or_default()))
+                    .collect::<BTreeMap<_, _>>()
+            };
 
-        let env = env_of(None, "never");
+        let env = env_of(None, None, None, "never");
         assert_eq!(env["VOGT_CODEX_APPROVAL_POLICY"], "never");
+        assert!(!env.contains_key("VOGT_MODEL"));
+        assert!(!env.contains_key("VOGT_EFFORT"));
         assert!(
             !env.contains_key("VOGT_PERMISSION_MODE"),
             "the default posture is the pod's own default"
         );
 
-        let env = env_of(Some("accept-edits"), "on-request");
+        let env = env_of(
+            Some("claude-opus-4-6"),
+            Some("high"),
+            Some("accept-edits"),
+            "on-request",
+        );
+        assert_eq!(env["VOGT_MODEL"], "claude-opus-4-6");
+        assert_eq!(env["VOGT_EFFORT"], "high");
         assert_eq!(env["VOGT_PERMISSION_MODE"], "accept-edits");
         assert_eq!(env["VOGT_CODEX_APPROVAL_POLICY"], "on-request");
 
-        let env = env_of(Some("default"), "never");
+        let env = env_of(None, None, Some("default"), "never");
         assert!(!env.contains_key("VOGT_PERMISSION_MODE"));
     }
 
@@ -2934,6 +2960,7 @@ mod tests {
             &project_source("demo", "rust-2"),
             &[],
             "session",
+            None,
             None,
             None,
             None,
@@ -3526,6 +3553,7 @@ mod tests {
             &default_source(cfg),
             &[],
             "session",
+            None,
             None,
             None,
             None,
