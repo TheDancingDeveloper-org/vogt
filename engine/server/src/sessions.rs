@@ -1300,6 +1300,20 @@ impl SessionRegistry {
                 spec.command = Some(rewritten);
             }
         }
+        // WI-3815. Codex's first start in the pod's `/work` checkout otherwise
+        // stops at its interactive folder-trust screen before the driver can
+        // submit the brief. Keep this as a command-local override so it does
+        // not mutate the user's shared Codex config.
+        if let Some(command) = spec.command.as_deref() {
+            let cwd = spec
+                .cwd
+                .as_deref()
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| self.cfg.default_cwd.clone());
+            if let Some(rewritten) = agent_cli::with_codex_trust(command, &cwd) {
+                spec.command = Some(rewritten);
+            }
+        }
         // WI-3491. The registered LLM providers, as this launch's own
         // `model_providers`; their keys come through the manifest.
         if let Some(command) = spec.command.as_deref() {
