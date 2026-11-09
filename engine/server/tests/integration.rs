@@ -2290,7 +2290,9 @@ async fn session_output(base: &str, body: Value, expected: &str) -> String {
         .await
         .unwrap();
     let id = created["id"].as_str().unwrap().to_string();
-    session_output_after_exit(&client, base, &id, &[expected]).await
+    session_output_after_exit(&client, base, &id, &[expected])
+        .await
+        .printed
 }
 
 #[tokio::test]
@@ -3249,7 +3251,8 @@ async fn session_prompt_is_written_to_a_file_the_child_is_pointed_at() {
         &id,
         &[&path_line, "Fix the flaky forge test."],
     )
-    .await;
+    .await
+    .printed;
     assert!(
         printed.contains(&path_line),
         "child should be told the prompt file path; got {printed:?}"
@@ -3316,7 +3319,9 @@ async fn an_agent_started_with_a_brief_is_told_to_read_it() {
         .join("sessions")
         .join(format!("{id}.md"));
 
-    let printed = session_output_after_exit(&client, &base, &id, &["suggest=["]).await;
+    let printed = session_output_after_exit(&client, &base, &id, &["suggest=["])
+        .await
+        .printed;
     assert!(
         printed.contains(&format!("arg=[--session-id]\r\narg=[{id}]")),
         "a fresh claude launch should carry the session id; got {printed:?}"
@@ -3397,7 +3402,9 @@ async fn a_session_without_a_prompt_gets_no_file_and_no_variable() {
         .unwrap();
     let id = created["id"].as_str().unwrap().to_string();
 
-    let printed = session_output_after_exit(&client, &base, &id, &["file=[]"]).await;
+    let printed = session_output_after_exit(&client, &base, &id, &["file=[]"])
+        .await
+        .printed;
     assert!(
         printed.contains("file=[]"),
         "no brief means no variable; got {printed:?}"
@@ -3548,20 +3555,25 @@ async fn artifact_cleanup_collects_prompts_of_sessions_the_registry_forgot() {
 }
 
 /// Run a session to completion and return everything it printed.
-/// The scrollback of a session that has exited, once it holds every string
-/// in `expected`.
+/// A session that has exited, and everything it printed, once the scrollback
+/// holds every string in `expected`.
 ///
 /// The exit code and the PTY reader's last bytes race: on a loaded runner the
 /// session can report its exit while the tail of the child's output is still
 /// on its way into the scrollback. So this polls until both the exit and the
 /// expected content are visible, and on its deadline returns what it has for
 /// the caller's assertion to report.
+struct ExitedSession {
+    printed: String,
+    exit_code: Option<i32>,
+}
+
 async fn session_output_after_exit(
     client: &reqwest::Client,
     base: &str,
     id: &str,
     expected: &[&str],
-) -> String {
+) -> ExitedSession {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     loop {
         let detail: SessionDetail = client
@@ -3578,7 +3590,10 @@ async fn session_output_after_exit(
             .unwrap();
         let printed = String::from_utf8_lossy(&snapshot).into_owned();
         if exited && expected.iter().all(|want| printed.contains(want)) {
-            return printed;
+            return ExitedSession {
+                printed,
+                exit_code: detail.summary.exit_code,
+            };
         }
         if tokio::time::Instant::now() >= deadline {
             assert!(
@@ -3586,7 +3601,10 @@ async fn session_output_after_exit(
                 "session {id} never exited with output; exit_code={:?}, scrollback_bytes={}",
                 detail.summary.exit_code, detail.summary.scrollback_bytes,
             );
-            return printed;
+            return ExitedSession {
+                printed,
+                exit_code: detail.summary.exit_code,
+            };
         }
         tokio::time::sleep(Duration::from_millis(40)).await;
     }
@@ -19777,7 +19795,7 @@ sleep 2
         // the note can arrive in more than one chunk. Poll for the text itself,
         // not for a non-empty scrollback (WI-3289, the same race as WI-3286).
         let sid = id.to_string();
-        let out = super::session_output_after_exit(
+        let exited = super::session_output_after_exit(
             &h.client,
             &h.base,
             &sid,
@@ -19787,6 +19805,12 @@ sleep 2
             ],
         )
         .await;
+        let out = &exited.printed;
+        assert_eq!(
+            exited.exit_code,
+            Some(1),
+            "a failed mint ends the session with exit 1; got {out:?}"
+        );
         assert!(out.contains("session pod could not be created"), "{out}");
         assert!(out.contains("graft could not be reached"), "{out}");
         assert_eq!(minter.grants.lock().unwrap().len(), 1);
@@ -19863,13 +19887,19 @@ sleep 2
         // code can be visible before the note is, so wait for the text
         // (WI-3289).
         let sid = id.to_string();
-        let out = super::session_output_after_exit(
+        let exited = super::session_output_after_exit(
             &h.client,
             &h.base,
             &sid,
             &["session pod could not be created"],
         )
         .await;
+        let out = &exited.printed;
+        assert_eq!(
+            exited.exit_code,
+            Some(1),
+            "a failed pod creation ends the session with exit 1; got {out:?}"
+        );
         assert!(out.contains("session pod could not be created"), "{out}");
     }
 
