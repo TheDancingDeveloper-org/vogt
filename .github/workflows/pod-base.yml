@@ -171,10 +171,14 @@ jobs:
           VARIANT: ${{ matrix.variant }}
         run: |
           set -euo pipefail
-          # Only the Dockerfile: everything else about this image — the base
-          # digest, the SDK pins, the Flutter checksum — is inside it, which is
-          # exactly why the pins were moved there rather than passed in.
-          hash="$(sha256sum engine/Dockerfile.pod | cut -c1-12)"
+          # The build's context is `engine/` and its Dockerfile does
+          # `COPY . .`: the image is compiled from the whole tree, not only
+          # from `engine/Dockerfile.pod`. Hashing the Dockerfile alone meant a
+          # change under `engine/session-agent` reused the previous tag and
+          # published an image that did not contain it. Hash the tracked tree
+          # the build copies; files dropped by the Dockerfile ignore file only
+          # over-invalidate the tag, which is the safe direction.
+          hash="$(git ls-tree -r HEAD -- engine | sha256sum | cut -c1-12)"
           week="$(date -u +%GW%V)"
           tag="${VARIANT}-${hash}-${week}"
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
