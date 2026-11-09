@@ -17282,7 +17282,161 @@ async fn llm_provider_handler_refuses_unlisted_and_shared_manifest_secrets() {
         .text()
         .await
         .unwrap()
-        .contains("approved manifest or grant project"));
+        .contains("is not in the approved agent-auth manifest"));
+}
+
+/// WI-3699, A5 Step 1 shape: the deployment manifest holds several provider
+/// secrets in one project, an existing provider already owns one of them, and
+/// the second temporary provider must be able to take a *different* approved
+/// secret under its own env_key.  The manifest VARs are deliberately not the
+/// provider env_keys, as in the deployment.
+#[tokio::test]
+async fn llm_provider_handler_registers_an_a5_shaped_temporary_provider() {
+    let tmp = tempfile::tempdir().unwrap();
+    let registry = tmp.path().join("llm-providers.toml");
+    let mut cfg = test_config();
+    cfg.llm_providers_file = Some(registry);
+    cfg.agent_auth_secrets = vogt_engine_server::secret_broker::parse_manifest(
+        "HOMELAB_LITELLM_SESSION_KEY approved-project HOMELAB_LITELLM_SESSION_KEY\n\
+         HOMELAB_LITELLM_CLAWBAY_KEY approved-project HOMELAB_LITELLM_CLAWBAY_KEY ondemand\n\
+         HOMELAB_LITELLM_DEEPSEEK_KEY approved-project HOMELAB_LITELLM_DEEPSEEK_KEY ondemand",
+    )
+    .unwrap();
+    let (base, _state, _guard) = boot_with_state(cfg).await;
+    let client = reqwest::Client::new();
+
+    let existing = client
+        .post(format!("{base}/api/llm-providers"))
+        .headers(auth())
+        .json(&provider_request_with_secret(
+            "litellm-deepseek",
+            "LITELLM_DEEPSEEK_PROVIDER_KEY",
+            "HOMELAB_LITELLM_DEEPSEEK_KEY",
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(existing.status(), StatusCode::OK);
+
+    // The refused A5 registration: a distinct provider, a distinct env_key and
+    // another approved manifest secret.  Nothing about the request shadows a
+    // deployment variable, so it must be accepted.
+    let temporary = client
+        .post(format!("{base}/api/llm-providers"))
+        .headers(auth())
+        .json(&provider_request_with_secret(
+            "a5-temp",
+            "A5_TEMP_PROVIDER_KEY",
+            "HOMELAB_LITELLM_CLAWBAY_KEY",
+        ))
+        .send()
+        .await
+        .unwrap();
+    let temporary_status = temporary.status();
+    let temporary_text = temporary.text().await.unwrap();
+    assert_eq!(temporary_status, StatusCode::OK, "body: {temporary_text}");
+    let body: Value = serde_json::from_str(&temporary_text).unwrap();
+    assert_eq!(body["provider"]["state"], "active");
+    assert_eq!(body["provider"]["env_key"], "A5_TEMP_PROVIDER_KEY");
+    assert_eq!(
+        body["provider"]["secret_name"],
+        "HOMELAB_LITELLM_CLAWBAY_KEY"
+    );
+
+    // Using that secret's manifest VAR as the env_key is still refused: the
+    // registry would add a second manifest line for the same variable.
+    let shadowing = client
+        .post(format!("{base}/api/llm-providers"))
+        .headers(auth())
+        .json(&provider_request_with_secret(
+            "a5-shadow",
+            "HOMELAB_LITELLM_CLAWBAY_KEY",
+            "HOMELAB_LITELLM_CLAWBAY_KEY",
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(shadowing.status(), StatusCode::BAD_REQUEST);
+    assert!(shadowing
+        .text()
+        .await
+        .unwrap()
+        .contains("clashes with manifest VAR"));
+
+    // The existing provider's secret stays exclusive to it.
+    let shared = client
+        .post(format!("{base}/api/llm-providers"))
+        .headers(auth())
+        .json(&provider_request_with_secret(
+            "a5-shared",
+            "LITELLM_SHARED_PROVIDER_KEY",
+            "HOMELAB_LITELLM_DEEPSEEK_KEY",
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(shared.status(), StatusCode::BAD_REQUEST);
+    assert!(shared
+        .text()
+        .await
+        .unwrap()
+        .contains("already another provider's"));
+
+    let listed: Value = client
+        .get(format!("{base}/api/llm-providers"))
+        .headers(auth())
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(listed["providers"].as_array().unwrap().len(), 2);
+    assert!(listed["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|provider| provider["state"] == "active"));
+
+    // The exact request behind the A5 report: the same approved secret name,
+    // but with the project id from the compose-era `personal/vogt-dev`
+    // overlay instead of the id in this deployment's mounted manifest.  The
+    // refusal is correct policy, and it names the reference so an unapproved
+    // project id cannot be mistaken for an env_key rule.
+    let mut wrong_project = provider_request_with_secret(
+        "a5-temp",
+        "A5_TEMP_PROVIDER_KEY",
+        "HOMELAB_LITELLM_CLAWBAY_KEY",
+    );
+    wrong_project["secret_project"] = json!("76b1ebe1-3656-4cef-952c-30d5d489c6e7");
+    let refused = client
+        .post(format!("{base}/api/llm-providers"))
+        .headers(auth())
+        .json(&wrong_project)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+    let refused_body = refused.text().await.unwrap();
+    assert!(
+        refused_body.contains("a5-temp")
+            && refused_body
+                .contains("76b1ebe1-3656-4cef-952c-30d5d489c6e7/HOMELAB_LITELLM_CLAWBAY_KEY"),
+        "body: {refused_body}"
+    );
+
+    let removed = client
+        .post(format!("{base}/api/llm-providers/remove"))
+        .headers(auth())
+        .json(&json!({"name": "a5-temp"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(removed.status(), StatusCode::OK);
+    assert_eq!(
+        removed.json::<Value>().await.unwrap()["removed"],
+        Value::Bool(true)
+    );
 }
 
 #[tokio::test]
