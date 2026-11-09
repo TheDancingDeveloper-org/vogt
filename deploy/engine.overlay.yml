@@ -60,7 +60,7 @@ services:
         # Optional image-managed agent CLIs. When enabled, versions come from
         # engine/agent-versions.env unless an operator deliberately overrides
         # one with a reproducible build arg.
-        INSTALL_AI_CLIENTS: "${VOGT_INSTALL_AI_CLIENTS:-false}"
+        INSTALL_AI_CLIENTS: "${VOGT_INSTALL_AI_CLIENTS:-true}"
         CODEX_VERSION: "${VOGT_CODEX_VERSION:-}"
         CODEX_ACP_VERSION: "${VOGT_CODEX_ACP_VERSION:-}"
         CLAUDE_CODE_VERSION: "${VOGT_CLAUDE_CODE_VERSION:-}"
