@@ -4631,7 +4631,11 @@ those names in `AGENT_AUTH_ONDEMAND`, beside `AGENT_AUTH_GRANTED`. A session
 asks with `vogt-agent-auth fetch VAR`, which calls the engine's
 `POST /api/agent-auth/fetch/{var}` on loopback (`VOGT_ENGINE_BROKER_URL`) with a
 per-session broker token the engine minted at spawn (`VOGT_ENGINE_BROKER_TOKEN`)
-and revokes when the session is forgotten. The engine — not the helper —
+and revokes when the session is forgotten. A pod session has neither of those:
+it reaches the same route at `VOGT_ENGINE_URL` with its stream credential in
+`VOGT_SESSION_TOKEN_FILE`, the same pair `vogt-policy-hook` already presents,
+so `fetch`, `store` and `grants` work from a pod without the engine-side broker
+pair. The engine — not the helper —
 enforces that `VAR` is in `ENGINE_AGENT_AUTH_SECRETS` (any entry, not only
 `ondemand`; an undeclared name is refused with the manifest line to add),
 rate-limits per session, then runs the configured helper's `get VAR` with the
