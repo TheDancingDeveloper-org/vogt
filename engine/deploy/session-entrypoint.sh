@@ -246,6 +246,23 @@ add_dir=${VOGT_ADD_DIR:-$clone_dir/.vogt}; mkdir -p "$add_dir"; chmod 700 "$add_
 jq -r '.brief // ""' "$response" >"$add_dir/brief.md"; chmod 600 "$add_dir/brief.md"
 export VOGT_ADD_DIR="$add_dir"
 export VOGT_SESSION_CWD="$work_dir"; export VOGT_SESSION_BRIEF_FILE="$add_dir/brief.md"
+# The caller's own environment (WI-3883) is applied here, after the clone and
+# the git view that spend the source credential, and nowhere earlier:
+# exporting it into this shell before `graft clone` would let a caller name
+# GRAFT_ENDPOINT (or another credential lookup's target) and receive the
+# token. A name the engine already set keeps the engine's value, so the
+# bootstrap response's own `env` wins. The engine refused every dangerous
+# name at start; the name is checked again because a response is data.
+if jq -e '(.agent_env | type) == "object"' "$response" >/dev/null 2>&1; then
+  jq -r '.agent_env | to_entries[] | [.key, (.value|tostring)] | @tsv' "$response" >"$tmp_dir/agent-env.tsv"
+  while IFS="$(printf '\t')" read -r name value; do
+    [ -n "$name" ] || continue
+    case "$name" in [!A-Z_]*|*[!A-Z0-9_]*) fail "bootstrap returned an invalid agent environment name: $name" ;; esac
+    eval "already=\${$name+x}"
+    [ -z "$already" ] || continue
+    export "$name=$value"
+  done <"$tmp_dir/agent-env.tsv"
+fi
 step=handoff; say handoff
 elapsed=$(( $(date +%s) - started_at )); printf 'session-entrypoint: boot completed in %ss\n' "$elapsed" >&2; printf 'vogt_session_boot_seconds %s\n' "$elapsed" >&2
 trap - EXIT HUP INT TERM; cleanup
