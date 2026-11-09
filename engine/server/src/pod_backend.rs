@@ -914,8 +914,17 @@ fn pod_env(
             value: Some(cfg.cli.clone()),
             ..Default::default()
         },
-        // Keep the entrypoint's checkout location and the session-agent's
-        // launch defaults sourced from one pod-side constant.
+        // The clone root: the entrypoint checks the project's source out here,
+        // and a caller's cwd, carried through the bootstrap response, is a
+        // path inside it (WI-3883).
+        EnvVar {
+            name: "VOGT_CLONE_DIR".into(),
+            value: Some(vogt_session_agent::DEFAULT_WORK_DIR.into()),
+            ..Default::default()
+        },
+        // The session's working directory. The bootstrap response replaces it
+        // with the caller's cwd inside the clone; with no cwd it stays the
+        // clone root. Keep both sourced from one pod-side constant.
         EnvVar {
             name: "VOGT_WORK_DIR".into(),
             value: Some(vogt_session_agent::DEFAULT_WORK_DIR.into()),
