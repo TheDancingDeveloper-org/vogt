@@ -168,6 +168,23 @@ pub fn validate_against_manifest(
     Ok(())
 }
 
+/// Return whether a provider names one exact secret approved by the live
+/// manifest or by an operator-approved grant project.  The provider's
+/// `env_key` is intentionally not part of this lookup: it is the name Codex
+/// reads, and may be distinct from the manifest VAR that authorises the
+/// underlying secret.  Shadowing that VAR is checked separately above.
+pub fn secret_reference_is_approved(
+    provider: &Provider,
+    manifest: &[ManifestSecret],
+    grant_projects: &[String],
+) -> bool {
+    manifest.iter().any(|entry| {
+        entry.project_id == provider.secret_project && entry.secret_name == provider.secret_name
+    }) || grant_projects
+        .iter()
+        .any(|project| project == &provider.secret_project)
+}
+
 /// Names which are owned by the engine/runtime and may not be supplied by a
 /// provider registry entry.  In particular, allowing ENGINE_* here would let
 /// an operator-controlled registry replace the engine's own credentials.
