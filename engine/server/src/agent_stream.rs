@@ -841,17 +841,8 @@ pub async fn bootstrap(
         let broker = state.sessions.secret_broker();
         let providers = broker.providers();
         if !providers.is_empty() {
-            let model = req
-                .model
-                .as_deref()
-                .or_else(|| {
-                    providers
-                        .iter()
-                        .find_map(|p| p.models.first().map(String::as_str))
-                })
-                .unwrap_or("grok");
             codex_config = Some(
-                crate::llm_providers::codex_config(model, &providers)
+                crate::llm_providers::codex_config(req.model.as_deref(), &providers)
                     + "\n"
                     + &codex_config.unwrap_or_default(),
             );
@@ -1140,6 +1131,42 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn provider(name: &str, models: &[&str]) -> crate::llm_providers::Provider {
+        crate::llm_providers::Provider {
+            name: name.into(),
+            base_url: "http://litellm:4000/v1".into(),
+            wire_api: "chat".into(),
+            env_key: "PROVIDER_KEY".into(),
+            secret_project: "project".into(),
+            secret_name: "PROVIDER_KEY".into(),
+            models: models.iter().map(|model| (*model).into()).collect(),
+        }
+    }
+
+    #[test]
+    fn codex_model_selection_prefers_request_then_provider_then_default() {
+        let providers = [
+            provider("deepseek", &["deepseek-chat"]),
+            provider("other", &[]),
+        ];
+        assert_eq!(
+            crate::llm_providers::codex_selection(Some("requested"), &providers)
+                .map(|(model, provider)| (model, provider.name.as_str())),
+            Some(("requested".into(), "deepseek"))
+        );
+        assert_eq!(
+            crate::llm_providers::codex_selection(None, &providers)
+                .map(|(model, provider)| (model, provider.name.as_str())),
+            Some(("deepseek-chat".into(), "deepseek"))
+        );
+        let providers = [provider("other", &[])];
+        assert_eq!(
+            crate::llm_providers::codex_selection(None, &providers)
+                .map(|(model, provider)| (model, provider.name.as_str())),
+            Some(("grok".into(), "other"))
+        );
+    }
 
     #[test]
     fn a_slow_reader_gets_one_resync_per_expected_offset() {
