@@ -41,12 +41,14 @@ struct Pending {
     expires: Instant,
 }
 /// What a session spec asked the pod for that only the bootstrap response can
-/// carry (WI-3883): the caller's extra environment and the work directory
-/// inside the clone. Held from pod create until the pod's one bootstrap
-/// request, like the credential itself, and never written into the pod spec.
+/// carry (WI-3883): the caller's extra environment, which the entrypoint
+/// applies only at the agent's final exec, and the work directory inside the
+/// clone. Held from pod create until the pod's one bootstrap request, like the
+/// credential itself, and never written into the pod spec or into the
+/// entrypoint's environment before the clone.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PodLaunch {
-    pub env: Vec<(String, String)>,
+    pub agent_env: Vec<(String, String)>,
     /// The pod-side working directory (`VOGT_WORK_DIR`), when the caller's
     /// cwd is not the clone root.
     pub work_dir: Option<String>,
@@ -366,6 +368,12 @@ pub struct BootstrapResponse {
     pub session_token: String,
     pub bundle: serde_json::Value,
     pub env: serde_json::Value,
+    /// The caller's extra environment (WI-3883), kept apart from `env` on
+    /// purpose: the entrypoint applies it only at the final `exec` of the
+    /// agent, after the clone and every step that uses a credential. Absent
+    /// when the caller sent none.
+    #[serde(skip_serializing_if = "serde_json::Map::is_empty")]
+    pub agent_env: serde_json::Map<String, serde_json::Value>,
     /// The project-owned source selected for this session.
     pub source: vogt_engine_contract::source::SourceDescriptor,
     pub brief: String,
@@ -833,12 +841,14 @@ pub async fn bootstrap(
     );
     // The caller's extra environment and working directory (WI-3883) travel
     // here rather than in the pod spec, so a value never lands in the
-    // Kubernetes object. Inserted before the engine's own fields: a reserved
-    // name was refused at start, and the engine's value wins over any
-    // remaining overlap.
+    // Kubernetes object. The environment stays apart from `env` so the
+    // entrypoint cannot export it into its own shell: it is handed to the
+    // agent at the final `exec`, after the clone that spends the source
+    // token, or a caller's `GRAFT_ENDPOINT` would receive that token.
     let launch = state.agent_auth.take_launch(id).await.unwrap_or_default();
-    for (name, value) in launch.env {
-        env.insert(name, serde_json::Value::String(value));
+    let mut agent_env = serde_json::Map::new();
+    for (name, value) in launch.agent_env {
+        agent_env.insert(name, serde_json::Value::String(value));
     }
     if let Some(dir) = launch.work_dir {
         env.insert("VOGT_WORK_DIR".into(), serde_json::Value::String(dir));
@@ -978,6 +988,7 @@ pub async fn bootstrap(
         session_token,
         bundle: serde_json::Value::Object(bundle),
         env: serde_json::Value::Object(env),
+        agent_env,
         source,
         source_token,
         mcp_config,
