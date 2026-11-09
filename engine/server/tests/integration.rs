@@ -18257,6 +18257,230 @@ mod pod_stream {
             .contains("light"));
     }
 
+    /// The core token this test's own `vogt-core` adopts at `init`.
+    const CORE_TOKEN: &str = "pod-codex-core-token-1234567890";
+
+    /// A real `vogt-core`, pointed at this engine and at the transcript roots a
+    /// deployment serving pod Codex replies sets.
+    struct CoreGuard {
+        child: std::process::Child,
+        url: String,
+        _dir: tempfile::TempDir,
+    }
+
+    impl Drop for CoreGuard {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
+    async fn boot_codex_core(engine_url: &str, transcript_root: &std::path::Path) -> CoreGuard {
+        let binary = std::env::var("CARGO_TARGET_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../target"))
+            .join("debug/vogt-core");
+        assert!(
+            binary.is_file(),
+            "vogt-core debug binary is missing at {}; build it with `cargo build -p vogt-core` before these tests",
+            binary.display()
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let core_token = dir.path().join("core-token");
+        std::fs::write(&core_token, CORE_TOKEN).unwrap();
+        let engine_token = dir.path().join("engine-token");
+        std::fs::write(&engine_token, TEST_TOKEN).unwrap();
+        let init = std::process::Command::new(&binary)
+            .arg("init")
+            .arg("--data-dir")
+            .arg(dir.path())
+            .env("VOGT_BOOTSTRAP_CORE_TOKEN_FILE", &core_token)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .unwrap();
+        assert!(
+            init.status.success(),
+            "vogt-core init failed: {}\n{}",
+            init.status,
+            String::from_utf8_lossy(&init.stderr)
+        );
+        // `serve` announces the port it was given, so port 0 is useless here;
+        // ask the kernel for a free one instead.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+            .to_string();
+        let child = std::process::Command::new(&binary)
+            .args(["serve", "--host", "127.0.0.1", "--port", &port])
+            .arg("--data-dir")
+            .arg(dir.path())
+            .env("VOGT_BOOTSTRAP_CORE_TOKEN_FILE", &core_token)
+            .env("VOGT_ENGINE_URL", engine_url)
+            .env("VOGT_ENGINE_TOKEN_FILE", &engine_token)
+            // What a deployment that serves pod Codex replies sets: the root
+            // the engine writes the pod's rollout back under.
+            .env(
+                "VOGT_SESSION_TRANSCRIPT_ROOTS",
+                json!({ "codex": transcript_root.to_string_lossy() }).to_string(),
+            )
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let url = format!("http://127.0.0.1:{port}");
+        let client = reqwest::Client::new();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if client
+                .get(format!("{url}/health/ready"))
+                .send()
+                .await
+                .map(|response| response.status().is_success())
+                .unwrap_or(false)
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "vogt-core never became ready at {url}"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        CoreGuard {
+            child,
+            url,
+            _dir: dir,
+        }
+    }
+
+    /// WI-3869: a pod Codex's rollout, shipped by the real
+    /// `vogt-session-agent` at the path contract, lands under the engine's
+    /// Codex home, and `session.last_reply` on a real `vogt-core` returns the
+    /// assistant text. A Codex-only session has no Claude root or account, so
+    /// this is also the write-back path P2b (WI-3868) opened.
+    #[tokio::test]
+    async fn a_pod_codex_rollout_reaches_session_last_reply() {
+        let pod = tempfile::tempdir().unwrap();
+        let pod_home = pod.path().to_path_buf();
+        let engine_home = tempfile::tempdir().unwrap();
+        let engine_root = engine_home.path().to_path_buf();
+        let template = SessionTemplate {
+            name: "pod".into(),
+            description: "pod-backed Codex".into(),
+            command: Some(vec!["codex".into()]),
+            cwd: None,
+            env: Vec::new(),
+            account: None,
+            default_name: None,
+            match_repo_names: Vec::new(),
+            match_path_prefixes: Vec::new(),
+            tags: Vec::new(),
+            backend: "pod".into(),
+            host_capable: false,
+            pod_capable: false,
+        };
+        let stored = engine_root.clone();
+        let mut h = harness_cfg(false, Some(vec![template]), move |cfg| {
+            // A fresh pod Codex pins its conversation to the engine's session
+            // id, and the engine stores its rollout under its own Codex home.
+            cfg.codex_session_id = true;
+            cfg.codex_transcript_root = Some(stored);
+        })
+        .await;
+        let id = h.start().await;
+        let (_, token) = h.created.recv().await.unwrap();
+        let body: Value = h
+            .bootstrap_as(id, &token, "codex")
+            .await
+            .json()
+            .await
+            .unwrap();
+        let session_token = body["session_token"].as_str().unwrap().to_string();
+        let conversation = body["env"]["VOGT_SESSION_CONVERSATION_ID"]
+            .as_str()
+            .expect("a pinned Codex conversation")
+            .to_string();
+        assert_eq!(conversation, id.to_string());
+
+        // What the pod's Codex writes when the assistant answers.
+        let date = OffsetDateTime::now_utc().date();
+        let (year, month, day) = (date.year(), u8::from(date.month()), date.day());
+        let reply = "PONG from the pod's Codex";
+        let record = json!({
+            "timestamp": "2026-11-09T00:00:00Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": reply}],
+            },
+        });
+        let relative = format!(
+            "sessions/{year:04}/{month:02}/{day:02}/rollout-{year:04}-{month:02}-{day:02}T00-00-00-{conversation}.jsonl"
+        );
+        let rollout = pod_home.join(&relative);
+        std::fs::create_dir_all(rollout.parent().unwrap()).unwrap();
+        std::fs::write(&rollout, format!("{record}\n")).unwrap();
+
+        // The in-pod uploader for real: this session has no Claude root and no
+        // account, and its rollout must still travel at the contract path.
+        // `run` is not `Send`, so drive it and the assertions together on this
+        // task rather than spawning it.
+        let uploader = vogt_session_agent::run(vogt_session_agent::Config {
+            session_id: id.to_string(),
+            engine_url: h.base.clone(),
+            token: session_token,
+            cli: "codex".into(),
+            command: Some(vec!["/bin/sh".into(), "-c".into(), "sleep 2".into()]),
+            cwd: Some(pod.path().to_string_lossy().into_owned()),
+            cols: 120,
+            rows: 40,
+            buffer_bytes: 64 * 1024,
+            claude_config_dir: None,
+            codex_home: Some(pod_home),
+            permission_mode: None,
+            codex_approval_policy: "never".into(),
+            account: None,
+            conversation_id: Some(conversation.clone()),
+            resume: false,
+            claude: vogt_session_agent::ClaudeLaunch::default(),
+        });
+        let observe = async {
+            // The engine writes it under its own Codex home, at the same date
+            // path.
+            let landed = engine_home.path().join(&relative);
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while !landed.is_file() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the pod's rollout never reached the engine at {}",
+                    landed.display()
+                );
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            assert!(std::fs::read_to_string(&landed).unwrap().contains(reply));
+
+            let core = boot_codex_core(&h.base, &engine_home.path().join("sessions")).await;
+            let response = reqwest::Client::new()
+                .get(format!("{}/api/sessions/last-reply", core.url))
+                .query(&[("id", id.to_string()), ("n", "1".to_string())])
+                .bearer_auth(CORE_TOKEN)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let answer: Value = response.json().await.unwrap();
+            assert_eq!(answer["agent"], "codex", "{answer}");
+            assert_eq!(answer["conversation_id"], conversation, "{answer}");
+            assert_eq!(answer["messages"][0]["text"], reply, "{answer}");
+        };
+        let (uploaded, ()) = tokio::join!(uploader, observe);
+        uploaded.expect("the session-agent ships the rollout and exits");
+    }
+
     /// WI-3355: the bootstrap response carries the session's brief, not its
     /// name, so the pod's brief file holds the task.
     #[tokio::test]
