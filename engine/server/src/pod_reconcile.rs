@@ -17,6 +17,7 @@
 //! its record as hibernated (`recover_records`).
 use crate::{
     agent_stream::{AgentAuth, PodLink},
+    chats::redact,
     error::Result,
     pod_backend::{
         pod_exit_code, pod_fatal_waiting_reason, pod_is_ours, pod_phase, pod_reason,
@@ -105,7 +106,7 @@ const LOG_NOTE_BYTES: usize = 8 * 1024;
 /// The tail of a failed pod's container log, or `None` when there is none to
 /// show. The pod's status only ever says "Error" for a container that exited
 /// without a message; the log is where the reason actually is.
-async fn failed_log_tail(launcher: &dyn PodLauncher, id: Uuid) -> Option<String> {
+async fn failed_log_tail(launcher: &dyn PodLauncher, auth: &AgentAuth, id: Uuid) -> Option<String> {
     match launcher.log_tail(id).await {
         Ok(tail) => {
             let tail = tail.trim_end();
@@ -123,7 +124,11 @@ async fn failed_log_tail(launcher: &dyn PodLauncher, id: Uuid) -> Option<String>
                     .map(|i| start + i + 1)
                     .unwrap_or(start);
             }
-            Some(tail[start..].to_string())
+            let mut tail = redact(&tail[start..]);
+            if let Some(token) = auth.session_token(id).await {
+                tail = tail.replace(&token, "[redacted]");
+            }
+            Some(tail)
         }
         Err(e) => {
             tracing::debug!(session = %id, error = %e, "reading a failed pod's log failed");
@@ -165,7 +170,7 @@ pub async fn sweep(launcher: &dyn PodLauncher, auth: &AgentAuth, cfg: &PodConfig
                 if let Some(link) = link.as_deref() {
                     tracing::warn!(session = %id, code, %note, "ending a session whose pod died");
                     let note = if code != 0 {
-                        match failed_log_tail(launcher, id).await {
+                        match failed_log_tail(launcher, auth, id).await {
                             Some(tail) => format!(
                                 "{note}\n--- container log (last {LOG_TAIL_LINES} lines) ---\n{tail}"
                             ),
@@ -440,12 +445,20 @@ mod tests {
         let id = Uuid::new_v4();
         let auth = AgentAuth::default();
         let (link, mut reader) = auth.register_pod(id);
+        auth.issue(id, b"bootstrap").await;
+        assert!(auth.consume(id, b"bootstrap").await);
+        let session_token = auth.session_token(id).await.unwrap();
         link.ingest(0, b"hello").unwrap();
         let mut kube = MockKube::with(vec![pod(id, terminated("Failed", 137, "OOMKilled"))]);
         kube.log = Some(
-            "session-entrypoint: step clone\n\
-                         session agent failed: no such file\n"
-                .into(),
+            format!(
+                "session-entrypoint: step clone\n\
+                 session agent failed: no such file\n\
+                 Authorization: Bearer bearer-secret-123456\n\
+                 token=source-secret-123456\n\
+                 session={session_token}\n"
+            )
+            .into(),
         );
 
         let report = sweep(&kube, &auth, &cfg()).await.unwrap();
@@ -463,6 +476,11 @@ mod tests {
         assert!(output.contains("session pod failed: OOMKilled"));
         assert!(output.contains("--- container log (last 50 lines) ---"));
         assert!(output.contains("session agent failed: no such file"));
+        assert!(output.contains("Authorization: [redacted] [redacted]"));
+        assert!(output.contains("token=[redacted]"));
+        assert!(!output.contains("bearer-secret-123456"));
+        assert!(!output.contains("source-secret-123456"));
+        assert!(!output.contains(&session_token));
     }
 
     #[tokio::test]
