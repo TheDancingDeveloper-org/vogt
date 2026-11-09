@@ -77,9 +77,10 @@ pub async fn llm_provider_set(
         &manifest,
         &state.config.agent_grant_projects,
     ) {
-        return Err(crate::error::ApiError::BadRequest(
-            "provider secret must reference an approved manifest or grant project".into(),
-        ));
+        return Err(crate::error::ApiError::BadRequest(format!(
+            "provider {}: secret reference {}/{} is not in the approved agent-auth manifest or an approved grant project",
+            provider.name, provider.secret_project, provider.secret_name
+        )));
     }
     let mut providers =
         crate::llm_providers::load(path).map_err(crate::error::ApiError::BadRequest)?;
