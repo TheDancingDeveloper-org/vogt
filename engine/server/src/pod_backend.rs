@@ -41,6 +41,10 @@ pub struct PodTemplatePolicy {
     pub node_selector: Option<BTreeMap<String, String>>,
     #[serde(default)]
     pub affinity: Option<Affinity>,
+    /// How long this template's pods may run before the kubelet stops them
+    /// (`activeDeadlineSeconds`). Unset keeps the deployment default.
+    #[serde(default)]
+    pub active_deadline_seconds: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -123,6 +127,11 @@ pub struct PodConfig {
     /// session is ended.
     #[serde(default = "default_pending_timeout")]
     pub pending_timeout: Duration,
+    /// How long a session pod may run before the kubelet terminates it
+    /// (`activeDeadlineSeconds`, default 12 h). Zero leaves the deadline
+    /// unset; a template policy may override it.
+    #[serde(default = "default_session_deadline")]
+    pub session_deadline: Duration,
     /// How long an adopted pod's agent has to dial in again after an engine
     /// restart before the pod is given up as lost.
     #[serde(default = "default_reconnect_timeout")]
@@ -436,6 +445,9 @@ fn default_reconcile_interval() -> Duration {
 fn default_pending_timeout() -> Duration {
     Duration::from_secs(600)
 }
+fn default_session_deadline() -> Duration {
+    Duration::from_secs(12 * 60 * 60)
+}
 impl Default for PodConfig {
     fn default() -> Self {
         Self {
@@ -496,6 +508,7 @@ impl Default for PodConfig {
             image_pull_secret: None,
             reconcile_interval: default_reconcile_interval(),
             pending_timeout: default_pending_timeout(),
+            session_deadline: default_session_deadline(),
             reconnect_timeout: default_reconnect_timeout(),
             engine_id: default_engine_id(),
         }
@@ -595,6 +608,14 @@ impl PodConfig {
         if let Some(v) = text("ENGINE_POD_RESOURCE_LIMITS") {
             cfg.resource_limits = parse_resources("ENGINE_POD_RESOURCE_LIMITS", &v)?;
         }
+        if let Some(v) = text("ENGINE_POD_SESSION_DEADLINE_SECONDS") {
+            let secs: u64 = v.parse().map_err(|_| {
+                ApiError::Config(format!(
+                    "ENGINE_POD_SESSION_DEADLINE_SECONDS must be a whole number of seconds, got {v:?}"
+                ))
+            })?;
+            cfg.session_deadline = Duration::from_secs(secs);
+        }
         if let Some(v) = text("ENGINE_POD_ENGINE_ID") {
             cfg.engine_id = sanitize_engine_id(&v);
         }
@@ -657,6 +678,12 @@ impl PodConfig {
         }
         for (template, policy) in &cfg.template_policies {
             check_policy_against_node(template, policy, &cfg.cache_node)?;
+            if policy.active_deadline_seconds.is_some_and(|s| s <= 0) {
+                return Err(ApiError::Config(format!(
+                    "ENGINE_POD_TEMPLATE_POLICIES: {template}.active_deadline_seconds \
+                     must be a positive number of seconds"
+                )));
+            }
         }
         if let Some(url) = &cfg.cache_provisioner_url {
             if !(url.starts_with("https://") || (insecure && url.starts_with("http://"))) {
@@ -747,6 +774,15 @@ const BOOTSTRAP_VOLUME: &str = "bootstrap";
 /// the next session that installs from it.
 const PRIVATE_CACHE_VOLUME: &str = "session-cache";
 const PRIVATE_CACHE_DIR: &str = "/cache";
+/// The container root filesystem is read-only, so every path the entrypoint,
+/// the agent CLIs and a coding session write to is a per-pod `emptyDir`: the
+/// session user's home (and with it `CODEX_HOME`, `CLAUDE_CONFIG_DIR` and
+/// `XDG_CONFIG_HOME`), `/tmp`, the clone and work tree, and the runtime
+/// directory the bootstrap writes its token and MCP files to.
+const HOME_MOUNT: &str = "/home/vogt";
+const TMP_MOUNT: &str = "/tmp";
+const WORK_MOUNT: &str = vogt_session_agent::DEFAULT_WORK_DIR;
+const RUNTIME_MOUNT: &str = "/run/vogt";
 /// The shared per-node claim, read-only. Sessions can read a seed an operator
 /// put there but can never write it; nothing in the image reads it by default.
 const SHARED_CACHE_VOLUME: &str = "session-cache-seed";
@@ -1045,6 +1081,30 @@ pub fn pod_fatal_waiting_reason(pod: &Pod) -> Option<String> {
         })
 }
 
+/// Whether the kubelet stopped this pod because it outlived its
+/// `activeDeadlineSeconds`. The pod and the terminated container both carry
+/// `DeadlineExceeded`; either is enough, and the reconciler gives such a
+/// session its own end reason rather than the generic failure note.
+pub fn pod_hit_active_deadline(pod: &Pod) -> bool {
+    const DEADLINE_EXCEEDED: &str = "DeadlineExceeded";
+    let Some(status) = pod.status.as_ref() else {
+        return false;
+    };
+    if status.reason.as_deref() == Some(DEADLINE_EXCEEDED) {
+        return true;
+    }
+    status.container_statuses.as_ref().is_some_and(|statuses| {
+        statuses.iter().any(|container| {
+            container
+                .state
+                .as_ref()
+                .and_then(|state| state.terminated.as_ref())
+                .and_then(|terminated| terminated.reason.as_deref())
+                == Some(DEADLINE_EXCEEDED)
+        })
+    })
+}
+
 /// Extract a session id only from the engine-owned label, never from a pod
 /// name supplied by an external caller.
 pub fn session_id_from_pod(pod: &Pod) -> Option<Uuid> {
@@ -1280,6 +1340,27 @@ pub fn pod_template(
             ..Default::default()
         });
     }
+    // The root filesystem is read-only (F5b): the writable paths the
+    // entrypoint and the agents need are per-pod emptyDirs, never shared
+    // storage. CODEX_HOME, CLAUDE_CONFIG_DIR and XDG_CONFIG_HOME default
+    // under HOME, so the home mount covers them too.
+    for (name, dir) in [
+        ("session-home", HOME_MOUNT),
+        ("session-tmp", TMP_MOUNT),
+        ("session-work", WORK_MOUNT),
+        ("session-run", RUNTIME_MOUNT),
+    ] {
+        mounts.push(VolumeMount {
+            name: name.into(),
+            mount_path: dir.into(),
+            ..Default::default()
+        });
+        volumes.push(Volume {
+            name: name.into(),
+            empty_dir: Some(EmptyDirVolumeSource::default()),
+            ..Default::default()
+        });
+    }
     // The bootstrap credential is a file, never a pod-spec value. The Secret
     // it names is created right after the pod (it needs the pod's uid to be
     // owned by it); the kubelet holds the container until the volume resolves.
@@ -1298,6 +1379,13 @@ pub fn pod_template(
             ..Default::default()
         }),
         ..Default::default()
+    });
+    // A session pod is bounded: the kubelet terminates it at its template's
+    // policy or the deployment default, so a wedged agent cannot hold a node
+    // until an operator notices. Zero in the deployment config leaves it unset.
+    let active_deadline_seconds = policy.and_then(|p| p.active_deadline_seconds).or_else(|| {
+        (!cfg.session_deadline.is_zero())
+            .then(|| i64::try_from(cfg.session_deadline.as_secs()).unwrap_or(i64::MAX))
     });
     Pod {
         metadata: ObjectMeta {
@@ -1334,6 +1422,7 @@ pub fn pod_template(
                 }),
                 security_context: Some(SecurityContext {
                     allow_privilege_escalation: Some(false),
+                    read_only_root_filesystem: Some(true),
                     capabilities: Some(Capabilities {
                         drop: Some(vec!["ALL".into()]),
                         ..Default::default()
@@ -1369,6 +1458,7 @@ pub fn pod_template(
             }),
             volumes: Some(volumes),
             priority_class_name: cfg.priority_class.clone(),
+            active_deadline_seconds,
             restart_policy: Some("Never".into()),
             ..Default::default()
         }),
@@ -2253,6 +2343,22 @@ mod tests {
         );
         assert_eq!(secret.default_mode, Some(0o400));
         assert_eq!(secret.optional, Some(false));
+        // The root filesystem is read-only (F5b); every writable path the
+        // entrypoint and the agents use is a per-pod emptyDir.
+        assert_eq!(security.read_only_root_filesystem, Some(true));
+        assert_eq!(spec.active_deadline_seconds, Some(12 * 60 * 60));
+        for (name, path) in [
+            ("session-home", "/home/vogt"),
+            ("session-tmp", "/tmp"),
+            ("session-work", "/work"),
+            ("session-run", "/run/vogt"),
+        ] {
+            let mount = mounts.iter().find(|mount| mount.name == name).unwrap();
+            assert_eq!(mount.mount_path, path);
+            assert_ne!(mount.read_only, Some(true), "{name} must be writable");
+            let volume = volumes.iter().find(|volume| volume.name == name).unwrap();
+            assert!(volume.empty_dir.is_some(), "{name} must be an emptyDir");
+        }
     }
 
     #[test]
@@ -3429,6 +3535,64 @@ mod tests {
     }
 
     #[test]
+    fn active_deadline_follows_the_template_policy_and_zero_disables_it() {
+        let mut cfg = PodConfig {
+            session_deadline: Duration::from_secs(3600),
+            ..Default::default()
+        };
+        assert_eq!(
+            pod_template_for(&cfg).spec.unwrap().active_deadline_seconds,
+            Some(3600)
+        );
+        cfg.template_policies.insert(
+            "Pod".into(),
+            PodTemplatePolicy {
+                active_deadline_seconds: Some(900),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            pod_template_for(&cfg).spec.unwrap().active_deadline_seconds,
+            Some(900)
+        );
+        cfg.template_policies.clear();
+        cfg.session_deadline = Duration::ZERO;
+        assert_eq!(
+            pod_template_for(&cfg).spec.unwrap().active_deadline_seconds,
+            None
+        );
+    }
+
+    #[test]
+    fn the_session_deadline_is_read_from_the_environment_and_must_be_positive() {
+        let cfg = PodConfig::from_lookup(
+            lookup(&[("ENGINE_POD_SESSION_DEADLINE_SECONDS", "7200")]),
+            None,
+        )
+        .unwrap();
+        assert_eq!(cfg.session_deadline, Duration::from_secs(7200));
+        let cfg = PodConfig::from_lookup(
+            lookup(&[("ENGINE_POD_SESSION_DEADLINE_SECONDS", "0")]),
+            None,
+        )
+        .unwrap();
+        assert_eq!(cfg.session_deadline, Duration::ZERO);
+        assert!(PodConfig::from_lookup(
+            lookup(&[("ENGINE_POD_SESSION_DEADLINE_SECONDS", "soon")]),
+            None
+        )
+        .is_err());
+        assert!(PodConfig::from_lookup(
+            lookup(&[(
+                "ENGINE_POD_TEMPLATE_POLICIES",
+                r#"{"Pod":{"active_deadline_seconds":0}}"#,
+            )]),
+            None
+        )
+        .is_err());
+    }
+
+    #[test]
     fn config_defaults_are_the_current_values() {
         let cfg = PodConfig::from_lookup(lookup(&[]), None).unwrap();
         let d = PodConfig::default();
@@ -3441,6 +3605,7 @@ mod tests {
         assert_eq!(cfg.image_pull_secret, None);
         assert_eq!(cfg.resource_requests, d.resource_requests);
         assert_eq!(cfg.resource_limits, d.resource_limits);
+        assert_eq!(cfg.session_deadline, Duration::from_secs(12 * 60 * 60));
     }
 
     #[test]
@@ -3696,16 +3861,32 @@ mod tests {
         )
         .unwrap();
         let spec = pod_template_for(&cfg).spec.unwrap();
-        // The private cache and the bootstrap Secret are left: no shared claim.
+        // The private cache, the writable paths under the read-only root and
+        // the bootstrap Secret are left: no shared claim.
         let volumes = spec.volumes.unwrap();
-        assert_eq!(volumes.len(), 2);
-        assert_eq!(volumes[0].name, "session-cache");
+        assert_eq!(
+            volumes
+                .iter()
+                .map(|volume| volume.name.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "session-cache",
+                "session-home",
+                "session-tmp",
+                "session-work",
+                "session-run",
+                "bootstrap"
+            ]
+        );
+        assert!(volumes
+            .iter()
+            .all(|volume| volume.persistent_volume_claim.is_none()));
         assert!(volumes[0].empty_dir.is_some());
-        assert_eq!(volumes[1].name, "bootstrap");
+        assert!(volumes.last().unwrap().secret.is_some());
         assert!(spec.node_name.is_none());
         let c = &spec.containers[0];
         assert!(c.env_from.as_ref().unwrap().is_empty());
-        assert_eq!(c.volume_mounts.as_ref().unwrap().len(), 2);
+        assert_eq!(c.volume_mounts.as_ref().unwrap().len(), 6);
         assert_eq!(spec.image_pull_secrets.unwrap()[0].name, "pull");
     }
 
