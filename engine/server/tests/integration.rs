@@ -17557,6 +17557,35 @@ async fn an_omitted_placement_follows_the_template_backend() {
     h.state.sessions.remove(id).unwrap();
 }
 
+#[tokio::test]
+async fn a_pod_placement_refuses_a_worktree_and_names_the_field() {
+    let mut h = pod_stream::harness(false).await;
+    let response = reqwest::Client::new()
+        .post(format!("{}/api/sessions", h.base))
+        .headers(auth())
+        .json(&json!({
+            "name": "pod-worktree",
+            "template": "pod",
+            "placement": "pod",
+            "worktree": { "branch": "wi-3883-worker", "base_ref": "main" }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = response.text().await.unwrap();
+    assert!(
+        body.contains("worktree"),
+        "the refusal names the field: {body}"
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), h.created.recv())
+            .await
+            .is_err(),
+        "a refused start must not create a pod"
+    );
+}
+
 // ---- Pod-backed sessions: the engine side of the session-agent stream ------
 //
 // The test plays the in-pod vogt-session-agent: it receives the bootstrap
