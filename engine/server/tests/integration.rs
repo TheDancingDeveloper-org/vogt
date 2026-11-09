@@ -16891,8 +16891,12 @@ async fn a_manifest_line_added_after_start_reaches_the_next_launch() {
 }
 
 /// WI-3491: a provider registered after the engine started reaches the next
-/// host Codex launch, its table as a `-c` override and its key resolved by
-/// the real `agent-auth.sh`; removed, the next launch has neither.
+/// Codex pod launch — its tables in the pod bootstrap's `codex_config` and its
+/// key resolved by the real `agent-auth.sh`; removed, the next launch has
+/// neither.
+///
+/// Codex runs only in a session pod (WI-3844), so this goes through the pod
+/// harness's bootstrap rather than a host PTY.
 #[tokio::test]
 async fn a_registered_llm_provider_reaches_the_next_codex_launch_and_leaves_with_it() {
     for tool in ["jq", "curl", "timeout"] {
@@ -16918,80 +16922,99 @@ async fn a_registered_llm_provider_reaches_the_next_codex_launch_and_leaves_with
         std::fs::write(&path, body).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
     };
-    write_exec("vogt-mcp-bootstrap", "#!/bin/sh\nexit 0\n");
-    write_exec("infisical", "#!/bin/sh\nprintf tok-123\n");
-    // A stand-in Codex: says which provider overrides it got and its key.
+    // The stand-in Infisical CLI: universal-auth gets a token, the project
+    // read answers with the one secret the registry names.
     write_exec(
-        "codex",
-        "#!/bin/sh\nprov=$(printf '%s\\n' \"$@\" | sed -n 's/^model_providers\\.\\([a-z]*\\)=.*/\\1/p' | tr '\\n' ,)\necho \"providers=[$prov] key=[${DS_KEY:-}]\"\nexec sleep 30\n",
+        "infisical",
+        "#!/bin/sh\ncase \"$*\" in\n*'secrets get'*) printf ds-value ;;\n*) printf tok-123 ;;\nesac\n",
     );
-    let api = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let api_url = format!("http://{}", api.local_addr().unwrap());
-    tokio::spawn(async move {
-        let app = axum::Router::new().route(
-            "/api/v4/secrets",
-            axum::routing::get(|| async {
-                axum::Json(json!({ "secrets": [
-                    { "secretKey": "ds-secret", "secretValue": "ds-value" }
-                ]}))
-            }),
-        );
-        axum::serve(api, app).await.unwrap()
-    });
+    // The broker runs the helper with only its re-granted engine environment;
+    // this wrapper gives the real script the identity and the stand-in CLI.
+    let helper = tmp.path().join("agent-auth-with-identity");
+    std::fs::write(
+        &helper,
+        format!(
+            "#!/bin/sh\nexport INFISICAL_API_URL=http://infisical.invalid/api\nexport INFISICAL_CLIENT_ID=id\nexport INFISICAL_CLIENT_SECRET=secret\nexport PATH={}:/usr/bin:/bin\nexec {} \"$@\"\n",
+            bin.display(),
+            script.display()
+        ),
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
 
     let registry = tmp.path().join("llm-providers.toml");
-    let mut cfg = broker_config(&tmp, "");
-    cfg.agent_auth_helper = script.clone();
-    cfg.llm_providers_file = Some(registry.clone());
-    let (base, _state, _h) = boot_with_state(cfg).await;
-    let client = reqwest::Client::builder()
-        .default_headers(auth())
-        .build()
-        .unwrap();
-    let path = format!("{}:/usr/bin:/bin", bin.display());
-    let start = |name: &'static str| {
-        let client = client.clone();
-        let base = base.clone();
-        let script = script.display().to_string();
-        let (path, api_url, bin) = (path.clone(), api_url.clone(), bin.clone());
-        async move {
-            client
-                .post(format!("{base}/api/sessions"))
-                .json(&json!({
-                    "name": name,
-                    "command": [script, "run", "--", bin.join("codex").display().to_string()],
-                    "env": [
-                        ["PATH", path],
-                        ["VOGT_MCP_BOOTSTRAP", bin.join("vogt-mcp-bootstrap").display().to_string()],
-                        ["ENGINE_AGENT_AUTH_TIMEOUT", "5"],
-                        ["INFISICAL_API_URL", format!("{api_url}/api")],
-                        ["INFISICAL_CLIENT_ID", "id"],
-                        ["INFISICAL_CLIENT_SECRET", "secret"],
-                    ],
-                }))
-                .send()
-                .await
-                .unwrap()
-                .json::<Value>()
-                .await
-                .unwrap()["id"]
-                .as_str()
-                .unwrap()
-                .to_string()
-        }
+    let template = SessionTemplate {
+        name: "codex-pod".into(),
+        description: "pod-backed Codex".into(),
+        command: Some(vec!["codex".into()]),
+        cwd: None,
+        env: vec![],
+        backend: "pod".into(),
+        host_capable: false,
+        pod_capable: false,
+        account: None,
+        default_name: None,
+        match_repo_names: vec![],
+        match_path_prefixes: vec![],
+        tags: vec![],
     };
+    let reg = registry.clone();
+    let mut h = pod_stream::harness_cfg(false, Some(vec![template]), move |cfg| {
+        cfg.agent_auth_helper = helper;
+        cfg.llm_providers_file = Some(reg);
+    })
+    .await;
+
+    async fn start(h: &mut pod_stream::Harness, name: &str) -> Value {
+        let id = h
+            .start_body(json!({
+                "name": name,
+                "template": "codex-pod",
+                "placement": "pod",
+            }))
+            .await;
+        let (created, token) = h.created.recv().await.expect("a pod is created");
+        assert_eq!(created, id);
+        reqwest::Client::new()
+            .post(format!("{}/api/agent-auth/bootstrap", h.base))
+            .bearer_auth(String::from_utf8_lossy(&token))
+            .json(&json!({
+                "session_id": id.to_string(),
+                "graft_repo": "vogt",
+                "graft_line": "rust-2",
+                "cli": "codex",
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap()
+    }
 
     std::fs::write(
         &registry,
         "[[provider]]\nname = \"ds\"\nbase_url = \"http://litellm/v1\"\nwire_api = \"chat\"\nenv_key = \"DS_KEY\"\nsecret_project = \"proj-a\"\nsecret_name = \"ds-secret\"\n",
     )
     .unwrap();
-    let with = start("registered").await;
-    live_output_containing(&client, &base, &with, &["providers=[ds,] key=[ds-value]"]).await;
+    let with = start(&mut h, "registered").await;
+    assert_eq!(with["env"]["DS_KEY"], "ds-value");
+    let config: toml::Table = toml::from_str(with["codex_config"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        config["model_providers"]["ds"]["env_key"].as_str(),
+        Some("DS_KEY")
+    );
 
     std::fs::write(&registry, "").unwrap();
-    let without = start("removed").await;
-    live_output_containing(&client, &base, &without, &["providers=[] key=[]"]).await;
+    let without = start(&mut h, "removed").await;
+    assert!(without["env"].get("DS_KEY").is_none(), "{without}");
+    assert!(!without["codex_config"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("model_providers"));
 }
 
 fn provider_request(name: &str, env_key: &str) -> Value {
