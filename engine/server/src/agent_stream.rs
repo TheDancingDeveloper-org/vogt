@@ -342,6 +342,8 @@ pub struct BootstrapRequest {
     pub source: Option<SourceDescriptor>,
     pub cli: String,
     #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
     pub extra_ca_file: Option<String>,
 }
 #[derive(Debug, Serialize)]
@@ -839,8 +841,20 @@ pub async fn bootstrap(
         let broker = state.sessions.secret_broker();
         let providers = broker.providers();
         if !providers.is_empty() {
-            let tables = crate::llm_providers::codex_config_tables(&providers);
-            codex_config = Some(codex_config.unwrap_or_default() + "\n" + &tables);
+            let model = req
+                .model
+                .as_deref()
+                .or_else(|| {
+                    providers
+                        .iter()
+                        .find_map(|p| p.models.first().map(String::as_str))
+                })
+                .unwrap_or("grok");
+            codex_config = Some(
+                crate::llm_providers::codex_config(model, &providers)
+                    + "\n"
+                    + &codex_config.unwrap_or_default(),
+            );
             for wanted in crate::llm_providers::manifest_entries(&providers) {
                 // Fetch only the registry's own secret: a permitted entry that
                 // names another project or secret is some other manifest line,

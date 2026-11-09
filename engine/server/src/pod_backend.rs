@@ -1066,6 +1066,7 @@ pub fn pod_template(
     source_env: &[(String, String)],
     kind: &str,
     account: Option<&str>,
+    model: Option<&str>,
     command: &[String],
 ) -> Pod {
     let mut labels = BTreeMap::from([
@@ -1086,6 +1087,13 @@ pub fn pod_template(
         .find_map(|(k, v)| (k == "VOGT_SESSION_IMAGE").then_some(v.as_str()))
         .unwrap_or(&cfg.default_image);
     let mut env = pod_env(cfg, source, source_env, id);
+    if let Some(model) = model {
+        env.push(EnvVar {
+            name: "VOGT_MODEL".into(),
+            value: Some(model.into()),
+            ..Default::default()
+        });
+    }
     env.extend(PRIVATE_CACHE_ENV.iter().map(|(name, value)| EnvVar {
         name: (*name).into(),
         value: Some((*value).into()),
@@ -1996,6 +2004,7 @@ mod tests {
                 &source_env(&src),
                 "session",
                 None,
+                None,
                 &[],
             );
             let carried: SourceDescriptor =
@@ -2069,6 +2078,7 @@ mod tests {
             &[],
             "agent",
             Some("acct"),
+            None,
             &["bash".into()],
         );
         let labels = pod.metadata.labels.unwrap();
@@ -2235,6 +2245,7 @@ mod tests {
             },
             &[],
             "session",
+            None,
             None,
             &[],
         );
@@ -2578,6 +2589,7 @@ mod tests {
                 &[],
                 "session",
                 None,
+                None,
                 command,
             );
             pod.spec.unwrap().containers[0]
@@ -2636,6 +2648,7 @@ mod tests {
             &project_source("demo", "rust-2"),
             &[],
             "session",
+            None,
             None,
             &[],
         );
@@ -3225,6 +3238,7 @@ mod tests {
             &default_source(cfg),
             &[],
             "session",
+            None,
             None,
             &[],
         )
