@@ -383,6 +383,12 @@ pub struct Config {
     /// The posture the engine started this session with (`VOGT_PERMISSION_MODE`),
     /// as the host launcher receives it. `None` is the default posture.
     pub permission_mode: Option<String>,
+    /// The model the engine started this session with (`VOGT_MODEL`), as the
+    /// host launcher receives it (WI-3881).
+    pub model: Option<String>,
+    /// The reasoning effort the engine started this session with
+    /// (`VOGT_EFFORT`), as the host launcher receives it (WI-3881).
+    pub effort: Option<String>,
     /// Codex's `approval_policy` for the default and accept-edits postures
     /// (`VOGT_CODEX_APPROVAL_POLICY`), defaulting to
     /// [`CODEX_APPROVAL_DEFAULT`] (WI-3864).
@@ -539,6 +545,14 @@ impl Config {
                 .filter(|v| !v.is_empty()),
             resume: std::env::var("VOGT_SESSION_RESUME").is_ok_and(|v| v == "1"),
             permission_mode: std::env::var("VOGT_PERMISSION_MODE")
+                .ok()
+                .map(|v| v.trim().to_owned())
+                .filter(|v| !v.is_empty()),
+            model: std::env::var("VOGT_MODEL")
+                .ok()
+                .map(|v| v.trim().to_owned())
+                .filter(|v| !v.is_empty()),
+            effort: std::env::var("VOGT_EFFORT")
                 .ok()
                 .map(|v| v.trim().to_owned())
                 .filter(|v| !v.is_empty()),
@@ -950,6 +964,87 @@ pub fn codex_permission_flags(
     }
 }
 
+/// A permission posture as Claude Code's flags (WI-926, WI-3881).
+///
+/// `None` is the default posture: no flag at all. The host launcher
+/// (`agent_cli::permission_flags`) and the pod's own `claude_args` both call
+/// this, so a posture cannot mean one thing on a host and another in a pod.
+pub fn claude_permission_flags(mode: Option<&str>) -> Result<Option<Vec<String>>, String> {
+    match mode.map(str::trim).filter(|m| !m.is_empty()) {
+        None | Some("default") => Ok(None),
+        Some("accept-edits") | Some("accept_edits") => Ok(Some(vec![
+            "--permission-mode".to_string(),
+            "acceptEdits".to_string(),
+        ])),
+        Some("bypass") => Ok(Some(vec!["--dangerously-skip-permissions".to_string()])),
+        Some(other) => Err(format!(
+            "permission_mode {other:?} is not one of default, accept-edits, bypass"
+        )),
+    }
+}
+
+/// Everything a Claude Code launch carries beyond the binary (WI-3881).
+///
+/// The host launcher (`agent_cli::launch`) and the pod's own `command_line`
+/// both build their argv from this, so no Claude flag can exist in one and be
+/// missing from the other.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ClaudeArgs<'a> {
+    pub model: Option<&'a str>,
+    pub effort: Option<&'a str>,
+    /// `(id, resume)`: a previous conversation to `--resume`, or a fresh id to
+    /// pin with `--session-id`.
+    pub conversation: Option<(&'a str, bool)>,
+    pub permission_mode: Option<&'a str>,
+    /// The driven-session policy, `--settings=<file>`.
+    pub settings: Option<&'a Path>,
+    /// The engine's MCP set, `--strict-mcp-config --mcp-config=<file>`.
+    pub mcp_config: Option<&'a Path>,
+    /// Directories Claude Code may read outside its cwd, as `--add-dir=<dir>`.
+    pub add_dirs: &'a [String],
+    /// The positional first prompt, which goes last.
+    pub prompt: Option<&'a str>,
+}
+
+/// Claude Code's arguments after the binary, in the host launcher's order
+/// (WI-3881).
+///
+/// The `=` forms keep `--settings`, `--mcp-config` and `--add-dir` from
+/// taking the next word: Claude Code reads each as variadic, and the prompt
+/// after them is positional.
+pub fn claude_args(args: &ClaudeArgs<'_>) -> Result<Vec<String>, String> {
+    let mut argv = Vec::new();
+    if let Some(model) = args.model.map(str::trim).filter(|m| !m.is_empty()) {
+        argv.extend(["--model".to_string(), model.to_string()]);
+    }
+    if let Some(effort) = args.effort.map(str::trim).filter(|e| !e.is_empty()) {
+        argv.extend(["--effort".to_string(), effort.to_string()]);
+    }
+    if let Some((id, resume)) = args.conversation {
+        argv.extend([
+            if resume { "--resume" } else { "--session-id" }.to_string(),
+            id.to_string(),
+        ]);
+    }
+    if let Some(flags) = claude_permission_flags(args.permission_mode)? {
+        argv.extend(flags);
+    }
+    if let Some(file) = args.settings {
+        argv.push(format!("--settings={}", file.display()));
+    }
+    if let Some(file) = args.mcp_config {
+        argv.push("--strict-mcp-config".to_string());
+        argv.push(format!("--mcp-config={}", file.display()));
+    }
+    for dir in args.add_dirs {
+        argv.push(format!("--add-dir={dir}"));
+    }
+    if let Some(prompt) = args.prompt {
+        argv.push(prompt.to_string());
+    }
+    Ok(argv)
+}
+
 /// The shell line that starts the CLI. A conversation is pinned to the
 /// engine's conversation id (`--session-id` for Claude and Codex) or resumed
 /// from the transcript the engine seeded (`--resume` for Claude, `codex
@@ -964,31 +1059,36 @@ pub fn command_line(config: &Config) -> Result<String, AgentError> {
     });
     match config.cli.as_str() {
         "claude" => {
-            // The host launcher's order (`agent_cli::launch`): the
-            // conversation, the driven-session policy, the MCP set, then
-            // `--add-dir`. The `=` forms keep the variadic flags from taking
-            // the next word.
+            // The same builder the host launcher uses (WI-3881), then shell
+            // quoting only: the flags themselves exist in one place. The
+            // entrypoint exports `VOGT_SESSION_CWD`, which `Config.cwd` is
+            // read from, so the concrete directory is quoted here rather
+            // than left for the shell to expand.
+            let cwd = [config
+                .cwd
+                .clone()
+                .unwrap_or_else(|| DEFAULT_WORK_DIR.to_string())];
+            let prompt = config
+                .claude
+                .brief
+                .as_deref()
+                .filter(|_| !config.resume)
+                .map(brief_instruction);
+            let args = claude_args(&ClaudeArgs {
+                model: config.model.as_deref(),
+                effort: config.effort.as_deref(),
+                conversation: conversation.map(|id| (id, config.resume)),
+                permission_mode: config.permission_mode.as_deref(),
+                settings: config.claude.settings.as_deref(),
+                mcp_config: config.claude.mcp_config.as_deref(),
+                add_dirs: &cwd,
+                prompt: prompt.as_deref(),
+            })
+            .map_err(AgentError::Pty)?;
             let mut line = String::from("claude");
-            match (conversation, config.resume) {
-                (Some(id), true) => line.push_str(&format!(" --resume {id}")),
-                (Some(id), false) => line.push_str(&format!(" --session-id {id}")),
-                (None, _) => {}
-            }
-            if let Some(file) = &config.claude.settings {
-                line.push_str(&format!(" --settings={}", sh_quote(file)));
-            }
-            if let Some(file) = &config.claude.mcp_config {
-                line.push_str(&format!(
-                    " --strict-mcp-config --mcp-config={}",
-                    sh_quote(file)
-                ));
-            }
-            // The `=` form: `--add-dir` is variadic, and the prompt after it
-            // must stay a prompt. A resumed conversation has read its brief.
-            line.push_str(" --add-dir=\"$VOGT_SESSION_CWD\"");
-            if let (Some(file), false) = (&config.claude.brief, config.resume) {
+            for arg in args {
                 line.push(' ');
-                line.push_str(&sh_quote(Path::new(&brief_instruction(file))));
+                line.push_str(&sh_quote(Path::new(&arg)));
             }
             Ok(line)
         }
@@ -1445,6 +1545,8 @@ mod tests {
             account: None,
             conversation_id: None,
             resume: false,
+            model: None,
+            effort: None,
             permission_mode: None,
             codex_approval_policy: CODEX_APPROVAL_DEFAULT.into(),
             claude: ClaudeLaunch::default(),
@@ -1470,6 +1572,8 @@ mod tests {
             account: None,
             conversation_id: None,
             resume: false,
+            model: None,
+            effort: None,
             permission_mode: None,
             codex_approval_policy: CODEX_APPROVAL_DEFAULT.into(),
             claude: ClaudeLaunch::default(),
@@ -1807,6 +1911,8 @@ mod tests {
             account: None,
             conversation_id: None,
             resume: false,
+            model: None,
+            effort: None,
             permission_mode: None,
             codex_approval_policy: CODEX_APPROVAL_DEFAULT.into(),
             claude: ClaudeLaunch::default(),
@@ -1837,23 +1943,20 @@ mod tests {
             account: None,
             conversation_id: Some("abc-123".into()),
             resume: false,
+            model: None,
+            effort: None,
             permission_mode: None,
             codex_approval_policy: CODEX_APPROVAL_DEFAULT.into(),
             claude: ClaudeLaunch::default(),
         };
-        assert!(command_line(&config)
-            .unwrap()
-            .starts_with("claude --session-id abc-123 "));
+        let argv = argv_of(&command_line(&config).unwrap());
+        assert_eq!(&argv[..2], ["--session-id", "abc-123"]);
         config.resume = true;
-        assert!(command_line(&config)
-            .unwrap()
-            .starts_with("claude --resume abc-123 "));
+        let argv = argv_of(&command_line(&config).unwrap());
+        assert_eq!(&argv[..2], ["--resume", "abc-123"]);
         // An id that is not plain is never put on a shell line.
         config.conversation_id = Some("x; rm -rf /".into());
-        assert_eq!(
-            command_line(&config).unwrap(),
-            "claude --add-dir=\"$VOGT_SESSION_CWD\""
-        );
+        assert_eq!(command_line(&config).unwrap(), "claude '--add-dir=/work'");
     }
 
     /// WI-3873: Codex, like Claude, must be told the engine's conversation id
@@ -1991,7 +2094,9 @@ mod tests {
             account: None,
             conversation_id: Some("abc-123".into()),
             resume: false,
-            permission_mode: None,
+            model: Some("claude-opus-4-6".into()),
+            effort: Some("high".into()),
+            permission_mode: Some("accept-edits".into()),
             codex_approval_policy: CODEX_APPROVAL_DEFAULT.into(),
             claude: ClaudeLaunch {
                 settings: Some(IMAGE_SETTINGS_FILE.into()),
@@ -1999,12 +2104,18 @@ mod tests {
                 brief: None,
             },
         };
-        // The host launcher's flags, in its order.
+        // The host launcher's flags, in its order (WI-3881).
         assert_eq!(
             argv_of(&command_line(&config).unwrap()),
             [
+                "--model",
+                "claude-opus-4-6",
+                "--effort",
+                "high",
                 "--session-id",
                 "abc-123",
+                "--permission-mode",
+                "acceptEdits",
                 "--settings=/usr/local/share/vogt/driven-session-settings.json",
                 "--strict-mcp-config",
                 "--mcp-config=/run/vogt/mcp.json",
@@ -2016,8 +2127,50 @@ mod tests {
             ..config
         };
         let argv = argv_of(&command_line(&resumed).unwrap());
-        assert_eq!(&argv[..2], ["--resume", "abc-123"]);
+        assert!(
+            argv.windows(2).any(|w| w == ["--resume", "abc-123"]),
+            "{argv:?}"
+        );
         assert!(argv.contains(&"--strict-mcp-config".to_string()));
+    }
+
+    /// WI-3881: Claude's posture flags live here, beside the argv they go on,
+    /// so the host launcher and the pod cannot spell one differently.
+    #[test]
+    fn claude_postures_map_to_its_flags_and_default_adds_none() {
+        assert_eq!(claude_permission_flags(None).unwrap(), None);
+        assert_eq!(claude_permission_flags(Some("default")).unwrap(), None);
+        assert_eq!(
+            claude_permission_flags(Some("accept_edits")).unwrap(),
+            Some(vec!["--permission-mode".into(), "acceptEdits".into()])
+        );
+        assert_eq!(
+            claude_permission_flags(Some("bypass")).unwrap(),
+            Some(vec!["--dangerously-skip-permissions".into()])
+        );
+        assert!(claude_permission_flags(Some("yolo")).is_err());
+
+        let args = claude_args(&ClaudeArgs {
+            model: Some("claude-opus-4-6"),
+            effort: Some("high"),
+            conversation: Some(("abc-123", false)),
+            permission_mode: Some("accept-edits"),
+            ..ClaudeArgs::default()
+        })
+        .unwrap();
+        assert_eq!(
+            args,
+            [
+                "--model",
+                "claude-opus-4-6",
+                "--effort",
+                "high",
+                "--session-id",
+                "abc-123",
+                "--permission-mode",
+                "acceptEdits",
+            ]
+        );
     }
 
     fn claude_config(claude: ClaudeLaunch, resume: bool) -> Config {
@@ -2036,6 +2189,8 @@ mod tests {
             account: None,
             conversation_id: Some("abc-123".into()),
             resume,
+            model: None,
+            effort: None,
             permission_mode: None,
             codex_approval_policy: CODEX_APPROVAL_DEFAULT.into(),
             claude,
@@ -2102,6 +2257,8 @@ mod tests {
             account: None,
             conversation_id: None,
             resume: false,
+            model: None,
+            effort: None,
             permission_mode: None,
             codex_approval_policy: CODEX_APPROVAL_DEFAULT.into(),
             claude: ClaudeLaunch::default(),
@@ -2267,6 +2424,8 @@ mod tests {
             account: None,
             conversation_id: None,
             resume: false,
+            model: None,
+            effort: None,
             permission_mode: None,
             codex_approval_policy: CODEX_APPROVAL_DEFAULT.into(),
             claude: ClaudeLaunch::default(),
@@ -2320,6 +2479,8 @@ mod tests {
             account: None,
             conversation_id: None,
             resume: false,
+            model: None,
+            effort: None,
             permission_mode: None,
             codex_approval_policy: CODEX_APPROVAL_DEFAULT.into(),
             claude: ClaudeLaunch {
@@ -2407,6 +2568,8 @@ mod tests {
             account: None,
             conversation_id: None,
             resume: false,
+            model: None,
+            effort: None,
             permission_mode: None,
             codex_approval_policy: CODEX_APPROVAL_DEFAULT.into(),
             claude: ClaudeLaunch::default(),
