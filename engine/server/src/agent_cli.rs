@@ -184,16 +184,7 @@ pub fn permission_flags(mode: Option<&str>) -> Result<Option<Vec<String>>> {
     }
 }
 
-/// The `approval_policy` a driven Codex starts with when the deployment names
-/// none (WI-2028). `never` matches the Claude Code workers, whose permissions
-/// are bypassed: a worker runs the commands its task needs instead of stopping
-/// at `-a on-request` for a person, or an oversight session, to answer.
-pub const CODEX_APPROVAL_DEFAULT: &str = "never";
-
-/// The `-a` values Codex accepts. The deployment's value is passed through
-/// unchanged; anything else is refused at startup rather than handed to a CLI
-/// that would fail to launch (or read as a different policy).
-pub const CODEX_APPROVAL_POLICIES: [&str; 4] = ["untrusted", "on-failure", "on-request", "never"];
+pub use vogt_session_agent::{CODEX_APPROVAL_DEFAULT, CODEX_APPROVAL_POLICIES};
 
 /// Check `ENGINE_CODEX_APPROVAL_POLICY` (or the config file's key): one of
 /// [`CODEX_APPROVAL_POLICIES`], `never` when unset or blank.
@@ -211,56 +202,18 @@ pub fn parse_codex_approval_policy(raw: Option<&str>) -> Result<String> {
     )))
 }
 
-/// A permission posture as Codex flags (WI-1143, WI-2028).
+/// A permission posture as Codex flags (WI-1143, WI-2028, WI-3864).
 ///
-/// The pod is the isolation boundary and cannot create a user namespace, so
-/// `workspace-write` (and `--approve-for-me`, which hard-wires it) would fail
-/// the launch. Every posture therefore uses `-s danger-full-access`. The
-/// default and accept-edits postures pin `-a <approval>`, where `approval` is
-/// the deployment's [`CODEX_APPROVAL_DEFAULT`] (`never` unless it says
-/// otherwise): a driven worker runs without asking. A deployment that restores
-/// `on-request` gets the old behaviour, and accept-edits then also routes those
-/// asks through Codex's automatic reviewer (`-c
-/// approvals_reviewer="auto_review"`), without changing the sandbox. Bypass
-/// drops both approvals and the sandbox and is a person's grant only.
-///
-/// `exec` is a `codex exec` launch. That subcommand rejects `-a`, so the
-/// approval pin is left off; the sandbox, and for accept-edits the reviewer,
-/// stay.
-///
-/// `None` means the caller did not ask for a posture. That is not the default
-/// posture: the wrapper used to force bypass, and a launch that omitted the
-/// flags would look like it had applied one.
+/// The flags themselves live in `vogt_session_agent`, because the pod's own
+/// launch line needs the same ones: an agent template runs the session agent,
+/// not this rewritten argv, so the two must not be able to drift. This
+/// function only maps the crate's error into the engine's `ApiError`.
 pub fn codex_permission_flags(
     mode: Option<&str>,
     exec: bool,
     approval: &str,
 ) -> Result<Option<Vec<String>>> {
-    let sandbox = ["-s".to_string(), "danger-full-access".to_string()];
-    let ask = if exec || approval.trim().is_empty() {
-        Vec::new()
-    } else {
-        vec!["-a".to_string(), approval.trim().to_string()]
-    };
-    match mode.map(str::trim).filter(|m| !m.is_empty()) {
-        None => Ok(None),
-        Some("default") => Ok(Some(ask.into_iter().chain(sandbox).collect())),
-        Some("accept-edits") | Some("accept_edits") => Ok(Some(
-            ask.into_iter()
-                .chain([
-                    "-c".to_string(),
-                    "approvals_reviewer=\"auto_review\"".to_string(),
-                ])
-                .chain(sandbox)
-                .collect(),
-        )),
-        Some("bypass") => Ok(Some(vec![
-            "--dangerously-bypass-approvals-and-sandbox".to_string()
-        ])),
-        Some(other) => Err(ApiError::BadRequest(format!(
-            "permission_mode {other:?} is not one of default, accept-edits, bypass"
-        ))),
-    }
+    vogt_session_agent::codex_permission_flags(mode, exec, approval).map_err(ApiError::BadRequest)
 }
 
 /// The command and the extra environment a session should start with.
