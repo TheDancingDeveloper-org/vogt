@@ -156,6 +156,19 @@ RUN if existing="$(getent passwd 1000 | cut -d: -f1)" && [ -n "$existing" ]; the
     && install -d -o 1000 -g 1000 -m 0700 /run/vogt /work \
     && install -d -o 1000 -g 1000 /home/vogt/Working /home/vogt/.config /cache/xdg /cache/npm /cache/pnpm /cache/pip /cache/uv
 
+# The Codex managed policy is only a policy if the session user can read it:
+# `requirements.toml` being 0644 says nothing when its parent /etc/codex is
+# root-only, and the session agent then refuses to start Codex at all
+# ("cannot be read (Permission denied)"). The base image may already carry an
+# /etc/codex with such a mode, so set both and prove the read as vogt — the
+# same rule the merged image applies (engine/Dockerfile, WI-1143).
+RUN mkdir -p /etc/codex \
+    && chown root:root /etc/codex \
+    && chmod 0755 /etc/codex \
+    && chown root:root /etc/codex/requirements.toml \
+    && chmod 0644 /etc/codex/requirements.toml \
+    && su - vogt -c 'test -r /etc/codex/requirements.toml'
+
 # Runtime hooks. The entrypoint fetches all session-specific state from the
 # authenticated broker; no account or service credential is baked here.
 COPY --chmod=0755 deploy/agent-auth.sh /usr/local/bin/vogt-agent-auth

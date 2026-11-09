@@ -384,6 +384,7 @@ fn fake_agent_template() -> SessionTemplate {
         account: None,
         backend: "local".to_string(),
         host_capable: false,
+        pod_capable: false,
     }
 }
 
@@ -10560,6 +10561,7 @@ fn conversation_sandbox() -> (tempfile::TempDir, Config, std::path::PathBuf) {
         account: None,
         backend: "local".to_string(),
         host_capable: false,
+        pod_capable: false,
     });
     (tmp, cfg, stub)
 }
@@ -17152,6 +17154,7 @@ async fn session_template_list_uses_the_real_engine_route_and_summary() {
         env: vec![],
         backend: "pod".into(),
         host_capable: true,
+        pod_capable: false,
         account: None,
         default_name: None,
         match_repo_names: vec![],
@@ -17308,6 +17311,9 @@ mod pod_stream {
         fn list(&self) -> vogt_engine_server::pod_backend::ListFuture<'_> {
             Box::pin(async move { Ok(self.listed.lock().unwrap().clone()) })
         }
+        fn log_tail(&self, _: Uuid) -> vogt_engine_server::pod_backend::LogFuture<'_> {
+            Box::pin(async { Ok(String::new()) })
+        }
     }
 
     impl FakeLauncher {
@@ -17378,6 +17384,7 @@ mod pod_stream {
                 tags: Vec::new(),
                 backend: "pod".into(),
                 host_capable: true,
+                pod_capable: false,
             }]
         });
         let (base, state, guard) = boot_with_state(cfg).await;
@@ -17605,6 +17612,7 @@ mod pod_stream {
             tags: Vec::new(),
             backend: backend.into(),
             host_capable: false,
+            pod_capable: false,
         };
         let mut h = harness_cfg(
             false,
@@ -17853,6 +17861,7 @@ mod pod_stream {
             tags: Vec::new(),
             backend: "pod".into(),
             host_capable: false,
+            pod_capable: false,
         };
         let dir = acct.clone();
         let mut h = harness_cfg(false, Some(vec![claude]), move |cfg| {
@@ -19254,6 +19263,7 @@ mod pod_stream {
             tags: Vec::new(),
             backend: "pod".into(),
             host_capable: false,
+            pod_capable: false,
         }];
         let (base, state, guard) = boot_with_state(cfg).await;
         let (tx, created) = tokio::sync::mpsc::unbounded_channel();

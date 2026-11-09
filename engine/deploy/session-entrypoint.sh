@@ -171,7 +171,9 @@ if [ -n "$(jq -r '.source_token // .graft_token // empty' "$response")" ]; then
 fi
 step=clone; say clone
 work_dir=${VOGT_WORK_DIR:-/work}
-mkdir -p "$work_dir"
+# A bare mkdir under `set -e` would end the script with no reason in the log;
+# name the directory so a failed clone step says why (WI-3762).
+mkdir -p "$work_dir" || fail "cannot create $work_dir"
 if [ "$source_kind" = git ]; then
   if ! git clone --branch "$source_ref" --single-branch "$source_repo" "$work_dir" >/dev/null 2>"$tmp_dir/git.err"; then
     fail "git clone $source_repo into $work_dir failed: $(tail -n3 "$tmp_dir/git.err" | tr '\n' ' ' | cut -c1-400)"
