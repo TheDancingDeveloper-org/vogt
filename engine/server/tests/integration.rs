@@ -16653,18 +16653,35 @@ async fn a_launch_with_the_secrets_manager_down_degrades_and_recovers_without_re
     // Down: the login hangs, as it did against an Infisical with no Redis.
     write_exec("infisical", "#!/bin/sh\nexec sleep 30\n");
 
-    // A stand-in secrets-manager API that answers the one bulk read.
+    // A stand-in secrets-manager API that answers the one bulk read, and the
+    // universal-auth login once `login_up` is set. The login is an API call,
+    // not a CLI call (WI-3885), so "down" is this server hanging it.
     let api = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let api_url = format!("http://{}", api.local_addr().unwrap());
+    let login_up = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let login_state = login_up.clone();
     tokio::spawn(async move {
-        let app = axum::Router::new().route(
-            "/api/v4/secrets",
-            axum::routing::get(|| async {
-                axum::Json(json!({ "secrets": [
-                    { "secretKey": "ALPHA", "secretValue": "alpha-value" }
-                ]}))
-            }),
-        );
+        let app = axum::Router::new()
+            .route(
+                "/api/v4/secrets",
+                axum::routing::get(|| async {
+                    axum::Json(json!({ "secrets": [
+                        { "secretKey": "ALPHA", "secretValue": "alpha-value" }
+                    ]}))
+                }),
+            )
+            .route(
+                "/api/v1/auth/universal-auth/login",
+                axum::routing::post(move || {
+                    let login_up = login_state.clone();
+                    async move {
+                        if !login_up.load(std::sync::atomic::Ordering::SeqCst) {
+                            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                        }
+                        axum::Json(json!({ "accessToken": "tok-123" }))
+                    }
+                }),
+            );
         axum::serve(api, app).await.unwrap()
     });
 
@@ -16741,7 +16758,7 @@ async fn a_launch_with_the_secrets_manager_down_degrades_and_recovers_without_re
         .contains("timed out"));
 
     // The secrets manager is back: the next launch gets its credentials.
-    write_exec("infisical", "#!/bin/sh\nprintf tok-123\n");
+    login_up.store(true, std::sync::atomic::Ordering::SeqCst);
     let up = start("auth-up").await;
     live_output_containing(
         &client,
@@ -16785,15 +16802,21 @@ async fn a_manifest_line_added_after_start_reaches_the_next_launch() {
     let api = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let api_url = format!("http://{}", api.local_addr().unwrap());
     tokio::spawn(async move {
-        let app = axum::Router::new().route(
-            "/api/v4/secrets",
-            axum::routing::get(|| async {
-                axum::Json(json!({ "secrets": [
-                    { "secretKey": "ALPHA", "secretValue": "alpha-value" },
-                    { "secretKey": "PROVIDER_KEY", "secretValue": "provider-value" }
-                ]}))
-            }),
-        );
+        let app = axum::Router::new()
+            .route(
+                "/api/v4/secrets",
+                axum::routing::get(|| async {
+                    axum::Json(json!({ "secrets": [
+                        { "secretKey": "ALPHA", "secretValue": "alpha-value" },
+                        { "secretKey": "PROVIDER_KEY", "secretValue": "provider-value" }
+                    ]}))
+                }),
+            )
+            // Universal-auth is an API request in the helper (WI-3885).
+            .route(
+                "/api/v1/auth/universal-auth/login",
+                axum::routing::post(|| async { axum::Json(json!({ "accessToken": "tok-123" })) }),
+            );
         axum::serve(api, app).await.unwrap()
     });
 
@@ -16928,6 +16951,13 @@ async fn a_registered_llm_provider_reaches_the_next_codex_launch_and_leaves_with
     write_exec(
         "infisical",
         "#!/bin/sh\ncase \"$*\" in\n*'secrets get'*) printf ds-value ;;\n*) printf tok-123 ;;\nesac\n",
+    );
+    // The helper logs in over the API now (WI-3885); answer that one request
+    // and leave every other curl call (the broker, the bulk read) to the real
+    // binary. The bulk read still fails, so the CLI fallback supplies ds-value.
+    write_exec(
+        "curl",
+        "#!/bin/sh\ncase \"$*\" in\n*'/api/v1/auth/universal-auth/login'*)\n  cat >/dev/null\n  printf '%s' '{\"accessToken\":\"tok-123\"}'\n  ;;\n*) exec /usr/bin/curl \"$@\" ;;\nesac\n",
     );
     // The broker runs the helper with only its re-granted engine environment;
     // this wrapper gives the real script the identity and the stand-in CLI.
