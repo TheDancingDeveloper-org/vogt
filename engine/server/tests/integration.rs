@@ -18470,7 +18470,11 @@ mod pod_stream {
         }
     }
 
-    async fn boot_codex_core(engine_url: &str, transcript_root: &std::path::Path) -> CoreGuard {
+    /// The `vogt-core` debug binary these tests drive. Assert it before a
+    /// session starts: a missing binary discovered only inside the joined
+    /// observe future leaves the pod uploader running, so the test hangs to
+    /// its timeout instead of failing with this message (WI-3873).
+    fn vogt_core_binary() -> std::path::PathBuf {
         let binary = std::env::var("CARGO_TARGET_DIR")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|_| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../target"))
@@ -18480,6 +18484,11 @@ mod pod_stream {
             "vogt-core debug binary is missing at {}; build it with `cargo build -p vogt-core` before these tests",
             binary.display()
         );
+        binary
+    }
+
+    async fn boot_codex_core(engine_url: &str, transcript_root: &std::path::Path) -> CoreGuard {
+        let binary = vogt_core_binary();
         let dir = tempfile::tempdir().unwrap();
         let core_token = dir.path().join("core-token");
         std::fs::write(&core_token, CORE_TOKEN).unwrap();
@@ -18601,6 +18610,9 @@ mod pod_stream {
     /// this is also the write-back path P2b (WI-3868) opened.
     #[tokio::test]
     async fn a_pod_codex_rollout_reaches_session_last_reply() {
+        // Fail before the harness and uploader start, not from inside the
+        // joined observe future, where a missing binary hangs the test.
+        let _core_binary = vogt_core_binary();
         let pod = tempfile::tempdir().unwrap();
         let pod_home = pod.path().to_path_buf();
         let engine_home = tempfile::tempdir().unwrap();
