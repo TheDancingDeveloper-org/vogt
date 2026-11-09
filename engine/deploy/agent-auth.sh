@@ -87,8 +87,12 @@
 #                Resolves exactly one manifest entry and prints its value —
 #                nothing else — to stdout. Refuses a VAR not in the manifest.
 #   fetch VAR    session-side. Runs inside a session, which holds no identity,
-#                only VOGT_ENGINE_BROKER_URL and VOGT_ENGINE_BROKER_TOKEN (minted
-#                by the engine for that session). Asks the engine's
+#                only the broker address and a per-session credential: an
+#                engine session's VOGT_ENGINE_BROKER_URL and
+#                VOGT_ENGINE_BROKER_TOKEN (minted by the engine for that
+#                session), or a pod session's VOGT_ENGINE_URL and
+#                VOGT_SESSION_TOKEN_FILE, as `policy-hook.sh` already uses.
+#                Asks the engine's
 #                `POST /api/agent-auth/fetch/VAR` and prints the value. The
 #                engine enforces the manifest, rate-limits, and audits the
 #                fetch by session and name, never value.
@@ -120,25 +124,55 @@ readonly DEFAULT_VOGT_URL="http://127.0.0.1:8910"
 readonly CURL_EXTRA_CA_FILE="${VOGT_ENGINE_EXTRA_CA_FILE:-${ENGINE_AGENT_AUTH_EXTRA_CA_FILE:-}}"
 AUTH_TMP_DIR=""
 
+# The broker's address. An engine session is handed VOGT_ENGINE_BROKER_URL; a
+# pod session has no broker URL and names the same engine as VOGT_ENGINE_URL,
+# exactly as `policy-hook.sh` does (WI-3885).
+broker_url() {
+    printf '%s' "${VOGT_ENGINE_BROKER_URL:-${VOGT_ENGINE_URL:-}}"
+}
+
+# The file holding the broker credential, when there is one. Precedence is the
+# engine's broker token file, then the broker token value, then a pod
+# session's stream credential (VOGT_SESSION_TOKEN_FILE, a 0600 file the
+# entrypoint wrote; it names the same session to the same route — WI-3243).
+broker_token_file() {
+    if [[ -n "${VOGT_ENGINE_BROKER_TOKEN_FILE:-}" ]]; then
+        printf '%s' "$VOGT_ENGINE_BROKER_TOKEN_FILE"
+        return 0
+    fi
+    if [[ -n "${VOGT_ENGINE_BROKER_TOKEN:-}" ]]; then
+        return 1
+    fi
+    [[ -n "${VOGT_SESSION_TOKEN_FILE:-}" ]] || return 1
+    printf '%s' "$VOGT_SESSION_TOKEN_FILE"
+}
+
 broker_token_available() {
+    local file
     if [[ -n "${VOGT_ENGINE_BROKER_TOKEN_FILE:-}" ]]; then
         [[ -r "$VOGT_ENGINE_BROKER_TOKEN_FILE" ]] || die "broker token file is not readable"
-        return
+        return 0
     fi
-    [[ -n "${VOGT_ENGINE_BROKER_TOKEN:-}" ]] || return 1
+    [[ -n "${VOGT_ENGINE_BROKER_TOKEN:-}" ]] && return 0
+    file="$(broker_token_file)" || return 1
+    [[ -r "$file" ]]
 }
 
 broker_curl() {
-    broker_token_available || return 1
     local -a tls_args=()
+    local file token
+    broker_token_available || return 1
     [[ -z "$CURL_EXTRA_CA_FILE" ]] || tls_args+=(--cacert "$CURL_EXTRA_CA_FILE")
-    if [[ -n "${VOGT_ENGINE_BROKER_TOKEN_FILE:-}" ]]; then
-        curl "${tls_args[@]}" \
-            -H @<(printf 'Authorization: Bearer '; cat "$VOGT_ENGINE_BROKER_TOKEN_FILE"; printf '\n') "$@"
+    # The credential reaches curl through a file descriptor, never argv, where
+    # every process on the host could read it.
+    if [[ -n "${VOGT_ENGINE_BROKER_TOKEN:-}" && -z "${VOGT_ENGINE_BROKER_TOKEN_FILE:-}" ]]; then
+        token="$VOGT_ENGINE_BROKER_TOKEN"
     else
-        curl "${tls_args[@]}" \
-            -H @<(printf 'Authorization: Bearer '; printf '%s' "$VOGT_ENGINE_BROKER_TOKEN"; printf '\n') "$@"
+        file="$(broker_token_file)"
+        token="$(tr -d '[:space:]' <"$file")"
     fi
+    curl "${tls_args[@]}" \
+        -H @<(printf 'Authorization: Bearer %s\n' "$token") "$@"
 }
 
 # Names of the credential variables this helper grants the launched session,
@@ -215,7 +249,7 @@ launch_stage() {
 # on loopback, and a launch must never wait on, or fail because of, its own
 # telemetry. Without a broker (not an engine session) there is no one to tell.
 report_launch() {
-    local outcome="$1" error="${2:-}" total_ms stages p body
+    local outcome="$1" error="${2:-}" total_ms stages p body url
     [[ -n "$LAUNCH_T0" ]] || return 0
     total_ms="$(ms_since "$LAUNCH_T0")"
     # Said in the session too when it was slow, so the person waiting sees why.
@@ -223,7 +257,8 @@ report_launch() {
         printf 'agent-auth: launch took %d.%ds; the engine log (vogt::launch) has each stage\n' \
             $(( total_ms / 1000 )) $(( total_ms % 1000 / 100 )) >&2
     fi
-    [[ -n "${VOGT_ENGINE_BROKER_URL:-}" ]] && broker_token_available || return 0
+    url="$(broker_url)"
+    [[ -n "$url" ]] && broker_token_available || return 0
     command -v jq >/dev/null 2>&1 || return 0
     command -v curl >/dev/null 2>&1 || return 0
     for p in "${!PROJECT_MODE[@]}"; do
@@ -242,7 +277,7 @@ report_launch() {
          + (if $error == "" then {} else {error: $error} end)')" || return 0
     broker_curl -sS --max-time 2 -o /dev/null -X POST \
         -H 'Content-Type: application/json' --data-binary @- \
-        "${VOGT_ENGINE_BROKER_URL%/}/api/agent-auth/launch-report" <<<"$body" \
+        "${url%/}/api/agent-auth/launch-report" <<<"$body" \
         >/dev/null 2>&1 || true
 }
 
@@ -362,7 +397,7 @@ probe_mcp() {
     : >"$error_file"
     status="$(curl -sS --max-time 15 "$@" \
         -o "$response_file" -w '%{http_code}' \
-        -H "Authorization: Bearer $token" \
+        -H @<(printf 'Authorization: Bearer %s\n' "$token") \
         -H 'Content-Type: application/json' \
         -H 'Accept: application/json, text/event-stream' \
         --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"vogt-agent-auth","version":"1"}}}' \
@@ -382,28 +417,33 @@ probe_mcp() {
 }
 
 mint_access_token() {
-    local temp_home token
-    temp_home="$(mktemp -d)"
-    if ! token="$(HOME="$temp_home" bounded infisical login \
-        --method universal-auth \
-        --domain "${INFISICAL_API_URL:-}" \
-        --client-id "$INFISICAL_CLIENT_ID" \
-        --client-secret "$INFISICAL_CLIENT_SECRET" \
-        --plain --silent)"; then
-        rm -rf "$temp_home"
-        return 1
-    fi
-    rm -rf "$temp_home"
-    printf '%s' "$token"
+    local base secs raw
+    command -v curl >/dev/null 2>&1 || return 1
+    command -v jq >/dev/null 2>&1 || return 1
+    secs="$(call_timeout)"
+    (( secs > 0 )) || return 1
+    base="${INFISICAL_API_URL%/}"
+    base="${base%/api}"
+    # The client secret rides in the JSON body on stdin, never argv, and this
+    # is the same universal-auth request `infisical login` makes (WI-3885):
+    # on the host, --client-secret was visible in `ps` to every user.
+    raw="$(jq -nc --arg id "$INFISICAL_CLIENT_ID" --arg secret "$INFISICAL_CLIENT_SECRET" \
+            '{clientId: $id, clientSecret: $secret}' |
+        curl -sS --fail --connect-timeout "$secs" --max-time "$secs" \
+            -H 'Content-Type: application/json' --data-binary @- \
+            "$base/api/v1/auth/universal-auth/login" 2>/dev/null)" || return 1
+    jq -r '.accessToken // empty' <<<"$raw"
 }
 
 get_secret() {
     local access_token="$1" project_id="$2" secret_name="$3"
-    bounded infisical secrets get "$secret_name" \
+    # The access token is an environment value for this one CLI call, never
+    # argv: the CLI has no token-file switch, and --token was visible in `ps`
+    # (WI-3885).
+    INFISICAL_TOKEN="$access_token" bounded infisical secrets get "$secret_name" \
         --domain "${INFISICAL_API_URL:-}" \
         --projectId "$project_id" \
         --env "$INFISICAL_ENV" \
-        --token "$access_token" \
         --plain --silent
 }
 
@@ -506,14 +546,21 @@ resolve_secret() {
 # pluggable write half of the broker, mirroring `get_secret`; a different
 # secrets manager replaces exactly this function).
 write_secret() {
-    local access_token="$1" project_id="$2" secret_name="$3" value
+    local access_token="$1" project_id="$2" secret_name="$3" value tmp rc=0
     value="$(cat)"
-    infisical secrets set "$secret_name=$value" \
+    # The value goes through a 0600 file (`NAME=@file`), not argv, so it is
+    # not readable in `ps`; the access token likewise rides in the
+    # environment for this one call (WI-3885).
+    umask 077
+    tmp="$(mktemp)"
+    printf '%s' "$value" >"$tmp"
+    INFISICAL_TOKEN="$access_token" infisical secrets set "$secret_name=@$tmp" \
         --domain "${INFISICAL_API_URL:-}" \
         --projectId "$project_id" \
         --env "$INFISICAL_ENV" \
-        --token "$access_token" \
-        --silent
+        --silent || rc=$?
+    rm -f "$tmp"
+    return "$rc"
 }
 
 # True when a comma-separated flag list contains a given flag. The flag field
@@ -620,9 +667,10 @@ set_one() {
 # Every refusal repeats the engine's own reason, which for an undeclared or
 # non-writable name is the manifest line or flag to add.
 store_one() {
-    local var="$1" value response status body
-    if [[ -z "${VOGT_ENGINE_BROKER_URL:-}" ]] || ! broker_token_available; then
-        die "no secret broker in this environment (VOGT_ENGINE_BROKER_URL/token file are unset): not an engine session, or the engine declares nothing in ENGINE_AGENT_AUTH_SECRETS"
+    local var="$1" value response status body url
+    url="$(broker_url)"
+    if [[ -z "$url" ]] || ! broker_token_available; then
+        die "no secret broker in this environment (VOGT_ENGINE_BROKER_URL or VOGT_ENGINE_URL and a token or VOGT_SESSION_TOKEN_FILE are unset): not an engine session, or the engine declares nothing in ENGINE_AGENT_AUTH_SECRETS"
     fi
     require_command curl
     value="$(cat)"
@@ -632,7 +680,7 @@ store_one() {
     status="$(printf '%s' "$value" | broker_curl -sS --max-time 45 -o "$response" -w '%{http_code}' \
         -X POST \
         -H 'Content-Type: text/plain' --data-binary @- \
-        "${VOGT_ENGINE_BROKER_URL%/}/api/agent-auth/store/$var" 2>/dev/null)" || status="000"
+        "${url%/}/api/agent-auth/store/$var" 2>/dev/null)" || status="000"
     if [[ "$status" == "200" ]]; then
         cat "$response"
         rm -f "$response"
@@ -641,7 +689,7 @@ store_one() {
     body="$(tr -d '\r\n' <"$response" | cut -c1-300)"
     rm -f "$response"
     case "$status" in
-        000) die "secret broker unreachable at $VOGT_ENGINE_BROKER_URL" ;;
+        000) die "secret broker unreachable at $url" ;;
         401) die "secret broker refused this session's token (HTTP 401); the engine no longer knows this session" ;;
         403) die "secret broker refused storing $var (HTTP 403): ${body:-not writable in the manifest}" ;;
         413) die "secret broker refused storing $var (HTTP 413): value over the size cap" ;;
@@ -656,16 +704,17 @@ store_one() {
 # engine's own reason, which for an undeclared name is the manifest line to
 # add; the identity is never involved on this side.
 fetch_one() {
-    local var="$1" response status body
-    if [[ -z "${VOGT_ENGINE_BROKER_URL:-}" ]] || ! broker_token_available; then
-        die "no secret broker in this environment (VOGT_ENGINE_BROKER_URL/token file are unset): not an engine session, or the engine declares nothing in ENGINE_AGENT_AUTH_SECRETS"
+    local var="$1" response status body url
+    url="$(broker_url)"
+    if [[ -z "$url" ]] || ! broker_token_available; then
+        die "no secret broker in this environment (VOGT_ENGINE_BROKER_URL or VOGT_ENGINE_URL and a token or VOGT_SESSION_TOKEN_FILE are unset): not an engine session, or the engine declares nothing in ENGINE_AGENT_AUTH_SECRETS"
     fi
     require_command curl
     umask 077
     response="$(mktemp)"
     status="$(broker_curl -sS --max-time 45 -o "$response" -w '%{http_code}' \
         -X POST \
-        "${VOGT_ENGINE_BROKER_URL%/}/api/agent-auth/fetch/$var" 2>/dev/null)" || status="000"
+        "${url%/}/api/agent-auth/fetch/$var" 2>/dev/null)" || status="000"
     if [[ "$status" == "200" ]]; then
         cat "$response"
         rm -f "$response"
@@ -674,7 +723,7 @@ fetch_one() {
     body="$(tr -d '\r\n' <"$response" | cut -c1-300)"
     rm -f "$response"
     case "$status" in
-        000) die "secret broker unreachable at $VOGT_ENGINE_BROKER_URL" ;;
+        000) die "secret broker unreachable at $url" ;;
         401) die "secret broker refused this session's token (HTTP 401); the engine no longer knows this session" ;;
         403) die "secret broker refused $var (HTTP 403): ${body:-not in the manifest}" ;;
         *) die "secret broker failed for $var (HTTP $status): ${body:-<empty body>}" ;;
@@ -686,16 +735,17 @@ fetch_one() {
 # the agent knows which VAR to `fetch`, and the grant is visible in its
 # transcript. Needs only the broker token.
 list_grants() {
-    local response status
-    if [[ -z "${VOGT_ENGINE_BROKER_URL:-}" ]] || ! broker_token_available; then
-        die "no secret broker in this environment (VOGT_ENGINE_BROKER_URL/token file are unset): not an engine session, or the engine declares nothing in ENGINE_AGENT_AUTH_SECRETS"
+    local response status url
+    url="$(broker_url)"
+    if [[ -z "$url" ]] || ! broker_token_available; then
+        die "no secret broker in this environment (VOGT_ENGINE_BROKER_URL or VOGT_ENGINE_URL and a token or VOGT_SESSION_TOKEN_FILE are unset): not an engine session, or the engine declares nothing in ENGINE_AGENT_AUTH_SECRETS"
     fi
     require_command curl
     require_command jq
     umask 077
     response="$(mktemp)"
     status="$(broker_curl -sS --max-time 15 -o "$response" -w '%{http_code}' \
-        "${VOGT_ENGINE_BROKER_URL%/}/api/agent-auth/grants" 2>/dev/null)" || status="000"
+        "${url%/}/api/agent-auth/grants" 2>/dev/null)" || status="000"
     if [[ "$status" != "200" ]]; then
         rm -f "$response"
         die "secret broker could not list grants (HTTP $status)"
@@ -922,7 +972,7 @@ run_configured_probes() {
         [[ -n "${url:-}" && -n "${token_var:-}" ]] || die \
             "malformed ENGINE_AGENT_AUTH_PROBES entry (want 'NAME URL TOKEN_VAR'): $line"
         token="${!token_var:-}"
-        if curl -fsS -H "Authorization: Bearer $token" "$url" >/dev/null; then
+        if curl -fsS -H @<(printf 'Authorization: Bearer %s\n' "$token") "$url" >/dev/null; then
             printf 'ok: %s (%s)\n' "$name" "$url"
         else
             die "$name probe failed at $url"
