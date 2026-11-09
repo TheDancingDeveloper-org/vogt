@@ -175,22 +175,28 @@ if [ -n "$(jq -r '.source_token // .graft_token // empty' "$response")" ]; then
   export VOGT_GRAFT_TOKEN_FILE="$source_token_file"
 fi
 step=clone; say clone
-work_dir=${VOGT_WORK_DIR:-/work}
+# The clone root is where the project's source is checked out; the session may
+# run in a directory inside it, which the bootstrap response carries as
+# VOGT_WORK_DIR (WI-3883). Keeping the two apart stops a requested subdirectory
+# from moving the checkout itself.
+clone_dir=${VOGT_CLONE_DIR:-/work}
+work_dir=${VOGT_WORK_DIR:-$clone_dir}
 # A bare mkdir under `set -e` would end the script with no reason in the log;
 # name the directory so a failed clone step says why (WI-3762).
-mkdir -p "$work_dir" || fail "cannot create $work_dir"
+mkdir -p "$clone_dir" || fail "cannot create $clone_dir"
 if [ "$source_kind" = git ]; then
-  if ! git clone --branch "$source_ref" --single-branch "$source_repo" "$work_dir" >/dev/null 2>"$tmp_dir/git.err"; then
-    fail "git clone $source_repo into $work_dir failed: $(tail -n3 "$tmp_dir/git.err" | tr '\n' ' ' | cut -c1-400)"
+  if ! git clone --branch "$source_ref" --single-branch "$source_repo" "$clone_dir" >/dev/null 2>"$tmp_dir/git.err"; then
+    fail "git clone $source_repo into $clone_dir failed: $(tail -n3 "$tmp_dir/git.err" | tr '\n' ' ' | cut -c1-400)"
   fi
 elif [ "$source_kind" = graft ]; then
-if ! graft --token-file "$source_token_file" clone "$source_repo" "$work_dir" --line "$source_ref" >/dev/null 2>"$tmp_dir/graft.err"; then
+if ! graft --token-file "$source_token_file" clone "$source_repo" "$clone_dir" --line "$source_ref" >/dev/null 2>"$tmp_dir/graft.err"; then
   # graft's stderr names the endpoint and the refusal, never the token file's content.
-  fail "g clone $source_repo --line $source_ref into $work_dir failed (GRAFT_ENDPOINT=${GRAFT_ENDPOINT:-unset}): $(tail -n3 "$tmp_dir/graft.err" | tr '\n' ' ' | cut -c1-400)"
+  fail "g clone $source_repo --line $source_ref into $clone_dir failed (GRAFT_ENDPOINT=${GRAFT_ENDPOINT:-unset}): $(tail -n3 "$tmp_dir/graft.err" | tr '\n' ' ' | cut -c1-400)"
 fi
 else
   fail "unsupported source kind: $source_kind"
 fi
+[ -d "$work_dir" ] || fail "the session's cwd is not in the clone: $work_dir"
 # WI-3356: give /work a read-only git view so `git log -1 -p`, `git diff` and
 # `git status` work in the pod (reviewers and most briefs assume git). graft
 # has no git export, so the view is built from the clone: a baseline commit of
@@ -201,11 +207,11 @@ fi
 # stops the boot.
 git_view() {
   command -v git >/dev/null 2>&1 || return 0
-  [ -e "$work_dir/.git" ] && return 0
-  gv() { git -C "$work_dir" -c user.name=graft -c user.email=graft@localhost -c core.hooksPath=/dev/null "$@"; }
-  gg() { graft --token-file "$source_token_file" -C "$work_dir" "$@"; }
+  [ -e "$clone_dir/.git" ] && return 0
+  gv() { git -C "$clone_dir" -c user.name=graft -c user.email=graft@localhost -c core.hooksPath=/dev/null "$@"; }
+  gg() { graft --token-file "$source_token_file" -C "$clone_dir" "$@"; }
   gv init -q 2>/dev/null || return 0
-  printf '.graft/\n.vogt/\n' >"$work_dir/.git/info/exclude"
+  printf '.graft/\n.vogt/\n' >"$clone_dir/.git/info/exclude"
   gv add -A -f -- . ':(exclude).graft' ':(exclude).vogt' >/dev/null 2>&1 || return 0
   tree=$(gv write-tree 2>/dev/null) || return 0
   tip_json=$(gg --json log --limit 1 2>/dev/null) || tip_json=
@@ -217,7 +223,7 @@ git_view() {
      && gg diff "$parent" "$tip" >"$tmp_dir/tip.patch" 2>/dev/null && [ -s "$tmp_dir/tip.patch" ]; then
     # Undo the tip's patch on the files to get the parent's tree, commit it,
     # then commit the real tree on top.
-    if (cd "$work_dir" && patch -R -E -p1 -s -f --no-backup-if-mismatch <"$tmp_dir/tip.patch" >/dev/null 2>&1) \
+    if (cd "$clone_dir" && patch -R -E -p1 -s -f --no-backup-if-mismatch <"$tmp_dir/tip.patch" >/dev/null 2>&1) \
        && gv add -A -f -- . ':(exclude).graft' ':(exclude).vogt' >/dev/null 2>&1 && ptree=$(gv write-tree 2>/dev/null) \
        && base=$(printf 'graft %s: before %s\n' "$VOGT_GRAFT_LINE" "$tip" | gv commit-tree "$ptree" 2>/dev/null) \
        && head=$(printf '%s\n\ngraft changeset %s\n' "$subject" "$tip" | gv commit-tree "$tree" -p "$base" 2>/dev/null); then
@@ -231,12 +237,12 @@ git_view() {
   fi
   # Restore the files to the real tree whichever way the commits were built.
   gv update-ref HEAD "$head" && gv reset -q --hard >/dev/null 2>&1 && gv clean -fdq >/dev/null 2>&1 || true
-  printf 'session-entrypoint: git view of %s ready (read-only; land with g)\n' "$work_dir" >&2
+  printf 'session-entrypoint: git view of %s ready (read-only; land with g)\n' "$clone_dir" >&2
 }
 step=git-view; say git-view
-git_view || printf 'session-entrypoint: could not build a git view of %s; continuing\n' "$work_dir" >&2
+git_view || printf 'session-entrypoint: could not build a git view of %s; continuing\n' "$clone_dir" >&2
 step=brief; say brief
-add_dir=${VOGT_ADD_DIR:-$work_dir/.vogt}; mkdir -p "$add_dir"; chmod 700 "$add_dir"
+add_dir=${VOGT_ADD_DIR:-$clone_dir/.vogt}; mkdir -p "$add_dir"; chmod 700 "$add_dir"
 jq -r '.brief // ""' "$response" >"$add_dir/brief.md"; chmod 600 "$add_dir/brief.md"
 export VOGT_ADD_DIR="$add_dir"
 export VOGT_SESSION_CWD="$work_dir"; export VOGT_SESSION_BRIEF_FILE="$add_dir/brief.md"

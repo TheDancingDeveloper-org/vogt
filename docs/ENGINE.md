@@ -3329,6 +3329,21 @@ worker does not stop at an approval menu (WI-3864). Any other command runs as
 given (`VOGT_SESSION_COMMAND`), and no command uses `ENGINE_POD_CLI` (default
 `codex`).
 
+**A pod start carries the caller's `cwd` and extra `env` (WI-3883).** A pod
+clones the project's checkout itself, so a requested `cwd` is only meaningful
+as a path inside that clone: the engine resolves it against the checkout's git
+top level and sends the pod-side path as `VOGT_WORK_DIR` in the bootstrap
+response. A `cwd` outside any checkout is refused with a 400 naming `cwd`, and
+so is a `worktree`, which the pod would have to cut itself. The caller's extra
+environment travels in the same bootstrap response, never in the pod spec, and
+the entrypoint exports it for the agent process. A name the engine or the pod
+owns — `VOGT_*`, `PATH`, `HOME`, or a credential-shaped name — is refused with
+a 400 naming it, rather than shadowed or silently dropped; Vogt's own
+session-contract names (`VOGT_HTTP_TOKEN`, `VOGT_SESSION_ID`, `VOGT_WORK_ITEM`,
+`VOGT_URL`, `VOGT_ENGINE_URL`, `CLAUDE_CONFIG_DIR`, `VOGT_SESSION_IMAGE`) are
+skipped: vogt-core sends them on every start, and the engine sets its own
+value where the pod needs one rather than carrying a caller's.
+
 Engines can share the namespace (dev and prod, or an old process during a
 rollout), so ownership is explicit:
 
@@ -4801,8 +4816,11 @@ needs only `create` on `secrets` (no `get`, `list`, `watch`, `update` or
 `delete`). The pod spec also sets
 `VOGT_ENGINE_URL`, `VOGT_SESSION_ID`,
 `VOGT_SOURCE_JSON` (the session's source descriptor), `VOGT_CLI` (`claude`
-or `codex`), the source provider's env (for graft, `GRAFT_ENDPOINT` when
-known) and, when configured, `VOGT_EXTRA_CA_FILE`. Every pod also gets
+or `codex`), `VOGT_CLONE_DIR` (the clone root, `/work`) and
+`VOGT_WORK_DIR` (the work directory, replaced through the bootstrap response
+when the caller's `cwd` is inside the checkout), the source provider's env
+(for graft, `GRAFT_ENDPOINT` when known) and, when configured,
+`VOGT_EXTRA_CA_FILE`. Every pod also gets
 `VOGT_CODEX_APPROVAL_POLICY` (the engine's validated
 `ENGINE_CODEX_APPROVAL_POLICY`, `never` by default) and, for a posture other
 than the default, `VOGT_PERMISSION_MODE`; the session agent feeds both to the
@@ -4936,16 +4954,17 @@ bootstrap refusal quotes the engine's one-line reason only). In order:
 7. `graft-token` — a returned `graft_token` (the one minted for this pod) is written `0600` beside the
    session token (`VOGT_GRAFT_TOKEN_FILE`, default `graft-token` in the same
    directory) and exported as a path only.
-8. `clone` — `graft --token-file <file> clone ...` into `VOGT_WORK_DIR`
-   (default `/work`). A failure names the endpoint and graft's last stderr
-   lines.
+8. `clone` — `graft --token-file <file> clone ...` into `VOGT_CLONE_DIR`
+   (default `/work`). The agent's work directory is `VOGT_WORK_DIR`, which is
+   the clone root unless the bootstrap response carried a `cwd` inside the
+   checkout. A failure names the endpoint and graft's last stderr lines.
    Afterwards `/work` is given a read-only git view (WI-3356; step
    `git-view`, best effort): a baseline commit of the line's tree before its
    tip changeset and the tip on top, with no remote, so `git log -1 -p`,
    `git diff` and `git status` work. Commits and lands still go through `g`.
-9. `brief` — the brief is written to `<workdir>/.vogt/brief.md`
-   (`VOGT_ADD_DIR`), and `VOGT_SESSION_CWD` and `VOGT_SESSION_BRIEF_FILE` are
-   exported.
+9. `brief` — the brief is written to `<clone root>/.vogt/brief.md`
+   (`VOGT_ADD_DIR`), and `VOGT_SESSION_CWD` (the work directory) and
+   `VOGT_SESSION_BRIEF_FILE` are exported.
 10. `handoff` — the entrypoint prints `session-entrypoint: boot completed in
    <n>s` and the metric line `vogt_session_boot_seconds <n>` (for pod log
    collection), removes its scratch directory and execs `vogt-session-agent`.
