@@ -37,8 +37,9 @@
 #   POD_CODEX_TASK             prompt typed into the session
 #   POD_CODEX_TIMEOUT          seconds to wait for the tool result (default 180)
 #   POD_CODEX_CONVERSATION     conversation id the launch line pins; the
-#                              rollout the pod writes must carry it (default
-#                              pod-codex-smoke)
+#                              rollout the pod writes must carry it (default: a
+#                              fresh UUID, because Codex pins --session-id to
+#                              the UUID shape the engine always passes)
 #
 # Needs docker, cargo and uv (the screen is parsed with pyte). This is a
 # developer/acceptance harness, not a CI job: it calls a real model.
@@ -62,7 +63,7 @@ POD_CODEX_WIRE_API="${POD_CODEX_WIRE_API:-chat}"
 POD_CODEX_ENV_KEY="${POD_CODEX_ENV_KEY:-POD_CODEX_API_KEY}"
 POD_CODEX_TASK="${POD_CODEX_TASK:-Run the shell command echo PONG and reply with exactly its output.}"
 POD_CODEX_TIMEOUT="${POD_CODEX_TIMEOUT:-180}"
-POD_CODEX_CONVERSATION="${POD_CODEX_CONVERSATION:-pod-codex-smoke}"
+POD_CODEX_CONVERSATION="${POD_CODEX_CONVERSATION:-$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid)}"
 
 # Docker gets the key by name, never in argv. `--env-file` keeps it out of the
 # command line and out of this transcript.
@@ -111,13 +112,20 @@ case "$line" in
   *) die "the generated line does not pin the conversation: $line" ;;
 esac
 
-# The pod's Codex home on the host, so the rollout it writes after the turn
-# can be inspected once the container is gone.
-POD_CODEX_HOME="$(mktemp -d)"
-chmod 0777 "$POD_CODEX_HOME"
+# The pod's Codex home: a docker volume, so the rollout it writes after the
+# turn survives the container. A host bind works only when the daemon shares
+# this machine's filesystem; against a daemon that cannot see the path, docker
+# silently mounts an empty root-owned directory and Codex fails to open its
+# state DB (WI-3873).
+POD_CODEX_HOME_VOLUME="pod-codex-smoke-$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid)"
+docker volume create "$POD_CODEX_HOME_VOLUME" >/dev/null
+# Docker seeds a fresh volume from the image's directory, whose owner is root;
+# the pod runs as uid 1000.
+docker run --rm --user 0:0 -v "${POD_CODEX_HOME_VOLUME}:/home/vogt/.codex" \
+  --entrypoint /bin/sh "$POD_IMAGE" -c 'mkdir -p /home/vogt/.codex && chmod 0777 /home/vogt/.codex'
 
 export POD_CODEX_LINE="$line"
-export POD_CODEX_TASK POD_CODEX_TIMEOUT POD_CODEX_PROVIDER POD_CODEX_HOME
+export POD_CODEX_TASK POD_CODEX_TIMEOUT POD_CODEX_PROVIDER POD_CODEX_HOME_VOLUME
 export POD_CODEX_CONVERSATION
 export POD_CODEX_MODEL POD_CODEX_BASE_URL POD_CODEX_WIRE_API POD_CODEX_ENV_KEY
 export POD_CODEX_ENV_FILE="${POD_CODEX_ENV_FILE:-}"
@@ -170,7 +178,7 @@ cmd = [
     "-e", "TERM=xterm-256color",
     "-e", "POD_CODEX_LINE=" + line,
     "--tmpfs", "/work:rw,exec,mode=0755,uid=1000,gid=1000",
-    "-v", os.environ["POD_CODEX_HOME"] + ":/home/vogt/.codex",
+    "-v", os.environ["POD_CODEX_HOME_VOLUME"] + ":/home/vogt/.codex",
     "--entrypoint", "/bin/bash", "-w", "/work",
     *pod_env_args, image, "-lc", inner,
 ]
@@ -242,8 +250,13 @@ if not answer or bwrap or approval:
     sys.exit(1)
 PY
 
-rollout="$(find "$POD_CODEX_HOME/sessions" -type f \
-  -name "rollout-*-${POD_CODEX_CONVERSATION}.jsonl" -print -quit 2>/dev/null || true)"
+rollout="$(docker run --rm -v "${POD_CODEX_HOME_VOLUME}:/home/vogt/.codex" \
+  --entrypoint /bin/sh "$POD_IMAGE" \
+  -c "find /home/vogt/.codex/sessions -type f -name 'rollout-*-${POD_CODEX_CONVERSATION}.jsonl' -print -quit" \
+  2>/dev/null || true)"
 [ -n "$rollout" ] || die "no rollout-*-${POD_CODEX_CONVERSATION}.jsonl under the pod's CODEX_HOME"
-echo "pod-codex-smoke: rollout: ${rollout#"$POD_CODEX_HOME"/}"
+copy="$(mktemp -d)"
+docker run --rm -v "${POD_CODEX_HOME_VOLUME}:/home/vogt/.codex" \
+  --entrypoint /bin/cat "$POD_IMAGE" "$rollout" > "$copy/$(basename "$rollout")"
+echo "pod-codex-smoke: rollout: ${rollout#/home/vogt/.codex/} (copy: $copy)"
 echo "pod-codex-smoke: PASS — the generated line ran a shell tool call in the pod image with no bwrap error and no approval menu, and Codex named its rollout for ${POD_CODEX_CONVERSATION}"
