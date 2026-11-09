@@ -1,10 +1,12 @@
 //! Turning "run it on GPT 5.6, medium, on this brief" into the argv one agent
 //! CLI wants
 //!
-//! This is engine knowledge on purpose. Vogt decides *which* model a session
-//! was asked for and audits that decision; how a model id reaches a running
-//! process is `claude --model`, `codex -m`, or `opencode --model`, and which
-//! of those exist is a property of this pod's image rather than of the estate
+//! Vogt decides *which* model a session was asked for and audits that decision;
+//! how a model id reaches a running process is `claude --model`, `codex -m`, or
+//! `opencode --model`, and which of those exist is a property of this pod's
+//! image rather than of the estate. Claude's own flags live in
+//! `vogt_session_agent` (WI-3881) because the pod's launch line builds them
+//! too; this module delegates so host and pod cannot drift.
 //!
 //! The same goes for the other things a launch can carry: a previous
 //! conversation to resume, and the first prompt that points the agent at the
@@ -170,18 +172,12 @@ pub fn opencode_posture(mode: Option<&str>, policy: Option<&str>) -> Option<Stri
 
 /// A permission posture a session may be started with, as Claude Code's
 /// flags for Claude Code. `None` is the default posture: no flag at all.
+///
+/// The flags live in `vogt_session_agent` (WI-3881), because the pod's own
+/// launch line needs the same ones: an agent template runs the session agent,
+/// not this rewritten argv, so the two must not be able to drift.
 pub fn permission_flags(mode: Option<&str>) -> Result<Option<Vec<String>>> {
-    match mode.map(str::trim).filter(|m| !m.is_empty()) {
-        None | Some("default") => Ok(None),
-        Some("accept-edits") | Some("accept_edits") => Ok(Some(vec![
-            "--permission-mode".to_string(),
-            "acceptEdits".to_string(),
-        ])),
-        Some("bypass") => Ok(Some(vec!["--dangerously-skip-permissions".to_string()])),
-        Some(other) => Err(ApiError::BadRequest(format!(
-            "permission_mode {other:?} is not one of default, accept-edits, bypass"
-        ))),
-    }
+    vogt_session_agent::claude_permission_flags(mode).map_err(ApiError::BadRequest)
 }
 
 pub use vogt_session_agent::{CODEX_APPROVAL_DEFAULT, CODEX_APPROVAL_POLICIES};
@@ -334,32 +330,6 @@ pub fn launch(command: Option<&[String]>, req: &LaunchRequest<'_>) -> Result<Lau
     let mut env = Vec::new();
     match binary.as_str() {
         "claude" => {
-            if let Some(model) = model {
-                rewritten.extend(["--model".to_string(), model.to_string()]);
-            }
-            if let Some(effort) = effort {
-                rewritten.extend(["--effort".to_string(), effort.to_string()]);
-            }
-            if let Some(id) = resume {
-                rewritten.extend(["--resume".to_string(), id.to_string()]);
-            } else if let (true, Some(id)) = (bare, req.session_id) {
-                rewritten.extend(["--session-id".to_string(), id.to_string()]);
-            }
-            if let Some(flags) = permission {
-                rewritten.extend(flags);
-            }
-            if let Some(file) = req.settings_file {
-                // The driven-session policy (WI-926): auto-mode rules added to
-                // Claude Code's own through `$defaults`. `=` form, like
-                // `--add-dir`, so it can never take a following positional.
-                rewritten.push(format!("--settings={}", file.display()));
-            }
-            if let Some(file) = req.mcp.and_then(|m| m.claude_config.as_deref()) {
-                // Only the servers in this file, not the user's own set
-                // (WI-2740). `=` form: `--mcp-config` is variadic.
-                rewritten.push("--strict-mcp-config".to_string());
-                rewritten.push(format!("--mcp-config={}", file.display()));
-            }
             // The brief lives under the engine's state directory, outside the
             // session's working directory, and reading it there would stop a
             // fresh session at a permission prompt before it began (WI-912).
@@ -373,13 +343,30 @@ pub fn launch(command: Option<&[String]>, req: &LaunchRequest<'_>) -> Result<Lau
                     dirs.push(dir);
                 }
             }
-            for dir in dirs {
-                rewritten.push(format!("--add-dir={}", dir.display()));
-            }
-            // Positional, and last: `claude [options] [prompt]`.
-            if let Some(prompt) = prompt {
-                rewritten.push(prompt);
-            }
+            // The flags live in `vogt_session_agent` (WI-3881): the pod's own
+            // launch line builds them with the same function, so a model,
+            // effort or posture cannot reach one launch and silently miss the
+            // other. Only the values differ, not the order or the spelling.
+            let session_id = req.session_id.map(|id| id.to_string());
+            let conversation = match (resume, bare, session_id.as_deref()) {
+                (Some(id), _, _) => Some((id, true)),
+                (None, true, Some(id)) => Some((id, false)),
+                _ => None,
+            };
+            let add_dirs: Vec<String> = dirs.iter().map(|dir| dir.display().to_string()).collect();
+            rewritten.extend(
+                vogt_session_agent::claude_args(&vogt_session_agent::ClaudeArgs {
+                    model,
+                    effort,
+                    conversation,
+                    permission_mode: req.permission_mode,
+                    settings: req.settings_file,
+                    mcp_config: req.mcp.and_then(|m| m.claude_config.as_deref()),
+                    add_dirs: &add_dirs,
+                    prompt: prompt.as_deref(),
+                })
+                .map_err(ApiError::BadRequest)?,
+            );
             env.extend(
                 CLAUDE_QUIET_ENV
                     .iter()
@@ -1585,16 +1572,9 @@ mod permission_tests {
 
     #[test]
     fn postures_map_to_claudes_flags_and_default_adds_none() {
-        assert_eq!(permission_flags(None).unwrap(), None);
-        assert_eq!(permission_flags(Some("default")).unwrap(), None);
-        assert_eq!(
-            permission_flags(Some("accept_edits")).unwrap(),
-            Some(cmd(&["--permission-mode", "acceptEdits"]))
-        );
-        assert_eq!(
-            permission_flags(Some("bypass")).unwrap(),
-            Some(cmd(&["--dangerously-skip-permissions"]))
-        );
+        // Claude's own mapping is tested beside the flags it builds
+        // (`vogt_session_agent::claude_permission_flags`, WI-3881); this
+        // wrapper only maps its error.
         assert!(permission_flags(Some("yolo")).is_err());
         assert!(codex_permission_flags(Some("yolo"), false, "never").is_err());
         assert_eq!(codex_permission_flags(None, false, "never").unwrap(), None);
@@ -1817,5 +1797,92 @@ mod permission_tests {
         assert!(!codex.iter().any(|a| a.contains("mcp-config")));
         let opencode = launch(Some(&cmd(&["opencode"])), &req).unwrap().command;
         assert!(opencode.is_none(), "opencode is left as it was");
+    }
+
+    /// WI-3881: the host launcher and the pod's own launch line build Claude's
+    /// argv from the same function. The model, effort, posture, settings,
+    /// conversation, add-dir and first prompt must arrive as the same words in
+    /// the same order, so a pod session cannot silently lose a launch input a
+    /// host session would have received.
+    #[test]
+    #[cfg(unix)]
+    fn host_and_pod_claude_argv_agree() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+        let brief = dir.path().join("brief.md");
+        std::fs::write(&settings, r#"{"permissions":{}}"#).unwrap();
+        std::fs::write(&brief, "# task\n").unwrap();
+        let id = Uuid::new_v4();
+        let cwd = "/work";
+
+        let host = launch(
+            Some(&cmd(&["claude"])),
+            &LaunchRequest {
+                model: Some("claude-opus-4-6"),
+                effort: Some("high"),
+                resume: None,
+                brief_file: Some(&brief),
+                session_id: Some(id),
+                codex_session_id: true,
+                permission_mode: Some("accept-edits"),
+                settings_file: Some(&settings),
+                add_dirs: &[PathBuf::from(cwd)],
+                opencode_config: None,
+                codex_approval_policy: "never",
+                mcp: None,
+                codex_compact_limit: None,
+            },
+        )
+        .unwrap()
+        .command
+        .expect("a rewritten command");
+        assert_eq!(host[0], "claude");
+
+        let pod_config = vogt_session_agent::Config {
+            session_id: "s".into(),
+            engine_url: "http://127.0.0.1:1".into(),
+            token: "t".into(),
+            cli: "claude".into(),
+            command: None,
+            cwd: Some(cwd.into()),
+            cols: 80,
+            rows: 24,
+            buffer_bytes: 1024,
+            claude_config_dir: None,
+            codex_home: None,
+            account: None,
+            conversation_id: Some(id.to_string()),
+            resume: false,
+            model: Some("claude-opus-4-6".into()),
+            effort: Some("high".into()),
+            permission_mode: Some("accept-edits".into()),
+            codex_approval_policy: "never".into(),
+            claude: vogt_session_agent::ClaudeLaunch {
+                settings: Some(settings),
+                mcp_config: None,
+                brief: Some(brief),
+            },
+        };
+        let line = vogt_session_agent::command_line(&pod_config).unwrap();
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("claude() {{ printf '%s\\n' \"$@\"; }}; {line}"))
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        let pod: Vec<String> = String::from_utf8(out.stdout)
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect();
+
+        assert_eq!(&host[1..], pod.as_slice());
+        for flag in ["--model", "--effort", "--permission-mode", "--settings"] {
+            assert!(
+                pod.iter()
+                    .any(|arg| arg == flag || arg.starts_with(&format!("{flag}="))),
+                "the pod argv lacks {flag}: {pod:?}"
+            );
+        }
     }
 }
