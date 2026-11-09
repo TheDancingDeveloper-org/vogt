@@ -455,6 +455,8 @@ impl SessionRegistry {
                 "session",
                 spec.account.as_deref(),
                 spec.model.as_deref(),
+                spec.permission_mode.as_deref(),
+                self.cfg.codex_approval_policy.as_str(),
                 spec.command.as_deref().unwrap_or_default(),
             )
         });
