@@ -820,20 +820,20 @@ pub fn command_line(config: &Config) -> Result<String, AgentError> {
         }
         // No `--add-dir`: Codex's effective sandbox refuses extra writable
         // roots and exits. The PTY already starts in the session cwd, which
-        // is the workspace root Codex uses. The explicit trust setting and
-        // skip-git-repo-check keep a fresh pod from stopping at Codex's
-        // interactive folder-trust screen before it can read its brief. The
-        // pod's git view is deliberately not a writable checkout.
+        // is the workspace root Codex uses. The pod's `/work` carries a git
+        // view, and Codex asks its folder-trust question for a git cwd it has
+        // no trust entry for, which a fresh pod never has (WI-3839). The
+        // entry is an inline table: `-c` splits its key on every `.`, so a
+        // dotted `projects."/work".trust_level` names a project called
+        // `"/work"`, quotes included, and never matches. `--skip-git-repo-check`
+        // is an `exec` flag the interactive CLI refuses.
         "codex" => {
             let cwd = config.cwd.as_deref().unwrap_or(DEFAULT_WORK_DIR);
             let setting = format!(
-                "projects.{}.trust_level=\"trusted\"",
+                "projects={{{}={{trust_level=\"trusted\"}}}}",
                 toml_basic_string(cwd)
             );
-            Ok(format!(
-                "codex -c {} --skip-git-repo-check",
-                sh_quote(Path::new(&setting))
-            ))
+            Ok(format!("codex -c {}", sh_quote(Path::new(&setting))))
         }
         "opencode" => Ok("opencode".into()),
         _ => Err(AgentError::Pty(
@@ -1688,10 +1688,66 @@ mod tests {
         config.cli = "codex".into();
         assert_eq!(
             command_line(&config).unwrap(),
-            r#"codex -c 'projects."/work".trust_level="trusted"' --skip-git-repo-check"#
+            r#"codex -c 'projects={"/work"={trust_level="trusted"}}'"#
         );
         config.cli = "nope".into();
         assert!(command_line(&config).is_err());
+    }
+
+    /// The Codex binary for the argv parse check (WI-3839): `VOGT_CODEX_BIN`,
+    /// which CI sets to the pinned fork. Without it the check is skipped,
+    /// unless `VOGT_CODEX_REQUIRED` says this run must have one.
+    #[cfg(unix)]
+    fn real_codex() -> Option<PathBuf> {
+        match std::env::var_os("VOGT_CODEX_BIN") {
+            Some(bin) => Some(PathBuf::from(bin)),
+            None if std::env::var_os("VOGT_CODEX_REQUIRED").is_some() => {
+                panic!("VOGT_CODEX_REQUIRED is set but VOGT_CODEX_BIN is not")
+            }
+            None => {
+                eprintln!("skipped: set VOGT_CODEX_BIN to check argv against Codex");
+                None
+            }
+        }
+    }
+
+    /// Whether the real Codex parses `line` (a shell command naming `codex`):
+    /// clap rejects an unknown flag before it reaches the trailing `--help`.
+    #[cfg(unix)]
+    fn codex_parses(codex: &Path, line: &str) -> bool {
+        let bin = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(codex, bin.path().join("codex")).unwrap();
+        let path = format!(
+            "{}:{}",
+            bin.path().display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("{line} --help"))
+            .env("PATH", path)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+    }
+
+    /// WI-3839: the interactive CLI refused `--skip-git-repo-check`, an
+    /// `exec` flag, and every pod Codex launch exited at once. A string test
+    /// cannot see that, so the generated line goes through Codex's own parser.
+    #[cfg(unix)]
+    #[test]
+    fn the_pod_codex_line_parses_with_the_real_codex() {
+        let Some(codex) = real_codex() else { return };
+        let config = Config {
+            cli: "codex".into(),
+            cwd: Some("/work".into()),
+            ..claude_config(ClaudeLaunch::default(), false)
+        };
+        let line = command_line(&config).unwrap();
+        assert!(codex_parses(&codex, &line), "codex refused: {line}");
+        assert!(!codex_parses(&codex, "codex --skip-git-repo-check"));
     }
 
     /// WI-3335: the engine does not judge a pod's Codex by its own files, so

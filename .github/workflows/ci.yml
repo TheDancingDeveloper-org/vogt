@@ -761,6 +761,24 @@ jobs:
         working-directory: engine
         run: cargo clippy --locked ${{ steps.scope.outputs.args }} --all-targets -- -D warnings
 
+      # The pinned Codex fork, the same release asset and checksum the pod
+      # image bakes, so the launch tests run the generated argv through the
+      # real CLI's parser and an unknown flag fails here (WI-3839).
+      - name: pinned Codex for the argv parse tests
+        if: always() && !cancelled() && needs.changes.outputs.rust == 'true'
+        working-directory: engine
+        run: |
+          set -euo pipefail
+          . ./agent-versions.env
+          target=x86_64-unknown-linux-musl
+          dir="$RUNNER_TEMP/codex"
+          mkdir -p "$dir"
+          curl -fsSL --retry 3 "$VOGT_CODEX_SOURCE/releases/download/fork-${VOGT_CODEX_SHA}/codex-${target}.tar.gz" \
+            | tar -xz -C "$dir" "${target}/codex"
+          echo "$VOGT_CODEX_SHA256_LINUX_AMD64  $dir/${target}/codex" | sha256sum -c -
+          echo "VOGT_CODEX_BIN=$dir/${target}/codex" >> "$GITHUB_ENV"
+          echo "VOGT_CODEX_REQUIRED=1" >> "$GITHUB_ENV"
+
       # cargo-nextest runs each test in its own process, so a test that hangs
       # is terminated by `engine/.config/nextest.toml` (terminate-after) and
       # reported as a failure, instead of holding the job until its timeout
