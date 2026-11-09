@@ -64,7 +64,8 @@ the example does: compiled defaults are not portable operator choices.
 | `ENGINE_POD_PREFERRED_NODES` | Comma-separated `NAME[:WEIGHT]`, weights 1–100. |
 | `ENGINE_POD_EXCLUDED_NODES` | Comma-separated forbidden nodes. |
 | `ENGINE_POD_TOLERATIONS` | JSON array of Kubernetes tolerations. |
-| `ENGINE_POD_TEMPLATE_POLICIES` | JSON map keyed by template: resource_requests, resource_limits, node_selector and affinity overrides. |
+| `ENGINE_POD_TEMPLATE_POLICIES` | JSON map keyed by template: resource_requests, resource_limits, node_selector, affinity and active_deadline_seconds overrides. |
+| `ENGINE_POD_SESSION_DEADLINE_SECONDS` | `activeDeadlineSeconds` for every session pod, default 43200 (12 h); `0` leaves it unset. |
 | `ENGINE_POD_CACHE_PVC` | Read-only seed claim; empty disables. Writable tool caches use private emptyDir. |
 | `ENGINE_POD_CACHE_NODE` | Hard cache-node pin; empty allows normal scheduling. |
 | `ENGINE_POD_CACHE_ENV_CONFIG_MAP` | Cache environment ConfigMap; empty disables. |
