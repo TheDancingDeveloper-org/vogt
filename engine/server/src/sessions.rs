@@ -93,22 +93,15 @@ fn validate_template_placement(
 ) -> Result<()> {
     match placement {
         None => Ok(()),
-        Some("host") if !template.supports_host() => {
-            let agent = template
-                .command
-                .as_deref()
-                .and_then(crate::agent_cli::agent_name);
-            if agent.as_deref() == Some("codex") {
-                Err(ApiError::BadRequest(
-                    "Codex runs in a session pod; placement=host is not supported".into(),
-                ))
-            } else {
-                Err(ApiError::BadRequest(format!(
-                    "template {:?} is pod-only and cannot run on the host",
-                    template.name
-                )))
-            }
+        Some("host") if template_agent(template).as_deref() == Some("codex") => {
+            Err(ApiError::BadRequest(
+                "Codex runs in a session pod; placement=host is not supported".into(),
+            ))
         }
+        Some("host") if !template.supports_host() => Err(ApiError::BadRequest(format!(
+            "template {:?} is pod-only and cannot run on the host",
+            template.name
+        ))),
         Some("pod") if !pod_backends_enabled => Err(ApiError::BadRequest(
             "requested placement \"pod\" is not available: pod backends are disabled".into(),
         )),
@@ -121,6 +114,24 @@ fn validate_template_placement(
             "invalid placement {other:?}; expected \"host\" or \"pod\""
         ))),
     }
+}
+
+fn template_agent(template: &crate::config::SessionTemplate) -> Option<String> {
+    template
+        .command
+        .as_deref()
+        .and_then(crate::agent_cli::agent_name)
+}
+
+fn validate_host_command(command: Option<&[String]>, placement: Option<&str>) -> Result<()> {
+    if placement == Some("host")
+        && command.and_then(crate::agent_cli::agent_name).as_deref() == Some("codex")
+    {
+        return Err(ApiError::BadRequest(
+            "Codex runs in a session pod; placement=host is not supported".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_requested_placement(placement: Option<&str>, pod_backends_enabled: bool) -> Result<()> {
@@ -861,6 +872,9 @@ impl SessionRegistry {
                 )?;
             }
         }
+        // A raw command can bypass template expansion. Codex is pod-only even
+        // for that API shape, so refuse it before any PTY or pod work starts.
+        validate_host_command(spec.command.as_deref(), spec.placement.as_deref())?;
         // Expand a template name into a command before anything downstream
         // reads `command`. Only when the caller gave no explicit command —
         // the GUI copies a template's command into the spec itself and sends
@@ -3694,7 +3708,7 @@ fn wake_settings_file<'a>(
 #[cfg(test)]
 mod tests {
     use super::{
-        normalize_session_name, validate_placement_template_requirement,
+        normalize_session_name, validate_host_command, validate_placement_template_requirement,
         validate_requested_placement, validate_template_placement,
     };
     use crate::config::SessionTemplate;
@@ -3774,6 +3788,11 @@ mod tests {
             .to_string()
             .contains("Codex runs in a session pod; placement=host is not supported"));
         assert!(validate_template_placement(&codex, Some("pod"), true).is_ok());
+        let raw_codex = vec!["codex".to_string()];
+        let error = validate_host_command(Some(&raw_codex), Some("host")).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("Codex runs in a session pod; placement=host is not supported"));
         assert!(validate_requested_placement(Some("pod"), false).is_err());
         assert!(validate_requested_placement(Some("sidecar"), true).is_err());
     }
