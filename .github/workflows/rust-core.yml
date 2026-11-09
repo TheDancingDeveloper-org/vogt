@@ -86,10 +86,12 @@ jobs:
           shared-key: rust-core
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/rust-core' }}
 
-      - name: session-entrypoint (shellcheck and contract test)
+      - name: deploy scripts (shellcheck and contract tests)
         run: |
-          shellcheck engine/deploy/session-entrypoint.sh engine/deploy/tests/session-entrypoint.sh
+          shellcheck engine/deploy/session-entrypoint.sh engine/deploy/tests/session-entrypoint.sh \
+            engine/deploy/agent-auth.sh engine/deploy/tests/agent-auth.sh
           bash engine/deploy/tests/session-entrypoint.sh
+          bash engine/deploy/tests/agent-auth.sh
 
       - name: cargo fmt
         working-directory: engine
