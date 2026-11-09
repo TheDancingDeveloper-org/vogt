@@ -1899,9 +1899,13 @@ engine id (WI-912; the design is `docs/design/session-hibernation.md`).
     (the record keeps the account name, so the lease is sticky). The bootstrap
     response carries the engine-held bundle, including the transcript, and
     `VOGT_SESSION_RESUME=1`, `VOGT_SESSION_ACCOUNT` and
-    `VOGT_SESSION_CONVERSATION_ID`; the agent starts `claude --resume <id>`
-    (a fresh pod starts `claude --session-id <id>`), and the entrypoint runs
-    `g clone` as for any pod.
+    `VOGT_SESSION_CONVERSATION_ID`; the agent starts `claude --resume <id>` or
+    `codex resume <id>` (a fresh pod starts `claude --session-id <id>` or
+    `codex --session-id <id>`), and the entrypoint runs `g clone` as for any
+    pod. The resume flag is set from either layout the bundle may hold:
+    Claude's `<conversation>.jsonl` or a Codex
+    `sessions/<date>/rollout-<stamp>-<conversation>.jsonl`, so a woken Codex
+    pod continues its conversation instead of starting fresh (WI-3873).
   - **Unlanded workspace changes are lost by design.** The pod's workspace is
     deleted with it; only graft-landed work, the transcript and the account
     config survive a hibernation.
