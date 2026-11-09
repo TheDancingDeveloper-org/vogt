@@ -57,6 +57,13 @@
 # still names the package so a pin of it says why it is refused, and a refusal
 # also drops any `current` an older image left, so nothing stale stays active.
 #
+# The baked manifest is a claim about the image, and this script checks it: a
+# request for the baked version only resets to the image copy when that copy
+# is actually on disk. An image whose manifest named a CLI the build never
+# installed (WI-3761) used to answer "image copy is current", skip the
+# download, and leave a session with no binary — so a missing copy now falls
+# through to a real install.
+#
 # Versions are exact by default. The npm dist-tags `latest` and `stable` are
 # accepted only with VOGT_AGENT_CLI_ALLOW_DIST_TAGS=1, so the human gate that
 # caught 2.1.237 stays the default and floating is a deliberate opt-in.
@@ -71,6 +78,8 @@ set -euo pipefail
 root="${VOGT_AGENT_CLI_ROOT:-/opt/vogt/agent-clis}"
 baked_manifest="${VOGT_AGENT_CLI_BAKED_MANIFEST:-/usr/local/share/vogt/agent-versions.resolved}"
 tools_table="${VOGT_AGENT_CLI_TOOLS:-/usr/local/share/vogt/agent-clis.tools}"
+image_bin="${VOGT_AGENT_CLI_IMAGE_BIN:-/usr/local/bin}"
+image_libexec="${VOGT_AGENT_CLI_IMAGE_LIBEXEC:-/usr/local/libexec}"
 keep="${VOGT_AGENT_CLI_KEEP:-3}"
 allow_dist_tags="${VOGT_AGENT_CLI_ALLOW_DIST_TAGS:-0}"
 
@@ -127,6 +136,23 @@ active_version() {
     local link="$root/$1/current"
     [[ -L "$link" ]] || return 0
     basename "$(readlink "$link")"
+}
+
+# Where the image's own copy of a tool lives. `/usr/local/bin/codex` is the
+# full-access wrapper, which the image copies in even when the fork release
+# was never installed, so it is not evidence of a copy; the release itself is
+# `/usr/local/libexec/codex-real`. Every other kind puts its binary on PATH.
+image_copy_for() {
+    local tool="$1"
+    if [[ "$(kind_for "$tool")" == "github-release" ]]; then
+        printf '%s/%s-real' "$image_libexec" "$(binary_for "$tool")"
+    else
+        printf '%s/%s' "$image_bin" "$(binary_for "$tool")"
+    fi
+}
+
+image_copy_exists() {
+    [[ -x "$(image_copy_for "$1")" ]]
 }
 
 # Rewrite `manifest` from what the filesystem says, never from what this run
@@ -504,11 +530,22 @@ main() {
 
     # The baked version is the image copy: nothing to download, nothing on
     # PATH ahead of /usr/local/bin. This is what makes "set it back" offline.
+    # Only when that copy is really there: the manifest is the image's claim,
+    # and an image that did not install the tool (INSTALL_AI_CLIENTS off, or
+    # an arch with no release) must not be treated as carrying it (WI-3761).
     if [[ -z "$version" || ( -n "$baked" && "$version" == "$baked" ) ]]; then
-        reset_to_image "$tool"
-        write_manifest
-        log "$tool: image copy${baked:+ ($baked)} is current"
-        exit 0
+        if image_copy_exists "$tool"; then
+            reset_to_image "$tool"
+            write_manifest
+            log "$tool: image copy${baked:+ ($baked)} is current"
+            exit 0
+        elif [[ -z "$version" ]]; then
+            reset_to_image "$tool"
+            write_manifest
+            log "$tool: this image carries no copy and none was requested"
+            exit 0
+        fi
+        log "$tool: the manifest names $version but $(image_copy_for "$tool") is absent; installing it"
     fi
 
     local current
