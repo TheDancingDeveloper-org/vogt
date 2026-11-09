@@ -627,38 +627,32 @@ pub fn with_codex_guidance(
 
 /// `command` with Codex's project trust override for the session cwd inserted
 /// right after the Codex binary (WI-3815), or `None` when it is not a Codex
-/// launch or already carries the override. Pod sessions start in `/work`,
-/// which is a freshly-created checkout from Codex's point of view; without
-/// this non-interactive override Codex opens its folder-trust screen and a
-/// driven session exits before it can read its brief. Codex also checks that
-/// the cwd is a git repository before applying project trust; pod workspaces
-/// deliberately expose only a read-only git view, so the explicit
-/// `--skip-git-repo-check` is part of the unattended launch contract. The
-/// same arguments are safe for host sessions and avoid editing shared config.
+/// launch or already carries the override. Codex asks its interactive
+/// folder-trust question for a git cwd it has no trust entry for; pod
+/// sessions start in `/work`, a fresh checkout with a git view, and a driven
+/// session exits at that screen before it can read its brief. The entry is
+/// an inline table because `-c` splits its key on every `.`: a dotted
+/// `projects."/work".trust_level` names a project called `"/work"`, quotes
+/// included, and never matches (WI-3839). `--skip-git-repo-check` is an
+/// `exec` flag the interactive CLI refuses. The override is this launch's
+/// own, so the shared config is not edited.
 pub fn with_codex_trust(command: &[String], cwd: &Path) -> Option<Vec<String>> {
     if agent_name(command).as_deref() != Some("codex") {
         return None;
     }
-    let key = crate::codex_guidance::toml_basic_string(&cwd.to_string_lossy());
-    let prefix = format!("projects.{key}.trust_level=");
-    let has_trust = command.iter().any(|arg| arg.starts_with(&prefix));
-    let has_skip = command.iter().any(|arg| arg == "--skip-git-repo-check");
-    if has_trust && has_skip {
+    if command.iter().any(|arg| arg.starts_with("projects=")) {
         return None;
     }
+    let key = crate::codex_guidance::toml_basic_string(&cwd.to_string_lossy());
     let (idx, _) = agent_binary(command);
     let mut out = command.to_vec();
-    let mut additions = Vec::new();
-    if !has_trust {
-        additions.extend([
+    out.splice(
+        idx + 1..idx + 1,
+        [
             "-c".to_string(),
-            format!("projects.{key}.trust_level=\"trusted\""),
-        ]);
-    }
-    if !has_skip {
-        additions.push("--skip-git-repo-check".to_string());
-    }
-    out.splice(idx + 1..idx + 1, additions);
+            format!("projects={{{key}={{trust_level=\"trusted\"}}}}"),
+        ],
+    );
     Some(out)
 }
 
@@ -833,15 +827,50 @@ mod tests {
         let out = with_codex_trust(&command, cwd).unwrap();
         assert_eq!(&out[..4], &command[..4]);
         assert_eq!(
-            &out[4..7],
-            [
-                "-c",
-                "projects.\"/work\".trust_level=\"trusted\"",
-                "--skip-git-repo-check"
-            ]
+            &out[4..],
+            ["-c", "projects={\"/work\"={trust_level=\"trusted\"}}"]
+        );
+        // The value is the TOML Codex reads: the cwd's own trust entry.
+        let parsed: toml::Table = toml::from_str(&out[5]).unwrap();
+        assert_eq!(
+            parsed["projects"]["/work"]["trust_level"].as_str(),
+            Some("trusted")
         );
         assert!(with_codex_trust(&out, cwd).is_none());
         assert!(with_codex_trust(&["claude".to_string()], cwd).is_none());
+    }
+
+    /// WI-3839: the interactive CLI refused `--skip-git-repo-check`, an
+    /// `exec` flag, and every Codex launch exited at once. A string test
+    /// cannot see that, so the trust override goes through Codex's own
+    /// parser: `VOGT_CODEX_BIN`, which CI sets to the pinned fork. Without it
+    /// the check is skipped, unless `VOGT_CODEX_REQUIRED` says it must run.
+    #[test]
+    fn the_codex_trust_override_parses_with_the_real_codex() {
+        let codex = match std::env::var("VOGT_CODEX_BIN") {
+            Ok(bin) => bin,
+            Err(_) if std::env::var_os("VOGT_CODEX_REQUIRED").is_some() => {
+                panic!("VOGT_CODEX_REQUIRED is set but VOGT_CODEX_BIN is not")
+            }
+            Err(_) => {
+                eprintln!("skipped: set VOGT_CODEX_BIN to check argv against Codex");
+                return;
+            }
+        };
+        // clap rejects an unknown flag before it reaches the trailing `--help`.
+        let parses = |argv: &[String]| {
+            std::process::Command::new(&codex)
+                .args(&argv[1..])
+                .arg("--help")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap()
+                .success()
+        };
+        let out = with_codex_trust(&["codex".to_string()], Path::new("/work")).unwrap();
+        assert!(parses(&out), "codex refused: {out:?}");
+        assert!(!parses(&["codex".into(), "--skip-git-repo-check".into()]));
     }
 
     fn instructions(arg: &str) -> String {
