@@ -97,10 +97,13 @@ ARG ESTATE_IMAGE=${POD_BASE_IMAGE}
 ARG VOGT_SOURCE_REF=local
 ARG VOGT_SOURCE_SHA=0000000000000000000000000000000000000000
 ARG VOGT_PRODUCT_VERSION=local/dev
-# Off by default (prod). The published stack bake passes
-# INSTALL_AI_CLIENTS=true so dev images carry the pinned agent CLIs, while
-# production builds remain opt-in/user-managed. See AGENTS.md "Codex and
-# Claude are deliberately not installed by container bootstrap".
+# Off by default. A build that wants the pinned agent CLIs must ask for them:
+# the published stack/workbench bakes pass INSTALL_AI_CLIENTS=true, while a
+# from-source or custom image (the `vogt-dev` deployment among them) carries
+# none unless its build passes the arg. The resolved manifest below is written
+# from what the build actually installed, so an image that carries no CLI does
+# not claim one (WI-3761). See AGENTS.md "Codex and Claude are deliberately not
+# installed by container bootstrap".
 ARG INSTALL_AI_CLIENTS=false
 # Flutter is dev-only, and is now the thing that separates the two published
 # variants of the pod base rather than a build arg here: `dev` is built
@@ -382,10 +385,6 @@ RUN set -eu; \
     codex_acp_version="${CODEX_ACP_VERSION:-${VOGT_CODEX_ACP_VERSION}}"; \
     claude_code_version="${CLAUDE_CODE_VERSION:-${VOGT_CLAUDE_CODE_VERSION}}"; \
     opencode_version="${OPENCODE_VERSION:-${VOGT_OPENCODE_VERSION}}"; \
-    go_version="$(go version | sed -n 's/^go version go\([^ ]*\) .*/\1/p')"; \
-    printf 'codex=%s\ncodex-acp=%s\nclaude-code=%s\nopencode=%s\ngo=%s\n' \
-        "$codex_sha" "$codex_acp_version" "$claude_code_version" "$opencode_version" "$go_version" \
-        > /usr/local/share/vogt/agent-versions.resolved; \
     printf 'codex\t%s\tcodex\tVOGT_CODEX_SHA\tgithub-release\ncodex-acp\t@agentclientprotocol/codex-acp\tcodex-acp\tVOGT_CODEX_ACP_VERSION\tnpm\ncodex-npm\t@openai/codex\tcodex\tVOGT_CODEX_VERSION\tnpm\nclaude-code\t@anthropic-ai/claude-code\tclaude\tVOGT_CLAUDE_CODE_VERSION\tnpm\nopencode\topencode-ai\topencode\tVOGT_OPENCODE_VERSION\tnpm\ngo\thttps://go.dev/dl\tgo\tVOGT_GO_VERSION\tgo-dist\n' \
         "$VOGT_CODEX_SOURCE" \
         > /usr/local/share/vogt/agent-clis.tools; \
@@ -452,6 +451,37 @@ RUN set -eu; \
         /usr/local/libexec/codex-real --version; \
         fi; \
     fi
+
+# What this image *carries* as a managed pin, not what the build asked for.
+# The runtime installer treats a row here as proof that the matching image
+# copy exists (a request for the baked version then points `current` back at
+# it without a download), and the verifier judges the active copy against it.
+# Writing every row unconditionally — as this did before WI-3761 — made a
+# build with INSTALL_AI_CLIENTS off claim `codex=<sha>` it never installed: a
+# host Codex session skipped the install, found no binary, and died half a
+# second in. The pod base's own unpinned `opencode` is not this pin either, so
+# the whole optional block is gated on the build arg, and each row on its
+# binary as well (arm64 has no Codex release). `go` is unconditional.
+RUN set -eu; \
+    . /usr/local/share/vogt/agent-versions.env; \
+    manifest=/usr/local/share/vogt/agent-versions.resolved; \
+    : > "$manifest"; \
+    if [ "$INSTALL_AI_CLIENTS" = "true" ]; then \
+        if [ -x /usr/local/libexec/codex-real ]; then \
+            printf 'codex=%s\n' "${CODEX_SHA:-${VOGT_CODEX_SHA}}" >> "$manifest"; \
+        fi; \
+        if [ -x /usr/local/bin/codex-acp ]; then \
+            printf 'codex-acp=%s\n' "${CODEX_ACP_VERSION:-${VOGT_CODEX_ACP_VERSION}}" >> "$manifest"; \
+        fi; \
+        if [ -x /usr/local/bin/claude ]; then \
+            printf 'claude-code=%s\n' "${CLAUDE_CODE_VERSION:-${VOGT_CLAUDE_CODE_VERSION}}" >> "$manifest"; \
+        fi; \
+        if [ -x /usr/local/bin/opencode ]; then \
+            printf 'opencode=%s\n' "${OPENCODE_VERSION:-${VOGT_OPENCODE_VERSION}}" >> "$manifest"; \
+        fi; \
+    fi; \
+    printf 'go=%s\n' "$(go version | sed -n 's/^go version go\([^ ]*\) .*/\1/p')" >> "$manifest"; \
+    cat "$manifest"
 
 # The pin above is the contract, so the CLI must not undo it at runtime.
 #
