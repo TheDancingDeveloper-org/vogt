@@ -1,0 +1,205 @@
+name: rust-2 dev images
+
+# Publishes the two images the `vogt-dev` deployment pins, from the rust-2
+# integration line (WI-3887):
+#
+#   repo.indexarr.net/indexarr/vogt-dev-pod     <- engine/Dockerfile.pod
+#   repo.indexarr.net/indexarr/vogt-dev-engine  <- engine/Dockerfile
+#
+# Both are pushed by digest with provenance and an SBOM, and the run prints the
+# pair. The engine image is built on the pod digest this same run published, not
+# on a tag, so the deployment can repin exactly the two digests that were built
+# together. Nothing here deploys: the operator's ops pull request moves a
+# deployment.
+#
+# Every other image in this repository is published by `build.yml` from `main`
+# and `dev`. That workflow does not build `rust-2`, which is a graft line, so
+# this one exists for the line the k8s dev deployment runs.
+#
+# The registry login uses the estate's Forgejo package-write token, the same
+# `x-access-token` convention the other repositories' GitHub releases use for
+# repo.indexarr.net. It must be readable as `FORGEJO_CARGO_TOKEN` by this
+# repository (repository or organisation secret).
+
+on:
+  push:
+    branches: [rust-2]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # Only pulls: the bases are in GHCR and are public, but logging in avoids the
+  # shared runners' anonymous pull rate limit. Nothing is pushed to GHCR here.
+  packages: read
+
+env:
+  POD_IMAGE: repo.indexarr.net/indexarr/vogt-dev-pod
+  ENGINE_IMAGE: repo.indexarr.net/indexarr/vogt-dev-engine
+  CACHE_IMAGE: ${{ vars.VOGT_BUILDKIT_CACHE_REGISTRY }}/vogt-buildcache
+
+concurrency:
+  # A newer rust-2 commit supersedes an older build. Nothing pins the superseded
+  # digest, so cancelling the intermediate run is safe and keeps a queue of
+  # twenty-minute builds from forming.
+  group: rust2-dev-images-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pod:
+    name: pod image by digest
+    runs-on: [self-hosted, docker, publish]
+    timeout-minutes: 120
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
+        with:
+          driver-opts: network=host
+          buildkitd-config-inline: |
+            [registry."${{ vars.VOGT_BUILDKIT_CACHE_REGISTRY }}"]
+              http = true
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
+        with:
+          registry: repo.indexarr.net
+          username: x-access-token
+          password: ${{ secrets.FORGEJO_CARGO_TOKEN }}
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: build and push the pod image by digest
+        id: push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
+        with:
+          # The Dockerfile does `COPY . .` and copies `agent-versions.env`,
+          # `deploy/` and `session-agent/` from this context.
+          context: engine
+          file: engine/Dockerfile.pod
+          # No tag. `push-by-digest` is the same push shape `build.yml` uses
+          # for the stack, and it is what makes the report below a digest
+          # rather than a name that could later move.
+          outputs: type=image,name=${{ env.POD_IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          provenance: true
+          sbom: true
+          cache-from: type=registry,ref=${{ env.CACHE_IMAGE }}:rust2-pod
+          cache-to: type=registry,ref=${{ env.CACHE_IMAGE }}:rust2-pod,mode=max
+
+      - name: report the pod digest
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          case "$DIGEST" in
+            sha256:*) ;;
+            *) echo "the pod build produced no digest: ${DIGEST:-<empty>}" >&2; exit 1 ;;
+          esac
+          echo "pod: ${POD_IMAGE}@${DIGEST}"
+          {
+            echo "### vogt-dev-pod"
+            echo
+            echo '```yaml'
+            echo "image: ${POD_IMAGE}@${DIGEST}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  engine:
+    name: engine image by digest
+    needs: pod
+    runs-on: [self-hosted, docker, publish]
+    timeout-minutes: 90
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
+        with:
+          driver-opts: network=host
+          buildkitd-config-inline: |
+            [registry."${{ vars.VOGT_BUILDKIT_CACHE_REGISTRY }}"]
+              http = true
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
+        with:
+          registry: repo.indexarr.net
+          username: x-access-token
+          password: ${{ secrets.FORGEJO_CARGO_TOKEN }}
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: build and push the engine image by digest
+        id: push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
+        with:
+          # engine/Dockerfile embeds `web/dist` and builds the Python core, so
+          # its context is the repository root.
+          context: .
+          file: engine/Dockerfile
+          # The runtime stage is FROM the pod image. Pin it to the digest this
+          # run just published so the pair is what a single rust-2 commit
+          # produced, and so an operator repins two consistent digests.
+          build-args: |
+            POD_BASE_IMAGE=${{ env.POD_IMAGE }}@${{ needs.pod.outputs.digest }}
+            ESTATE_IMAGE=${{ env.POD_IMAGE }}@${{ needs.pod.outputs.digest }}
+            VOGT_SOURCE_REF=${{ github.ref_name }}
+            VOGT_SOURCE_SHA=${{ github.sha }}
+          outputs: type=image,name=${{ env.ENGINE_IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          provenance: true
+          sbom: true
+          cache-from: type=registry,ref=${{ env.CACHE_IMAGE }}:rust2-engine
+          cache-to: type=registry,ref=${{ env.CACHE_IMAGE }}:rust2-engine,mode=max
+
+      - name: report the engine digest
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          case "$DIGEST" in
+            sha256:*) ;;
+            *) echo "the engine build produced no digest: ${DIGEST:-<empty>}" >&2; exit 1 ;;
+          esac
+          echo "engine: ${ENGINE_IMAGE}@${DIGEST}"
+          {
+            echo "### vogt-dev-engine"
+            echo
+            echo '```yaml'
+            echo "image: ${ENGINE_IMAGE}@${DIGEST}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  digests:
+    name: the pair to pin
+    needs: [pod, engine]
+    runs-on: [self-hosted]
+    timeout-minutes: 5
+    steps:
+      - name: print both digests
+        env:
+          POD_DIGEST: ${{ needs.pod.outputs.digest }}
+          ENGINE_DIGEST: ${{ needs.engine.outputs.digest }}
+        run: |
+          set -euo pipefail
+          for digest in "$POD_DIGEST" "$ENGINE_DIGEST"; do
+            case "$digest" in
+              sha256:*) ;;
+              *) echo "a build produced no digest: ${digest:-<empty>}" >&2; exit 1 ;;
+            esac
+          done
+          {
+            echo "## rust-2 dev images"
+            echo
+            echo '```yaml'
+            echo "image: ${ENGINE_IMAGE}@${ENGINE_DIGEST}"
+            echo "sessionImage: ${POD_IMAGE}@${POD_DIGEST}"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
