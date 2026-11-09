@@ -75,6 +75,8 @@ jobs:
       rust: ${{ steps.classify.outputs.rust }}
       rust_full: ${{ steps.classify.outputs.rust_full }}
       rust_packages: ${{ steps.classify.outputs.rust_packages }}
+      session_entrypoint: ${{ steps.classify.outputs.session_entrypoint }}
+      session_agent: ${{ steps.classify.outputs.session_agent }}
       web: ${{ steps.classify.outputs.web }}
       full: ${{ steps.classify.outputs.full }}
       voice: ${{ steps.classify.outputs.voice }}
@@ -104,6 +106,8 @@ jobs:
               echo "rust=true"
               echo "rust_full=true"
               echo "rust_packages="
+              echo "session_entrypoint=true"
+              echo "session_agent=true"
               echo "web=true"
               echo "voice=true"
               echo "voice_full=true"
@@ -160,6 +164,8 @@ jobs:
 
           python=false
           rust=false
+          session_entrypoint=false
+          session_agent=false
           web=false
           voice=false
           mobile=false
@@ -181,6 +187,12 @@ jobs:
           # web-only PR does not rebuild the crate against its new bundle;
           # that embed check runs in the merge queue, where both are true.
           matches '^engine/' && rust=true
+          # The entrypoint contract test and the session-agent crate are
+          # checked by their own steps in the engine job: neither is implied
+          # by a server or contract change, and a `session-agent` change must
+          # also re-run the entrypoint test that writes its launch line.
+          matches '^engine/deploy/' && session_entrypoint=true
+          matches '^engine/session-agent/' && session_agent=true
           matches '^web/' && web=true
           # The engine compiles `docs/ENGINE.md` in with `include_str!` (its
           # voice-policy test reads the capability matrix), so the document is
@@ -264,6 +276,8 @@ jobs:
             echo "rust=$rust"
             echo "rust_full=$rust_full"
             echo "rust_packages=$rust_packages"
+            echo "session_entrypoint=$session_entrypoint"
+            echo "session_agent=$session_agent"
             echo "web=$web"
             echo "voice=$voice"
             echo "voice_full=$voice_full"
@@ -728,6 +742,27 @@ jobs:
           fi
           git --version
           rg --version
+
+      # The entrypoint contract test drives `engine/deploy/session-entrypoint.sh`
+      # with a fake curl, graft and agent. `rust-core.yml` runs it, but a PR
+      # into main never triggers that workflow, so the required check carries
+      # its own copy (WI-3888). A session-agent change re-runs it too: the
+      # entrypoint writes the launch line for that binary.
+      - name: session-entrypoint (shellcheck and contract test)
+        # Runs after a failed step too, so one round reports every failure.
+        if: always() && !cancelled() && (needs.changes.outputs.session_entrypoint == 'true' || needs.changes.outputs.session_agent == 'true')
+        run: |
+          shellcheck engine/deploy/session-entrypoint.sh engine/deploy/tests/session-entrypoint.sh
+          bash engine/deploy/tests/session-entrypoint.sh
+
+      # A session-agent-only PR runs its own tests directly, rather than
+      # relying on it happening to be covered by a workspace-wide run that a
+      # different path was what requested (WI-3888).
+      - name: cargo test (vogt-session-agent)
+        # Runs after a failed step too, so one round reports every failure.
+        if: always() && !cancelled() && needs.changes.outputs.session_agent == 'true'
+        working-directory: engine
+        run: cargo test --locked -p vogt-session-agent
 
       # `-D warnings` because the engine's pipeline denied them, and a lint
       # that does not fail is a lint nobody reads.

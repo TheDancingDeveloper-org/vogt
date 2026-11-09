@@ -24,6 +24,8 @@ and each merge forced sibling PRs to rebase and run it all again.
 | `.github/workflows/`, `Dockerfile`, `.dockerignore`, `deploy/`, `.gitignore` | everything, as in the queue |
 | `src/`, `tests/`, `scripts/`, `pyproject.toml`, `uv.lock`, `config.example.toml` | Python lint/mypy/pytest on 3.13, and the core-alone job |
 | `engine/`, `docs/ENGINE.md` | the engine job's **rust** half: fmt, rust-version, cargo audit, clippy, nextest, doctests |
+| `engine/deploy/**` | the engine job's **rust** half plus the entrypoint shellcheck and contract test |
+| `engine/session-agent/**` | the engine job's **rust** half, `cargo test -p vogt-session-agent`, and the entrypoint contract test |
 | `web/` | the engine job's **web** half: pnpm audit, typecheck, vitest, demo Playwright, PWA build, bundle budget |
 | `voice/` | the voice job |
 | `engine/server/**`, `engine/contract/**` or `engine/core/**` | only the Rust member the diff touches: clippy, nextest and doctests run with `-p` |
