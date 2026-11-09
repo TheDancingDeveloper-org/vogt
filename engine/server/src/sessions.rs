@@ -123,17 +123,6 @@ fn template_agent(template: &crate::config::SessionTemplate) -> Option<String> {
         .and_then(crate::agent_cli::agent_name)
 }
 
-fn validate_host_command(command: Option<&[String]>, placement: Option<&str>) -> Result<()> {
-    if placement == Some("host")
-        && command.and_then(crate::agent_cli::agent_name).as_deref() == Some("codex")
-    {
-        return Err(ApiError::BadRequest(
-            "Codex runs in a session pod; placement=host is not supported".into(),
-        ));
-    }
-    Ok(())
-}
-
 fn validate_requested_placement(placement: Option<&str>, pod_backends_enabled: bool) -> Result<()> {
     match placement {
         None | Some("host") => Ok(()),
@@ -872,9 +861,6 @@ impl SessionRegistry {
                 )?;
             }
         }
-        // A raw command can bypass template expansion. Codex is pod-only even
-        // for that API shape, so refuse it before any PTY or pod work starts.
-        validate_host_command(spec.command.as_deref(), spec.placement.as_deref())?;
         // Expand a template name into a command before anything downstream
         // reads `command`. Only when the caller gave no explicit command —
         // the GUI copies a template's command into the spec itself and sends
@@ -1103,6 +1089,10 @@ impl SessionRegistry {
         // boot and refuses Codex there (WI-3335).
         let pod_backed = self.cfg.pod_backends_enabled
             && self.runs_in_pod(spec.template.as_deref(), spec.placement.as_deref());
+        // Placement is now effective: an omitted placement uses the template
+        // or backend default, which is host for local/raw launches. Codex is
+        // pod-only even when the caller did not spell out `placement=host`.
+        validate_codex_placement(base_command.as_deref(), pod_backed)?;
         codex_policy_refusal(
             base_command.as_deref(),
             pod_backed,
@@ -3672,6 +3662,15 @@ fn codex_policy_refusal(
     }
 }
 
+fn validate_codex_placement(command: Option<&[String]>, pod_backed: bool) -> Result<()> {
+    if !pod_backed && command.and_then(agent_cli::agent_name).as_deref() == Some("codex") {
+        return Err(ApiError::BadRequest(
+            "Codex runs in a session pod; placement=host is not supported".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// The settings file a wake hands the agent (WI-1250). It replays the one
 /// recorded at the first start, so a later change to the deployment's config
 /// does not quietly move the session onto another policy. A recorded file
@@ -3708,7 +3707,7 @@ fn wake_settings_file<'a>(
 #[cfg(test)]
 mod tests {
     use super::{
-        normalize_session_name, validate_host_command, validate_placement_template_requirement,
+        normalize_session_name, validate_codex_placement, validate_placement_template_requirement,
         validate_requested_placement, validate_template_placement,
     };
     use crate::config::SessionTemplate;
@@ -3788,13 +3787,24 @@ mod tests {
             .to_string()
             .contains("Codex runs in a session pod; placement=host is not supported"));
         assert!(validate_template_placement(&codex, Some("pod"), true).is_ok());
-        let raw_codex = vec!["codex".to_string()];
-        let error = validate_host_command(Some(&raw_codex), Some("host")).unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("Codex runs in a session pod; placement=host is not supported"));
         assert!(validate_requested_placement(Some("pod"), false).is_err());
         assert!(validate_requested_placement(Some("sidecar"), true).is_err());
+    }
+
+    #[test]
+    fn raw_codex_without_placement_is_rejected_as_host_placement() {
+        let raw_codex = vec!["codex".to_string()];
+        let error = validate_codex_placement(Some(&raw_codex), false).unwrap_err();
+        assert!(error.to_string().contains("Codex"));
+        assert!(error.to_string().contains("host"));
+    }
+
+    #[test]
+    fn local_template_without_placement_is_rejected_as_host_placement() {
+        let mut template = template("local");
+        template.command = Some(vec!["codex".to_string()]);
+        assert!(template.backend == "local");
+        assert!(validate_codex_placement(template.command.as_deref(), false).is_err());
     }
 
     #[test]

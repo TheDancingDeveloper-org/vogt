@@ -184,13 +184,13 @@ def test_core_and_stack_are_built_once_and_tagged_after_smoke() -> None:
     assert "cosign" not in build
     assert "docker/build-push-action" not in stack
     assert ".github/stack-bake.hcl" in stack
-    assert "stack gitguard" in stack
-    assert stack.index("docker pull") < stack.index("codex_gitguard_e2e")
-    assert stack.index("codex_gitguard_e2e") < stack.index("imagetools create")
+    # The shipped gitguard target was removed with Klaudia; the stack now
+    # smoke-tests the merged image directly after its single bake.
+    assert "gitguard" not in stack
     bake = (ROOT / ".github" / "stack-bake.hcl").read_text(encoding="utf-8")
-    assert 'target "stack"' in bake and 'target "gitguard"' in bake
+    assert 'target "stack"' in bake
     assert "push-by-digest=true" in bake
-    assert 'target     = "codex-gitguard-e2e"' in bake
+    assert "gitguard" not in bake
     # The bake's cache ref is a variable. The job must set it, or cache-from
     # and cache-to are an empty registry ref and the stack cache is lost.
     assert "CACHE_REF:" in stack
