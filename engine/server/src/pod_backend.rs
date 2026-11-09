@@ -15,7 +15,7 @@ use k8s_openapi::api::core::v1::{
 use k8s_openapi::{apimachinery::pkg::apis::meta::v1::OwnerReference, ByteString};
 use kube::config::{KubeConfigOptions, Kubeconfig};
 use kube::{
-    api::{Api, DeleteParams, ListParams, ObjectMeta, PostParams, Preconditions},
+    api::{Api, DeleteParams, ListParams, LogParams, ObjectMeta, PostParams, Preconditions},
     Client, Config as KubeConfig,
 };
 use serde::{Deserialize, Serialize};
@@ -710,6 +710,11 @@ fn parse_resources(
 /// then, so this only bounds how long the pod lingers in `Terminating`, during
 /// which its name cannot be reused by a wake.
 const POD_DELETE_GRACE_SECONDS: u32 = 5;
+
+/// The container the session agent (entrypoint and CLI) runs in.
+pub const SESSION_CONTAINER: &str = "session-agent";
+/// How many lines of that container's log a failed-session note keeps.
+pub const LOG_TAIL_LINES: i64 = 50;
 /// How long [`teardown_pod`] waits for a deleted pod to leave the cluster. Under
 /// the 30 s a hibernate waits for the teardown, so a slow API is reported by
 /// the teardown, not by the hibernate giving up first.
@@ -1242,7 +1247,7 @@ pub fn pod_template(
         },
         spec: Some(PodSpec {
             containers: vec![Container {
-                name: "session-agent".into(),
+                name: SESSION_CONTAINER.into(),
                 image: Some(image.into()),
                 env: Some(env),
                 env_from: Some(env_from),
@@ -1522,6 +1527,23 @@ impl PodBackendFactory {
         }
         Ok(pods.items)
     }
+
+    /// The last [`LOG_TAIL_LINES`] lines the session container wrote. A pod
+    /// that exits without a message reports only "Error" in its status, so
+    /// this is often the only place the cause of a failed session appears.
+    pub async fn pod_log_tail(&self, id: Uuid) -> Result<String> {
+        Api::<Pod>::namespaced(self.client.clone(), &self.cfg.namespace)
+            .logs(
+                &pod_name(id),
+                &LogParams {
+                    container: Some(SESSION_CONTAINER.into()),
+                    tail_lines: Some(LOG_TAIL_LINES),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(|e| ApiError::Internal(format!("reading session pod logs: {e}")))
+    }
 }
 
 /// Validate the first agent frame before associating a socket with a session.
@@ -1570,7 +1592,12 @@ pub trait PodLauncher: Send + Sync {
     /// Every pod in the sessions namespace that carries a session label and
     /// this engine's `vogt.engine` label.
     fn list(&self) -> ListFuture<'_>;
+    /// The tail of the session container's log, for a diagnosis the pod's
+    /// status does not carry. A launcher with no logs returns an empty string.
+    fn log_tail(&self, id: Uuid) -> LogFuture<'_>;
 }
+pub type LogFuture<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send + 'a>>;
 pub type ListFuture<'a> =
     std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<Pod>>> + Send + 'a>>;
 pub type LaunchFuture<'a> =
@@ -1596,6 +1623,9 @@ impl PodLauncher for PodBackendFactory {
     }
     fn list(&self) -> ListFuture<'_> {
         Box::pin(self.reconcile())
+    }
+    fn log_tail(&self, id: Uuid) -> LogFuture<'_> {
+        Box::pin(PodBackendFactory::pod_log_tail(self, id))
     }
 }
 
@@ -1675,6 +1705,9 @@ impl PodLauncher for KubeLauncher {
     }
     fn list(&self) -> ListFuture<'_> {
         Box::pin(async move { PodLauncher::list(self.factory().await?).await })
+    }
+    fn log_tail(&self, id: Uuid) -> LogFuture<'_> {
+        Box::pin(async move { PodLauncher::log_tail(self.factory().await?, id).await })
     }
 }
 
@@ -1938,6 +1971,7 @@ mod tests {
             tags: vec![],
             backend: "pod".into(),
             host_capable: false,
+            pod_capable: false,
             account: None,
         };
         for (repo, line) in [("vogt", "rust-2"), ("farmeggs", "backlog-1")] {
@@ -2011,6 +2045,7 @@ mod tests {
             tags: vec![],
             backend: "pod".into(),
             host_capable: false,
+            pod_capable: false,
             account: None,
         };
         let id = Uuid::nil();
@@ -2174,6 +2209,7 @@ mod tests {
                 tags: vec![],
                 backend: "pod".into(),
                 host_capable: false,
+                pod_capable: false,
                 account: None,
             },
             Uuid::nil(),
@@ -2503,6 +2539,7 @@ mod tests {
             tags: vec![],
             backend: "pod".into(),
             host_capable: false,
+            pod_capable: false,
             account: None,
         };
         let env_of = |command: &[String]| {
@@ -2562,6 +2599,7 @@ mod tests {
             tags: vec![],
             backend: "pod".into(),
             host_capable: false,
+            pod_capable: false,
             account: None,
         };
         let pod = pod_template(
@@ -2691,6 +2729,9 @@ mod tests {
         }
         fn list(&self) -> ListFuture<'_> {
             Box::pin(async { Ok(Vec::new()) })
+        }
+        fn log_tail(&self, _: Uuid) -> LogFuture<'_> {
+            Box::pin(async { Ok(String::new()) })
         }
     }
     fn lingering(polls_until_gone: Option<usize>) -> Lingering {
@@ -3147,6 +3188,7 @@ mod tests {
             tags: vec![],
             backend: "pod".into(),
             host_capable: false,
+            pod_capable: false,
             account: None,
         };
         pod_template(
