@@ -630,26 +630,35 @@ pub fn with_codex_guidance(
 /// launch or already carries the override. Pod sessions start in `/work`,
 /// which is a freshly-created checkout from Codex's point of view; without
 /// this non-interactive override Codex opens its folder-trust screen and a
-/// driven session exits before it can read its brief. The same explicit
-/// override is safe for host sessions and avoids editing a shared config.
+/// driven session exits before it can read its brief. Codex also checks that
+/// the cwd is a git repository before applying project trust; pod workspaces
+/// deliberately expose only a read-only git view, so the explicit
+/// `--skip-git-repo-check` is part of the unattended launch contract. The
+/// same arguments are safe for host sessions and avoid editing shared config.
 pub fn with_codex_trust(command: &[String], cwd: &Path) -> Option<Vec<String>> {
     if agent_name(command).as_deref() != Some("codex") {
         return None;
     }
     let key = crate::codex_guidance::toml_basic_string(&cwd.to_string_lossy());
     let prefix = format!("projects.{key}.trust_level=");
-    if command.iter().any(|arg| arg.starts_with(&prefix)) {
+    let has_trust = command.iter().any(|arg| arg.starts_with(&prefix));
+    let has_skip = command.iter().any(|arg| arg == "--skip-git-repo-check");
+    if has_trust && has_skip {
         return None;
     }
     let (idx, _) = agent_binary(command);
     let mut out = command.to_vec();
-    out.splice(
-        idx + 1..idx + 1,
-        [
+    let mut additions = Vec::new();
+    if !has_trust {
+        additions.extend([
             "-c".to_string(),
             format!("projects.{key}.trust_level=\"trusted\""),
-        ],
-    );
+        ]);
+    }
+    if !has_skip {
+        additions.push("--skip-git-repo-check".to_string());
+    }
+    out.splice(idx + 1..idx + 1, additions);
     Some(out)
 }
 
@@ -824,8 +833,12 @@ mod tests {
         let out = with_codex_trust(&command, cwd).unwrap();
         assert_eq!(&out[..4], &command[..4]);
         assert_eq!(
-            &out[4..6],
-            ["-c", "projects.\"/work\".trust_level=\"trusted\""]
+            &out[4..7],
+            [
+                "-c",
+                "projects.\"/work\".trust_level=\"trusted\"",
+                "--skip-git-repo-check"
+            ]
         );
         assert!(with_codex_trust(&out, cwd).is_none());
         assert!(with_codex_trust(&["claude".to_string()], cwd).is_none());
