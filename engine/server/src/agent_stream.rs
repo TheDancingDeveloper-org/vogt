@@ -404,6 +404,7 @@ fn bootstrap_env(
     engine: String,
     id: Uuid,
     cli: &str,
+    model: Option<&str>,
     source_env: &[(String, String)],
     extra_ca_file: Option<&str>,
 ) -> serde_json::Map<String, serde_json::Value> {
@@ -417,6 +418,16 @@ fn bootstrap_env(
     }
     for (name, value) in source_env {
         env.insert(name.clone(), serde_json::Value::String(value.clone()));
+    }
+    // The session agent builds the pod's Claude line itself (WI-3881), so the
+    // model the caller asked for travels through the same contract as the one
+    // the pod spec carries; a pod whose spec is missing it still launches on
+    // the requested model.
+    if let Some(model) = model.map(str::trim).filter(|model| !model.is_empty()) {
+        env.insert(
+            "VOGT_MODEL".into(),
+            serde_json::Value::String(model.to_owned()),
+        );
     }
     if let Some(path) = extra_ca_file {
         env.insert(
@@ -836,6 +847,7 @@ pub async fn bootstrap(
         cfg.engine_endpoint,
         id,
         &req.cli,
+        req.model.as_deref(),
         &provider.pod_env(&source),
         req.extra_ca_file.as_deref(),
     );
@@ -1515,13 +1527,16 @@ mod tests {
             "http://engine".into(),
             Uuid::nil(),
             "claude",
+            Some("claude-opus-4-6"),
             &source_env,
             None,
         );
         assert_eq!(env["SOURCE_ENDPOINT"], "http://src");
         assert_eq!(env["VOGT_CLI"], "claude");
-        let bare = bootstrap_env("e".into(), Uuid::nil(), "claude", &[], None);
+        assert_eq!(env["VOGT_MODEL"], "claude-opus-4-6");
+        let bare = bootstrap_env("e".into(), Uuid::nil(), "claude", None, &[], None);
         assert!(!bare.contains_key("SOURCE_ENDPOINT"));
+        assert!(!bare.contains_key("VOGT_MODEL"));
     }
 
     #[test]
