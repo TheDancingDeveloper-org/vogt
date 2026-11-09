@@ -40,6 +40,17 @@ struct Pending {
     token: Vec<u8>,
     expires: Instant,
 }
+/// What a session spec asked the pod for that only the bootstrap response can
+/// carry (WI-3883): the caller's extra environment and the work directory
+/// inside the clone. Held from pod create until the pod's one bootstrap
+/// request, like the credential itself, and never written into the pod spec.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PodLaunch {
+    pub env: Vec<(String, String)>,
+    /// The pod-side working directory (`VOGT_WORK_DIR`), when the caller's
+    /// cwd is not the clone root.
+    pub work_dir: Option<String>,
+}
 #[derive(Debug, Clone)]
 struct SessionCredential {
     token: Vec<u8>,
@@ -52,6 +63,10 @@ struct PendingCredential {
 #[derive(Debug, Default)]
 pub struct AgentAuth {
     pending: Mutex<HashMap<Uuid, Pending>>,
+    /// The last launch's carried fields, until its bootstrap request takes
+    /// them. Withdrawn with the credential, so a pod that never boots leaves
+    /// nothing behind.
+    launches: Mutex<HashMap<Uuid, PodLaunch>>,
     /// Per-session source credentials minted at pod create, held until the
     /// pod's bootstrap request takes them (or the pod is withdrawn or
     /// forgotten). Handles only: the value stays in the provider's file.
@@ -452,7 +467,16 @@ impl AgentAuth {
     /// `BOOTSTRAP_TTL`; this closes that window.
     pub async fn withdraw(&self, id: Uuid) {
         self.pending.lock().await.remove(&id);
+        self.launches.lock().await.remove(&id);
         self.source_credentials.lock().await.remove(&id);
+    }
+    /// Hold what the session spec asked the pod to carry, for the bootstrap
+    /// response to take once the pod presents its credential.
+    pub async fn issue_launch(&self, id: Uuid, launch: PodLaunch) {
+        self.launches.lock().await.insert(id, launch);
+    }
+    pub async fn take_launch(&self, id: Uuid) -> Option<PodLaunch> {
+        self.launches.lock().await.remove(&id)
     }
     /// Whether a bootstrap credential is held for `id`: issued, and neither
     /// consumed nor withdrawn.
@@ -631,6 +655,9 @@ impl AgentAuth {
         if let Ok(mut held) = self.source_credentials.try_lock() {
             held.remove(&id);
         }
+        if let Ok(mut launches) = self.launches.try_lock() {
+            launches.remove(&id);
+        }
     }
     pub fn send(&self, id: Uuid, frame: Frame) -> std::io::Result<()> {
         let result = self
@@ -804,6 +831,18 @@ pub async fn bootstrap(
         &provider.pod_env(&source),
         req.extra_ca_file.as_deref(),
     );
+    // The caller's extra environment and working directory (WI-3883) travel
+    // here rather than in the pod spec, so a value never lands in the
+    // Kubernetes object. Inserted before the engine's own fields: a reserved
+    // name was refused at start, and the engine's value wins over any
+    // remaining overlap.
+    let launch = state.agent_auth.take_launch(id).await.unwrap_or_default();
+    for (name, value) in launch.env {
+        env.insert(name, serde_json::Value::String(value));
+    }
+    if let Some(dir) = launch.work_dir {
+        env.insert("VOGT_WORK_DIR".into(), serde_json::Value::String(dir));
+    }
     env.insert(
         "VOGT_SOURCE_JSON".into(),
         serde_json::to_string(&source)

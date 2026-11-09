@@ -469,6 +469,18 @@ fn git_output(repo: &Path, args: &[&str]) -> Result<String> {
     git_command(repo, args, None)
 }
 
+/// The top of the working tree `dir` is in, when it is inside one. A pod
+/// session clones the project's checkout itself, so a requested cwd is only
+/// meaningful as a path inside that clone (WI-3883).
+pub fn worktree_top(dir: &Path) -> Option<PathBuf> {
+    if !dir.is_dir() {
+        return None;
+    }
+    let output = git_output(dir, &["rev-parse", "--show-toplevel"]).ok()?;
+    let path = PathBuf::from(output.trim());
+    path.is_absolute().then_some(path)
+}
+
 /// `git fetch` of one refspec. When `token` is set it is the only credential
 /// git may use for this command: askpass answers GitHub with
 /// `x-access-token` / the token, and the checkout's credential helper is
