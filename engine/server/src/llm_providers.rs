@@ -365,10 +365,33 @@ pub fn codex_config_tables(providers: &[Provider]) -> String {
 
 /// The complete Codex config fragment for a pod launch. Root keys must precede
 /// the provider tables or Codex will interpret them as table members.
-pub fn codex_config(model: &str, providers: &[Provider]) -> String {
+/// Select the provider and model for a Codex launch. Prefer the explicitly
+/// named `litellm` provider for compatibility with the shared deployment, but
+/// fall back to the first registered provider (whose name is the actual TOML
+/// table key). A provider's first model is its fallback model.
+pub fn codex_selection<'a>(
+    requested_model: Option<&str>,
+    providers: &'a [Provider],
+) -> Option<(String, &'a Provider)> {
+    let provider = providers
+        .iter()
+        .find(|p| p.name == "litellm")
+        .or_else(|| providers.first())?;
+    let model = requested_model
+        .filter(|model| !model.is_empty())
+        .map(str::to_owned)
+        .or_else(|| provider.models.first().cloned())
+        .unwrap_or_else(|| "grok".to_owned());
+    Some((model, provider))
+}
+
+pub fn codex_config(requested_model: Option<&str>, providers: &[Provider]) -> String {
+    let (model, provider) = codex_selection(requested_model, providers)
+        .expect("codex config requires at least one provider");
     format!(
-        "model_provider = \"litellm\"\nmodel = {}\n\n{}",
-        crate::codex_guidance::toml_basic_string(model),
+        "model_provider = {}\nmodel = {}\n\n{}",
+        crate::codex_guidance::toml_basic_string(&provider.name),
+        crate::codex_guidance::toml_basic_string(&model),
         codex_config_tables(providers)
     )
 }
@@ -415,8 +438,12 @@ models = ["deepseek-chat"]
             Some("DEEPSEEK_KEY")
         );
 
-        let config: toml::Table = toml::from_str(&codex_config("grok", &providers)).unwrap();
-        assert_eq!(config["model_provider"].as_str(), Some("litellm"));
+        let config: toml::Table = toml::from_str(&codex_config(Some("grok"), &providers)).unwrap();
+        assert_eq!(config["model_provider"].as_str(), Some("deepseek"));
+        assert!(config["model_providers"]
+            .as_table()
+            .unwrap()
+            .contains_key("deepseek"));
         assert_eq!(config["model"].as_str(), Some("grok"));
     }
 
