@@ -18750,6 +18750,8 @@ mod pod_stream {
             buffer_bytes: 64 * 1024,
             claude_config_dir: None,
             codex_home: Some(pod_home.clone()),
+            model: None,
+            effort: None,
             permission_mode: None,
             codex_approval_policy: "never".into(),
             account: None,
