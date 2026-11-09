@@ -66,8 +66,15 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError:
                 self.send(400, "not json")
                 return
-            if (payload.get("clientId") != "client-id"
-                    or payload.get("clientSecret") != "client-secret-value"):
+            if payload.get("clientSecret") != "client-secret-value":
+                self.send(401, "bad identity")
+                return
+            if payload.get("clientId") == "no-token-id":
+                # A 200 that carries no token is a failed login, not a
+                # credential with an empty value.
+                self.send(200, "{}")
+                return
+            if payload.get("clientId") != "client-id":
                 self.send(401, "bad identity")
                 return
             self.send(200, '{"accessToken":"access-token-value"}')
@@ -139,10 +146,22 @@ grep -q 'no secret broker in this environment' "$testdir/noauth.err" \
     || fail "missing-broker message: $(cat "$testdir/noauth.err")"
 
 # 4. The universal-auth login carries the client secret in the body, not argv,
-#    and still yields the access token.
+#    and still yields the access token. A jq shim records jq's real argv, the
+#    way the reviewer found the `--arg secret "$..."` leak with `pgrep -a jq`.
+shimdir="$testdir/shim"
+mkdir -p "$shimdir"
+real_jq="$(command -v jq)"
+cat >"$shimdir/jq" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >>"$testdir/jq-argv.log"
+exec "$real_jq" "\$@"
+EOF
+chmod +x "$shimdir/jq"
+
 # shellcheck disable=SC2016 # the sourced shell expands $1, not this one
 out="$(env -u VOGT_ENGINE_BROKER_URL -u VOGT_ENGINE_BROKER_TOKEN \
     -u VOGT_ENGINE_BROKER_TOKEN_FILE -u VOGT_SESSION_TOKEN_FILE \
+    PATH="$shimdir:$PATH" \
     INFISICAL_API_URL="$base/api" INFISICAL_CLIENT_ID=client-id \
     INFISICAL_CLIENT_SECRET=client-secret-value \
     bash -c 'source "$1"; mint_access_token' _ "$script")" \
@@ -150,6 +169,25 @@ out="$(env -u VOGT_ENGINE_BROKER_URL -u VOGT_ENGINE_BROKER_TOKEN \
 [[ "$out" == "access-token-value" ]] || fail "mint_access_token printed '$out'"
 grep -q '^/api/v1/auth/universal-auth/login|.*client-secret-value' \
     "$testdir/requests.log" || fail "login body did not carry the client secret"
+[[ -s "$testdir/jq-argv.log" ]] || fail "jq shim observed no invocation"
+if grep -q 'client-secret-value' "$testdir/jq-argv.log"; then
+    fail "client secret appeared in jq argv: $(cat "$testdir/jq-argv.log")"
+fi
+
+# 4b. A login response with a 200 and no access token is a failure, so the
+#     callers fall back or die instead of using an empty credential.
+# shellcheck disable=SC2016 # the sourced shell expands $1, not this one
+if env -u VOGT_ENGINE_BROKER_URL -u VOGT_ENGINE_BROKER_TOKEN \
+    -u VOGT_ENGINE_BROKER_TOKEN_FILE -u VOGT_SESSION_TOKEN_FILE \
+    INFISICAL_API_URL="$base/api" INFISICAL_CLIENT_ID=no-token-id \
+    INFISICAL_CLIENT_SECRET=client-secret-value \
+    bash -c 'source "$1"; mint_access_token' _ "$script" \
+    >"$testdir/no-token.out" 2>&1; then
+    fail "mint_access_token succeeded without an access token: $(cat "$testdir/no-token.out")"
+fi
+if [[ -s "$testdir/no-token.out" ]]; then
+    fail "mint_access_token printed an empty token: $(cat "$testdir/no-token.out")"
+fi
 
 # 5. A probe's bearer reaches curl through a descriptor, never argv.
 # shellcheck disable=SC2016 # the sourced shell expands $1 and $2, not this one
@@ -166,11 +204,18 @@ grep -q '^/api/mcp|Bearer probe-token|' "$testdir/requests.log" \
 
 # 6. No secret variable is expanded into a command's argv anywhere in the
 #    helper. Comments may name the retired flags; command lines may not use
-#    them. curl headers go through @<(printf ...).
+#    them. That includes `jq --arg name "$SECRET"` (the reviewer's `pgrep -a
+#    jq` leak) and a secret interpolated into a single-quoted jq program.
+#    curl headers go through @<(printf ...).
+secret_var='[A-Za-z_][A-Za-z0-9_]*(secret|token|password|passwd|credential|api_?key|private_key)'
 leaks="$(grep -vE '^[[:space:]]*#' "$script" \
-    | grep -nE -- '--client-secret|--token([= ]|$)|-H "Authorization|=[$]value' || true)"
+    | grep -niE -- '--client-secret|--token([= ]|$)|-H "Authorization|=[$]value|--arg(json)?[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]+"\$\{?'"$secret_var" || true)"
 [[ -z "$leaks" ]] || fail "secret expanded into argv:
 $leaks"
+jq_leaks="$(grep -vE '^[[:space:]]*#' "$script" \
+    | grep -nE "jq[^']*'[^']*\\\$\\{?${secret_var}" || true)"
+[[ -z "$jq_leaks" ]] || fail "secret interpolated into a jq program:
+$jq_leaks"
 grep -q -- '-H @<(printf .Authorization: Bearer' "$script" \
     || fail "curl no longer reads the bearer from a descriptor"
 
