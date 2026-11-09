@@ -17989,6 +17989,124 @@ mod pod_stream {
         assert_eq!(spec_source["ref"], "rust-2");
     }
 
+    /// WI-3883: a pod started from a template's own pod default (no explicit
+    /// placement) carries the caller's extra environment to the agent through
+    /// the bootstrap response, never through the pod spec.
+    #[tokio::test]
+    async fn a_pod_session_carries_extra_env_through_the_bootstrap_response() {
+        let mut h = harness(false).await;
+        let id = h
+            .start_body(json!({
+                "name": "pod-env",
+                "template": "pod",
+                "env": [["CARGO_BUILD_JOBS", "4"], ["RUST_LOG", "info"]],
+            }))
+            .await;
+        let (_, token) = h.created.recv().await.unwrap();
+        let pod = h.launcher.pods.lock().unwrap().pop().expect("pod created");
+        let spec_env: std::collections::BTreeMap<String, String> = pod.spec.unwrap().containers[0]
+            .env
+            .clone()
+            .unwrap()
+            .into_iter()
+            .filter_map(|v| v.value.map(|value| (v.name, value)))
+            .collect();
+        assert!(
+            !spec_env.contains_key("CARGO_BUILD_JOBS"),
+            "a caller env value must not land in the pod spec"
+        );
+        let body: Value = h.bootstrap(id, &token).await.json().await.unwrap();
+        assert_eq!(body["env"]["CARGO_BUILD_JOBS"], "4");
+        assert_eq!(body["env"]["RUST_LOG"], "info");
+    }
+
+    /// WI-3883: a cwd inside the project's checkout becomes the pod's work
+    /// directory, as a path under the clone root the entrypoint checks out.
+    #[tokio::test]
+    async fn a_pod_session_runs_in_the_cwd_inside_the_clone() {
+        let clone = tempfile::tempdir().unwrap();
+        let repo = clone.path().join("repo");
+        let sub = repo.join("engine");
+        std::fs::create_dir_all(&sub).unwrap();
+        let init = std::process::Command::new("git")
+            .args(["init", "-q", "-b", "main"])
+            .current_dir(&repo)
+            .status()
+            .unwrap();
+        assert!(init.success(), "git init");
+        let sub = sub.canonicalize().unwrap();
+
+        let mut h = harness(false).await;
+        let id = h
+            .start_body(json!({
+                "name": "pod-cwd",
+                "template": "pod",
+                "cwd": sub.to_string_lossy(),
+            }))
+            .await;
+        let (_, token) = h.created.recv().await.unwrap();
+        let body: Value = h.bootstrap(id, &token).await.json().await.unwrap();
+        assert_eq!(body["env"]["VOGT_WORK_DIR"], "/work/engine");
+    }
+
+    /// WI-3883: a cwd outside every checkout is not something the pod can
+    /// honour, so the start is refused and the field is named.
+    #[tokio::test]
+    async fn a_pod_cwd_outside_the_clone_is_refused_and_names_the_field() {
+        let outside = tempfile::tempdir().unwrap();
+        let mut h = harness(false).await;
+        let response = h
+            .client
+            .post(format!("{}/api/sessions", h.base))
+            .json(&json!({
+                "name": "pod-cwd-escape",
+                "template": "pod",
+                "cwd": outside.path().to_string_lossy(),
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response.text().await.unwrap();
+        assert!(body.contains("cwd"), "the refusal names the field: {body}");
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), h.created.recv())
+                .await
+                .is_err(),
+            "a refused start must not create a pod"
+        );
+    }
+
+    /// WI-3883: an environment name the engine or the pod owns is refused by
+    /// name rather than shadowed or dropped.
+    #[tokio::test]
+    async fn a_pod_session_refuses_a_reserved_env_name_and_names_the_field() {
+        let mut h = harness(false).await;
+        let response = h
+            .client
+            .post(format!("{}/api/sessions", h.base))
+            .json(&json!({
+                "name": "pod-env-reserved",
+                "template": "pod",
+                "env": [["VOGT_WORK_DIR", "/elsewhere"]],
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response.text().await.unwrap();
+        assert!(
+            body.contains("VOGT_WORK_DIR"),
+            "the refusal names the variable: {body}"
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), h.created.recv())
+                .await
+                .is_err(),
+            "a refused start must not create a pod"
+        );
+    }
+
     /// WI-3335: a deployment with an invalid managed Codex policy refuses a
     /// local Codex launch, while a pod-backed Codex template still starts (the
     /// pod checks its own filesystem at boot).

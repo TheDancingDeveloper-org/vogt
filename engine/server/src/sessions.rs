@@ -163,46 +163,87 @@ const SESSION_CONTRACT_ENV: &[&str] = &[
     "VOGT_SESSION_IMAGE",
 ];
 
-/// Fields a session pod cannot honour (WI-3883): it checks out the project's
-/// source at its own path and builds its environment from the source
-/// provider, so a caller's `worktree`, `cwd` and extra `env` would be
-/// dropped. Starting anyway would open the session somewhere the caller did
-/// not ask for, so they are refused and the field is named instead.
-///
-/// A deployment that moves a template's default to pods is the deployment's
-/// choice, and vogt-core names a `cwd` and its session-contract `env` on
-/// every start. Only a caller that asked for `placement=pod` itself is told
-/// those are dropped; refusing them for a template default would refuse
-/// every session on a pod-only deployment.
-fn validate_pod_placement_fields(
-    explicit_pod: bool,
-    cwd: Option<&str>,
-    worktree: bool,
-    env: Option<&[(String, String)]>,
-) -> Result<()> {
+/// The one session field a pod cannot honour (WI-3883): a pod checks out the
+/// project's source itself, so a caller's `worktree` is refused and named.
+/// `cwd` and extra `env` are carried through the bootstrap response instead
+/// ([`pod_carry_env`] and [`pod_work_dir`]); what cannot be carried — a
+/// reserved environment name — is refused and named there rather than
+/// silently dropped.
+fn validate_pod_placement_fields(worktree: bool) -> Result<()> {
     if worktree {
         return Err(ApiError::BadRequest(
             "placement \"pod\" does not support worktree: the pod checks out the project's source itself".into(),
         ));
     }
-    if !explicit_pod {
-        return Ok(());
+    Ok(())
+}
+
+/// The extra environment a pod can carry from the session spec (WI-3883). The
+/// bootstrap response hands it to the entrypoint, which exports it for the
+/// agent process, so it never enters the Kubernetes object.
+///
+/// Names the engine or the pod owns are reserved: `VOGT_*` (the engine sets
+/// those itself), `PATH` and `HOME`, and credential-shaped names (the session
+/// already carries its own credentials). A caller naming one is refused
+/// rather than shadowed. Vogt's session-contract variables are skipped, not
+/// refused: vogt-core sends them on every start, and the engine sets its own
+/// value where the pod needs one (the launch's `VOGT_WORK_DIR` above all)
+/// rather than carrying a caller's.
+fn pod_carry_env(env: &[(String, String)]) -> Result<Vec<(String, String)>> {
+    let mut carried = Vec::new();
+    for (name, value) in env {
+        if SESSION_CONTRACT_ENV.contains(&name.as_str()) {
+            continue;
+        }
+        let mut chars = name.chars();
+        let valid = chars
+            .next()
+            .is_some_and(|c| c == '_' || c.is_ascii_alphabetic())
+            && chars.all(|c| c == '_' || c.is_ascii_alphanumeric());
+        if !valid {
+            return Err(ApiError::BadRequest(format!(
+                "placement \"pod\" cannot carry env {name:?}: not an environment name"
+            )));
+        }
+        if name.starts_with("VOGT_") || name == "PATH" || name == "HOME" || pty::is_secret_env(name)
+        {
+            return Err(ApiError::BadRequest(format!(
+                "placement \"pod\" reserves env {name:?}: the engine or the pod sets it, so a caller value would be shadowed"
+            )));
+        }
+        carried.push((name.clone(), value.clone()));
     }
-    if let Some(dir) = cwd {
-        return Err(ApiError::BadRequest(format!(
-            "placement \"pod\" does not support cwd {dir:?}: the pod works in the project's source checkout"
-        )));
-    }
-    if let Some((name, _)) = env
-        .unwrap_or_default()
-        .iter()
-        .find(|(name, _)| !SESSION_CONTRACT_ENV.contains(&name.as_str()))
+    Ok(carried)
+}
+
+/// The pod-side working directory for a requested `cwd` (WI-3883): its place
+/// inside the git checkout the pod clones, re-rooted under the session agent's
+/// default work directory. The clone is the checkout itself, so a cwd equal to
+/// it is the clone root; a cwd outside any checkout cannot be honoured, and a
+/// cwd that would climb out of the checkout is refused rather than escaped.
+fn pod_work_dir(cwd: &str) -> Result<String> {
+    let dir = std::path::Path::new(cwd);
+    let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    let root = git::worktree_top(&dir).ok_or_else(|| {
+        ApiError::BadRequest(format!(
+            "placement \"pod\" cannot start at cwd {cwd:?}: it is not inside a source checkout, and the pod clones that checkout itself"
+        ))
+    })?;
+    let relative = dir.strip_prefix(&root).map_err(|_| {
+        ApiError::BadRequest(format!(
+            "placement \"pod\" cannot start at cwd {cwd:?}: it escapes the source checkout {root:?} the pod clones"
+        ))
+    })?;
+    if relative
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
     {
         return Err(ApiError::BadRequest(format!(
-            "placement \"pod\" does not support env {name:?}: the pod takes its environment from the source provider"
+            "placement \"pod\" cannot start at cwd {cwd:?}: it escapes the source checkout {root:?} the pod clones"
         )));
     }
-    Ok(())
+    let work = std::path::Path::new(vogt_session_agent::DEFAULT_WORK_DIR).join(relative);
+    Ok(work.to_string_lossy().into_owned())
 }
 
 pub struct SessionRegistry {
@@ -443,6 +484,7 @@ impl SessionRegistry {
         id: Uuid,
         spec: &SessionSpec,
         template: &crate::config::SessionTemplate,
+        launch: crate::agent_stream::PodLaunch,
     ) -> Result<crate::pty::SpawnedSession> {
         let auth = crate::agent_stream::global();
         let pod_config = self.pod_config()?;
@@ -531,6 +573,7 @@ impl SessionRegistry {
             if let Some(pod) = pod {
                 auth.issue(id, &token).await;
                 auth.issue_source(id, source.clone()).await;
+                auth.issue_launch(id, launch).await;
                 // The pod's own source credential, minted before the pod
                 // exists so a failure leaves nothing to clean up but the
                 // bootstrap token. The provider keeps it so the pod's teardown
@@ -1073,9 +1116,6 @@ impl SessionRegistry {
         // conversation would move `cwd` to its transcript's directory, which
         // is not the checkout the caller named, so the two are refused
         // together rather than cut from somewhere unasked.
-        // What the caller asked for, before a resume or a worktree moves it:
-        // the pod placement refusal below names the field the request names.
-        let requested_cwd = spec.cwd.clone();
         let worktree = spec.worktree.take();
         if worktree.is_some() && spec.resume.as_deref().is_some_and(|r| !r.trim().is_empty()) {
             return Err(ApiError::BadRequest(
@@ -1153,17 +1193,21 @@ impl SessionRegistry {
         let pod_backed = self.cfg.pod_backends_enabled
             && self.runs_in_pod(spec.template.as_deref(), spec.placement.as_deref());
         // A field a session pod cannot honour is refused on the start that
-        // asks for it, rather than silently dropped (WI-3883). A wake replays
-        // engine state rather than a request, so its recorded values are left
-        // alone.
-        if pod_backed && matches!(&creating, Creating::Fresh(_)) {
-            validate_pod_placement_fields(
-                spec.placement.as_deref() == Some("pod"),
-                requested_cwd.as_deref(),
-                worktree.is_some(),
-                spec.env.as_deref(),
-            )?;
+        // asks for it, rather than silently dropped (WI-3883). What a pod can
+        // carry — the caller's extra environment and its place inside the
+        // clone — travels through the bootstrap response, so neither value
+        // enters the Kubernetes object.
+        if pod_backed {
+            validate_pod_placement_fields(worktree.is_some())?;
         }
+        let pod_launch = if pod_backed {
+            Some(crate::agent_stream::PodLaunch {
+                env: pod_carry_env(&base_env)?,
+                work_dir: spec.cwd.as_deref().map(pod_work_dir).transpose()?,
+            })
+        } else {
+            None
+        };
         // Placement is now effective: an omitted placement uses the template
         // or backend default, which is host for local/raw launches. Codex is
         // pod-only even when the caller did not spell out `placement=host`.
@@ -1557,7 +1601,7 @@ impl SessionRegistry {
             })
             .flatten();
         let spawned = if let Some(template) = pod_template {
-            self.spawn_pod_session(id, &spec, template)
+            self.spawn_pod_session(id, &spec, template, pod_launch.unwrap_or_default())
         } else {
             pty::spawn(
                 id,
@@ -3782,8 +3826,9 @@ fn wake_settings_file<'a>(
 #[cfg(test)]
 mod tests {
     use super::{
-        normalize_session_name, validate_codex_placement, validate_placement_template_requirement,
-        validate_pod_placement_fields, validate_requested_placement, validate_template_placement,
+        normalize_session_name, pod_carry_env, validate_codex_placement,
+        validate_placement_template_requirement, validate_pod_placement_fields,
+        validate_requested_placement, validate_template_placement,
     };
     use crate::config::SessionTemplate;
 
@@ -3833,37 +3878,35 @@ mod tests {
     }
 
     #[test]
-    fn pod_placement_refuses_the_fields_a_pod_would_drop() {
-        let contract = vec![
-            ("VOGT_HTTP_TOKEN".to_string(), "t".to_string()),
-            ("VOGT_SESSION_ID".to_string(), "s".to_string()),
-            ("VOGT_WORK_ITEM".to_string(), "WI-1".to_string()),
-        ];
-        // A worktree is refused whichever way the pod default was chosen.
-        let error = validate_pod_placement_fields(false, None, true, Some(&contract)).unwrap_err();
+    fn pod_placement_refuses_a_worktree() {
+        let error = validate_pod_placement_fields(true).unwrap_err();
         assert!(error.to_string().contains("worktree"), "{error}");
-        // Explicit pod placement also refuses cwd and env, naming each.
-        let error =
-            validate_pod_placement_fields(true, Some("/checkout"), false, None).unwrap_err();
-        assert!(error.to_string().contains("cwd"), "{error}");
-        let mut env = contract.clone();
-        env.push(("FOO".into(), "bar".into()));
-        let error = validate_pod_placement_fields(true, None, false, Some(&env)).unwrap_err();
-        assert!(
-            error.to_string().contains("env") && error.to_string().contains("FOO"),
-            "{error}"
-        );
+        assert!(validate_pod_placement_fields(false).is_ok());
     }
 
     #[test]
-    fn pod_placement_accepts_the_session_contract_and_a_template_default() {
+    fn pod_env_carries_extra_names_and_skips_the_session_contract() {
         let env = vec![
             ("VOGT_HTTP_TOKEN".to_string(), "t".to_string()),
             ("VOGT_SESSION_ID".to_string(), "s".to_string()),
             ("VOGT_SESSION_IMAGE".to_string(), "img".to_string()),
+            ("CARGO_BUILD_JOBS".to_string(), "4".to_string()),
         ];
-        assert!(validate_pod_placement_fields(false, Some("/checkout"), false, Some(&env)).is_ok());
-        assert!(validate_pod_placement_fields(true, None, false, Some(&env)).is_ok());
+        assert_eq!(
+            pod_carry_env(&env).unwrap(),
+            vec![("CARGO_BUILD_JOBS".to_string(), "4".to_string())]
+        );
+        for name in [
+            "VOGT_WORK_DIR",
+            "PATH",
+            "HOME",
+            "GH_TOKEN",
+            "1BAD",
+            "BAD-NAME",
+        ] {
+            let error = pod_carry_env(&[(name.to_string(), "x".to_string())]).unwrap_err();
+            assert!(error.to_string().contains(name), "{name}: {error}");
+        }
     }
 
     #[test]
