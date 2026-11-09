@@ -417,7 +417,7 @@ probe_mcp() {
 }
 
 mint_access_token() {
-    local base secs raw
+    local base secs raw token
     command -v curl >/dev/null 2>&1 || return 1
     command -v jq >/dev/null 2>&1 || return 1
     secs="$(call_timeout)"
@@ -426,13 +426,19 @@ mint_access_token() {
     base="${base%/api}"
     # The client secret rides in the JSON body on stdin, never argv, and this
     # is the same universal-auth request `infisical login` makes (WI-3885):
-    # on the host, --client-secret was visible in `ps` to every user.
-    raw="$(jq -nc --arg id "$INFISICAL_CLIENT_ID" --arg secret "$INFISICAL_CLIENT_SECRET" \
-            '{clientId: $id, clientSecret: $secret}' |
+    # on the host, --client-secret was visible in `ps` to every user, and so
+    # is `jq --arg secret "$..."` — jq reads both values from its environment.
+    raw="$(INFISICAL_CLIENT_ID="$INFISICAL_CLIENT_ID" \
+            INFISICAL_CLIENT_SECRET="$INFISICAL_CLIENT_SECRET" \
+            jq -nc '{clientId: env.INFISICAL_CLIENT_ID, clientSecret: env.INFISICAL_CLIENT_SECRET}' |
         curl -sS --fail --connect-timeout "$secs" --max-time "$secs" \
             -H 'Content-Type: application/json' --data-binary @- \
             "$base/api/v1/auth/universal-auth/login" 2>/dev/null)" || return 1
-    jq -r '.accessToken // empty' <<<"$raw"
+    # A 200 without a token is a failed login, not an empty credential: the
+    # callers' `|| die` must see it, as they did when the CLI did the login.
+    token="$(jq -er '.accessToken // empty' <<<"$raw")" || return 1
+    [[ -n "$token" ]] || return 1
+    printf '%s\n' "$token"
 }
 
 get_secret() {
