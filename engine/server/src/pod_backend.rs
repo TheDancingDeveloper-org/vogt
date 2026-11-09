@@ -48,6 +48,9 @@ pub struct PodConfig {
     pub namespace: String,
     pub kubeconfig: Option<std::path::PathBuf>,
     pub engine_endpoint: String,
+    /// MCP endpoint used by agent clients inside a session pod.
+    #[serde(default)]
+    pub mcp_url: Option<String>,
     pub default_image: String,
     pub connect_timeout: Duration,
     /// Default resource policy; values are copied verbatim into the pod.
@@ -439,6 +442,7 @@ impl Default for PodConfig {
             namespace: "vogt-sessions".into(),
             kubeconfig: None,
             engine_endpoint: "http://192.168.1.75:18197".into(),
+            mcp_url: None,
             default_image: "ghcr.io/thedancingdeveloper-org/vogt-session:latest".into(),
             connect_timeout: Duration::from_secs(30),
             resource_requests: BTreeMap::from([
@@ -622,6 +626,7 @@ impl PodConfig {
                 }
             }
         }
+        optional("ENGINE_POD_MCP_URL", &mut cfg.mcp_url);
         if let Some(v) = text("ENGINE_POD_SEED_ALLOWED_PREFIXES") {
             cfg.seed_allowed_prefixes = v
                 .split(',')
@@ -908,6 +913,13 @@ fn pod_env(
             ..Default::default()
         },
     ];
+    if let Some(url) = &cfg.mcp_url {
+        env.push(EnvVar {
+            name: "VOGT_MCP_URL".into(),
+            value: Some(url.clone()),
+            ..Default::default()
+        });
+    }
     env.extend(source_env.iter().map(|(name, value)| EnvVar {
         name: name.clone(),
         value: Some(value.clone()),
@@ -2281,6 +2293,21 @@ mod tests {
                 .value
                 .as_deref(),
             Some("/etc/ssl/custom.pem")
+        );
+    }
+
+    #[test]
+    fn pod_env_includes_configured_mcp_url() {
+        let cfg = PodConfig {
+            mcp_url: Some("http://vogt-engine.vogt.svc:8910/mcp".into()),
+            ..Default::default()
+        };
+        let env = pod_env(&cfg, &default_source(&cfg), &[], Uuid::nil());
+        assert_eq!(
+            env.iter()
+                .find(|variable| variable.name == "VOGT_MCP_URL")
+                .and_then(|variable| variable.value.as_deref()),
+            Some("http://vogt-engine.vogt.svc:8910/mcp")
         );
     }
 
