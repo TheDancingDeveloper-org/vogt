@@ -262,13 +262,12 @@ impl SessionTemplate {
                 match_path_prefixes: vec![],
                 tags: vec!["agent".to_string(), "codex".to_string()],
                 account: None,
-                backend: default_session_backend(),
+                // Codex always runs in a session pod. The engine image keeps
+                // INSTALL_AI_CLIENTS=false, so a host launch would otherwise
+                // hang or fail only after the PTY starts (WI-3844).
+                backend: "pod".to_string(),
                 host_capable: false,
-                // Codex (protected) is the one built-in agent template that
-                // runs in a pod on request while its default stays the host
-                // (WI-3675, WI-3762): the pod image bakes the same driven
-                // policy and the session agent starts the CLI itself.
-                pod_capable: true,
+                pod_capable: false,
             },
             SessionTemplate {
                 name: "OpenCode (protected)".to_string(),
@@ -2517,15 +2516,16 @@ mod prefix_tests {
                 .host_capable,
             "local defaults are host-only"
         );
-        // WI-3762: Codex (protected) keeps the host default and opts into a
-        // pod on request; the other agent templates stay host-only.
+        // WI-3844: Codex is pod-only because the engine image deliberately
+        // keeps INSTALL_AI_CLIENTS=false; it must never launch on the host.
         let codex = cfg
             .session_templates
             .iter()
             .find(|t| t.name == "Codex (protected)")
             .unwrap();
-        assert_eq!(codex.backend, "local", "its default placement is unchanged");
-        assert!(codex.supports_pod() && codex.supports_host());
+        assert_eq!(codex.backend, "pod");
+        assert!(codex.supports_pod());
+        assert!(!codex.supports_host(), "Codex must be pod-only");
         let claude = cfg
             .session_templates
             .iter()
