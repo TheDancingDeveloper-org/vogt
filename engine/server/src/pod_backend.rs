@@ -2375,6 +2375,41 @@ mod tests {
     }
 
     #[test]
+    fn kache_cache_env_is_secret_backed_and_configured_read_only() {
+        let pod = pod_template_for(&PodConfig::default());
+        let spec = pod.spec.as_ref().unwrap();
+        let container = &spec.containers[0];
+        let env_from = container.env_from.as_ref().unwrap();
+        assert!(env_from.iter().any(|source| {
+            source
+                .config_map_ref
+                .as_ref()
+                .is_some_and(|reference| reference.name == "session-cache-env")
+        }));
+        assert!(env_from.iter().any(|source| {
+            source
+                .secret_ref
+                .as_ref()
+                .is_some_and(|reference| reference.name == "kache-s3")
+        }));
+        assert!(spec.volumes.as_ref().unwrap().iter().any(|volume| {
+            volume
+                .config_map
+                .as_ref()
+                .is_some_and(|config| config.name == "kache-config")
+        }));
+        let kache_mount = container
+            .volume_mounts
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|mount| mount.name == "kache-config")
+            .unwrap();
+        assert_eq!(kache_mount.mount_path, "/etc/kache");
+        assert_eq!(kache_mount.read_only, Some(true));
+    }
+
+    #[test]
     fn two_sessions_share_no_writable_volume() {
         let cfg = PodConfig::default();
         let a = pod_for(&cfg, Uuid::from_u128(1));
