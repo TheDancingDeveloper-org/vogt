@@ -327,6 +327,11 @@ pub struct Config {
 /// as the merged image, so the engine's documentation of it holds for pods.
 pub const IMAGE_SETTINGS_FILE: &str = "/usr/local/share/vogt/driven-session-settings.json";
 
+/// The default checkout directory used by `deploy/session-entrypoint.sh`.
+/// Keep the pod launcher's default in the same crate as the command builder so
+/// a pod-backed agent and the entrypoint agree about the project Codex trusts.
+pub const DEFAULT_WORK_DIR: &str = "/work";
+
 /// The `--settings` and `--mcp-config` files of a Claude Code launch.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ClaudeLaunch {
@@ -399,6 +404,26 @@ impl ClaudeLaunch {
 /// words or run anything on the line `command_line` builds.
 fn sh_quote(value: &Path) -> String {
     format!("'{}'", value.to_string_lossy().replace('\'', "'\\''"))
+}
+
+fn toml_basic_string(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\u{08}' => out.push_str("\\b"),
+            '\u{0C}' => out.push_str("\\f"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            ch if ch.is_control() => out.push_str(&format!("\\u{:04X}", ch as u32)),
+            ch => out.push(ch),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// The argv in `VOGT_SESSION_COMMAND` (a JSON array of strings), if any.
@@ -795,8 +820,17 @@ pub fn command_line(config: &Config) -> Result<String, AgentError> {
         }
         // No `--add-dir`: Codex's effective sandbox refuses extra writable
         // roots and exits. The PTY already starts in the session cwd, which
-        // is the workspace root Codex uses.
-        "codex" => Ok("codex".into()),
+        // is the workspace root Codex uses. The explicit trust setting keeps
+        // a fresh pod from stopping at Codex's interactive folder-trust
+        // screen before it can read its brief.
+        "codex" => {
+            let cwd = config.cwd.as_deref().unwrap_or(DEFAULT_WORK_DIR);
+            let setting = format!(
+                "projects.{}.trust_level=\"trusted\"",
+                toml_basic_string(cwd)
+            );
+            Ok(format!("codex -c {}", sh_quote(Path::new(&setting))))
+        }
         "opencode" => Ok("opencode".into()),
         _ => Err(AgentError::Pty(
             "VOGT_CLI must be claude, codex or opencode".into(),
@@ -1648,7 +1682,10 @@ mod tests {
         // Codex refuses extra writable roots, so it gets no `--add-dir`; the
         // PTY already starts in the session cwd.
         config.cli = "codex".into();
-        assert_eq!(command_line(&config).unwrap(), "codex");
+        assert_eq!(
+            command_line(&config).unwrap(),
+            r#"codex -c 'projects."/work".trust_level="trusted"'"#
+        );
         config.cli = "nope".into();
         assert!(command_line(&config).is_err());
     }
