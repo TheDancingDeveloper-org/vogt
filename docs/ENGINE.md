@@ -4509,6 +4509,12 @@ At each launch the registry does two things, and nothing else:
   secret, at the registry's `base_url`, and the pod fetch would bypass the
   manifest line's `ondemand` or `writable` policy. A pod fetches a provider
   key only when the live entry names the registry's own project and secret.
+  The API may register a provider against any exact `project_id`/`secret_name`
+  pair already approved by the manifest, even when the provider's `env_key` is
+  different from that manifest VAR. The secret reference remains exclusive to
+  one provider, and an `env_key` that collides with a manifest VAR is refused;
+  this permits separate approved secrets to back separate temporary providers
+  without letting a provider shadow deployment-owned environment variables.
 - A Codex session gets one `model_providers.<name>` table per provider. A
   host launch gets them as `-c` overrides on its argv, so the shared
   `~/.codex/config.toml` is never rewritten. A pod gets them in the
