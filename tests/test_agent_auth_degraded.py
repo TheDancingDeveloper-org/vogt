@@ -52,6 +52,9 @@ class _Fake(BaseHTTPRequestHandler):
     # The API answers the login but a project read hangs: Infisical up, its
     # Redis or Postgres down.
     reads_hang: ClassVar[bool] = False
+    # The universal-auth login itself hangs, as it did when Infisical had no
+    # Redis: no read is attempted after it.
+    login_hang: ClassVar[bool] = False
 
     def do_GET(self) -> None:
         if _Fake.reads_hang:
@@ -67,7 +70,24 @@ class _Fake(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         length = int(self.headers.get("Content-Length") or 0)
-        _Fake.reports.append(json.loads(self.rfile.read(length)))
+        raw = self.rfile.read(length) if length else b"{}"
+        if self.path == "/api/v1/auth/universal-auth/login":
+            if _Fake.login_hang:
+                time.sleep(8)
+                return
+            # The client secret rides in this body, never in argv (WI-3885).
+            if json.loads(raw) != {"clientId": "id", "clientSecret": "secret"}:
+                self.send_response(401)
+                self.end_headers()
+                return
+            body = b'{"accessToken":"tok-123"}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        _Fake.reports.append(json.loads(raw))
         self.send_response(204)
         self.end_headers()
 
@@ -79,6 +99,7 @@ class _Fake(BaseHTTPRequestHandler):
 def server() -> Any:
     _Fake.reports = []
     _Fake.reads_hang = False
+    _Fake.login_hang = False
     srv = ThreadingHTTPServer(("127.0.0.1", 0), _Fake)
     thread = threading.Thread(target=srv.serve_forever, daemon=True)
     thread.start()
@@ -86,16 +107,14 @@ def server() -> Any:
     srv.shutdown()
 
 
-def _bin(tmp_path: Path, *, infisical_up: bool) -> Path:
+def _bin(tmp_path: Path) -> Path:
     bindir = tmp_path / "bin"
     bindir.mkdir(exist_ok=True)
     cli = bindir / "infisical"
-    # Down: login hangs, as it did against an Infisical with no Redis.
-    login = "printf tok-123" if infisical_up else "sleep 30"
-    # Every CLI call is recorded; a per-secret read (`secrets get`) hangs too.
+    # Every CLI call is recorded; a per-secret read (`secrets get`) hangs, so
+    # a fallback path is bounded by the launch budget rather than finishing.
     cli.write_text(
-        f'#!/bin/sh\necho "$1" >> {tmp_path}/cli-calls\n'
-        f'[ "$1" = login ] && exec {login}\nexec sleep 30\n',
+        f'#!/bin/sh\necho "$1" >> {tmp_path}/cli-calls\nexec sleep 30\n',
         encoding="utf-8",
     )
     cli.chmod(0o755)
@@ -114,7 +133,10 @@ def _launch(
     manifest: str = "ALPHA proj-a ALPHA\nLATER proj-a LATER ondemand",
     extra: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    bindir = _bin(tmp_path, infisical_up=infisical_up)
+    bindir = _bin(tmp_path)
+    # The login is an API request now, so the fake engine decides whether it
+    # answers: a down identity path is a hung login, not a hung CLI.
+    _Fake.login_hang = not infisical_up
     env = {
         "PATH": f"{bindir}:/usr/bin:/bin",
         "HOME": str(tmp_path),
@@ -182,8 +204,11 @@ def test_hung_reads_are_not_retried_secret_by_secret(
     assert proc.returncode == 0, proc.stderr
     # One budget for the whole launch, not 10 s per secret (WI-1812 review).
     assert took < 8, f"16 hung reads must share one budget, took {took:.1f}s"
-    calls = (tmp_path / "cli-calls").read_text(encoding="utf-8").split()
-    assert calls == ["login"], "no per-secret CLI fallback after an unanswered read"
+    calls_path = tmp_path / "cli-calls"
+    calls = (
+        calls_path.read_text(encoding="utf-8").split() if calls_path.exists() else []
+    )
+    assert calls == [], "no per-secret CLI fallback after an unanswered read"
     env = _env(proc.stdout)
     assert env["AGENT_AUTH_GRANTED"] == ""
     assert "did not answer" in env["AGENT_AUTH_UNAVAILABLE"]
