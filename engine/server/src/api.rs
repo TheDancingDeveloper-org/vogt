@@ -72,7 +72,11 @@ pub async fn llm_provider_set(
         .map_err(crate::error::ApiError::BadRequest)?;
     crate::llm_providers::validate_against_manifest(&provider, &manifest)
         .map_err(crate::error::ApiError::BadRequest)?;
-    if !secret_reference_is_approved(&provider, &manifest, &state.config.agent_grant_projects) {
+    if !crate::llm_providers::secret_reference_is_approved(
+        &provider,
+        &manifest,
+        &state.config.agent_grant_projects,
+    ) {
         return Err(crate::error::ApiError::BadRequest(
             "provider secret must reference an approved manifest or grant project".into(),
         ));
@@ -102,18 +106,6 @@ pub async fn llm_provider_set(
             crate::error::ApiError::Internal(error)
         })?;
     Ok(Json(serde_json::json!({"provider": status})))
-}
-
-fn secret_reference_is_approved(
-    provider: &crate::llm_providers::Provider,
-    manifest: &[crate::secret_broker::ManifestSecret],
-    grant_projects: &[String],
-) -> bool {
-    manifest.iter().any(|entry| {
-        entry.project_id == provider.secret_project && entry.secret_name == provider.secret_name
-    }) || grant_projects
-        .iter()
-        .any(|project| project == &provider.secret_project)
 }
 
 pub async fn llm_provider_remove(
@@ -2041,8 +2033,7 @@ mod source_authority_tests {
 
 #[cfg(test)]
 mod llm_provider_tests {
-    use super::secret_reference_is_approved;
-    use crate::llm_providers::Provider;
+    use crate::llm_providers::{secret_reference_is_approved, Provider};
     use crate::secret_broker::{ManifestPolicy, ManifestSecret};
 
     fn provider() -> Provider {
