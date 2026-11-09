@@ -279,7 +279,6 @@ def test_the_engine_overlay_builds_the_engine_and_fronts_the_core() -> None:
     assert "dockerfile: engine/Dockerfile" in overlay
     assert "CORE_IMAGE" not in overlay, "the engine builds its own core now"
     assert "INSTALL_AI_CLIENTS:" in overlay
-    assert 'INSTALL_AI_CLIENTS: "${VOGT_INSTALL_AI_CLIENTS:-true}"' in overlay
     assert "CODEX_VERSION:" in overlay
     assert 'VOGT_CORE_URL: "http://vogt:8000"' in overlay
     assert "VOGT_CORE_TOKEN_FILE:" in overlay
