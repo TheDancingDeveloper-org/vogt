@@ -20,8 +20,8 @@ use crate::{
     chats::redact,
     error::Result,
     pod_backend::{
-        pod_exit_code, pod_fatal_waiting_reason, pod_is_ours, pod_phase, pod_reason,
-        session_id_from_pod, PodConfig, PodLauncher, LOG_TAIL_LINES,
+        pod_exit_code, pod_fatal_waiting_reason, pod_hit_active_deadline, pod_is_ours, pod_phase,
+        pod_reason, session_id_from_pod, PodConfig, PodLauncher, LOG_TAIL_LINES,
     },
 };
 use k8s_openapi::api::core::v1::Pod;
@@ -70,7 +70,14 @@ pub fn judge(pod: &Pod, link: Option<&PodLink>, cfg: &PodConfig, age: Option<Dur
         },
         "errored" => Verdict::End {
             code: pod_exit_code(pod).filter(|c| *c != 0).unwrap_or(1),
-            note: detail("failed"),
+            // A pod the kubelet stopped at its activeDeadlineSeconds gets its
+            // own reason, so a session ended by policy reads differently from
+            // one that failed.
+            note: if pod_hit_active_deadline(pod) {
+                detail("hit its active deadline")
+            } else {
+                detail("failed")
+            },
         },
         "pending" => {
             if let Some(reason) = pod_fatal_waiting_reason(pod) {
@@ -400,6 +407,32 @@ mod tests {
             judge(&pod(id, phase("Pending")), Some(&link), &cfg, late),
             Verdict::End { code: 1, .. }
         ));
+    }
+
+    #[test]
+    fn a_pod_stopped_at_its_active_deadline_has_its_own_end_reason() {
+        let id = Uuid::new_v4();
+        let (_auth, link) = live(id);
+        let mut status = terminated("Failed", 137, "");
+        status.reason = Some("DeadlineExceeded".into());
+        status.message =
+            Some("Pod was active on the node longer than the specified deadline".into());
+        status.container_statuses.as_mut().unwrap()[0]
+            .state
+            .as_mut()
+            .unwrap()
+            .terminated
+            .as_mut()
+            .unwrap()
+            .reason = Some("DeadlineExceeded".into());
+        match judge(&pod(id, status), Some(&link), &cfg(), None) {
+            Verdict::End { code, note } => {
+                assert_eq!(code, 137);
+                assert!(note.starts_with("hit its active deadline:"), "{note}");
+                assert_ne!(note, "failed: DeadlineExceeded");
+            }
+            other => panic!("unexpected verdict: {other:?}"),
+        }
     }
 
     #[test]
