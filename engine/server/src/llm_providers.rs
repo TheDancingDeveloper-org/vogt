@@ -363,6 +363,16 @@ pub fn codex_config_tables(providers: &[Provider]) -> String {
         .collect()
 }
 
+/// The complete Codex config fragment for a pod launch. Root keys must precede
+/// the provider tables or Codex will interpret them as table members.
+pub fn codex_config(model: &str, providers: &[Provider]) -> String {
+    format!(
+        "model_provider = \"litellm\"\nmodel = {}\n\n{}",
+        crate::codex_guidance::toml_basic_string(model),
+        codex_config_tables(providers)
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -404,6 +414,10 @@ models = ["deepseek-chat"]
             config["model_providers"]["deepseek"]["env_key"].as_str(),
             Some("DEEPSEEK_KEY")
         );
+
+        let config: toml::Table = toml::from_str(&codex_config("grok", &providers)).unwrap();
+        assert_eq!(config["model_provider"].as_str(), Some("litellm"));
+        assert_eq!(config["model"].as_str(), Some("grok"));
     }
 
     #[test]
