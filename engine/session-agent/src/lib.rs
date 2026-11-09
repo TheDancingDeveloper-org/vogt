@@ -346,6 +346,13 @@ pub struct Config {
     /// Resume the conversation from the transcript the engine seeded into the
     /// bundle instead of starting it (a pod woken from hibernation).
     pub resume: bool,
+    /// The posture the engine started this session with (`VOGT_PERMISSION_MODE`),
+    /// as the host launcher receives it. `None` is the default posture.
+    pub permission_mode: Option<String>,
+    /// Codex's `approval_policy` for the default and accept-edits postures
+    /// (`VOGT_CODEX_APPROVAL_POLICY`), defaulting to
+    /// [`CODEX_APPROVAL_DEFAULT`] (WI-3864).
+    pub codex_approval_policy: String,
     /// The files Claude Code is started with, as the engine starts one on a
     /// host (WI-3243).
     pub claude: ClaudeLaunch,
@@ -497,6 +504,15 @@ impl Config {
                 .ok()
                 .filter(|v| !v.is_empty()),
             resume: std::env::var("VOGT_SESSION_RESUME").is_ok_and(|v| v == "1"),
+            permission_mode: std::env::var("VOGT_PERMISSION_MODE")
+                .ok()
+                .map(|v| v.trim().to_owned())
+                .filter(|v| !v.is_empty()),
+            codex_approval_policy: std::env::var("VOGT_CODEX_APPROVAL_POLICY")
+                .ok()
+                .map(|v| v.trim().to_owned())
+                .filter(|v| !v.is_empty())
+                .unwrap_or_else(|| CODEX_APPROVAL_DEFAULT.to_owned()),
             claude: ClaudeLaunch::from_env(),
         })
     }
@@ -834,6 +850,72 @@ pub fn resize_pty(master: &PtyMaster, cols: u16, rows: u16) -> Result<(), AgentE
         .map_err(|e| AgentError::Pty(e.to_string()))
 }
 
+/// The `approval_policy` a driven Codex starts with when the deployment names
+/// none (WI-2028). `never` matches the Claude Code workers, whose permissions
+/// are bypassed: a worker runs the commands its task needs instead of stopping
+/// at `-a on-request` for a person, or an oversight session, to answer.
+pub const CODEX_APPROVAL_DEFAULT: &str = "never";
+
+/// The `-a` values Codex accepts. The deployment's value is passed through
+/// unchanged; anything else is refused at startup rather than handed to a CLI
+/// that would fail to launch (or read as a different policy).
+pub const CODEX_APPROVAL_POLICIES: [&str; 4] = ["untrusted", "on-failure", "on-request", "never"];
+
+/// A permission posture as Codex flags (WI-1143, WI-2028, WI-3864).
+///
+/// The pod is the isolation boundary and cannot create a user namespace, so
+/// `workspace-write` (and `--approve-for-me`, which hard-wires it) would fail
+/// the launch. Every posture therefore uses `-s danger-full-access`. The
+/// default and accept-edits postures pin `-a <approval>`, where `approval` is
+/// the deployment's [`CODEX_APPROVAL_DEFAULT`] (`never` unless it says
+/// otherwise): a driven worker runs without asking. A deployment that restores
+/// `on-request` gets the old behaviour, and accept-edits then also routes those
+/// asks through Codex's automatic reviewer (`-c
+/// approvals_reviewer="auto_review"`), without changing the sandbox. Bypass
+/// drops both approvals and the sandbox and is a person's grant only.
+///
+/// `exec` is a `codex exec` launch. That subcommand rejects `-a`, so the
+/// approval pin is left off; the sandbox, and for accept-edits the reviewer,
+/// stay.
+///
+/// `None` means the caller did not ask for a posture. That is not the default
+/// posture: a launch that omitted the flags would run the CLI's own sandbox,
+/// which a pod cannot satisfy.
+///
+/// The host launcher (`agent_cli`) calls this same function; the pod's own
+/// launch line does too, so the two cannot drift.
+pub fn codex_permission_flags(
+    mode: Option<&str>,
+    exec: bool,
+    approval: &str,
+) -> Result<Option<Vec<String>>, String> {
+    let sandbox = ["-s".to_string(), "danger-full-access".to_string()];
+    let ask = if exec || approval.trim().is_empty() {
+        Vec::new()
+    } else {
+        vec!["-a".to_string(), approval.trim().to_string()]
+    };
+    match mode.map(str::trim).filter(|m| !m.is_empty()) {
+        None => Ok(None),
+        Some("default") => Ok(Some(ask.into_iter().chain(sandbox).collect())),
+        Some("accept-edits") | Some("accept_edits") => Ok(Some(
+            ask.into_iter()
+                .chain([
+                    "-c".to_string(),
+                    "approvals_reviewer=\"auto_review\"".to_string(),
+                ])
+                .chain(sandbox)
+                .collect(),
+        )),
+        Some("bypass") => Ok(Some(vec![
+            "--dangerously-bypass-approvals-and-sandbox".to_string()
+        ])),
+        Some(other) => Err(format!(
+            "permission_mode {other:?} is not one of default, accept-edits, bypass"
+        )),
+    }
+}
+
 /// The shell line that starts the CLI. A Claude conversation is pinned to the
 /// engine's conversation id (`--session-id`), or resumed from the transcript
 /// the engine seeded (`--resume`), so the transcript this agent writes back is
@@ -883,14 +965,28 @@ pub fn command_line(config: &Config) -> Result<String, AgentError> {
         // entry is an inline table: `-c` splits its key on every `.`, so a
         // dotted `projects."/work".trust_level` names a project called
         // `"/work"`, quotes included, and never matches. `--skip-git-repo-check`
-        // is an `exec` flag the interactive CLI refuses.
+        // is an `exec` flag the interactive CLI refuses. The posture flags come
+        // from `codex_permission_flags`, the same function the host launch
+        // uses (WI-3864): the pod cannot create the user namespace the CLI's
+        // default sandbox needs, so the absent posture is still `default`, not
+        // "let the CLI decide" (`-s danger-full-access -a never`).
         "codex" => {
             let cwd = config.cwd.as_deref().unwrap_or(DEFAULT_WORK_DIR);
             let setting = format!(
                 "projects={{{}={{trust_level=\"trusted\"}}}}",
                 toml_basic_string(cwd)
             );
-            Ok(format!("codex -c {}", sh_quote(Path::new(&setting))))
+            let mut line = format!("codex -c {}", sh_quote(Path::new(&setting)));
+            let mode = Some(config.permission_mode.as_deref().unwrap_or("default"));
+            if let Some(flags) = codex_permission_flags(mode, false, &config.codex_approval_policy)
+                .map_err(AgentError::Pty)?
+            {
+                for flag in flags {
+                    line.push(' ');
+                    line.push_str(&sh_quote(Path::new(&flag)));
+                }
+            }
+            Ok(line)
         }
         "opencode" => Ok("opencode".into()),
         _ => Err(AgentError::Pty(
@@ -1303,6 +1399,8 @@ mod tests {
             account: None,
             conversation_id: None,
             resume: false,
+            permission_mode: None,
+            codex_approval_policy: CODEX_APPROVAL_DEFAULT.into(),
             claude: ClaudeLaunch::default(),
         };
         let (_reader, _writer, child, _master) = spawn_pty(&config).unwrap();
@@ -1326,6 +1424,8 @@ mod tests {
             account: None,
             conversation_id: None,
             resume: false,
+            permission_mode: None,
+            codex_approval_policy: CODEX_APPROVAL_DEFAULT.into(),
             claude: ClaudeLaunch::default(),
         }
     }
@@ -1661,6 +1761,8 @@ mod tests {
             account: None,
             conversation_id: None,
             resume: false,
+            permission_mode: None,
+            codex_approval_policy: CODEX_APPROVAL_DEFAULT.into(),
             claude: ClaudeLaunch::default(),
         };
         let (_reader, _writer, mut child, master) = spawn_pty(&config).unwrap();
@@ -1689,6 +1791,8 @@ mod tests {
             account: None,
             conversation_id: Some("abc-123".into()),
             resume: false,
+            permission_mode: None,
+            codex_approval_policy: CODEX_APPROVAL_DEFAULT.into(),
             claude: ClaudeLaunch::default(),
         };
         assert!(command_line(&config)
@@ -1706,11 +1810,11 @@ mod tests {
         );
     }
 
-    /// The argv `claude` sees when the shell runs `line`, one word per line.
-    fn argv_of(line: &str) -> Vec<String> {
+    /// The argv `name` sees when the shell runs `line`, one word per line.
+    fn argv_of_cli(name: &str, line: &str) -> Vec<String> {
         let out = std::process::Command::new("/bin/sh")
             .arg("-c")
-            .arg(format!("claude() {{ printf '%s\\n' \"$@\"; }}; {line}"))
+            .arg(format!("{name}() {{ printf '%s\\n' \"$@\"; }}; {line}"))
             .env("VOGT_SESSION_CWD", "/work")
             .output()
             .unwrap();
@@ -1720,6 +1824,11 @@ mod tests {
             .lines()
             .map(str::to_owned)
             .collect()
+    }
+
+    /// The argv `claude` sees when the shell runs `line`, one word per line.
+    fn argv_of(line: &str) -> Vec<String> {
+        argv_of_cli("claude", line)
     }
 
     #[test]
@@ -1739,6 +1848,8 @@ mod tests {
             account: None,
             conversation_id: Some("abc-123".into()),
             resume: false,
+            permission_mode: None,
+            codex_approval_policy: CODEX_APPROVAL_DEFAULT.into(),
             claude: ClaudeLaunch {
                 settings: Some(IMAGE_SETTINGS_FILE.into()),
                 mcp_config: Some("/run/vogt/mcp.json".into()),
@@ -1782,6 +1893,8 @@ mod tests {
             account: None,
             conversation_id: Some("abc-123".into()),
             resume,
+            permission_mode: None,
+            codex_approval_policy: CODEX_APPROVAL_DEFAULT.into(),
             claude,
         }
     }
@@ -1846,6 +1959,8 @@ mod tests {
             account: None,
             conversation_id: None,
             resume: false,
+            permission_mode: None,
+            codex_approval_policy: CODEX_APPROVAL_DEFAULT.into(),
             claude: ClaudeLaunch::default(),
         };
         assert_eq!(command_line(&config).unwrap(), "opencode");
@@ -1854,9 +1969,74 @@ mod tests {
         config.cli = "codex".into();
         assert_eq!(
             command_line(&config).unwrap(),
-            r#"codex -c 'projects={"/work"={trust_level="trusted"}}'"#
+            r#"codex -c 'projects={"/work"={trust_level="trusted"}}' '-a' 'never' '-s' 'danger-full-access'"#
         );
         config.cli = "nope".into();
+        assert!(command_line(&config).is_err());
+    }
+
+    /// WI-3864: a pod Codex gets the same posture flags as a host Codex. The
+    /// pod cannot create the user namespace `workspace-write` needs, so every
+    /// posture names `danger-full-access`; a bypass drops the sandbox and the
+    /// approvals together.
+    #[test]
+    fn a_pod_codex_line_carries_the_same_posture_as_a_host_launch() {
+        let mut config = claude_config(ClaudeLaunch::default(), false);
+        config.cli = "codex".into();
+
+        // Default: the deployment's approval policy, never by default.
+        let argv = argv_of_cli("codex", &command_line(&config).unwrap());
+        assert_eq!(
+            argv,
+            [
+                "-c",
+                r#"projects={"/work"={trust_level="trusted"}}"#,
+                "-a",
+                "never",
+                "-s",
+                "danger-full-access",
+            ]
+        );
+
+        // accept-edits keeps the sandbox and adds the auto reviewer.
+        config.permission_mode = Some("accept-edits".into());
+        let argv = argv_of_cli("codex", &command_line(&config).unwrap());
+        assert_eq!(
+            &argv[2..],
+            [
+                "-a",
+                "never",
+                "-c",
+                "approvals_reviewer=\"auto_review\"",
+                "-s",
+                "danger-full-access",
+            ]
+        );
+
+        // A deployment that restores asking passes `on-request` through.
+        config.permission_mode = Some("accept_edits".into());
+        config.codex_approval_policy = "on-request".into();
+        let argv = argv_of_cli("codex", &command_line(&config).unwrap());
+        assert!(
+            argv.windows(2).any(|w| w == ["-a", "on-request"]),
+            "{argv:?}"
+        );
+        assert!(argv.contains(&"-s".to_string()), "{argv:?}");
+        assert!(argv.contains(&"danger-full-access".to_string()), "{argv:?}");
+
+        // Bypass drops both, and the pod never falls back to the CLI's own
+        // `workspace-write` sandbox.
+        config.permission_mode = Some("bypass".into());
+        config.codex_approval_policy = "never".into();
+        let line = command_line(&config).unwrap();
+        assert!(
+            line.contains("--dangerously-bypass-approvals-and-sandbox"),
+            "{line}"
+        );
+        assert!(!line.contains(" -s "), "{line}");
+
+        // An unknown posture is refused, not handed to the CLI.
+        config.permission_mode = Some("yolo".into());
         assert!(command_line(&config).is_err());
     }
 
@@ -1938,6 +2118,8 @@ mod tests {
             account: None,
             conversation_id: None,
             resume: false,
+            permission_mode: None,
+            codex_approval_policy: CODEX_APPROVAL_DEFAULT.into(),
             claude: ClaudeLaunch::default(),
         };
         // No requirements file in the pod.
@@ -1989,6 +2171,8 @@ mod tests {
             account: None,
             conversation_id: None,
             resume: false,
+            permission_mode: None,
+            codex_approval_policy: CODEX_APPROVAL_DEFAULT.into(),
             claude: ClaudeLaunch {
                 settings: Some("/a b/it's; touch /tmp/x.json".into()),
                 mcp_config: None,
@@ -2074,6 +2258,8 @@ mod tests {
             account: None,
             conversation_id: None,
             resume: false,
+            permission_mode: None,
+            codex_approval_policy: CODEX_APPROVAL_DEFAULT.into(),
             claude: ClaudeLaunch::default(),
         };
         let (mut reader, _writer, mut child, _master) = spawn_pty(&config).unwrap();

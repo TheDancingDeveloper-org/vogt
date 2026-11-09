@@ -884,6 +884,8 @@ fn pod_env(
     source: &SourceDescriptor,
     source_env: &[(String, String)],
     id: Uuid,
+    permission_mode: Option<&str>,
+    codex_approval_policy: &str,
 ) -> Vec<EnvVar> {
     let mut env = vec![
         EnvVar {
@@ -920,6 +922,24 @@ fn pod_env(
             ..Default::default()
         },
     ];
+    // The session agent builds the pod's Codex line itself, so the posture the
+    // engine validated and would have put on a host argv has to travel with
+    // the pod (WI-3864). The default posture is the CLI default: leave the
+    // variable out and the pod's own `Config` applies it.
+    if let Some(mode) = permission_mode.map(str::trim) {
+        if !mode.is_empty() && mode != "default" {
+            env.push(EnvVar {
+                name: "VOGT_PERMISSION_MODE".into(),
+                value: Some(mode.to_string()),
+                ..Default::default()
+            });
+        }
+    }
+    env.push(EnvVar {
+        name: "VOGT_CODEX_APPROVAL_POLICY".into(),
+        value: Some(codex_approval_policy.to_string()),
+        ..Default::default()
+    });
     if let Some(url) = &cfg.mcp_url {
         env.push(EnvVar {
             name: "VOGT_MCP_URL".into(),
@@ -1074,6 +1094,8 @@ pub fn pod_template(
     kind: &str,
     account: Option<&str>,
     model: Option<&str>,
+    permission_mode: Option<&str>,
+    codex_approval_policy: &str,
     command: &[String],
 ) -> Pod {
     let mut labels = BTreeMap::from([
@@ -1093,7 +1115,14 @@ pub fn pod_template(
         .iter()
         .find_map(|(k, v)| (k == "VOGT_SESSION_IMAGE").then_some(v.as_str()))
         .unwrap_or(&cfg.default_image);
-    let mut env = pod_env(cfg, source, source_env, id);
+    let mut env = pod_env(
+        cfg,
+        source,
+        source_env,
+        id,
+        permission_mode,
+        codex_approval_policy,
+    );
     if let Some(model) = model {
         env.push(EnvVar {
             name: "VOGT_MODEL".into(),
@@ -2012,6 +2041,8 @@ mod tests {
                 "session",
                 None,
                 None,
+                None,
+                vogt_session_agent::CODEX_APPROVAL_DEFAULT,
                 &[],
             );
             let carried: SourceDescriptor =
@@ -2086,6 +2117,8 @@ mod tests {
             "agent",
             Some("acct"),
             None,
+            None,
+            vogt_session_agent::CODEX_APPROVAL_DEFAULT,
             &["bash".into()],
         );
         let labels = pod.metadata.labels.unwrap();
@@ -2254,6 +2287,8 @@ mod tests {
             "session",
             None,
             None,
+            None,
+            vogt_session_agent::CODEX_APPROVAL_DEFAULT,
             &[],
         );
         let metadata = pod.metadata;
@@ -2289,12 +2324,26 @@ mod tests {
     fn pod_env_carries_the_providers_source_env() {
         let cfg = PodConfig::default();
         let src = default_source(&cfg);
-        let env = pod_env(&cfg, &src, &source_env(&src), Uuid::nil());
+        let env = pod_env(
+            &cfg,
+            &src,
+            &source_env(&src),
+            Uuid::nil(),
+            None,
+            vogt_session_agent::CODEX_APPROVAL_DEFAULT,
+        );
         let stub = env.iter().find(|v| v.name == "STUB_SOURCE_REPO");
         assert_eq!(stub.and_then(|v| v.value.as_deref()), Some("vogt"));
-        assert!(pod_env(&cfg, &src, &[], Uuid::nil())
-            .iter()
-            .all(|v| v.name != "STUB_SOURCE_REPO"));
+        assert!(pod_env(
+            &cfg,
+            &src,
+            &[],
+            Uuid::nil(),
+            None,
+            vogt_session_agent::CODEX_APPROVAL_DEFAULT,
+        )
+        .iter()
+        .all(|v| v.name != "STUB_SOURCE_REPO"));
     }
 
     #[test]
@@ -2303,7 +2352,14 @@ mod tests {
             extra_ca_file: Some("/etc/ssl/custom.pem".into()),
             ..Default::default()
         };
-        let env = pod_env(&cfg, &default_source(&cfg), &[], Uuid::nil());
+        let env = pod_env(
+            &cfg,
+            &default_source(&cfg),
+            &[],
+            Uuid::nil(),
+            None,
+            vogt_session_agent::CODEX_APPROVAL_DEFAULT,
+        );
         assert_eq!(
             env.iter()
                 .find(|v| v.name == "VOGT_EXTRA_CA_FILE")
@@ -2320,7 +2376,14 @@ mod tests {
             mcp_url: Some("http://vogt-engine.vogt.svc:8910/mcp".into()),
             ..Default::default()
         };
-        let env = pod_env(&cfg, &default_source(&cfg), &[], Uuid::nil());
+        let env = pod_env(
+            &cfg,
+            &default_source(&cfg),
+            &[],
+            Uuid::nil(),
+            None,
+            vogt_session_agent::CODEX_APPROVAL_DEFAULT,
+        );
         assert_eq!(
             env.iter()
                 .find(|variable| variable.name == "VOGT_MCP_URL")
@@ -2632,6 +2695,8 @@ mod tests {
                 "session",
                 None,
                 None,
+                None,
+                vogt_session_agent::CODEX_APPROVAL_DEFAULT,
                 command,
             );
             pod.spec.unwrap().containers[0]
@@ -2660,6 +2725,70 @@ mod tests {
         let env = env_of(&argv(&["bash", "-l"]));
         assert_eq!(env["VOGT_CLI"], cfg.cli);
         assert_eq!(env["VOGT_SESSION_COMMAND"], r#"["bash","-l"]"#);
+    }
+
+    /// WI-3864: the pod's session agent builds the Codex line, so the posture
+    /// the engine validated has to reach it in the env. The default posture is
+    /// left out so the pod's own default applies.
+    #[test]
+    fn a_pod_carries_the_codex_posture_the_engine_validated() {
+        let cfg = PodConfig::default();
+        let template = SessionTemplate {
+            name: "Codex (protected)".into(),
+            description: "codex".into(),
+            command: None,
+            cwd: None,
+            env: vec![],
+            default_name: None,
+            match_repo_names: vec![],
+            match_path_prefixes: vec![],
+            tags: vec![],
+            backend: "pod".into(),
+            host_capable: false,
+            pod_capable: false,
+            account: None,
+        };
+        let env_of = |mode: Option<&str>, approval: &str| {
+            let pod = pod_template(
+                &cfg,
+                &template,
+                Uuid::nil(),
+                &default_source(&cfg),
+                &[],
+                "session",
+                None,
+                None,
+                mode,
+                approval,
+                &[
+                    "vogt-agent-auth".into(),
+                    "run".into(),
+                    "--".into(),
+                    "codex".into(),
+                ],
+            );
+            pod.spec.unwrap().containers[0]
+                .env
+                .clone()
+                .unwrap()
+                .into_iter()
+                .map(|e| (e.name, e.value.unwrap_or_default()))
+                .collect::<BTreeMap<_, _>>()
+        };
+
+        let env = env_of(None, "never");
+        assert_eq!(env["VOGT_CODEX_APPROVAL_POLICY"], "never");
+        assert!(
+            !env.contains_key("VOGT_PERMISSION_MODE"),
+            "the default posture is the pod's own default"
+        );
+
+        let env = env_of(Some("accept-edits"), "on-request");
+        assert_eq!(env["VOGT_PERMISSION_MODE"], "accept-edits");
+        assert_eq!(env["VOGT_CODEX_APPROVAL_POLICY"], "on-request");
+
+        let env = env_of(Some("default"), "never");
+        assert!(!env.contains_key("VOGT_PERMISSION_MODE"));
     }
 
     #[test]
@@ -2692,6 +2821,8 @@ mod tests {
             "session",
             None,
             None,
+            None,
+            vogt_session_agent::CODEX_APPROVAL_DEFAULT,
             &[],
         );
         assert_eq!(
@@ -3282,6 +3413,8 @@ mod tests {
             "session",
             None,
             None,
+            None,
+            vogt_session_agent::CODEX_APPROVAL_DEFAULT,
             &[],
         )
     }
