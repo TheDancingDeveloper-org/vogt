@@ -4839,7 +4839,12 @@ when the caller's `cwd` is inside the checkout), the source provider's env
 `ENGINE_CODEX_APPROVAL_POLICY`, `never` by default) and, for a posture other
 than the default, `VOGT_PERMISSION_MODE`; the session agent feeds both to the
 same `codex_permission_flags` the host launch uses (WI-3864), and the model,
-effort and posture to the shared `claude_args` (WI-3881).
+effort and posture to the shared `claude_args` (WI-3881). The bootstrap
+response's `env` also carries the four names-only agent-auth breadcrumbs
+`AGENT_AUTH_MODE` (`brokered`), `AGENT_AUTH_GRANTED`, `AGENT_AUTH_ONDEMAND` and
+`AGENT_AUTH_WRITABLE` (WI-3884), so in-pod `vogt-agent-auth fetch`, `store` and
+`grants` see the same contract as a host session without a value entering the
+bootstrap response.
 
 The container's root filesystem is read-only (`readOnlyRootFilesystem: true`)
 on top of the existing uid/gid 1000, no-privilege-escalation and dropped
