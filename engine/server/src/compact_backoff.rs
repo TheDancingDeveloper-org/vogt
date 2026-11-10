@@ -68,8 +68,8 @@ pub fn default_limit() -> u64 {
 
 /// Codex compacts at `min(limit, 90% of the window)`; a limit above that does
 /// nothing, so a backed-off limit stops there.
-fn limit_ceiling() -> u64 {
-    MODEL_WINDOW_TOKENS / 10 * 9
+fn limit_ceiling(window: u64) -> u64 {
+    window / 10 * 9
 }
 
 /// Forget the floor: the session compacts cleanly again.
@@ -85,8 +85,24 @@ pub fn clear_floor(state_dir: &Path, session: Uuid) {
 /// never at or below it (that would lower the limit and make Codex compact
 /// more), and never above the ceiling where Codex stops compacting at all.
 pub fn launch_limit(state_dir: &Path, session: Uuid, default: u64) -> Option<u64> {
+    launch_limit_for_window(state_dir, session, default, MODEL_WINDOW_TOKENS)
+}
+
+/// [`launch_limit`] for a provider that states its own context window and
+/// limit (WI-3871). The selected provider's `default` and window are the base,
+/// so a floor can only raise the limit from what that provider actually runs
+/// with — never from the deployment's 272k/200k defaults, which describe a
+/// different model.
+pub fn launch_limit_for_window(
+    state_dir: &Path,
+    session: Uuid,
+    default: u64,
+    window: u64,
+) -> Option<u64> {
     let wanted = load_floor(state_dir, session)?.saturating_add(COMPACT_MARGIN_TOKENS);
-    let limit = wanted.min(limit_ceiling());
+    // A provider limit above the provider window's ceiling already suppresses
+    // compaction on its own; never back off below it.
+    let limit = wanted.min(limit_ceiling(window)).max(default);
     (limit > default).then_some(limit)
 }
 
@@ -142,6 +158,34 @@ mod tests {
         assert!(limit < MODEL_WINDOW_TOKENS);
         // A default already at the ceiling has nothing to raise to.
         assert_eq!(launch_limit(dir.path(), id, limit), None);
+    }
+
+    /// WI-3871 review blocker 1: a provider's own window and limit are the
+    /// base, so the backoff is derived from 500k/1M, not from 200k/272k.
+    #[test]
+    fn a_provider_limit_is_the_base_for_the_backoff() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = Uuid::new_v4();
+        // A floor that would raise the global 200k default is well clear of a
+        // provider's 500k limit, so it must not lower the provider's limit.
+        record_floor(dir.path(), id, 300_000).unwrap();
+        assert_eq!(
+            launch_limit_for_window(dir.path(), id, 500_000, 1_000_000),
+            None
+        );
+        // Past floor + margin over the provider limit, the raise is derived
+        // from the provider's limit and clamped under its window.
+        record_floor(dir.path(), id, 520_000).unwrap();
+        assert_eq!(
+            launch_limit_for_window(dir.path(), id, 500_000, 1_000_000),
+            Some(540_000)
+        );
+        // The ceil is 90% of the provider window, not of 272k.
+        record_floor(dir.path(), id, 950_000).unwrap();
+        assert_eq!(
+            launch_limit_for_window(dir.path(), id, 500_000, 1_000_000),
+            Some(900_000)
+        );
     }
 
     #[test]

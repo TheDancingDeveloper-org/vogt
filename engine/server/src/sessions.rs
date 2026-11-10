@@ -1278,10 +1278,28 @@ impl SessionRegistry {
             .as_deref()
             .and_then(agent_cli::codex_args_of)
             .unwrap_or_default();
-        let codex_compact_limit = crate::compact_backoff::launch_limit(
+        // The provider registry is read here, before the worktree is cut:
+        // the selected provider's own window and compact limit are the base
+        // for the compact backoff (WI-3871). A floor raises from what the
+        // provider actually runs with, never from the deployment defaults
+        // meant for a different model.
+        let codex_providers = if codex_agent {
+            self.secret_broker.providers()
+        } else {
+            Vec::new()
+        };
+        let codex_selection = codex_agent
+            .then(|| crate::llm_providers::codex_selection(spec.model.as_deref(), &codex_providers))
+            .flatten();
+        let (provider_limit, provider_window) = codex_selection
+            .as_ref()
+            .map(|(_, provider)| (provider.auto_compact_token_limit, provider.context_window))
+            .unwrap_or((None, None));
+        let codex_compact_limit = crate::compact_backoff::launch_limit_for_window(
             &self.cfg.state_dir,
             id,
-            crate::compact_backoff::default_limit(),
+            provider_limit.unwrap_or_else(crate::compact_backoff::default_limit),
+            provider_window.unwrap_or(crate::compact_backoff::MODEL_WINDOW_TOKENS),
         );
         let mut pod_launch = if pod_backed {
             // A wake (or an engine restart adopting a pod) replays a record
@@ -1483,14 +1501,6 @@ impl SessionRegistry {
             .unwrap_or_else(|| self.cfg.default_cwd.clone());
         let codex_guidance = codex_agent
             .then(|| crate::codex_guidance::developer_instructions(&codex_cwd, home.as_deref()))
-            .flatten();
-        let codex_providers = if codex_agent {
-            self.secret_broker.providers()
-        } else {
-            Vec::new()
-        };
-        let codex_selection = codex_agent
-            .then(|| crate::llm_providers::codex_selection(spec.model.as_deref(), &codex_providers))
             .flatten();
         let codex_provider = codex_selection
             .as_ref()
