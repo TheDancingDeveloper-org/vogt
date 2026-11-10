@@ -131,7 +131,9 @@ fi
 # No git and no gh means nothing the policy can refuse, so do not ask. This
 # reads the raw payload, not the translation: a Codex command may be a JSON
 # array, and the translated string escapes the newlines that separate words.
-printf '%s' "$raw" | grep -Eq '(^|[^[:alnum:]_])(git|gh)([^[:alnum:]_]|$)' || exit 0
+# `rm` is asked too: a plain rm deletes the files a discard guard protects
+# (WI-1326), and the engine reads it as `git rm` for that rule.
+printf '%s' "$raw" | grep -Eq '(^|[^[:alnum:]_])(git|gh|rm)([^[:alnum:]_]|$)' || exit 0
 
 url="${VOGT_ENGINE_BROKER_URL:-}"
 token="${VOGT_ENGINE_BROKER_TOKEN:-}"
