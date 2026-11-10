@@ -58,8 +58,15 @@ const KEY: &str = "developer_instructions";
 /// The `-c` value for a Codex session working in `cwd`, or `None` when there
 /// is no guidance to carry. `home` is the engine user's home directory.
 pub fn developer_instructions_override(cwd: &Path, home: Option<&Path>) -> Option<String> {
-    let body = gather(cwd, home)?;
+    let body = developer_instructions(cwd, home)?;
     Some(format!("{KEY}={}", toml_basic_string(&body)))
+}
+
+/// The workspace guidance body a Codex launch starts with, before any charter.
+/// The host launcher and the pod's `VOGT_CODEX_LAUNCH_B64` carry the same body
+/// into the shared builder (WI-3882).
+pub fn developer_instructions(cwd: &Path, home: Option<&Path>) -> Option<String> {
+    gather(cwd, home)
 }
 
 /// True when `command` already carries a guidance override.

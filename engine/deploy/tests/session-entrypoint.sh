@@ -206,20 +206,26 @@ rolled="$tmp/codexbundle/home/.codex/sessions/2026/11/09/rollout-2026-11-09T00-0
 out=$(run_case "$tmp/codexhome" VOGT_CLI=codex CODEX_HOME="$tmp/codexhome/codex" BUNDLE_JSON="$CODEX_BUNDLE" 2>&1) || fail "explicit CODEX_HOME path: $out"
 [[ $(<"$tmp/codexhome/codex/sessions/2026/11/09/rollout-2026-11-09T00-00-00-s1.jsonl") == rollout ]] || fail "codex rollout not restored under CODEX_HOME from the environment"
 [ ! -e "$tmp/codexhome/home/.codex/sessions" ] || fail "codex rollout written under the default home"
-# WI-3161: Codex gets the engine's MCP servers in $CODEX_HOME/config.toml,
-# replacing only the tables the engine owns; opencode gets opencode.json.
+# WI-3161/WI-3882: Codex gets the engine's MCP servers in
+# $CODEX_HOME/config.toml, replacing only the tables the engine owns. The full
+# bootstrap fragment (providers and model selection too) is kept beside it for
+# the session agent's `-c` builder; opencode gets opencode.json.
 # shellcheck disable=SC2016
 CODEX_TOML=$'[mcp_servers.vogt]\nurl = "https://e/mcp"\nbearer_token_env_var = "VOGT_HTTP_TOKEN"\n\n'
 mkdir -p "$tmp/codexcfg/home/.codex"
 printf '[model]\nname = "x"\n\n[mcp_servers.vogt]\nurl = "https://stale/mcp"\n\n[mcp_servers.other]\nurl = "https://o"\n' >"$tmp/codexcfg/home/.codex/config.toml"
 out=$(run_case "$tmp/codexcfg" VOGT_CLI=codex CODEX_CONFIG="$CODEX_TOML" 2>&1) || fail "codex config path: $out"
 cfg="$tmp/codexcfg/home/.codex/config.toml"
+frag="$tmp/codexcfg/home/.codex/vogt-codex.toml"
 [[ $(stat -c %a "$cfg") == 600 ]] || fail "codex config mode"
+[[ $(stat -c %a "$frag") == 600 ]] || fail "codex fragment mode"
 grep -q 'url = "https://e/mcp"' "$cfg" || fail "codex vogt table missing"
+grep -q 'url = "https://e/mcp"' "$frag" || fail "codex fragment missing"
 ! grep -q stale "$cfg" || fail "stale vogt table kept"
 { grep -q '^\[model\]' "$cfg" && grep -q 'mcp_servers.other' "$cfg"; } || fail "codex config's own tables lost"
 [ "$(grep -c 'mcp_servers.vogt' "$cfg")" = 1 ] || fail "duplicate vogt table"
 grep -q '^session-entrypoint: codex posture: mcp-config$' <<<"$out" || fail "codex posture line"
+grep -q "^VOGT_CODEX_CONFIG_FILE=$frag$" "$tmp/codexcfg/agent.env" || fail "codex fragment not exported"
 ! grep -q 'minted' "$cfg" || fail "credential in codex config"
 # WI-3288: quoted, spaced and dotted-key forms of the owned tables are replaced
 # too, so Codex never sees a duplicate table.
@@ -247,16 +253,19 @@ cfg="$tmp/codexq/home/.codex/config.toml"
 grep -q 'url = "https://e/mcp"' "$cfg" || fail "codex vogt table missing (quoted case)"
 { grep -q '^model = "x"' "$cfg" && grep -q 'keep.url' "$cfg" && grep -q 'other.one' "$cfg" && grep -q '^  "a",' "$cfg"; } || fail "codex config's own entries lost (quoted case)"
 [ "$(grep -c '^\[mcp_servers.vogt\]' "$cfg")" = 1 ] || fail "duplicate vogt table (quoted case)"
-# WI-3491: a registered LLM provider replaces a table of the same name; the
-# config's other providers stay, and no table is declared twice.
+# WI-3491/WI-3882: a registered LLM provider is an argv override now, so the
+# fragment carries it and the shared config is not rewritten with it. The
+# config's own providers stay where they are.
 mkdir -p "$tmp/codexprov/home/.codex"
 printf '[model_providers.deepseek]\nbase_url = "https://stale"\n\n[model_providers.mine]\nbase_url = "https://m"\n' >"$tmp/codexprov/home/.codex/config.toml"
 PROV_TOML="$CODEX_TOML"$'\n[model_providers.deepseek]\nname = "deepseek"\nbase_url = "https://new/v1"\nwire_api = "chat"\nenv_key = "DEEPSEEK_KEY"\n'
 out=$(run_case "$tmp/codexprov" VOGT_CLI=codex CODEX_CONFIG="$PROV_TOML" 2>&1) || fail "codex provider path: $out"
 cfg="$tmp/codexprov/home/.codex/config.toml"
-[ "$(grep -c '^\[model_providers.deepseek\]' "$cfg")" = 1 ] || fail "duplicate provider table"
-grep -q 'base_url = "https://new/v1"' "$cfg" || fail "provider table not replaced"
-! grep -q 'https://stale' "$cfg" || fail "stale provider table kept"
+frag="$tmp/codexprov/home/.codex/vogt-codex.toml"
+[ "$(grep -c '^\[model_providers.deepseek\]' "$frag")" = 1 ] || fail "provider table not in fragment"
+grep -q 'base_url = "https://new/v1"' "$frag" || fail "provider table missing from fragment"
+! grep -q 'https://new/v1' "$cfg" || fail "provider table merged into shared config"
+grep -q 'https://stale' "$cfg" || fail "config's own provider table rewritten"
 grep -q '^\[model_providers.mine\]' "$cfg" || fail "config's own provider lost"
 OC='{"mcp":{"vogt":{"type":"remote","url":"https://e/mcp"}}}'
 out=$(run_case "$tmp/ocfg" VOGT_CLI=opencode OPENCODE_CONFIG="$OC" XDG_CONFIG_HOME="$tmp/ocfg/xdg" 2>&1) || fail "opencode path: $out"

@@ -1265,7 +1265,24 @@ impl SessionRegistry {
         if pod_backed {
             validate_pod_placement_fields(worktree.is_some())?;
         }
-        let pod_launch = if pod_backed {
+        // The Codex launch data the pod cannot derive itself (WI-3882). The
+        // guidance and trust path are built after a worktree is cut, so they
+        // name the directory the agent actually runs in.
+        let codex_agent = base_command
+            .as_deref()
+            .and_then(agent_cli::agent_name)
+            .as_deref()
+            == Some("codex");
+        let codex_template_args = base_command
+            .as_deref()
+            .and_then(agent_cli::codex_args_of)
+            .unwrap_or_default();
+        let codex_compact_limit = crate::compact_backoff::launch_limit(
+            &self.cfg.state_dir,
+            id,
+            crate::compact_backoff::default_limit(),
+        );
+        let mut pod_launch = if pod_backed {
             // A wake (or an engine restart adopting a pod) replays a record
             // whose cwd and env were validated when the session started, so
             // it must not refuse now: a checkout removed since, or a name
@@ -1347,30 +1364,26 @@ impl SessionRegistry {
             &self.cfg.state_dir,
             id,
         );
-        let launch = agent_cli::launch(
-            spec.command.as_deref(),
-            &agent_cli::LaunchRequest {
-                model: spec.model.as_deref(),
-                effort: spec.effort.as_deref(),
-                resume: spec.resume.as_deref(),
-                brief_file: brief_path.as_deref(),
-                // A compacting wake pins a new conversation id (WI-2037): the
-                // engine id is the conversation it replaces.
-                session_id: Some(conversation_pin),
-                codex_session_id: self.cfg.codex_session_id,
-                permission_mode: spec.permission_mode.as_deref(),
-                settings_file,
-                add_dirs: recorded.map(|r| r.add_dirs.as_slice()).unwrap_or(&[]),
-                opencode_config: self.cfg.agent_onboarding.opencode_config.as_deref(),
-                codex_approval_policy: self.cfg.codex_approval_policy.as_str(),
-                mcp: Some(&mcp_trim),
-                codex_compact_limit: crate::compact_backoff::launch_limit(
-                    &self.cfg.state_dir,
-                    id,
-                    crate::compact_backoff::default_limit(),
-                ),
-            },
-        )?;
+        let launch_request = agent_cli::LaunchRequest {
+            model: spec.model.as_deref(),
+            effort: spec.effort.as_deref(),
+            resume: spec.resume.as_deref(),
+            brief_file: brief_path.as_deref(),
+            // A compacting wake pins a new conversation id (WI-2037): the
+            // engine id is the conversation it replaces.
+            session_id: Some(conversation_pin),
+            codex_session_id: self.cfg.codex_session_id,
+            permission_mode: spec.permission_mode.as_deref(),
+            settings_file,
+            add_dirs: recorded.map(|r| r.add_dirs.as_slice()).unwrap_or(&[]),
+            opencode_config: self.cfg.agent_onboarding.opencode_config.as_deref(),
+            codex_approval_policy: self.cfg.codex_approval_policy.as_str(),
+            mcp: Some(&mcp_trim),
+            codex_compact_limit,
+        };
+        // Validated now, before any worktree is cut; Codex's cwd-dependent
+        // overrides are added again after the worktree exists (WI-3882).
+        let launch = agent_cli::launch(spec.command.as_deref(), &launch_request)?;
         if let Some(rewritten) = launch.command {
             spec.command = Some(rewritten);
         }
@@ -1458,6 +1471,75 @@ impl SessionRegistry {
             spec.cwd = Some(created.to_string_lossy().into_owned());
             cut.0 = Some((checkout, created, worktree.branch.trim().to_string()));
         }
+        // Codex's cwd-dependent overrides are built here, where the session
+        // actually runs (WI-3882). The first launch above validated the model
+        // and conversation before any worktree was cut; this one adds the
+        // guidance, trust, provider and compact overrides the pod also gets.
+        let codex_cwd = spec
+            .cwd
+            .as_deref()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| self.cfg.default_cwd.clone());
+        let codex_guidance = codex_agent
+            .then(|| crate::codex_guidance::developer_instructions(&codex_cwd, home.as_deref()))
+            .flatten();
+        let codex_providers = if codex_agent {
+            self.secret_broker.providers()
+        } else {
+            Vec::new()
+        };
+        let codex_selection = codex_agent
+            .then(|| crate::llm_providers::codex_selection(spec.model.as_deref(), &codex_providers))
+            .flatten();
+        let codex_provider = codex_selection
+            .as_ref()
+            .map(|(_, provider)| provider.name.clone());
+        let codex_config_model = codex_selection.as_ref().map(|(model, _)| model.clone());
+        let codex_provider_args: Vec<vogt_session_agent::CodexProvider> = codex_providers
+            .iter()
+            .map(|provider| vogt_session_agent::CodexProvider {
+                name: provider.name.clone(),
+                base_url: provider.base_url.clone(),
+                wire_api: provider.wire_api.clone(),
+                env_key: provider.env_key.clone(),
+            })
+            .collect();
+        if codex_agent {
+            let extras = agent_cli::CodexExtras {
+                guidance: codex_guidance.as_deref(),
+                charter: spec.charter.as_deref(),
+                providers: &codex_provider_args,
+                provider: codex_provider.as_deref(),
+                config_model: codex_config_model.as_deref(),
+                trust_cwd: Some(codex_cwd.as_path()),
+                mcp_servers: &mcp_trim.codex_servers,
+            };
+            let launch =
+                agent_cli::launch_with_codex(base_command.as_deref(), &launch_request, &extras)?;
+            if let Some(rewritten) = launch.command {
+                spec.command = Some(rewritten);
+            }
+        }
+        let codex_launch = vogt_session_agent::CodexLaunch {
+            guidance: codex_guidance,
+            charter: spec.charter.clone(),
+            compact_limit: codex_compact_limit,
+            template_args: codex_template_args,
+            config_file: None,
+        };
+        if let Some(launch) = pod_launch.as_mut().filter(|_| codex_agent) {
+            // One base64 JSON value keeps the multi-line guidance out of the
+            // bootstrap's TSV environment path, which cannot carry a newline.
+            use base64::Engine as _;
+            let encoded = base64::engine::general_purpose::STANDARD
+                .encode(serde_json::to_vec(&codex_launch).expect("codex launch serializes"));
+            launch
+                .agent_env
+                .retain(|(name, _)| name != "VOGT_CODEX_LAUNCH_B64");
+            launch
+                .agent_env
+                .push(("VOGT_CODEX_LAUNCH_B64".into(), encoded));
+        }
 
         // The session's git tree and what was dirty in it beforehand
         // (WI-1324). Taken once, at the first start: a wake reuses the
@@ -1493,61 +1575,6 @@ impl SessionRegistry {
                 .unwrap_or_else(|| self.cfg.default_cwd.clone());
             if let Some(root) = crate::session_scratch::roots().into_iter().next() {
                 crate::session_scratch::write_scratch_cargo_config(&root, &cwd, shared);
-            }
-        }
-
-        // WI-1357. Codex reads no CLAUDE.md, .claude/rules or .claude/skills,
-        // and no AGENTS.md above its git root, so the workspace guidance a
-        // Claude session gets is handed over as one `-c` override. Built after
-        // the worktree is cut, because that is where the session runs.
-        if let Some(command) = spec.command.as_deref() {
-            let cwd = spec
-                .cwd
-                .as_deref()
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| self.cfg.default_cwd.clone());
-            let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-            if let Some(rewritten) = agent_cli::with_codex_guidance(command, &cwd, home.as_deref())
-            {
-                spec.command = Some(rewritten);
-            }
-        }
-        // WI-3815. Codex's first start in the pod's `/work` checkout otherwise
-        // stops at its interactive folder-trust screen before the driver can
-        // submit the brief. Keep this as a command-local override so it does
-        // not mutate the user's shared Codex config.
-        if let Some(command) = spec.command.as_deref() {
-            let cwd = spec
-                .cwd
-                .as_deref()
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| self.cfg.default_cwd.clone());
-            let cwd = if pod_backed && agent_cli::agent_name(command).as_deref() == Some("codex") {
-                // The engine's cwd is a host path. The pod entrypoint checks
-                // out into the session-agent's shared default instead, so
-                // build the host-side launch metadata with the pod's real
-                // cwd rather than an unusable host path.
-                std::path::PathBuf::from(vogt_session_agent::DEFAULT_WORK_DIR)
-            } else {
-                cwd
-            };
-            if let Some(rewritten) = agent_cli::with_codex_trust(command, &cwd) {
-                spec.command = Some(rewritten);
-            }
-        }
-        // WI-3491. The registered LLM providers, as this launch's own
-        // `model_providers`; their keys come through the manifest.
-        if let Some(command) = spec.command.as_deref() {
-            let providers = self.secret_broker.providers();
-            if let Some(rewritten) = agent_cli::with_codex_providers(command, &providers) {
-                spec.command = Some(rewritten);
-            }
-        }
-        // WI-2038. The scope's charters ride in Codex's standing
-        // instructions as well as in the brief, after the workspace guidance.
-        if let (Some(command), Some(charter)) = (spec.command.as_deref(), spec.charter.as_deref()) {
-            if let Some(rewritten) = agent_cli::with_codex_charter(command, charter) {
-                spec.command = Some(rewritten);
             }
         }
 
