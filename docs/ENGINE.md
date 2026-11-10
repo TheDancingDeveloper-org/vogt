@@ -4558,8 +4558,13 @@ models = ["deepseek-chat"]               # informational
 At each launch the registry does two things, and nothing else:
 
 - Each provider's `env_key` joins the agent-auth manifest as an `optional`
-  line (`env_key secret_project secret_name`). The helper resolves it into the
-  session, and the broker's policy covers it. A name in no manifest and no
+  line (`env_key secret_project secret_name`). A host launch resolves it
+  through the helper, so Codex gets the value. A pod launch does not: the
+  bootstrap names the key among the `AGENT_AUTH_ONDEMAND` breadcrumbs and
+  carries no value, and the session agent fetches each key into the Codex
+  child's environment through `vogt-agent-auth fetch` immediately before it
+  starts (WI-3886), so the value never joins the pod's long-lived process
+  tree. The broker's policy covers either path. A name in no manifest and no
   registry is still refused. A provider whose `env_key` is already a VAR in
   `ENGINE_AGENT_AUTH_SECRETS` or the manifest file is dropped whole: it gets
   no Codex table and no key fetch, and is logged by provider and VAR name.
@@ -4685,7 +4690,9 @@ may carry a third flag, `ondemand` — `VAR PROJECT_ID SECRET_NAME ondemand` —
 which declares `VAR` for sessions but does **not** resolve it at launch. It is
 never sitting in the session's environment for the whole session; it exists
 there only at the moment it is asked for. The session's environment lists
-those names in `AGENT_AUTH_ONDEMAND`, beside `AGENT_AUTH_GRANTED`. A session
+those names in `AGENT_AUTH_ONDEMAND`, beside `AGENT_AUTH_GRANTED`; a Codex
+pod's provider keys are listed there too, because the launch wrapper fetches
+them on demand rather than receiving them in the bootstrap (WI-3886). A session
 asks with `vogt-agent-auth fetch VAR`, which calls the engine's
 `POST /api/agent-auth/fetch/{var}` on loopback (`VOGT_ENGINE_BROKER_URL`) with a
 per-session broker token the engine minted at spawn (`VOGT_ENGINE_BROKER_TOKEN`)
@@ -4870,7 +4877,13 @@ response's `env` also carries the four names-only agent-auth breadcrumbs
 `AGENT_AUTH_MODE` (`brokered`), `AGENT_AUTH_GRANTED`, `AGENT_AUTH_ONDEMAND` and
 `AGENT_AUTH_WRITABLE` (WI-3884), so in-pod `vogt-agent-auth fetch`, `store` and
 `grants` see the same contract as a host session without a value entering the
-bootstrap response. A Codex pod also gets `VOGT_CODEX_LAUNCH_B64`, one base64
+bootstrap response. A Codex pod's registered provider keys appear in
+`AGENT_AUTH_ONDEMAND` by name and nowhere else in the response; the session
+agent fetches each one into the Codex child through `vogt-agent-auth fetch`
+just before the CLI starts (WI-3886). The entrypoint refuses a bootstrap that
+also carries a value for an ondemand name, so a regression fails the boot
+instead of exporting a provider key into the pod's whole process tree. A Codex
+pod also gets `VOGT_CODEX_LAUNCH_B64`, one base64
 JSON value carrying the guidance, charter, compact limit and template argv the
 pod cannot derive, and the entrypoint exports `VOGT_CODEX_CONFIG_FILE`;
 `codex_args` combines both with the fragment, so a host and a pod launch build
