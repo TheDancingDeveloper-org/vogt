@@ -678,6 +678,7 @@ pub async fn run_once(
                         Some(summary.clone()),
                         vogt_engine_contract::HibernateTrigger::Budget,
                         false,
+                        false,
                         None,
                     )
                     .await

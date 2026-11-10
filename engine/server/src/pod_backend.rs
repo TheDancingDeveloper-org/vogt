@@ -57,6 +57,9 @@ pub struct PodConfig {
     pub mcp_url: Option<String>,
     pub default_image: String,
     pub connect_timeout: Duration,
+    /// How long a running pod may go without an agent heartbeat.
+    #[serde(default = "default_heartbeat_timeout")]
+    pub heartbeat_timeout: Duration,
     /// Default resource policy; values are copied verbatim into the pod.
     pub resource_requests:
         BTreeMap<String, k8s_openapi::apimachinery::pkg::api::resource::Quantity>,
@@ -123,6 +126,9 @@ pub struct PodConfig {
     /// How often the reconciler compares the cluster with the engine's sessions.
     #[serde(default = "default_reconcile_interval")]
     pub reconcile_interval: Duration,
+    /// Maximum time between reconcile passes.
+    #[serde(default = "default_reconcile_timeout")]
+    pub reconcile_timeout: Duration,
     /// How long a pod may sit Pending (unschedulable, pulling) before its
     /// session is ended.
     #[serde(default = "default_pending_timeout")]
@@ -368,6 +374,12 @@ fn merged_affinity(cfg: &PodConfig, policy: Option<&PodTemplatePolicy>) -> Optio
 fn default_reconnect_timeout() -> Duration {
     Duration::from_secs(120)
 }
+fn default_heartbeat_timeout() -> Duration {
+    Duration::from_secs(60)
+}
+fn default_reconcile_timeout() -> Duration {
+    default_reconcile_interval()
+}
 /// The label that marks which engine deployment owns a session pod.
 pub const ENGINE_LABEL: &str = "vogt.engine";
 pub const DEFAULT_ENGINE_ID: &str = "vogt-engine";
@@ -457,6 +469,7 @@ impl Default for PodConfig {
             mcp_url: None,
             default_image: "ghcr.io/thedancingdeveloper-org/vogt-session:latest".into(),
             connect_timeout: Duration::from_secs(30),
+            heartbeat_timeout: default_heartbeat_timeout(),
             resource_requests: BTreeMap::from([
                 (
                     "cpu".into(),
@@ -507,6 +520,7 @@ impl Default for PodConfig {
             service_account: "vogt-session".into(),
             image_pull_secret: None,
             reconcile_interval: default_reconcile_interval(),
+            reconcile_timeout: default_reconcile_timeout(),
             pending_timeout: default_pending_timeout(),
             session_deadline: default_session_deadline(),
             reconnect_timeout: default_reconnect_timeout(),
@@ -608,6 +622,23 @@ impl PodConfig {
         if let Some(v) = text("ENGINE_POD_RESOURCE_LIMITS") {
             cfg.resource_limits = parse_resources("ENGINE_POD_RESOURCE_LIMITS", &v)?;
         }
+        for (name, target) in [
+            ("ENGINE_POD_CONNECT_TIMEOUT", &mut cfg.connect_timeout),
+            ("ENGINE_POD_PENDING_TIMEOUT", &mut cfg.pending_timeout),
+            ("ENGINE_POD_RECONNECT_TIMEOUT", &mut cfg.reconnect_timeout),
+            ("ENGINE_POD_RECONCILE_TIMEOUT", &mut cfg.reconcile_timeout),
+            ("ENGINE_POD_HEARTBEAT_TIMEOUT", &mut cfg.heartbeat_timeout),
+        ] {
+            if let Some(value) = text(name) {
+                let secs: u64 = value.parse().map_err(|_| {
+                    ApiError::Config(format!(
+                        "{name} must be a whole number of seconds, got {value:?}"
+                    ))
+                })?;
+                *target = Duration::from_secs(secs);
+            }
+        }
+        cfg.reconcile_interval = cfg.reconcile_timeout;
         if let Some(v) = text("ENGINE_POD_SESSION_DEADLINE_SECONDS") {
             let secs: u64 = v.parse().map_err(|_| {
                 ApiError::Config(format!(
