@@ -71,9 +71,15 @@ while IFS="$(printf '\t')" read -r path encoded; do
   printf '%s' "$encoded" | base64 -d >"$dest" || fail 'bootstrap returned invalid bundle data'; chmod 600 "$dest"
 done <"$tmp_dir/bundle.tsv"
 step=brokered-env; say brokered-env
+# WI-3886: a name declared ondemand is fetched around the CLI that needs it,
+# never exported into this shell. A bootstrap response that also carries a
+# value for one is a contract violation: exporting it would put a provider key
+# in the pod's whole process tree for the session's life.
+ondemand=$(jq -r '.env.AGENT_AUTH_ONDEMAND // ""' "$response")
 jq -r '.env // {} | to_entries[] | [.key, (.value|tostring)] | @tsv' "$response" >"$tmp_dir/env.tsv"
 while IFS="$(printf '\t')" read -r name value; do
   case "$name" in ''|[!A-Za-z_]*|*[!A-Za-z0-9_]*) fail 'bootstrap returned an invalid environment name' ;; esac
+  case " $ondemand " in *" $name "*) fail "bootstrap returned a value for ondemand variable $name; provider values are fetched at launch and never exported" ;; esac
   case "$name" in VOGT_BOOTSTRAP_TOKEN|VOGT_BOOTSTRAP_TOKEN_FILE|VOGT_AGENT_BOOTSTRAP_TOKEN) continue ;; esac
   export "$name=$value"
 done <"$tmp_dir/env.tsv"
