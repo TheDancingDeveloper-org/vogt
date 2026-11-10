@@ -129,6 +129,22 @@ repository root is a separate build rather than a stage of this one: it is the
 hardened core-only image, not something to deploy on its own (`DEPLOYMENT.md`).
 The merged image no longer takes its core from it; that image is retired at I7.
 
+**The `rust-2` dev images.** `vogt-dev` runs two images built from the
+`rust-2` graft line: `vogt-dev-pod` from `engine/Dockerfile.pod` and
+`vogt-dev-engine` from `engine/Dockerfile`. `rust-2` is a graft line, not a
+branch in this repository, so nothing pushes it and a workflow watching it
+never runs (WI-3947). What does exist on GitHub is the batch pull request
+that `graft-mirror pr-batch` exports the line into: `graft/batch-<n>`, based
+on `rust-core`, one commit per land, each with a `Graft-Changeset:` trailer.
+`.github/workflows/rust2-images.yml` therefore triggers on a push to
+`graft/batch-*`, refuses a ref without that trailer, and builds
+`VOGT_SOURCE_SHA` from the trailer, so a running engine names the changeset
+it came from instead of an unlookupable squashed sha. The practical
+consequence: dev images move when a batch is cut, not on every land, so a
+land that is not yet in a batch is not in an image. Both images are pushed by
+digest with provenance and an SBOM, the run summary prints the pair to pin,
+and nothing in this repository deploys them.
+
 Build arguments worth knowing: `INSTALL_AI_CLIENTS=true` bakes in the `claude`
 and `opencode` CLIs at the Renovate-pinned versions in
 `engine/agent-versions.env`, `codex` (WI-1142) from the fork release asset for
