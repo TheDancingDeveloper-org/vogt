@@ -396,6 +396,10 @@ pub struct Config {
     /// The files Claude Code is started with, as the engine starts one on a
     /// host (WI-3243).
     pub claude: ClaudeLaunch,
+    /// The extra Codex launch data the engine cannot put in the pod's
+    /// environment directly (WI-3882): guidance, charter, a compact limit and
+    /// the template's own arguments.
+    pub codex: CodexLaunch,
 }
 
 /// Where the image installs the default driven-session policy; the same path
@@ -472,6 +476,29 @@ impl ClaudeLaunch {
             mcp_config: mcp_config.filter(|p| !p.is_empty()).map(PathBuf::from),
             brief: None,
         }
+    }
+}
+
+impl CodexLaunch {
+    /// Read the engine's per-launch Codex data from `VOGT_CODEX_LAUNCH_B64`
+    /// and the entrypoint's full bootstrap fragment from
+    /// `VOGT_CODEX_CONFIG_FILE`. A missing or malformed value is no extra
+    /// data, not a launch failure: the pod still starts on its config file.
+    pub fn from_env() -> Self {
+        use base64::Engine as _;
+        let mut launch = std::env::var("VOGT_CODEX_LAUNCH_B64")
+            .ok()
+            .and_then(|encoded| {
+                base64::engine::general_purpose::STANDARD
+                    .decode(encoded.trim())
+                    .ok()
+            })
+            .and_then(|bytes| serde_json::from_slice::<CodexLaunch>(&bytes).ok())
+            .unwrap_or_default();
+        launch.config_file = std::env::var_os("VOGT_CODEX_CONFIG_FILE")
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from);
+        launch
     }
 }
 
@@ -562,6 +589,7 @@ impl Config {
                 .filter(|v| !v.is_empty())
                 .unwrap_or_else(|| CODEX_APPROVAL_DEFAULT.to_owned()),
             claude: ClaudeLaunch::from_env(),
+            codex: CodexLaunch::from_env(),
         })
     }
     pub fn ws_url(&self) -> Result<String, AgentError> {
@@ -964,6 +992,240 @@ pub fn codex_permission_flags(
     }
 }
 
+/// The `model_auto_compact_token_limit_scope` every Vogt Codex launch uses:
+/// the fixed prefix counts too, so the backed-off limit is a total.
+pub const CODEX_COMPACT_SCOPE: &str = "total";
+
+/// The MCP servers whose tools a driven Codex may call without a per-call
+/// approval prompt. This is the same operator-approved list the host's
+/// `mcp-bootstrap.sh` writes into `config.toml` (WI-3882); `komodo` is
+/// deliberately absent because its writes change running stacks.
+pub const CODEX_APPROVED_MCP_SERVERS: [&str; 5] =
+    ["vogt", "cadastre", "github-ro", "forgejo-ro", "grafana-ro"];
+
+/// One `model_providers.<name>` table as the shared Codex builder needs it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodexProvider {
+    pub name: String,
+    pub base_url: String,
+    pub wire_api: String,
+    pub env_key: String,
+}
+
+/// The per-launch data the engine carries to a pod that is not already in its
+/// environment or its bootstrap `codex_config` (WI-3882). It travels as one
+/// base64 JSON value so a YAML/TSV environment path cannot mangle it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CodexLaunch {
+    /// Workspace guidance gathered by the engine, as the host launch would
+    /// pass it: `developer_instructions`.
+    pub guidance: Option<String>,
+    /// The scope's charters, appended to the guidance.
+    pub charter: Option<String>,
+    /// The compact backoff limit, when the engine overrides the configured one.
+    pub compact_limit: Option<u64>,
+    /// The template's own arguments after the Codex binary (`-c ...`, `-m ...`),
+    /// which a pod otherwise drops.
+    pub template_args: Vec<String>,
+    /// Where the entrypoint wrote the full bootstrap Codex fragment. Unset on
+    /// the host; a pod's entrypoint exports `VOGT_CODEX_CONFIG_FILE`.
+    pub config_file: Option<PathBuf>,
+}
+
+/// Everything a Codex launch carries beyond the binary (WI-3882).
+///
+/// The host launcher (`agent_cli::launch_with_codex`) and the pod's own
+/// `command_line` both build their argv from this, so no Codex `-c` override
+/// can exist in one and be missing from the other.
+pub struct CodexArgs<'a> {
+    /// The template's own arguments after the binary, in their original order.
+    pub command_args: &'a [String],
+    /// A previous conversation to `resume`, or a fresh id to pin.
+    pub resume: Option<&'a str>,
+    pub session_id: Option<&'a str>,
+    /// The model the caller asked for, as `-m`.
+    pub model: Option<&'a str>,
+    /// The provider registry's model, as `-c model=...`, only when `model` is
+    /// not named (the pod's bootstrap config selects one by default).
+    pub config_model: Option<&'a str>,
+    pub effort: Option<&'a str>,
+    pub permission_mode: Option<&'a str>,
+    pub approval_policy: &'a str,
+    /// A `codex exec` launch: it rejects `-a`.
+    pub exec: bool,
+    pub compact_limit: Option<u64>,
+    /// The selected `model_provider` registry key, as `-c model_provider=...`.
+    pub provider: Option<&'a str>,
+    pub providers: &'a [CodexProvider],
+    /// The checkout Codex should trust without asking (`projects={...}`).
+    pub trust_cwd: Option<&'a str>,
+    pub guidance: Option<&'a str>,
+    pub charter: Option<&'a str>,
+    /// MCP servers present in this launch, for `default_tools_approval_mode`.
+    pub mcp_servers: &'a [String],
+    /// The host's MCP trim overrides (`-c mcp_servers.NAME.enabled=...`).
+    pub mcp_args: &'a [String],
+    pub prompt: Option<&'a str>,
+}
+
+const MAX_CHARTER_INLINE_BYTES: usize = 4 * 1024;
+const MAX_CHARTER_ARG_BYTES: usize = 120 * 1024;
+const CHARTER_POINTER: &str = "## Charters\n\nThis scope has standing instructions \
+(charters) too long to repeat here. They are in the `## Charters` section of \
+the session brief; follow them as if they were written here.";
+
+fn provider_inline(p: &CodexProvider) -> String {
+    let s = toml_basic_string;
+    format!(
+        "{{ name = {}, base_url = {}, wire_api = {}, env_key = {}, requires_openai_auth = false }}",
+        s(&p.name),
+        s(&p.base_url),
+        s(&p.wire_api),
+        s(&p.env_key)
+    )
+}
+
+/// The `developer_instructions` override for a launch, with the scope's
+/// charters appended after the workspace guidance (WI-2038). A charter over
+/// the inline cap becomes a pointer to the brief; one that would push the
+/// argument over Linux's argv limit is left to the brief alone.
+pub fn codex_developer_instructions(
+    guidance: Option<&str>,
+    charter: Option<&str>,
+) -> Option<String> {
+    let guidance = guidance.map(str::trim).filter(|text| !text.is_empty());
+    let charter = charter.map(str::trim).filter(|text| !text.is_empty());
+    let charter = charter.map(|text| {
+        if text.len() > MAX_CHARTER_INLINE_BYTES {
+            tracing::info!(
+                bytes = text.len(),
+                "charter over the inline cap; Codex gets a pointer to the brief"
+            );
+            CHARTER_POINTER
+        } else {
+            text
+        }
+    });
+    let mut body = match (guidance, charter) {
+        (Some(guidance), Some(charter)) => format!("{guidance}\n\n{charter}"),
+        (Some(guidance), None) => guidance.to_string(),
+        (None, Some(charter)) => charter.to_string(),
+        (None, None) => return None,
+    };
+    let mut value = format!("developer_instructions={}", toml_basic_string(&body));
+    if value.len() > MAX_CHARTER_ARG_BYTES {
+        tracing::warn!(
+            bytes = value.len(),
+            "codex developer_instructions with charter over the argv cap; charter left to the brief"
+        );
+        body = guidance?.to_string();
+        value = format!("developer_instructions={}", toml_basic_string(&body));
+    }
+    Some(value)
+}
+
+/// Codex's arguments after the binary, in the host launcher's canonical order
+/// (WI-3882). Both a host launch and a pod's `command_line` call this.
+pub fn codex_args(args: &CodexArgs<'_>) -> Result<Vec<String>, String> {
+    let mut argv = Vec::new();
+    if let Some(id) = args.resume {
+        argv.extend(["resume".to_string(), id.to_string()]);
+    }
+    if let Some(provider) = args.provider.map(str::trim).filter(|name| !name.is_empty()) {
+        argv.extend([
+            "-c".to_string(),
+            format!("model_provider={}", toml_basic_string(provider)),
+        ]);
+    }
+    for provider in args.providers {
+        argv.extend([
+            "-c".to_string(),
+            format!(
+                "model_providers.{}={}",
+                provider.name,
+                provider_inline(provider)
+            ),
+        ]);
+    }
+    if let Some(cwd) = args.trust_cwd.map(str::trim).filter(|cwd| !cwd.is_empty()) {
+        let key = toml_basic_string(cwd);
+        argv.extend([
+            "-c".to_string(),
+            format!("projects={{{key}={{trust_level=\"trusted\"}}}}"),
+        ]);
+    }
+    if let Some(value) = codex_developer_instructions(args.guidance, args.charter) {
+        argv.extend(["-c".to_string(), value]);
+    }
+    for name in args.mcp_servers {
+        if CODEX_APPROVED_MCP_SERVERS.contains(&name.as_str()) {
+            argv.extend([
+                "-c".to_string(),
+                format!("mcp_servers.{name}.default_tools_approval_mode=\"approve\""),
+            ]);
+        }
+    }
+    // A client that does not go through the wrapper must not copy the pinned
+    // binary out from under it (WI-1149); the host's bootstrap writes this into
+    // the config, the pod's config is written by its entrypoint. Passing it on
+    // the argv makes both launches say the same thing.
+    argv.extend([
+        "-c".to_string(),
+        "features.daemon_auto_start=false".to_string(),
+    ]);
+    argv.extend(args.command_args.iter().cloned());
+    if let Some(model) = args.model.map(str::trim).filter(|model| !model.is_empty()) {
+        argv.extend(["-m".to_string(), model.to_string()]);
+    } else if let Some(model) = args
+        .config_model
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+    {
+        argv.extend([
+            "-c".to_string(),
+            format!("model={}", toml_basic_string(model)),
+        ]);
+    }
+    if let Some(effort) = args
+        .effort
+        .map(str::trim)
+        .filter(|effort| !effort.is_empty())
+    {
+        argv.extend(["-c".to_string(), format!("model_reasoning_effort={effort}")]);
+    }
+    let mode = args
+        .permission_mode
+        .map(str::trim)
+        .filter(|mode| !mode.is_empty())
+        .unwrap_or("default");
+    if let Some(flags) = codex_permission_flags(Some(mode), args.exec, args.approval_policy)? {
+        argv.extend(flags);
+    }
+    argv.extend([
+        "-c".to_string(),
+        "tui.terminal_title=[\"agent-state\"]".to_string(),
+        "-c".to_string(),
+        "tui.animations=false".to_string(),
+    ]);
+    if let Some(limit) = args.compact_limit {
+        argv.extend([
+            "-c".to_string(),
+            format!("model_auto_compact_token_limit={limit}"),
+            "-c".to_string(),
+            format!("model_auto_compact_token_limit_scope=\"{CODEX_COMPACT_SCOPE}\""),
+        ]);
+    }
+    argv.extend(args.mcp_args.iter().cloned());
+    if let Some(id) = args.session_id {
+        argv.extend(["--session-id".to_string(), id.to_string()]);
+    }
+    if let Some(prompt) = args.prompt {
+        argv.push(prompt.to_string());
+    }
+    Ok(argv)
+}
+
 /// A permission posture as Claude Code's flags (WI-926, WI-3881).
 ///
 /// `None` is the default posture: no flag at all. The host launcher
@@ -1045,6 +1307,89 @@ pub fn claude_args(args: &ClaudeArgs<'_>) -> Result<Vec<String>, String> {
     Ok(argv)
 }
 
+/// The provider, model and MCP tables the entrypoint wrote for this pod.
+#[derive(Debug, Default)]
+struct CodexConfigFile {
+    model_provider: Option<String>,
+    model: Option<String>,
+    providers: Vec<CodexProvider>,
+    mcp_servers: Vec<String>,
+}
+
+fn codex_file_config(
+    launch: &CodexLaunch,
+    codex_home: Option<&Path>,
+) -> Result<CodexConfigFile, AgentError> {
+    let path = launch.config_file.clone().or_else(|| {
+        codex_home.map(|home| {
+            let fragment = home.join("vogt-codex.toml");
+            if fragment.is_file() {
+                fragment
+            } else {
+                home.join("config.toml")
+            }
+        })
+    });
+    let Some(path) = path else {
+        return Ok(CodexConfigFile::default());
+    };
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(CodexConfigFile::default())
+        }
+        Err(error) => {
+            return Err(AgentError::Pty(format!(
+                "reading Codex config {}: {error}",
+                path.display()
+            )))
+        }
+    };
+    let table: toml::Table = toml::from_str(&text).map_err(|error| {
+        AgentError::Pty(format!(
+            "Codex config {} is not valid TOML: {error}",
+            path.display()
+        ))
+    })?;
+    let mut file = CodexConfigFile {
+        model_provider: table
+            .get("model_provider")
+            .and_then(toml::Value::as_str)
+            .map(str::to_owned),
+        model: table
+            .get("model")
+            .and_then(toml::Value::as_str)
+            .map(str::to_owned),
+        ..Default::default()
+    };
+    if let Some(providers) = table.get("model_providers").and_then(toml::Value::as_table) {
+        for (name, value) in providers {
+            let Some(table) = value.as_table() else {
+                continue;
+            };
+            let Some(base_url) = table.get("base_url").and_then(toml::Value::as_str) else {
+                continue;
+            };
+            let Some(wire_api) = table.get("wire_api").and_then(toml::Value::as_str) else {
+                continue;
+            };
+            let Some(env_key) = table.get("env_key").and_then(toml::Value::as_str) else {
+                continue;
+            };
+            file.providers.push(CodexProvider {
+                name: name.clone(),
+                base_url: base_url.to_string(),
+                wire_api: wire_api.to_string(),
+                env_key: env_key.to_string(),
+            });
+        }
+    }
+    if let Some(servers) = table.get("mcp_servers").and_then(toml::Value::as_table) {
+        file.mcp_servers = servers.keys().cloned().collect();
+    }
+    Ok(file)
+}
+
 /// The shell line that starts the CLI. A conversation is pinned to the
 /// engine's conversation id (`--session-id` for Claude and Codex) or resumed
 /// from the transcript the engine seeded (`--resume` for Claude, `codex
@@ -1106,31 +1451,39 @@ pub fn command_line(config: &Config) -> Result<String, AgentError> {
         // default sandbox needs, so the absent posture is still `default`, not
         // "let the CLI decide" (`-s danger-full-access -a never`).
         "codex" => {
+            // The same builder the host launcher uses (WI-3882). The provider
+            // tables and model selection reach it from the bootstrap fragment;
+            // guidance, charter, a compact limit and the template's own
+            // arguments arrive in `VOGT_CODEX_LAUNCH_B64`.
+            let file = codex_file_config(&config.codex, config.codex_home.as_deref())?;
             let cwd = config.cwd.as_deref().unwrap_or(DEFAULT_WORK_DIR);
-            let setting = format!(
-                "projects={{{}={{trust_level=\"trusted\"}}}}",
-                toml_basic_string(cwd)
-            );
-            // The host launcher's order (`agent_cli::launch`): `resume` is a
-            // subcommand, so it goes straight after the binary and ahead of
-            // every option; a fresh launch is pinned the same way Claude is.
-            // Without this Codex names its rollout after its own uuid, and the
-            // engine can neither write back nor resume the conversation.
+            let base = config.codex.template_args.as_slice();
+            let pin = conversation.filter(|_| !config.resume && base.is_empty());
+            let args = codex_args(&CodexArgs {
+                command_args: base,
+                resume: conversation.filter(|_| config.resume),
+                session_id: pin,
+                model: config.model.as_deref(),
+                config_model: file.model.as_deref(),
+                effort: config.effort.as_deref(),
+                permission_mode: config.permission_mode.as_deref(),
+                approval_policy: &config.codex_approval_policy,
+                exec: false,
+                compact_limit: config.codex.compact_limit,
+                provider: file.model_provider.as_deref(),
+                providers: &file.providers,
+                trust_cwd: Some(cwd),
+                guidance: config.codex.guidance.as_deref(),
+                charter: config.codex.charter.as_deref(),
+                mcp_servers: &file.mcp_servers,
+                mcp_args: &[],
+                prompt: None,
+            })
+            .map_err(AgentError::Pty)?;
             let mut line = String::from("codex");
-            match (conversation, config.resume) {
-                (Some(id), true) => line.push_str(&format!(" resume {id}")),
-                (Some(id), false) => line.push_str(&format!(" --session-id {id}")),
-                (None, _) => {}
-            }
-            line.push_str(&format!(" -c {}", sh_quote(Path::new(&setting))));
-            let mode = Some(config.permission_mode.as_deref().unwrap_or("default"));
-            if let Some(flags) = codex_permission_flags(mode, false, &config.codex_approval_policy)
-                .map_err(AgentError::Pty)?
-            {
-                for flag in flags {
-                    line.push(' ');
-                    line.push_str(&sh_quote(Path::new(&flag)));
-                }
+            for arg in args {
+                line.push(' ');
+                line.push_str(&sh_quote(Path::new(&arg)));
             }
             Ok(line)
         }
@@ -1550,6 +1903,7 @@ mod tests {
             permission_mode: None,
             codex_approval_policy: CODEX_APPROVAL_DEFAULT.into(),
             claude: ClaudeLaunch::default(),
+            codex: CodexLaunch::default(),
         };
         let (_reader, _writer, child, _master) = spawn_pty(&config).unwrap();
         // The reap waits for the exit, so no sleep races the kill.
@@ -1577,6 +1931,7 @@ mod tests {
             permission_mode: None,
             codex_approval_policy: CODEX_APPROVAL_DEFAULT.into(),
             claude: ClaudeLaunch::default(),
+            codex: CodexLaunch::default(),
         }
     }
 
@@ -1916,6 +2271,7 @@ mod tests {
             permission_mode: None,
             codex_approval_policy: CODEX_APPROVAL_DEFAULT.into(),
             claude: ClaudeLaunch::default(),
+            codex: CodexLaunch::default(),
         };
         let (_reader, _writer, mut child, master) = spawn_pty(&config).unwrap();
         let size = master.get_size().unwrap();
@@ -1948,6 +2304,7 @@ mod tests {
             permission_mode: None,
             codex_approval_policy: CODEX_APPROVAL_DEFAULT.into(),
             claude: ClaudeLaunch::default(),
+            codex: CodexLaunch::default(),
         };
         let argv = argv_of(&command_line(&config).unwrap());
         assert_eq!(&argv[..2], ["--session-id", "abc-123"]);
@@ -1966,29 +2323,19 @@ mod tests {
     fn codex_is_pinned_to_or_resumes_the_engine_conversation() {
         let mut config = claude_config(ClaudeLaunch::default(), false);
         config.cli = "codex".into();
+        let argv = argv_of_cli("codex", &command_line(&config).unwrap());
         assert!(
-            command_line(&config)
-                .unwrap()
-                .starts_with("codex --session-id abc-123 "),
-            "{}",
-            command_line(&config).unwrap()
+            argv.windows(2).any(|w| w == ["--session-id", "abc-123"]),
+            "{argv:?}"
         );
         config.resume = true;
-        assert!(
-            command_line(&config)
-                .unwrap()
-                .starts_with("codex resume abc-123 "),
-            "{}",
-            command_line(&config).unwrap()
-        );
+        let argv = argv_of_cli("codex", &command_line(&config).unwrap());
+        assert_eq!(&argv[..2], ["resume", "abc-123"], "{argv:?}");
         // An id that is not plain never reaches the shell line.
         config.resume = false;
         config.conversation_id = Some("x; rm -rf /".into());
-        assert!(
-            !command_line(&config).unwrap().contains("--session-id"),
-            "{}",
-            command_line(&config).unwrap()
-        );
+        let argv = argv_of_cli("codex", &command_line(&config).unwrap());
+        assert!(!argv.iter().any(|a| a == "--session-id"), "{argv:?}");
     }
 
     /// WI-3873: the rollout name comes from the launch line, not from a file
@@ -2103,6 +2450,7 @@ mod tests {
                 mcp_config: Some("/run/vogt/mcp.json".into()),
                 brief: None,
             },
+            codex: CodexLaunch::default(),
         };
         // The host launcher's flags, in its order (WI-3881).
         assert_eq!(
@@ -2194,6 +2542,7 @@ mod tests {
             permission_mode: None,
             codex_approval_policy: CODEX_APPROVAL_DEFAULT.into(),
             claude,
+            codex: CodexLaunch::default(),
         }
     }
 
@@ -2262,14 +2611,28 @@ mod tests {
             permission_mode: None,
             codex_approval_policy: CODEX_APPROVAL_DEFAULT.into(),
             claude: ClaudeLaunch::default(),
+            codex: CodexLaunch::default(),
         };
         assert_eq!(command_line(&config).unwrap(), "opencode");
         // Codex refuses extra writable roots, so it gets no `--add-dir`; the
         // PTY already starts in the session cwd.
         config.cli = "codex".into();
         assert_eq!(
-            command_line(&config).unwrap(),
-            r#"codex -c 'projects={"/work"={trust_level="trusted"}}' '-a' 'never' '-s' 'danger-full-access'"#
+            argv_of_cli("codex", &command_line(&config).unwrap()),
+            [
+                "-c",
+                r#"projects={"/work"={trust_level="trusted"}}"#,
+                "-c",
+                "features.daemon_auto_start=false",
+                "-a",
+                "never",
+                "-s",
+                "danger-full-access",
+                "-c",
+                r#"tui.terminal_title=["agent-state"]"#,
+                "-c",
+                "tui.animations=false",
+            ]
         );
         config.cli = "nope".into();
         assert!(command_line(&config).is_err());
@@ -2286,33 +2649,28 @@ mod tests {
 
         // Default: the deployment's approval policy, never by default.
         let argv = argv_of_cli("codex", &command_line(&config).unwrap());
-        assert_eq!(
-            argv,
-            [
-                "--session-id",
-                "abc-123",
-                "-c",
-                r#"projects={"/work"={trust_level="trusted"}}"#,
-                "-a",
-                "never",
-                "-s",
-                "danger-full-access",
-            ]
+        assert!(argv.windows(2).any(|w| w == ["-a", "never"]), "{argv:?}");
+        assert!(
+            argv.windows(2).any(|w| w == ["-s", "danger-full-access"]),
+            "{argv:?}"
+        );
+        assert!(
+            argv.windows(2).any(|w| w == ["--session-id", "abc-123"]),
+            "{argv:?}"
         );
 
         // accept-edits keeps the sandbox and adds the auto reviewer.
         config.permission_mode = Some("accept-edits".into());
         let argv = argv_of_cli("codex", &command_line(&config).unwrap());
-        assert_eq!(
-            &argv[4..],
-            [
-                "-a",
-                "never",
-                "-c",
-                "approvals_reviewer=\"auto_review\"",
-                "-s",
-                "danger-full-access",
-            ]
+        assert!(
+            argv.windows(2)
+                .any(|w| w == ["-c", "approvals_reviewer=\"auto_review\""]),
+            "{argv:?}"
+        );
+        assert!(argv.windows(2).any(|w| w == ["-a", "never"]), "{argv:?}");
+        assert!(
+            argv.windows(2).any(|w| w == ["-s", "danger-full-access"]),
+            "{argv:?}"
         );
 
         // A deployment that restores asking passes `on-request` through.
@@ -2429,6 +2787,7 @@ mod tests {
             permission_mode: None,
             codex_approval_policy: CODEX_APPROVAL_DEFAULT.into(),
             claude: ClaudeLaunch::default(),
+            codex: CodexLaunch::default(),
         };
         // No requirements file in the pod.
         let err = codex_guard(&config, &requirements, &hook).unwrap_err();
@@ -2488,6 +2847,7 @@ mod tests {
                 mcp_config: None,
                 brief: None,
             },
+            codex: CodexLaunch::default(),
         };
         assert_eq!(
             argv_of(&command_line(&config).unwrap()),
@@ -2573,6 +2933,7 @@ mod tests {
             permission_mode: None,
             codex_approval_policy: CODEX_APPROVAL_DEFAULT.into(),
             claude: ClaudeLaunch::default(),
+            codex: CodexLaunch::default(),
         };
         let (mut reader, _writer, mut child, _master) = spawn_pty(&config).unwrap();
         let mut out = String::new();

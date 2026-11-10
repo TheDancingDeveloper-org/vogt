@@ -123,20 +123,25 @@ fi
 if [ "$VOGT_CLI" = codex ] && [ -n "$(jq -r '.codex_config // empty' "$response")" ]; then
   mkdir -p "$codex_home"; chmod 700 "$codex_home"
   codex_cfg="$codex_home/config.toml"
-  # The LLM providers the engine registered for this launch (WI-3491) replace
-  # any table of the same name: the merged file must not declare one twice.
-  codex_providers=$(jq -r '.codex_config' "$response" | sed -n 's/^\[model_providers\.\([a-z0-9_-]*\)\]$/\1/p' | paste -sd'|' -)
+  codex_fragment="$codex_home/vogt-codex.toml"
+  jq -r '.codex_config' "$response" >"$tmp_dir/codex-fragment.toml"
+  # Providers and model selection are per-launch `-c` overrides now (WI-3882);
+  # the session agent reads the full fragment and builds them. Only the MCP
+  # tables stay in the shared config, so a person can still use it.
+  awk '
+    /^[ \t]*\[/ { in_mcp = ($0 ~ /^[ \t]*\[\[?[ \t]*mcp_servers\./) }
+    in_mcp { print }
+  ' "$tmp_dir/codex-fragment.toml" >"$tmp_dir/codex-mcp.toml"
   if [ -f "$codex_cfg" ]; then
     # Drop earlier vogt/cadastre MCP server definitions, keep the rest. A table
     # header is compared with its spaces and quotes removed, so [mcp_servers."vogt"],
     # [ mcp_servers . 'vogt' ] and [mcp_servers.vogt.env] all match, as do
     # single-line dotted keys (mcp_servers.vogt.url = ... at the top level, vogt.url
     # = ... under [mcp_servers]). A multi-line value on such a dotted key is not split.
-    awk -v providers="$codex_providers" '
+    awk '
       /^[ \t]*\[\[?[^][]*\]\]?[ \t]*(#.*)?$/ {
         h = $0; sub(/[ \t]*#.*$/, "", h); gsub(/[ \t"\047]/, "", h)
         skip = (h ~ /^\[\[?mcp_servers\.(vogt|cadastre)(\.|\])/)
-        if (providers != "" && h ~ ("^\\[model_providers\\.(" providers ")(\\.|\\])")) skip = 1
         root = (h == "[mcp_servers]") ? 2 : 0
         if (skip) next
         print; next
@@ -151,8 +156,10 @@ if [ "$VOGT_CLI" = codex ] && [ -n "$(jq -r '.codex_config // empty' "$response"
       { print }
     ' "$codex_cfg" >"$tmp_dir/codex.toml"
   else : >"$tmp_dir/codex.toml"; fi
-  jq -r '.codex_config' "$response" >>"$tmp_dir/codex.toml"
+  cat "$tmp_dir/codex-mcp.toml" >>"$tmp_dir/codex.toml"
   cat "$tmp_dir/codex.toml" >"$codex_cfg"; chmod 600 "$codex_cfg"
+  cat "$tmp_dir/codex-fragment.toml" >"$codex_fragment"; chmod 600 "$codex_fragment"
+  export VOGT_CODEX_CONFIG_FILE="$codex_fragment"
   printf 'session-entrypoint: codex posture: mcp-config\n' >&2
 fi
 if [ "$VOGT_CLI" = opencode ] && jq -e '.opencode_config | type == "object"' "$response" >/dev/null 2>&1; then
