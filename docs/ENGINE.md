@@ -4561,6 +4561,8 @@ wire_api = "chat"                        # or "responses"
 env_key = "HOMELAB_LITELLM_DEEPSEEK_KEY" # the variable Codex reads the key from
 secret_project = "<secrets-manager project id>"
 secret_name = "HOMELAB_LITELLM_DEEPSEEK_KEY"
+context_window = 1000000                 # optional Codex model_context_window
+auto_compact_token_limit = 500000        # optional Codex auto-compact threshold
 models = ["deepseek-chat"]               # informational
 ```
 
