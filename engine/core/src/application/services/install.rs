@@ -19,11 +19,13 @@ const INSTALL_BOOTSTRAP: &str = "install.bootstrap";
 const INSTALL_BOOTSTRAPPED_EVENT: &str = "install.bootstrapped";
 const BOOTSTRAP_SCOPES: &[&str] = &["admin"];
 
+// Byte-for-byte `services/install.py` (the parity golden pins these): the
+// answer is compared as a value, not as prose, so the port may not reword it.
 const API_WARNING: &str = "This is the only time the secret is shown. It is not \
-    stored and cannot be recovered — losing it means issuing another with \
-    `vogt-core token issue` in the container.";
+    stored and cannot be recovered — losing it means issuing another over the \
+    loopback surface.";
 const SESSION_WARNING: &str = "This is a browser session; sign in again with your \
-    password when it expires. API tokens for agents come from `vogt-core token issue`.";
+    password when it expires. API tokens for agents come from `vogt token issue`.";
 
 type SqliteWrite<'a, C, I> = WriteContext<'a, C, I, SqliteDeclaredStore<C, I>>;
 

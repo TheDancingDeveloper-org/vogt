@@ -3,10 +3,18 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
+
 SCRIPT = Path(__file__).resolve().parents[1] / "engine" / "deploy" / "agent-auth.sh"
+
+pytestmark = pytest.mark.skipif(
+    not SCRIPT.is_file() or shutil.which("bash") is None,
+    reason="needs engine/deploy (absent in the core-alone job) and bash",
+)
 
 
 def test_remote_broker_uses_token_file_and_extra_ca_without_disabling_tls(
