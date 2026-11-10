@@ -115,6 +115,7 @@ pub struct PodLink {
     torn_notify: Notify,
     /// An agent has completed its hello on this link.
     connected: AtomicBool,
+    last_heartbeat: std::sync::Mutex<Instant>,
     /// The link was rebuilt after an engine restart rather than registered by
     /// a launch: its cursor came from the output log, and until an agent
     /// dials in the pod's fate is unknown.
@@ -144,6 +145,7 @@ impl PodLink {
             torn_down: AtomicBool::new(false),
             torn_notify: Notify::new(),
             connected: AtomicBool::new(false),
+            last_heartbeat: std::sync::Mutex::new(Instant::now()),
             adopted: AtomicBool::new(false),
         }
     }
@@ -172,6 +174,17 @@ impl PodLink {
     /// An agent has dialled in on this link at least once.
     pub fn has_connected(&self) -> bool {
         self.connected.load(Ordering::Acquire)
+    }
+
+    pub fn heartbeat_age(&self) -> Duration {
+        self.last_heartbeat
+            .lock()
+            .expect("pod link lock poisoned")
+            .elapsed()
+    }
+
+    fn note_heartbeat(&self) {
+        *self.last_heartbeat.lock().expect("pod link lock poisoned") = Instant::now();
     }
 
     /// Rebuilt after an engine restart (see `AgentAuth::adopt_pod`).
@@ -1136,6 +1149,7 @@ where
         return;
     }
     link.connected.store(true, Ordering::Release);
+    link.note_heartbeat();
     let (tx, mut commands) = mpsc::unbounded_channel();
     agent_auth.attach(id, tx.clone()).await;
     // A stop asked for while no agent was attached is delivered on arrival.
@@ -1236,6 +1250,7 @@ where
                             link.flush_notify.notify_waiters();
                         }
                         Frame::Heartbeat { .. } => {
+                            link.note_heartbeat();
                             let next = link.next_offset();
                             if !send_frame(&mut socket, &Frame::Ack { offset: next }).await { break; }
                         }

@@ -620,6 +620,9 @@ pub struct HibernateRequest {
     /// screen kept for reading. Off unless asked for.
     #[serde(default)]
     pub allow_shell: bool,
+    /// Permit hibernating a pod whose agent is not currently attached.
+    #[serde(default)]
+    pub force: bool,
     /// The session this one's work was handed to (WI-1251): an engine session
     /// id the engine already knows, other than this one. A wake is then
     /// refused until `WakeRequest::force`. Setting it on a session that is
