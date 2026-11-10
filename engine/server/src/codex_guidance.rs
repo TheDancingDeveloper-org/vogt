@@ -15,9 +15,9 @@
 //! fork's own knobs do not reach far enough: `[skills] extra_user_roots` is
 //! confined under `CODEX_HOME`, and its project-doc walk stops at the `.git`
 //! marker. Only the checkout's own guidance is inlined; the workspace files
-//! above it are named by path under a short safety summary, and skills are
-//! an index of name and `SKILL.md` path that the model opens when one
-//! applies. The body rides on every request, so it is kept small (WI-2035).
+//! above it are named by a one-line pointer to their roots under a short
+//! safety summary, as are the skill roots. The body rides on every request,
+//! so it is kept small (WI-2035, WI-3870).
 //!
 //! Every file is resolved through symlinks and kept only when the real path
 //! is a Markdown file inside an allowed root (the top of the walk, or `$HOME`)
@@ -264,10 +264,37 @@ fn oversight_only(path: &Path) -> bool {
             .is_some_and(|name| OVERSIGHT_ONLY.contains(&name))
 }
 
+/// The roots of the guidance files that were named rather than inlined: the
+/// directory holding `AGENTS.md`/`CLAUDE.md`, and the parent of a `.claude`
+/// rules directory.
+fn guidance_roots(named: &[PathBuf]) -> Vec<String> {
+    let rules = Path::new(".claude").join("rules");
+    let mut roots: Vec<String> = Vec::new();
+    for path in named {
+        let root = match path.parent() {
+            Some(parent) if parent.ends_with(&rules) => parent
+                .parent()
+                .and_then(Path::parent)
+                .map(Path::to_path_buf),
+            Some(parent) => Some(parent.to_path_buf()),
+            None => None,
+        };
+        if let Some(root) = root {
+            let root = root.display().to_string();
+            if !roots.contains(&root) {
+                roots.push(root);
+            }
+        }
+    }
+    roots
+}
+
 /// The guidance body, kept small because it rides on every request
 /// (WI-2035): only the checkout's own guidance (its `CLAUDE.md` pointer) is
-/// inlined. Everything above it is named by path with a short safety
-/// summary, and skills are listed by name and path.
+/// inlined. Everything above it, and the skills, are named by one-line
+/// pointers to their roots under a short safety summary (WI-3870). A driven
+/// worker that needs a rule or skill lists the directory and opens the one
+/// its task touches, so the body does not grow with the number of files.
 fn gather(cwd: &Path, home: Option<&Path>) -> Option<String> {
     let walk = plan(cwd, home)?;
     let mut body = String::from(
@@ -318,23 +345,29 @@ fn gather(cwd: &Path, home: Option<&Path>) -> Option<String> {
     }
     if !listed.is_empty() {
         body.push_str(SAFETY_SUMMARY);
-        body.push_str("\n\nWorkspace guidance files; read one when the task touches it:\n");
-        for path in &listed {
-            body.push_str(&format!("- {}\n", path.display()));
-        }
-        body.push('\n');
+        body.push_str(
+            "\n\nWorkspace guidance files: read `AGENTS.md`, `CLAUDE.md` or \
+             `.claude/rules/<name>.md` under ",
+        );
+        body.push_str(&guidance_roots(&listed).join(", "));
+        body.push_str(" when a task touches one; list with `ls`.\n");
     }
     let skills = skills(&walk);
     if !skills.is_empty() {
-        let mut index = String::from(
-            "Skills (name: SKILL.md). When a task may match one, read its SKILL.md first:\n",
+        let mut roots: Vec<String> = skills
+            .iter()
+            .filter_map(|skill| skill.path.parent().and_then(Path::parent))
+            .map(|root| root.display().to_string())
+            .collect();
+        roots.sort();
+        roots.dedup();
+        let pointer = format!(
+            "Skills: read `<name>/SKILL.md` under {} when a task matches one; \
+             list with `ls`.\n",
+            roots.join(", ")
         );
-        for skill in &skills {
-            index.push_str(&format!("- {}: {}\n", skill.name, skill.path.display()));
-        }
-        index.push('\n');
-        if body.len() + index.len() <= MAX_TOTAL_BYTES {
-            body.push_str(&index);
+        if body.len() + pointer.len() <= MAX_TOTAL_BYTES {
+            body.push_str(&pointer);
         }
     }
     if body.len() == preamble {
@@ -428,15 +461,25 @@ mod tests {
         assert!(body.contains("<guidance source="));
         assert!(body.contains("REPO_CLAUDE"));
         assert!(body.contains("Safety: never commit credentials"));
+        // One pointer per root, not one line per file (WI-3870).
+        assert!(
+            body.contains("Workspace guidance files: read `AGENTS.md`, `CLAUDE.md` or `.claude/rules/<name>.md` under "),
+            "{body}"
+        );
+        for root in [ws.clone(), home.join(".claude")] {
+            assert!(
+                body.contains(&root.display().to_string()),
+                "{} missing from:\n{body}",
+                root.display()
+            );
+        }
         for path in [
             ws.join("AGENTS.md"),
-            ws.join("CLAUDE.md"),
             ws.join(".claude/rules/operator.md"),
             home.join(".claude/CLAUDE.md"),
-            home.join(".claude/rules/user.md"),
         ] {
             let shown = format!("- {}", path.display());
-            assert!(body.contains(&shown), "{shown} missing from:\n{body}");
+            assert!(!body.contains(&shown), "{shown} still listed in:\n{body}");
         }
         for text in [
             "WORKSPACE_AGENTS",
@@ -451,8 +494,15 @@ mod tests {
         ] {
             assert!(!body.contains(text), "{text} inlined in:\n{body}");
         }
-        let skill = ws.join(".claude/skills/komodo/SKILL.md");
-        assert!(body.contains(&format!("- komodo: {}", skill.display())));
+        let skills = ws.join(".claude/skills");
+        assert!(
+            body.contains(&format!(
+                "Skills: read `<name>/SKILL.md` under {}",
+                skills.display()
+            )),
+            "{body}"
+        );
+        assert!(!body.contains("- komodo:"), "skill named in:\n{body}");
         // Codex reads the checkout's own AGENTS.md natively.
         assert!(!body.contains("REPO_AGENTS"));
     }
@@ -483,8 +533,12 @@ mod tests {
         // Roughly 4 bytes a token: the old body inlined every file and
         // description (~100 KiB, ~25k tokens); the new one is an index.
         assert!(inlined_before > 90_000, "{inlined_before}");
-        assert!(body.len() < 8 * 1024, "{} bytes:\n{body}", body.len());
+        assert!(body.len() < 4 * 1024, "{} bytes:\n{body}", body.len());
         assert!(body.len() * 10 < inlined_before);
+        // The index grew with every skill; the pointer does not.
+        for i in 0..40 {
+            assert!(!body.contains(&format!("skill{i:02}")), "{body}");
+        }
     }
 
     #[test]
@@ -507,7 +561,7 @@ mod tests {
         assert!(!body.contains("AUTH_TOKEN"));
         assert!(!body.contains("CODEX_NOTES"));
         assert!(!body.contains("evil"));
-        assert!(body.contains("operator.md"));
+        assert!(body.contains(".claude/rules/<name>.md"));
     }
 
     #[test]
