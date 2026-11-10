@@ -185,7 +185,6 @@ const STDERR_TAIL: usize = 4 * 1024;
 /// How the driver is launched, resolved once at boot.
 #[derive(Debug, Clone)]
 struct Launch {
-    argv: Vec<String>,
     /// `argv` from the driver on: a chat runs the driver itself, never a
     /// credential wrapper in front of it (`vogt-agent-auth run --`), which
     /// would hand it the deployment's whole manifest.
@@ -250,7 +249,6 @@ fn resolve_codex(
         }
         return Some(Launch {
             driver: driver_of(&argv),
-            argv,
             template: None,
         });
     }
@@ -260,7 +258,6 @@ fn resolve_codex(
                 if runs_codex(&argv) {
                     return Some(Launch {
                         driver: driver_of(&argv),
-                        argv,
                         template: Some(template.name.clone()),
                     });
                 }
@@ -273,7 +270,6 @@ fn resolve_codex(
     let argv = template.command.clone()?;
     Some(Launch {
         driver: driver_of(&argv),
-        argv,
         template: Some(template.name.clone()),
     })
 }
@@ -952,24 +948,38 @@ impl ChatRuntime {
                 "a turn is still running; wait for it to finish, or stop it, then promote".into(),
             ));
         }
-        // One writer per transcript: the chat's process goes before the
-        // session resumes the same conversation.
-        self.stop_process(id, Duration::from_secs(10)).await;
         let launch = &self.launch;
         let template = req
             .template
             .clone()
             .filter(|t| !t.trim().is_empty())
             .or_else(|| launch.template.clone());
+        // A chat's driver is Codex, and Codex sessions are pod-only: the
+        // placement gate refuses a session that would run it on the host.
+        // With no template there is nothing to place in a pod, so refuse
+        // here — before the chat's process is stopped — and name the setting
+        // that fixes it, rather than surfacing the gate's message from deep
+        // in the start path.
+        let Some(template) = template else {
+            return Err(ApiError::Conflict(
+                "this chat's Codex driver has no pod-backed session template; set \
+                 ENGINE_CHAT_TEMPLATE to a pod-backed Codex template to continue the \
+                 chat in a session"
+                    .into(),
+            ));
+        };
         let name = req
             .name
             .clone()
             .filter(|n| !n.trim().is_empty())
             .unwrap_or_else(|| format!("chat: {}", truncate_chars(&record.title, 40)));
+        // One writer per transcript: the chat's process goes before the
+        // session resumes the same conversation.
+        self.stop_process(id, Duration::from_secs(10)).await;
         let spec = SessionSpec {
             name,
-            command: template.is_none().then(|| launch.argv.clone()),
-            template,
+            command: None,
+            template: Some(template),
             cwd: req.cwd.clone(),
             resume: Some(id.to_string()),
             model: record.model.clone(),

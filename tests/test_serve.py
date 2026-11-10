@@ -382,7 +382,9 @@ def test_a_granted_tool_call_works_over_http(
         arguments={"kind": "bug", "title": "Filed over HTTP", "reason": WHY},
     )
     assert response["result"]["isError"] is False
-    assert response["result"]["structuredContent"]["item"]["ref"] == "WI-1"
+    # A compact write result is the item's own fields (WI-1525), not an `item`
+    # wrapper; `mode: "full"` is what asks for the whole record.
+    assert response["result"]["structuredContent"]["ref"] == "WI-1"
 
 
 # -- serve options ---------------------------------------------------------

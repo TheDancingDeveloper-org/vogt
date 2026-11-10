@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -502,7 +503,9 @@ def test_exclude_roles_supervised_by_and_since_narrow_the_table(
     recent = sweep_sessions(
         wired,
         SweepSessionsParams(
-            mode="full", since="2026-10-20T00:00:00Z", exclude_roles=[]
+            mode="full",
+            since=datetime(2026, 10, 20, tzinfo=UTC),
+            exclude_roles=[],
         ),
     )
     assert [row.session.engine_session_id for row in recent.rows if row.session] == [

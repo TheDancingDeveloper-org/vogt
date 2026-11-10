@@ -115,7 +115,7 @@ def test_m1_demo(instance: AppContext, agent: Agent) -> None:
         title="Segment fetch retries forever",
         priority="p1",
         reason="observed while reading the retry loop",
-    )["item"]
+    )
     assert bug["ref"] == "WI-1"
     assert bug["state"] == "open"
 
@@ -126,7 +126,7 @@ def test_m1_demo(instance: AppContext, agent: Agent) -> None:
         title="Add a retry budget",
         priority="p2",
         reason="the bug cannot be fixed without this",
-    )["item"]
+    )
     related = agent.tool(
         "work_relate",
         ref=bug["ref"],
@@ -144,7 +144,7 @@ def test_m1_demo(instance: AppContext, agent: Agent) -> None:
         ref=bug["ref"],
         to_state="in_progress",
         reason="the agent picked this up",
-    )["item"]
+    )
     assert moved["state"] == "in_progress"
 
     # and be refused when it tries to finish work that is still blocked

@@ -95,7 +95,8 @@ def servers(tmp_path: Path) -> dict[str, Any]:
     if not config.exists():
         return {}
     loaded: dict[str, Any] = json.loads(config.read_text(encoding="utf-8"))
-    return loaded.get("mcpServers", {})
+    servers: object = loaded.get("mcpServers", {})
+    return servers if isinstance(servers, dict) else {}
 
 
 def test_cadastre_is_not_registered_without_a_url(tmp_path: Path) -> None:
