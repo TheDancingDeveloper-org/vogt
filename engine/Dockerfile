@@ -256,8 +256,10 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # nothing, which is a `FROM` with no argument rather than an error naming the
 # variable.
 #
-# The pod base hands this stage over as `root`, on purpose: this stage installs
-# into /usr/local before dropping to `sprooty` at the very end.
+# The pod base is not guaranteed to hand this stage over as `root`: the digest
+# CI pins has `Config.User` `1000:1000`. Every RUN below that writes into
+# /usr/local or /etc needs root, so this stage sets `USER root` explicitly
+# before its first such RUN and drops to `sprooty` at the very end.
 FROM ${ESTATE_IMAGE}
 
 LABEL org.opencontainers.image.title="vogt-stack" \
@@ -296,6 +298,7 @@ COPY engine/agent-versions.env /usr/local/share/vogt/agent-versions.env
 # name instead of fetching an unpinned toolchain into the module cache.
 ARG GO_VERSION
 ENV GOTOOLCHAIN=local
+USER root
 RUN set -eu; \
     . /usr/local/share/vogt/agent-versions.env; \
     go_version="${GO_VERSION:-${VOGT_GO_VERSION}}"; \
