@@ -1281,6 +1281,8 @@ mod tests {
             env_key: "PROVIDER_KEY".into(),
             secret_project: "project".into(),
             secret_name: "PROVIDER_KEY".into(),
+            context_window: None,
+            auto_compact_token_limit: None,
             models: models.iter().map(|model| (*model).into()).collect(),
         }
     }

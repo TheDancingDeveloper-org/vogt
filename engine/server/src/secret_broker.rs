@@ -2645,6 +2645,8 @@ mod tests {
                 base_url: p.base_url.clone(),
                 wire_api: p.wire_api.clone(),
                 env_key: p.env_key.clone(),
+                context_window: p.context_window,
+                auto_compact_token_limit: p.auto_compact_token_limit,
             })
             .collect();
         let argv = vogt_session_agent::codex_args(&vogt_session_agent::CodexArgs {
