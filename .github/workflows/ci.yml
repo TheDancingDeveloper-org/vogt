@@ -535,6 +535,15 @@ jobs:
           # through 3.x). kube 4.x drops it, but needs k8s-openapi 0.28, which
           # replaced chrono with jiff and so edits pod_reconcile.rs. Accepted
           # in a local-only Vogt item; the kube 4 move is the way out.
+          # RUSTSEC-2026-0459: bundled SQLite before 3.54.0 (libsqlite3-sys
+          # 0.30.1) can return uninitialized page-cache bytes from a database
+          # whose sibling -wal was written by a less trusted party with a
+          # different page size. sqlx 0.9.0 is the newest release and pins
+          # libsqlite3-sys 0.30, so the lock cannot reach the patched 0.39;
+          # both databases are engine-created files under the engine's own
+          # state directory, and pod sessions mount no such path. Reviewed
+          # 2026-11-10 (WI-3876); operator acceptance pending. rusqlite 0.41
+          # removes the core's copy, and this ignore goes when sqlx moves.
           # These ignores stay explicit while the audit denies future
           # vulnerabilities, unsound advisories, and yanks.
           cargo audit --no-fetch --db "$advisory_db" \
@@ -542,7 +551,8 @@ jobs:
             --ignore RUSTSEC-2023-0071 \
             --ignore RUSTSEC-2024-0449 \
             --ignore RUSTSEC-2025-0134 \
-            --ignore RUSTSEC-2026-0387
+            --ignore RUSTSEC-2026-0387 \
+            --ignore RUSTSEC-2026-0459
 
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
         # Runs after a failed step too, so one round reports every failure.

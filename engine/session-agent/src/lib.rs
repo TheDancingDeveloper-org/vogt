@@ -2987,17 +2987,40 @@ mod tests {
         )
         .unwrap();
         std::fs::write(&hook, "#!/bin/sh\nexit 0\n").unwrap();
-        let err = codex_guard(&config, &requirements, &hook).unwrap_err();
-        assert!(err.to_string().contains("root-owned"), "{err}");
+        // The refusal is about ownership, so the fixtures must not be owned by
+        // root. A root runner (some CI containers) makes everything it writes
+        // root-owned; hand the files to an unprivileged uid to describe the
+        // session user, and skip the case only where root cannot chown (a
+        // rootless user namespace), which is never the production shape.
+        let session_owned = session_owns(&[dir.path(), &requirements, &hook]);
+        if session_owned {
+            let err = codex_guard(&config, &requirements, &hook).unwrap_err();
+            assert!(err.to_string().contains("root-owned"), "{err}");
+        }
         // An argv naming Codex is held to the same check.
         config.cli = "claude".into();
         config.command = Some(vec!["/usr/local/bin/codex".into()]);
-        assert!(codex_guard(&config, &requirements, &hook).is_err());
+        if session_owned {
+            assert!(codex_guard(&config, &requirements, &hook).is_err());
+        }
         // Other CLIs never consult it.
         config.command = None;
         assert!(codex_guard(&config, &requirements, &hook).is_ok());
         config.cli = "opencode".into();
         assert!(codex_guard(&config, &requirements, &hook).is_ok());
+    }
+
+    /// Gives `paths` an unprivileged owner, as a session's own files have.
+    /// Returns whether the ownership case can be exercised: true when the
+    /// runner is not root, or when it can hand the files to uid 65534.
+    fn session_owns(paths: &[&std::path::Path]) -> bool {
+        use std::os::unix::fs::MetadataExt as _;
+        if paths[0].metadata().unwrap().uid() != 0 {
+            return true;
+        }
+        paths
+            .iter()
+            .all(|path| std::os::unix::fs::chown(path, Some(65534), Some(65534)).is_ok())
     }
 
     #[test]
