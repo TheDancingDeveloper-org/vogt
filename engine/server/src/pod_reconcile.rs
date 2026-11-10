@@ -59,17 +59,29 @@ pub fn judge(pod: &Pod, link: Option<&PodLink>, cfg: &PodConfig, age: Option<Dur
         // delete failed, the link is forgotten and the pod is an orphan next.
         return Verdict::Keep;
     }
-    if pod_phase(pod) == "running"
-        && link.has_connected()
-        && link.heartbeat_age() > cfg.heartbeat_timeout
-    {
-        return Verdict::End {
-            code: 1,
-            note: format!(
-                "agent heartbeat silent for more than {}s",
-                cfg.heartbeat_timeout.as_secs()
-            ),
-        };
+    if pod_phase(pod) == "running" && link.has_connected() {
+        if link.is_connected() {
+            if link.heartbeat_age() > cfg.heartbeat_timeout {
+                return Verdict::End {
+                    code: 1,
+                    note: format!(
+                        "agent heartbeat silent for more than {}s",
+                        cfg.heartbeat_timeout.as_secs()
+                    ),
+                };
+            }
+        } else if link
+            .disconnected_age()
+            .is_some_and(|age| age > cfg.reconnect_timeout)
+        {
+            return Verdict::End {
+                code: 1,
+                note: format!(
+                    "agent did not reconnect within {}s",
+                    cfg.reconnect_timeout.as_secs()
+                ),
+            };
+        }
     }
     let detail = |what: &str| match pod_reason(pod) {
         Some(reason) => format!("{what}: {reason}"),
@@ -464,6 +476,42 @@ mod tests {
             judge(&terminating, Some(&link), &cfg(), None),
             Verdict::Keep
         );
+    }
+
+    #[test]
+    fn a_disconnect_is_judged_by_reconnect_timeout_not_heartbeat_timeout() {
+        let id = Uuid::new_v4();
+        let (_auth, link) = live(id);
+        link.note_connected();
+        link.note_disconnected();
+        std::thread::sleep(Duration::from_millis(5));
+
+        let reconnecting = PodConfig {
+            heartbeat_timeout: Duration::ZERO,
+            reconnect_timeout: Duration::from_secs(60),
+            ..Default::default()
+        };
+        assert_eq!(
+            judge(&pod(id, phase("Running")), Some(&link), &reconnecting, None),
+            Verdict::Keep,
+            "a disconnected agent gets the reconnect timeout, not the heartbeat one"
+        );
+
+        let gone = PodConfig {
+            heartbeat_timeout: Duration::ZERO,
+            reconnect_timeout: Duration::ZERO,
+            ..Default::default()
+        };
+        assert!(!link.is_connected());
+        assert!(link.has_connected());
+        assert!(link.disconnected_age().unwrap() > gone.reconnect_timeout);
+        match judge(&pod(id, phase("Running")), Some(&link), &gone, None) {
+            Verdict::End { code, note } => {
+                assert_eq!(code, 1);
+                assert!(note.contains("did not reconnect"), "{note}");
+            }
+            other => panic!("unexpected verdict: {other:?}"),
+        }
     }
 
     #[test]
