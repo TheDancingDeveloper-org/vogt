@@ -9909,6 +9909,17 @@ async fn a_shell_hibernates_only_when_asked_and_wakes_fresh() {
     assert_eq!(refused.status(), StatusCode::CONFLICT);
     assert!(refused.text().await.unwrap().contains("allow_shell"));
 
+    // WI-3878: `force` opens the not-attached-agent gate only; a shell still
+    // needs `allow_shell` and no conversation to resume.
+    let forced = client
+        .post(format!("{base}/api/sessions/{id}/hibernate"))
+        .json(&json!({ "force": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(forced.status(), StatusCode::CONFLICT);
+    assert!(forced.text().await.unwrap().contains("allow_shell"));
+
     let hibernated: Value = client
         .post(format!("{base}/api/sessions/{id}/hibernate"))
         .json(&json!({ "allow_shell": true }))
@@ -12873,6 +12884,7 @@ async fn a_superseded_session_and_a_contended_work_item_are_not_woken() {
             Some("idle".into()),
             vogt_engine_contract::HibernateTrigger::Idle,
             false,
+            false,
             None,
         )
         .await
@@ -12883,6 +12895,7 @@ async fn a_superseded_session_and_a_contended_work_item_are_not_woken() {
             uuid::Uuid::parse_str(&budgeted).unwrap(),
             Some("budget".into()),
             vogt_engine_contract::HibernateTrigger::Budget,
+            false,
             false,
             None,
         )
@@ -20371,6 +20384,57 @@ sleep 2
         assert!(h.launcher.deleted.lock().unwrap().contains(&orphan));
     }
 
+    /// WI-3878: a Running pod whose attached agent stops sending heartbeats
+    /// is ended by the reconciler with the heartbeat-specific reason, and the
+    /// deadline comes from the environment-backed setting.
+    #[tokio::test]
+    async fn a_running_pods_silent_agent_ends_at_the_heartbeat_timeout() {
+        let mut h = harness(false).await;
+        let id = h.start().await;
+        let token = h.session_token(id).await;
+        let mut agent = h.dial(id, &token, 0).await;
+        assert_eq!(take(&mut agent).await, Frame::Ack { offset: 0 });
+
+        *h.launcher.listed.lock().unwrap() = vec![running_pod(id)];
+        let env = [("ENGINE_POD_HEARTBEAT_TIMEOUT", "1")];
+        let cfg = vogt_engine_server::pod_backend::PodConfig::from_lookup(
+            |name| {
+                env.iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| (*value).to_string())
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(cfg.heartbeat_timeout, Duration::from_secs(1));
+
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        let report = vogt_engine_server::pod_reconcile::sweep(
+            h.launcher.as_ref(),
+            &h.state.agent_auth,
+            &cfg,
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.ended, vec![id]);
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let detail = h.detail(id).await;
+                if detail.summary.exit_code == Some(1)
+                    && String::from_utf8_lossy(&h.scrollback(id).await)
+                        .contains("agent heartbeat silent for more than 1s")
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("the heartbeat timeout ends the session with its own reason");
+        drop(agent);
+        ended(&h.state.sessions, id).await;
+    }
+
     // ---- Hibernation, wake and restart re-adoption (WI-3158, WI-3205) ------
 
     /// A harness whose template runs Claude on a named account, so the session
@@ -20867,6 +20931,45 @@ sleep 2
         );
         let summary = registry.summary_of(id).unwrap();
         assert_eq!(summary.activity, ActivityState::Hibernated);
+    }
+
+    /// WI-3878: `ENGINE_POD_RECONNECT_TIMEOUT` (read through the same lookup
+    /// `PodConfig::from_env` uses) is what decides how long an adopted pod's
+    /// agent may take to redial before the pod is marked lost.
+    #[tokio::test]
+    async fn an_env_overridden_reconnect_timeout_marks_an_unreturning_pod_lost() {
+        let (mut h, _accounts) = claude_harness().await;
+        let id = h.start().await;
+        let token = h.session_token(id).await;
+        let mut agent = h.dial(id, &token, 0).await;
+        assert_eq!(take(&mut agent).await, Frame::Ack { offset: 0 });
+        let old_link = h.state.agent_auth.pod(id).unwrap();
+        h.state.agent_auth.forget_pod(id);
+        drop(agent);
+        let launcher = fake_launcher(vec![running_pod(id)]);
+        let registry = restarted(&h, launcher.clone());
+        let env = [("ENGINE_POD_RECONNECT_TIMEOUT", "1")];
+        let cfg = vogt_engine_server::pod_backend::PodConfig::from_lookup(
+            |name| {
+                env.iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| (*value).to_string())
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(cfg.reconnect_timeout, Duration::from_secs(1));
+
+        let adopted = registry.readopt_pods(cfg.reconnect_timeout).await;
+        old_link.finish(137);
+        assert_eq!(adopted, vec![id]);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !(registry.is_hibernated(id) && launcher.deleted.lock().unwrap().contains(&id)) {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("the one-second reconnect timeout, not the 120 s default, marks the pod lost");
     }
 
     #[tokio::test]

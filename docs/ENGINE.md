@@ -1925,7 +1925,7 @@ engine id (WI-912; the design is `docs/design/session-hibernation.md`).
     resume replays exactly the output the engine missed. An agent that is
     ahead of the log (output acknowledged but not yet logged when the engine
     died) is skipped forward rather than refused. If no agent dials in within
-    `reconnect_timeout` (120 s) the pod is marked lost: it is deleted and the
+    `ENGINE_POD_RECONNECT_TIMEOUT` (120 s) the pod is marked lost: it is deleted and the
     session stays hibernated as `recovered`, wakeable from the engine-held
     transcript. A pod with no kept credential is not adopted; the reconciler
     deletes it as an orphan.
@@ -3321,10 +3321,19 @@ heartbeats, and deletes a pod that no live session owns.
 Pod lifecycle timing is configurable in whole seconds through
 `ENGINE_POD_CONNECT_TIMEOUT` (30), `ENGINE_POD_PENDING_TIMEOUT` (600),
 `ENGINE_POD_RECONNECT_TIMEOUT` (120), `ENGINE_POD_RECONCILE_TIMEOUT` (15), and
-`ENGINE_POD_HEARTBEAT_TIMEOUT` (60). The heartbeat timer starts when the agent
-completes its hello and is refreshed by each heartbeat; a silent running pod is
-ended with a distinct heartbeat-timeout reason. Hibernating a pod whose agent
-is not attached returns `409` unless the request explicitly sets `force=true`.
+`ENGINE_POD_HEARTBEAT_TIMEOUT` (60); a value that is not a whole number of
+seconds refuses engine start. `ENGINE_POD_RECONCILE_TIMEOUT` is the sweep
+interval. The heartbeat timer applies only while an agent is attached: it
+starts when the agent completes its hello and is refreshed by each heartbeat,
+and a silent running pod is ended with a distinct heartbeat-timeout reason.
+When the agent's socket drops, the heartbeat deadline stops and
+`ENGINE_POD_RECONNECT_TIMEOUT` governs how long it may stay away before the
+session is ended as unreconnected. Hibernating a pod whose agent is not
+attached returns `409` unless the request explicitly sets `force=true`;
+`force` does not bypass the separate no-pinned-conversation refusal
+(`allow_shell`). Internal lifecycle paths (restart readoption, shutdown, idle
+policy and budget) hibernate or mark such a pod lost without the person-facing
+`409`.
 
 The built-in templates (used when the config file lists none) run on
 `ENGINE_SESSION_BACKEND` (or `VOGT_ENGINE_SESSION_BACKEND`): `local`

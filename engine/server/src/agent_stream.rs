@@ -62,6 +62,9 @@ struct PendingCredential {
     handle: crate::source_provider::CredentialHandle,
     expires: Instant,
 }
+
+type AgentLinks = HashMap<Uuid, (mpsc::UnboundedSender<Frame>, Arc<PodLink>)>;
+
 #[derive(Debug, Default)]
 pub struct AgentAuth {
     pending: Mutex<HashMap<Uuid, Pending>>,
@@ -75,7 +78,9 @@ pub struct AgentAuth {
     source_credentials: Mutex<HashMap<Uuid, PendingCredential>>,
     sources: Mutex<HashMap<Uuid, SourceDescriptor>>,
     sessions: Mutex<HashMap<Uuid, SessionCredential>>,
-    links: std::sync::Mutex<HashMap<Uuid, mpsc::UnboundedSender<Frame>>>,
+    /// The attached agent's command channel, beside the link it belongs to so
+    /// attach/detach can update the connection state under one lock.
+    links: std::sync::Mutex<AgentLinks>,
     pods: std::sync::Mutex<HashMap<Uuid, Arc<PodLink>>>,
 }
 
@@ -113,9 +118,13 @@ pub struct PodLink {
     /// a wake never races the old pod's teardown.
     torn_down: AtomicBool,
     torn_notify: Notify,
-    /// An agent has completed its hello on this link.
+    /// An agent's socket is attached right now.
     connected: AtomicBool,
+    /// An agent has completed its hello on this link at least once.
+    ever_connected: AtomicBool,
     last_heartbeat: std::sync::Mutex<Instant>,
+    /// When the current agent's socket was lost, while it is not connected.
+    disconnected_at: std::sync::Mutex<Option<Instant>>,
     /// The link was rebuilt after an engine restart rather than registered by
     /// a launch: its cursor came from the output log, and until an agent
     /// dials in the pod's fate is unknown.
@@ -145,7 +154,9 @@ impl PodLink {
             torn_down: AtomicBool::new(false),
             torn_notify: Notify::new(),
             connected: AtomicBool::new(false),
+            ever_connected: AtomicBool::new(false),
             last_heartbeat: std::sync::Mutex::new(Instant::now()),
+            disconnected_at: std::sync::Mutex::new(None),
             adopted: AtomicBool::new(false),
         }
     }
@@ -173,6 +184,11 @@ impl PodLink {
 
     /// An agent has dialled in on this link at least once.
     pub fn has_connected(&self) -> bool {
+        self.ever_connected.load(Ordering::Acquire)
+    }
+
+    /// An agent's socket is attached right now.
+    pub fn is_connected(&self) -> bool {
         self.connected.load(Ordering::Acquire)
     }
 
@@ -185,6 +201,31 @@ impl PodLink {
 
     fn note_heartbeat(&self) {
         *self.last_heartbeat.lock().expect("pod link lock poisoned") = Instant::now();
+    }
+
+    /// A new agent completed its hello: it is attached and its heartbeat
+    /// clock starts now, not when the previous socket went away.
+    pub(crate) fn note_connected(&self) {
+        *self.disconnected_at.lock().expect("pod link lock poisoned") = None;
+        self.ever_connected.store(true, Ordering::Release);
+        self.connected.store(true, Ordering::Release);
+        self.note_heartbeat();
+    }
+
+    /// The attached agent's socket went away. The link stays registered so a
+    /// redial resumes it, but the heartbeat deadline no longer applies: the
+    /// reconnect timeout owns a disconnect.
+    pub(crate) fn note_disconnected(&self) {
+        self.connected.store(false, Ordering::Release);
+        *self.disconnected_at.lock().expect("pod link lock poisoned") = Some(Instant::now());
+    }
+
+    /// How long the link has had no attached agent, if it has none now.
+    pub fn disconnected_age(&self) -> Option<Duration> {
+        self.disconnected_at
+            .lock()
+            .expect("pod link lock poisoned")
+            .map(|at| at.elapsed())
     }
 
     /// Rebuilt after an engine restart (see `AgentAuth::adopt_pod`).
@@ -615,17 +656,22 @@ impl AgentAuth {
         );
         true
     }
-    async fn attach(&self, id: Uuid, tx: mpsc::UnboundedSender<Frame>) {
+    async fn attach(&self, id: Uuid, tx: mpsc::UnboundedSender<Frame>, link: Arc<PodLink>) {
         self.links
             .lock()
             .expect("agent links lock poisoned")
-            .insert(id, tx);
+            .insert(id, (tx, Arc::clone(&link)));
+        link.note_connected();
     }
-    /// Drop the link, unless a newer connection has already replaced it.
+    /// Drop the link, unless a newer connection has already replaced it. A
+    /// dropped socket marks the link disconnected, so a redial is judged by
+    /// the reconnect timeout rather than the heartbeat deadline.
     async fn detach(&self, id: Uuid, tx: &mpsc::UnboundedSender<Frame>) {
         let mut links = self.links.lock().expect("agent links lock poisoned");
-        if links.get(&id).is_some_and(|cur| cur.same_channel(tx)) {
+        if let Some((_, link)) = links.get(&id).filter(|(cur, _)| cur.same_channel(tx)) {
+            let link = Arc::clone(link);
             links.remove(&id);
+            link.note_disconnected();
         }
     }
 
@@ -749,7 +795,7 @@ impl AgentAuth {
             .lock()
             .expect("agent links lock poisoned")
             .get(&id)
-            .map(|tx| tx.send(frame))
+            .map(|(tx, _)| tx.send(frame))
             .ok_or_else(|| {
                 std::io::Error::new(
                     std::io::ErrorKind::NotConnected,
@@ -1148,10 +1194,8 @@ where
         let _ = socket.close().await;
         return;
     }
-    link.connected.store(true, Ordering::Release);
-    link.note_heartbeat();
     let (tx, mut commands) = mpsc::unbounded_channel();
-    agent_auth.attach(id, tx.clone()).await;
+    agent_auth.attach(id, tx.clone(), Arc::clone(&link)).await;
     // A stop asked for while no agent was attached is delivered on arrival.
     if link.stop_requested() {
         let _ = tx.send(Frame::Signal {
@@ -1752,9 +1796,10 @@ mod tests {
     async fn commands_reach_the_connected_agent() {
         let auth = AgentAuth::default();
         let id = Uuid::new_v4();
+        let (link, _reader) = auth.register_pod(id);
         let (tx, mut rx) = mpsc::unbounded_channel();
         let tx2 = tx.clone();
-        auth.attach(id, tx).await;
+        auth.attach(id, tx, link).await;
         auth.send(
             id,
             Frame::Resize {
@@ -1778,10 +1823,11 @@ mod tests {
     async fn an_old_connections_cleanup_leaves_the_new_one_attached() {
         let auth = AgentAuth::default();
         let id = Uuid::new_v4();
+        let (link, _reader) = auth.register_pod(id);
         let (old, _old_rx) = mpsc::unbounded_channel();
         let (new, mut new_rx) = mpsc::unbounded_channel();
-        auth.attach(id, old.clone()).await;
-        auth.attach(id, new).await;
+        auth.attach(id, old.clone(), Arc::clone(&link)).await;
+        auth.attach(id, new, link).await;
         auth.detach(id, &old).await;
         auth.send(id, Frame::Ack { offset: 3 }).unwrap();
         assert_eq!(new_rx.recv().await, Some(Frame::Ack { offset: 3 }));
