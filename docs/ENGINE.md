@@ -1704,12 +1704,14 @@ checks decide what it can finish on its own (WI-926; the design is
   Claude Code would load and inserts it after the binary as one
   `-c developer_instructions="…"` (a TOML basic string). Inside `$HOME` the
   walk climbs from the working directory to `$HOME`, past the git root, so
-  `~/Working/AGENTS.md`, `CLAUDE.md` and `.claude/rules/*.md` arrive;
+  it finds `~/Working/AGENTS.md`, `CLAUDE.md` and `.claude/rules/*.md`;
   outside `$HOME` it stops at the git root. `~/.claude/CLAUDE.md` and
   `~/.claude/rules` come first; the `AGENTS.md` files Codex already reads
-  (git root to working directory) are skipped. Skills from each
-  `.claude/skills` and `~/.claude/skills` go in as an index of name,
-  description and `SKILL.md` path. Every file is resolved through symlinks
+  (git root to working directory) are skipped. Only the checkout's own
+  guidance is inlined: the workspace files and the skills from each
+  `.claude/skills` and `~/.claude/skills` are named by a one-line pointer
+  to their root directories (WI-3870), so the body does not grow with the
+  number of rules or skills. Every file is resolved through symlinks
   and kept only if it is a `.md` file inside the walk's top or `$HOME`,
   outside `.codex`, `.ssh`, `.git`, `.config`, `.local` and the other
   credential directories, and at most 32 KiB; the body is capped at 96 KiB,
