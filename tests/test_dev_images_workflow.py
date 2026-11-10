@@ -11,10 +11,18 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
+ENGINE = REPO_ROOT / "engine"
 POD_DOCKERFILE = REPO_ROOT / "engine" / "Dockerfile.pod"
 POD_BASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "pod-base.yml"
 DEV_IMAGES_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "rust2-images.yml"
+
+pytestmark = pytest.mark.skipif(
+    not ENGINE.is_dir(),
+    reason="needs engine/ (absent in the core-alone job)",
+)
 
 
 def _args(text: str) -> dict[str, str]:
@@ -57,13 +65,27 @@ def test_pod_base_tag_covers_the_engine_tree_the_image_copies() -> None:
 def test_dev_image_workflow_publishes_both_images_by_digest() -> None:
     workflow = DEV_IMAGES_WORKFLOW.read_text(encoding="utf-8")
     assert "workflow_dispatch:" in workflow
-    assert "branches: [rust-2]" in workflow
+    # `rust-2` is a graft line, so no GitHub branch of that name is ever
+    # pushed: the only ref that carries its commits is the batch export
+    # (WI-3947). Watching `rust-2` itself made this workflow unreachable.
+    assert 'branches: ["graft/batch-*"]' in workflow
+    assert "branches: [rust-2]" not in workflow
     assert "repo.indexarr.net/indexarr/vogt-dev-pod" in workflow
     assert "repo.indexarr.net/indexarr/vogt-dev-engine" in workflow
     assert workflow.count("push-by-digest=true") == 2
     assert workflow.count("provenance: true") == 2
     assert workflow.count("sbom: true") == 2
     assert "steps.push.outputs.digest" in workflow
+
+
+def test_dev_image_workflow_builds_the_changeset_the_batch_export_names() -> None:
+    workflow = DEV_IMAGES_WORKFLOW.read_text(encoding="utf-8")
+    # The engine names the graft changeset it was built from, not the squashed
+    # GitHub sha: a ref without the trailer is refused rather than published
+    # under a rust-2 name (WI-3947).
+    assert "Graft-Changeset: *" in workflow
+    assert "needs.source.outputs.changeset" in workflow
+    assert "VOGT_SOURCE_SHA=${{ github.sha }}" not in workflow
 
 
 def test_the_engine_image_is_built_on_the_runs_pod_digest() -> None:

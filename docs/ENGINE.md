@@ -4087,6 +4087,9 @@ can affect the forge; the same approval gate and core writeback policy apply.
 | `work.unrelate` | Confirmation-gated | Available after approval: Remove a typed relation between two work items. |
 | `work.bind_branch` | Confirmation-gated | Available after approval: Declare the git branch a work item is worked on. |
 | `work.comment` | Confirmation-gated | Available after approval: Comment on a work item, attributed to the acting actor. |
+| `work.land` | Operator-only | Unavailable: Lands a changeset on its line, which is the operator's call after reviewing the batch. For agents over MCP/CLI/REST, not a voice action. |
+| `workspace.list` | Operator-only | Unavailable: Workspace bookkeeping for the GUI and agents; not curated for the assistant. Read it over MCP, REST or the CLI. |
+| `workspace.clean` | Operator-only | Unavailable: Removes a workspace's directories or worktrees; destructive, and never a voice action. |
 | `backlog` | Voice-readable | Available: The ranked backlog, globally or for one project. |
 | `bugs` | Voice-readable | Available: Open bugs across every project, ranked. |
 | `why` | Voice-readable | Available: Per-input score contributions for one ranked item. |
@@ -4122,9 +4125,13 @@ can affect the forge; the same approval gate and core writeback policy apply.
 | `serve` | Operator-only | Unavailable: Local server process management; no remote MCP tool. |
 | `session.start` | Confirmation-gated | Available after approval: Open a coding session for a work item or a project. |
 | `session.list` | Voice-readable | Available: List coding sessions with their live activity state. |
+| `session.template_list` | Operator-only | Unavailable: The launch templates a session may start from; the assistant starts sessions against a work item or project, not a template. For agents over MCP/CLI/REST. |
 | `session.stop` | Confirmation-gated | Available after approval: Stop a coding session and revoke the token it ran with (either id form). |
 | `agent_cli.list` | Voice-readable | Available: Report the pod's agent CLIs: active, baked and upstream versions. |
 | `agent_cli.update` | Operator-only | Unavailable: Installs executable tooling on the host. |
+| `llm_provider.list` | Operator-only | Unavailable: Admin model-provider configuration; provider endpoints and keys are operator setup, not a spoken answer. |
+| `llm_provider.set` | Operator-only | Unavailable: Changes model-provider configuration; operator setup, never a voice turn. |
+| `llm_provider.remove` | Operator-only | Unavailable: Removes model-provider configuration; operator setup, never a voice turn. |
 | `session.history_list` | Voice-readable | Available: List archived sessions (history), newest first. |
 | `agent_activity.search` | Operator-only | Unavailable: Agent transcript activity is not curated for the voice assistant; read it over MCP, REST or the CLI. |
 | `agent_activity.summary` | Operator-only | Unavailable: Agent transcript activity is not curated for the voice assistant; read it over MCP, REST or the CLI. |
