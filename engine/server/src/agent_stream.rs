@@ -406,7 +406,8 @@ pub struct BootstrapResponse {
 pub(crate) struct AuthBreadcrumbs {
     /// The variables this session holds an approved grant for.
     pub granted: Vec<String>,
-    /// Manifest entries declared `ondemand`: fetchable through the broker.
+    /// Manifest entries declared `ondemand`, plus the Codex provider keys a
+    /// pod fetches at launch (WI-3886): fetchable through the broker by name.
     pub ondemand: Vec<String>,
     /// Manifest entries flagged `writable`: storable through the broker.
     pub writable: Vec<String>,
@@ -895,7 +896,22 @@ pub async fn bootstrap(
         }
     };
     let broker = state.sessions.secret_broker();
-    let breadcrumbs = AuthBreadcrumbs::snapshot(broker, id);
+    let mut breadcrumbs = AuthBreadcrumbs::snapshot(broker, id);
+    // WI-3886: a Codex pod fetches its provider keys at launch, around the CLI
+    // only. The bootstrap names them among the ondemand entries and carries no
+    // value: `vogt-agent-auth fetch` resolves each one into the Codex child
+    // (the session agent's launch line), so a key never joins the pod's
+    // long-lived environment.
+    let providers = if req.cli == "codex" {
+        broker.providers()
+    } else {
+        Vec::new()
+    };
+    for entry in crate::llm_providers::manifest_entries(&providers) {
+        if !breadcrumbs.ondemand.contains(&entry.var) {
+            breadcrumbs.ondemand.push(entry.var);
+        }
+    }
     let mut env = bootstrap_env(
         cfg.engine_endpoint,
         id,
@@ -955,39 +971,17 @@ pub async fn bootstrap(
             }
         }
     }
-    // WI-3491: a Codex pod gets the registered LLM providers as it launches,
-    // as a host session does: their `model_providers` tables in its config and
-    // each provider's key, resolved now through the helper and the manifest.
-    // A key that cannot be resolved is left out and logged by name.
-    if req.cli == "codex" {
-        let providers = broker.providers();
-        if !providers.is_empty() {
-            codex_config = Some(
-                crate::llm_providers::codex_config(req.model.as_deref(), &providers)
-                    + "\n"
-                    + &codex_config.unwrap_or_default(),
-            );
-            for wanted in crate::llm_providers::manifest_entries(&providers) {
-                // Fetch only the registry's own secret: a permitted entry that
-                // names another project or secret is some other manifest line,
-                // whose policy this path must not bypass.
-                let Some(entry) = broker.permitted(&wanted.var).filter(|e| {
-                    e.project_id == wanted.project_id && e.secret_name == wanted.secret_name
-                }) else {
-                    tracing::warn!(session = %id, var = %wanted.var, "provider key is not the registry's entry; not resolved for pod launch");
-                    continue;
-                };
-                match broker.fetch(&entry).await {
-                    Ok(value) => {
-                        tracing::info!(session = %id, var = %entry.var, "provider key resolved for pod launch");
-                        env.insert(entry.var.clone(), serde_json::Value::String(value));
-                    }
-                    Err(error) => {
-                        tracing::warn!(session = %id, var = %entry.var, %error, "provider key not resolved for pod launch");
-                    }
-                }
-            }
-        }
+    // WI-3491/WI-3886: a Codex pod gets the registered LLM providers as it
+    // launches, as a host session does: their `model_providers` tables in its
+    // config, and their `env_key` names among the ondemand breadcrumbs above.
+    // The session agent fetches each key around the Codex child; resolving it
+    // here would put the value in the whole pod's environment.
+    if req.cli == "codex" && !providers.is_empty() {
+        codex_config = Some(
+            crate::llm_providers::codex_config(req.model.as_deref(), &providers)
+                + "\n"
+                + &codex_config.unwrap_or_default(),
+        );
     }
     // A pod resumes from the account bundle the engine holds: the login, the
     // global config and, for a woken session, its conversation's transcript.
