@@ -1503,6 +1503,8 @@ impl SessionRegistry {
                 base_url: provider.base_url.clone(),
                 wire_api: provider.wire_api.clone(),
                 env_key: provider.env_key.clone(),
+                context_window: provider.context_window,
+                auto_compact_token_limit: provider.auto_compact_token_limit,
             })
             .collect();
         if codex_agent {
