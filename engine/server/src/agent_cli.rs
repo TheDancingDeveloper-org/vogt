@@ -549,143 +549,6 @@ fn agent_binary(command: &[String]) -> (usize, String) {
     (idx, name)
 }
 
-/// `command` with the workspace guidance override inserted right after the
-/// Codex binary (WI-1357), or `None` when it is not a Codex launch, already
-/// carries one, or there is nothing to carry. Only the argument list changes:
-/// `CODEX_HOME` is never set, so the user's `~/.codex` (MCP servers,
-/// providers, trust, login, transcripts) stays the config Codex reads.
-pub fn with_codex_guidance(
-    command: &[String],
-    cwd: &Path,
-    home: Option<&Path>,
-) -> Option<Vec<String>> {
-    if agent_name(command).as_deref() != Some("codex")
-        || crate::codex_guidance::has_override(command)
-    {
-        return None;
-    }
-    let value = crate::codex_guidance::developer_instructions_override(cwd, home)?;
-    let (idx, _) = agent_binary(command);
-    let mut out = command.to_vec();
-    out.splice(idx + 1..idx + 1, ["-c".to_string(), value]);
-    Some(out)
-}
-
-/// `command` with Codex's project trust override for the session cwd inserted
-/// right after the Codex binary (WI-3815), or `None` when it is not a Codex
-/// launch or already carries the override. Codex asks its interactive
-/// folder-trust question for a git cwd it has no trust entry for; pod
-/// sessions start in `/work`, a fresh checkout with a git view, and a driven
-/// session exits at that screen before it can read its brief. The entry is
-/// an inline table because `-c` splits its key on every `.`: a dotted
-/// `projects."/work".trust_level` names a project called `"/work"`, quotes
-/// included, and never matches (WI-3839). `--skip-git-repo-check` is an
-/// `exec` flag the interactive CLI refuses. The override is this launch's
-/// own, so the shared config is not edited.
-pub fn with_codex_trust(command: &[String], cwd: &Path) -> Option<Vec<String>> {
-    if agent_name(command).as_deref() != Some("codex") {
-        return None;
-    }
-    if command.iter().any(|arg| arg.starts_with("projects=")) {
-        return None;
-    }
-    let key = crate::codex_guidance::toml_basic_string(&cwd.to_string_lossy());
-    let (idx, _) = agent_binary(command);
-    let mut out = command.to_vec();
-    out.splice(
-        idx + 1..idx + 1,
-        [
-            "-c".to_string(),
-            format!("projects={{{key}={{trust_level=\"trusted\"}}}}"),
-        ],
-    );
-    Some(out)
-}
-
-/// `command` with one `-c model_providers.<name>=…` override per registered
-/// LLM provider inserted right after the Codex binary (WI-3491), or `None`
-/// when it is not a Codex launch or nothing is registered. The shared
-/// `~/.codex/config.toml` is not touched, so the providers are this launch's.
-pub fn with_codex_providers(
-    command: &[String],
-    providers: &[crate::llm_providers::Provider],
-) -> Option<Vec<String>> {
-    if providers.is_empty() || agent_name(command).as_deref() != Some("codex") {
-        return None;
-    }
-    let (idx, _) = agent_binary(command);
-    let mut out = command.to_vec();
-    out.splice(
-        idx + 1..idx + 1,
-        crate::llm_providers::codex_overrides(providers),
-    );
-    Some(out)
-}
-
-/// Linux caps one argv entry at 128 KiB; a charter that would push Codex's
-/// `developer_instructions` past this stays in the brief alone.
-const MAX_CHARTER_ARG_BYTES: usize = 120 * 1024;
-/// Largest charter text inlined into `developer_instructions`, which rides on
-/// every Codex request (WI-2035 trimmed it to a few KiB). A larger one is
-/// replaced by [`CHARTER_POINTER`]: the brief carries the full text.
-const MAX_CHARTER_INLINE_BYTES: usize = 4 * 1024;
-const CHARTER_POINTER: &str = "## Charters\n\nThis scope has standing instructions \
-(charters) too long to repeat here. They are in the `## Charters` section of \
-the session brief; follow them as if they were written here.";
-
-/// `command` with the scope's charters (WI-2038) appended to Codex's
-/// `developer_instructions`, or `None` when it is not a Codex launch, there is
-/// no charter, or the result cannot be built. Runs after
-/// [`with_codex_guidance`]: an override already present is decoded and
-/// extended, otherwise one is added right after the Codex binary. A charter
-/// over [`MAX_CHARTER_INLINE_BYTES`] is appended as a pointer to the brief.
-pub fn with_codex_charter(command: &[String], charter: &str) -> Option<Vec<String>> {
-    const PREFIX: &str = "developer_instructions=";
-    let charter = charter.trim();
-    if charter.is_empty() || agent_name(command).as_deref() != Some("codex") {
-        return None;
-    }
-    let charter = if charter.len() > MAX_CHARTER_INLINE_BYTES {
-        tracing::info!(
-            bytes = charter.len(),
-            "charter over the inline cap; Codex gets a pointer to the brief"
-        );
-        CHARTER_POINTER
-    } else {
-        charter
-    };
-    let mut out = command.to_vec();
-    let encode = |body: &str| format!("{PREFIX}{}", crate::codex_guidance::toml_basic_string(body));
-    match out.iter().position(|arg| arg.starts_with(PREFIX)) {
-        Some(pos) => {
-            let parsed: Option<String> =
-                toml::from_str::<toml::Table>(&format!("v = {}", &out[pos][PREFIX.len()..]))
-                    .ok()
-                    .and_then(|t| t.get("v").and_then(|v| v.as_str()).map(str::to_owned));
-            let Some(existing) = parsed else {
-                tracing::warn!(
-                    "codex developer_instructions did not parse; charter left to the brief"
-                );
-                return None;
-            };
-            out[pos] = encode(&format!("{}\n\n{charter}", existing.trim_end()));
-            if out[pos].len() > MAX_CHARTER_ARG_BYTES {
-                tracing::warn!(
-                    bytes = out[pos].len(),
-                    "codex developer_instructions with charter over the argv cap; charter left to the brief"
-                );
-                return None;
-            }
-        }
-        None => {
-            let value = encode(charter);
-            let (idx, _) = agent_binary(command);
-            out.splice(idx + 1..idx + 1, ["-c".to_string(), value]);
-        }
-    }
-    Some(out)
-}
-
 /// A conversation id becomes an argument to the agent CLI, so it is held to a
 /// narrower vocabulary than a model id: Claude Code and Codex ids are UUIDs,
 /// OpenCode's are `ses_…`, and a Codex session *name* is a plain word. No `/`
@@ -742,149 +605,70 @@ pub(crate) fn validate(field: &str, value: &str) -> Result<()> {
 mod tests {
 
     #[test]
-    fn codex_guidance_is_an_argument_and_leaves_codex_home_alone() {
-        let tmp = tempfile::tempdir().unwrap();
-        let home = tmp.path().join("home");
-        let repo = home.join("Working").join("repo");
-        std::fs::create_dir_all(repo.join(".git")).unwrap();
-        std::fs::write(home.join("Working").join("AGENTS.md"), "WS").unwrap();
-        let command: Vec<String> = ["env", "X=1", "--", "/usr/bin/codex", "--yolo"]
-            .map(String::from)
-            .to_vec();
-        let out = with_codex_guidance(&command, &repo, Some(&home)).unwrap();
-        assert_eq!(&out[..4], &command[..4]);
-        assert_eq!(out[4], "-c");
-        assert!(out[5].starts_with("developer_instructions=\""));
-        assert_eq!(out[6], "--yolo");
-        // The user's ~/.codex stays the config home: nothing names CODEX_HOME.
-        assert!(!out.iter().any(|arg| arg.contains("CODEX_HOME")));
-        // A second start does not stack another copy; other agents are untouched.
-        assert!(with_codex_guidance(&out, &repo, Some(&home)).is_none());
-        let claude = vec!["claude".to_string()];
-        assert!(with_codex_guidance(&claude, &repo, Some(&home)).is_none());
-    }
-
-    #[test]
-    fn codex_trust_is_an_explicit_cwd_override() {
-        let command: Vec<String> = ["vogt-agent-auth", "run", "--", "codex"]
-            .map(String::from)
-            .to_vec();
-        let cwd = Path::new("/work");
-        let out = with_codex_trust(&command, cwd).unwrap();
-        assert_eq!(&out[..4], &command[..4]);
-        assert_eq!(
-            &out[4..],
-            ["-c", "projects={\"/work\"={trust_level=\"trusted\"}}"]
-        );
-        // The value is the TOML Codex reads: the cwd's own trust entry.
-        let parsed: toml::Table = toml::from_str(&out[5]).unwrap();
-        assert_eq!(
-            parsed["projects"]["/work"]["trust_level"].as_str(),
-            Some("trusted")
-        );
-        assert!(with_codex_trust(&out, cwd).is_none());
-        assert!(with_codex_trust(&["claude".to_string()], cwd).is_none());
-    }
-
-    /// WI-3839: the interactive CLI refused `--skip-git-repo-check`, an
-    /// `exec` flag, and every Codex launch exited at once. A string test
-    /// cannot see that, so the trust override goes through Codex's own
-    /// parser: `VOGT_CODEX_BIN`, which CI sets to the pinned fork. Without it
-    /// the check is skipped, unless `VOGT_CODEX_REQUIRED` says it must run.
-    #[test]
-    fn the_codex_trust_override_parses_with_the_real_codex() {
-        let codex = match std::env::var("VOGT_CODEX_BIN") {
-            Ok(bin) => bin,
-            Err(_) if std::env::var_os("VOGT_CODEX_REQUIRED").is_some() => {
-                panic!("VOGT_CODEX_REQUIRED is set but VOGT_CODEX_BIN is not")
-            }
-            Err(_) => {
-                eprintln!("skipped: set VOGT_CODEX_BIN to check argv against Codex");
-                return;
-            }
-        };
-        // clap rejects an unknown flag before it reaches the trailing `--help`.
-        let parses = |argv: &[String]| {
-            std::process::Command::new(&codex)
-                .args(&argv[1..])
-                .arg("--help")
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .unwrap()
-                .success()
-        };
-        let out = with_codex_trust(&["codex".to_string()], Path::new("/work")).unwrap();
-        assert!(parses(&out), "codex refused: {out:?}");
-        assert!(!parses(&["codex".into(), "--skip-git-repo-check".into()]));
-    }
-
-    fn instructions(arg: &str) -> String {
-        let value = arg.strip_prefix("developer_instructions=").unwrap();
-        let parsed: toml::Table = toml::from_str(&format!("v = {value}")).unwrap();
-        parsed["v"].as_str().unwrap().to_string()
-    }
-
-    #[test]
-    fn codex_charter_extends_the_guidance_override_after_it() {
-        let tmp = tempfile::tempdir().unwrap();
-        let home = tmp.path().join("home");
-        let repo = home.join("Working").join("repo");
-        std::fs::create_dir_all(repo.join(".git")).unwrap();
-        std::fs::write(repo.join("CLAUDE.md"), "WS \"quoted\"").unwrap();
-        let command: Vec<String> = ["/usr/bin/codex", "--yolo"].map(String::from).to_vec();
-        let guided = with_codex_guidance(&command, &repo, Some(&home)).unwrap();
-        let out = with_codex_charter(&guided, "## Charters\n\nNo brand names.").unwrap();
-        assert_eq!(
-            out.len(),
-            guided.len(),
-            "extended in place, not a second -c"
-        );
-        let body = instructions(&out[2]);
+    fn shared_codex_instructions_preserve_guidance_charter_and_caps() {
+        let value = vogt_session_agent::codex_developer_instructions(
+            Some("WS \"quoted\""),
+            Some("## Charters\n\nNo brand names."),
+        )
+        .unwrap();
+        let body = value.strip_prefix("developer_instructions=").unwrap();
+        let parsed: toml::Table = toml::from_str(&format!("v = {body}")).unwrap();
+        let body = parsed["v"].as_str().unwrap();
         assert!(body.contains("WS \"quoted\""));
         assert!(body.ends_with("## Charters\n\nNo brand names."));
         assert!(body.find("WS").unwrap() < body.find("No brand names.").unwrap());
-    }
 
-    #[test]
-    fn codex_providers_ride_after_the_wrapped_binary_and_only_on_codex() {
-        let providers = crate::llm_providers::parse(
-            "[[provider]]\nname = \"ds\"\nbase_url = \"http://l/v1\"\nwire_api = \"chat\"\nenv_key = \"DS_KEY\"\nsecret_project = \"p\"\nsecret_name = \"s\"\n",
+        let pointer =
+            vogt_session_agent::codex_developer_instructions(None, Some(&"x".repeat(4 * 1024 + 1)))
+                .unwrap();
+        assert!(pointer.contains("too long to repeat here"));
+        assert!(vogt_session_agent::codex_developer_instructions(
+            Some(&"y".repeat(120 * 1024)),
+            Some("charter"),
         )
-        .unwrap();
-        let wrapped: Vec<String> = ["vogt-agent-auth", "run", "--", "codex", "--model", "m"]
-            .map(String::from)
-            .to_vec();
-        let out = with_codex_providers(&wrapped, &providers).unwrap();
-        assert_eq!(&out[..4], &wrapped[..4]);
-        assert_eq!(out[4], "-c");
-        assert!(out[5].starts_with("model_providers.ds={"), "{}", out[5]);
-        assert_eq!(&out[6..], &wrapped[4..]);
-        let claude: Vec<String> = vec!["claude".into()];
-        assert!(with_codex_providers(&claude, &providers).is_none());
-        assert!(with_codex_providers(&wrapped, &[]).is_none());
+        .is_some());
     }
 
     #[test]
-    fn codex_charter_adds_an_override_when_there_is_no_guidance() {
-        let command: Vec<String> = ["env", "--", "codex"].map(String::from).to_vec();
-        let out = with_codex_charter(&command, "Stop at push.").unwrap();
-        assert_eq!(out[3], "-c");
-        assert_eq!(instructions(&out[4]), "Stop at push.");
-        // Other agents, and an empty charter, are left alone.
-        assert!(with_codex_charter(&["claude".to_string()], "x").is_none());
-        assert!(with_codex_charter(&command, "  ").is_none());
-        // Over the inline cap: a pointer to the brief, not the text.
-        let big = with_codex_charter(&command, &"x".repeat(MAX_CHARTER_INLINE_BYTES + 1)).unwrap();
-        assert_eq!(instructions(&big[4]), CHARTER_POINTER);
-        // An existing override already near the argv cap: left alone.
-        let huge = format!(
-            "developer_instructions={}",
-            crate::codex_guidance::toml_basic_string(&"y".repeat(MAX_CHARTER_ARG_BYTES))
-        );
-        let near: Vec<String> = vec!["codex".into(), "-c".into(), huge];
-        assert!(with_codex_charter(&near, "Stop at push.").is_none());
+    fn shared_codex_trust_and_provider_overrides_are_secret_free() {
+        let provider = vogt_session_agent::CodexProvider {
+            name: "ds".into(),
+            base_url: "http://l/v1".into(),
+            wire_api: "chat".into(),
+            env_key: "DS_KEY".into(),
+        };
+        let args = vogt_session_agent::codex_args(&vogt_session_agent::CodexArgs {
+            command_args: &[],
+            resume: None,
+            session_id: None,
+            model: None,
+            config_model: None,
+            effort: None,
+            permission_mode: None,
+            approval_policy: "never",
+            exec: false,
+            compact_limit: None,
+            provider: None,
+            providers: &[provider],
+            trust_cwd: Some("/work"),
+            guidance: None,
+            charter: None,
+            mcp_servers: &[],
+            mcp_args: &[],
+            prompt: None,
+        })
+        .unwrap();
+        assert!(args
+            .iter()
+            .any(|arg| arg == r#"projects={"/work"={trust_level="trusted"}}"#));
+        let provider_arg = args
+            .iter()
+            .find(|arg| arg.starts_with("model_providers.ds="))
+            .unwrap();
+        assert!(provider_arg.contains("DS_KEY"));
+        assert!(!provider_arg.contains("secret"));
     }
+
     use super::*;
 
     fn cmd(parts: &[&str]) -> Vec<String> {
@@ -2043,6 +1827,12 @@ url = "http://komodo/mcp"
             "komodo is not in the auto-approval list: {host:?}"
         );
         assert!(host.windows(2).any(|w| w == ["-a", "never"]));
+        assert!(host
+            .windows(2)
+            .any(|w| w == ["-c", "model_reasoning_effort=high"]));
+        assert!(host
+            .windows(2)
+            .any(|w| w == ["-c", "approvals_reviewer=\"auto_review\""]));
         assert!(host
             .windows(2)
             .any(|w| w == ["-c", "features.daemon_auto_start=false"]));
