@@ -806,7 +806,7 @@ impl SessionRegistry {
                         }
                         tracing::warn!(session = %id, "an adopted pod's agent did not reconnect; marking it lost");
                         if let Err(e) = registry
-                            .hibernate(
+                            .hibernate_internal(
                                 id,
                                 Some(
                                     "the session's pod did not reconnect after the engine restarted"
@@ -814,7 +814,6 @@ impl SessionRegistry {
                                 ),
                                 HibernateTrigger::Recovered,
                                 true,
-                                false,
                                 None,
                             )
                             .await
@@ -2310,6 +2309,37 @@ impl SessionRegistry {
         force: bool,
         superseded_by: Option<String>,
     ) -> Result<SessionSummary> {
+        // A person's `force` opens only the not-attached-agent gate; the
+        // no-pinned-conversation (shell) refusal keeps its own `allow_shell`.
+        self.hibernate_with(id, reason, trigger, allow_shell, force, superseded_by)
+            .await
+    }
+
+    /// Hibernate from an internal lifecycle decision (readoption, shutdown,
+    /// policy, budget). Those paths have no person to pass `force`, and a pod
+    /// whose agent is mid-reconnect must still be ended or marked lost; only
+    /// the API path is refused with a 409 for that state.
+    pub(crate) async fn hibernate_internal(
+        &self,
+        id: Uuid,
+        reason: Option<String>,
+        trigger: HibernateTrigger,
+        allow_shell: bool,
+        superseded_by: Option<String>,
+    ) -> Result<SessionSummary> {
+        self.hibernate_with(id, reason, trigger, allow_shell, true, superseded_by)
+            .await
+    }
+
+    async fn hibernate_with(
+        &self,
+        id: Uuid,
+        reason: Option<String>,
+        trigger: HibernateTrigger,
+        allow_shell: bool,
+        allow_detached: bool,
+        superseded_by: Option<String>,
+    ) -> Result<SessionSummary> {
         let superseded_by = self.checked_successor(id, superseded_by)?;
         let lock = self.transition_lock(id);
         let _held = lock.lock().await;
@@ -2319,7 +2349,7 @@ impl SessionRegistry {
             }
             return self.hibernated_summary(id).ok_or(ApiError::NotFound);
         };
-        if let Some(refusal) = self.hibernate_refusal(&session, allow_shell || force) {
+        if let Some(refusal) = self.hibernate_refusal(&session, allow_shell) {
             return Err(ApiError::Conflict(refusal));
         }
         let mut record = self
@@ -2341,12 +2371,12 @@ impl SessionRegistry {
             {
                 FlushOutcome::Done => {}
                 FlushOutcome::NotAttached => {
-                    if !force {
+                    if !allow_detached {
                         return Err(ApiError::Conflict(
                             "the session's pod agent is not attached; pass force=true to hibernate anyway".into(),
                         ));
                     }
-                    tracing::warn!(session = %id, "force-hibernating a pod session whose agent is not attached; its transcript is as last written back");
+                    tracing::warn!(session = %id, "hibernating a pod session whose agent is not attached; its transcript is as last written back");
                 }
                 FlushOutcome::Failed => {
                     return Err(ApiError::Conflict(
@@ -3071,12 +3101,11 @@ impl SessionRegistry {
             |(id, allow_shell)| async move {
                 (
                     id,
-                    self.hibernate(
+                    self.hibernate_internal(
                         id,
                         Some("the engine was shutting down".into()),
                         HibernateTrigger::Shutdown,
                         allow_shell,
-                        false,
                         None,
                     )
                     .await,
