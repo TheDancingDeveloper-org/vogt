@@ -43,6 +43,10 @@ pub struct Provider {
     pub base_url: String,
     pub wire_api: String,
     pub env_key: String,
+    #[serde(default)]
+    pub context_window: Option<u64>,
+    #[serde(default)]
+    pub auto_compact_token_limit: Option<u64>,
     pub secret_project: String,
     pub secret_name: String,
     #[serde(default)]
@@ -126,6 +130,17 @@ pub fn parse(text: &str) -> Result<Vec<Provider>, String> {
             if !is_manifest_word(value) {
                 return Err(format!(
                     "provider {}: {field} must be one word with no '#'",
+                    p.name
+                ));
+            }
+        }
+        for (field, value) in [
+            ("context_window", p.context_window),
+            ("auto_compact_token_limit", p.auto_compact_token_limit),
+        ] {
+            if value == Some(0) {
+                return Err(format!(
+                    "provider {}: {field} must be greater than zero",
                     p.name
                 ));
             }
@@ -343,12 +358,16 @@ pub fn codex_config_tables(providers: &[Provider]) -> String {
         .iter()
         .map(|p| {
             format!(
-                "[model_providers.{}]\nname = {}\nbase_url = {}\nwire_api = {}\nenv_key = {}\nrequires_openai_auth = false\n\n",
+                "[model_providers.{}]\nname = {}\nbase_url = {}\nwire_api = {}\nenv_key = {}{}{}\nrequires_openai_auth = false\n\n",
                 p.name,
                 s(&p.name),
                 s(&p.base_url),
                 s(&p.wire_api),
-                s(&p.env_key)
+                s(&p.env_key),
+                p.context_window.map(|v| format!("
+context_window = {v}")).unwrap_or_default(),
+                p.auto_compact_token_limit.map(|v| format!("
+auto_compact_token_limit = {v}")).unwrap_or_default()
             )
         })
         .collect()
@@ -397,6 +416,8 @@ name = "deepseek"
 base_url = "http://litellm:4000/v1"
 wire_api = "chat"
 env_key = "DEEPSEEK_KEY"
+context_window = 1000000
+auto_compact_token_limit = 500000
 secret_project = "proj-a"
 secret_name = "HOMELAB_LITELLM_DEEPSEEK_KEY"
 models = ["deepseek-chat"]
@@ -417,6 +438,8 @@ models = ["deepseek-chat"]
             base_url: provider.base_url.clone(),
             wire_api: provider.wire_api.clone(),
             env_key: provider.env_key.clone(),
+            context_window: provider.context_window,
+            auto_compact_token_limit: provider.auto_compact_token_limit,
         };
         let args = vogt_session_agent::codex_args(&vogt_session_agent::CodexArgs {
             command_args: &[],
@@ -495,6 +518,14 @@ models = ["deepseek-chat"]
     }
 
     #[test]
+    fn context_limits_must_be_positive_when_present() {
+        for field in ["context_window", "auto_compact_token_limit"] {
+            let text = DEEPSEEK.replace("context_window = 1000000", &format!("{field} = 0"));
+            assert!(parse(&text).is_err(), "accepted zero {field}");
+        }
+    }
+
+    #[test]
     fn an_entry_cannot_smuggle_a_key_a_line_or_a_flag() {
         let with = |field: &str, value: &str| DEEPSEEK.replace(field, value);
         let refused = [
@@ -540,7 +571,7 @@ models = ["deepseek-chat"]
         let statuses = statuses(Some(&path), &[]).unwrap();
         let json = serde_json::to_string(&statuses).unwrap();
         assert!(json.contains("DEEPSEEK_KEY"));
-        assert!(!json.contains("token"));
+        assert!(!json.contains("super-secret"));
     }
 
     #[test]
