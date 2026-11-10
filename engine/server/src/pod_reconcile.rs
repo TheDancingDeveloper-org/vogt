@@ -59,6 +59,18 @@ pub fn judge(pod: &Pod, link: Option<&PodLink>, cfg: &PodConfig, age: Option<Dur
         // delete failed, the link is forgotten and the pod is an orphan next.
         return Verdict::Keep;
     }
+    if pod_phase(pod) == "running"
+        && link.has_connected()
+        && link.heartbeat_age() > cfg.heartbeat_timeout
+    {
+        return Verdict::End {
+            code: 1,
+            note: format!(
+                "agent heartbeat silent for more than {}s",
+                cfg.heartbeat_timeout.as_secs()
+            ),
+        };
+    }
     let detail = |what: &str| match pod_reason(pod) {
         Some(reason) => format!("{what}: {reason}"),
         None => what.to_string(),

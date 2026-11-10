@@ -327,6 +327,7 @@ pub async fn hibernate_session(
                 req.reason,
                 vogt_engine_contract::HibernateTrigger::Manual,
                 req.allow_shell,
+                req.force,
                 req.superseded_by,
             )
             .await?,
