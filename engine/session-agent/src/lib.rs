@@ -1051,6 +1051,8 @@ pub struct CodexProvider {
     pub base_url: String,
     pub wire_api: String,
     pub env_key: String,
+    pub context_window: Option<u64>,
+    pub auto_compact_token_limit: Option<u64>,
 }
 
 /// The per-launch data the engine carries to a pod that is not already in its
@@ -1119,11 +1121,13 @@ the session brief; follow them as if they were written here.";
 fn provider_inline(p: &CodexProvider) -> String {
     let s = toml_basic_string;
     format!(
-        "{{ name = {}, base_url = {}, wire_api = {}, env_key = {}, requires_openai_auth = false }}",
+        "{{ name = {}, base_url = {}, wire_api = {}, env_key = {}, requires_openai_auth = false{}{} }}",
         s(&p.name),
         s(&p.base_url),
         s(&p.wire_api),
-        s(&p.env_key)
+        s(&p.env_key),
+        p.context_window.map(|v| format!(", context_window = {v}")).unwrap_or_default(),
+        p.auto_compact_token_limit.map(|v| format!(", auto_compact_token_limit = {v}")).unwrap_or_default()
     )
 }
 
@@ -1188,6 +1192,20 @@ pub fn codex_args(args: &CodexArgs<'_>) -> Result<Vec<String>, String> {
                 provider_inline(provider)
             ),
         ]);
+    }
+    if let Some(selected) = args
+        .provider
+        .and_then(|name| args.providers.iter().find(|p| p.name == name))
+    {
+        if let Some(window) = selected.context_window {
+            argv.extend(["-c".to_string(), format!("model_context_window={window}")]);
+        }
+        if let Some(limit) = selected.auto_compact_token_limit {
+            argv.extend([
+                "-c".to_string(),
+                format!("model_auto_compact_token_limit={limit}"),
+            ]);
+        }
     }
     if let Some(cwd) = args.trust_cwd.map(str::trim).filter(|cwd| !cwd.is_empty()) {
         let key = toml_basic_string(cwd);
@@ -1422,6 +1440,14 @@ fn codex_file_config(
                 base_url: base_url.to_string(),
                 wire_api: wire_api.to_string(),
                 env_key: env_key.to_string(),
+                context_window: table
+                    .get("context_window")
+                    .and_then(toml::Value::as_integer)
+                    .and_then(|v| u64::try_from(v).ok()),
+                auto_compact_token_limit: table
+                    .get("auto_compact_token_limit")
+                    .and_then(toml::Value::as_integer)
+                    .and_then(|v| u64::try_from(v).ok()),
             });
         }
     }
@@ -2390,6 +2416,8 @@ mod tests {
             base_url: "http://litellm:4000/v1".into(),
             wire_api: "chat".into(),
             env_key: env_key.into(),
+            context_window: None,
+            auto_compact_token_limit: None,
         };
         let prefix = codex_provider_key_prefix(&[
             provider("DS_KEY"),
