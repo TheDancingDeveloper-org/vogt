@@ -4602,7 +4602,12 @@ At each launch the registry does two things, and nothing else:
   and names it as `VOGT_CODEX_CONFIG_FILE`, and the session agent reads the
   provider, model selection and MCP server names from it. Both launches then
   pass the same `-c` overrides through `vogt_session_agent::codex_args`
-  (WI-3882), so a provider cannot reach one and not the other. Only the
+  (WI-3882), so a provider cannot reach one and not the other. The selected
+  provider's `context_window` and `auto_compact_token_limit` are the base for
+  the compact backoff (WI-2832): a recorded floor can only raise the limit
+  from the provider's value, never from the deployment's 272k/200k defaults,
+  and each key is emitted once so no later `-c` can replace it with a lower
+  one. Only the
   `[mcp_servers.*]` tables are merged into the shared `config.toml`, for a
   person's own CLI. The engine resolves each key through the helper when the
   pod boots, logging each resolution by name.
