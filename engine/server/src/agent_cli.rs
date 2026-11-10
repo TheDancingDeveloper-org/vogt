@@ -150,6 +150,27 @@ impl<'a> LaunchRequest<'a> {
     }
 }
 
+/// The Codex-only launch inputs that live outside [`LaunchRequest`] because
+/// they are built from the session's cwd, scope and provider registry. Host
+/// and pod paths pass the same values to the shared builder (WI-3882).
+#[derive(Default)]
+pub struct CodexExtras<'a> {
+    /// Workspace guidance gathered by the engine.
+    pub guidance: Option<&'a str>,
+    /// The scope's charters, appended after the guidance.
+    pub charter: Option<&'a str>,
+    pub providers: &'a [vogt_session_agent::CodexProvider],
+    /// The selected `model_provider` registry key.
+    pub provider: Option<&'a str>,
+    /// The provider registry's fallback model, used only when the caller named
+    /// no model.
+    pub config_model: Option<&'a str>,
+    /// The checkout Codex should trust without asking.
+    pub trust_cwd: Option<&'a Path>,
+    /// The MCP servers in this launch, for `default_tools_approval_mode`.
+    pub mcp_servers: &'a [String],
+}
+
 /// opencode's `accept-edits` posture: file work is allowed, everything else
 /// asks, like Claude Code's `acceptEdits`. Every key is named because a key
 /// left out falls through to the user's own opencode config.
@@ -258,6 +279,16 @@ pub fn apply(
 /// ask of that kind: a plain shell started with one keeps only the
 /// `VOGT_ENGINE_AGENT_TASK_PROMPT_FILE` variable it always had.
 pub fn launch(command: Option<&[String]>, req: &LaunchRequest<'_>) -> Result<Launch> {
+    launch_with_codex(command, req, &CodexExtras::default())
+}
+
+/// [`launch`] with the Codex inputs that come from the session's cwd, scope and
+/// provider registry (WI-3882). A non-Codex launch ignores `codex`.
+pub fn launch_with_codex(
+    command: Option<&[String]>,
+    req: &LaunchRequest<'_>,
+    codex: &CodexExtras<'_>,
+) -> Result<Launch> {
     let model = trimmed(req.model);
     let effort = trimmed(req.effort);
     let resume = trimmed(req.resume);
@@ -374,77 +405,41 @@ pub fn launch(command: Option<&[String]>, req: &LaunchRequest<'_>) -> Result<Lau
             );
         }
         "codex" => {
-            if let Some(id) = resume {
-                // A subcommand, so straight after the binary; whatever the
-                // template carried follows it, and `codex resume` takes the
-                // same options the bare TUI does.
-                rewritten.splice(
-                    binary_idx + 1..binary_idx + 1,
-                    ["resume".to_string(), id.to_string()],
-                );
-            }
-            if let Some(model) = model {
-                rewritten.extend(["-m".to_string(), model.to_string()]);
-            }
-            if let Some(effort) = effort {
-                // Codex has no dedicated flag; the documented way is a config
-                // override, and `-c key=value` is a first-class argument
-                // rather than a trick.
-                rewritten.extend(["-c".to_string(), format!("model_reasoning_effort={effort}")]);
-            }
-            // WI-1143. A launch that names no posture still gets the default:
-            // the wrapper no longer forces bypass, and omitting the flags would
-            // look like the session had applied one. An explicit posture is
-            // never dropped onto that default. `codex exec` rejects `-a`, so
-            // that launch keeps the sandbox and the reviewer but not the pin.
-            let flags = codex_permission.unwrap_or_else(|| {
-                codex_permission_flags(Some("default"), codex_exec, req.codex_approval_policy)
-                    .ok()
-                    .flatten()
-                    .unwrap_or_default()
-            });
-            rewritten.extend(flags);
-            // The WI-1127 fork reads its state back through the window title
-            // (WI-1145). Stock Codex accepts `-c` and ignores a `tui` key it
-            // does not know, so every launch asks for the `agent-state` title
-            // and turns the animations off — they repaint without changing the
-            // screen, which keeps a finished turn reading as busy. The values
-            // are TOML: an array needs its brackets and quotes, a bool does not.
-            rewritten.extend([
-                "-c".to_string(),
-                "tui.terminal_title=[\"agent-state\"]".to_string(),
-                "-c".to_string(),
-                "tui.animations=false".to_string(),
-            ]);
-            if let Some(limit) = req.codex_compact_limit {
-                // Scope `total` so the fixed prefix counts, as mcp-bootstrap
-                // sets it; the limit is the backed-off one, not the default.
-                rewritten.extend([
-                    "-c".to_string(),
-                    format!("model_auto_compact_token_limit={limit}"),
-                    "-c".to_string(),
-                    format!(
-                        "model_auto_compact_token_limit_scope=\"{}\"",
-                        crate::compact_backoff::COMPACT_SCOPE
-                    ),
-                ]);
-            }
-            if let Some(mcp) = req.mcp {
-                rewritten.extend(mcp.codex_args.iter().cloned());
-            }
-            // Fresh only, and only when the binary accepts the flag (WI-1126,
-            // on by default since WI-1354). A resume already names its id via
-            // the subcommand, and a template with arguments of its own is left
-            // alone.
-            if resume.is_none() && bare && req.codex_session_id {
-                if let Some(id) = req.session_id {
-                    rewritten.extend(["--session-id".to_string(), id.to_string()]);
-                }
-            }
-            // Positional, and last: `codex [PROMPT]` / `codex resume [ID] [PROMPT]`.
-            if let Some(prompt) = prompt {
-                rewritten.push(prompt);
-            }
+            // The flags live in `vogt_session_agent` (WI-3882): the pod's own
+            // launch line builds them with the same function, so guidance,
+            // providers, the approval-mode overrides and the compact limit
+            // cannot reach one launch and silently miss the other.
+            let session_id = req
+                .session_id
+                .filter(|_| req.codex_session_id)
+                .map(|id| id.to_string());
+            let pin = session_id.as_deref().filter(|_| resume.is_none() && bare);
+            let trust_cwd = codex
+                .trust_cwd
+                .map(|path| path.to_string_lossy().into_owned());
+            let args = vogt_session_agent::codex_args(&vogt_session_agent::CodexArgs {
+                command_args: &command[binary_idx + 1..],
+                resume,
+                session_id: pin,
+                model,
+                config_model: codex.config_model,
+                effort,
+                permission_mode: req.permission_mode,
+                approval_policy: req.codex_approval_policy,
+                exec: codex_exec,
+                compact_limit: req.codex_compact_limit,
+                provider: codex.provider,
+                providers: codex.providers,
+                trust_cwd: trust_cwd.as_deref(),
+                guidance: codex.guidance,
+                charter: codex.charter,
+                mcp_servers: codex.mcp_servers,
+                mcp_args: req.mcp.map(|m| m.codex_args.as_slice()).unwrap_or(&[]),
+                prompt: prompt.as_deref(),
+            })
+            .map_err(ApiError::BadRequest)?;
+            rewritten.truncate(binary_idx + 1);
+            rewritten.extend(args);
         }
         "opencode" => {
             if let Some(model) = model {
@@ -478,6 +473,17 @@ pub fn agent_name(command: &[String]) -> Option<String> {
     }
     let (_, binary) = agent_binary(command);
     KNOWN.contains(&binary.as_str()).then_some(binary)
+}
+
+/// The arguments a Codex command carries after its binary, when it is one.
+/// The pod path needs them because the session agent rebuilds the launch line
+/// instead of running the template's argv (WI-3882).
+pub fn codex_args_of(command: &[String]) -> Option<Vec<String>> {
+    if agent_name(command).as_deref() != Some("codex") {
+        return None;
+    }
+    let (binary_idx, _) = agent_binary(command);
+    Some(command[binary_idx + 1..].to_vec())
 }
 
 /// The agent conversation a session started with `command` runs, when its
@@ -921,6 +927,8 @@ mod tests {
             out,
             cmd(&[
                 "codex",
+                "-c",
+                "features.daemon_auto_start=false",
                 "-m",
                 "gpt-5.6",
                 "-c",
@@ -972,6 +980,8 @@ mod tests {
             out,
             cmd(&[
                 "/usr/local/bin/codex",
+                "-c",
+                "features.daemon_auto_start=false",
                 "-m",
                 "gpt-5.6",
                 "-a",
@@ -1087,11 +1097,10 @@ mod tests {
             .unwrap()
             .command
             .unwrap();
-        // The brief stays last. Ahead of it: the default posture (WI-1143)
-        // and the two `-c` pairs that ask the fork for its `agent-state` title
-        // (WI-1145).
-        assert_eq!(codex.len(), 13);
-        assert!(codex[12].contains(BRIEF));
+        // The brief stays last. Ahead of it: the default posture (WI-1143),
+        // the daemon override (WI-3882) and the two `-c` pairs that ask the
+        // fork for its `agent-state` title (WI-1145).
+        assert!(codex.last().unwrap().contains(BRIEF));
         assert!(codex.windows(2).any(|w| w == ["-a", "never"]));
         assert!(codex.windows(2).any(|w| w == ["-s", "danger-full-access"]));
         assert!(codex
@@ -1172,6 +1181,8 @@ mod tests {
                 cmd(&[
                     "resume",
                     id,
+                    "-c",
+                    "features.daemon_auto_start=false",
                     "-m",
                     "m1",
                     "-a",
@@ -1195,6 +1206,8 @@ mod tests {
                 "codex",
                 "resume",
                 id,
+                "-c",
+                "features.daemon_auto_start=false",
                 "--search",
                 "-m",
                 "m1",
@@ -1342,6 +1355,8 @@ mod tests {
             [
                 protected("codex"),
                 cmd(&[
+                    "-c",
+                    "features.daemon_auto_start=false",
                     "-a",
                     "never",
                     "-s",
@@ -1379,6 +1394,8 @@ mod tests {
             [
                 protected("codex"),
                 cmd(&[
+                    "-c",
+                    "features.daemon_auto_start=false",
                     "-a",
                     "never",
                     "-s",
@@ -1507,6 +1524,8 @@ mod opencode_posture_tests {
             got.command.unwrap(),
             [
                 "codex",
+                "-c",
+                "features.daemon_auto_start=false",
                 "--dangerously-bypass-approvals-and-sandbox",
                 "-c",
                 "tui.terminal_title=[\"agent-state\"]",
@@ -1725,6 +1744,8 @@ mod permission_tests {
             .unwrap(),
             cmd(&[
                 "codex",
+                "-c",
+                "features.daemon_auto_start=false",
                 "-a",
                 "never",
                 "-s",
@@ -1759,6 +1780,8 @@ mod permission_tests {
                 .unwrap(),
             cmd(&[
                 "codex",
+                "-c",
+                "features.daemon_auto_start=false",
                 "exec",
                 "-s",
                 "danger-full-access",
@@ -1862,6 +1885,7 @@ mod permission_tests {
                 mcp_config: None,
                 brief: Some(brief),
             },
+            codex: vogt_session_agent::CodexLaunch::default(),
         };
         let line = vogt_session_agent::command_line(&pod_config).unwrap();
         let out = std::process::Command::new("sh")
@@ -1884,5 +1908,158 @@ mod permission_tests {
                 "the pod argv lacks {flag}: {pod:?}"
             );
         }
+    }
+
+    /// WI-3882: the host launcher and the pod's own launch line build Codex's
+    /// argv from the same builder. Guidance, charter, the provider table, the
+    /// approval-mode and compact overrides, and the template's own arguments
+    /// must be the same words in the same order on both, so a pod cannot
+    /// silently lose an override a host launch would have received.
+    #[test]
+    #[cfg(unix)]
+    fn host_and_pod_codex_argv_agree() {
+        let dir = tempfile::tempdir().unwrap();
+        let fragment = dir.path().join("vogt-codex.toml");
+        std::fs::write(
+            &fragment,
+            r#"model_provider = "litellm"
+model = "gpt-5.6"
+
+[model_providers.litellm]
+base_url = "http://100.92.54.45:4000"
+wire_api = "responses"
+env_key = "LITELLM_API_KEY"
+
+[mcp_servers.vogt]
+url = "http://vogt/mcp"
+
+[mcp_servers.komodo]
+url = "http://komodo/mcp"
+"#,
+        )
+        .unwrap();
+        let id = Uuid::new_v4();
+        let conversation = id.to_string();
+        let cwd = "/work/wi-3882";
+        let guidance = "Follow AGENTS.md.";
+        let charter = "## Charter\nStop at push, do not poll CI.";
+        let template = cmd(&["-c", "tui.notifications=true"]);
+        let providers = [vogt_session_agent::CodexProvider {
+            name: "litellm".into(),
+            base_url: "http://100.92.54.45:4000".into(),
+            wire_api: "responses".into(),
+            env_key: "LITELLM_API_KEY".into(),
+        }];
+        let servers = ["vogt".to_string(), "komodo".to_string()];
+
+        let host_command = [cmd(&["codex"]), template.clone()].concat();
+        let host = launch_with_codex(
+            Some(&host_command),
+            &LaunchRequest {
+                model: Some("gpt-5.6"),
+                effort: Some("high"),
+                resume: Some(&conversation),
+                brief_file: None,
+                session_id: Some(id),
+                codex_session_id: true,
+                permission_mode: Some("accept-edits"),
+                settings_file: None,
+                add_dirs: &[],
+                opencode_config: None,
+                codex_approval_policy: "never",
+                mcp: None,
+                codex_compact_limit: Some(96_000),
+            },
+            &CodexExtras {
+                guidance: Some(guidance),
+                charter: Some(charter),
+                providers: &providers,
+                provider: Some("litellm"),
+                config_model: None,
+                trust_cwd: Some(Path::new(cwd)),
+                mcp_servers: &servers,
+            },
+        )
+        .unwrap()
+        .command
+        .expect("a rewritten command");
+        let host = codex_args_of(&host).unwrap();
+
+        let pod_config = vogt_session_agent::Config {
+            session_id: "s".into(),
+            engine_url: "http://127.0.0.1:1".into(),
+            token: "t".into(),
+            cli: "codex".into(),
+            command: None,
+            cwd: Some(cwd.into()),
+            cols: 80,
+            rows: 24,
+            buffer_bytes: 1024,
+            claude_config_dir: None,
+            codex_home: Some(dir.path().to_path_buf()),
+            account: None,
+            conversation_id: Some(conversation),
+            resume: true,
+            model: Some("gpt-5.6".into()),
+            effort: Some("high".into()),
+            permission_mode: Some("accept-edits".into()),
+            codex_approval_policy: "never".into(),
+            claude: vogt_session_agent::ClaudeLaunch::default(),
+            codex: vogt_session_agent::CodexLaunch {
+                guidance: Some(guidance.into()),
+                charter: Some(charter.into()),
+                compact_limit: Some(96_000),
+                template_args: template,
+                config_file: None,
+            },
+        };
+        let line = vogt_session_agent::command_line(&pod_config).unwrap();
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("codex() {{ printf '%s\\n' \"$@\"; }}; {line}"))
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        let pod: Vec<String> = String::from_utf8(out.stdout)
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        // The shell function stands in for the binary, so `$@` is the argv
+        // after it; `codex_args_of` already stripped the host's binary.
+        assert_eq!(host, pod, "host and pod Codex argv differ");
+
+        for flag in [
+            "model_provider=\"litellm\"",
+            "mcp_servers.vogt.default_tools_approval_mode=\"approve\"",
+        ] {
+            assert!(
+                host.iter().any(|arg| arg == flag),
+                "the shared argv lacks {flag}: {host:?}"
+            );
+        }
+        assert!(
+            !host.iter().any(|arg| arg.contains("komodo")),
+            "komodo is not in the auto-approval list: {host:?}"
+        );
+        assert!(host.windows(2).any(|w| w == ["-a", "never"]));
+        assert!(host
+            .windows(2)
+            .any(|w| w == ["-c", "features.daemon_auto_start=false"]));
+        assert!(host
+            .windows(2)
+            .any(|w| w == ["-c", "model_auto_compact_token_limit=96000"]));
+        assert!(host
+            .windows(2)
+            .any(|w| w == ["-c", "model_auto_compact_token_limit_scope=\"total\""]));
+        let instructions = host
+            .iter()
+            .find_map(|arg| arg.strip_prefix("developer_instructions="))
+            .expect("the guidance override");
+        let parsed: toml::Table = toml::from_str(&format!("v = {instructions}")).unwrap();
+        let body = parsed["v"].as_str().unwrap();
+        assert!(body.contains(guidance), "{body}");
+        assert!(body.ends_with("Stop at push, do not poll CI."), "{body}");
+        assert!(!host.iter().any(|arg| arg.contains("CODEX_HOME")));
     }
 }

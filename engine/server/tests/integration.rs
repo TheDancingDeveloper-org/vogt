@@ -18930,6 +18930,7 @@ mod pod_stream {
             conversation_id: Some(conversation.clone()),
             resume: false,
             claude: vogt_session_agent::ClaudeLaunch::default(),
+            codex: vogt_session_agent::CodexLaunch::default(),
         };
         let line = vogt_session_agent::command_line(&agent).expect("a Codex launch line");
         let mut argv = shell_argv(&line);
