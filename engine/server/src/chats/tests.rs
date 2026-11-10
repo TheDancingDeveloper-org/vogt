@@ -109,7 +109,7 @@ fn the_launch_is_a_codex_command_the_operator_names() {
     };
     let launch = resolve_codex(&named, &templates).unwrap();
     assert_eq!(launch.template, None);
-    assert_eq!(launch.argv, ["/opt/bin/codex"]);
+    assert_eq!(launch.driver, ["/opt/bin/codex"]);
 
     // The engine speaks only the Codex app-server protocol: anything else
     // means no chats.

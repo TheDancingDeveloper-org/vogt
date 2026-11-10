@@ -55,6 +55,14 @@ ENGINE_COUNTERPARTS: Mapping[str, str] = {
     "GET /api/auth/check": "auth.whoami",
     "GET /api/agent-clis": "agent_cli.list",
     "POST /api/agent-clis/{tool}": "agent_cli.update",
+    # Provider admin and workspace bookkeeping: the GUI configures providers
+    # and cleans workspaces through the engine, and the same two things are
+    # registry operations, so the CLI, REST and MCP reach them as well.
+    "GET /api/llm-providers": "llm_provider.list",
+    "POST /api/llm-providers": "llm_provider.set",
+    "POST /api/llm-providers/remove": "llm_provider.remove",
+    "GET /api/workspaces": "workspace.list",
+    "POST /api/workspaces/clean": "workspace.clean",
     "GET /api/history/sessions": "session.history_list",
     "GET /api/history/search": "session.search_output",
     "GET /api/history/{id}": "session.history_list",
@@ -139,11 +147,12 @@ _HISTORY_WRITE = (
     "`history-write` is deliberately not held by the core's engine "
     "credential."
 )
-_CHAT_GATE = (
-    "A quick chat's approval gate: the chat's own agent's PreToolUse hook "
-    "asks it, with the per-process token the engine gave that agent, whether "
-    "a tool call may run. Not a person's or another agent's call; the "
-    "decision itself is `chat.decide`, which only a person may make."
+_AGENT_STREAM = (
+    "The engine's relay for an outbound pod agent: `bootstrap` mints the "
+    "per-session stream token and the `/sessions/{id}/agent` socket carries "
+    "that agent's output frames. Agent plumbing rather than an operation a "
+    "person or another agent performs; the session's own view of it is "
+    "`session.screen`."
 )
 _SESSION_SELF = (
     "A session's own calls with its per-session broker token (secret "
@@ -236,5 +245,7 @@ ENGINE_ONLY: Mapping[str, str] = {
     "POST /api/agent-auth/conversation": _SESSION_SELF,
     "POST /api/agent-auth/policy-check": _SESSION_SELF,
     "GET /api/agent-auth/grants": _SESSION_SELF,
-    "POST /api/chats/{id}/gate": _CHAT_GATE,
+    "POST /api/agent-auth/store/{var}/bundle-file": _SESSION_SELF,
+    "POST /api/agent-auth/bootstrap": _AGENT_STREAM,
+    "GET /api/agent-auth/sessions/{id}/agent": _AGENT_STREAM,
 }
