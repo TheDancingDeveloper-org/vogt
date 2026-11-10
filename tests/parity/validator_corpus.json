@@ -38262,6 +38262,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -38358,6 +38359,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -38397,6 +38399,7 @@
     "work_item": "x",
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -38478,6 +38481,7 @@
     "work_item": "é😀",
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -38517,6 +38521,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -38556,6 +38561,7 @@
     "work_item": null,
     "project": "x",
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -38637,6 +38643,7 @@
     "work_item": null,
     "project": "é😀",
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -38676,6 +38683,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -38715,6 +38723,7 @@
     "work_item": null,
     "project": null,
     "template": "x",
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -38796,6 +38805,7 @@
     "work_item": null,
     "project": null,
     "template": "é😀",
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -38824,6 +38834,191 @@
  },
  {
   "op": "session.start",
+  "tag": "placement:null",
+  "params": {
+   "reason": "x",
+   "placement": null
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "work_item": null,
+    "project": null,
+    "template": null,
+    "placement": null,
+    "task": null,
+    "files": [],
+    "symbols": [],
+    "done": [],
+    "gates": [],
+    "repo_map": null,
+    "permission_mode": "default",
+    "account": null,
+    "resume": null,
+    "name": null,
+    "model": null,
+    "effort": null,
+    "autopilot": null,
+    "role": "worker",
+    "from_handoff": null,
+    "review_of": null,
+    "budget": null,
+    "worktree": null,
+    "cwd": null,
+    "cold_wake_opt_out": false,
+    "reason": "x",
+    "purpose": null,
+    "mode": "compact"
+   }
+  }
+ },
+ {
+  "op": "session.start",
+  "tag": "placement:valid",
+  "params": {
+   "reason": "x",
+   "placement": "host"
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "work_item": null,
+    "project": null,
+    "template": null,
+    "placement": "host",
+    "task": null,
+    "files": [],
+    "symbols": [],
+    "done": [],
+    "gates": [],
+    "repo_map": null,
+    "permission_mode": "default",
+    "account": null,
+    "resume": null,
+    "name": null,
+    "model": null,
+    "effort": null,
+    "autopilot": null,
+    "role": "worker",
+    "from_handoff": null,
+    "review_of": null,
+    "budget": null,
+    "worktree": null,
+    "cwd": null,
+    "cold_wake_opt_out": false,
+    "reason": "x",
+    "purpose": null,
+    "mode": "compact"
+   }
+  }
+ },
+ {
+  "op": "session.start",
+  "tag": "placement:enum-bad",
+  "params": {
+   "reason": "x",
+   "placement": "zzz-bad"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for session.start:\n1 validation error for StartSessionParams\nplacement\n  Input should be 'host' or 'pod' [type=literal_error, input_value='zzz-bad', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"reason\": \"x\", \"placement\": \"zzz-bad\"}",
+   "errors": [
+    {
+     "loc": [
+      "placement"
+     ],
+     "type": "literal_error"
+    }
+   ]
+  }
+ },
+ {
+  "op": "session.start",
+  "tag": "placement:enum-case",
+  "params": {
+   "reason": "x",
+   "placement": "HOST"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for session.start:\n1 validation error for StartSessionParams\nplacement\n  Input should be 'host' or 'pod' [type=literal_error, input_value='HOST', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"reason\": \"x\", \"placement\": \"HOST\"}",
+   "errors": [
+    {
+     "loc": [
+      "placement"
+     ],
+     "type": "literal_error"
+    }
+   ]
+  }
+ },
+ {
+  "op": "session.start",
+  "tag": "placement:int",
+  "params": {
+   "reason": "x",
+   "placement": 5
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for session.start:\n1 validation error for StartSessionParams\nplacement\n  Input should be 'host' or 'pod' [type=literal_error, input_value=5, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"reason\": \"x\", \"placement\": 5}",
+   "errors": [
+    {
+     "loc": [
+      "placement"
+     ],
+     "type": "literal_error"
+    }
+   ]
+  }
+ },
+ {
+  "op": "session.start",
+  "tag": "placement:bool",
+  "params": {
+   "reason": "x",
+   "placement": true
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for session.start:\n1 validation error for StartSessionParams\nplacement\n  Input should be 'host' or 'pod' [type=literal_error, input_value=True, input_type=bool]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"reason\": \"x\", \"placement\": true}",
+   "errors": [
+    {
+     "loc": [
+      "placement"
+     ],
+     "type": "literal_error"
+    }
+   ]
+  }
+ },
+ {
+  "op": "session.start",
+  "tag": "placement:unicode",
+  "params": {
+   "reason": "x",
+   "placement": "é😀"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for session.start:\n1 validation error for StartSessionParams\nplacement\n  Input should be 'host' or 'pod' [type=literal_error, input_value='é😀', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"reason\": \"x\", \"placement\": \"é😀\"}",
+   "errors": [
+    {
+     "loc": [
+      "placement"
+     ],
+     "type": "literal_error"
+    }
+   ]
+  }
+ },
+ {
+  "op": "session.start",
   "tag": "task:null",
   "params": {
    "reason": "x",
@@ -38835,6 +39030,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -38874,6 +39070,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": "x",
     "files": [],
     "symbols": [],
@@ -38955,6 +39152,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": "é😀",
     "files": [],
     "symbols": [],
@@ -39015,6 +39213,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -39143,6 +39342,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -39271,6 +39471,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -39399,6 +39600,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -39506,6 +39708,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -39545,6 +39748,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -39584,6 +39788,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -39623,6 +39828,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -39683,6 +39889,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -39722,6 +39929,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -39782,6 +39990,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -39842,6 +40051,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -39986,6 +40196,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -40025,6 +40236,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -40148,6 +40360,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -40187,6 +40400,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -40310,6 +40524,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -40349,6 +40564,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -40430,6 +40646,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -40469,6 +40686,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -40508,6 +40726,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -40589,6 +40808,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -40628,6 +40848,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -40667,6 +40888,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -40748,6 +40970,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -40787,6 +41010,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -40826,6 +41050,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -40865,6 +41090,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -40904,6 +41130,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -40964,6 +41191,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -41003,6 +41231,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -41063,6 +41292,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -41123,6 +41353,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -41267,6 +41498,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -41306,6 +41538,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -41387,6 +41620,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -41426,6 +41660,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -41465,6 +41700,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -41546,6 +41782,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -41585,6 +41822,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -41624,6 +41862,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -41713,6 +41952,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -41757,6 +41997,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -41796,6 +42037,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -41835,6 +42077,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -41874,6 +42117,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -41934,6 +42178,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -41973,6 +42218,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -42033,6 +42279,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -42072,6 +42319,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -42111,6 +42359,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -42192,6 +42441,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -42252,6 +42502,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -42291,6 +42542,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -42330,6 +42582,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -42390,6 +42643,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -42429,6 +42683,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -42489,6 +42744,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -42547,6 +42803,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -42665,6 +42922,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -42704,6 +42962,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -42743,6 +43002,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -42908,6 +43168,7 @@
     "work_item": null,
     "project": null,
     "template": null,
+    "placement": null,
     "task": null,
     "files": [],
     "symbols": [],
@@ -45186,6 +45447,44 @@
     "limit": 50,
     "offset": 0
    }
+  }
+ },
+ {
+  "op": "session.template_list",
+  "tag": "valid-minimal",
+  "params": {},
+  "py": {
+   "ok": true,
+   "dump": {}
+  }
+ },
+ {
+  "op": "session.template_list",
+  "tag": "empty",
+  "params": {},
+  "py": {
+   "ok": true,
+   "dump": {}
+  }
+ },
+ {
+  "op": "session.template_list",
+  "tag": "extra-key",
+  "params": {
+   "zz_extra": 1
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for session.template_list:\n1 validation error for StatusParams\nzz_extra\n  Extra inputs are not permitted [type=extra_forbidden, input_value=1, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.13/v/extra_forbidden",
+   "sent": "{\"zz_extra\": 1}",
+   "errors": [
+    {
+     "loc": [
+      "zz_extra"
+     ],
+     "type": "extra_forbidden"
+    }
+   ]
   }
  },
  {
@@ -72204,6 +72503,1786 @@
     {
      "loc": [
       "version"
+     ],
+     "type": "missing"
+    }
+   ]
+  }
+ },
+ {
+  "op": "llm_provider.list",
+  "tag": "valid-minimal",
+  "params": {},
+  "py": {
+   "ok": true,
+   "dump": {}
+  }
+ },
+ {
+  "op": "llm_provider.list",
+  "tag": "empty",
+  "params": {},
+  "py": {
+   "ok": true,
+   "dump": {}
+  }
+ },
+ {
+  "op": "llm_provider.list",
+  "tag": "extra-key",
+  "params": {
+   "zz_extra": 1
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for llm_provider.list:\n1 validation error for LlmProviderParams\nzz_extra\n  Extra inputs are not permitted [type=extra_forbidden, input_value=1, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.13/v/extra_forbidden",
+   "sent": "{\"zz_extra\": 1}",
+   "errors": [
+    {
+     "loc": [
+      "zz_extra"
+     ],
+     "type": "extra_forbidden"
+    }
+   ]
+  }
+ },
+ {
+  "op": "llm_provider.set",
+  "tag": "valid-minimal",
+  "params": {
+   "name": "x",
+   "base_url": "x",
+   "env_key": "x",
+   "secret_project": "x",
+   "secret_name": "x",
+   "reason": "x"
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "name": "x",
+    "base_url": "x",
+    "wire_api": "chat",
+    "env_key": "x",
+    "secret_project": "x",
+    "secret_name": "x",
+    "models": [],
+    "reason": "x"
+   }
+  }
+ },
+ {
+  "op": "llm_provider.set",
+  "tag": "empty",
+  "params": {},
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for llm_provider.set:\n6 validation errors for LlmProviderSetParams\nname\n  Field required [type=missing, input_value={}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/missing\nbase_url\n  Field required [type=missing, input_value={}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/missing\nenv_key\n  Field required [type=missing, input_value={}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/missing\nsecret_project\n  Field required [type=missing, input_value={}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/missing\nsecret_name\n  Field required [type=missing, input_value={}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/missing\nreason\n  Field required [type=missing, input_value={}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/missing",
+   "sent": "{}",
+   "errors": [
+    {
+     "loc": [
+      "name"
+     ],
+     "type": "missing"
+    },
+    {
+     "loc": [
+      "base_url"
+     ],
+     "type": "missing"
+    },
+    {
+     "loc": [
+      "env_key"
+     ],
+     "type": "missing"
+    },
+    {
+     "loc": [
+      "secret_project"
+     ],
+     "type": "missing"
+    },
+    {
+     "loc": [
+      "secret_name"
+     ],
+     "type": "missing"
+    },
+    {
+     "loc": [
+      "reason"
+     ],
+     "type": "missing"
+    }
+   ]
+  }
+ },
+ {
+  "op": "llm_provider.set",
+  "tag": "extra-key",
+  "params": {
+   "name": "x",
+   "base_url": "x",
+   "env_key": "x",
+   "secret_project": "x",
+   "secret_name": "x",
+   "reason": "x",
+   "zz_extra": 1
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for llm_provider.set:\n1 validation error for LlmProviderSetParams\nzz_extra\n  Extra inputs are not permitted [type=extra_forbidden, input_value=1, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.13/v/extra_forbidden",
+   "sent": "{\"name\": \"x\", \"base_url\": \"x\", \"env_key\": \"x\", \"secret_project\": \"x\", \"secret_name\": \"x\", \"reason\": \"x\", \"zz_extra\": 1}",
+   "errors": [
+    {
+     "loc": [
+      "zz_extra"
+     ],
+     "type": "extra_forbidden"
+    }
+   ]
+  }
+ },
+ {
+  "op": "llm_provider.set",
+  "tag": "missing:name",
+  "params": {
+   "base_url": "x",
+   "env_key": "x",
+   "secret_project": "x",
+   "secret_name": "x",
+   "reason": "x"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for llm_provider.set:\n1 validation error for LlmProviderSetParams\nname\n  Field required [type=missing, input_value={'base_url': 'x', 'env_ke...me': 'x', 'reason': 'x'}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/missing",
+   "sent": "{\"base_url\": \"x\", \"env_key\": \"x\", \"secret_project\": \"x\", \"secret_name\": \"x\", \"reason\": \"x\"}",
+   "errors": [
+    {
+     "loc": [
+      "name"
+     ],
+     "type": "missing"
+    }
+   ]
+  }
+ },
+ {
+  "op": "llm_provider.set",
+  "tag": "missing:base_url",
+  "params": {
+   "name": "x",
+   "env_key": "x",
+   "secret_project": "x",
+   "secret_name": "x",
+   "reason": "x"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for llm_provider.set:\n1 validation error for LlmProviderSetParams\nbase_url\n  Field required [type=missing, input_value={'name': 'x', 'env_key': ...me': 'x', 'reason': 'x'}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/missing",
+   "sent": "{\"name\": \"x\", \"env_key\": \"x\", \"secret_project\": \"x\", \"secret_name\": \"x\", \"reason\": \"x\"}",
+   "errors": [
+    {
+     "loc": [
+      "base_url"
+     ],
+     "type": "missing"
+    }
+   ]
+  }
+ },
+ {
+  "op": "llm_provider.set",
+  "tag": "missing:env_key",
+  "params": {
+   "name": "x",
+   "base_url": "x",
+   "secret_project": "x",
+   "secret_name": "x",
+   "reason": "x"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for llm_provider.set:\n1 validation error for LlmProviderSetParams\nenv_key\n  Field required [type=missing, input_value={'name': 'x', 'base_url':...me': 'x', 'reason': 'x'}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/missing",
+   "sent": "{\"name\": \"x\", \"base_url\": \"x\", \"secret_project\": \"x\", \"secret_name\": \"x\", \"reason\": \"x\"}",
+   "errors": [
+    {
+     "loc": [
+      "env_key"
+     ],
+     "type": "missing"
+    }
+   ]
+  }
+ },
+ {
+  "op": "llm_provider.set",
+  "tag": "missing:secret_project",
+  "params": {
+   "name": "x",
+   "base_url": "x",
+   "env_key": "x",
+   "secret_name": "x",
+   "reason": "x"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for llm_provider.set:\n1 validation error for LlmProviderSetParams\nsecret_project\n  Field required [type=missing, input_value={'name': 'x', 'base_url':...me': 'x', 'reason': 'x'}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/missing",
+   "sent": "{\"name\": \"x\", \"base_url\": \"x\", \"env_key\": \"x\", \"secret_name\": \"x\", \"reason\": \"x\"}",
+   "errors": [
+    {
+     "loc": [
+      "secret_project"
+     ],
+     "type": "missing"
+    }
+   ]
+  }
+ },
+ {
+  "op": "llm_provider.set",
+  "tag": "missing:secret_name",
+  "params": {
+   "name": "x",
+   "base_url": "x",
+   "env_key": "x",
+   "secret_project": "x",
+   "reason": "x"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for llm_provider.set:\n1 validation error for LlmProviderSetParams\nsecret_name\n  Field required [type=missing, input_value={'name': 'x', 'base_url':...ct': 'x', 'reason': 'x'}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/missing",
+   "sent": "{\"name\": \"x\", \"base_url\": \"x\", \"env_key\": \"x\", \"secret_project\": \"x\", \"reason\": \"x\"}",
+   "errors": [
+    {
+     "loc": [
+      "secret_name"
+     ],
+     "type": "missing"
+    }
+   ]
+  }
+ },
+ {
+  "op": "llm_provider.set",
+  "tag": "missing:reason",
+  "params": {
+   "name": "x",
+   "base_url": "x",
+   "env_key": "x",
+   "secret_project": "x",
+   "secret_name": "x"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for llm_provider.set:\n1 validation error for LlmProviderSetParams\nreason\n  Field required [type=missing, input_value={'name': 'x', 'base_url':...'x', 'secret_name': 'x'}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/missing",
+   "sent": "{\"name\": \"x\", \"base_url\": \"x\", \"env_key\": \"x\", \"secret_project\": \"x\", \"secret_name\": \"x\"}",
+   "errors": [
+    {
+     "loc": [
+      "reason"
+     ],
+     "type": "missing"
+    }
+   ]
+  }
+ },
+ {
+  "op": "llm_provider.set",
+  "tag": "name:null",
+  "params": {
+   "name": null,
+   "base_url": "x",
+   "env_key": "x",
+   "secret_project": "x",
+   "secret_name": "x",
+   "reason": "x"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for llm_provider.set:\n1 validation error for LlmProviderSetParams\nname\n  Input should be a valid string [type=string_type, input_value=None, input_type=NoneType]\n    For further information visit https://errors.pydantic.dev/2.13/v/string_type",
+   "sent": "{\"name\": null, \"base_url\": \"x\", \"env_key\": \"x\", \"secret_project\": \"x\", \"secret_name\": \"x\", \"reason\": \"x\"}",
+   "errors": [
+    {
+     "loc": [
+      "name"
+     ],
+     "type": "string_type"
+    }
+   ]
+  }
+ },
+ {
+  "op": "llm_provider.set",
+  "tag": "name:valid",
+  "params": {
+   "name": "x",
+   "base_url": "x",
+   "env_key": "x",
+   "secret_project": "x",
+   "secret_name": "x",
+   "reason": "x"
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "name": "x",
+    "base_url": "x",
+    "wire_api": "chat",
+    "env_key": "x",
+    "secret_project": "x",
+    "secret_name": "x",
+    "models": [],
+    "reason": "x"
+   }
+  }
+ },
+ {
+  "op": "llm_provider.set",
+  "tag": "name:int",
+  "params": {
+   "name": 5,
+   "base_url": "x",
+   "env_key": "x",
+   "secret_project": "x",
+   "secret_name": "x",
+   "reason": "x"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for llm_provider.set:\n1 validation error for LlmProviderSetParams\nname\n  Input should be a valid string [type=string_type, input_value=5, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.13/v/string_type",
+   "sent": "{\"name\": 5, \"base_url\": \"x\", \"env_key\": \"x\", \"secret_project\": \"x\", \"secret_name\": \"x\", \"reason\": \"x\"}",
+   "errors": [
+    {
+     "loc": [
+      "name"
+     ],
+     "type": "string_type"
+    }
+   ]
+  }
+ },
+ {
+  "op": "llm_provider.set",
+  "tag": "name:bool",
+  "params": {
+   "name": true,
+   "base_url": "x",
+   "env_key": "x",
+   "secret_project": "x",
+   "secret_name": "x",
+   "reason": "x"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for llm_provider.set:\n1 validation error for LlmProviderSetParams\nname\n  Input should be a valid string [type=string_type, input_value=True, input_type=bool]\n    For further information visit https://errors.pydantic.dev/2.13/v/string_type",
+   "sent": "{\"name\": true, \"base_url\": \"x\", \"env_key\": \"x\", \"secret_project\": \"x\", \"secret_name\": \"x\", \"reason\": \"x\"}",
+   "errors": [
+    {
+     "loc": [
+      "name"
+     ],
+     "type": "string_type"
+    }
+   ]
+  }
+ },
+ {
+  "op": "llm_provider.set",
+  "tag": "name:unicode",
+  "params": {
+   "name": "é😀",
+   "base_url": "x",
+   "env_key": "x",
+   "secret_project": "x",
+   "secret_name": "x",
+   "reason": "x"
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "name": "é😀",
+    "base_url": "x",
+    "wire_api": "chat",
+    "env_key": "x",
+    "secret_project": "x",
+    "secret_name": "x",
+    "models": [],
+    "reason": "x"
+   }
+  }
+ },
+ {
+  "op": "llm_provider.set",
+  "tag": "base_url:null",
+  "params": {
+   "name": "x",
+   "base_url": null,
+   "env_key": "x",
+   "secret_project": "x",
+   "secret_name": "x",
+   "reason": "x"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for llm_provider.set:\n1 validation error for LlmProviderSetParams\nbase_url\n  Input should be a valid string [type=string_type, input_value=None, input_type=NoneType]\n    For further information visit https://errors.pydantic.dev/2.13/v/string_type",
+   "sent": "{\"name\": \"x\", \"base_url\": null, \"env_key\": \"x\", \"secret_project\": \"x\", \"secret_name\": \"x\", \"reason\": \"x\"}",
+   "errors": [
+    {
+     "loc": [
+      "base_url"
+     ],
+     "type": "string_type"
+    }
+   ]
+  }
+ },
+ {
+  "op": "llm_provider.set",
+  "tag": "base_url:valid",
+  "params": {
+   "name": "x",
+   "base_url": "x",
+   "env_key": "x",
+   "secret_project": "x",
+   "secret_name": "x",
+   "reason": "x"
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "name": "x",
+    "base_url": "x",
+    "wire_api": "chat",
+    "env_key": "x",
+    "secret_project": "x",
+    "secret_name": "x",
+    "models": [],
+    "reason": "x"
+   }
+  }
+ },
+ {
+  "op": "llm_provider.set",
+  "tag": "base_url:int",
+  "params": {
+   "name": "x",
+   "base_url": 5,
+   "env_key": "x",
+   "secret_project": "x",
+   "secret_name": "x",
+   "reason": "x"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for llm_provider.set:\n1 validation error for LlmProviderSetParams\nbase_url\n  Input should be a valid string [type=string_type, input_value=5, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.13/v/string_type",
+   "sent": "{\"name\": \"x\", \"base_url\": 5, \"env_key\": \"x\", \"secret_project\": \"x\", \"secret_name\": \"x\", \"reason\": \"x\"}",
+   "errors": [
+    {
+     "loc": [
+      "base_url"
+     ],
+     "type": "string_type"
+    }
+   ]
+  }
+ },
+ {
+  "op": "llm_provider.set",
+  "tag": "base_url:bool",
+  "params": {
+   "name": "x",
+   "base_url": true,
+   "env_key": "x",
+   "secret_project": "x",
+   "secret_name": "x",
+   "reason": "x"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for llm_provider.set:\n1 validation error for LlmProviderSetParams\nbase_url\n  Input should be a valid string [type=string_type, input_value=True, input_type=bool]\n    For further information visit https://errors.pydantic.dev/2.13/v/string_type",
+   "sent": "{\"name\": \"x\", \"base_url\": true, \"env_key\": \"x\", \"secret_project\": \"x\", \"secret_name\": \"x\", \"reason\": \"x\"}",
+   "errors": [
+    {
+     "loc": [
+      "base_url"
+     ],
+     "type": "string_type"
+    }
+   ]
+  }
+ },
+ {
+  "op": "llm_provider.set",
+  "tag": "base_url:unicode",
+  "params": {
+   "name": "x",
+   "base_url": "é😀",
+   "env_key": "x",
+   "secret_project": "x",
+   "secret_name": "x",
+   "reason": "x"
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "name": "x",
+    "base_url": "é😀",
+    "wire_api": "chat",
+    "env_key": "x",
+    "secret_project": "x",
+    "secret_name": "x",
+    "models": [],
+    "reason": "x"
+   }
+  }
+ },
+ {
+  "op": "llm_provider.set",
+  "tag": "wire_api:null",
+  "params": {
+   "name": "x",
+   "base_url": "x",
+   "env_key": "x",
+   "secret_project": "x",
+   "secret_name": "x",
+   "reason": "x",
+   "wire_api": null
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for llm_provider.set:\n1 validation error for LlmProviderSetParams\nwire_api\n  Input should be 'chat' or 'responses' [type=literal_error, input_value=None, input_type=NoneType]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"name\": \"x\", \"base_url\": \"x\", \"env_key\": \"x\", \"secret_project\": \"x\", \"secret_name\": \"x\", \"reason\": \"x\", \"wire_api\": null}",
+   "errors": [
+    {
+     "loc": [
+      "wire_api"
+     ],
+     "type": "literal_error"
+    }
+   ]
+  }
+ },
+ {
+  "op": "llm_provider.set",
+  "tag": "wire_api:valid",
+  "params": {
+   "name": "x",
+   "base_url": "x",
+   "env_key": "x",
+   "secret_project": "x",
+   "secret_name": "x",
+   "reason": "x",
+   "wire_api": "chat"
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "name": "x",
+    "base_url": "x",
+    "wire_api": "chat",
+    "env_key": "x",
+    "secret_project": "x",
+    "secret_name": "x",
+    "models": [],
+    "reason": "x"
+   }
+  }
+ },
+ {
+  "op": "llm_provider.set",
+  "tag": "wire_api:enum-bad",
+  "params": {
+   "name": "x",
+   "base_url": "x",
+   "env_key": "x",
+   "secret_project": "x",
+   "secret_name": "x",
+   "reason": "x",
+   "wire_api": "zzz-bad"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for llm_provider.set:\n1 validation error for LlmProviderSetParams\nwire_api\n  Input should be 'chat' or 'responses' [type=literal_error, input_value='zzz-bad', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"name\": \"x\", \"base_url\": \"x\", \"env_key\": \"x\", \"secret_project\": \"x\", \"secret_name\": \"x\", \"reason\": \"x\", \"wire_api\": \"zzz-bad\"}",
+   "errors": [
+    {
+     "loc": [
+      "wire_api"
+     ],
+     "type": "literal_error"
+    }
+   ]
+  }
+ },
+ {
+  "op": "llm_provider.set",
+  "tag": "wire_api:enum-case",
+  "params": {
+   "name": "x",
+   "base_url": "x",
+   "env_key": "x",
+   "secret_project": "x",
+   "secret_name": "x",
+   "reason": "x",
+   "wire_api": "CHAT"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for llm_provider.set:\n1 validation error for LlmProviderSetParams\nwire_api\n  Input should be 'chat' or 'responses' [type=literal_error, input_value='CHAT', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"name\": \"x\", \"base_url\": \"x\", \"env_key\": \"x\", \"secret_project\": \"x\", \"secret_name\": \"x\", \"reason\": \"x\", \"wire_api\": \"CHAT\"}",
+   "errors": [
+    {
+     "loc": [
+      "wire_api"
+     ],
+     "type": "literal_error"
+    }
+   ]
+  }
+ },
+ {
+  "op": "llm_provider.set",
+  "tag": "wire_api:int",
+  "params": {
+   "name": "x",
+   "base_url": "x",
+   "env_key": "x",
+   "secret_project": "x",
+   "secret_name": "x",
+   "reason": "x",
+   "wire_api": 5
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for llm_provider.set:\n1 validation error for LlmProviderSetParams\nwire_api\n  Input should be 'chat' or 'responses' [type=literal_error, input_value=5, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"name\": \"x\", \"base_url\": \"x\", \"env_key\": \"x\", \"secret_project\": \"x\", \"secret_name\": \"x\", \"reason\": \"x\", \"wire_api\": 5}",
+   "errors": [
+    {
+     "loc": [
+      "wire_api"
+     ],
+     "type": "literal_error"
+    }
+   ]
+  }
+ },
+ {
+  "op": "llm_provider.set",
+  "tag": "wire_api:bool",
+  "params": {
+   "name": "x",
+   "base_url": "x",
+   "env_key": "x",
+   "secret_project": "x",
+   "secret_name": "x",
+   "reason": "x",
+   "wire_api": true
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for llm_provider.set:\n1 validation error for LlmProviderSetParams\nwire_api\n  Input should be 'chat' or 'responses' [type=literal_error, input_value=True, input_type=bool]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"name\": \"x\", \"base_url\": \"x\", \"env_key\": \"x\", \"secret_project\": \"x\", \"secret_name\": \"x\", \"reason\": \"x\", \"wire_api\": true}",
+   "errors": [
+    {
+     "loc": [
+      "wire_api"
+     ],
+     "type": "literal_error"
+    }
+   ]
+  }
+ },
+ {
+  "op": "llm_provider.set",
+  "tag": "wire_api:unicode",
+  "params": {
+   "name": "x",
+   "base_url": "x",
+   "env_key": "x",
+   "secret_project": "x",
+   "secret_name": "x",
+   "reason": "x",
+   "wire_api": "é😀"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for llm_provider.set:\n1 validation error for LlmProviderSetParams\nwire_api\n  Input should be 'chat' or 'responses' [type=literal_error, input_value='é😀', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "sent": "{\"name\": \"x\", \"base_url\": \"x\", \"env_key\": \"x\", \"secret_project\": \"x\", \"secret_name\": \"x\", \"reason\": \"x\", \"wire_api\": \"é😀\"}",
+   "errors": [
+    {
+     "loc": [
+      "wire_api"
+     ],
+     "type": "literal_error"
+    }
+   ]
+  }
+ },
+ {
+  "op": "llm_provider.set",
+  "tag": "env_key:null",
+  "params": {
+   "name": "x",
+   "base_url": "x",
+   "env_key": null,
+   "secret_project": "x",
+   "secret_name": "x",
+   "reason": "x"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for llm_provider.set:\n1 validation error for LlmProviderSetParams\nenv_key\n  Input should be a valid string [type=string_type, input_value=None, input_type=NoneType]\n    For further information visit https://errors.pydantic.dev/2.13/v/string_type",
+   "sent": "{\"name\": \"x\", \"base_url\": \"x\", \"env_key\": null, \"secret_project\": \"x\", \"secret_name\": \"x\", \"reason\": \"x\"}",
+   "errors": [
+    {
+     "loc": [
+      "env_key"
+     ],
+     "type": "string_type"
+    }
+   ]
+  }
+ },
+ {
+  "op": "llm_provider.set",
+  "tag": "env_key:valid",
+  "params": {
+   "name": "x",
+   "base_url": "x",
+   "env_key": "x",
+   "secret_project": "x",
+   "secret_name": "x",
+   "reason": "x"
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "name": "x",
+    "base_url": "x",
+    "wire_api": "chat",
+    "env_key": "x",
+    "secret_project": "x",
+    "secret_name": "x",
+    "models": [],
+    "reason": "x"
+   }
+  }
+ },
+ {
+  "op": "llm_provider.set",
+  "tag": "env_key:int",
+  "params": {
+   "name": "x",
+   "base_url": "x",
+   "env_key": 5,
+   "secret_project": "x",
+   "secret_name": "x",
+   "reason": "x"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for llm_provider.set:\n1 validation error for LlmProviderSetParams\nenv_key\n  Input should be a valid string [type=string_type, input_value=5, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.13/v/string_type",
+   "sent": "{\"name\": \"x\", \"base_url\": \"x\", \"env_key\": 5, \"secret_project\": \"x\", \"secret_name\": \"x\", \"reason\": \"x\"}",
+   "errors": [
+    {
+     "loc": [
+      "env_key"
+     ],
+     "type": "string_type"
+    }
+   ]
+  }
+ },
+ {
+  "op": "llm_provider.set",
+  "tag": "env_key:bool",
+  "params": {
+   "name": "x",
+   "base_url": "x",
+   "env_key": true,
+   "secret_project": "x",
+   "secret_name": "x",
+   "reason": "x"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for llm_provider.set:\n1 validation error for LlmProviderSetParams\nenv_key\n  Input should be a valid string [type=string_type, input_value=True, input_type=bool]\n    For further information visit https://errors.pydantic.dev/2.13/v/string_type",
+   "sent": "{\"name\": \"x\", \"base_url\": \"x\", \"env_key\": true, \"secret_project\": \"x\", \"secret_name\": \"x\", \"reason\": \"x\"}",
+   "errors": [
+    {
+     "loc": [
+      "env_key"
+     ],
+     "type": "string_type"
+    }
+   ]
+  }
+ },
+ {
+  "op": "llm_provider.set",
+  "tag": "env_key:unicode",
+  "params": {
+   "name": "x",
+   "base_url": "x",
+   "env_key": "é😀",
+   "secret_project": "x",
+   "secret_name": "x",
+   "reason": "x"
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "name": "x",
+    "base_url": "x",
+    "wire_api": "chat",
+    "env_key": "é😀",
+    "secret_project": "x",
+    "secret_name": "x",
+    "models": [],
+    "reason": "x"
+   }
+  }
+ },
+ {
+  "op": "llm_provider.set",
+  "tag": "secret_project:null",
+  "params": {
+   "name": "x",
+   "base_url": "x",
+   "env_key": "x",
+   "secret_project": null,
+   "secret_name": "x",
+   "reason": "x"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for llm_provider.set:\n1 validation error for LlmProviderSetParams\nsecret_project\n  Input should be a valid string [type=string_type, input_value=None, input_type=NoneType]\n    For further information visit https://errors.pydantic.dev/2.13/v/string_type",
+   "sent": "{\"name\": \"x\", \"base_url\": \"x\", \"env_key\": \"x\", \"secret_project\": null, \"secret_name\": \"x\", \"reason\": \"x\"}",
+   "errors": [
+    {
+     "loc": [
+      "secret_project"
+     ],
+     "type": "string_type"
+    }
+   ]
+  }
+ },
+ {
+  "op": "llm_provider.set",
+  "tag": "secret_project:valid",
+  "params": {
+   "name": "x",
+   "base_url": "x",
+   "env_key": "x",
+   "secret_project": "x",
+   "secret_name": "x",
+   "reason": "x"
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "name": "x",
+    "base_url": "x",
+    "wire_api": "chat",
+    "env_key": "x",
+    "secret_project": "x",
+    "secret_name": "x",
+    "models": [],
+    "reason": "x"
+   }
+  }
+ },
+ {
+  "op": "llm_provider.set",
+  "tag": "secret_project:int",
+  "params": {
+   "name": "x",
+   "base_url": "x",
+   "env_key": "x",
+   "secret_project": 5,
+   "secret_name": "x",
+   "reason": "x"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for llm_provider.set:\n1 validation error for LlmProviderSetParams\nsecret_project\n  Input should be a valid string [type=string_type, input_value=5, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.13/v/string_type",
+   "sent": "{\"name\": \"x\", \"base_url\": \"x\", \"env_key\": \"x\", \"secret_project\": 5, \"secret_name\": \"x\", \"reason\": \"x\"}",
+   "errors": [
+    {
+     "loc": [
+      "secret_project"
+     ],
+     "type": "string_type"
+    }
+   ]
+  }
+ },
+ {
+  "op": "llm_provider.set",
+  "tag": "secret_project:bool",
+  "params": {
+   "name": "x",
+   "base_url": "x",
+   "env_key": "x",
+   "secret_project": true,
+   "secret_name": "x",
+   "reason": "x"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for llm_provider.set:\n1 validation error for LlmProviderSetParams\nsecret_project\n  Input should be a valid string [type=string_type, input_value=True, input_type=bool]\n    For further information visit https://errors.pydantic.dev/2.13/v/string_type",
+   "sent": "{\"name\": \"x\", \"base_url\": \"x\", \"env_key\": \"x\", \"secret_project\": true, \"secret_name\": \"x\", \"reason\": \"x\"}",
+   "errors": [
+    {
+     "loc": [
+      "secret_project"
+     ],
+     "type": "string_type"
+    }
+   ]
+  }
+ },
+ {
+  "op": "llm_provider.set",
+  "tag": "secret_project:unicode",
+  "params": {
+   "name": "x",
+   "base_url": "x",
+   "env_key": "x",
+   "secret_project": "é😀",
+   "secret_name": "x",
+   "reason": "x"
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "name": "x",
+    "base_url": "x",
+    "wire_api": "chat",
+    "env_key": "x",
+    "secret_project": "é😀",
+    "secret_name": "x",
+    "models": [],
+    "reason": "x"
+   }
+  }
+ },
+ {
+  "op": "llm_provider.set",
+  "tag": "secret_name:null",
+  "params": {
+   "name": "x",
+   "base_url": "x",
+   "env_key": "x",
+   "secret_project": "x",
+   "secret_name": null,
+   "reason": "x"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for llm_provider.set:\n1 validation error for LlmProviderSetParams\nsecret_name\n  Input should be a valid string [type=string_type, input_value=None, input_type=NoneType]\n    For further information visit https://errors.pydantic.dev/2.13/v/string_type",
+   "sent": "{\"name\": \"x\", \"base_url\": \"x\", \"env_key\": \"x\", \"secret_project\": \"x\", \"secret_name\": null, \"reason\": \"x\"}",
+   "errors": [
+    {
+     "loc": [
+      "secret_name"
+     ],
+     "type": "string_type"
+    }
+   ]
+  }
+ },
+ {
+  "op": "llm_provider.set",
+  "tag": "secret_name:valid",
+  "params": {
+   "name": "x",
+   "base_url": "x",
+   "env_key": "x",
+   "secret_project": "x",
+   "secret_name": "x",
+   "reason": "x"
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "name": "x",
+    "base_url": "x",
+    "wire_api": "chat",
+    "env_key": "x",
+    "secret_project": "x",
+    "secret_name": "x",
+    "models": [],
+    "reason": "x"
+   }
+  }
+ },
+ {
+  "op": "llm_provider.set",
+  "tag": "secret_name:int",
+  "params": {
+   "name": "x",
+   "base_url": "x",
+   "env_key": "x",
+   "secret_project": "x",
+   "secret_name": 5,
+   "reason": "x"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for llm_provider.set:\n1 validation error for LlmProviderSetParams\nsecret_name\n  Input should be a valid string [type=string_type, input_value=5, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.13/v/string_type",
+   "sent": "{\"name\": \"x\", \"base_url\": \"x\", \"env_key\": \"x\", \"secret_project\": \"x\", \"secret_name\": 5, \"reason\": \"x\"}",
+   "errors": [
+    {
+     "loc": [
+      "secret_name"
+     ],
+     "type": "string_type"
+    }
+   ]
+  }
+ },
+ {
+  "op": "llm_provider.set",
+  "tag": "secret_name:bool",
+  "params": {
+   "name": "x",
+   "base_url": "x",
+   "env_key": "x",
+   "secret_project": "x",
+   "secret_name": true,
+   "reason": "x"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for llm_provider.set:\n1 validation error for LlmProviderSetParams\nsecret_name\n  Input should be a valid string [type=string_type, input_value=True, input_type=bool]\n    For further information visit https://errors.pydantic.dev/2.13/v/string_type",
+   "sent": "{\"name\": \"x\", \"base_url\": \"x\", \"env_key\": \"x\", \"secret_project\": \"x\", \"secret_name\": true, \"reason\": \"x\"}",
+   "errors": [
+    {
+     "loc": [
+      "secret_name"
+     ],
+     "type": "string_type"
+    }
+   ]
+  }
+ },
+ {
+  "op": "llm_provider.set",
+  "tag": "secret_name:unicode",
+  "params": {
+   "name": "x",
+   "base_url": "x",
+   "env_key": "x",
+   "secret_project": "x",
+   "secret_name": "é😀",
+   "reason": "x"
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "name": "x",
+    "base_url": "x",
+    "wire_api": "chat",
+    "env_key": "x",
+    "secret_project": "x",
+    "secret_name": "é😀",
+    "models": [],
+    "reason": "x"
+   }
+  }
+ },
+ {
+  "op": "llm_provider.set",
+  "tag": "models:null",
+  "params": {
+   "name": "x",
+   "base_url": "x",
+   "env_key": "x",
+   "secret_project": "x",
+   "secret_name": "x",
+   "reason": "x",
+   "models": null
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for llm_provider.set:\n1 validation error for LlmProviderSetParams\nmodels\n  Input should be a valid list [type=list_type, input_value=None, input_type=NoneType]\n    For further information visit https://errors.pydantic.dev/2.13/v/list_type",
+   "sent": "{\"name\": \"x\", \"base_url\": \"x\", \"env_key\": \"x\", \"secret_project\": \"x\", \"secret_name\": \"x\", \"reason\": \"x\", \"models\": null}",
+   "errors": [
+    {
+     "loc": [
+      "models"
+     ],
+     "type": "list_type"
+    }
+   ]
+  }
+ },
+ {
+  "op": "llm_provider.set",
+  "tag": "models:valid",
+  "params": {
+   "name": "x",
+   "base_url": "x",
+   "env_key": "x",
+   "secret_project": "x",
+   "secret_name": "x",
+   "reason": "x",
+   "models": []
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "name": "x",
+    "base_url": "x",
+    "wire_api": "chat",
+    "env_key": "x",
+    "secret_project": "x",
+    "secret_name": "x",
+    "models": [],
+    "reason": "x"
+   }
+  }
+ },
+ {
+  "op": "llm_provider.set",
+  "tag": "models:notlist",
+  "params": {
+   "name": "x",
+   "base_url": "x",
+   "env_key": "x",
+   "secret_project": "x",
+   "secret_name": "x",
+   "reason": "x",
+   "models": "a,b"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for llm_provider.set:\n1 validation error for LlmProviderSetParams\nmodels\n  Input should be a valid list [type=list_type, input_value='a,b', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/list_type",
+   "sent": "{\"name\": \"x\", \"base_url\": \"x\", \"env_key\": \"x\", \"secret_project\": \"x\", \"secret_name\": \"x\", \"reason\": \"x\", \"models\": \"a,b\"}",
+   "errors": [
+    {
+     "loc": [
+      "models"
+     ],
+     "type": "list_type"
+    }
+   ]
+  }
+ },
+ {
+  "op": "llm_provider.set",
+  "tag": "models:dict",
+  "params": {
+   "name": "x",
+   "base_url": "x",
+   "env_key": "x",
+   "secret_project": "x",
+   "secret_name": "x",
+   "reason": "x",
+   "models": {
+    "a": 1
+   }
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for llm_provider.set:\n1 validation error for LlmProviderSetParams\nmodels\n  Input should be a valid list [type=list_type, input_value={'a': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/list_type",
+   "sent": "{\"name\": \"x\", \"base_url\": \"x\", \"env_key\": \"x\", \"secret_project\": \"x\", \"secret_name\": \"x\", \"reason\": \"x\", \"models\": {\"a\": 1}}",
+   "errors": [
+    {
+     "loc": [
+      "models"
+     ],
+     "type": "list_type"
+    }
+   ]
+  }
+ },
+ {
+  "op": "llm_provider.set",
+  "tag": "models:item-int",
+  "params": {
+   "name": "x",
+   "base_url": "x",
+   "env_key": "x",
+   "secret_project": "x",
+   "secret_name": "x",
+   "reason": "x",
+   "models": [
+    5
+   ]
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for llm_provider.set:\n1 validation error for LlmProviderSetParams\nmodels.0\n  Input should be a valid string [type=string_type, input_value=5, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.13/v/string_type",
+   "sent": "{\"name\": \"x\", \"base_url\": \"x\", \"env_key\": \"x\", \"secret_project\": \"x\", \"secret_name\": \"x\", \"reason\": \"x\", \"models\": [5]}",
+   "errors": [
+    {
+     "loc": [
+      "models",
+      0
+     ],
+     "type": "string_type"
+    }
+   ]
+  }
+ },
+ {
+  "op": "llm_provider.set",
+  "tag": "reason:null",
+  "params": {
+   "name": "x",
+   "base_url": "x",
+   "env_key": "x",
+   "secret_project": "x",
+   "secret_name": "x",
+   "reason": null
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for llm_provider.set:\n1 validation error for LlmProviderSetParams\nreason\n  Input should be a valid string [type=string_type, input_value=None, input_type=NoneType]\n    For further information visit https://errors.pydantic.dev/2.13/v/string_type",
+   "sent": "{\"name\": \"x\", \"base_url\": \"x\", \"env_key\": \"x\", \"secret_project\": \"x\", \"secret_name\": \"x\", \"reason\": null}",
+   "errors": [
+    {
+     "loc": [
+      "reason"
+     ],
+     "type": "string_type"
+    }
+   ]
+  }
+ },
+ {
+  "op": "llm_provider.set",
+  "tag": "reason:valid",
+  "params": {
+   "name": "x",
+   "base_url": "x",
+   "env_key": "x",
+   "secret_project": "x",
+   "secret_name": "x",
+   "reason": "x"
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "name": "x",
+    "base_url": "x",
+    "wire_api": "chat",
+    "env_key": "x",
+    "secret_project": "x",
+    "secret_name": "x",
+    "models": [],
+    "reason": "x"
+   }
+  }
+ },
+ {
+  "op": "llm_provider.set",
+  "tag": "reason:int",
+  "params": {
+   "name": "x",
+   "base_url": "x",
+   "env_key": "x",
+   "secret_project": "x",
+   "secret_name": "x",
+   "reason": 5
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for llm_provider.set:\n1 validation error for LlmProviderSetParams\nreason\n  Input should be a valid string [type=string_type, input_value=5, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.13/v/string_type",
+   "sent": "{\"name\": \"x\", \"base_url\": \"x\", \"env_key\": \"x\", \"secret_project\": \"x\", \"secret_name\": \"x\", \"reason\": 5}",
+   "errors": [
+    {
+     "loc": [
+      "reason"
+     ],
+     "type": "string_type"
+    }
+   ]
+  }
+ },
+ {
+  "op": "llm_provider.set",
+  "tag": "reason:bool",
+  "params": {
+   "name": "x",
+   "base_url": "x",
+   "env_key": "x",
+   "secret_project": "x",
+   "secret_name": "x",
+   "reason": true
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for llm_provider.set:\n1 validation error for LlmProviderSetParams\nreason\n  Input should be a valid string [type=string_type, input_value=True, input_type=bool]\n    For further information visit https://errors.pydantic.dev/2.13/v/string_type",
+   "sent": "{\"name\": \"x\", \"base_url\": \"x\", \"env_key\": \"x\", \"secret_project\": \"x\", \"secret_name\": \"x\", \"reason\": true}",
+   "errors": [
+    {
+     "loc": [
+      "reason"
+     ],
+     "type": "string_type"
+    }
+   ]
+  }
+ },
+ {
+  "op": "llm_provider.set",
+  "tag": "reason:minlen-1",
+  "params": {
+   "name": "x",
+   "base_url": "x",
+   "env_key": "x",
+   "secret_project": "x",
+   "secret_name": "x",
+   "reason": ""
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for llm_provider.set:\n1 validation error for LlmProviderSetParams\nreason\n  String should have at least 1 character [type=string_too_short, input_value='', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/string_too_short",
+   "sent": "{\"name\": \"x\", \"base_url\": \"x\", \"env_key\": \"x\", \"secret_project\": \"x\", \"secret_name\": \"x\", \"reason\": \"\"}",
+   "errors": [
+    {
+     "loc": [
+      "reason"
+     ],
+     "type": "string_too_short"
+    }
+   ]
+  }
+ },
+ {
+  "op": "llm_provider.set",
+  "tag": "reason:ws",
+  "params": {
+   "name": "x",
+   "base_url": "x",
+   "env_key": "x",
+   "secret_project": "x",
+   "secret_name": "x",
+   "reason": " "
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for llm_provider.set:\n1 validation error for LlmProviderSetParams\nreason\n  String should have at least 1 character [type=string_too_short, input_value=' ', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/string_too_short",
+   "sent": "{\"name\": \"x\", \"base_url\": \"x\", \"env_key\": \"x\", \"secret_project\": \"x\", \"secret_name\": \"x\", \"reason\": \" \"}",
+   "errors": [
+    {
+     "loc": [
+      "reason"
+     ],
+     "type": "string_too_short"
+    }
+   ]
+  }
+ },
+ {
+  "op": "llm_provider.set",
+  "tag": "reason:unicode",
+  "params": {
+   "name": "x",
+   "base_url": "x",
+   "env_key": "x",
+   "secret_project": "x",
+   "secret_name": "x",
+   "reason": "é😀"
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "name": "x",
+    "base_url": "x",
+    "wire_api": "chat",
+    "env_key": "x",
+    "secret_project": "x",
+    "secret_name": "x",
+    "models": [],
+    "reason": "é😀"
+   }
+  }
+ },
+ {
+  "op": "llm_provider.set",
+  "tag": "two-missing",
+  "params": {
+   "env_key": "x",
+   "secret_project": "x",
+   "secret_name": "x",
+   "reason": "x"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for llm_provider.set:\n2 validation errors for LlmProviderSetParams\nname\n  Field required [type=missing, input_value={'env_key': 'x', 'secret_...me': 'x', 'reason': 'x'}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/missing\nbase_url\n  Field required [type=missing, input_value={'env_key': 'x', 'secret_...me': 'x', 'reason': 'x'}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/missing",
+   "sent": "{\"env_key\": \"x\", \"secret_project\": \"x\", \"secret_name\": \"x\", \"reason\": \"x\"}",
+   "errors": [
+    {
+     "loc": [
+      "name"
+     ],
+     "type": "missing"
+    },
+    {
+     "loc": [
+      "base_url"
+     ],
+     "type": "missing"
+    }
+   ]
+  }
+ },
+ {
+  "op": "llm_provider.remove",
+  "tag": "valid-minimal",
+  "params": {
+   "name": "x",
+   "reason": "x"
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "name": "x",
+    "reason": "x"
+   }
+  }
+ },
+ {
+  "op": "llm_provider.remove",
+  "tag": "empty",
+  "params": {},
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for llm_provider.remove:\n2 validation errors for LlmProviderRemoveParams\nname\n  Field required [type=missing, input_value={}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/missing\nreason\n  Field required [type=missing, input_value={}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/missing",
+   "sent": "{}",
+   "errors": [
+    {
+     "loc": [
+      "name"
+     ],
+     "type": "missing"
+    },
+    {
+     "loc": [
+      "reason"
+     ],
+     "type": "missing"
+    }
+   ]
+  }
+ },
+ {
+  "op": "llm_provider.remove",
+  "tag": "extra-key",
+  "params": {
+   "name": "x",
+   "reason": "x",
+   "zz_extra": 1
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for llm_provider.remove:\n1 validation error for LlmProviderRemoveParams\nzz_extra\n  Extra inputs are not permitted [type=extra_forbidden, input_value=1, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.13/v/extra_forbidden",
+   "sent": "{\"name\": \"x\", \"reason\": \"x\", \"zz_extra\": 1}",
+   "errors": [
+    {
+     "loc": [
+      "zz_extra"
+     ],
+     "type": "extra_forbidden"
+    }
+   ]
+  }
+ },
+ {
+  "op": "llm_provider.remove",
+  "tag": "missing:name",
+  "params": {
+   "reason": "x"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for llm_provider.remove:\n1 validation error for LlmProviderRemoveParams\nname\n  Field required [type=missing, input_value={'reason': 'x'}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/missing",
+   "sent": "{\"reason\": \"x\"}",
+   "errors": [
+    {
+     "loc": [
+      "name"
+     ],
+     "type": "missing"
+    }
+   ]
+  }
+ },
+ {
+  "op": "llm_provider.remove",
+  "tag": "missing:reason",
+  "params": {
+   "name": "x"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for llm_provider.remove:\n1 validation error for LlmProviderRemoveParams\nreason\n  Field required [type=missing, input_value={'name': 'x'}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/missing",
+   "sent": "{\"name\": \"x\"}",
+   "errors": [
+    {
+     "loc": [
+      "reason"
+     ],
+     "type": "missing"
+    }
+   ]
+  }
+ },
+ {
+  "op": "llm_provider.remove",
+  "tag": "name:null",
+  "params": {
+   "name": null,
+   "reason": "x"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for llm_provider.remove:\n1 validation error for LlmProviderRemoveParams\nname\n  Input should be a valid string [type=string_type, input_value=None, input_type=NoneType]\n    For further information visit https://errors.pydantic.dev/2.13/v/string_type",
+   "sent": "{\"name\": null, \"reason\": \"x\"}",
+   "errors": [
+    {
+     "loc": [
+      "name"
+     ],
+     "type": "string_type"
+    }
+   ]
+  }
+ },
+ {
+  "op": "llm_provider.remove",
+  "tag": "name:valid",
+  "params": {
+   "name": "x",
+   "reason": "x"
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "name": "x",
+    "reason": "x"
+   }
+  }
+ },
+ {
+  "op": "llm_provider.remove",
+  "tag": "name:int",
+  "params": {
+   "name": 5,
+   "reason": "x"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for llm_provider.remove:\n1 validation error for LlmProviderRemoveParams\nname\n  Input should be a valid string [type=string_type, input_value=5, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.13/v/string_type",
+   "sent": "{\"name\": 5, \"reason\": \"x\"}",
+   "errors": [
+    {
+     "loc": [
+      "name"
+     ],
+     "type": "string_type"
+    }
+   ]
+  }
+ },
+ {
+  "op": "llm_provider.remove",
+  "tag": "name:bool",
+  "params": {
+   "name": true,
+   "reason": "x"
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for llm_provider.remove:\n1 validation error for LlmProviderRemoveParams\nname\n  Input should be a valid string [type=string_type, input_value=True, input_type=bool]\n    For further information visit https://errors.pydantic.dev/2.13/v/string_type",
+   "sent": "{\"name\": true, \"reason\": \"x\"}",
+   "errors": [
+    {
+     "loc": [
+      "name"
+     ],
+     "type": "string_type"
+    }
+   ]
+  }
+ },
+ {
+  "op": "llm_provider.remove",
+  "tag": "name:unicode",
+  "params": {
+   "name": "é😀",
+   "reason": "x"
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "name": "é😀",
+    "reason": "x"
+   }
+  }
+ },
+ {
+  "op": "llm_provider.remove",
+  "tag": "reason:null",
+  "params": {
+   "name": "x",
+   "reason": null
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for llm_provider.remove:\n1 validation error for LlmProviderRemoveParams\nreason\n  Input should be a valid string [type=string_type, input_value=None, input_type=NoneType]\n    For further information visit https://errors.pydantic.dev/2.13/v/string_type",
+   "sent": "{\"name\": \"x\", \"reason\": null}",
+   "errors": [
+    {
+     "loc": [
+      "reason"
+     ],
+     "type": "string_type"
+    }
+   ]
+  }
+ },
+ {
+  "op": "llm_provider.remove",
+  "tag": "reason:valid",
+  "params": {
+   "name": "x",
+   "reason": "x"
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "name": "x",
+    "reason": "x"
+   }
+  }
+ },
+ {
+  "op": "llm_provider.remove",
+  "tag": "reason:int",
+  "params": {
+   "name": "x",
+   "reason": 5
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for llm_provider.remove:\n1 validation error for LlmProviderRemoveParams\nreason\n  Input should be a valid string [type=string_type, input_value=5, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.13/v/string_type",
+   "sent": "{\"name\": \"x\", \"reason\": 5}",
+   "errors": [
+    {
+     "loc": [
+      "reason"
+     ],
+     "type": "string_type"
+    }
+   ]
+  }
+ },
+ {
+  "op": "llm_provider.remove",
+  "tag": "reason:bool",
+  "params": {
+   "name": "x",
+   "reason": true
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for llm_provider.remove:\n1 validation error for LlmProviderRemoveParams\nreason\n  Input should be a valid string [type=string_type, input_value=True, input_type=bool]\n    For further information visit https://errors.pydantic.dev/2.13/v/string_type",
+   "sent": "{\"name\": \"x\", \"reason\": true}",
+   "errors": [
+    {
+     "loc": [
+      "reason"
+     ],
+     "type": "string_type"
+    }
+   ]
+  }
+ },
+ {
+  "op": "llm_provider.remove",
+  "tag": "reason:minlen-1",
+  "params": {
+   "name": "x",
+   "reason": ""
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for llm_provider.remove:\n1 validation error for LlmProviderRemoveParams\nreason\n  String should have at least 1 character [type=string_too_short, input_value='', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/string_too_short",
+   "sent": "{\"name\": \"x\", \"reason\": \"\"}",
+   "errors": [
+    {
+     "loc": [
+      "reason"
+     ],
+     "type": "string_too_short"
+    }
+   ]
+  }
+ },
+ {
+  "op": "llm_provider.remove",
+  "tag": "reason:ws",
+  "params": {
+   "name": "x",
+   "reason": " "
+  },
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for llm_provider.remove:\n1 validation error for LlmProviderRemoveParams\nreason\n  String should have at least 1 character [type=string_too_short, input_value=' ', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/string_too_short",
+   "sent": "{\"name\": \"x\", \"reason\": \" \"}",
+   "errors": [
+    {
+     "loc": [
+      "reason"
+     ],
+     "type": "string_too_short"
+    }
+   ]
+  }
+ },
+ {
+  "op": "llm_provider.remove",
+  "tag": "reason:unicode",
+  "params": {
+   "name": "x",
+   "reason": "é😀"
+  },
+  "py": {
+   "ok": true,
+   "dump": {
+    "name": "x",
+    "reason": "é😀"
+   }
+  }
+ },
+ {
+  "op": "llm_provider.remove",
+  "tag": "two-missing",
+  "params": {},
+  "py": {
+   "ok": false,
+   "text": "invalid arguments for llm_provider.remove:\n2 validation errors for LlmProviderRemoveParams\nname\n  Field required [type=missing, input_value={}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/missing\nreason\n  Field required [type=missing, input_value={}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/missing",
+   "sent": "{}",
+   "errors": [
+    {
+     "loc": [
+      "name"
+     ],
+     "type": "missing"
+    },
+    {
+     "loc": [
+      "reason"
      ],
      "type": "missing"
     }
