@@ -563,6 +563,22 @@ def test_a_worktree_session_is_cut_from_the_integration_branch(
     assert "worktree" not in engine.last_spec
 
 
+def test_a_worktree_start_sends_the_checkouts_it_may_not_write_to(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """WI-1326: a worktree session carries every registered project's root,
+    which the engine refuses git writes into; a start in the checkout itself
+    sends exactly what it sent before."""
+    start_session(wired, StartSessionParams(project="vogt", worktree=True, reason=WHY))
+    assert engine.last_spec["policy"] == {
+        "forbidden_text": [],
+        "merge_deploys_prod": False,
+        "protected_checkouts": [ROOT],
+    }
+    start_session(wired, StartSessionParams(project="vogt", reason=WHY))
+    assert "policy" not in engine.last_spec
+
+
 def test_a_cwd_opens_in_an_existing_worktree(
     wired: AppContext,
     engine: StandInEngine,
