@@ -1808,6 +1808,23 @@ fn bundle_conversation<'a>(
     }
 }
 
+/// The session a presented broker credential names: a host session's broker
+/// grant first, else the stream credential a pod's bootstrap handed it
+/// (WI-3334, WI-3884). The registry is asked as well, so a session it has
+/// forgotten is refused even if a token was somehow not withdrawn.
+async fn presenting_session(state: &AppState, presented: &str) -> Option<Uuid> {
+    let session = match state.sessions.secret_broker().authenticate(presented) {
+        Some(id) => Some(id),
+        None => {
+            state
+                .agent_auth
+                .session_for_token(presented.as_bytes())
+                .await
+        }
+    };
+    session.filter(|id| state.sessions.get(*id).is_ok())
+}
+
 /// Store a file from the Claude account bundle. The request carries base64 so
 /// JSON remains safe for credentials and JSONL alike; neither the payload nor
 /// its decoded contents are logged.
@@ -1828,16 +1845,7 @@ pub async fn store_bundle_file(
     };
     // A host session presents its broker grant; a pod presents the stream
     // credential its bootstrap handed it, the only one it holds (WI-3334).
-    let session_id = match broker.authenticate(presented) {
-        Some(id) => Some(id),
-        None => {
-            state
-                .agent_auth
-                .session_for_token(presented.as_bytes())
-                .await
-        }
-    };
-    let Some(session_id) = session_id.filter(|id| state.sessions.get(*id).is_ok()) else {
+    let Some(session_id) = presenting_session(&state, presented).await else {
         return ApiError::Unauthorized.into_response();
     };
     if let Some(retry_after) = state.auth.check_mutation_rate_limit(
@@ -1982,6 +1990,10 @@ fn digest(token: &str) -> [u8; 32] {
 
 /// `POST /api/agent-auth/fetch/{var}` — hand a session one manifest secret.
 ///
+/// The caller is a host session presenting its broker grant or a pod
+/// presenting its stream credential (WI-3884); either names one session, and
+/// the fetch reaches only that session's manifest and approved grants.
+///
 /// Registered outside `auth::require_bearer` on purpose (the session has no
 /// engine bearer to present) and so does every check itself, in the
 /// order that leaks least: the token first, so an unauthenticated caller
@@ -2018,20 +2030,14 @@ pub async fn fetch(
         auth::record_auth_failure(&Method::POST, &path, &request_id, "missing broker token").await;
         return ApiError::Unauthorized.into_response();
     };
-    // A token is valid for as long as the engine remembers its session, and
-    // the registry is asked as well as the grant table so the two cannot
-    // drift: a session the registry has forgotten is refused even if a
-    // revoke was somehow missed.
-    let session = match broker
-        .authenticate(presented)
-        .filter(|id| state.sessions.get(*id).is_ok())
-    {
-        Some(id) => id,
-        None => {
-            auth::record_auth_failure(&Method::POST, &path, &request_id, "unknown broker token")
-                .await;
-            return ApiError::Unauthorized.into_response();
-        }
+    // A host session presents its broker grant; a pod presents the stream
+    // credential its bootstrap handed it (WI-3884). Either is valid only for
+    // as long as the registry remembers the session, so the two cannot drift:
+    // a session the registry has forgotten is refused even if a revoke was
+    // somehow missed.
+    let Some(session) = presenting_session(&state, presented).await else {
+        auth::record_auth_failure(&Method::POST, &path, &request_id, "unknown broker token").await;
+        return ApiError::Unauthorized.into_response();
     };
 
     if let Some(retry_after) = state
@@ -2148,6 +2154,10 @@ pub async fn fetch(
 /// value. What `vogt-agent-auth grants` prints, so the agent — and the
 /// permission classifier reading its transcript — can see what a person
 /// approved for it.
+///
+/// A host session presents its broker grant and a pod its stream credential
+/// (WI-3884); both name one session, and the answer is that session's grants
+/// alone.
 pub async fn own_grants(State(state): State<Arc<AppState>>, request: Request<Body>) -> Response {
     let broker = state.sessions.secret_broker();
     let path = request.uri().path().to_string();
@@ -2156,15 +2166,17 @@ pub async fn own_grants(State(state): State<Arc<AppState>>, request: Request<Bod
         .get::<RequestId>()
         .map(|id| id.0.clone())
         .unwrap_or_default();
-    let session = request
+    let presented = request
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .map(str::trim)
-        .filter(|v| !v.is_empty())
-        .and_then(|token| broker.authenticate(token))
-        .filter(|id| state.sessions.get(*id).is_ok());
+        .filter(|v| !v.is_empty());
+    let session = match presented {
+        Some(token) => presenting_session(&state, token).await,
+        None => None,
+    };
     let Some(session) = session else {
         auth::record_auth_failure(
             &Method::GET,

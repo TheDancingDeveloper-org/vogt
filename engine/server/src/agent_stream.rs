@@ -398,6 +398,44 @@ pub struct BootstrapResponse {
     pub opencode_config: Option<serde_json::Value>,
 }
 
+/// The names-only agent-auth breadcrumbs a pod's bootstrap env carries
+/// (WI-3884): what the deployment declared for sessions and what this session
+/// holds. The values are names, never secrets, so the entrypoint can export
+/// them into the session's environment before the agent starts.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct AuthBreadcrumbs {
+    /// The variables this session holds an approved grant for.
+    pub granted: Vec<String>,
+    /// Manifest entries declared `ondemand`: fetchable through the broker.
+    pub ondemand: Vec<String>,
+    /// Manifest entries flagged `writable`: storable through the broker.
+    pub writable: Vec<String>,
+}
+
+impl AuthBreadcrumbs {
+    /// Read the live manifest and this session's grants from the broker.
+    pub(crate) fn snapshot(broker: &crate::secret_broker::SecretBroker, session: Uuid) -> Self {
+        let manifest = broker.manifest();
+        Self {
+            granted: broker
+                .grants_for(session, time::OffsetDateTime::now_utc())
+                .into_iter()
+                .map(|held| held.grant.var)
+                .collect(),
+            ondemand: manifest
+                .iter()
+                .filter(|entry| entry.policy == crate::secret_broker::ManifestPolicy::OnDemand)
+                .map(|entry| entry.var.clone())
+                .collect(),
+            writable: manifest
+                .iter()
+                .filter(|entry| entry.writable)
+                .map(|entry| entry.var.clone())
+                .collect(),
+        }
+    }
+}
+
 /// The contract env the bootstrap response carries (the same fields as the
 /// pod's spec.env), as strings.
 fn bootstrap_env(
@@ -407,6 +445,7 @@ fn bootstrap_env(
     model: Option<&str>,
     source_env: &[(String, String)],
     extra_ca_file: Option<&str>,
+    breadcrumbs: &AuthBreadcrumbs,
 ) -> serde_json::Map<String, serde_json::Value> {
     let mut env = serde_json::Map::new();
     for (name, value) in [
@@ -418,6 +457,18 @@ fn bootstrap_env(
     }
     for (name, value) in source_env {
         env.insert(name.clone(), serde_json::Value::String(value.clone()));
+    }
+    // The four names-only agent-auth breadcrumbs the host path exports
+    // (WI-3884): a pod is brokered too, and the session's tooling can tell
+    // what the deployment declared and what this session holds without a
+    // value ever entering the bootstrap response.
+    for (name, value) in [
+        ("AGENT_AUTH_MODE", "brokered".to_owned()),
+        ("AGENT_AUTH_GRANTED", breadcrumbs.granted.join(" ")),
+        ("AGENT_AUTH_ONDEMAND", breadcrumbs.ondemand.join(" ")),
+        ("AGENT_AUTH_WRITABLE", breadcrumbs.writable.join(" ")),
+    ] {
+        env.insert(name.into(), serde_json::Value::String(value));
     }
     // The session agent builds the pod's Claude line itself (WI-3881), so the
     // model the caller asked for travels through the same contract as the one
@@ -843,6 +894,8 @@ pub async fn bootstrap(
                 .into_response()
         }
     };
+    let broker = state.sessions.secret_broker();
+    let breadcrumbs = AuthBreadcrumbs::snapshot(broker, id);
     let mut env = bootstrap_env(
         cfg.engine_endpoint,
         id,
@@ -850,6 +903,7 @@ pub async fn bootstrap(
         req.model.as_deref(),
         &provider.pod_env(&source),
         req.extra_ca_file.as_deref(),
+        &breadcrumbs,
     );
     // The caller's extra environment and working directory (WI-3883) travel
     // here rather than in the pod spec, so a value never lands in the
@@ -906,7 +960,6 @@ pub async fn bootstrap(
     // each provider's key, resolved now through the helper and the manifest.
     // A key that cannot be resolved is left out and logged by name.
     if req.cli == "codex" {
-        let broker = state.sessions.secret_broker();
         let providers = broker.providers();
         if !providers.is_empty() {
             codex_config = Some(
@@ -1530,13 +1583,68 @@ mod tests {
             Some("claude-opus-4-6"),
             &source_env,
             None,
+            &AuthBreadcrumbs::default(),
         );
         assert_eq!(env["SOURCE_ENDPOINT"], "http://src");
         assert_eq!(env["VOGT_CLI"], "claude");
         assert_eq!(env["VOGT_MODEL"], "claude-opus-4-6");
-        let bare = bootstrap_env("e".into(), Uuid::nil(), "claude", None, &[], None);
+        let bare = bootstrap_env(
+            "e".into(),
+            Uuid::nil(),
+            "claude",
+            None,
+            &[],
+            None,
+            &AuthBreadcrumbs::default(),
+        );
         assert!(!bare.contains_key("SOURCE_ENDPOINT"));
         assert!(!bare.contains_key("VOGT_MODEL"));
+    }
+
+    /// WI-3884: a pod's bootstrap env names the broker model and the names
+    /// the deployment declared / the session holds — never a value.
+    #[test]
+    fn bootstrap_env_carries_the_four_agent_auth_breadcrumbs() {
+        let breadcrumbs = AuthBreadcrumbs {
+            granted: vec!["GRANTED_ONE".into(), "GRANTED_TWO".into()],
+            ondemand: vec!["ONDEMAND_ONE".into()],
+            writable: vec!["WRITABLE_ONE".into(), "WRITABLE_TWO".into()],
+        };
+        let env = bootstrap_env(
+            "http://engine".into(),
+            Uuid::nil(),
+            "codex",
+            None,
+            &[],
+            None,
+            &breadcrumbs,
+        );
+        assert_eq!(env["AGENT_AUTH_MODE"], "brokered");
+        assert_eq!(env["AGENT_AUTH_GRANTED"], "GRANTED_ONE GRANTED_TWO");
+        assert_eq!(env["AGENT_AUTH_ONDEMAND"], "ONDEMAND_ONE");
+        assert_eq!(env["AGENT_AUTH_WRITABLE"], "WRITABLE_ONE WRITABLE_TWO");
+        // The empty case is present and empty, not absent: a session can tell
+        // "nothing declared" from an older bootstrap that never set it.
+        let empty = bootstrap_env(
+            "e".into(),
+            Uuid::nil(),
+            "claude",
+            None,
+            &[],
+            None,
+            &AuthBreadcrumbs::default(),
+        );
+        for name in [
+            "AGENT_AUTH_MODE",
+            "AGENT_AUTH_GRANTED",
+            "AGENT_AUTH_ONDEMAND",
+            "AGENT_AUTH_WRITABLE",
+        ] {
+            assert!(empty.contains_key(name), "bootstrap env lacks {name}");
+        }
+        assert_eq!(empty["AGENT_AUTH_GRANTED"], "");
+        assert_eq!(empty["AGENT_AUTH_ONDEMAND"], "");
+        assert_eq!(empty["AGENT_AUTH_WRITABLE"], "");
     }
 
     #[test]
