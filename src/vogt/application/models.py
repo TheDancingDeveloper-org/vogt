@@ -6856,9 +6856,7 @@ class ChatApprovalView(Result):
     id: str
     tool_name: str
     summary: str = Field(description="What the call would do: a command, a path.")
-    source: str = Field(
-        description="`codex` (the app-server asked)."
-    )
+    source: str = Field(description="`codex` (the app-server asked).")
     status: str = Field(description="pending, allowed, denied or expired.")
     requested_at: str
     expires_at: str
