@@ -3313,9 +3313,18 @@ terminal that raised it.
 
 With `ENGINE_POD_BACKENDS_ENABLED` on, a template whose backend is `pod` runs
 its process in a Kubernetes pod (namespace `vogt-sessions`) that dials back to
-the engine. A reconciler sweeps the namespace every `reconcile_interval` (15 s):
-it ends a live session whose pod failed, vanished or sat Pending too long, and
-deletes a pod that no live session owns.
+the engine. A reconciler sweeps the namespace every
+`ENGINE_POD_RECONCILE_TIMEOUT` (15 s): it ends a live session whose pod failed,
+vanished, sat Pending too long, or whose attached agent stopped sending
+heartbeats, and deletes a pod that no live session owns.
+
+Pod lifecycle timing is configurable in whole seconds through
+`ENGINE_POD_CONNECT_TIMEOUT` (30), `ENGINE_POD_PENDING_TIMEOUT` (600),
+`ENGINE_POD_RECONNECT_TIMEOUT` (120), `ENGINE_POD_RECONCILE_TIMEOUT` (15), and
+`ENGINE_POD_HEARTBEAT_TIMEOUT` (60). The heartbeat timer starts when the agent
+completes its hello and is refreshed by each heartbeat; a silent running pod is
+ended with a distinct heartbeat-timeout reason. Hibernating a pod whose agent
+is not attached returns `409` unless the request explicitly sets `force=true`.
 
 The built-in templates (used when the config file lists none) run on
 `ENGINE_SESSION_BACKEND` (or `VOGT_ENGINE_SESSION_BACKEND`): `local`
