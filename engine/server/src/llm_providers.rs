@@ -406,6 +406,161 @@ pub fn codex_config(requested_model: Option<&str>, providers: &[Provider]) -> St
     )
 }
 
+/// Catalog description prefix for entries this registry contributes. Kept
+/// distinct from the bootstrap's router entries so a rewrite can tell them
+/// apart and so an operator entry is never mistaken for one of ours.
+const CATALOG_DESCRIPTION: &str = "Estate LLM provider ";
+
+/// One `models` entry for a registered model. The shape is the one
+/// `mcp-bootstrap.sh` and `chat_codex::model_catalog` write: fallback metadata
+/// leaves apply_patch on code mode and warns at startup, so a registered model
+/// needs a real entry. The provider's own `context_window` is authoritative
+/// (WI-3871); the default covers a provider that names none.
+pub fn catalog_entry(slug: &str, priority: u64, context_window: Option<u64>) -> serde_json::Value {
+    serde_json::json!({
+        "slug": slug,
+        "display_name": slug,
+        "description": format!("{CATALOG_DESCRIPTION}{slug}."),
+        "supported_reasoning_levels": [],
+        "shell_type": "unified_exec",
+        "visibility": "list",
+        "supported_in_api": true,
+        "priority": priority,
+        "availability_nux": null,
+        "upgrade": null,
+        "model_messages": {
+            "instructions_template": format!(
+                "You are Codex, running through a registered estate LLM provider as {slug}."
+            ),
+            "approvals": null,
+            "collaboration_modes": null,
+            "auto_review": null,
+            "permissions": null,
+            "multi_agent": null
+        },
+        "default_reasoning_summary": "none",
+        "support_verbosity": false,
+        "default_verbosity": null,
+        "apply_patch_tool_type": "freeform",
+        "truncation_policy": {"mode": "bytes", "limit": 10000},
+        "context_window": context_window.unwrap_or(256000),
+        "effective_context_window_percent": 95,
+        "experimental_supported_tools": []
+    })
+}
+
+/// The catalog JSON a launch should load so `model` is not synthesized by
+/// Codex. `base` is the text of the catalog Codex would otherwise load (the
+/// file its `model_catalog_json` names), if any. `Ok(None)` means no override
+/// is needed: the model is already listed. `Err` means `base` was supplied
+/// but is not a model catalog, so the caller should leave the launch alone
+/// rather than replace a catalog it does not understand.
+pub fn catalog_for_model(
+    base: Option<&str>,
+    providers: &[Provider],
+    model: &str,
+) -> Result<Option<String>, String> {
+    let mut catalog: serde_json::Value = match base {
+        Some(text) => serde_json::from_str(text)
+            .map_err(|err| format!("existing model catalog is not JSON: {err}"))?,
+        None => serde_json::json!({ "models": [] }),
+    };
+    let models = catalog
+        .get_mut("models")
+        .and_then(serde_json::Value::as_array_mut)
+        .ok_or_else(|| "existing model catalog has no models array".to_string())?;
+    if models
+        .iter()
+        .any(|entry| entry.get("slug").and_then(serde_json::Value::as_str) == Some(model))
+    {
+        return Ok(None);
+    }
+    let mut priority = models
+        .iter()
+        .filter_map(|entry| entry.get("priority").and_then(serde_json::Value::as_u64))
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
+    for provider in providers {
+        for slug in &provider.models {
+            if models
+                .iter()
+                .any(|entry| entry.get("slug").and_then(serde_json::Value::as_str) == Some(slug))
+            {
+                continue;
+            }
+            models.push(catalog_entry(slug, priority, provider.context_window));
+            priority = priority.saturating_add(1);
+        }
+    }
+    serde_json::to_string_pretty(&catalog)
+        .map(Some)
+        .map_err(|err| format!("could not render the model catalog: {err}"))
+}
+
+/// The catalog text Codex's own config points at for a host launch.
+///
+/// `env` is the launch environment (a `CODEX_HOME` there wins), `home` is the
+/// engine's `$HOME`. A relative `model_catalog_json` resolves beside the
+/// config and a leading `~` against `home`, as Codex resolves both.
+///
+/// `Ok(None)` means the config names no catalog, so Codex loads its bundled
+/// one. `Err` means the config names a catalog that could not be read: the
+/// caller must leave the launch alone rather than substitute a catalog the
+/// operator's config does not name.
+pub fn configured_catalog(
+    env: Option<&[(String, String)]>,
+    home: Option<&Path>,
+) -> Result<Option<String>, String> {
+    let codex_home = env
+        .and_then(|vars| {
+            vars.iter()
+                .rev()
+                .find(|(key, _)| key == "CODEX_HOME")
+                .map(|(_, value)| std::path::PathBuf::from(value))
+        })
+        .or_else(|| std::env::var_os("CODEX_HOME").map(std::path::PathBuf::from))
+        .or_else(|| home.map(|home| home.join(".codex")));
+    let Some(codex_home) = codex_home else {
+        return Ok(None);
+    };
+    let config = codex_home.join("config.toml");
+    let text = match std::fs::read_to_string(&config) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(format!("cannot read {config:?}: {err}")),
+    };
+    let root: toml::Value =
+        toml::from_str(&text).map_err(|err| format!("{config:?} is not TOML: {err}"))?;
+    let Some(value) = root.get("model_catalog_json") else {
+        return Ok(None);
+    };
+    let raw = value
+        .as_str()
+        .ok_or_else(|| format!("model_catalog_json in {config:?} is not a string"))?;
+    let path = std::path::PathBuf::from(raw);
+    let home = home
+        .map(Path::to_path_buf)
+        .or_else(|| std::env::var_os("HOME").map(std::path::PathBuf::from));
+    let path = if let Some(rest) = raw.strip_prefix('~') {
+        let rest = rest.trim_start_matches(['/', '\\']);
+        match home {
+            Some(home) => home.join(rest),
+            None => path,
+        }
+    } else if path.is_absolute() {
+        path
+    } else {
+        config
+            .parent()
+            .map(|parent| parent.join(&path))
+            .unwrap_or(path)
+    };
+    std::fs::read_to_string(&path)
+        .map(Some)
+        .map_err(|err| format!("cannot read the model catalog {}: {err}", path.display()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -454,6 +609,7 @@ models = ["deepseek-chat"]
             compact_limit: None,
             provider: None,
             providers: &[shared],
+            catalog: None,
             trust_cwd: None,
             guidance: None,
             charter: None,
@@ -506,6 +662,7 @@ models = ["deepseek-chat"]
             compact_limit: None,
             provider: None,
             providers: &[],
+            catalog: None,
             trust_cwd: None,
             guidance: None,
             charter: None,
@@ -617,5 +774,162 @@ models = ["deepseek-chat"]
                 "accepted {key}"
             );
         }
+    }
+
+    #[test]
+    fn a_registered_model_gets_a_real_catalog_entry() {
+        let providers = parse(DEEPSEEK).unwrap();
+        let base = r#"{"models":[{"slug":"grok","priority":0}]}"#;
+        let merged = catalog_for_model(Some(base), &providers, "deepseek-chat")
+            .unwrap()
+            .expect("a registered model absent from the base needs an entry");
+        let catalog: serde_json::Value = serde_json::from_str(&merged).unwrap();
+        let models = catalog["models"].as_array().unwrap();
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0]["slug"].as_str(), Some("grok"));
+        let entry = &models[1];
+        assert_eq!(entry["slug"].as_str(), Some("deepseek-chat"));
+        assert_eq!(entry["priority"].as_u64(), Some(1));
+        assert_eq!(entry["apply_patch_tool_type"].as_str(), Some("freeform"));
+        assert_eq!(entry["visibility"].as_str(), Some("list"));
+        // The provider's own window is authoritative (WI-3871).
+        assert_eq!(entry["context_window"].as_u64(), Some(1000000));
+        assert!(entry["description"]
+            .as_str()
+            .unwrap()
+            .starts_with(CATALOG_DESCRIPTION));
+        assert!(entry["model_messages"]["instructions_template"]
+            .as_str()
+            .unwrap()
+            .contains("deepseek-chat"));
+
+        // The model is now listed, so a second launch needs no override.
+        assert!(
+            catalog_for_model(Some(&merged), &providers, "deepseek-chat")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_provider_without_a_window_gets_the_default_one() {
+        let providers = parse(&DEEPSEEK.replace("context_window = 1000000\n", "")).unwrap();
+        let text = catalog_for_model(None, &providers, "deepseek-chat")
+            .unwrap()
+            .unwrap();
+        let catalog: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            catalog["models"][0]["context_window"].as_u64(),
+            Some(256000)
+        );
+    }
+
+    #[test]
+    fn a_catalog_without_models_is_refused_rather_than_replaced() {
+        let providers = parse(DEEPSEEK).unwrap();
+        assert!(catalog_for_model(Some("[]"), &providers, "deepseek-chat").is_err());
+        assert!(catalog_for_model(Some("not json"), &providers, "deepseek-chat").is_err());
+    }
+
+    #[test]
+    fn no_base_catalog_lists_every_registered_model() {
+        let providers = parse(DEEPSEEK).unwrap();
+        let catalog = catalog_for_model(None, &providers, "deepseek-chat")
+            .unwrap()
+            .expect("without a base there is nothing to preserve");
+        let catalog: serde_json::Value = serde_json::from_str(&catalog).unwrap();
+        assert_eq!(catalog["models"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn the_launch_names_the_catalog_it_was_given() {
+        let path = std::path::Path::new("/state/session-catalogs/a.json");
+        let args = vogt_session_agent::codex_args(&vogt_session_agent::CodexArgs {
+            command_args: &[],
+            resume: None,
+            session_id: None,
+            model: None,
+            config_model: None,
+            effort: None,
+            permission_mode: None,
+            approval_policy: "never",
+            exec: false,
+            compact_limit: None,
+            provider: None,
+            providers: &[],
+            catalog: Some(path),
+            trust_cwd: None,
+            guidance: None,
+            charter: None,
+            mcp_servers: &[],
+            mcp_args: &[],
+            prompt: None,
+        })
+        .unwrap();
+        assert!(args
+            .iter()
+            .any(|arg| arg == "model_catalog_json=\"/state/session-catalogs/a.json\""));
+    }
+
+    #[test]
+    fn configured_catalog_resolves_a_relative_path_beside_the_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let catalog = r#"{"models":[{"slug":"grok","priority":0}]}"#;
+        std::fs::write(dir.path().join("vogt-model-catalog.json"), catalog).unwrap();
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "model_catalog_json = \"vogt-model-catalog.json\"\n",
+        )
+        .unwrap();
+        let env = vec![(
+            "CODEX_HOME".to_string(),
+            dir.path().to_string_lossy().into_owned(),
+        )];
+        assert_eq!(
+            configured_catalog(Some(&env), None).unwrap().as_deref(),
+            Some(catalog)
+        );
+
+        // A config that names no catalog: Codex loads its bundled one.
+        let plain = tempfile::tempdir().unwrap();
+        std::fs::write(plain.path().join("config.toml"), "model = \"grok\"\n").unwrap();
+        let plain_env = vec![(
+            "CODEX_HOME".to_string(),
+            plain.path().to_string_lossy().into_owned(),
+        )];
+        assert!(configured_catalog(Some(&plain_env), None)
+            .unwrap()
+            .is_none());
+
+        // A config that names a catalog that is not there is refused rather
+        // than replaced: the caller must leave that launch alone.
+        let missing = tempfile::tempdir().unwrap();
+        std::fs::write(
+            missing.path().join("config.toml"),
+            "model_catalog_json = \"gone.json\"\n",
+        )
+        .unwrap();
+        let missing_env = vec![(
+            "CODEX_HOME".to_string(),
+            missing.path().to_string_lossy().into_owned(),
+        )];
+        assert!(configured_catalog(Some(&missing_env), None).is_err());
+
+        // A leading `~` resolves against the home the caller gives.
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "model_catalog_json = \"~/vogt-model-catalog.json\"\n",
+        )
+        .unwrap();
+        let tilde_env = vec![(
+            "CODEX_HOME".to_string(),
+            dir.path().to_string_lossy().into_owned(),
+        )];
+        assert_eq!(
+            configured_catalog(Some(&tilde_env), Some(dir.path()))
+                .unwrap()
+                .as_deref(),
+            Some(catalog)
+        );
     }
 }

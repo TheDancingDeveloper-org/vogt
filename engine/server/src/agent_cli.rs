@@ -162,6 +162,9 @@ pub struct CodexExtras<'a> {
     pub providers: &'a [vogt_session_agent::CodexProvider],
     /// The selected `model_provider` registry key.
     pub provider: Option<&'a str>,
+    /// A catalog written for this launch, when the launch model is registered
+    /// by a provider but absent from the catalog Codex would otherwise load.
+    pub catalog: Option<&'a Path>,
     /// The provider registry's fallback model, used only when the caller named
     /// no model.
     pub config_model: Option<&'a str>,
@@ -430,6 +433,7 @@ pub fn launch_with_codex(
                 compact_limit: req.codex_compact_limit,
                 provider: codex.provider,
                 providers: codex.providers,
+                catalog: codex.catalog,
                 trust_cwd: trust_cwd.as_deref(),
                 guidance: codex.guidance,
                 charter: codex.charter,
@@ -652,6 +656,7 @@ mod tests {
             compact_limit: None,
             provider: None,
             providers: &[provider],
+            catalog: None,
             trust_cwd: Some("/work"),
             guidance: None,
             charter: None,
@@ -1765,6 +1770,7 @@ url = "http://komodo/mcp"
                 charter: Some(charter),
                 providers: &providers,
                 provider: Some("litellm"),
+                catalog: None,
                 config_model: None,
                 trust_cwd: Some(Path::new(cwd)),
                 mcp_servers: &servers,
@@ -1908,6 +1914,7 @@ url = "http://komodo/mcp"
                 charter: None,
                 providers,
                 provider: Some(selected),
+                catalog: None,
                 config_model: None,
                 trust_cwd: Some(Path::new(cwd)),
                 mcp_servers: &[],

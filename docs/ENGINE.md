@@ -4577,7 +4577,7 @@ auto_compact_token_limit = 500000        # optional Codex auto-compact threshold
 models = ["deepseek-chat"]               # informational
 ```
 
-At each launch the registry does two things, and nothing else:
+At each launch the registry does three things, and nothing else:
 
 - Each provider's `env_key` joins the agent-auth manifest as an `optional`
   line (`env_key secret_project secret_name`). A host launch resolves it
@@ -4622,6 +4622,21 @@ At each launch the registry does two things, and nothing else:
   `[mcp_servers.*]` tables are merged into the shared `config.toml`, for a
   person's own CLI. The engine resolves each key through the helper when the
   pod boots, logging each resolution by name.
+
+- A registered model that the catalog Codex would otherwise load does not list
+  gets a real catalog entry, so Codex does not synthesize fallback metadata for
+  it. Fallback metadata leaves apply_patch on code mode and prints "Model
+  metadata for <model> not found" at startup. On a host launch the engine
+  writes `<state_dir>/session-catalogs/<session-id>.json` — the effective
+  catalog (the file the shared config's `model_catalog_json` names, plus an
+  entry for every registered model) — and passes it as
+  `-c model_catalog_json=...`. The shared catalog is read, never rewritten, so
+  an operator's file and a running session are untouched. An entry uses the
+  provider's `context_window` when it names one. A model already listed needs
+  no override, and a shared config that names a catalog it cannot read is left
+  alone rather than replaced. Pod launches draw their catalog from the
+  bootstrap, which lists the router's groups only, so a pod launch of a
+  provider-registered model still needs its own entry there.
 
 Running sessions keep the providers and keys they launched with. Remove an
 entry and the next launch has neither. Every field is validated: a provider
