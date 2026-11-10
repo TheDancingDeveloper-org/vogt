@@ -171,6 +171,25 @@ def test_a_command_without_git_or_gh_never_asks(tmp_path: Path) -> None:
         broker.close()
 
 
+def test_a_plain_rm_is_asked_so_the_discard_guard_sees_it(tmp_path: Path) -> None:
+    """WI-1326: a bare `rm` of a file with uncommitted changes is a discard,
+    so the hook asks the engine rather than letting it pass unasked."""
+    reason = "refusing: discard guard: rm would discard 1 path(s)"
+    broker = _Broker(200, json.dumps({"decision": "deny", "reason": reason}).encode())
+    try:
+        env = {"VOGT_ENGINE_BROKER_URL": broker.url, "VOGT_ENGINE_BROKER_TOKEN": "t"}
+        denied = run(
+            tmp_path,
+            '{"tool_name":"Bash","tool_input":{"command":"rm README.md"}}',
+            env,
+        )
+        assert broker.requests, "a plain rm must be asked"
+        assert denied.returncode == 2
+        assert reason in denied.stderr
+    finally:
+        broker.close()
+
+
 def test_a_2xx_that_is_not_an_allow_refuses(tmp_path: Path) -> None:
     """Exit 0 only for a decision that is exactly "allow".
 
