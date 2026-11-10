@@ -123,12 +123,10 @@ pub struct PodConfig {
     /// Secret holding registry credentials for the session image, if private.
     #[serde(default)]
     pub image_pull_secret: Option<String>,
-    /// How often the reconciler compares the cluster with the engine's sessions.
+    /// How often the reconciler compares the cluster with the engine's
+    /// sessions (`ENGINE_POD_RECONCILE_TIMEOUT`).
     #[serde(default = "default_reconcile_interval")]
     pub reconcile_interval: Duration,
-    /// Maximum time between reconcile passes.
-    #[serde(default = "default_reconcile_timeout")]
-    pub reconcile_timeout: Duration,
     /// How long a pod may sit Pending (unschedulable, pulling) before its
     /// session is ended.
     #[serde(default = "default_pending_timeout")]
@@ -377,9 +375,6 @@ fn default_reconnect_timeout() -> Duration {
 fn default_heartbeat_timeout() -> Duration {
     Duration::from_secs(60)
 }
-fn default_reconcile_timeout() -> Duration {
-    default_reconcile_interval()
-}
 /// The label that marks which engine deployment owns a session pod.
 pub const ENGINE_LABEL: &str = "vogt.engine";
 pub const DEFAULT_ENGINE_ID: &str = "vogt-engine";
@@ -520,7 +515,6 @@ impl Default for PodConfig {
             service_account: "vogt-session".into(),
             image_pull_secret: None,
             reconcile_interval: default_reconcile_interval(),
-            reconcile_timeout: default_reconcile_timeout(),
             pending_timeout: default_pending_timeout(),
             session_deadline: default_session_deadline(),
             reconnect_timeout: default_reconnect_timeout(),
@@ -626,7 +620,7 @@ impl PodConfig {
             ("ENGINE_POD_CONNECT_TIMEOUT", &mut cfg.connect_timeout),
             ("ENGINE_POD_PENDING_TIMEOUT", &mut cfg.pending_timeout),
             ("ENGINE_POD_RECONNECT_TIMEOUT", &mut cfg.reconnect_timeout),
-            ("ENGINE_POD_RECONCILE_TIMEOUT", &mut cfg.reconcile_timeout),
+            ("ENGINE_POD_RECONCILE_TIMEOUT", &mut cfg.reconcile_interval),
             ("ENGINE_POD_HEARTBEAT_TIMEOUT", &mut cfg.heartbeat_timeout),
         ] {
             if let Some(value) = text(name) {
@@ -638,7 +632,6 @@ impl PodConfig {
                 *target = Duration::from_secs(secs);
             }
         }
-        cfg.reconcile_interval = cfg.reconcile_timeout;
         if let Some(v) = text("ENGINE_POD_SESSION_DEADLINE_SECONDS") {
             let secs: u64 = v.parse().map_err(|_| {
                 ApiError::Config(format!(
@@ -3694,6 +3687,39 @@ mod tests {
         assert_eq!(cfg.resource_requests["cpu"].0, "50m");
         assert!(cfg.resource_limits.is_empty());
         assert_eq!(cfg.engine_id, sanitize_engine_id("Smoke Engine"));
+    }
+
+    #[test]
+    fn pod_timeouts_read_from_the_environment() {
+        let cfg = PodConfig::from_lookup(
+            lookup(&[
+                ("ENGINE_POD_CONNECT_TIMEOUT", "11"),
+                ("ENGINE_POD_PENDING_TIMEOUT", "22"),
+                ("ENGINE_POD_RECONNECT_TIMEOUT", "33"),
+                ("ENGINE_POD_RECONCILE_TIMEOUT", "44"),
+                ("ENGINE_POD_HEARTBEAT_TIMEOUT", "55"),
+            ]),
+            None,
+        )
+        .unwrap();
+        assert_eq!(cfg.connect_timeout, Duration::from_secs(11));
+        assert_eq!(cfg.pending_timeout, Duration::from_secs(22));
+        assert_eq!(cfg.reconnect_timeout, Duration::from_secs(33));
+        assert_eq!(cfg.reconcile_interval, Duration::from_secs(44));
+        assert_eq!(cfg.heartbeat_timeout, Duration::from_secs(55));
+
+        for name in [
+            "ENGINE_POD_CONNECT_TIMEOUT",
+            "ENGINE_POD_PENDING_TIMEOUT",
+            "ENGINE_POD_RECONNECT_TIMEOUT",
+            "ENGINE_POD_RECONCILE_TIMEOUT",
+            "ENGINE_POD_HEARTBEAT_TIMEOUT",
+        ] {
+            assert!(
+                PodConfig::from_lookup(lookup(&[(name, "1.5")]), None).is_err(),
+                "{name} must refuse a non-integer"
+            );
+        }
     }
 
     #[test]
