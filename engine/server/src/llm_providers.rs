@@ -336,32 +336,6 @@ pub fn manifest_entries(providers: &[Provider]) -> Vec<ManifestSecret> {
         .collect()
 }
 
-/// One provider as a TOML inline table, the value of
-/// `model_providers.<name>`.
-fn inline_table(p: &Provider) -> String {
-    let s = crate::codex_guidance::toml_basic_string;
-    format!(
-        "{{ name = {}, base_url = {}, wire_api = {}, env_key = {}, requires_openai_auth = false }}",
-        s(&p.name),
-        s(&p.base_url),
-        s(&p.wire_api),
-        s(&p.env_key)
-    )
-}
-
-/// The `-c` overrides that give a host-launched Codex these providers.
-pub fn codex_overrides(providers: &[Provider]) -> Vec<String> {
-    providers
-        .iter()
-        .flat_map(|p| {
-            [
-                "-c".to_string(),
-                format!("model_providers.{}={}", p.name, inline_table(p)),
-            ]
-        })
-        .collect()
-}
-
 /// The same providers as `config.toml` tables, for a pod's `codex_config`.
 pub fn codex_config_tables(providers: &[Provider]) -> String {
     let s = crate::codex_guidance::toml_basic_string;
@@ -436,10 +410,36 @@ models = ["deepseek-chat"]
             "DEEPSEEK_KEY proj-a HOMELAB_LITELLM_DEEPSEEK_KEY optional\n"
         );
 
-        // The -c override is what Codex parses as `key=value` TOML.
-        let overrides = codex_overrides(&providers);
-        assert_eq!(overrides[0], "-c");
-        let (key, value) = overrides[1].split_once('=').unwrap();
+        // The shared builder is what Codex parses as `key=value` TOML.
+        let provider = &providers[0];
+        let shared = vogt_session_agent::CodexProvider {
+            name: provider.name.clone(),
+            base_url: provider.base_url.clone(),
+            wire_api: provider.wire_api.clone(),
+            env_key: provider.env_key.clone(),
+        };
+        let args = vogt_session_agent::codex_args(&vogt_session_agent::CodexArgs {
+            command_args: &[],
+            resume: None,
+            session_id: None,
+            model: None,
+            config_model: None,
+            effort: None,
+            permission_mode: None,
+            approval_policy: "never",
+            exec: false,
+            compact_limit: None,
+            provider: None,
+            providers: &[shared],
+            trust_cwd: None,
+            guidance: None,
+            charter: None,
+            mcp_servers: &[],
+            mcp_args: &[],
+            prompt: None,
+        })
+        .unwrap();
+        let (key, value) = args[1].split_once('=').unwrap();
         assert_eq!(key, "model_providers.deepseek");
         let table: toml::Table = toml::from_str(&format!("v = {value}")).unwrap();
         let v = table["v"].as_table().unwrap();
@@ -470,7 +470,28 @@ models = ["deepseek-chat"]
         assert!(load(Path::new("/nonexistent/providers.toml"))
             .unwrap()
             .is_empty());
-        assert!(codex_overrides(&[]).is_empty());
+        let args = vogt_session_agent::codex_args(&vogt_session_agent::CodexArgs {
+            command_args: &[],
+            resume: None,
+            session_id: None,
+            model: None,
+            config_model: None,
+            effort: None,
+            permission_mode: None,
+            approval_policy: "never",
+            exec: false,
+            compact_limit: None,
+            provider: None,
+            providers: &[],
+            trust_cwd: None,
+            guidance: None,
+            charter: None,
+            mcp_servers: &[],
+            mcp_args: &[],
+            prompt: None,
+        })
+        .unwrap();
+        assert!(!args.iter().any(|arg| arg.starts_with("model_providers.")));
     }
 
     #[test]
