@@ -37,8 +37,9 @@ graft=""; [ -z "${GRAFT_TOKEN:-}" ] || graft=$(printf ',"source_token":"%s"' "$G
 [ -z "${CODEX_CONFIG:-}" ] || graft="$graft,\"codex_config\":$(printf %s "$CODEX_CONFIG" | jq -Rs .)"
 [ -z "${OPENCODE_CONFIG:-}" ] || graft="$graft,\"opencode_config\":$OPENCODE_CONFIG"
 bundle=${BUNDLE_JSON:-"{\"sub/.credentials.json\":\"$(printf bundle | base64)\"}"}
-printf '{"session_token":"%s"%s,"source":%s,"bundle":%s,"env":{"VOGT_SESSION_ID":"s1","VOGT_BOOTSTRAP_TOKEN":"%s"},"agent_env":{"EXTRA":"yes","VOGT_SESSION_ID":"caller"},"brief":"hello brief"}' \
-  "$(cat "$CASE_DIR/session")" "$graft" "$SOURCE_JSON" "$bundle" "$(cat "$CASE_DIR/boot")"
+env_json=${ENV_JSON:-"{\"VOGT_SESSION_ID\":\"s1\",\"VOGT_BOOTSTRAP_TOKEN\":\"$(cat "$CASE_DIR/boot")\"}"}
+printf '{"session_token":"%s"%s,"source":%s,"bundle":%s,"env":%s,"agent_env":{"EXTRA":"yes","VOGT_SESSION_ID":"caller"},"brief":"hello brief"}' \
+  "$(cat "$CASE_DIR/session")" "$graft" "$SOURCE_JSON" "$bundle" "$env_json"
 SH
   cat >"$dir/bin/graft" <<'SH'
 #!/bin/sh
@@ -259,7 +260,8 @@ grep -q 'url = "https://e/mcp"' "$cfg" || fail "codex vogt table missing (quoted
 mkdir -p "$tmp/codexprov/home/.codex"
 printf '[model_providers.deepseek]\nbase_url = "https://stale"\n\n[model_providers.mine]\nbase_url = "https://m"\n' >"$tmp/codexprov/home/.codex/config.toml"
 PROV_TOML="$CODEX_TOML"$'\n[model_providers.deepseek]\nname = "deepseek"\nbase_url = "https://new/v1"\nwire_api = "chat"\nenv_key = "DEEPSEEK_KEY"\n'
-out=$(run_case "$tmp/codexprov" VOGT_CLI=codex CODEX_CONFIG="$PROV_TOML" 2>&1) || fail "codex provider path: $out"
+PROVIDER_ENV='{"VOGT_SESSION_ID":"s1","AGENT_AUTH_MODE":"brokered","AGENT_AUTH_ONDEMAND":"DEEPSEEK_KEY"}'
+out=$(run_case "$tmp/codexprov" VOGT_CLI=codex CODEX_CONFIG="$PROV_TOML" ENV_JSON="$PROVIDER_ENV" 2>&1) || fail "codex provider path: $out"
 cfg="$tmp/codexprov/home/.codex/config.toml"
 frag="$tmp/codexprov/home/.codex/vogt-codex.toml"
 [ "$(grep -c '^\[model_providers.deepseek\]' "$frag")" = 1 ] || fail "provider table not in fragment"
@@ -267,6 +269,10 @@ grep -q 'base_url = "https://new/v1"' "$frag" || fail "provider table missing fr
 ! grep -q 'https://new/v1' "$cfg" || fail "provider table merged into shared config"
 grep -q 'https://stale' "$cfg" || fail "config's own provider table rewritten"
 grep -q '^\[model_providers.mine\]' "$cfg" || fail "config's own provider lost"
+# WI-3886: the provider key is named among the ondemand entries and no value
+# for it reaches the entrypoint's environment before the CLI starts.
+grep -q '^AGENT_AUTH_ONDEMAND=DEEPSEEK_KEY$' "$tmp/codexprov/agent.env" || fail "provider key name missing from the ondemand breadcrumb"
+[[ $(grep -c '_KEY=' "$tmp/codexprov/agent.env") == 0 ]] || fail "provider key value exported: $(grep '_KEY=' "$tmp/codexprov/agent.env")"
 OC='{"mcp":{"vogt":{"type":"remote","url":"https://e/mcp"}}}'
 out=$(run_case "$tmp/ocfg" VOGT_CLI=opencode OPENCODE_CONFIG="$OC" XDG_CONFIG_HOME="$tmp/ocfg/xdg" 2>&1) || fail "opencode path: $out"
 jq -e '.mcp.vogt.url=="https://e/mcp"' "$tmp/ocfg/xdg/opencode/opencode.json" >/dev/null || fail "opencode config content"
@@ -305,6 +311,13 @@ if run_case "$tmp/unauthorized" BOOT_MODE=401 >"$tmp/401.out" 2>&1; then fail "4
 grep -q 'bootstrap failed.*refused' "$tmp/401.out" || fail "401 error"
 if run_case "$tmp/clone-failure" CLONE_FAIL=1 >"$tmp/clone.out" 2>&1; then fail "clone failure succeeded"; fi
 grep -q 'clone failed' "$tmp/clone.out" || fail "clone error"
+# WI-3886: a name declared ondemand must arrive as a name, never a value. A
+# response that does both is refused before the CLI starts.
+LEAK_ENV='{"VOGT_SESSION_ID":"s1","AGENT_AUTH_ONDEMAND":"DEEPSEEK_KEY","DEEPSEEK_KEY":"provider-key-value"}'
+if run_case "$tmp/ondemand-leak" VOGT_CLI=codex ENV_JSON="$LEAK_ENV" >"$tmp/ondemand-leak.out" 2>&1; then fail "ondemand value exported"; fi
+grep -q 'bootstrap returned a value for ondemand variable DEEPSEEK_KEY' "$tmp/ondemand-leak.out" || fail "ondemand value refusal: $(cat "$tmp/ondemand-leak.out")"
+[ ! -e "$tmp/ondemand-leak/agent.env" ] || fail "agent started with an exported ondemand value"
+! grep -q 'provider-key-value' "$tmp/ondemand-leak.out" || fail "ondemand value appeared in output"
 for output in "$tmp/missing.out" "$tmp/401.out" "$tmp/clone.out"; do
   ! grep -Eq "$BOOT|$SESSION" "$output" || fail "secret appeared in output"
 done
