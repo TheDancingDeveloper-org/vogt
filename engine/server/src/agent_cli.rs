@@ -636,6 +636,8 @@ mod tests {
             base_url: "http://l/v1".into(),
             wire_api: "chat".into(),
             env_key: "DS_KEY".into(),
+            context_window: None,
+            auto_compact_token_limit: None,
         };
         let args = vogt_session_agent::codex_args(&vogt_session_agent::CodexArgs {
             command_args: &[],
@@ -1713,6 +1715,8 @@ model = "gpt-5.6"
 base_url = "http://100.92.54.45:4000"
 wire_api = "responses"
 env_key = "LITELLM_API_KEY"
+context_window = 1000000
+auto_compact_token_limit = 500000
 
 [mcp_servers.vogt]
 url = "http://vogt/mcp"
@@ -1733,6 +1737,8 @@ url = "http://komodo/mcp"
             base_url: "http://100.92.54.45:4000".into(),
             wire_api: "responses".into(),
             env_key: "LITELLM_API_KEY".into(),
+            context_window: Some(1_000_000),
+            auto_compact_token_limit: Some(500_000),
         }];
         let servers = ["vogt".to_string(), "komodo".to_string()];
 
@@ -1816,12 +1822,18 @@ url = "http://komodo/mcp"
         for flag in [
             "model_provider=\"litellm\"",
             "mcp_servers.vogt.default_tools_approval_mode=\"approve\"",
+            "model_context_window=1000000",
+            "model_auto_compact_token_limit=500000",
         ] {
             assert!(
                 host.iter().any(|arg| arg == flag),
                 "the shared argv lacks {flag}: {host:?}"
             );
         }
+        assert!(host.iter().any(|arg| arg == "model_context_window=1000000"));
+        assert!(host
+            .iter()
+            .any(|arg| arg == "model_auto_compact_token_limit=500000"));
         assert!(
             !host.iter().any(|arg| arg.contains("komodo")),
             "komodo is not in the auto-approval list: {host:?}"
