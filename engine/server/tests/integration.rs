@@ -15124,7 +15124,7 @@ async fn codex_asks_go_to_a_person_and_errors_are_retryable() {
 }
 
 #[tokio::test]
-async fn a_promoted_codex_chat_continues_in_a_session_and_takes_no_more_messages() {
+async fn a_promoted_codex_chat_continues_in_a_pod_session_and_takes_no_more_messages() {
     if std::process::Command::new("python3")
         .arg("--version")
         .output()
@@ -15140,23 +15140,41 @@ async fn a_promoted_codex_chat_continues_in_a_session_and_takes_no_more_messages
         .unwrap();
     let driver = bin.path().join("codex");
     std::os::unix::fs::symlink(&fixture, &driver).unwrap();
-    let cfg = Config {
-        chat: vogt_engine_server::chats::ChatPolicy {
-            enabled: true,
+    // Codex is pod-only, so a chat is promoted through the template the
+    // deployment configured for it, never the chat's own host argv.
+    let mut h = pod_stream::harness_cfg(
+        false,
+        Some(vec![SessionTemplate {
+            name: "codex-pod".into(),
+            description: "pod-backed Codex chat driver".into(),
             command: Some(vec![driver.to_string_lossy().into_owned()]),
-            approval_timeout: Duration::from_secs(10),
-            ..Default::default()
+            cwd: None,
+            env: Vec::new(),
+            account: None,
+            default_name: None,
+            match_repo_names: Vec::new(),
+            match_path_prefixes: Vec::new(),
+            tags: Vec::new(),
+            backend: "pod".into(),
+            host_capable: false,
+            pod_capable: true,
+        }]),
+        |cfg| {
+            cfg.chat = vogt_engine_server::chats::ChatPolicy {
+                enabled: true,
+                template: Some("codex-pod".into()),
+                approval_timeout: Duration::from_secs(10),
+                ..Default::default()
+            };
         },
-        session_templates: vec![],
-        ..test_config()
-    };
-    let (base, _state, guard) = boot_with_state(cfg).await;
+    )
+    .await;
     let client = reqwest::Client::builder()
         .default_headers(auth())
         .build()
         .unwrap();
     let created: Value = client
-        .post(format!("{base}/api/chats"))
+        .post(format!("{}/api/chats", h.base))
         .json(&json!({ "driver": "codex", "message": "plan the fix" }))
         .send()
         .await
@@ -15165,9 +15183,9 @@ async fn a_promoted_codex_chat_continues_in_a_session_and_takes_no_more_messages
         .await
         .unwrap();
     let id = created["chat"]["id"].as_str().unwrap().to_string();
-    wait_chat_idle(&client, &base, &id).await;
+    wait_chat_idle(&client, &h.base, &id).await;
     let promoted = client
-        .post(format!("{base}/api/chats/{id}/promote"))
+        .post(format!("{}/api/chats/{id}/promote", h.base))
         .json(&json!({ "name": "fix it" }))
         .send()
         .await
@@ -15188,15 +15206,63 @@ async fn a_promoted_codex_chat_continues_in_a_session_and_takes_no_more_messages
         promoted["chat"]["live"] == false,
         "the chat's own process is gone"
     );
+    // And it runs in a pod, because the driver's template is pod-backed.
+    let (pod, _token) = tokio::time::timeout(Duration::from_secs(5), h.created.recv())
+        .await
+        .expect("the promoted session creates a pod")
+        .expect("the pod is created");
+    assert_eq!(pod.to_string(), session);
 
     let refused = client
-        .post(format!("{base}/api/chats/{id}/messages"))
+        .post(format!("{}/api/chats/{id}/messages", h.base))
         .json(&json!({ "text": "more" }))
         .send()
         .await
         .unwrap();
     assert_eq!(refused.status(), StatusCode::CONFLICT);
-    drop(guard);
+}
+
+/// Codex is pod-only: a chat launched by a bare `ENGINE_CHAT_COMMAND` has no
+/// template to place a session in, so promotion refuses with the setting to
+/// configure instead of a host-placed start's placement error — and it
+/// refuses before stopping the chat's process, so the chat still works.
+#[tokio::test]
+async fn a_codex_chat_without_a_pod_template_refuses_promotion_and_keeps_its_process() {
+    let Some((base, client, _state, _guard, _bin)) = boot_chats().await else {
+        return;
+    };
+    let created: Value = client
+        .post(format!("{base}/api/chats"))
+        .json(&json!({ "driver": "codex", "message": "plan the fix" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["chat"]["id"].as_str().unwrap().to_string();
+    wait_chat_idle(&client, &base, &id).await;
+    let promoted = client
+        .post(format!("{base}/api/chats/{id}/promote"))
+        .json(&json!({ "name": "fix it" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(promoted.status(), StatusCode::CONFLICT);
+    let body = promoted.text().await.unwrap();
+    assert!(body.contains("ENGINE_CHAT_TEMPLATE"), "{body}");
+    let detail: Value = client
+        .get(format!("{base}/api/chats/{id}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(detail.get("promoted_session").is_none(), "{detail}");
+    // The process was not stopped: the chat takes another turn.
+    let sent = chat_send(&client, &base, &id, "hello again").await;
+    assert!(sent["entries"].is_array(), "{sent}");
 }
 
 #[tokio::test]
@@ -16596,6 +16662,10 @@ async fn hibernation_keeps_build_output_and_removal_cleans_it() {
 /// input and every request queued behind it (WI-1644). The engine here runs
 /// on a single-threaded runtime, so a spinning watcher hangs the runtime
 /// outright: the watchdog thread turns that into a failure, not a hung suite.
+///
+/// The session is spawned through `pty::spawn` directly: this is a regression
+/// test of the watcher, and a Codex *session* started over the API would be
+/// refused by the pod-only placement gate before a PTY existed.
 #[test]
 fn a_quiet_working_codex_session_does_not_starve_the_runtime() {
     let (done_tx, done_rx) = std::sync::mpsc::channel();
@@ -16605,47 +16675,46 @@ fn a_quiet_working_codex_session_does_not_starve_the_runtime() {
             .build()
             .unwrap();
         rt.block_on(async {
-            let (base, _guard) = boot().await;
             let tmp = tempfile::tempdir().unwrap();
             let codex = tmp.path().join("codex");
             std::fs::write(
                 &codex,
-                "#!/bin/sh\nprintf '\\033]0;codex: working\\007Working (0s)\\n'\nexec sleep 30\n",
+                "#!/bin/sh\nprintf '\\033]0;codex: working\\007Working (0s)\n'\nexec sleep 30\n",
             )
             .unwrap();
             std::fs::set_permissions(&codex, std::os::unix::fs::PermissionsExt::from_mode(0o755))
                 .unwrap();
-            let client = client_for(TEST_TOKEN);
-            let created: Value = client
-                .post(format!("{base}/api/sessions"))
-                .json(&json!({
-                    "name": "quiet-codex",
-                    "command": ["env", "--", codex.to_string_lossy()],
-                }))
-                .send()
-                .await
-                .unwrap()
-                .json()
-                .await
-                .unwrap();
-            let id = created["id"].as_str().unwrap().to_string();
-            // Several quiet windows (idle_after_ms is 200 in the test config).
+            let spec = vogt_engine_contract::SessionSpec {
+                name: "quiet-codex".into(),
+                command: Some(vec![codex.to_string_lossy().into_owned()]),
+                ..Default::default()
+            };
+            let spawned = vogt_engine_server::pty::spawn(
+                Uuid::new_v4(),
+                &spec,
+                vogt_engine_server::pty::SpawnDefaults {
+                    default_shell: "/bin/sh",
+                    auto_agent_auth: false,
+                    agent_auth_helper: std::path::Path::new("/usr/local/bin/vogt-agent-auth"),
+                    default_cwd: tmp.path(),
+                    scrollback_bytes: 64 * 1024,
+                    activity_idle_after_ms: 200,
+                    secret_broker: None,
+                    agent_auth_manifest: None,
+                    on_exit: None,
+                },
+                vogt_engine_server::events::EventBus::new(64),
+                None,
+            )
+            .unwrap();
+            let session = spawned.session;
+            // Several quiet windows (idle_after_ms is 200 here).
             tokio::time::sleep(Duration::from_millis(1_500)).await;
-            let started = std::time::Instant::now();
-            let got: Value = client
-                .get(format!("{base}/api/sessions/{id}"))
-                .send()
-                .await
-                .unwrap()
-                .json()
-                .await
-                .unwrap();
-            assert_eq!(got["summary"]["activity"], "running", "{got}");
-            assert!(started.elapsed() < Duration::from_secs(2));
-            let _ = client
-                .delete(format!("{base}/api/sessions/{id}"))
-                .send()
-                .await;
+            assert_eq!(
+                session.activity(),
+                vogt_engine_contract::ActivityState::Running
+            );
+            session.kill().unwrap();
         });
         let _ = done_tx.send(());
     });
@@ -18320,7 +18389,9 @@ mod pod_stream {
 
     /// WI-3335: a deployment with an invalid managed Codex policy refuses a
     /// local Codex launch, while a pod-backed Codex template still starts (the
-    /// pod checks its own filesystem at boot).
+    /// pod checks its own filesystem at boot). The local launch is now
+    /// refused earlier — Codex sessions are pod-only — so the placement gate
+    /// answers before the policy file is read; the pod must still start.
     #[tokio::test]
     async fn a_pod_codex_is_not_refused_by_the_engines_policy_check() {
         let template = |name: &str, backend: &str| SessionTemplate {
@@ -18361,11 +18432,11 @@ mod pod_stream {
         assert!(pod.status().is_success(), "{}", pod.text().await.unwrap());
         let local = start("codex-local").await.unwrap();
         assert_eq!(local.status(), StatusCode::BAD_REQUEST);
-        assert!(local
-            .text()
-            .await
-            .unwrap()
-            .contains("refusing to start a Codex session"));
+        let body = local.text().await.unwrap();
+        assert!(
+            body.contains("Codex runs in a session pod"),
+            "a host Codex launch is refused by placement: {body}"
+        );
         let (_id, _token) = h.created.recv().await.expect("the pod is created");
     }
 

@@ -25,6 +25,18 @@ ignore = [
     # replacing kube or its transitive YAML stack is outside this CI fix. Ignored here and in
     # rust-core.yml's cargo audit (WI-3229). Reviewed 2026-11-06 (WI-2674).
     "RUSTSEC-2024-0449",
+    # RUSTSEC-2026-0459: bundled SQLite before 3.54.0 (libsqlite3-sys 0.30.1)
+    # can return uninitialized page-cache bytes when it opens a database whose
+    # sibling -wal file was written by a less trusted party with a different
+    # page size. Reviewed 2026-11-10 (WI-3876): sqlx 0.9.0 is the newest
+    # release and pins libsqlite3-sys 0.30, so the lock cannot reach the
+    # patched 0.39. Both databases are files the engine creates under its own
+    # state directory: a host session shares the engine's uid and could
+    # already read them unencrypted, and pod sessions mount no such path.
+    # rusqlite 0.41 uses the patched libsqlite3-sys and removes the core's
+    # copy; this ignore goes when sqlx moves as well. Operator acceptance is
+    # pending on WI-3876.
+    "RUSTSEC-2026-0459",
 ]
 
 [licenses]

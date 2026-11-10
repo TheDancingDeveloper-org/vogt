@@ -72,6 +72,7 @@ pinned by the `application/resolve.rs` tests in the Rust core (WI-1058).
 | test_decisions.py | ported | Decision entity and `decision.*` operations (WI-1321, migration 0023): `application/services/decisions_test.rs`. |
 | test_delivery.py | ported | `delivery.rs`. |
 | test_demo_delivery.py | retired | Browser-only public demo delivery. Not the core. |
+| test_dev_images_workflow.py | retired | The rust-2 dev images' build and publish rules (WI-3887): Dockerfile pinning, the pod-base content tag and the digest-only publish. `.github/workflows/` and `engine/Dockerfile*`, which the core crate does not own. |
 | test_diagnostics.py | ported | Instance diagnostics service. |
 | test_dispatch.py | ported | `engine/core/src/application/dispatch_test.rs` (all 6 cases; the 8 parametrized malformed-value cases run as one table-driven test). |
 | test_drift.py | ported | `application/drift.rs`. |
@@ -112,6 +113,7 @@ pinned by the `application/resolve.rs` tests in the Rust core (WI-1058).
 | test_m1_demo.py | retired | Milestone demo script. Not a core regression. |
 | test_m2_demo.py | retired | Milestone demo script. Not a core regression. |
 | test_mcp_bootstrap_cadastre.py | retired | Cadastre MCP bootstrap is an external deployment shell/adapter concern, not Rust-core product behaviour. |
+| test_mcp_bootstrap_permissions.py | retired | `engine/deploy/mcp-bootstrap.sh` must not abort a launch for a client it cannot configure (WI-3761). A deployment shell script, not Rust-core product behaviour. |
 | test_mcp.py | ported | `adapters/mcp/framing.rs` and the MCP HTTP adapter. |
 | test_mcp_stdio.py | ported | MCP stdio serving in `main.rs` and `adapters/mcp`. |
 | test_metrics.py | ported | `adapters/http/metrics.rs` (WI-1080): the opt-in `VOGT_METRICS_ADDR` listener on its own port, wired into `serve`. Ported: nothing listens without the env, a bare port or a missing host is refused, every series carries `component="core"` under the stock process-exporter names (resident and virtual memory, CPU seconds, open fds, start time, read from `/proc/self`), a scrape is served and logs nothing, and a second start does not rebind. Python's `python_gc_*` series have no Rust counterpart. |
