@@ -1193,19 +1193,14 @@ pub fn codex_args(args: &CodexArgs<'_>) -> Result<Vec<String>, String> {
             ),
         ]);
     }
-    if let Some(selected) = args
+    // The selected provider supplies the context window; its compact limit is
+    // emitted once, below, with the backoff (WI-3871). Both are authoritative
+    // for that provider and never fall back to the deployment defaults.
+    let selected = args
         .provider
-        .and_then(|name| args.providers.iter().find(|p| p.name == name))
-    {
-        if let Some(window) = selected.context_window {
-            argv.extend(["-c".to_string(), format!("model_context_window={window}")]);
-        }
-        if let Some(limit) = selected.auto_compact_token_limit {
-            argv.extend([
-                "-c".to_string(),
-                format!("model_auto_compact_token_limit={limit}"),
-            ]);
-        }
+        .and_then(|name| args.providers.iter().find(|p| p.name == name));
+    if let Some(window) = selected.and_then(|p| p.context_window) {
+        argv.extend(["-c".to_string(), format!("model_context_window={window}")]);
     }
     if let Some(cwd) = args.trust_cwd.map(str::trim).filter(|cwd| !cwd.is_empty()) {
         let key = toml_basic_string(cwd);
@@ -1267,13 +1262,28 @@ pub fn codex_args(args: &CodexArgs<'_>) -> Result<Vec<String>, String> {
         "-c".to_string(),
         "tui.animations=false".to_string(),
     ]);
-    if let Some(limit) = args.compact_limit {
+    // One emission per key: the selected provider's limit is the base, and an
+    // engine backoff (computed from that base in `sessions`) may only raise
+    // it. Emitting a second, lower value here would silently win, since Codex
+    // takes the last `-c` for a key.
+    let compact_limit = [
+        selected.and_then(|provider| provider.auto_compact_token_limit),
+        args.compact_limit,
+    ]
+    .into_iter()
+    .flatten()
+    .max();
+    if let Some(limit) = compact_limit {
         argv.extend([
             "-c".to_string(),
             format!("model_auto_compact_token_limit={limit}"),
-            "-c".to_string(),
-            format!("model_auto_compact_token_limit_scope=\"{CODEX_COMPACT_SCOPE}\""),
         ]);
+        if args.compact_limit.is_some() {
+            argv.extend([
+                "-c".to_string(),
+                format!("model_auto_compact_token_limit_scope=\"{CODEX_COMPACT_SCOPE}\""),
+            ]);
+        }
     }
     argv.extend(args.mcp_args.iter().cloned());
     if let Some(id) = args.session_id {
