@@ -814,6 +814,7 @@ impl SessionRegistry {
                                 ),
                                 HibernateTrigger::Recovered,
                                 true,
+                                false,
                                 None,
                             )
                             .await
@@ -2294,6 +2295,7 @@ impl SessionRegistry {
         reason: Option<String>,
         trigger: HibernateTrigger,
         allow_shell: bool,
+        force: bool,
         superseded_by: Option<String>,
     ) -> Result<SessionSummary> {
         let superseded_by = self.checked_successor(id, superseded_by)?;
@@ -2305,7 +2307,7 @@ impl SessionRegistry {
             }
             return self.hibernated_summary(id).ok_or(ApiError::NotFound);
         };
-        if let Some(refusal) = self.hibernate_refusal(&session, allow_shell) {
+        if let Some(refusal) = self.hibernate_refusal(&session, allow_shell || force) {
             return Err(ApiError::Conflict(refusal));
         }
         let mut record = self
@@ -2327,7 +2329,12 @@ impl SessionRegistry {
             {
                 FlushOutcome::Done => {}
                 FlushOutcome::NotAttached => {
-                    tracing::warn!(session = %id, "hibernating a pod session whose agent is not attached; its transcript is as last written back");
+                    if !force {
+                        return Err(ApiError::Conflict(
+                            "the session's pod agent is not attached; pass force=true to hibernate anyway".into(),
+                        ));
+                    }
+                    tracing::warn!(session = %id, "force-hibernating a pod session whose agent is not attached; its transcript is as last written back");
                 }
                 FlushOutcome::Failed => {
                     return Err(ApiError::Conflict(
@@ -3057,6 +3064,7 @@ impl SessionRegistry {
                         Some("the engine was shutting down".into()),
                         HibernateTrigger::Shutdown,
                         allow_shell,
+                        false,
                         None,
                     )
                     .await,
