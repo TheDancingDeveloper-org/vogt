@@ -1101,6 +1101,9 @@ pub struct CodexArgs<'a> {
     /// The selected `model_provider` registry key, as `-c model_provider=...`.
     pub provider: Option<&'a str>,
     pub providers: &'a [CodexProvider],
+    /// A model catalog written for this launch, as `-c model_catalog_json=...`
+    /// (a provider-registered model absent from the shared catalog).
+    pub catalog: Option<&'a Path>,
     /// The checkout Codex should trust without asking (`projects={...}`).
     pub trust_cwd: Option<&'a str>,
     pub guidance: Option<&'a str>,
@@ -1190,6 +1193,15 @@ pub fn codex_args(args: &CodexArgs<'_>) -> Result<Vec<String>, String> {
                 "model_providers.{}={}",
                 provider.name,
                 provider_inline(provider)
+            ),
+        ]);
+    }
+    if let Some(catalog) = args.catalog {
+        argv.extend([
+            "-c".to_string(),
+            format!(
+                "model_catalog_json={}",
+                toml_basic_string(&catalog.to_string_lossy())
             ),
         ]);
     }
@@ -1549,6 +1561,7 @@ pub fn command_line(config: &Config) -> Result<String, AgentError> {
                 compact_limit: config.codex.compact_limit,
                 provider: file.model_provider.as_deref(),
                 providers: &file.providers,
+                catalog: None,
                 trust_cwd: Some(cwd),
                 guidance: config.codex.guidance.as_deref(),
                 charter: config.codex.charter.as_deref(),

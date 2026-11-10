@@ -1517,11 +1517,26 @@ impl SessionRegistry {
             })
             .collect();
         if codex_agent {
+            // A provider-registered model is not a router group, so the
+            // shared catalog has no entry for it and Codex synthesizes
+            // fallback metadata for it at startup. Give this launch its own
+            // catalog instead of rewriting the shared one.
+            let codex_catalog = codex_config_model.as_deref().and_then(|model| {
+                provider_launch_catalog(
+                    &self.cfg.state_dir,
+                    id,
+                    model,
+                    &codex_providers,
+                    Some(&base_env),
+                    home.as_deref(),
+                )
+            });
             let extras = agent_cli::CodexExtras {
                 guidance: codex_guidance.as_deref(),
                 charter: spec.charter.as_deref(),
                 providers: &codex_provider_args,
                 provider: codex_provider.as_deref(),
+                catalog: codex_catalog.as_deref(),
                 config_model: codex_config_model.as_deref(),
                 trust_cwd: Some(codex_cwd.as_path()),
                 mcp_servers: &mcp_trim.codex_servers,
@@ -3847,6 +3862,58 @@ fn recover_records(
     }
 }
 
+/// Write the per-launch model catalog when the launch model is registered by
+/// an LLM provider but absent from the catalog Codex would otherwise load.
+/// The shared catalog is read, not rewritten: the entry lives in the session's
+/// state directory and reaches Codex as a `-c model_catalog_json` override.
+fn provider_launch_catalog(
+    state_dir: &std::path::Path,
+    id: Uuid,
+    model: &str,
+    providers: &[crate::llm_providers::Provider],
+    env: Option<&[(String, String)]>,
+    home: Option<&std::path::Path>,
+) -> Option<std::path::PathBuf> {
+    let matching: Vec<&crate::llm_providers::Provider> = providers
+        .iter()
+        .filter(|provider| provider.models.contains(&model.to_string()))
+        .collect();
+    if !matches!(matching.as_slice(), [_]) {
+        return None;
+    }
+    let base = match crate::llm_providers::configured_catalog(env, home) {
+        Ok(Some(text)) => Some(text),
+        // No catalog named: start from the engine's own estate catalog rather
+        // than an empty one, so the picker keeps the router groups.
+        Ok(None) => Some(crate::chat_codex::model_catalog()),
+        Err(err) => {
+            tracing::warn!(session = %id, model = %model, error = %err, "model catalog not overridden");
+            return None;
+        }
+    };
+    match crate::llm_providers::catalog_for_model(base.as_deref(), providers, model) {
+        Ok(Some(text)) => {
+            let directory = state_dir.join("session-catalogs");
+            if let Err(err) = std::fs::create_dir_all(&directory) {
+                tracing::warn!(session = %id, error = %err, "could not create the launch catalog directory; leaving the shared catalog alone");
+                return None;
+            }
+            let directory = std::fs::canonicalize(&directory).unwrap_or(directory);
+            let path = directory.join(format!("{id}.json"));
+            if let Err(err) = std::fs::write(&path, text) {
+                tracing::warn!(session = %id, error = %err, "could not write the launch catalog; leaving the shared catalog alone");
+                return None;
+            }
+            Some(path)
+        }
+        Ok(None) => None,
+        Err(err) => {
+            tracing::warn!(session = %id, model = %model, error = %err, "model catalog not overridden");
+            None
+        }
+    }
+}
+
 fn pod_token_dir(state_dir: &std::path::Path) -> std::path::PathBuf {
     state_dir.join("pod-tokens")
 }
@@ -3984,6 +4051,63 @@ mod tests {
         validate_requested_placement, validate_template_placement,
     };
     use crate::config::SessionTemplate;
+
+    #[test]
+    fn a_registered_model_gets_a_per_session_catalog_without_touching_the_shared_one() {
+        let shared = tempfile::tempdir().unwrap();
+        let base = r#"{"models":[{"slug":"grok","priority":0}]}"#;
+        std::fs::write(shared.path().join("vogt-model-catalog.json"), base).unwrap();
+        std::fs::write(
+            shared.path().join("config.toml"),
+            "model_catalog_json = \"vogt-model-catalog.json\"\n",
+        )
+        .unwrap();
+        let providers = crate::llm_providers::parse(
+            "[[provider]]\nname = \"ds\"\nbase_url = \"http://l/v1\"\nwire_api = \"chat\"\nenv_key = \"DS_KEY\"\nsecret_project = \"p\"\nsecret_name = \"s\"\nmodels = [\"deepseek/deepseek-v4-flash\"]\n",
+        )
+        .unwrap();
+        let env = vec![(
+            "CODEX_HOME".to_string(),
+            shared.path().to_string_lossy().into_owned(),
+        )];
+        let state = tempfile::tempdir().unwrap();
+        let id = uuid::Uuid::from_u128(11);
+        let path = super::provider_launch_catalog(
+            state.path(),
+            id,
+            "deepseek/deepseek-v4-flash",
+            &providers,
+            Some(&env),
+            None,
+        )
+        .expect("a missing registered model needs a launch catalog");
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let slugs: Vec<&str> = written["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|entry| entry["slug"].as_str())
+            .collect();
+        assert_eq!(slugs, ["grok", "deepseek/deepseek-v4-flash"]);
+        // The shared catalog is read, not rewritten.
+        assert_eq!(
+            std::fs::read_to_string(shared.path().join("vogt-model-catalog.json")).unwrap(),
+            base
+        );
+        // Once listed, a later launch needs no override.
+        let listed = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(shared.path().join("vogt-model-catalog.json"), listed).unwrap();
+        assert!(super::provider_launch_catalog(
+            state.path(),
+            id,
+            "deepseek/deepseek-v4-flash",
+            &providers,
+            Some(&env),
+            None
+        )
+        .is_none());
+    }
 
     #[test]
     fn a_pod_only_template_cannot_be_forced_onto_the_host() {
