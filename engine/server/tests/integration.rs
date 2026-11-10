@@ -17989,6 +17989,178 @@ mod pod_stream {
         assert_eq!(spec_source["ref"], "rust-2");
     }
 
+    /// WI-3884: the bootstrap env names the brokered model and the names the
+    /// deployment declared and this session holds — never a value.
+    #[tokio::test]
+    async fn pod_bootstrap_carries_the_agent_auth_breadcrumbs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut h = harness_cfg(false, None, |cfg| {
+            cfg.agent_auth_helper = fake_broker_helper(tmp.path());
+            cfg.agent_auth_secrets = vogt_engine_server::secret_broker::parse_manifest(
+                "F3_ONDEMAND acct f3-ondemand ondemand\n\
+                 F3_WRITABLE acct f3-writable ondemand,writable\n",
+            )
+            .unwrap();
+        })
+        .await;
+        let id = h.start().await;
+        let now = OffsetDateTime::now_utc();
+        h.state
+            .sessions
+            .secret_broker()
+            .apply_grant(
+                id,
+                vogt_engine_contract::SessionGrant {
+                    grant_id: "grt_f3_1".into(),
+                    var: "F3_GRANTED".into(),
+                    project_id: "acct".into(),
+                    secret_name: "f3-granted".into(),
+                    uses: vogt_engine_contract::GrantUses::Ttl,
+                    expires_at: (now + time::Duration::hours(1))
+                        .format(&time::format_description::well_known::Rfc3339)
+                        .unwrap(),
+                    reason: "the pod needs it".into(),
+                },
+                now,
+            )
+            .unwrap();
+        let (_, boot) = h.created.recv().await.unwrap();
+        let body: Value = h.bootstrap(id, boot.as_slice()).await.json().await.unwrap();
+        assert_eq!(body["env"]["AGENT_AUTH_MODE"], "brokered");
+        assert_eq!(body["env"]["AGENT_AUTH_GRANTED"], "F3_GRANTED");
+        // `writable` is orthogonal to the read policy, so the
+        // `ondemand,writable` entry is listed by both names, as on the host.
+        assert_eq!(
+            body["env"]["AGENT_AUTH_ONDEMAND"],
+            "F3_ONDEMAND F3_WRITABLE"
+        );
+        assert_eq!(body["env"]["AGENT_AUTH_WRITABLE"], "F3_WRITABLE");
+        // Names only: the fake helper's values are not in the response.
+        assert!(!body.to_string().contains("value-of-"), "{body}");
+    }
+
+    /// WI-3884: the pod's stream credential is the broker credential for
+    /// `fetch` and `grants` — scoped to the manifest and to that session's own
+    /// approved grants, and every fetch is audited by name.
+    #[tokio::test]
+    async fn a_pod_stream_token_fetches_the_manifest_and_only_its_own_grant() {
+        let logs = LogCapture::default();
+        let _logging = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_writer(logs.clone())
+                .with_ansi(false)
+                .with_max_level(tracing::Level::TRACE)
+                .finish(),
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        let mut h = harness_cfg(false, None, |cfg| {
+            cfg.agent_auth_helper = fake_broker_helper(tmp.path());
+            cfg.agent_auth_secrets = vogt_engine_server::secret_broker::parse_manifest(
+                "POD_ONDEMAND acct pod-ondemand ondemand\n",
+            )
+            .unwrap();
+        })
+        .await;
+        let id = h.start().await;
+        let token = h.session_token(id).await;
+        let other = h.start().await;
+        let other_token = h.session_token(other).await;
+
+        // A person-approved grant for the *other* session only.
+        let now = OffsetDateTime::now_utc();
+        h.state
+            .sessions
+            .secret_broker()
+            .apply_grant(
+                other,
+                vogt_engine_contract::SessionGrant {
+                    grant_id: "grt_pod_1".into(),
+                    var: "POD_GRANT".into(),
+                    project_id: "acct".into(),
+                    secret_name: "pod-grant".into(),
+                    uses: vogt_engine_contract::GrantUses::Ttl,
+                    expires_at: (now + time::Duration::hours(1))
+                        .format(&time::format_description::well_known::Rfc3339)
+                        .unwrap(),
+                    reason: "the other pod needs it".into(),
+                },
+                now,
+            )
+            .unwrap();
+
+        // `set_default` is thread-local and does not rebuild the global
+        // callsite interest cache; a sibling test that hits the broker
+        // handlers first can cache them as "never" for this thread. Rebuild
+        // it now that this thread's subscriber is installed.
+        tracing::callsite::rebuild_interest_cache();
+        let plain = reqwest::Client::new();
+        let fetch = |token: &str, var: &str| {
+            plain
+                .post(format!("{}/api/agent-auth/fetch/{var}", h.base))
+                .bearer_auth(token.to_string())
+                .send()
+        };
+
+        // Its own manifest entry: the value, verbatim.
+        let got = fetch(&token, "POD_ONDEMAND").await.unwrap();
+        let status = got.status();
+        let body = got.text().await.unwrap();
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body, "value-of-POD_ONDEMAND");
+
+        // Another session's grant is not reachable through this stream token.
+        let refused = fetch(&token, "POD_GRANT").await.unwrap();
+        assert_eq!(refused.status(), 403);
+        let error = refused.text().await.unwrap();
+        assert!(error.contains("POD_GRANT"), "{error}");
+        assert!(error.contains("ENGINE_AGENT_AUTH_SECRETS"), "{error}");
+
+        // A name the deployment never declared is refused with the fix.
+        assert_eq!(fetch(&token, "NOT_DECLARED").await.unwrap().status(), 403);
+
+        // The owning session's stream token reaches its own grant.
+        let got = fetch(&other_token, "POD_GRANT").await.unwrap();
+        assert_eq!(got.status(), 200);
+        assert_eq!(got.text().await.unwrap(), "value-of-POD_GRANT");
+
+        // `grants` lists each session its own grant, never a value.
+        let listed: Vec<Value> = plain
+            .get(format!("{}/api/agent-auth/grants", h.base))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(listed.is_empty(), "{listed:?}");
+        let listed: Vec<Value> = plain
+            .get(format!("{}/api/agent-auth/grants", h.base))
+            .bearer_auth(&other_token)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0]["var"], "POD_GRANT");
+        assert!(!listed[0].to_string().contains("value-of-"));
+
+        // The fetch is audited by session and name, never by value.
+        let captured = || String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+        until("the fetch audit line", || {
+            let logged = captured();
+            logged.contains("vogt::audit")
+                && logged.contains(&id.to_string())
+                && logged.contains("POD_ONDEMAND")
+        })
+        .await;
+        let logged = captured();
+        assert!(!logged.contains("value-of-POD_ONDEMAND"), "{logged}");
+        assert!(!logged.contains("value-of-POD_GRANT"), "{logged}");
+    }
+
     /// WI-3883: a pod started from a template's own pod default (no explicit
     /// placement) carries the caller's extra environment to the agent through
     /// the bootstrap response's `agent_env`, never through the pod spec and
