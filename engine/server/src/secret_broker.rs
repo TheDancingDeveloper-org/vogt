@@ -2662,6 +2662,7 @@ mod tests {
             compact_limit: None,
             provider: None,
             providers: &providers,
+            catalog: None,
             trust_cwd: None,
             guidance: None,
             charter: None,
