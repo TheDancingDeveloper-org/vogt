@@ -721,10 +721,12 @@ pub async fn serve_forever(cfg: Config) -> std::io::Result<()> {
     // a test must never reach for whatever cluster the host's kubeconfig names.
     // Take back the pods the previous process left running before the
     // reconciler would treat them as orphans.
-    state
-        .sessions
-        .readopt_pods(crate::pod_backend::PodConfig::default().reconnect_timeout)
-        .await;
+    if let Ok(pod_config) = state.sessions.pod_config() {
+        state
+            .sessions
+            .readopt_pods(pod_config.reconnect_timeout)
+            .await;
+    }
     state.sessions.start_pod_reconciler();
     // Graceful shutdown: the engine had no shutdown path, so every
     // redeploy SIGKILLed the PTYs and nothing was archived. Kubernetes/compose
