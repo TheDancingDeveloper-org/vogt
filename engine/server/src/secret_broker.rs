@@ -2637,8 +2637,37 @@ mod tests {
         // can be pointed at the registry's base_url.
         let names: Vec<_> = broker.providers().into_iter().map(|p| p.name).collect();
         assert_eq!(names, ["c"]);
-        let wrapped = vec!["codex".to_string()];
-        let argv = crate::agent_cli::with_codex_providers(&wrapped, &broker.providers()).unwrap();
+        let providers: Vec<_> = broker
+            .providers()
+            .iter()
+            .map(|p| vogt_session_agent::CodexProvider {
+                name: p.name.clone(),
+                base_url: p.base_url.clone(),
+                wire_api: p.wire_api.clone(),
+                env_key: p.env_key.clone(),
+            })
+            .collect();
+        let argv = vogt_session_agent::codex_args(&vogt_session_agent::CodexArgs {
+            command_args: &[],
+            resume: None,
+            session_id: None,
+            model: None,
+            config_model: None,
+            effort: None,
+            permission_mode: None,
+            approval_policy: "never",
+            exec: false,
+            compact_limit: None,
+            provider: None,
+            providers: &providers,
+            trust_cwd: None,
+            guidance: None,
+            charter: None,
+            mcp_servers: &[],
+            mcp_args: &[],
+            prompt: None,
+        })
+        .unwrap();
         assert!(!argv
             .iter()
             .any(|a| a.contains("STACK") || a.contains("LIVE")));
