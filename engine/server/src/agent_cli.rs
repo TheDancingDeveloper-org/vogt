@@ -1758,7 +1758,7 @@ url = "http://komodo/mcp"
                 opencode_config: None,
                 codex_approval_policy: "never",
                 mcp: None,
-                codex_compact_limit: Some(96_000),
+                codex_compact_limit: None,
             },
             &CodexExtras {
                 guidance: Some(guidance),
@@ -1798,7 +1798,7 @@ url = "http://komodo/mcp"
             codex: vogt_session_agent::CodexLaunch {
                 guidance: Some(guidance.into()),
                 charter: Some(charter.into()),
-                compact_limit: Some(96_000),
+                compact_limit: None,
                 template_args: template,
                 config_file: None,
             },
@@ -1848,12 +1848,18 @@ url = "http://komodo/mcp"
         assert!(host
             .windows(2)
             .any(|w| w == ["-c", "features.daemon_auto_start=false"]));
-        assert!(host
-            .windows(2)
-            .any(|w| w == ["-c", "model_auto_compact_token_limit=96000"]));
-        assert!(host
-            .windows(2)
-            .any(|w| w == ["-c", "model_auto_compact_token_limit_scope=\"total\""]));
+        // One emission per key: a provider that states its limit gets exactly
+        // that value, not the deployment's 200k default (WI-3871 review).
+        assert_eq!(
+            host.iter()
+                .filter(|arg| arg.starts_with("model_auto_compact_token_limit="))
+                .count(),
+            1,
+            "{host:?}"
+        );
+        assert!(!host
+            .iter()
+            .any(|arg| arg.starts_with("model_auto_compact_token_limit_scope")));
         let instructions = host
             .iter()
             .find_map(|arg| arg.strip_prefix("developer_instructions="))
@@ -1863,5 +1869,273 @@ url = "http://komodo/mcp"
         assert!(body.contains(guidance), "{body}");
         assert!(body.ends_with("Stop at push, do not poll CI."), "{body}");
         assert!(!host.iter().any(|arg| arg.contains("CODEX_HOME")));
+    }
+
+    fn codex_host_and_pod_argv(
+        dir: &tempfile::TempDir,
+        fragment: &str,
+        providers: &[vogt_session_agent::CodexProvider],
+        selected: &str,
+        model: &str,
+        compact_limit: Option<u64>,
+    ) -> (Vec<String>, Vec<String>) {
+        std::fs::write(dir.path().join("vogt-codex.toml"), fragment).unwrap();
+        let id = Uuid::new_v4();
+        let conversation = id.to_string();
+        let cwd = "/work/wi-3871";
+        let template = cmd(&["-c", "tui.notifications=true"]);
+        let launch_request = LaunchRequest {
+            model: Some(model),
+            effort: None,
+            resume: Some(&conversation),
+            brief_file: None,
+            session_id: Some(id),
+            codex_session_id: true,
+            permission_mode: Some("accept-edits"),
+            settings_file: None,
+            add_dirs: &[],
+            opencode_config: None,
+            codex_approval_policy: "never",
+            mcp: None,
+            codex_compact_limit: compact_limit,
+        };
+        let host_command = [cmd(&["codex"]), template.clone()].concat();
+        let host = launch_with_codex(
+            Some(&host_command),
+            &launch_request,
+            &CodexExtras {
+                guidance: None,
+                charter: None,
+                providers,
+                provider: Some(selected),
+                config_model: None,
+                trust_cwd: Some(Path::new(cwd)),
+                mcp_servers: &[],
+            },
+        )
+        .unwrap()
+        .command
+        .expect("a rewritten command");
+        let host = codex_args_of(&host).unwrap();
+
+        let pod_config = vogt_session_agent::Config {
+            session_id: "s".into(),
+            engine_url: "http://127.0.0.1:1".into(),
+            token: "t".into(),
+            cli: "codex".into(),
+            command: None,
+            cwd: Some(cwd.into()),
+            cols: 80,
+            rows: 24,
+            buffer_bytes: 1024,
+            claude_config_dir: None,
+            codex_home: Some(dir.path().to_path_buf()),
+            account: None,
+            conversation_id: Some(conversation),
+            resume: true,
+            model: Some(model.into()),
+            effort: None,
+            permission_mode: Some("accept-edits".into()),
+            codex_approval_policy: "never".into(),
+            claude: vogt_session_agent::ClaudeLaunch::default(),
+            codex: vogt_session_agent::CodexLaunch {
+                guidance: None,
+                charter: None,
+                compact_limit,
+                template_args: template,
+                config_file: None,
+            },
+        };
+        let line = vogt_session_agent::command_line(&pod_config).unwrap();
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("codex() {{ printf '%s\\n' \"$@\"; }}; {line}"))
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        let pod: Vec<String> = String::from_utf8(out.stdout)
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        (host, pod)
+    }
+
+    /// WI-3871 review blocker 2: a provider that sets neither limit puts
+    /// neither key on the host argv or the pod's launch line.
+    #[test]
+    #[cfg(unix)]
+    fn codex_launch_omits_limits_a_provider_does_not_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let plain = vogt_session_agent::CodexProvider {
+            name: "litellm".into(),
+            base_url: "http://litellm:4000".into(),
+            wire_api: "responses".into(),
+            env_key: "LITELLM_API_KEY".into(),
+            context_window: None,
+            auto_compact_token_limit: None,
+        };
+        let fragment = r#"model_provider = "litellm"
+model = "gpt-5.6"
+
+[model_providers.litellm]
+base_url = "http://litellm:4000"
+wire_api = "responses"
+env_key = "LITELLM_API_KEY"
+"#;
+        let (host, pod) = codex_host_and_pod_argv(
+            &dir,
+            fragment,
+            std::slice::from_ref(&plain),
+            "litellm",
+            "gpt-5.6",
+            None,
+        );
+        for argv in [&host, &pod] {
+            assert!(
+                !argv.iter().any(
+                    |arg| arg.contains("context_window") || arg.contains("compact_token_limit")
+                ),
+                "an unconfigured provider put a limit on the line: {argv:?}"
+            );
+        }
+        assert_eq!(host, pod, "host and pod Codex argv differ");
+    }
+
+    /// A provider that is registered but not selected contributes its table,
+    /// never the launch flags.
+    #[test]
+    #[cfg(unix)]
+    fn codex_launch_ignores_limits_of_an_unselected_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let plain = vogt_session_agent::CodexProvider {
+            name: "litellm".into(),
+            base_url: "http://litellm:4000".into(),
+            wire_api: "responses".into(),
+            env_key: "LITELLM_API_KEY".into(),
+            context_window: None,
+            auto_compact_token_limit: None,
+        };
+        let limited = vogt_session_agent::CodexProvider {
+            name: "deepseek".into(),
+            base_url: "http://litellm:4000/v1".into(),
+            wire_api: "chat".into(),
+            env_key: "DEEPSEEK_KEY".into(),
+            context_window: Some(1_000_000),
+            auto_compact_token_limit: Some(500_000),
+        };
+        let fragment = r#"model_provider = "litellm"
+model = "gpt-5.6"
+
+[model_providers.litellm]
+base_url = "http://litellm:4000"
+wire_api = "responses"
+env_key = "LITELLM_API_KEY"
+
+[model_providers.deepseek]
+base_url = "http://litellm:4000/v1"
+wire_api = "chat"
+env_key = "DEEPSEEK_KEY"
+context_window = 1000000
+auto_compact_token_limit = 500000
+"#;
+        let providers = [plain, limited];
+        let (host, pod) =
+            codex_host_and_pod_argv(&dir, fragment, &providers, "litellm", "gpt-5.6", None);
+        for argv in [&host, &pod] {
+            assert!(
+                !argv
+                    .iter()
+                    .any(|arg| arg.starts_with("model_context_window")
+                        || arg.starts_with("model_auto_compact_token_limit")),
+                "an unselected provider put a launch limit on the line: {argv:?}"
+            );
+            // Its table still travels whole, for a launch that selects it.
+            assert!(argv
+                .iter()
+                .any(|arg| arg.starts_with("model_providers.deepseek=")));
+        }
+        // Two provider tables arrive in registry order on the host and TOML
+        // order (sorted) from the pod's file; the words are the same.
+        let mut host_sorted = host.clone();
+        host_sorted.sort();
+        let mut pod_sorted = pod.clone();
+        pod_sorted.sort();
+        assert_eq!(host_sorted, pod_sorted, "host and pod Codex argv differ");
+    }
+
+    /// WI-3871 review blocker 1: the backoff cannot replace the provider's
+    /// limit with a lower deployment value, and there is exactly one emission
+    /// of the key when both are present.
+    #[test]
+    #[cfg(unix)]
+    fn codex_compact_limit_never_lowers_the_provider_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let deepseek = vogt_session_agent::CodexProvider {
+            name: "litellm".into(),
+            base_url: "http://litellm:4000/v1".into(),
+            wire_api: "chat".into(),
+            env_key: "LITELLM_API_KEY".into(),
+            context_window: Some(1_000_000),
+            auto_compact_token_limit: Some(500_000),
+        };
+        let fragment = r#"model_provider = "litellm"
+model = "deepseek-v4-flash"
+
+[model_providers.litellm]
+base_url = "http://litellm:4000/v1"
+wire_api = "chat"
+env_key = "LITELLM_API_KEY"
+context_window = 1000000
+auto_compact_token_limit = 500000
+"#;
+        // A backoff derived from the provider's 500k base, not from 200k/272k.
+        let (host, pod) = codex_host_and_pod_argv(
+            &dir,
+            fragment,
+            std::slice::from_ref(&deepseek),
+            "litellm",
+            "deepseek-v4-flash",
+            Some(540_000),
+        );
+        for argv in [&host, &pod] {
+            let limits: Vec<&String> = argv
+                .iter()
+                .filter(|arg| arg.starts_with("model_auto_compact_token_limit="))
+                .collect();
+            assert_eq!(limits.len(), 1, "{argv:?}");
+            assert_eq!(limits[0].as_str(), "model_auto_compact_token_limit=540000");
+            assert!(argv.iter().any(|arg| arg == "model_context_window=1000000"));
+        }
+        assert_eq!(host, pod, "host and pod Codex argv differ");
+
+        // A stale deployment-sized floor (96k) must not come back at all.
+        let (host, pod) = codex_host_and_pod_argv(
+            &dir,
+            fragment,
+            std::slice::from_ref(&deepseek),
+            "litellm",
+            "deepseek-v4-flash",
+            Some(96_000),
+        );
+        for argv in [&host, &pod] {
+            assert!(
+                !argv
+                    .iter()
+                    .any(|arg| arg == "model_auto_compact_token_limit=96000"),
+                "{argv:?}"
+            );
+            assert_eq!(
+                argv.iter()
+                    .filter(|arg| arg.starts_with("model_auto_compact_token_limit="))
+                    .count(),
+                1,
+                "{argv:?}"
+            );
+            assert!(argv
+                .iter()
+                .any(|arg| arg == "model_auto_compact_token_limit=500000"));
+        }
+        assert_eq!(host, pod, "host and pod Codex argv differ");
     }
 }
