@@ -673,11 +673,10 @@ pub async fn run_once(
                 // Cleared again if the call fails, so the next tick retries.
                 current.set_budget_hard_done(true);
                 match registry
-                    .hibernate(
+                    .hibernate_internal(
                         id,
                         Some(summary.clone()),
                         vogt_engine_contract::HibernateTrigger::Budget,
-                        false,
                         false,
                         None,
                     )

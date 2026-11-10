@@ -301,7 +301,7 @@ pub async fn run_once(registry: &SessionRegistry, policy: &Policy) {
     };
     for (id, trigger, why) in choose(policy, &candidates, available) {
         match registry
-            .hibernate(id, Some(why.clone()), trigger, false, false, None)
+            .hibernate_internal(id, Some(why.clone()), trigger, false, None)
             .await
         {
             Ok(_) => tracing::info!(session = %id, ?trigger, reason = %why, "hibernated by policy"),
