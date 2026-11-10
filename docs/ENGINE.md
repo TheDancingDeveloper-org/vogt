@@ -166,6 +166,9 @@ the binary with `--no-daemon`, and bootstrap writes
 is installed — merging the key into an existing `[features]` table and
 forcing a `true` already there to `false` — so a client that does not go
 through the wrapper still does not copy the binary out from under the pin.
+Every Vogt-launched Codex also carries `-c features.daemon_auto_start=false`
+on its argv (WI-3882), so a launch that does not read that config says the
+same thing.
 The image also carries a Go toolchain (WI-951), unconditionally: the release
 `engine/agent-versions.env` pins as `VOGT_GO_VERSION`, checked against the
 sha256s recorded beside it, unpacked to `/usr/local/go` and linked as
@@ -455,7 +458,11 @@ what the Claude driven-session policy lets a Claude session call without a
 person. `komodo` is deliberately not on the list, since its `deploy_stack` and
 `write_stack_file` change running stacks, and neither is any other server:
 those keep the person gate. A table that already names a mode keeps it, and a
-server nobody registered is not created. The read-only, browser and sub-agent
+server nobody registered is not created. A Vogt launch also passes
+`-c mcp_servers.<name>.default_tools_approval_mode="approve"` for those five
+servers when they are in the launch's MCP set, host and pod alike (WI-3882),
+so a launch that does not read this config still skips the prompt for them.
+The read-only, browser and sub-agent
 writers emit the same row in the tables they own, so a restart does not
 rewrite them, and they carry over a mode an operator already set there. The
 key lives in the session's own `~/.codex/config.toml`, which the session can
@@ -3327,7 +3334,20 @@ so the two argv cannot drift. For Codex it also applies the posture the engine c
 `codex_permission_flags` a host launch uses: every posture names
 `-s danger-full-access`, because a pod cannot create the user namespace
 `workspace-write` needs, and the default posture pins `-a never` so a driven
-worker does not stop at an approval menu (WI-3864). Any other command runs as
+worker does not stop at an approval menu (WI-3864). Everything else a Codex
+launch carries is built by `vogt_session_agent::codex_args`, the same function
+the host launcher calls (WI-3882): the selected provider and its
+`model_providers.<name>` table (read from the bootstrap fragment in a pod), the
+workspace guidance and scope charter, `default_tools_approval_mode="approve"`
+for the approved MCP servers, the compact limit and
+`features.daemon_auto_start=false`, in one canonical order. The engine sends
+the pod the pieces it gathered itself — guidance, charter, compact limit and
+the template's own argv — as base64 JSON in `VOGT_CODEX_LAUNCH_B64`, applied
+at the final `exec`; the entrypoint writes the bootstrap's full Codex fragment
+to `$CODEX_HOME/vogt-codex.toml` and exports `VOGT_CODEX_CONFIG_FILE` naming
+it. Only the fragment's `[mcp_servers.*]` tables are merged into the shared
+`$CODEX_HOME/config.toml`, so provider and model selection stay per-launch
+instead of being written into a person's config. Any other command runs as
 given (`VOGT_SESSION_COMMAND`), and no command uses `ENGINE_POD_CLI` (default
 `codex`).
 
@@ -4561,9 +4581,15 @@ At each launch the registry does two things, and nothing else:
 - A Codex session gets one `model_providers.<name>` table per provider. A
   host launch gets them as `-c` overrides on its argv, so the shared
   `~/.codex/config.toml` is never rewritten. A pod gets them in the
-  bootstrap's `codex_config`, where they replace any table of the same name,
-  and the engine resolves each key through the helper when the pod boots,
-  logging each resolution by name.
+  bootstrap's `codex_config`, where they replace any table of the same name;
+  the entrypoint writes that full fragment to `$CODEX_HOME/vogt-codex.toml`
+  and names it as `VOGT_CODEX_CONFIG_FILE`, and the session agent reads the
+  provider, model selection and MCP server names from it. Both launches then
+  pass the same `-c` overrides through `vogt_session_agent::codex_args`
+  (WI-3882), so a provider cannot reach one and not the other. Only the
+  `[mcp_servers.*]` tables are merged into the shared `config.toml`, for a
+  person's own CLI. The engine resolves each key through the helper when the
+  pod boots, logging each resolution by name.
 
 Running sessions keep the providers and keys they launched with. Remove an
 entry and the next launch has neither. Every field is validated: a provider
@@ -4844,7 +4870,11 @@ response's `env` also carries the four names-only agent-auth breadcrumbs
 `AGENT_AUTH_MODE` (`brokered`), `AGENT_AUTH_GRANTED`, `AGENT_AUTH_ONDEMAND` and
 `AGENT_AUTH_WRITABLE` (WI-3884), so in-pod `vogt-agent-auth fetch`, `store` and
 `grants` see the same contract as a host session without a value entering the
-bootstrap response.
+bootstrap response. A Codex pod also gets `VOGT_CODEX_LAUNCH_B64`, one base64
+JSON value carrying the guidance, charter, compact limit and template argv the
+pod cannot derive, and the entrypoint exports `VOGT_CODEX_CONFIG_FILE`;
+`codex_args` combines both with the fragment, so a host and a pod launch build
+the same Codex argv (WI-3882).
 
 The container's root filesystem is read-only (`readOnlyRootFilesystem: true`)
 on top of the existing uid/gid 1000, no-privilege-escalation and dropped
@@ -4977,14 +5007,20 @@ bootstrap refusal quotes the engine's one-line reason only). In order:
    refused.
 5. `brokered-env` — the response's `env` map is exported to the session,
    except the bootstrap token names.
-6. `claude-config` — for `VOGT_CLI=claude` only: the response's `mcp_config` is
-   written `0600` beside the session token (`mcp.json`) and named to the
-   session agent as `VOGT_CLAUDE_MCP_CONFIG`; `NODE_EXTRA_CA_CERTS` is set from
-   `VOGT_EXTRA_CA_FILE`; the conversation and policy hooks are installed into
-   `$CLAUDE_CONFIG_DIR/settings.json` (best effort). It then prints
-   `session-entrypoint: claude posture: <parts>`, naming which of `settings`,
-   `mcp-config`, `policy-hook` and `session-hook` are in place. The pod smoke's
-   boot marker requires all four.
+6. `claude-config` — the agent's own config files. For `VOGT_CLI=claude`, the
+   response's `mcp_config` is written `0600` beside the session token
+   (`mcp.json`) and named to the session agent as `VOGT_CLAUDE_MCP_CONFIG`;
+   `NODE_EXTRA_CA_CERTS` is set from `VOGT_EXTRA_CA_FILE`; the conversation and
+   policy hooks are installed into `$CLAUDE_CONFIG_DIR/settings.json` (best
+   effort). It then prints `session-entrypoint: claude posture: <parts>`,
+   naming which of `settings`, `mcp-config`, `policy-hook` and `session-hook`
+   are in place. The pod smoke's boot marker requires all four. For
+   `VOGT_CLI=codex`, the response's full `codex_config` is written `0600` to
+   `$CODEX_HOME/vogt-codex.toml` and named as `VOGT_CODEX_CONFIG_FILE`, while
+   only its `[mcp_servers.*]` tables are merged into `$CODEX_HOME/config.toml`;
+   it prints `session-entrypoint: codex posture: mcp-config`. For
+   `VOGT_CLI=opencode`, `opencode_config` is written to
+   `$XDG_CONFIG_HOME/opencode/opencode.json` (WI-3882).
 7. `graft-token` — a returned `graft_token` (the one minted for this pod) is written `0600` beside the
    session token (`VOGT_GRAFT_TOKEN_FILE`, default `graft-token` in the same
    directory) and exported as a path only.
