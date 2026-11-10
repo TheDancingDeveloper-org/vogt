@@ -16,6 +16,15 @@ name: rust-2 dev images
 # and `dev`. That workflow does not build `rust-2`, which is a graft line, so
 # this one exists for the line the k8s dev deployment runs.
 #
+# `rust-2` is not a branch in this repository, and nothing pushes one: lands
+# happen with `g land` on the graft line, and `graft-mirror pr-batch` exports
+# the line to GitHub as the batch pull request. That export is the only ref
+# carrying rust-2's commits -- `graft/batch-<n>`, one commit per land, each
+# with a `Graft-Changeset:` trailer -- so a push to it is the trigger
+# (WI-3947). Watching `rust-2` itself could never fire, which is why no image
+# was ever published here. The consequence to keep in mind: dev images move
+# when a batch is cut, not on every land.
+#
 # The registry login uses the estate's Forgejo package-write token, the same
 # `x-access-token` convention the other repositories' GitHub releases use for
 # repo.indexarr.net. It must be readable as `FORGEJO_CARGO_TOKEN` by this
@@ -23,7 +32,9 @@ name: rust-2 dev images
 
 on:
   push:
-    branches: [rust-2]
+    # The batch pull request head, not `rust-2` (see the header). This also
+    # fires when pr-batch re-exports a line an earlier batch already carried.
+    branches: ["graft/batch-*"]
   workflow_dispatch:
 
 permissions:
@@ -45,8 +56,42 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  source:
+    name: the rust-2 changeset this build is
+    runs-on: [self-hosted]
+    timeout-minutes: 5
+    outputs:
+      changeset: ${{ steps.resolve.outputs.changeset }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: read the Graft-Changeset trailer
+        id: resolve
+        run: |
+          set -euo pipefail
+          # pr-batch writes one commit per land, in line order, and this job
+          # builds the tip. Taking the trailer from the tip means the image
+          # names the changeset it was built from rather than a squashed sha
+          # nobody can look up. A ref without one is not a rust-2 export --
+          # dispatching this against `main` would otherwise publish `main`
+          # under a rust-2 name, so refuse instead.
+          changeset="$(git log -1 --format=%B | sed -n 's/^Graft-Changeset: *//p' | head -n 1)"
+          if [ -z "$changeset" ]; then
+            echo "::error::${GITHUB_REF} has no Graft-Changeset trailer; dispatch this on a graft/batch-* branch that exports rust-2"
+            exit 1
+          fi
+          case "$changeset" in
+            *[!0-9a-f]*)
+              echo "::error::Graft-Changeset is not a lowercase hex id: ${changeset}"
+              exit 1
+              ;;
+          esac
+          echo "changeset=${changeset}" >> "$GITHUB_OUTPUT"
+          echo "rust-2 changeset: ${changeset}"
+
   pod:
     name: pod image by digest
+    needs: source
     runs-on: [self-hosted, docker, publish]
     timeout-minutes: 120
     outputs:
@@ -110,7 +155,7 @@ jobs:
 
   engine:
     name: engine image by digest
-    needs: pod
+    needs: [pod, source]
     runs-on: [self-hosted, docker, publish]
     timeout-minutes: 90
     outputs:
@@ -152,7 +197,7 @@ jobs:
             POD_BASE_IMAGE=${{ env.POD_IMAGE }}@${{ needs.pod.outputs.digest }}
             ESTATE_IMAGE=${{ env.POD_IMAGE }}@${{ needs.pod.outputs.digest }}
             VOGT_SOURCE_REF=${{ github.ref_name }}
-            VOGT_SOURCE_SHA=${{ github.sha }}
+            VOGT_SOURCE_SHA=${{ needs.source.outputs.changeset }}
           outputs: type=image,name=${{ env.ENGINE_IMAGE }},push-by-digest=true,name-canonical=true,push=true
           provenance: true
           sbom: true
