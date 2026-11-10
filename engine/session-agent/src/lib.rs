@@ -508,6 +508,47 @@ fn sh_quote(value: &Path) -> String {
     format!("'{}'", value.to_string_lossy().replace('\'', "'\\''"))
 }
 
+/// Whether `name` is a shell variable name. Provider keys reach this crate in
+/// the bootstrap-written Codex fragment, which is data: anything that is not
+/// a plain name is never put on the launch line.
+fn is_env_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    matches!(chars.next(), Some(c) if c == '_' || c.is_ascii_alphabetic())
+        && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+}
+
+/// The shell prefix that hands the Codex child the provider keys it needs
+/// (WI-3886). The bootstrap response carries only the key names; each value is
+/// fetched through the pod's agent-auth broker immediately before Codex starts
+/// and exported in the launch shell, so it exists in the CLI's environment and
+/// nowhere in the pod's long-lived process tree. A key that cannot be fetched
+/// is reported by name and left unset: a provider key is optional, and one
+/// broker failure must not stop a session that may not use that provider.
+fn codex_provider_key_prefix(providers: &[CodexProvider]) -> String {
+    let mut keys: Vec<&str> = providers
+        .iter()
+        .map(|provider| provider.env_key.as_str())
+        .filter(|name| is_env_name(name))
+        .collect();
+    keys.sort_unstable();
+    keys.dedup();
+    if keys.is_empty() {
+        return String::new();
+    }
+    let mut line = String::from("for __vogt_key in");
+    for key in keys {
+        line.push(' ');
+        line.push_str(key);
+    }
+    line.push_str(
+        "; do if __vogt_value=\"$(vogt-agent-auth fetch \"$__vogt_key\")\"; then \
+         export \"$__vogt_key=$__vogt_value\"; else \
+         printf 'session-agent: provider key %s was not delivered\\n' \"$__vogt_key\" >&2; \
+         fi; done; unset __vogt_key __vogt_value; ",
+    );
+    line
+}
+
 fn toml_basic_string(value: &str) -> String {
     let mut out = String::with_capacity(value.len() + 2);
     out.push('"');
@@ -1480,7 +1521,8 @@ pub fn command_line(config: &Config) -> Result<String, AgentError> {
                 prompt: None,
             })
             .map_err(AgentError::Pty)?;
-            let mut line = String::from("codex");
+            let mut line = codex_provider_key_prefix(&file.providers);
+            line.push_str("codex");
             for arg in args {
                 line.push(' ');
                 line.push_str(&sh_quote(Path::new(&arg)));
@@ -2336,6 +2378,92 @@ mod tests {
         config.conversation_id = Some("x; rm -rf /".into());
         let argv = argv_of_cli("codex", &command_line(&config).unwrap());
         assert!(!argv.iter().any(|a| a == "--session-id"), "{argv:?}");
+    }
+
+    /// WI-3886: the provider key names reach the launch line; the values do
+    /// not. Only plain variable names are put on the line, so a fragment the
+    /// engine never wrote cannot inject a shell word.
+    #[test]
+    fn a_codex_provider_key_prefix_names_plain_variables_only() {
+        let provider = |env_key: &str| CodexProvider {
+            name: "p".into(),
+            base_url: "http://litellm:4000/v1".into(),
+            wire_api: "chat".into(),
+            env_key: env_key.into(),
+        };
+        let prefix = codex_provider_key_prefix(&[
+            provider("DS_KEY"),
+            provider("BAD-KEY"),
+            provider("DS_KEY"),
+        ]);
+        assert!(prefix.starts_with("for __vogt_key in DS_KEY;"), "{prefix}");
+        assert!(!prefix.contains("BAD-KEY"), "{prefix}");
+        assert_eq!(codex_provider_key_prefix(&[]), "");
+    }
+
+    /// WI-3886: the key is fetched through the pod broker immediately before
+    /// Codex starts, so the CLI receives it and the launch line carries only
+    /// its name. A failed fetch is reported and leaves Codex runnable.
+    #[test]
+    fn a_codex_child_receives_its_provider_key_from_the_broker() {
+        let dir = tempfile::tempdir().unwrap();
+        let fragment = dir.path().join("vogt-codex.toml");
+        std::fs::write(
+            &fragment,
+            "model_providers.ds = { name = \"ds\", base_url = \"http://litellm:4000/v1\", \
+             wire_api = \"chat\", env_key = \"DS_KEY\" }\n",
+        )
+        .unwrap();
+        let mut config = claude_config(ClaudeLaunch::default(), false);
+        config.cli = "codex".into();
+        config.codex.config_file = Some(fragment);
+        let line = command_line(&config).unwrap();
+        assert!(line.contains("vogt-agent-auth fetch"), "{line}");
+        assert!(!line.contains("fetched-secret"), "{line}");
+
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let helper = bin.join("vogt-agent-auth");
+        std::fs::write(
+            &helper,
+            "#!/bin/sh\ncase \"$1\" in\nfetch)\n  [ -z \"${HELPER_FAIL:-}\" ] || { printf 'broker down\\n' >&2; exit 1; }\n  printf fetched-secret ;;\n*) exit 1 ;;\nesac\n",
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let path = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+
+        let run = |fail: bool| {
+            std::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(format!(
+                    "codex() {{ printf 'key=%s\\n' \"${{DS_KEY:-unset}}\"; }}; {line}"
+                ))
+                .env("PATH", &path)
+                .env("HELPER_FAIL", if fail { "1" } else { "" })
+                .output()
+                .unwrap()
+        };
+        let ok = run(false);
+        assert!(ok.status.success(), "{ok:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&ok.stdout).trim(),
+            "key=fetched-secret"
+        );
+
+        let failed = run(true);
+        assert!(failed.status.success(), "{failed:?}");
+        assert_eq!(String::from_utf8_lossy(&failed.stdout).trim(), "key=unset");
+        assert!(
+            String::from_utf8_lossy(&failed.stderr).contains("was not delivered"),
+            "{failed:?}"
+        );
     }
 
     /// WI-3873: the rollout name comes from the launch line, not from a file
