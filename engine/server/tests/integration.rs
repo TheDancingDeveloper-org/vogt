@@ -16932,68 +16932,17 @@ async fn a_manifest_line_added_after_start_reaches_the_next_launch() {
     assert_eq!(r.status(), 403);
 }
 
-/// WI-3491: a provider registered after the engine started reaches the next
-/// Codex pod launch — its tables in the pod bootstrap's `codex_config` and its
-/// key resolved by the real `agent-auth.sh`; removed, the next launch has
-/// neither.
+/// WI-3491/WI-3886: a provider registered after the engine started reaches the
+/// next Codex pod launch — its tables in the pod bootstrap's `codex_config`
+/// and its key name among the ondemand entries; removed, the next launch has
+/// neither. The key value is never resolved into the bootstrap (WI-3886): the
+/// session agent fetches it around the Codex child.
 ///
 /// Codex runs only in a session pod (WI-3844), so this goes through the pod
 /// harness's bootstrap rather than a host PTY.
 #[tokio::test]
 async fn a_registered_llm_provider_reaches_the_next_codex_launch_and_leaves_with_it() {
-    for tool in ["jq", "curl", "timeout"] {
-        if std::process::Command::new(tool)
-            .arg("--version")
-            .output()
-            .is_err()
-        {
-            eprintln!("skipping: the launch uses {tool}");
-            return;
-        }
-    }
-    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../deploy/agent-auth.sh")
-        .canonicalize()
-        .unwrap();
     let tmp = tempfile::tempdir().unwrap();
-    let bin = tmp.path().join("bin");
-    std::fs::create_dir_all(&bin).unwrap();
-    let write_exec = |name: &str, body: &str| {
-        use std::os::unix::fs::PermissionsExt;
-        let path = bin.join(name);
-        std::fs::write(&path, body).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    };
-    // The stand-in Infisical CLI: universal-auth gets a token, the project
-    // read answers with the one secret the registry names.
-    write_exec(
-        "infisical",
-        "#!/bin/sh\ncase \"$*\" in\n*'secrets get'*) printf ds-value ;;\n*) printf tok-123 ;;\nesac\n",
-    );
-    // The helper logs in over the API now (WI-3885); answer that one request
-    // and leave every other curl call (the broker, the bulk read) to the real
-    // binary. The bulk read still fails, so the CLI fallback supplies ds-value.
-    write_exec(
-        "curl",
-        "#!/bin/sh\ncase \"$*\" in\n*'/api/v1/auth/universal-auth/login'*)\n  cat >/dev/null\n  printf '%s' '{\"accessToken\":\"tok-123\"}'\n  ;;\n*) exec /usr/bin/curl \"$@\" ;;\nesac\n",
-    );
-    // The broker runs the helper with only its re-granted engine environment;
-    // this wrapper gives the real script the identity and the stand-in CLI.
-    let helper = tmp.path().join("agent-auth-with-identity");
-    std::fs::write(
-        &helper,
-        format!(
-            "#!/bin/sh\nexport INFISICAL_API_URL=http://infisical.invalid/api\nexport INFISICAL_CLIENT_ID=id\nexport INFISICAL_CLIENT_SECRET=secret\nexport PATH={}:/usr/bin:/bin\nexec {} \"$@\"\n",
-            bin.display(),
-            script.display()
-        ),
-    )
-    .unwrap();
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
-
     let registry = tmp.path().join("llm-providers.toml");
     let template = SessionTemplate {
         name: "codex-pod".into(),
@@ -17012,7 +16961,6 @@ async fn a_registered_llm_provider_reaches_the_next_codex_launch_and_leaves_with
     };
     let reg = registry.clone();
     let mut h = pod_stream::harness_cfg(false, Some(vec![template]), move |cfg| {
-        cfg.agent_auth_helper = helper;
         cfg.llm_providers_file = Some(reg);
     })
     .await;
@@ -17050,7 +16998,13 @@ async fn a_registered_llm_provider_reaches_the_next_codex_launch_and_leaves_with
     )
     .unwrap();
     let with = start(&mut h, "registered").await;
-    assert_eq!(with["env"]["DS_KEY"], "ds-value");
+    assert!(with["env"].get("DS_KEY").is_none(), "{with}");
+    assert_eq!(
+        with["env"]["AGENT_AUTH_ONDEMAND"].as_str(),
+        Some("DS_KEY"),
+        "{with}"
+    );
+    assert!(!with.to_string().contains("ds-value"), "{with}");
     let config: toml::Table = toml::from_str(with["codex_config"].as_str().unwrap()).unwrap();
     assert_eq!(
         config["model_providers"]["ds"]["env_key"].as_str(),
@@ -17060,6 +17014,11 @@ async fn a_registered_llm_provider_reaches_the_next_codex_launch_and_leaves_with
     std::fs::write(&registry, "").unwrap();
     let without = start(&mut h, "removed").await;
     assert!(without["env"].get("DS_KEY").is_none(), "{without}");
+    assert_eq!(
+        without["env"]["AGENT_AUTH_ONDEMAND"].as_str(),
+        Some(""),
+        "{without}"
+    );
     assert!(!without["codex_config"]
         .as_str()
         .unwrap_or_default()
@@ -18494,11 +18453,13 @@ mod pod_stream {
         assert!(body.get("codex_config").is_none(), "{body}");
     }
 
-    /// WI-3491: a Codex pod is bootstrapped with the registered providers'
-    /// tables and their keys, resolved at this launch; once a provider is
-    /// removed the next pod has neither, and nothing unregistered is resolved.
+    /// WI-3491/WI-3886: a Codex pod is bootstrapped with the registered
+    /// providers' tables and their key *names* among the ondemand entries;
+    /// no key value enters the bootstrap response, because the session agent
+    /// fetches it around the Codex child. Once a provider is removed the next
+    /// pod has neither, and nothing unregistered is named.
     #[tokio::test]
-    async fn a_codex_bootstrap_carries_the_registered_providers_and_their_keys() {
+    async fn a_codex_bootstrap_names_provider_keys_instead_of_resolving_them() {
         let core = mock_core().await;
         let dir = tempfile::tempdir().unwrap();
         let registry = dir.path().join("llm-providers.toml");
@@ -18525,8 +18486,15 @@ mod pod_stream {
             .json()
             .await
             .unwrap();
-        // The fake helper answers `get VAR` with `value-of-VAR`.
-        assert_eq!(body["env"]["DS_KEY"], "value-of-DS_KEY");
+        // The fake helper answers `get VAR` with `value-of-VAR`; WI-3886
+        // keeps that value out of the bootstrap response entirely.
+        assert!(body["env"].get("DS_KEY").is_none(), "{body}");
+        assert_eq!(
+            body["env"]["AGENT_AUTH_ONDEMAND"].as_str(),
+            Some("DS_KEY"),
+            "{body}"
+        );
+        assert!(!body.to_string().contains("value-of-DS_KEY"), "{body}");
         let config: toml::Table = toml::from_str(body["codex_config"].as_str().unwrap()).unwrap();
         assert_eq!(
             config["model_providers"]["ds"]["env_key"].as_str(),
@@ -18544,6 +18512,11 @@ mod pod_stream {
             .await
             .unwrap();
         assert!(body["env"].get("DS_KEY").is_none(), "{body}");
+        assert_eq!(
+            body["env"]["AGENT_AUTH_ONDEMAND"].as_str(),
+            Some(""),
+            "{body}"
+        );
         assert!(!body["codex_config"]
             .as_str()
             .unwrap_or_default()
