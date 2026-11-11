@@ -800,6 +800,22 @@ impl Walker {
                 inner.unreadable = true;
                 self.pieces_from(&pieces, inner, depth + 1);
             }
+            // `trap 'rm a.txt' EXIT`: the action runs later in this shell,
+            // after whatever `cd` the rest of the line makes (WI-4001
+            // bypass 6). It is read like a `sh -c` payload whose relative
+            // paths and repo cannot be placed; an absolute path still can.
+            "trap" => {
+                if let Some(payload) = trap_action(&words) {
+                    let (pieces, opaque) = lex(payload);
+                    if opaque {
+                        self.out.opaque.push(payload.to_string());
+                    }
+                    let mut inner = state.clone();
+                    inner.cd = true;
+                    inner.lost = true;
+                    self.pieces_from(&pieces, inner, depth + 1);
+                }
+            }
             "git" => {
                 let elsewhere = words
                     .iter()
@@ -932,6 +948,18 @@ fn shell_payload(words: &[String]) -> Payload<'_> {
         None if from_file => Payload::File,
         None => Payload::Stdin,
     }
+}
+
+/// The action `trap` installs: its first operand after any `--`, unless
+/// that is `-` (reset) or the call only lists (`-p`, `-l`).
+fn trap_action(words: &[String]) -> Option<&str> {
+    let mut args = words[1..].iter().map(String::as_str).peekable();
+    if args.peek() == Some(&"--") {
+        args.next();
+    } else if args.peek().is_some_and(|a| a.starts_with('-') && *a != "-") {
+        return None;
+    }
+    args.next().filter(|a| *a != "-" && !a.is_empty())
 }
 
 /// Whether `word` holds a brace expansion: a `{` later closed by `}` with a
@@ -2926,11 +2954,17 @@ mod tests {
     }
 
     fn assert_refused(p: &SessionPolicy, root: &Path, commands: &[&str]) {
+        let mut allowed = Vec::new();
         for command in commands {
-            let reason = check(p, command, root).unwrap_or_else(|| panic!("allowed: {command:?}"));
-            assert!(reason.contains("discard guard"), "{command}: {reason}");
-            assert!(!reason.contains("a.txt"), "{reason}");
+            match check(p, command, root) {
+                Some(reason) => {
+                    assert!(reason.contains("discard guard"), "{command}: {reason}");
+                    assert!(!reason.contains("a.txt"), "{reason}");
+                }
+                None => allowed.push(*command),
+            }
         }
+        assert!(allowed.is_empty(), "allowed: {allowed:#?}");
     }
 
     fn assert_allowed(p: &SessionPolicy, root: &Path, commands: &[&str]) {
@@ -2977,6 +3011,34 @@ mod tests {
                 "{r,}m a.txt",
                 "(echo; {rm,a.txt})",
                 "bash -c '{rm,a.txt}'",
+            ],
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Bypass 6: a `trap` payload runs later, in this shell.
+    #[test]
+    fn round3_trap_payloads_are_read() {
+        let (root, p) = round3("trap");
+        assert_refused(
+            &p,
+            &root,
+            &[
+                "trap 'rm a.txt' EXIT",
+                "trap -- 'git restore a.txt' EXIT INT",
+                "trap \"git checkout -- a.txt\" ERR",
+                "trap \"$CMD\" EXIT",
+                "trap 'cd /; rm -rf x' EXIT; true",
+            ],
+        );
+        assert_allowed(
+            &p,
+            &root,
+            &[
+                "trap 'rm -f /tmp/wi-scratch.log' EXIT",
+                "trap - EXIT",
+                "trap -p",
+                "trap 'echo done' EXIT; cargo test",
             ],
         );
         std::fs::remove_dir_all(&root).ok();
