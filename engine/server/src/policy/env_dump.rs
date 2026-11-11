@@ -17,16 +17,21 @@
 //! - `set` with no arguments, `export` / `readonly` with no name (`export
 //!   -p`), `declare` / `typeset` with no name (`declare -x`, `declare -p`),
 //!   and `declare -p` of a credential-named variable;
-//! - any read of `/proc/<pid>/environ`, and `ps` with BSD `e` (`ps auxe`),
-//!   which prints every process's environment;
+//! - any read of `/proc/<pid>/environ`, including one hidden by a quote
+//!   (`env""iron`) or a glob (`env*`, `e?viron`, `envir[o]n`), and `ps` with
+//!   BSD `e` (`ps auxe`), which prints every process's environment;
 //! - `echo`/`printf` of a credential-named variable (`echo
 //!   $VOGT_HTTP_TOKEN`) or of an indirect expansion (`echo ${!name}`), whether
 //!   it reaches the terminal directly, through a display program (`| cat`,
 //!   `| tee`, `| xxd`, `| grep`) or through a device file (`> /dev/stdout`,
 //!   `> /dev/tty`); `echo $AGENT_AUTH_MODE` is allowed, and so is a pipe into
-//!   a consumer (`docker login --password-stdin`, `wc`, a checksum) or a
-//!   redirect to a regular file;
+//!   a known passthrough filter feeding a consumer (`| cat | wc -c`) or a
+//!   redirect to a regular file, while any other pipeline stage is treated
+//!   as reaching the terminal (`| sed 'w /dev/stderr'`);
 //! - a here-string of a credential that a reader would print (`cat <<<`);
+//! - a heredoc body with an unquoted delimiter that expands a
+//!   credential-named variable (`cat <<X` … `X`) unless the command
+//!   redirects to a regular file;
 //! - an inline Python, Node, Perl, Ruby, awk or jq program that reads the
 //!   environment (`os.environ`, `os.getenv("TOKEN")`, `process.env`, `%ENV`,
 //!   `ENV`, `ENVIRON`, `jq env`), and the whole-object one-liners;
@@ -119,6 +124,11 @@ pub fn check(command: &str) -> Option<String> {
     if reads_proc_environ(&normalized) {
         return Some(refuse("reading /proc/<pid>/environ"));
     }
+    if heredoc_credential(command) {
+        return Some(refuse(
+            "a heredoc body that expands a credential-named variable",
+        ));
+    }
     if WHOLE_ENVIRON.is_match(&normalized) {
         return Some(refuse("printing the whole environment object"));
     }
@@ -150,7 +160,165 @@ fn reads_proc_environ(normalized: &str) -> bool {
         .split(|c: char| {
             c.is_whitespace() || matches!(c, '/' | ';' | '&' | '|' | '<' | '>' | '(' | ')')
         })
-        .any(|w| w == "environ")
+        .any(|w| glob_matches(w, "environ"))
+}
+
+/// A heredoc body (from a line with an unquoted delimiter) that expands a
+/// credential-named variable somewhere that does not redirect the whole
+/// command to a regular file: `cat <<X\n$VOGT_HTTP_TOKEN\nX` would print it.
+fn heredoc_credential(text: &str) -> bool {
+    let lines: Vec<&str> = text.split('\n').collect();
+    let mut found = false;
+    let mut index = 0;
+    while index < lines.len() {
+        for delimiter in heredoc_delimiters(lines[index]) {
+            let mut body = Vec::new();
+            let mut end = index + 1;
+            while end < lines.len() && lines[end].trim() != delimiter {
+                body.push(lines[end]);
+                end += 1;
+            }
+            if body.iter().any(|line| credential_expansion(line).is_some()) {
+                let owner = shell_words(lines[index]);
+                if !redirects_to_file(&owner) || redirects_to_terminal(&owner) {
+                    found = true;
+                }
+            }
+            index = end;
+        }
+        index += 1;
+    }
+    found
+}
+
+/// The unquoted heredoc delimiters introduced on `line` (`<<X`, `<<-EOF`).
+/// A quoted delimiter (`<<'EOF'`) leaves the body literal, so it is skipped.
+fn heredoc_delimiters(line: &str) -> Vec<&str> {
+    let bytes = line.as_bytes();
+    let mut delimiters = Vec::new();
+    let mut i = 0;
+    while i + 1 < bytes.len() {
+        if bytes[i] != b'<' || bytes[i + 1] != b'<' {
+            i += 1;
+            continue;
+        }
+        // `<<<` is a here-string, not a heredoc.
+        if bytes.get(i + 2) == Some(&b'<') {
+            i += 1;
+            continue;
+        }
+        let mut start = i + 2;
+        if bytes.get(start) == Some(&b'-') {
+            start += 1;
+        }
+        while bytes.get(start).is_some_and(|c| c.is_ascii_whitespace()) {
+            start += 1;
+        }
+        if matches!(bytes.get(start), Some(b'\'') | Some(b'"')) {
+            i = start + 1;
+            continue;
+        }
+        let mut end = start;
+        while bytes
+            .get(end)
+            .is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'_')
+        {
+            end += 1;
+        }
+        if end > start {
+            delimiters.push(&line[start..end]);
+            i = end;
+        } else {
+            i += 1;
+        }
+    }
+    delimiters
+}
+
+/// Whether `pattern` matches all of `text`, with the shell's glob characters:
+/// `*` any run, `?` one character, `[abc]`/`[a-z]`/`[!a]` one of a set.
+fn glob_matches(pattern: &str, text: &str) -> bool {
+    let p: Vec<char> = pattern.chars().collect();
+    let t: Vec<char> = text.chars().collect();
+    let (mut pi, mut ti) = (0, 0);
+    let (mut star, mut mark) = (usize::MAX, 0);
+    while ti < t.len() {
+        if pi < p.len() {
+            match p[pi] {
+                '?' => {
+                    pi += 1;
+                    ti += 1;
+                    continue;
+                }
+                '*' => {
+                    star = pi;
+                    mark = ti;
+                    pi += 1;
+                    continue;
+                }
+                '[' => {
+                    if let Some((matched, next)) = class_matches(&p, pi, t[ti]) {
+                        if matched {
+                            pi = next;
+                            ti += 1;
+                            continue;
+                        }
+                    } else if p[pi] == t[ti] {
+                        pi += 1;
+                        ti += 1;
+                        continue;
+                    }
+                }
+                c if c == t[ti] => {
+                    pi += 1;
+                    ti += 1;
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        if star == usize::MAX {
+            return false;
+        }
+        pi = star + 1;
+        mark += 1;
+        ti = mark;
+    }
+    while pi < p.len() && p[pi] == '*' {
+        pi += 1;
+    }
+    pi == p.len()
+}
+
+/// Match one character against the bracket expression starting at `p[start]`.
+/// `None` when the expression is unterminated and `[` is a literal.
+fn class_matches(p: &[char], start: usize, c: char) -> Option<(bool, usize)> {
+    let mut i = start + 1;
+    let mut negate = false;
+    if p.get(i) == Some(&'!') || p.get(i) == Some(&'^') {
+        negate = true;
+        i += 1;
+    }
+    let mut matched = false;
+    let mut first = true;
+    while i < p.len() {
+        if p[i] == ']' && !first {
+            return Some((matched != negate, i + 1));
+        }
+        first = false;
+        if p.get(i + 1) == Some(&'-') && p.get(i + 2).is_some_and(|n| *n != ']') {
+            if p[i] <= c && c <= p[i + 2] {
+                matched = true;
+            }
+            i += 3;
+            continue;
+        }
+        if p[i] == c {
+            matched = true;
+        }
+        i += 1;
+    }
+    None
 }
 
 /// The first rule `command` breaks, read as a shell would split it.
@@ -218,14 +386,16 @@ fn pipeline_is_quiet(
     if let Some(known) = memo[index] {
         return known;
     }
-    // Only a stage that passes its input straight on can borrow the
-    // downstream stage's silence. `tee /dev/stderr` and `cat >&2` show the
-    // bytes even when a later `wc -c` consumes the pipe (WI-4061 review).
-    let quiet = match (pieces_.get(index), after[index], pieces_.get(index + 1)) {
-        (Some(Piece::Cmd(current)), Some(rest), Some(Piece::Cmd(next)))
-            if plain_filter(current) && rest.starts_with('|') && !rest.starts_with("||") =>
+    // A stage only borrows the downstream stage's silence when it writes
+    // nothing of its own: no `tee`, no redirect to another descriptor, the
+    // terminal or stderr. `tee /dev/stderr`, `cat >&2` and `sed 'w
+    // /dev/stderr'` show the bytes even when a later `wc -c` consumes the
+    // pipe (WI-4061 review).
+    let quiet = match (pieces_.get(index), after[index]) {
+        (Some(Piece::Cmd(current)), Some(rest))
+            if !writes_beyond_pipe(current) && rest.starts_with('|') && !rest.starts_with("||") =>
         {
-            quiet_sink(next) || pipeline_is_quiet(index + 1, pieces_, after, memo)
+            downstream_is_quiet(index + 1, pieces_, after, memo)
         }
         _ => false,
     };
@@ -233,17 +403,53 @@ fn pipeline_is_quiet(
     quiet
 }
 
-/// Whether a pipeline stage passes its input to the next stage instead of
-/// showing it. `tee` writes a copy to a file or terminal, and a redirect to
-/// another descriptor (`>&2`, `2>&1`), a stderr stream or a device prints
-/// somewhere the pipe does not reach.
+/// Whether the bytes that arrive at stage `index` are consumed or passed on
+/// only to stages that are. A known sink consumes them; a plain passthrough
+/// filter continues the chain; every other program can print from its own
+/// program text (`sed 'w /dev/stderr'`, `awk '{print > "/dev/stderr"}'`,
+/// `dd of=/dev/stderr`) and is treated as reaching the terminal.
+fn downstream_is_quiet(
+    index: usize,
+    pieces_: &[Piece],
+    after: &[Option<&str>],
+    memo: &mut [Option<bool>],
+) -> bool {
+    let Some(Piece::Cmd(stage)) = pieces_.get(index) else {
+        return false;
+    };
+    if quiet_sink(stage) {
+        return true;
+    }
+    plain_filter(stage) && pipeline_is_quiet(index, pieces_, after, memo)
+}
+
+/// Whether a pipeline stage shows bytes somewhere the pipe does not reach:
+/// `tee` writes a copy, and a redirect to another descriptor (`>&2`,
+/// `2>&1`), stderr or a device prints outside it.
+fn writes_beyond_pipe(simple: &str) -> bool {
+    let raw = shell_words(simple);
+    let (words, _, _) = command_words_assigning(simple);
+    words.first().map(|w| base(w)) == Some("tee")
+        || redirects_to_terminal(&raw)
+        || raw
+            .iter()
+            .any(|word| descriptor_redirect(word) || stderr_redirect(word))
+}
+
+/// Whether a pipeline stage passes its input to the next stage: a small
+/// allowlist of filters whose only output is their stdout. An unknown
+/// program is not a passthrough, and `base64` is left out because it prints
+/// the bytes it is given (decoded or not).
 fn plain_filter(simple: &str) -> bool {
     let raw = shell_words(simple);
     let (words, _, _) = command_words_assigning(simple);
-    if words.first().map(|w| base(w)) == Some("tee") {
-        return false;
-    }
-    !redirects_to_terminal(&raw)
+    let program = words.first().map(|w| base(w)).unwrap_or_default();
+    let passthrough = matches!(
+        program,
+        "cat" | "wc" | "cut" | "head" | "tail" | "tr" | "md5sum" | "sort" | "uniq"
+    ) || (program.starts_with("sha") && program.ends_with("sum"));
+    passthrough
+        && !redirects_to_terminal(&raw)
         && !raw
             .iter()
             .any(|word| descriptor_redirect(word) || stderr_redirect(word))
@@ -416,6 +622,7 @@ static PY_ENVIRON_WHOLE: LazyLock<Regex> = LazyLock::new(|| {
         r"(?x)
         (print|pprint|dumps|dict|list|sorted|repr|str)\s*\(\s*(os\.)?environ\s*\)
         | (os\.)?environ\.(items|values|copy)\s*\(
+        | vars\s*\(\s*os\s*\)
         ",
     )
     .expect("static regex")
@@ -817,6 +1024,46 @@ mod tests {
             "grep -r env src/",
             "echo \"$TOKEN\" | wc -c",
             "echo \"$TOKEN\" > /dev/null",
+        ] {
+            assert_eq!(check(command), None, "{command}");
+        }
+    }
+
+    /// WI-4061 batch 126: a `/proc` read hidden by a glob or a quote, a
+    /// pipeline stage that prints from its own program text, and a heredoc
+    /// body that expands a credential.
+    #[test]
+    fn wi_4061_batch_126_refuses_the_regression_bypasses() {
+        for command in [
+            "cat /proc/self/env*",
+            "cat /proc/self/e?viron",
+            "cat /proc/1/envir[o]n",
+            "strings /proc/self/env\"\"iron",
+            "echo \"$VOGT_HTTP_TOKEN\" | sed 'w /dev/stderr' | wc -c",
+            "echo \"$VOGT_HTTP_TOKEN\" | awk '{print > \"/dev/stderr\"}' | wc -c",
+            "echo \"$VOGT_HTTP_TOKEN\" | dd of=/dev/stderr | wc -c",
+            "cat <<X\n$VOGT_HTTP_TOKEN\nX",
+            "cat <<-X\n$VOGT_HTTP_TOKEN\nX",
+            "python3 -c 'import os; print(vars(os)[\"envi\"+\"ron\"])'",
+        ] {
+            let reason = check(command).unwrap_or_else(|| panic!("allowed: {command}"));
+            assert!(reason.contains("environment guard"), "{command}: {reason}");
+            assert!(reason.contains("test -n"), "{command}: {reason}");
+        }
+    }
+
+    /// The batch 126 hardening must not refuse ordinary pipelines or a
+    /// heredoc that is literal or redirected to a file.
+    #[test]
+    fn wi_4061_batch_126_allows_ordinary_commands() {
+        for command in [
+            "cargo build 2>&1 | tail -5",
+            "ls 2>/dev/null | wc -l",
+            "git log | head",
+            "echo \"$TOKEN\" | sha256sum",
+            "echo \"$TOKEN\" | cat | wc -c",
+            "cat <<'X'\n$VOGT_HTTP_TOKEN\nX",
+            "cat > /tmp/x <<X\n$VOGT_HTTP_TOKEN\nX",
         ] {
             assert_eq!(check(command), None, "{command}");
         }

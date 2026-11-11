@@ -436,11 +436,39 @@ def test_an_unreachable_engine_still_refuses_an_environment_dump(
         "timeout 5 env",
         "nice env",
         "git log --grep=environment",
+        # WI-4061 batch 126: the offline /proc check must not be fooled by a
+        # quote or a glob now that the engine cannot be asked.
+        "cat /proc/self/env*",
+        'strings /proc/self/env""iron',
+        "cat /proc/self/e?viron",
+        "cat /proc/1/envir[o]n",
     ]:
         payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
         result = run(tmp_path, payload, env)
         assert result.returncode == 2, (command, result.stderr)
         assert "vogt policy check unavailable" in result.stderr, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cat /proc/self/e?viron",
+        "cat /proc/1/envir[o]n",
+        'python3 -c \'import os; print(vars(os)["envi"+"ron"])\'',
+    ],
+)
+def test_a_hidden_proc_or_vars_os_read_is_asked(tmp_path: Path, command: str) -> None:
+    """WI-4061 batch 126: the prefilter used to let a globbed /proc read and
+    a `vars(os)` concatenation through without ever asking the engine, so
+    the guard never saw them."""
+    broker = _Broker(200, b'{"decision":"allow"}')
+    try:
+        env = {"VOGT_ENGINE_BROKER_URL": broker.url, "VOGT_ENGINE_BROKER_TOKEN": "t"}
+        payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
+        assert run(tmp_path, payload, env).returncode == 0, command
+        assert len(broker.requests) == 1, command
+    finally:
+        broker.close()
 
 
 @pytest.mark.parametrize(
