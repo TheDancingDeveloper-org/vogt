@@ -116,6 +116,41 @@ AUTOPILOT = (
 )
 
 
+#: How an agent reads its environment without printing a secret (WI-3988).
+#: In every guide, because a worker has printed a Windows SSH key into its
+#: transcript with one unfiltered `cat`, and the rule that forbids it was
+#: advisory only. This restates the rule in the terms a worker acts on.
+SECRETS_AND_ENVIRONMENT = (
+    "## Secrets and the environment\n"
+    "\n"
+    "Command output lands in the transcript, and the transcript is not a "
+    "safe place for a secret. Do not print a value you have not checked is "
+    "safe: no `env`, `printenv`, `set`, or `export -p`; no `cat` or `head` "
+    "of a key, token, `.env`, or credential file; no `ssh -i` with a key "
+    "passed inline; no `echo` or `printf` of a variable whose name contains "
+    "KEY, TOKEN, SECRET, or PASSWORD. Read what you need instead:\n"
+    "\n"
+    "- names only, for example `env | cut -d= -f1` or `grep -o '^[A-Z_]*' file`;\n"
+    "- a length or presence check, for example `test -s file && echo present`, "
+    "or `secret describe NAME` for a store entry (it reports length, never "
+    "the value);\n"
+    "- a secret read straight into a variable or a `0600` file, never echoed "
+    "and never placed in a command's arguments.\n"
+    "\n"
+    "If a value was printed anyway, stop, say so in a `session_report` of kind "
+    "`blocker`, and do not repeat it. The value needs rotating by a person.\n"
+    "\n"
+    "## Before you report a missing config\n"
+    "\n"
+    "A config or file that a tool reports as missing is often at a different "
+    "path than the one you looked in. Before you report it missing, confirm "
+    "with a read-only command: `ls -la` of the directory the tool names, "
+    "`find` from the repository or container root for the file name, and the "
+    "tool's own `--config` or help output. Report it missing only when those "
+    "checks come back empty, and say which paths you checked.\n"
+)
+
+
 @dataclass(frozen=True)
 class ComposedBrief:
     """A session brief plus the text written beside it.
@@ -247,7 +282,13 @@ def _companion(session_id: str, *, work_ref: str | None) -> str:
         "and comments — nothing else. Every write needs a reason you have "
         "actually got: it is stored, and it is what somebody reads later when "
         "they ask why this changed.\n"
-        "\n" + bound + WHEN_BLOCKED + "\n" + DRIVING_OTHER_SESSIONS
+        "\n"
+        + bound
+        + WHEN_BLOCKED
+        + "\n"
+        + SECRETS_AND_ENVIRONMENT
+        + "\n"
+        + DRIVING_OTHER_SESSIONS
     )
 
 
@@ -770,6 +811,7 @@ def brief_for_project(
 
 __all__ = [
     "AUTOPILOT",
+    "SECRETS_AND_ENVIRONMENT",
     "WHEN_BLOCKED",
     "ComposedBrief",
     "brief_for_project",
