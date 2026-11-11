@@ -13,10 +13,11 @@
 # act on (`git`, `gh`, `rm` and the other deleting programs, the shells,
 # `eval`, `xargs`), the environment programs the environment guard reads
 # (`env`, `printenv`, `set`, `export`, `readonly`, `declare`, `typeset`,
-# `local`, `ps`), `environ`, or a credential-named expansion, read from the
-# decoded command. A command without one is allowed without a request, so a
-# policy check rarely slows an ordinary tool call. With no broker credential
-# to ask with it also allows, because there is no session policy to enforce.
+# `local`, `ps`), `environ`, any `/proc` path, `vars(os)`, or a
+# credential-named expansion, read from the decoded command. A command
+# without one is allowed without a request, so a policy check rarely slows an
+# ordinary tool call. With no broker credential to ask with it also allows,
+# because there is no session policy to enforce.
 #
 # A denial prints the engine's reason on stderr and exits 2, which Claude Code
 # treats as "do not run the tool". The engine being
@@ -25,8 +26,8 @@
 # refusal, not a pass. The one exception is a command forwarded only for an
 # ambiguous environment word whose every use an offline allowlist recognises
 # as harmless (`set -euo pipefail`, `export FOO=bar`, `env FOO=bar cmd`); a
-# real dump, a credential expansion, and any git/gh/destructive command stay
-# refused.
+# real dump, a `/proc` read, a credential expansion, and any
+# git/gh/destructive command stay refused.
 #
 # Credential: the session's own broker token (`VOGT_ENGINE_BROKER_TOKEN`),
 # which names the session by itself; a pod session, which has none, presents
@@ -205,7 +206,10 @@ for text in (cmd, unescaped):
     sys.stdout.write(text.replace("\"", "").replace("\x27", "").replace("\\", "").lower() + "\n")' 2>/dev/null)" ||
     decoded="git"
 printf '%s' "$decoded" | grep -Eq "(^|[^[:alnum:]_-])($words)([^[:alnum:]_-]|\$)" ||
-    printf '%s' "$decoded" | grep -Eq "$envish" || exit 0
+    printf '%s' "$decoded" | grep -Eq "$envish" ||
+    printf '%s' "$decoded" | grep -Fq '/proc' ||
+    printf '%s' "$decoded" | grep -Eq 'vars[[:space:]]*\([[:space:]]*os[[:space:]]*\)' ||
+    exit 0
 
 # Whether the command was asked about only for an environment word (or an
 # environment-looking expansion). A destructive word, or the "git" sentinel
@@ -294,7 +298,18 @@ if re.search(
     cmd,
 ):
     sys.exit(1)
-if re.search(r"/proc/[^ \t\n]*environ", cmd):
+def proc_read(text):
+    # The raw line hides a read behind quotes (`env""iron`) or a glob
+    # (`env*`, `e?viron`, `envir[o]n`), so read it with quotes and
+    # backslashes removed. An outage cannot ask the engine whose answer
+    # would name the file, so any /proc read fails closed.
+    flat = text.replace("\"", "").replace("\x27", "").replace("\\", "")
+    if "/proc/" in flat:
+        return True
+    return re.search(r"/proc/\S*(environ|env[*?\[]|[*?\[])", flat, re.I) is not None
+
+
+if proc_read(cmd):
     sys.exit(1)
 if re.search(r"(?i)(os\.environ|os\.getenv|process\.env|%env|\benviron\b|\$ENV\b|ENVIRON)", cmd):
     sys.exit(1)
@@ -382,6 +397,8 @@ def env_runs_a_program(args, depth=0):
 
 
 def harmless(seg, depth=0):
+    if proc_read(seg):
+        return False
     words = words_of(seg)
     if words is None:
         return False
