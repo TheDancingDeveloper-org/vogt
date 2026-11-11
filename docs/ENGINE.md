@@ -1275,9 +1275,7 @@ root, on a `worktree` or `cwd` start. A repo is resolved with `git rev-parse
 - **discard guard** — any session with a baseline: `git checkout [<ref>] --
   <paths>`, `git checkout <path>`, `git restore`, `git rm` (not `--cached`),
   `git clean -f`, `git stash [push]`, `git reset --hard`, `git checkout -f`,
-  `git switch --discard-changes`, `git checkout-index -f` (`-a` reaches
-  every path), `git mv -f` (its operands), any of these with
-  `--pathspec-from-file` (every path), and a plain `rm`/`unlink`, when a path they
+  `git switch --discard-changes`, and a plain `rm`/`unlink`, when a path they
   reach is in the baseline. A git command counts in the session's own repo; an
   `rm` is judged per operand — `~/` expanded, made absolute, its parent
   canonicalised so a symlinked spelling of the tree is the tree — wherever it
@@ -1311,35 +1309,17 @@ past its bounds — fails closed: if that part names git, rm or another
 deleting verb the discard guard counts every baseline path as reached, and
 if the line names a git write the protected-checkout rule refuses it.
 Line continuations are removed and ANSI-C strings (`$'\x72m'`) decoded
-before words are read. `trap '…' SIG` actions are read as a payload that runs after the line's
-`cd`s, and `su -c`, `runuser -c`, `script -c` and `busybox <applet>` as the
-command they run.
-
-**Variable programs.** A program word this reading cannot spell reaches
-every baseline path whatever the line says, since what it holds can be
-spelled any way: a variable (`$R a.txt`, `${R}m`, the `$CMD` of `eval
-"$CMD"` or `bash -c "$CMD"`, also after a wrapper such as `timeout 5 $R`),
-a command substitution (`$(printf %s%s r m) a.txt`, backticks, `eval
-"$(…)"`, `bash -c "$(cat f)"`) and a brace expansion (`{rm,a.txt}`,
-`{git,restore,a.txt}`). The one substitution read as safe is `eval` of a
-single literal `ssh-agent` call with only flags (`eval "$(ssh-agent -s)"`).
-A shell or `source`/`.` reading its script from stdin, a heredoc, a
-process substitution, `/dev/stdin`, `/dev/fd/*` or a here-string reaches
-every path too (`echo … | base64 -d | bash`). A git subcommand that is not a
-plain word (`git restore${IFS}a.txt`, `git $SUB`), or that may be an alias
-(`git -c alias.r=restore r`, `--config-env`, `include.path`, `GIT_CONFIG_*`
-on the line, or a `git config` that sets an alias or include), is treated
-as a discard of every path and as a write, and a brace pattern in a
-pathspec is unreadable. With an empty baseline (a fresh clone) the discard
-guard does not apply at all.
-
-Known false positives with a non-empty baseline, accepted because the
-alternative is reading what the shell will expand: `$EDITOR f`, `${CARGO:-cargo}
-test`, `"$(command -v cargo)" test`, and `git restore src/{a,b}.rs` (a brace
-pathspec) are refused. Run the literal program, or name the files one by one.
-The hook forwards a variable or substitution after a wrapper (`timeout`,
-`nice`, `stdbuf`, `setsid`, `ionice`, `doas`, `chronic`, …) and a braced
-program word to the engine rather than allowing them unasked.
+before words are read. A program that is a variable (`$R a.txt`, `${R}m`,
+the `$CMD` of `eval "$CMD"` or `bash -c "$CMD"`) reaches every baseline
+path whatever the line says, since what it holds can be spelled any way;
+one that is a command substitution (`eval "$(…)"`) does when the line names
+a deleting verb. A shell or `source`/`.` reading its script from a process
+substitution, `/dev/stdin`, `/dev/fd/*` or a here-string reaches every
+path when the line names git, rm or a deleting verb. A git subcommand that
+is not a plain word (`git restore${IFS}a.txt`, `git $SUB`) is treated as a
+discard of every path and as a write, and a brace pattern in a pathspec is
+unreadable. With
+an empty baseline (a fresh clone) the discard guard does not apply at all.
 
 Reasons name the rule and a path count, never a path's contents.
 
