@@ -4353,9 +4353,19 @@ def _wants_unbound_chore(params: StartSessionParams) -> bool:
 
 
 def _unbound_chore_title(params: StartSessionParams) -> str:
+    """A short, safe title for the chore: never the whole task text.
+
+    The first line of the name or task, whitespace collapsed, credential-shaped
+    substrings redacted, capped at 80 characters (WI-3987).
+    """
+    from vogt.core.agent_activity import redact
+
     task = (params.task or "").strip()
     head = (params.name or "").strip() or (task.splitlines()[0] if task else "")
-    return f"Session: {head.strip()[:180] or 'autopilot worker'}"
+    head = " ".join(redact(head).split())
+    if len(head) > 80:
+        head = head[:79].rstrip() + "…"
+    return f"Session: {head or 'autopilot worker'}"
 
 
 def _bind_unbound_worker(

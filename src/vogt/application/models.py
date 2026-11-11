@@ -1700,13 +1700,14 @@ class CreateWorkParams(Params):
     local_only: bool = Field(
         default=False,
         description=(
-            "Create the item locally without writing it upstream. On a "
-            "linked project a create normally goes through to the forge, and a "
-            "write-back policy that does not permit 'create' refuses it; pass "
-            "this to opt in to a native, local-only item instead — it carries "
-            "no upstream subject yet and is exactly what a later `forge link` "
-            "or `forge writeback` migrates upstream. Default off: the refusal "
-            "stays the default so nothing is created locally by surprise."
+            "Create the item locally without writing it upstream. Default "
+            "off: on a forge-linked project (`writable` true in project list) "
+            "a create without this flag CREATES AN UPSTREAM ISSUE on the forge "
+            "(e.g. a GitHub issue) and returns its subject key; a write-back "
+            "policy that does not permit 'create' refuses it instead. Pass "
+            "true to keep the item native and local-only: it carries no "
+            "upstream subject yet and is what a later `forge link` or "
+            "`forge writeback` migrates upstream."
         ),
     )
     reason: Reason
