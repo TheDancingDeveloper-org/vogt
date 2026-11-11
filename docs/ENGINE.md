@@ -5025,9 +5025,11 @@ is newer than the last accepted one, which is persisted beside the file
 append-only deltas at an expected offset. Claude keeps its account path
 (`projects/…`); a Codex rollout is the contract path
 `sessions/<YYYY>/<MM>/<DD>/rollout-…-<conversation>.jsonl` under
-`ENGINE_CODEX_TRANSCRIPT_ROOT` (default `$CODEX_HOME`, else `$HOME/.codex`),
-and its write-back may name an empty account because the rollout belongs to
-the conversation. Every refusal is audited on
+`ENGINE_CODEX_TRANSCRIPT_ROOT` — which defaults to the parent of
+`VOGT_SESSION_TRANSCRIPT_ROOTS["codex"]` when that root is set, so the writer
+always lands where `session.last_reply` reads, then `$CODEX_HOME`, then
+`$HOME/.codex` — and its write-back may name an empty account because the
+rollout belongs to the conversation. Every refusal is audited on
 `vogt::audit` by session id, account, file and reason, and an accepted write by
 name and byte length. Never a value.
 A deployment that serves `session.last_reply` for a pod Codex points
