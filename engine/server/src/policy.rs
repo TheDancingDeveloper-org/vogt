@@ -706,6 +706,14 @@ impl Walker {
         }
         let home = home_program(first);
         let first = home.as_ref().unwrap_or(first);
+        if brace_expands(first) {
+            // `{rm,a.txt}`, `{git,restore,a.txt}`, `{r,}m a.txt`: brace
+            // expansion spells the program (and its arguments) out of
+            // pieces this reading does not join (WI-4001 bypass 3).
+            self.out.opaque.push(simple.to_string());
+            self.out.dynamic = true;
+            return;
+        }
         if first.contains(['$', '`']) {
             // The program is an expansion (`$GIT checkout …`, `${R}m`, or
             // the `$CMD` an `eval`/`sh -c` payload holds): what it runs is
@@ -924,6 +932,19 @@ fn shell_payload(words: &[String]) -> Payload<'_> {
         None if from_file => Payload::File,
         None => Payload::Stdin,
     }
+}
+
+/// Whether `word` holds a brace expansion: a `{` later closed by `}` with a
+/// `,` or `..` between them. As a program it is not the word it looks like.
+fn brace_expands(word: &str) -> bool {
+    word.char_indices()
+        .filter(|(_, c)| *c == '{')
+        .any(|(i, _)| {
+            word[i + 1..].find('}').is_some_and(|end| {
+                let inner = &word[i + 1..i + 1 + end];
+                inner.contains(',') || inner.contains("..")
+            })
+        })
 }
 
 /// A script operand that is not a file on disk but what the line feeds in:
@@ -2893,5 +2914,71 @@ mod tests {
         let p = workspace(&["README.md"], Some("checkout"), root);
         assert!(check(&p, &deep, root).is_some());
         assert!(check(&p, "echo 'unterminated; git checkout -- README.md", root).is_some());
+    }
+
+    /// WI-4001 (round 3 re-review): the guard's must-refuse and must-allow
+    /// tables, against a worktree with `a.txt` dirty in its baseline.
+    fn round3(name: &str) -> (PathBuf, SessionPolicy) {
+        let root = repo(&format!("round3-{name}"));
+        std::fs::write(root.join("a.txt"), "x").unwrap();
+        let p = workspace(&["a.txt"], Some("worktree"), &root);
+        (root, p)
+    }
+
+    fn assert_refused(p: &SessionPolicy, root: &Path, commands: &[&str]) {
+        for command in commands {
+            let reason = check(p, command, root).unwrap_or_else(|| panic!("allowed: {command:?}"));
+            assert!(reason.contains("discard guard"), "{command}: {reason}");
+            assert!(!reason.contains("a.txt"), "{reason}");
+        }
+    }
+
+    fn assert_allowed(p: &SessionPolicy, root: &Path, commands: &[&str]) {
+        for command in commands {
+            assert_eq!(check(p, command, root), None, "{command:?}");
+        }
+    }
+
+    /// The ordinary worker commands the guard must keep allowing with a
+    /// non-empty baseline.
+    #[test]
+    fn round3_ordinary_commands_still_pass() {
+        let (root, p) = round3("ok");
+        assert_allowed(
+            &p,
+            &root,
+            &[
+                "cd engine && cargo test",
+                "git commit -m 'fix: x'",
+                "git commit -F - <<'EOF'\nfix: x\n\nbody\nEOF",
+                "for f in a b; do echo $f; done",
+                "eval \"$(ssh-agent -s)\"; git push",
+                "eval \"$(ssh-agent -s)\"",
+                "git restore --staged a.txt",
+                "git status && git diff",
+                "timeout 60 cargo test",
+                "ls src/{a,b}.rs",
+                "echo {a,b}",
+            ],
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Bypass 3: a brace expansion as the program word.
+    #[test]
+    fn round3_braced_programs_are_refused() {
+        let (root, p) = round3("braces");
+        assert_refused(
+            &p,
+            &root,
+            &[
+                "{rm,a.txt}",
+                "{git,restore,a.txt}",
+                "{r,}m a.txt",
+                "(echo; {rm,a.txt})",
+                "bash -c '{rm,a.txt}'",
+            ],
+        );
+        std::fs::remove_dir_all(&root).ok();
     }
 }
