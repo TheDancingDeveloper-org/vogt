@@ -220,6 +220,57 @@ def test_an_unreachable_engine_refuses_a_hidden_command(
     assert run(tmp_path, codex, env, mode="codex").returncode == 2, command
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git restore \\\na.txt",
+        "rm \\\na.txt",
+        "gi\\\nt restore a.txt",
+        "r\\\nm a.txt",
+        "$'\\x72m' a.txt",
+        "$'\\162m' a.txt",
+        "R=$(echo cm | tr c r); $R a.txt",
+        "X=y ${R}m a.txt",
+        ". <(echo x)",
+        "source <(echo x)",
+        "bash <(echo x)",
+        "bash /dev/stdin <<< x",
+    ],
+)
+def test_rereview_bypasses_are_asked(tmp_path: Path, command: str) -> None:
+    """WI-1326 re-review: a line continuation, an ANSI-C string, a variable as
+    the program, and a sourced or process-substituted script all reach the
+    engine, so an engine that cannot be asked refuses them, with a message
+    that does not call a read a write."""
+    env = {
+        "VOGT_ENGINE_BROKER_URL": "http://127.0.0.1:1",
+        "VOGT_ENGINE_BROKER_TOKEN": "t",
+    }
+    payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
+    refused = run(tmp_path, payload, env)
+    assert refused.returncode == 2, command
+    assert "vogt policy check unavailable" in refused.stderr
+    assert "write" not in refused.stderr
+    codex = json.dumps({"tool_name": "exec_command", "tool_input": {"cmd": command}})
+    assert run(tmp_path, codex, env, mode="codex").returncode == 2, command
+
+
+@pytest.mark.parametrize(
+    "command", ["echo $HOME", "ls -la; cargo test", "printf '%s\\n' x"]
+)
+def test_an_expansion_that_is_not_the_program_is_not_asked(
+    tmp_path: Path, command: str
+) -> None:
+    broker = _Broker(500, b"")
+    try:
+        env = {"VOGT_ENGINE_BROKER_URL": broker.url, "VOGT_ENGINE_BROKER_TOKEN": "t"}
+        payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
+        assert run(tmp_path, payload, env).returncode == 0, command
+        assert broker.requests == []
+    finally:
+        broker.close()
+
+
 def test_a_newline_separated_rm_is_asked(tmp_path: Path) -> None:
     reason = "refusing: discard guard: rm would discard 1 path(s)"
     broker = _Broker(200, json.dumps({"decision": "deny", "reason": reason}).encode())

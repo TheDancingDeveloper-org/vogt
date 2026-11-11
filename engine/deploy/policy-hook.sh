@@ -125,7 +125,7 @@ base = payload.get("cwd") or ""
 if cwd and not os.path.isabs(cwd) and isinstance(base, str) and os.path.isabs(base):
     cwd = os.path.join(base, cwd)
 json.dump({"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": cwd}, sys.stdout)')" || {
-        echo "vogt policy check unavailable; refusing git/gh write" >&2
+        echo "vogt policy check unavailable; refusing a command the policy may cover" >&2
         exit 2
     }
 fi
@@ -135,12 +135,18 @@ fi
 # escapes a newline as `\n`, so a raw-text match would miss the `git` in
 # `ls\ngit checkout -- f` (WI-1326 review). Quotes and backslashes are
 # dropped and case folded first, so `g""it` and `\git` still read as git.
-# The words are the engine's: git and gh, the deleting programs the discard
-# guard reads (`rm`, `unlink`, `mv`, `shred`, `truncate`), git's discarding
-# verbs (for `$GIT checkout …`), and the shells, `eval` and `xargs` that can
-# run any of them out of sight. A payload that cannot be decoded is asked.
-words='git|gh|rm|unlink|mv|shred|truncate|checkout|restore|reset|clean|stash|switch|bash|sh|zsh|dash|ksh|eval|xargs'
-decoded="$(printf '%s' "$input" | python3 -c 'import json, sys
+# Line continuations (backslash-newline) are removed first, and the command
+# is also read with its backslash escapes decoded, so `r\<newline>m` and
+# `$'\x72m'` read as rm. The words are the ones the engine acts on: git and
+# gh, `rm` and `unlink` (the discard guard judges a plain rm by its target),
+# git's discarding verbs (for `$GIT checkout …`), and the shells, `eval`,
+# `xargs`, `source` and `.` that can run any of them out of sight. The engine
+# does not read `mv`, `shred` or `truncate`; they are asked about only
+# because a variable or opaque text holding them is a possible discard. A
+# program that is an expansion (`$R a.txt`, `${R}m`) is always asked: what it
+# runs is not on the line. A payload that cannot be decoded is asked.
+words='git|gh|rm|unlink|mv|shred|truncate|checkout|restore|reset|clean|stash|switch|bash|sh|zsh|dash|ksh|eval|xargs|source'
+decoded="$(printf '%s' "$input" | python3 -c 'import json, re, sys
 try:
     payload = json.load(sys.stdin)
     cmd = payload.get("tool_input", {}).get("command", "")
@@ -150,7 +156,18 @@ if isinstance(cmd, list):
     cmd = "\n".join(str(part) for part in cmd)
 if not isinstance(cmd, str):
     sys.exit(3)
-sys.stdout.write(cmd.replace("\"", "").replace("\x27", "").replace("\\", "").lower())' 2>/dev/null)" ||
+cmd = cmd.replace("\\\n", "")
+# A program that is an expansion, or a sourced script: always asked.
+start = r"(^|[;&|(){}`\n!]|\b(then|do|else|eval|exec|command|builtin|sudo|env|time|nohup|xargs))\s*(\w+=\S*\s+)*"
+if re.search(start + r"[\"\x27]*\$", cmd) or re.search(start + r"\.\s", cmd):
+    sys.stdout.write("git")
+    sys.exit(0)
+try:
+    unescaped = cmd.encode("latin-1", "backslashreplace").decode("unicode_escape")
+except Exception:
+    unescaped = "git"
+for text in (cmd, unescaped):
+    sys.stdout.write(text.replace("\"", "").replace("\x27", "").replace("\\", "").lower() + "\n")' 2>/dev/null)" ||
     decoded="git"
 printf '%s' "$decoded" | grep -Eq "(^|[^[:alnum:]_-])($words)([^[:alnum:]_-]|\$)" || exit 0
 
@@ -173,7 +190,7 @@ code="$(curl -sS --max-time 5 -o "$body" -w '%{http_code}' -X POST \
     "${url%/}/api/agent-auth/policy-check" <<<"$input" 2>/dev/null)" || code="000"
 if [[ "$code" != 2* ]]; then
     rm -f "$body"
-    echo "vogt policy check unavailable; refusing git/gh write" >&2
+    echo "vogt policy check unavailable; refusing a command the policy may cover" >&2
     exit 2
 fi
 
@@ -196,7 +213,7 @@ try:
 except Exception:
     print("refused by project policy")' <"$body" 2>/dev/null || echo "refused by project policy")"
 else
-    reason="vogt policy check unreadable; refusing git/gh write"
+    reason="vogt policy check unreadable; refusing a command the policy may cover"
 fi
 rm -f "$body"
 printf '%s\n' "$reason" >&2
