@@ -1045,3 +1045,37 @@ fn full_mode_with_fields_slims_each_row_to_id_and_the_named_fields() {
     assert!(whole["sessions"][0].as_object().unwrap().len() > 2);
     assert_eq!(slim["total"], whole["total"]);
 }
+
+/// WI-3987: a worker started on a bare project must not get a work item
+/// created for it. The Python line's autopilot chore ("Session: <task>") is
+/// not carried onto rust-2; this pins that a project-only start writes no
+/// item, so the junk cannot come back through the engine path.
+#[test]
+fn a_project_only_worker_start_creates_no_work_item() {
+    let script = script_with(vec![(
+        200,
+        r#"{"id":"eng-9","name":"beta","cwd":"/work/tree","activity":"idle"}"#.to_string(),
+    )]);
+    let built = opened(Some(Arc::clone(&script)));
+    insert_project(&built, "beta");
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!("opened() builds a step clock");
+    };
+    let mut params = start_params(Some("beta"), Some("Ship the thing\nsecond line"), "because");
+    params.autopilot = Some(true);
+    start_session(ctx, &params).unwrap();
+    let items = ctx
+        .declared
+        .read()
+        .unwrap()
+        .list_work_items(&crate::storage::interface::WorkFilter::default())
+        .unwrap();
+    assert!(
+        items.is_empty(),
+        "a project-only start must not create a work item, found {:?}",
+        items
+            .iter()
+            .map(|item| item.title.clone())
+            .collect::<Vec<_>>()
+    );
+}
