@@ -261,6 +261,24 @@ SENSITIVE = {
     "PASSWD", "CREDENTIAL", "CREDENTIALS", "PRIVATE",
 }
 
+# A program that can read the environment inside its own program, where the
+# line itself shows no expansion. An outage cannot ask the engine, so a
+# segment that runs one is refused however harmless its arguments look: the
+# old fall-through allowed a Ruby one-liner printing ENV and jq -n env
+# (WI-4061 review).
+INTERPRETERS = {
+    "python", "pypy", "node", "nodejs", "perl", "ruby", "irb", "awk",
+    "gawk", "mawk", "nawk", "jq", "php", "lua", "luajit", "Rscript",
+    "tclsh", "pwsh", "powershell",
+}
+
+
+def interpreter(name):
+    return (
+        name in INTERPRETERS
+        or re.match(r"^(python|pypy|perl|ruby|node|php|lua)[0-9.]+$", name) is not None
+    )
+
 
 def credential(name):
     n = name.upper()
@@ -371,6 +389,15 @@ def harmless(seg, depth=0):
     if not words:
         return True
     name = words[0].rsplit("/", 1)[-1]
+    if interpreter(name):
+        return False
+    # A launcher can run an interpreter as its operand (`find -exec jq -n
+    # env`, `watch ruby -e …`), so the program in front is not the whole
+    # story.
+    if name in ("find", "xargs", "watch", "parallel") and any(
+        interpreter(word.rsplit("/", 1)[-1]) for word in words[1:]
+    ):
+        return False
     args = words[1:]
     flags = [a for a in args if a.startswith("-")]
     operands = [a for a in args if not a.startswith(("-", "+"))]
