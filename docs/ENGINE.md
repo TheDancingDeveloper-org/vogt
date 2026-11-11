@@ -1276,12 +1276,9 @@ root, on a `worktree` or `cwd` start. A repo is resolved with `git rev-parse
   <paths>`, `git checkout <path>`, `git restore`, `git rm` (not `--cached`),
   `git clean -f`, `git stash [push]`, `git reset --hard`, `git checkout -f`,
   `git switch --discard-changes`, `git checkout-index -f` (`-a` reaches
-  every path), `git mv -f` (its operands), `git checkout -m <path>`, `git
-  read-tree -u` with `-m`, `--reset` or `--prefix` (every path), any of these
-  with `--pathspec-from-file` (every path), and a plain `rm`/`unlink`, when a
-  path they reach is in the baseline. Options are read as git reads them: a
-  long option by any unique prefix (`reset --har`, `switch --discard`), a
-  short one anywhere in a cluster (`checkout -qf`, `-fb x`). A git command counts in the session's own repo; an
+  every path), `git mv -f` (its operands), any of these with
+  `--pathspec-from-file` (every path), and a plain `rm`/`unlink`, when a path they
+  reach is in the baseline. A git command counts in the session's own repo; an
   `rm` is judged per operand — `~/` expanded, made absolute, its parent
   canonicalised so a symlinked spelling of the tree is the tree — wherever it
   was typed, and an operand naming the tree or a directory above it reaches
@@ -1315,9 +1312,8 @@ deleting verb the discard guard counts every baseline path as reached, and
 if the line names a git write the protected-checkout rule refuses it.
 Line continuations are removed and ANSI-C strings (`$'\x72m'`) decoded
 before words are read. `trap '…' SIG` actions are read as a payload that runs after the line's
-`cd`s, and `su -c`, `runuser -c`, `script -c`, `env -S` and `busybox
-<applet>` as the command they run, the value attached (`env -S'…'`, `su
--c'…'`, `script -qc'…'`) or not.
+`cd`s, and `su -c`, `runuser -c`, `script -c` and `busybox <applet>` as the
+command they run.
 
 **Variable programs.** A program word this reading cannot spell reaches
 every baseline path whatever the line says, since what it holds can be
@@ -1333,33 +1329,17 @@ every path too (`echo … | base64 -d | bash`). A git subcommand that is not a
 plain word (`git restore${IFS}a.txt`, `git $SUB`), or that may be an alias
 (`git -c alias.r=restore r`, `--config-env`, `include.path`, `GIT_CONFIG_*`
 on the line, or a `git config` that sets an alias or include), is treated
-as a discard of every path and as a write, and so is a git call that runs a
-command of the caller's choosing: a config key that names one (`-c
-diff.external=…`, `core.fsmonitor`, `core.pager`, `pager.*`, `core.editor`,
-`sequence.editor`, `core.sshCommand`, `core.askpass`, `core.hooksPath`,
-`credential.helper`, `filter.*.smudge`/`clean`, `diff.*.textconv`,
-`merge.*.driver`, `difftool.*.cmd`, set with `-c`, `--config-env` or `git
-config`), `--exec-path=`, `grep -O`, `difftool -x`, `rebase -x`, `bisect run`,
-`submodule foreach`, or one of `GIT_EXTERNAL_DIFF`, `GIT_PAGER`, `PAGER`,
-`GIT_EDITOR`, `GIT_SEQUENCE_EDITOR`, `EDITOR`, `VISUAL`, `GIT_SSH`,
-`GIT_SSH_COMMAND`, `GIT_ASKPASS`, `SSH_ASKPASS`, `GIT_EXEC_PATH`, `LESSOPEN`
-assigned or exported on the line. A value that runs only `cat`, `less`/`more`
-with flags, `true`, `false` or `:` (or `ssh` with flags for an ssh setting,
-`/dev/null` for the hooks path) is read as harmless, so `GIT_PAGER=cat git
-log` and `GIT_EDITOR=true git commit --amend` pass; and a brace pattern in a
+as a discard of every path and as a write, and a brace pattern in a
 pathspec is unreadable. With an empty baseline (a fresh clone) the discard
 guard does not apply at all.
 
 Known false positives with a non-empty baseline, accepted because the
 alternative is reading what the shell will expand: `$EDITOR f`, `${CARGO:-cargo}
 test`, `"$(command -v cargo)" test`, and `git restore src/{a,b}.rs` (a brace
-pathspec) are refused, and so are `GIT_EDITOR=vim git commit` and `git -c
-core.pager=delta log` (a command-running setting whose program is not on the
-harmless list). Run the literal program, or name the files one by one.
+pathspec) are refused. Run the literal program, or name the files one by one.
 The hook forwards a variable or substitution after a wrapper (`timeout`,
 `nice`, `stdbuf`, `setsid`, `ionice`, `doas`, `chronic`, …) and a braced
-program word, and a payload attached to `env -S`/`su -c`/`script -c`
-(`env -S'rm a.txt'`), to the engine rather than allowing them unasked.
+program word to the engine rather than allowing them unasked.
 
 Reasons name the rule and a path count, never a path's contents.
 
