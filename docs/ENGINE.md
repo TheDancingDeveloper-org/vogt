@@ -1246,11 +1246,14 @@ decodes the command first, so a newline or tab (`\n` in the JSON) is a word
 boundary, removes line continuations (backslash-newline), and also reads it
 with backslash escapes decoded, so `r\<newline>m` and `$'\x72m'` read as
 `rm`. A command naming none of `git`, `gh`, `rm`, `unlink`, git's
-discarding verbs, a shell, `eval`, `xargs` or `source`, with no program that
-is an expansion (`$R a.txt`) and no `. script`, is allowed without a
-request; a payload it cannot decode is asked. (`mv`, `shred` and `truncate`
-are asked about too, but the engine judges them only inside opaque text or
-a variable's line, not as discards of their own.)
+discarding verbs, a shell, `eval`, `xargs` or `source`, none of the
+environment programs (`env`, `printenv`, `set`, `export`, `readonly`,
+`declare`, `typeset`, `local`, `ps`), no `environ`, no credential-named
+expansion and no `os.environ`/`process.env`/`%ENV`, with no program that is
+an expansion (`$R a.txt`) and no `. script`, is allowed without a request;
+a payload it cannot decode is asked. (`mv`, `shred` and `truncate` are asked
+about too, but the engine judges them only inside opaque text or a variable's
+line, not as discards of their own.)
 
 What is refused, and only for an agent session that carries a policy:
 
@@ -1412,11 +1415,31 @@ program word, and a payload attached to `env -S`/`su -c`/`script -c`
 
 Reasons name the rule and a path count, never a path's contents.
 
-A denial exits 2 with the reason on stderr and the command does not run. When
-the engine cannot be reached, or answers anything but 2xx, the hook fails
-closed for any command it would have asked about (`vogt policy check
+A denial exits 2 with the reason on stderr and the command does not run. The
+environment guard (WI-4046, WI-4061) rides the same check: it refuses a
+command whose purpose is to print the session's environment or a
+credential-named variable — bare `env`/`printenv`/`set`/`export -p`/
+`declare -p`, a read of `/proc/<pid>/environ`, `ps auxe`, a credential
+expansion printed or piped to a display program (`| cat`, `| tee`, `| xxd`,
+`> /dev/tty`), a here-string a reader prints, and an inline Python, Node,
+Perl, Ruby, awk or jq program that reads the environment. The credential
+name is matched on whole words, so `$MONKEY`, `$KEY_COUNT` and `$SORT_KEYS`
+pass. It refuses even a session with no project policy, because the
+environment holds the session's own tokens.
+
+When the engine cannot be reached, or answers anything but 2xx, the hook
+fails closed for any command it would have asked about (`vogt policy check
 unavailable; refusing a command the policy may cover`), a read such as `git
-status` included, and allows everything else. The same script is the
+status` included, and allows everything else. One narrow exception (WI-4061)
+keeps an engine outage from blocking ordinary shell setup: when the only
+reason the hook asked is an ambiguous environment word, an offline allowlist
+lets a harmless form through — `set -euo pipefail`, `set -- a b`,
+`export NAME=value`, `local x=1`, `declare -A name`, `ps aux`, and
+`env NAME=value cmd` that runs a program. A real dump (`env`, `printenv`,
+bare `set`, `export -p`, `declare -p`, `ps auxe`), a credential expansion,
+another language reading the environment, and any git/gh/destructive command
+stay refused. The allowlist is deliberately strict; a form it does not
+recognise keeps the fail-closed refusal. The same script is the
 Codex session's managed `SessionStart` and `PreToolUse` hook, run as
 `vogt-policy-hook codex`: that argument translates Codex's `tool_input` — a
 `command`, a `cmd`, or a `shell` argv array — into the engine's request before

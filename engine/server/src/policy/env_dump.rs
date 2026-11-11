@@ -19,15 +19,25 @@
 //!   and `declare -p` of a credential-named variable;
 //! - any read of `/proc/<pid>/environ`, and `ps` with BSD `e` (`ps auxe`),
 //!   which prints every process's environment;
-//! - `echo` of a credential-named variable (`echo $VOGT_HTTP_TOKEN`) or of an
-//!   indirect expansion (`echo ${!name}`); `echo $AGENT_AUTH_MODE` is
-//!   allowed;
-//! - a one-liner that prints the whole of `os.environ` or `process.env`.
+//! - `echo`/`printf` of a credential-named variable (`echo
+//!   $VOGT_HTTP_TOKEN`) or of an indirect expansion (`echo ${!name}`), whether
+//!   it reaches the terminal directly, through a display program (`| cat`,
+//!   `| tee`, `| xxd`, `| grep`) or through a device file (`> /dev/stdout`,
+//!   `> /dev/tty`); `echo $AGENT_AUTH_MODE` is allowed, and so is a pipe into
+//!   a consumer (`docker login --password-stdin`, `wc`, a checksum) or a
+//!   redirect to a regular file;
+//! - a here-string of a credential that a reader would print (`cat <<<`);
+//! - an inline Python, Node, Perl, Ruby, awk or jq program that reads the
+//!   environment (`os.environ`, `os.getenv("TOKEN")`, `process.env`, `%ENV`,
+//!   `ENV`, `ENVIRON`, `jq env`), and the whole-object one-liners;
+//! - a credential word is matched as a whole underscore-separated word, so
+//!   `$MONKEY`, `$KEY_COUNT` and `$SORT_KEYS` are ordinary names.
 //!
 //! It reads the same simple commands the rest of the policy reads, including
-//! substitutions, `sh -c` / `su -c` payloads, `eval` and `xargs`. A line the
-//! lexer cannot read with certainty that names one of these programs is
-//! refused (fail closed).
+//! substitutions, `sh -c` / `su -c` payloads, `eval`, `xargs` and the wrappers
+//! the policy steps over (`nice`, `timeout`, `time`, `stdbuf`, `busybox`,
+//! `sudo`, …). A line the lexer cannot read with certainty that names one of
+//! these programs is refused (fail closed).
 //!
 //! Like the rest of this module, it is a guardrail, not a boundary: a session
 //! can write a script file and run it, spell the program as a variable, or
@@ -53,10 +63,35 @@ const HINT: &str = "never print environment variables or tokens; name the variab
 /// unreadable.
 const MAX_DEPTH: usize = 8;
 
-/// A variable name that says it holds a credential.
-static SENSITIVE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)TOKEN|SECRET|KEY|PASSWORD|PASSWD|CREDENTIAL|PRIVATE").expect("static regex")
-});
+/// Words that, as a whole underscore-separated word of a variable name, say
+/// the name holds a credential. `KEY` is matched only at the end
+/// (`AWS_ACCESS_KEY`), so `KEY_COUNT` and `SORT_KEYS` are not keys; the
+/// plurals catch `ENGINE_EXTRA_TOKENS_JSON`.
+const SENSITIVE_WORDS: &[&str] = &[
+    "TOKEN",
+    "TOKENS",
+    "SECRET",
+    "SECRETS",
+    "PASSWORD",
+    "PASSWORDS",
+    "PASSWD",
+    "CREDENTIAL",
+    "CREDENTIALS",
+    "PRIVATE",
+];
+
+/// Whether `name` says it holds a credential. The match is on whole words,
+/// not a substring: `MONKEY`, `KEY_COUNT` and `SORT_KEYS` are ordinary names.
+fn credential_name(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    let word = |w: &str| {
+        upper == w || upper.ends_with(&format!("_{w}")) || upper.contains(&format!("_{w}_"))
+    };
+    upper == "KEY"
+        || upper.ends_with("_KEY")
+        || upper.contains("_KEY_")
+        || SENSITIVE_WORDS.iter().any(|w| word(w))
+}
 
 /// An expansion of a named variable: `$NAME`, `${NAME…}`, or an indirect
 /// `${!NAME}`.
@@ -132,22 +167,18 @@ fn line(command: &str, depth: usize) -> Option<&'static str> {
 
 /// The first rule `pieces` break. `captured` is true inside a substitution,
 /// whose output feeds the line rather than the terminal. `text` is the line
-/// the pieces came from, read to see whether a command's output is piped.
+/// the pieces came from, read to see where each command's output goes.
 fn pieces(pieces_: &[Piece], text: &str, depth: usize, captured: bool) -> Option<&'static str> {
-    let mut cursor = 0;
-    for piece in pieces_ {
+    let after = after_text(pieces_, text);
+    let mut quiet: Vec<Option<bool>> = vec![None; pieces_.len()];
+    for (index, piece) in pieces_.iter().enumerate() {
         let found = match piece {
-            Piece::Cmd(simple) => {
-                let piped = match text[cursor..].find(simple.as_str()) {
-                    Some(at) => {
-                        cursor += at + simple.len();
-                        let after = text[cursor..].trim_start();
-                        after.starts_with('|') && !after.starts_with("||")
-                    }
-                    None => false,
-                };
-                simple_command(simple, depth, false, captured || piped)
-            }
+            Piece::Cmd(simple) => simple_command(
+                simple,
+                depth,
+                false,
+                captured || pipeline_is_quiet(index, pieces_, &after, &mut quiet),
+            ),
             Piece::Sub(inner) => pieces(inner, &flatten(inner).join("\n"), depth, true),
             Piece::Open | Piece::Close => None,
         };
@@ -156,6 +187,76 @@ fn pieces(pieces_: &[Piece], text: &str, depth: usize, captured: bool) -> Option
         }
     }
     None
+}
+
+/// The text after each command in `text`, read in order. A command's output
+/// is piped when this starts with a single `|` (`||` is not a pipe).
+fn after_text<'a>(pieces_: &[Piece], text: &'a str) -> Vec<Option<&'a str>> {
+    let mut after = vec![None; pieces_.len()];
+    let mut cursor = 0;
+    for (index, piece) in pieces_.iter().enumerate() {
+        if let Piece::Cmd(simple) = piece {
+            if let Some(at) = text[cursor..].find(simple.as_str()) {
+                cursor += at + simple.len();
+                after[index] = Some(text[cursor..].trim_start());
+            }
+        }
+    }
+    after
+}
+
+/// Whether a command's output never reaches the terminal: it is captured by
+/// a substitution, or the pipeline it feeds ends in a program that consumes
+/// the bytes (a login, a checksum, a line count) or writes them to a regular
+/// file. A pipe to `cat`, `tee`, `xxd` or `grep` still shows the input.
+fn pipeline_is_quiet(
+    index: usize,
+    pieces_: &[Piece],
+    after: &[Option<&str>],
+    memo: &mut [Option<bool>],
+) -> bool {
+    if let Some(known) = memo[index] {
+        return known;
+    }
+    let quiet = match (after[index], pieces_.get(index + 1)) {
+        (Some(rest), Some(Piece::Cmd(next)))
+            if rest.starts_with('|') && !rest.starts_with("||") =>
+        {
+            quiet_sink(next) || pipeline_is_quiet(index + 1, pieces_, after, memo)
+        }
+        _ => false,
+    };
+    memo[index] = Some(quiet);
+    quiet
+}
+
+/// Whether `simple`, as the last stage of a pipe, does not show its input on
+/// the terminal.
+fn quiet_sink(simple: &str) -> bool {
+    let raw = shell_words(simple);
+    let (words, _, _) = command_words_assigning(simple);
+    let program = words.first().map(|w| base(w)).unwrap_or_default();
+    let args = words.get(1..).unwrap_or(&[]);
+    if matches!(program, "docker" | "podman" | "nerdctl")
+        && args.iter().any(|w| w == "login")
+        && args.iter().any(|w| w == "--password-stdin")
+    {
+        return true;
+    }
+    if matches!(
+        program,
+        "wc" | "cksum" | "md5sum" | "sha1sum" | "sha256sum" | "sha512sum"
+    ) {
+        return true;
+    }
+    if program == "grep"
+        && args
+            .iter()
+            .any(|w| matches!(w.as_str(), "-q" | "--quiet" | "--silent" | "-c" | "--count"))
+    {
+        return true;
+    }
+    redirects_to_file(&raw) && !redirects_to_terminal(&raw)
 }
 
 /// The rule one simple command breaks. `stdin_args` is true when the
@@ -187,6 +288,19 @@ fn simple_command(
         .filter(|w| !w.starts_with('-') && !w.starts_with('+') && !redirect(w))
         .collect();
     let options: Vec<&String> = args.iter().filter(|w| w.starts_with('-')).collect();
+    // A here-string of a credential is printed by whatever reads it, unless
+    // that reader consumes the bytes or writes them to a file.
+    if simple.contains("<<<")
+        && credential_expansion(simple).is_some()
+        && !quiet
+        && !quiet_sink(simple)
+    {
+        return Some("a here-string of a credential-named variable");
+    }
+    // Another language reading the environment inside its own program.
+    if let Some(reason) = interpreter(program, args) {
+        return Some(reason);
+    }
     match program {
         "printenv" => {
             if stdin_args {
@@ -200,7 +314,7 @@ fn simple_command(
             }
             operands
                 .iter()
-                .any(|w| SENSITIVE.is_match(w))
+                .any(|w| credential_name(w))
                 .then_some("`printenv` of a credential-named variable")
         }
         "set" => {
@@ -225,7 +339,7 @@ fn simple_command(
             (prints
                 && operands
                     .iter()
-                    .any(|w| SENSITIVE.is_match(w) || w.contains(['$', '`'])))
+                    .any(|w| credential_name(w) || w.contains(['$', '`'])))
             .then_some("`declare -p` of a credential-named variable")
         }
         "ps" => args
@@ -235,16 +349,12 @@ fn simple_command(
             })
             .then_some("`ps` with BSD `e`, which prints every process's environment"),
         "echo" | "print" | "printf" => {
-            let to_file = raw.iter().enumerate().any(|(i, w)| {
-                let r = w.trim_start_matches('1');
-                (r == ">" || r == ">>") && raw.get(i + 1).is_some_and(|t| !t.starts_with('&'))
-                    || (r.starts_with('>') && r.len() > 1 && !r[1..].starts_with(['&', '>']))
-                    || (r.starts_with(">>") && r.len() > 2 && !r[2..].starts_with('&'))
-            });
-            if quiet || to_file {
+            let to_file = redirects_to_file(&raw);
+            // A file is quiet unless it is the terminal in disguise.
+            if quiet || (to_file && !redirects_to_terminal(&raw)) {
                 None
             } else {
-                echo(simple)
+                credential_expansion(simple)
             }
         }
         "bash" | "sh" | "zsh" | "dash" | "ksh" => match shell_payload(&words) {
@@ -265,10 +375,109 @@ fn simple_command(
     }
 }
 
+/// A Python one-liner that prints the environment or reads a credential.
+static PY_ENVIRON_WHOLE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?x)
+        (print|pprint|dumps|dict|list|sorted|repr|str)\s*\(\s*(os\.)?environ\s*\)
+        | (os\.)?environ\.(items|values|copy)\s*\(
+        ",
+    )
+    .expect("static regex")
+});
+
+/// A Python read of one named environment variable.
+static PY_ENVIRON_NAME: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"(?x)
+        (?:os\.)?environ\.get\s*\(\s*['"]?([A-Za-z_][A-Za-z0-9_]*)
+        | (?:os\.)?getenv\s*\(\s*['"]?([A-Za-z_][A-Za-z0-9_]*)
+        | (?:os\.)?environ\s*\[\s*['"]?([A-Za-z_][A-Za-z0-9_]*)
+        "#,
+    )
+    .expect("static regex")
+});
+
+/// A Node read of one named environment variable.
+static NODE_ENVIRON_NAME: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"(?x)
+        process\.env\.([A-Za-z_][A-Za-z0-9_]*)
+        | process\.env\s*\[\s*['"]?([A-Za-z_][A-Za-z0-9_]*)
+        "#,
+    )
+    .expect("static regex")
+});
+
+/// A Node whole-object read: `process.env` not narrowed by a property.
+static NODE_ENVIRON_WHOLE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"process\.env\s*(?:$|[;,\)\]}\s])").expect("static regex"));
+
+/// A Perl read of one named environment variable.
+static PERL_ENVIRON_NAME: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"\$ENV\s*\{\s*['"]?([A-Za-z_][A-Za-z0-9_]*)"#).expect("static regex")
+});
+
+fn any_credential(captures: regex::Captures<'_>) -> bool {
+    captures
+        .iter()
+        .skip(1)
+        .flatten()
+        .any(|m| credential_name(m.as_str()))
+}
+
+/// A read of the environment inside another language's inline program. The
+/// shell does not expand here; the program itself looks the environment up.
+fn interpreter(program: &str, args: &[String]) -> Option<&'static str> {
+    let script = args.join(" ");
+    match program {
+        "python" | "python2" | "python3" => {
+            if PY_ENVIRON_WHOLE.is_match(&script)
+                || PY_ENVIRON_NAME.captures_iter(&script).any(any_credential)
+            {
+                Some("a Python program that reads the environment")
+            } else {
+                None
+            }
+        }
+        "node" | "nodejs" => {
+            if NODE_ENVIRON_WHOLE.is_match(&script)
+                || NODE_ENVIRON_NAME.captures_iter(&script).any(any_credential)
+            {
+                Some("a Node program that reads the environment")
+            } else {
+                None
+            }
+        }
+        "perl" => {
+            if script.contains("%ENV")
+                || PERL_ENVIRON_NAME.captures_iter(&script).any(any_credential)
+            {
+                Some("a Perl program that reads the environment")
+            } else {
+                None
+            }
+        }
+        "ruby" | "irb" => script
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .any(|w| w == "ENV")
+            .then_some("a Ruby program that reads the environment"),
+        "awk" | "gawk" | "mawk" | "nawk" => script
+            .contains("ENVIRON")
+            .then_some("an awk program that reads `ENVIRON`"),
+        "jq" => args
+            .iter()
+            .any(|a| a.trim() == "env" || a.contains("$ENV"))
+            .then_some("a jq program that reads the environment"),
+        _ => None,
+    }
+}
+
 /// Whether `words` holds an `env` that runs no program and so prints the
 /// environment: no `-i`/`--ignore-environment`/`-`, and only options and
 /// assignments after it. Only an `env` in program position counts: leading
-/// assignments and `sudo`/`command`/`exec` wrappers (with their options) may
+/// assignments and the wrappers the policy steps over (`sudo`, `nice`,
+/// `timeout`, `stdbuf`, `busybox`, …), with their options and values, may
 /// come first.
 fn bare_env(words: &[String]) -> bool {
     let mut i = 0;
@@ -278,14 +487,41 @@ fn bare_env(words: &[String]) -> bool {
             i += 1;
             continue;
         }
-        if matches!(
-            word,
-            "sudo" | "doas" | "command" | "exec" | "nohup" | "builtin"
-        ) {
-            i += 1;
-            continue;
+        match word {
+            "sudo" | "doas" | "command" | "exec" | "nohup" | "builtin" | "setsid" | "chronic"
+            | "busybox" | "time" => {
+                i += 1;
+            }
+            "nice" | "ionice" | "stdbuf" => {
+                i += 1;
+                while words.get(i).is_some_and(|w| w.starts_with('-')) {
+                    let value = matches!(
+                        words[i].as_str(),
+                        "-n" | "--adjustment" | "-c" | "--class" | "-p" | "-t" | "-i" | "-o" | "-e"
+                    );
+                    i += 1;
+                    if value && words.get(i).is_some_and(|w| !w.starts_with('-')) {
+                        i += 1;
+                    }
+                }
+            }
+            "timeout" => {
+                i += 1;
+                while words.get(i).is_some_and(|w| w.starts_with('-')) {
+                    let value =
+                        matches!(words[i].as_str(), "-s" | "--signal" | "-k" | "--kill-after");
+                    i += 1;
+                    if value {
+                        i += 1;
+                    }
+                }
+                // The duration (`timeout 5 env`).
+                if words.get(i).is_some_and(|w| !w.starts_with('-')) {
+                    i += 1;
+                }
+            }
+            _ => break,
         }
-        break;
     }
     if words.get(i).map(|w| base(w)) != Some("env") {
         return false;
@@ -350,13 +586,51 @@ fn redirect(word: &str) -> bool {
         .starts_with(['<', '>', '&'])
 }
 
-/// An `echo` that prints a credential-named variable or an indirect
-/// expansion.
-fn echo(simple: &str) -> Option<&'static str> {
+/// Whether `words` redirect `>`/`>>` to a file (rather than duplicating a
+/// descriptor with `>&2`).
+fn redirects_to_file(words: &[String]) -> bool {
+    words.iter().enumerate().any(|(i, w)| {
+        let r = w.trim_start_matches('1');
+        (r == ">" || r == ">>") && words.get(i + 1).is_some_and(|t| !t.starts_with('&'))
+            || (r.starts_with('>') && r.len() > 1 && !r[1..].starts_with(['&', '>']))
+            || (r.starts_with(">>") && r.len() > 2 && !r[2..].starts_with('&'))
+    })
+}
+
+/// Whether a redirect target is the terminal (or a descriptor naming it).
+fn terminal_target(target: &str) -> bool {
+    let target = target.trim_matches(['\'', '"']);
+    matches!(
+        target,
+        "/dev/stdout" | "/dev/stderr" | "/dev/tty" | "/dev/console"
+    ) || target.starts_with("/dev/fd/1")
+        || target.starts_with("/dev/fd/2")
+        || target.starts_with("/proc/self/fd/1")
+        || target.starts_with("/proc/self/fd/2")
+}
+
+/// Whether `words` redirect to the terminal: `> /dev/stdout`, `>/dev/tty`,
+/// `> /proc/self/fd/1`. Such a redirect is not the quiet file the guard
+/// otherwise allows.
+fn redirects_to_terminal(words: &[String]) -> bool {
+    words.iter().enumerate().any(|(i, w)| {
+        let r = w.trim_start_matches(|c: char| c.is_ascii_digit());
+        let attached = r.trim_start_matches(['<', '>', '&']);
+        if attached.is_empty() {
+            words.get(i + 1).is_some_and(|t| terminal_target(t))
+        } else {
+            terminal_target(attached)
+        }
+    })
+}
+
+/// A credential-named expansion, or an indirect `${!name}` expansion, on the
+/// line: what `echo`, `printf` or a here-string would print.
+fn credential_expansion(simple: &str) -> Option<&'static str> {
     EXPANSION.captures_iter(simple).find_map(|caps| {
         if &caps[1] == "!" {
             Some("`echo` of an indirect expansion")
-        } else if SENSITIVE.is_match(&caps[2]) {
+        } else if credential_name(&caps[2]) {
             Some("`echo` of a credential-named variable")
         } else {
             None
@@ -434,6 +708,77 @@ mod tests {
             let reason = check(command).unwrap_or_else(|| panic!("allowed: {command}"));
             assert!(reason.contains("environment guard"), "{command}: {reason}");
             assert!(reason.contains("test -n"), "{command}: {reason}");
+        }
+    }
+
+    /// WI-4061: the bypasses a delta review of WI-4046 found. A pipe or a
+    /// device redirect still reaches the terminal, a here-string is printed
+    /// by its reader, and an interpreter reads the environment itself.
+    #[test]
+    fn wi_4061_refuses_the_reviewed_bypasses() {
+        for command in [
+            // A display program downstream still shows the token.
+            "echo \"$VOGT_HTTP_TOKEN\" | cat",
+            "echo \"$VOGT_HTTP_TOKEN\" | tee /tmp/x",
+            "echo \"$VOGT_HTTP_TOKEN\" | xxd",
+            "echo \"$VOGT_HTTP_TOKEN\" | grep -i token",
+            "printf '%s\\n' \"$VOGT_HTTP_TOKEN\" | base64",
+            "env | cat",
+            "printenv GITHUB_TOKEN > /tmp/x",
+            // A redirect to a device that is the terminal.
+            "echo \"$VOGT_HTTP_TOKEN\" > /dev/stdout",
+            "echo \"$VOGT_HTTP_TOKEN\" >/dev/tty",
+            "echo \"$VOGT_HTTP_TOKEN\" > /proc/self/fd/1",
+            "echo \"$VOGT_HTTP_TOKEN\" > /dev/console",
+            // A here-string is printed by a reader.
+            "cat <<< \"$VOGT_HTTP_TOKEN\"",
+            "base64 <<< \"$VOGT_HTTP_TOKEN\"",
+            // Another language reads the environment itself.
+            "awk 'BEGIN{for (k in ENVIRON) print k, ENVIRON[k]}'",
+            "gawk 'BEGIN{print ENVIRON[\"VOGT_HTTP_TOKEN\"]}'",
+            "perl -e 'print $ENV{VOGT_HTTP_TOKEN}'",
+            "ruby -e 'puts ENV.to_h'",
+            "node -p process.env",
+            "node -e 'console.log(process.env.VOGT_HTTP_TOKEN)'",
+            "jq -n env",
+            "jq -n '$ENV'",
+            // More Python forms.
+            "python3 -c 'from os import environ; print(dict(environ))'",
+            "python3 -c 'import os; print(os.environ[\"VOGT_HTTP_TOKEN\"])'",
+            "python3 -c 'import os; print(os.getenv(\"VOGT_HTTP_TOKEN\"))'",
+            // Bare `env` behind a wrapper.
+            "nice env",
+            "timeout 5 env",
+            "time env",
+            "stdbuf -oL env",
+            "busybox env",
+        ] {
+            let reason = check(command).unwrap_or_else(|| panic!("allowed: {command}"));
+            assert!(reason.contains("environment guard"), "{command}: {reason}");
+            assert!(reason.contains("test -n"), "{command}: {reason}");
+        }
+    }
+
+    /// WI-4061: a credential word is matched as a whole name, and ordinary
+    /// commands must not be refused.
+    #[test]
+    fn wi_4061_allows_names_that_merely_contain_a_credential_word() {
+        for command in [
+            "echo $MONKEY",
+            "printenv MONKEY",
+            "printenv KEY_COUNT",
+            "printenv SORT_KEYS",
+            "echo $KEY_COUNT",
+            "echo $SORT_KEYS",
+            "env VAR=1 cargo test",
+            "git log --grep=environment",
+            "cargo test environment",
+            "echo $PATH",
+            "grep -r env src/",
+            "echo \"$TOKEN\" | wc -c",
+            "echo \"$TOKEN\" > /dev/null",
+        ] {
+            assert_eq!(check(command), None, "{command}");
         }
     }
 
