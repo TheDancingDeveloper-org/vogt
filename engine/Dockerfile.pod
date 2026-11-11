@@ -88,6 +88,24 @@ RUN apt-get update \
        openssh-client sudo unzip zip xz-utils zstd \
     && find /var/lib/apt/lists -type f -delete
 
+# Infisical CLI. The agent-auth helper (`engine/deploy/agent-auth.sh`) runs
+# `infisical` by name, and the engine calls that helper for on-demand provider
+# keys (WI-3886). Without it the broker fails with "command not found" and a pod
+# Codex session gets no key. `gnupg` is installed here because this base does
+# not carry it. Every stage that inherits this base must keep the binary.
+RUN install -m 0755 -d /usr/share/keyrings \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends gnupg \
+    && curl -1sLf https://artifacts-cli.infisical.com/infisical.gpg \
+       | gpg --dearmor -o /usr/share/keyrings/infisical-archive-keyring.gpg \
+    && chmod 0644 /usr/share/keyrings/infisical-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/infisical-archive-keyring.gpg] https://artifacts-cli.infisical.com/deb stable main" \
+       > /etc/apt/sources.list.d/infisical.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends infisical \
+    && rm -rf /var/lib/apt/lists/* \
+    && command -v infisical
+
 # Session pods reach estate services through Caddy's internal PKI. This public
 # root augments, rather than replaces, the system trust store.
 COPY deploy/pod/ca/caddy-local-root.crt /usr/local/share/ca-certificates/caddy-local-root.crt

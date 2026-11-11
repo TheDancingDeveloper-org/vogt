@@ -672,6 +672,11 @@ RUN chmod +x \
 # skips a non-executable file, so the check before chmod resolved the venv copy.
 RUN test "$(command -v vogt-mcp)" = /usr/local/bin/vogt-mcp
 
+# The agent-auth helper runs `infisical` by name for every brokered secret,
+# including on-demand provider keys (WI-3886). A base that drops the CLI would
+# otherwise build green and fail every pod Codex launch at runtime.
+RUN command -v infisical
+
 # One port. vogt-core listens on loopback inside this namespace and is not
 # exposed here, because there is nothing to expose it to: the engine is the
 # only way in.
