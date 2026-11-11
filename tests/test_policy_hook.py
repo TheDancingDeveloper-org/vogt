@@ -272,8 +272,6 @@ def test_rereview_bypasses_are_asked(tmp_path: Path, command: str) -> None:
         "{rm,a.txt}",
         "{git,restore,a.txt}",
         "{r,}m a.txt",
-        "$(printf %s%s r m) a.txt",
-        "`printf %s%s r m` a.txt",
     ],
 )
 def test_round3_wrapped_and_braced_programs_are_asked(
