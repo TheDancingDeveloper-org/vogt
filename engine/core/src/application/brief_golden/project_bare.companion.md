@@ -6,6 +6,8 @@ This session is `ses_brief01` and holds a token bound to its own actor, so anyth
 
 Vogt is reachable over MCP at the URL in `VOGT_URL`, with the token in `VOGT_HTTP_TOKEN`. The token may read, and may write work items and comments — nothing else. Every write needs a reason you have actually got: it is stored, and it is what somebody reads later when they ask why this changed.
 
+Never print environment variables or tokens: no `env`, `printenv`, `set`, `export -p` or `/proc/*/environ`, and no `echo` of a token. Name the variable you need and check it with `test -n "$NAME"`. What a command prints lands in the transcript.
+
 ## When you need a person
 
 If you cannot go on without a person — a decision, a credential, an action only they can take — call `session_report_blocked` with `blocker` (what you need, in a sentence) and `items` (the concrete things to do), then stop and wait. It shows on this session, raises an Inbox entry and a push, and tells anyone driving you not to re-prompt. When you can go on again, call `session_report_unblocked`. Both need a `reason` and, from inside this session, no `id`.

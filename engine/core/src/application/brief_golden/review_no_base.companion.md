@@ -6,6 +6,8 @@ This session is `ses_brief01` and holds a token bound to its own actor, so anyth
 
 Vogt is reachable over MCP at the URL in `VOGT_URL`, with the token in `VOGT_HTTP_TOKEN`. The token may read, and may write work items and comments — nothing else. Every write needs a reason you have actually got: it is stored, and it is what somebody reads later when they ask why this changed.
 
+Never print environment variables or tokens: no `env`, `printenv`, `set`, `export -p` or `/proc/*/environ`, and no `echo` of a token. Name the variable you need and check it with `test -n "$NAME"`. What a command prints lands in the transcript.
+
 This session is bound to WI-2 (`VOGT_WORK_ITEM`). If you move on to a different item, rebind with `session_bind_work` so the items say who is on them; binding never changes an item's state.
 
 ## When you need a person
