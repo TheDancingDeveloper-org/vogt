@@ -3814,6 +3814,51 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// WI-3985 field case: the session's own worktree is dirty (so its
+    /// baseline is not empty) and the worker clones another repo into a new
+    /// directory outside its cwd. Staging and committing its edits in that
+    /// clone, in the forms workers type, is allowed; a write to a registered
+    /// project checkout is still refused, and the session's own baseline is
+    /// still protected.
+    #[test]
+    fn a_dirty_session_may_commit_in_a_clone_it_made_elsewhere() {
+        let (main, wt) = checkout_and_worktree("wi3985-dirty");
+        std::fs::write(wt.join("f"), "dirty").unwrap();
+        std::fs::write(wt.join("untracked"), "x").unwrap();
+        let mut p = workspace(&["f", "untracked"], Some("worktree"), &wt);
+        p.protected_checkouts = vec![main.display().to_string()];
+        let clone = repo("wi3985-clone");
+        std::fs::write(clone.join("f"), "edit").unwrap();
+        std::fs::write(clone.join("b"), "new").unwrap();
+        let c = clone.display();
+        for command in [
+            format!("cd {c} && git add f b"),
+            format!("cd {c} && git add -N b"),
+            format!("git -C {c} add f b"),
+            format!("(cd {c} && git add f b)"),
+            format!("cd {c} && git commit -m x -- f b"),
+            format!("git -C {c} commit -m x"),
+            format!("bash -lc 'cd {c} && git commit -m x -- f b'"),
+        ] {
+            assert_eq!(check(&p, &command, &wt), None, "{command}");
+        }
+        // Codex's `workdir` puts the call in the clone itself.
+        for command in ["git add f b", "git commit -m x -- f b", "git add -A"] {
+            assert_eq!(check(&p, command, &clone), None, "{command}");
+        }
+        // Still refused: a write to the protected project checkout ...
+        let m = main.display();
+        let reason = check(&p, &format!("git -C {m} commit --allow-empty -m x"), &wt)
+            .expect("protected checkout write allowed");
+        assert!(reason.contains("protected checkout"), "{reason}");
+        // ... and discarding the session's own pre-existing changes.
+        let reason = check(&p, "git checkout -- f", &wt).expect("baseline discard allowed");
+        assert!(reason.contains("discard guard"), "{reason}");
+        std::fs::remove_dir_all(&clone).ok();
+        std::fs::remove_dir_all(&wt).ok();
+        std::fs::remove_dir_all(&main).ok();
+    }
+
     /// The lexer never panics, and fails closed on what it cannot balance.
     #[test]
     fn the_lexer_is_bounded() {
