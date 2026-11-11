@@ -4540,6 +4540,28 @@ def _ranking(ctx: AppContext, ref: str) -> WhyResult | None:
         return None
 
 
+def _full_tools(params: StartSessionParams) -> bool:
+    """Whether the session's MCP client lists the full vogt tool set.
+
+    The profile trims a listing, not a grant, but the companion must describe
+    the list the session will actually see: the worker profile hides the
+    session-driving tools, and a worker brief that promised them is what
+    WI-4071 was filed for. An oversight session keeps the full text whatever
+    set it started on, because driving peers is its job.
+
+    A start that names no set gets the engine's own default, which is the
+    worker set for Codex (`McpSet::for_agent`), so that rule is mirrored here
+    rather than waiting for the engine to disagree with the brief.
+    """
+    if params.role == "oversight":
+        return True
+    if params.mcp_set == "worker":
+        return False
+    return not (
+        params.mcp_set is None and _resolved_template_tag(params.template) == "codex"
+    )
+
+
 def _resolve_subject(
     view: ReadView, params: StartSessionParams, session_id: str, ctx: AppContext
 ) -> _Subject:
@@ -4565,7 +4587,13 @@ def _resolve_subject(
             cwd=project.root_path,
             work_item=item,
             brief=(
-                review_brief_for_work_item(view, item, session_id, project=project)
+                review_brief_for_work_item(
+                    view,
+                    item,
+                    session_id,
+                    project=project,
+                    full_tools=_full_tools(params),
+                )
                 if params.review_of is not None
                 else brief_for_work_item(
                     view,
@@ -4574,6 +4602,7 @@ def _resolve_subject(
                     _ranking(ctx, item.ref),
                     project=project,
                     decision_author=_decision_author(ctx, view),
+                    full_tools=_full_tools(params),
                 )
             ),
             policy=project.agent_policy,
@@ -4587,7 +4616,13 @@ def _resolve_subject(
         project_slug=project.slug,
         cwd=project.root_path,
         work_item=None,
-        brief=brief_for_project(view, project.slug, session_id, project=project),
+        brief=brief_for_project(
+            view,
+            project.slug,
+            session_id,
+            project=project,
+            full_tools=_full_tools(params),
+        ),
         policy=project.agent_policy,
         mcp_extra=project.mcp_extra,
     )
