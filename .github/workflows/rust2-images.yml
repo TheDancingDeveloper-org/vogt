@@ -25,10 +25,11 @@ name: rust-2 dev images
 # was ever published here. The consequence to keep in mind: dev images move
 # when a batch is cut, not on every land.
 #
-# The registry login uses the estate's Forgejo package-write token, the same
-# `x-access-token` convention the other repositories' GitHub releases use for
-# repo.indexarr.net. It must be readable as `FORGEJO_CARGO_TOKEN` by this
-# repository (repository or organisation secret).
+# The registry login uses the estate's Forgejo package-write token, account
+# `sprooty`, read from the repository secret `FORGEJO_REGISTRY_TOKEN` (the
+# operator's org credential, Infisical cicd/prod). It is a container-registry
+# credential only. The cargo registry token stays in its own secret and is not
+# used here. `FORGEJO_CARGO_TOKEN` is retired from this workflow.
 
 on:
   push:
@@ -109,8 +110,8 @@ jobs:
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
         with:
           registry: repo.indexarr.net
-          username: x-access-token
-          password: ${{ secrets.FORGEJO_CARGO_TOKEN }}
+          username: sprooty
+          password: ${{ secrets.FORGEJO_REGISTRY_TOKEN }}
 
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
         with:
@@ -173,8 +174,8 @@ jobs:
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
         with:
           registry: repo.indexarr.net
-          username: x-access-token
-          password: ${{ secrets.FORGEJO_CARGO_TOKEN }}
+          username: sprooty
+          password: ${{ secrets.FORGEJO_REGISTRY_TOKEN }}
 
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
         with:
