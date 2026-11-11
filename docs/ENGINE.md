@@ -1333,29 +1333,67 @@ every path too (`echo … | base64 -d | bash`). A git subcommand that is not a
 plain word (`git restore${IFS}a.txt`, `git $SUB`), or that may be an alias
 (`git -c alias.r=restore r`, `--config-env`, `include.path`, `GIT_CONFIG_*`
 on the line, or a `git config` that sets an alias or include), is treated
-as a discard of every path and as a write, and so is a git call that runs a
-command of the caller's choosing: a config key that names one (`-c
-diff.external=…`, `core.fsmonitor`, `core.pager`, `pager.*`, `core.editor`,
-`sequence.editor`, `core.sshCommand`, `core.askpass`, `core.hooksPath`,
-`credential.helper`, `filter.*.smudge`/`clean`, `diff.*.textconv`,
-`merge.*.driver`, `difftool.*.cmd`, set with `-c`, `--config-env` or `git
-config`), `--exec-path=`, `grep -O`, `difftool -x`, `rebase -x`, `bisect run`,
-`submodule foreach`, or one of `GIT_EXTERNAL_DIFF`, `GIT_PAGER`, `PAGER`,
-`GIT_EDITOR`, `GIT_SEQUENCE_EDITOR`, `EDITOR`, `VISUAL`, `GIT_SSH`,
-`GIT_SSH_COMMAND`, `GIT_ASKPASS`, `SSH_ASKPASS`, `GIT_EXEC_PATH`, `LESSOPEN`
-assigned or exported on the line. A value that runs only `cat`, `less`/`more`
-with flags, `true`, `false` or `:` (or `ssh` with flags for an ssh setting,
-`/dev/null` for the hooks path) is read as harmless, so `GIT_PAGER=cat git
-log` and `GIT_EDITOR=true git commit --amend` pass; and a brace pattern in a
-pathspec is unreadable. With an empty baseline (a fresh clone) the discard
-guard does not apply at all.
+as a discard of every path and as a write, and so is a git call that may run
+a command of the caller's choosing or change what reaches the working tree.
+
+Git configuration is read against an allowlist, not a list of dangerous
+keys. A key set with `-c`, `--config-env` or `git config [set] <key> <value>`
+is allowed only when it is a literal word and one of: `advice.*`, `color.*`,
+`column.*`, `user.*`, `author.*`, `committer.*`, `status.*`, `log.*`,
+`blame.*`, `i18n.*`, `safe.directory`, `init.defaultBranch`,
+`core.quotepath`, `core.abbrev`, `core.commentChar`/`commentString`,
+`commit.gpgsign`/`verbose`/`status`/`cleanup`, `tag.gpgsign`/`sort`,
+`branch.sort`, `pull.rebase`/`ff`, `push.default`/`autoSetupRemote`/
+`followTags`, `fetch.prune`/`pruneTags`/`parallel`, `format.pretty`,
+`grep.lineNumber`/`column`/`patternType`/`extendedRegexp`/`fullName`, the
+diff display keys (`diff.noprefix`, `mnemonicPrefix`, `relative`, `renames`,
+`renameLimit`, `algorithm`, `colorMoved`, `colorMovedWS`, `context`,
+`interHunkContext`, `indentHeuristic`, `statGraphWidth`, `statNameWidth`,
+`submodule`, `ignoreSubmodules`, `suppressBlankEmpty`, `wsErrorHighlight`),
+`merge.conflictStyle`/`stat`/`log`, `rebase.autoSquash`/`stat`/
+`missingCommitsCheck`, `rerere.enabled`, `gc.auto`/`autoDetach`,
+`maintenance.auto`, `credential.username`, an `alias.*` (judged as an
+alias above), or a command setting (`core.pager`, `pager.*`, `core.editor`,
+`sequence.editor`, `core.sshCommand`, `core.hooksPath`, `credential.helper`)
+whose value is harmless. Every other key is refused with a non-empty
+baseline, as is a key that is not a literal word (`git -c $K=…`) and any
+command setting given through `--config-env` (its value is not on the line).
+A value is harmless when it is empty, `cat`, `true`, `false` or `:`,
+`less`/`more` with flag clusters that hold no `o`, `O` or `k` and no
+`--log-file`/`--lesskey-*` (`less -Oa.txt` writes a.txt), `ssh` with flags
+naming no command or `-F`/`-E` file for an ssh setting, `/dev/null` for
+the hooks path, and `store` or `cache` for a credential helper.
+
+Also refused: `--exec-path=`, `grep -O`/`--open-files-in-pager`, `difftool
+-x`/`--extcmd`, `rebase -x`/`--exec` (any unique prefix, so `--ex=`), `bisect
+run` and `submodule foreach`. The environment is read from the words of each
+simple command after quote removal, not from the text: an assignment before
+the program or after `env` (`NAME=v` or `NAME+=v`), and the operands of
+`export`, `declare`, `typeset`, `local`, `readonly` (including a nameref `-n`
+pointing at one of these names), `read`/`mapfile` and `printf -v`. Refused
+are any `GIT_CONFIG`/`GIT_CONFIG_*` variable, and `GIT_EXTERNAL_DIFF`,
+`GIT_PAGER`, `PAGER`, `GIT_EDITOR`, `GIT_SEQUENCE_EDITOR`, `EDITOR`, `VISUAL`,
+`GIT_SSH`, `GIT_SSH_COMMAND`, `GIT_ASKPASS`, `SSH_ASKPASS`,
+`GIT_PROXY_COMMAND`, `LESS`, `MORE` (with the pager-flag rule above),
+`GIT_EXEC_PATH`, `GIT_TEMPLATE_DIR`, `LESSOPEN`, `LESSCLOSE`, `LESSEDIT`,
+`LESSKEY*` (only empty) and `LESSHISTFILE` (only empty, `-` or
+`/dev/null`) given anything but a harmless value; and a declared name that is
+not a literal word (`export $X=…`). A name in a quoted argument or heredoc
+body (`git commit -m "mention EDITOR=vim"`) sets nothing and is allowed. A
+redirection (`>`, `>>`) to `.git/config`, `.git/info` or `.git/hooks/*`, or
+`tee`, `sed`, `truncate`, `dd of=`, or `cp`/`mv`/`install`/`ln`/`rsync` with
+one of them as the destination, is refused too. For the safe flags of
+`clean -n`/`--dry-run`, `read-tree -n`, `restore -S`/`--staged` and `rm
+--cached`, the last of an option and its `--no-` form wins, so `clean -fn
+--no-dry-run` deletes. A brace pattern in a pathspec is unreadable. With an
+empty baseline (a fresh clone) the discard guard does not apply at all.
 
 Known false positives with a non-empty baseline, accepted because the
 alternative is reading what the shell will expand: `$EDITOR f`, `${CARGO:-cargo}
 test`, `"$(command -v cargo)" test`, and `git restore src/{a,b}.rs` (a brace
-pathspec) are refused, and so are `GIT_EDITOR=vim git commit` and `git -c
-core.pager=delta log` (a command-running setting whose program is not on the
-harmless list). Run the literal program, or name the files one by one.
+pathspec) are refused, and so are `GIT_EDITOR=vim git commit`, `git -c
+core.pager=delta log` (a command setting whose program is not harmless),
+and `git -c <key>` for any key off the allowlist. Run the literal program, or name the files one by one.
 The hook forwards a variable or substitution after a wrapper (`timeout`,
 `nice`, `stdbuf`, `setsid`, `ionice`, `doas`, `chronic`, …) and a braced
 program word, and a payload attached to `env -S`/`su -c`/`script -c`
