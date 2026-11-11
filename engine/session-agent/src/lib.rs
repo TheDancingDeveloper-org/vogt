@@ -1250,7 +1250,12 @@ pub fn codex_args(args: &CodexArgs<'_>) -> Result<Vec<String>, String> {
         argv.extend(["-c".to_string(), format!("model_context_window={window}")]);
     }
     if let Some(cwd) = args.trust_cwd.map(str::trim).filter(|cwd| !cwd.is_empty()) {
-        let key = toml_basic_string(cwd);
+        // WI-4025: a trailing slash names the same directory but a different
+        // `projects` key to Codex, so trust would miss and the folder-trust
+        // screen would stay up. Strip it, keeping a bare root as `/`.
+        let trimmed = cwd.trim_end_matches('/');
+        let trimmed = if trimmed.is_empty() { cwd } else { trimmed };
+        let key = toml_basic_string(trimmed);
         argv.extend([
             "-c".to_string(),
             format!("projects={{{key}={{trust_level=\"trusted\"}}}}"),
@@ -2859,6 +2864,50 @@ mod tests {
         );
         config.cli = "nope".into();
         assert!(command_line(&config).is_err());
+    }
+
+    /// WI-4025: the pod's trust entry must name the directory Codex actually
+    /// runs in. A cwd with a trailing slash (what a clone-root session
+    /// resolves to) must trust the same key as the bare directory, or the
+    /// folder-trust screen appears and the session never runs.
+    #[test]
+    fn a_pod_codex_trusts_the_work_dir_with_or_without_a_trailing_slash() {
+        let trust_arg = |cwd: &str| {
+            let args = codex_args(&CodexArgs {
+                command_args: &[],
+                resume: None,
+                session_id: None,
+                model: None,
+                config_model: None,
+                effort: None,
+                permission_mode: None,
+                approval_policy: "never",
+                exec: false,
+                compact_limit: None,
+                provider: None,
+                providers: &[],
+                catalog: None,
+                trust_cwd: Some(cwd),
+                guidance: None,
+                charter: None,
+                mcp_servers: &[],
+                mcp_args: &[],
+                prompt: None,
+            })
+            .unwrap();
+            args.into_iter()
+                .find(|a| a.starts_with("projects="))
+                .unwrap_or_default()
+        };
+        assert_eq!(
+            trust_arg("/work"),
+            r#"projects={"/work"={trust_level="trusted"}}"#
+        );
+        assert_eq!(
+            trust_arg("/work/"),
+            r#"projects={"/work"={trust_level="trusted"}}"#,
+            "a trailing slash must not move the trust entry off /work"
+        );
     }
 
     /// WI-3864: a pod Codex gets the same posture flags as a host Codex. The

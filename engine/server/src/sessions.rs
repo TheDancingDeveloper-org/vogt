@@ -307,7 +307,14 @@ fn pod_work_dir(cwd: &str) -> Result<String> {
         )));
     }
     let work = std::path::Path::new(vogt_session_agent::DEFAULT_WORK_DIR).join(relative);
-    Ok(work.to_string_lossy().into_owned())
+    // WI-4025: `join` with an empty relative path leaves a trailing slash
+    // ("/work/"), which Codex's trust key does not match; a clone-root session
+    // runs in the bare work directory.
+    let work = work.to_string_lossy().into_owned();
+    Ok(match work.trim_end_matches('/') {
+        "" => work,
+        trimmed => trimmed.to_string(),
+    })
 }
 
 pub struct SessionRegistry {
