@@ -787,21 +787,21 @@ fits in context.
   `work.get` resolves it. The PWA's session rail reads its work-item chips
   this way, one request per render.
 - **Can I create here?** Each `project.list` entry carries `writable` and
-  `writable_reason`: whether a default `work.create` (no `local_only`) would
-  land there now — forge-linked, write-back policy permits `create`, a forge
+  `writable_reason`: whether a `work.create` with `upstream=true` would land
+  on the forge now — forge-linked, write-back policy permits `create`, a forge
   credential resolves, the repo URL parses — and, if not, whether it would
   refuse `project_not_linked` or `upstream_write_refused` and how to fix it.
-  A default `work.create` on a forge-linked project also opens the upstream
-  issue on the forge (a GitHub issue for a GitHub-linked project); pass
-  `local_only=true` to create a native item only, with nothing sent to the
-  forge. `local_only=true` creates a local record on any project.
+  A default `work.create` creates a native item (`WI-n`) on any project and
+  sends nothing to the forge; pass `upstream=true` to open the upstream issue
+  as well (a GitHub issue for a GitHub-linked project). `local_only=true` is
+  the same native path stated explicitly.
 - **Unlinked projects.** A project-scoped `work.list` on an unlinked project
   answers `items: []` with `link_state: "unlinked"`; when the project holds
   open native items, `detail` says how many, names a few refs, and that they
   are still reachable by ref. Native items (`WI-n`) on an unlinked project
   take comments, transitions (including to `done`) and field edits; only a
-  default `work.create` and label edits refuse `project_not_linked`, and that
-  refusal says so.
+  `work.create` with `upstream=true` and label edits refuse
+  `project_not_linked`, and that refusal says so.
 
 - **A project's agent policy.** `project.update` takes `agent_policy` and
   replaces the whole policy. Besides `forbidden_text`, `merge_deploys_prod`,

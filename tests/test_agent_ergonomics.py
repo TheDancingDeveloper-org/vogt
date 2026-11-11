@@ -407,7 +407,7 @@ def test_backlog_and_brief_summary_drop_the_embedded_item(
 # -- can I create here? -------------------------------------------------------
 
 
-def test_project_list_says_which_projects_accept_a_create(
+def test_project_list_says_which_projects_accept_an_upstream_create(
     instance: AppContext, tmp_path: Any
 ) -> None:
     (tmp_path / "a").mkdir()
@@ -430,9 +430,9 @@ def test_project_list_says_which_projects_accept_a_create(
     listed = {p.slug: p for p in list_projects(instance, ListProjectsParams()).projects}
     assert listed["local"].writable is False
     assert "project_not_linked" in listed["local"].writable_reason
-    assert "local_only" in listed["local"].writable_reason
+    assert "upstream" in listed["local"].writable_reason
     # Linked, but the default write-back policy (`none`) does not permit
-    # create — exactly what `work.create` would refuse with.
+    # create — exactly what `work.create` with `upstream=true` refuses with.
     assert listed["linked"].writable is False
     assert "upstream_write_refused" in listed["linked"].writable_reason
     assert "forge writeback" in listed["linked"].writable_reason
@@ -440,5 +440,12 @@ def test_project_list_says_which_projects_accept_a_create(
     with pytest.raises(NotLinked):
         create_work(
             instance,
-            CreateWorkParams(kind="feature", title="x", project="local", reason=WHY),
+            CreateWorkParams(
+                kind="feature", title="x", project="local", upstream=True, reason=WHY
+            ),
         )
+    native = create_work(
+        instance,
+        CreateWorkParams(kind="feature", title="y", project="local", reason=WHY),
+    )
+    assert native.item.ref.startswith("WI-"), "the default create is native"

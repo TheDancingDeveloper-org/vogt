@@ -196,7 +196,7 @@ def _linked_project(ctx: AppContext) -> Any:
 # -- acceptance 1: create writes through, keyed by the subject -------------
 
 
-def test_create_on_linked_opens_the_issue_and_keys_the_overlay(
+def test_an_upstream_create_opens_the_issue_and_keys_the_overlay(
     linked: AppContext, forge: RecordingForge
 ) -> None:
     create_label(linked, CreateLabelParams(name="bug-ish", reason=WHY))
@@ -209,6 +209,7 @@ def test_create_on_linked_opens_the_issue_and_keys_the_overlay(
             priority="p1",
             project="demo",
             labels=["bug-ish"],
+            upstream=True,
             reason=WHY,
         ),
     )
@@ -233,12 +234,51 @@ def test_create_on_linked_opens_the_issue_and_keys_the_overlay(
     assert ledger[0].subject_key == SUBJECT_1
 
 
+def test_a_default_create_on_a_linked_project_is_native(
+    linked: AppContext, forge: RecordingForge
+) -> None:
+    """WI-3987: naming a project without `upstream` must not open an issue.
+
+    The oversight path that files a tracking item names the project and nothing
+    else; before this it opened a GitHub issue as a side effect.
+    """
+    created = create_work(
+        linked,
+        CreateWorkParams(
+            kind="chore", title="Track the sweep", project="demo", reason=WHY
+        ),
+    )
+    assert created.item.ref.startswith("WI-"), (
+        f"a native ref, not an upstream subject key: {created.item.ref}"
+    )
+    assert created.item.origin == "created"
+    assert forge.mutations == [], "a default create sent nothing upstream"
+    assert list_write_backs(linked, WriteBackListParams()).actions == []
+
+
+def test_upstream_and_local_only_together_are_refused(linked: AppContext) -> None:
+    with pytest.raises(InvalidRequest, match="at most one of upstream or local_only"):
+        create_work(
+            linked,
+            CreateWorkParams(
+                kind="bug",
+                title="two-faced",
+                project="demo",
+                upstream=True,
+                local_only=True,
+                reason=WHY,
+            ),
+        )
+
+
 def test_the_mirror_joined_to_the_overlay_is_the_item(
     linked: AppContext, forge: RecordingForge
 ) -> None:
     create_work(
         linked,
-        CreateWorkParams(kind="bug", title="Mirrored", project="demo", reason=WHY),
+        CreateWorkParams(
+            kind="bug", title="Mirrored", project="demo", upstream=True, reason=WHY
+        ),
     )
     onboard(linked, OnboardParams(project="demo", reason=WHY))
 
@@ -262,7 +302,9 @@ def test_vogt_only_changes_produce_zero_provider_calls(
 ) -> None:
     create_work(
         linked,
-        CreateWorkParams(kind="bug", title="Quiet", project="demo", reason=WHY),
+        CreateWorkParams(
+            kind="bug", title="Quiet", project="demo", upstream=True, reason=WHY
+        ),
     )
     onboard(linked, OnboardParams(project="demo", reason=WHY))
     forge.requests.clear()
@@ -308,7 +350,9 @@ def test_a_failed_create_raises_and_commits_nothing(tmp_path: Path) -> None:
     with pytest.raises(UpstreamWriteFailed):
         create_work(
             ctx,
-            CreateWorkParams(kind="bug", title="Lost", project="demo", reason=WHY),
+            CreateWorkParams(
+                kind="bug", title="Lost", project="demo", upstream=True, reason=WHY
+            ),
         )
 
     with ctx.declared.read() as view:
@@ -336,7 +380,9 @@ def test_a_policy_refusal_is_loud_not_a_silent_local_half(
     with pytest.raises(UpstreamWriteRefused, match="none"):
         create_work(
             ctx,
-            CreateWorkParams(kind="bug", title="Refused", project="demo", reason=WHY),
+            CreateWorkParams(
+                kind="bug", title="Refused", project="demo", upstream=True, reason=WHY
+            ),
         )
     assert forge.mutations == [], "refused before anything was sent"
 
@@ -355,7 +401,10 @@ def test_a_failed_comment_and_close_raise_and_change_nothing(
     set_write_back(ctx, SetWriteBackParams(project="demo", policy="full", reason=WHY))
     link_project(ctx, ForgeLinkParams(project="demo", reason=WHY))
     create_work(
-        ctx, CreateWorkParams(kind="bug", title="Flaky", project="demo", reason=WHY)
+        ctx,
+        CreateWorkParams(
+            kind="bug", title="Flaky", project="demo", upstream=True, reason=WHY
+        ),
     )
     onboard(ctx, OnboardParams(project="demo", reason=WHY))
     forge.fail_mutations = True
@@ -374,13 +423,15 @@ def test_a_failed_comment_and_close_raise_and_change_nothing(
 # -- acceptance 4: the unlinked refusal ------------------------------------
 
 
-def test_create_on_an_unlinked_project_is_the_typed_refusal(
+def test_an_upstream_create_on_an_unlinked_project_is_the_typed_refusal(
     linked: AppContext,
 ) -> None:
     with pytest.raises(NotLinked) as refused:
         create_work(
             linked,
-            CreateWorkParams(kind="bug", title="Nope", project="folder", reason=WHY),
+            CreateWorkParams(
+                kind="bug", title="Nope", project="folder", upstream=True, reason=WHY
+            ),
         )
     message = str(refused.value)
     assert "forge link" in message and "publish" in message, (
@@ -388,7 +439,7 @@ def test_create_on_an_unlinked_project_is_the_typed_refusal(
     )
     # WI-879: and what still works, so an agent does not conclude its native
     # items cannot be commented on or closed.
-    assert "local_only: true" in message
+    assert "drop `upstream`" in message
     assert "comments, transitions" in message
 
 
@@ -456,11 +507,16 @@ def test_board_and_backlog_count_each_upstream_issue_once(
     linked: AppContext, forge: RecordingForge
 ) -> None:
     create_work(
-        linked, CreateWorkParams(kind="bug", title="First", project="demo", reason=WHY)
+        linked,
+        CreateWorkParams(
+            kind="bug", title="First", project="demo", upstream=True, reason=WHY
+        ),
     )
     create_work(
         linked,
-        CreateWorkParams(kind="feature", title="Second", project="demo", reason=WHY),
+        CreateWorkParams(
+            kind="feature", title="Second", project="demo", upstream=True, reason=WHY
+        ),
     )
     # A third issue that exists only upstream — filed on the forge, never
     # through vogt, so it has no overlay row and must still appear once.
@@ -503,7 +559,11 @@ def test_the_board_pages_upstream_items_with_stable_cursors(
         create_work(
             linked,
             CreateWorkParams(
-                kind="feature", title=f"issue {index}", project="demo", reason=WHY
+                kind="feature",
+                title=f"issue {index}",
+                project="demo",
+                upstream=True,
+                reason=WHY,
             ),
         )
     onboard(linked, OnboardParams(project="demo", reason=WHY))
@@ -542,7 +602,9 @@ def test_closing_and_reopening_write_through(
 ) -> None:
     create_work(
         linked,
-        CreateWorkParams(kind="bug", title="Done soon", project="demo", reason=WHY),
+        CreateWorkParams(
+            kind="bug", title="Done soon", project="demo", upstream=True, reason=WHY
+        ),
     )
     onboard(linked, OnboardParams(project="demo", reason=WHY))
     forge.requests.clear()
@@ -566,7 +628,10 @@ def test_a_comment_posts_upstream_and_stores_no_local_row(
     linked: AppContext, forge: RecordingForge
 ) -> None:
     create_work(
-        linked, CreateWorkParams(kind="bug", title="Talky", project="demo", reason=WHY)
+        linked,
+        CreateWorkParams(
+            kind="bug", title="Talky", project="demo", upstream=True, reason=WHY
+        ),
     )
     onboard(linked, OnboardParams(project="demo", reason=WHY))
     forge.requests.clear()
@@ -588,7 +653,10 @@ def test_label_adds_write_through_and_removals_are_refused(
 ) -> None:
     create_label(linked, CreateLabelParams(name="shared", reason=WHY))
     create_work(
-        linked, CreateWorkParams(kind="bug", title="Tagged", project="demo", reason=WHY)
+        linked,
+        CreateWorkParams(
+            kind="bug", title="Tagged", project="demo", upstream=True, reason=WHY
+        ),
     )
     onboard(linked, OnboardParams(project="demo", reason=WHY))
     forge.requests.clear()
@@ -612,7 +680,10 @@ def test_title_and_body_edits_are_refused_as_upstream_truth(
     linked: AppContext,
 ) -> None:
     create_work(
-        linked, CreateWorkParams(kind="bug", title="Owned", project="demo", reason=WHY)
+        linked,
+        CreateWorkParams(
+            kind="bug", title="Owned", project="demo", upstream=True, reason=WHY
+        ),
     )
     onboard(linked, OnboardParams(project="demo", reason=WHY))
     with pytest.raises(InvalidRequest, match="upstream truth"):
@@ -627,10 +698,16 @@ def test_relations_between_upstream_items_are_refused_with_the_reason(
     from vogt.application.models import RelateWorkParams
 
     create_work(
-        linked, CreateWorkParams(kind="bug", title="A", project="demo", reason=WHY)
+        linked,
+        CreateWorkParams(
+            kind="bug", title="A", project="demo", upstream=True, reason=WHY
+        ),
     )
     create_work(
-        linked, CreateWorkParams(kind="bug", title="B", project="demo", reason=WHY)
+        linked,
+        CreateWorkParams(
+            kind="bug", title="B", project="demo", upstream=True, reason=WHY
+        ),
     )
     onboard(linked, OnboardParams(project="demo", reason=WHY))
     with pytest.raises(InvalidRequest, match="upstream-truth"):
@@ -717,12 +794,11 @@ def test_import_with_consolidation_links_the_project(
 def test_local_only_create_succeeds_under_policy_none(
     tmp_path: Path, forge: RecordingForge
 ) -> None:
-    """The explicit opt-in create on a linked project with policy `none`.
+    """The explicit native create on a linked project with policy `none`.
 
-    The default refusal stays the default; `local_only` reaches past it to a
-    native declared item that carries no upstream subject yet — no forge call —
-    and that item *is* the open-native population a later `forge link`/`forge
-    writeback` migrates upstream.
+    `local_only` states the default: a native declared item that carries no
+    upstream subject yet — no forge call — and that item *is* the open-native
+    population a later `forge link`/`forge writeback` migrates upstream.
     """
     ctx = _instance(tmp_path, forge)
     register_project(
@@ -760,10 +836,10 @@ def test_local_only_create_succeeds_under_policy_none(
     assert [item.ref for item in pending] == [created.item.ref]
 
 
-def test_default_create_on_linked_none_still_refuses(
+def test_an_upstream_create_on_linked_none_still_refuses(
     tmp_path: Path, forge: RecordingForge
 ) -> None:
-    """Without `local_only`, the decision-9 refusal is unchanged."""
+    """With `upstream=True`, the decision-9 refusal is unchanged."""
     ctx = _instance(tmp_path, forge)
     register_project(
         ctx,
@@ -777,10 +853,12 @@ def test_default_create_on_linked_none_still_refuses(
     with pytest.raises(UpstreamWriteRefused) as refused:
         create_work(
             ctx,
-            CreateWorkParams(kind="bug", title="Refused", project="demo", reason=WHY),
+            CreateWorkParams(
+                kind="bug", title="Refused", project="demo", upstream=True, reason=WHY
+            ),
         )
     # The refusal names the escape hatch, so the opt-in is discoverable.
-    assert "local_only" in str(refused.value)
+    assert "upstream" in str(refused.value)
     assert forge.mutations == []
 
 
@@ -808,23 +886,25 @@ def test_refusal_enumerates_every_missing_gate(
     with pytest.raises(UpstreamWriteRefused) as refused:
         create_work(
             ctx,
-            CreateWorkParams(kind="bug", title="Refused", project="demo", reason=WHY),
+            CreateWorkParams(
+                kind="bug", title="Refused", project="demo", upstream=True, reason=WHY
+            ),
         )
     message = str(refused.value)
     assert "none" in message, "the policy gate is named"
     assert "does not permit 'create'" in message
     assert "forge account link" in message, "the missing-credential gate is named"
-    assert "local_only" in message, "the escape hatch is offered"
+    assert "upstream" in message, "the escape hatch is offered"
     assert forge.mutations == []
 
 
 def test_local_only_create_works_on_an_unlinked_project(
     tmp_path: Path, forge: RecordingForge
 ) -> None:
-    """`local_only` is the sanctioned opt-in past the decision-10 refusal too.
+    """A native create is the default past the decision-10 refusal too.
 
-    On an unlinked project the default create is `NotLinked`; the explicit
-    local-only path creates the native item the read plane already serves.
+    On an unlinked project an `upstream` create is `NotLinked`; the default,
+    and `local_only` explicitly, create the native item the read plane serves.
     """
     ctx = _instance(tmp_path, forge)
     register_project(
@@ -836,7 +916,9 @@ def test_local_only_create_works_on_an_unlinked_project(
     with pytest.raises(NotLinked):
         create_work(
             ctx,
-            CreateWorkParams(kind="bug", title="Nope", project="folder", reason=WHY),
+            CreateWorkParams(
+                kind="bug", title="Nope", project="folder", upstream=True, reason=WHY
+            ),
         )
 
     created = create_work(

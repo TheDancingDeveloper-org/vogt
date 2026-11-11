@@ -8,11 +8,11 @@
 //! empty items and `link_state: "unlinked"` — rather than its native rows,
 //! which stay reachable by ref.
 //!
-//! `work.create` with no project, or with `local_only`, writes a native
-//! declared item. A linked project without `local_only` is the forge
-//! write-through: the issue is opened upstream first and the overlay is stored
-//! only once the forge accepted it. An unlinked project without `local_only`
-//! is the decision-10 refusal.
+//! `work.create` writes a native declared item by default, with or without a
+//! project. `upstream=true` on a linked project is the forge write-through:
+//! the issue is opened upstream first and the overlay is stored only once the
+//! forge accepted it. `upstream=true` on an unlinked project is the
+//! decision-10 refusal. `local_only` names the default explicitly.
 
 use serde_json::{json, Value};
 
@@ -91,9 +91,9 @@ pub fn board_list_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
     crate::with_ctx!(ctx, |ctx| list_board(ctx, params))
 }
 
-/// Create a work item. No project, or `local_only`, writes a native declared
-/// item. A linked project without `local_only` is the forge write-through
-/// (`_create_upstream`). An unlinked project without `local_only` is the
+/// Create a work item. The default, and `local_only`, writes a native declared
+/// item, with or without a project. `upstream` on a linked project is the forge
+/// write-through (`_create_upstream`). `upstream` on an unlinked project is the
 /// decision-10 refusal.
 pub(crate) fn create_work<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
 where
@@ -101,11 +101,24 @@ where
     I: IdFactory + 'static,
 {
     let params = parse_create(params)?;
+    if params.upstream && params.local_only {
+        return Err(VogtError::InvalidRequest(
+            "give at most one of upstream or local_only: a create is either published on the forge or kept native".to_string(),
+        ));
+    }
     let project = match params.project.as_deref() {
         None => None,
         Some(slug) => Some(resolve::project(&ctx.declared.read()?, slug)?),
     };
-    if params.project.is_none() || params.local_only {
+    if params.project.is_none() {
+        if params.upstream {
+            return Err(VogtError::InvalidRequest(
+                "upstream=true needs a project to publish the item to".to_string(),
+            ));
+        }
+        return create_native(ctx, &params, project.as_ref());
+    }
+    if !params.upstream {
         return create_native(ctx, &params, project.as_ref());
     }
     // A project was resolved above, so this is a project-scoped create.
@@ -283,6 +296,7 @@ struct CreateParams {
     initiative: Option<String>,
     assignee: Option<String>,
     labels: Vec<String>,
+    upstream: bool,
     local_only: bool,
     reason: String,
 }
@@ -323,6 +337,10 @@ fn parse_create(params: Value) -> Result<CreateParams, VogtError> {
         initiative: text("initiative"),
         assignee: text("assignee"),
         labels,
+        upstream: map
+            .get("upstream")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         local_only: map
             .get("local_only")
             .and_then(Value::as_bool)
@@ -339,7 +357,7 @@ fn refuse_unlinked(project: &Project, operation: &str) -> VogtError {
 /// `work.create`, or `work.update with labels`.
 fn refuse_unlinked_for(project: &Project, operation: &str) -> VogtError {
     VogtError::NotLinked(format!(
-        "{operation} needs a forge-linked project, and {} is not linked: link it (`forge link`, or re-import through `project import`) or publish it (`forge publish`) first; or pass `local_only: true` to keep a native item in this project. {UNLINKED_STILL_WORKS}.",
+        "{operation} needs a forge-linked project, and {} is not linked: link it (`forge link`, or re-import through `project import`) or publish it (`forge publish`) first; or drop `upstream` (the default) to keep a native item in this project. {UNLINKED_STILL_WORKS}.",
         crate::core::py_repr(&project.slug)
     ))
 }
@@ -395,9 +413,10 @@ where
     Ok(gaps)
 }
 
-/// Would a default `work.create` land in `project` now, and why. Ports
-/// `create_writability`: the decision-10 link check, then every write-through
-/// precondition, evaluated without writing or touching the network.
+/// Would an explicit upstream `work.create` land in `project` now, and why.
+/// Ports `create_writability`: the decision-10 link check, then every
+/// write-through precondition, evaluated without writing or touching the
+/// network.
 pub(crate) fn create_writability<C, I>(
     ctx: &AppContext<C, I>,
     project: &Project,
@@ -410,21 +429,20 @@ where
     if !upstream::is_linked(project) {
         return Ok((
             false,
-            "not forge-linked: work.create refuses with project_not_linked. Pass local_only=true for a local record, or link (`forge link`) or publish (`forge publish`) the project.".to_string(),
+            "not forge-linked: an upstream work.create (upstream=true) refuses with project_not_linked. Drop upstream for a native record, or link (`forge link`) or publish (`forge publish`) the project.".to_string(),
         ));
     }
     let gaps = gaps_for(ctx, project, actor, policy_gap(project, "create"))?;
     if gaps.is_empty() {
         return Ok((
             true,
-            "linked and write-back permits create: work.create opens the issue upstream."
-                .to_string(),
+            "linked and write-back permits create: work.create with upstream=true opens the issue upstream.".to_string(),
         ));
     }
     Ok((
         false,
         format!(
-            "linked, but work.create refuses with upstream_write_refused: {}. Or pass local_only=true for a local record.",
+            "linked, but an upstream work.create refuses with upstream_write_refused: {}. Drop upstream for a native record.",
             gaps.join("; ")
         ),
     ))
@@ -587,7 +605,7 @@ fn refuse_gaps(
         .collect::<Vec<_>>()
         .join("; ");
     let tail = if offer_local_only {
-        " Or pass `local_only` to create the item locally, without upstreaming it now."
+        " Or drop `upstream` to create the item locally, without upstreaming it now."
     } else {
         ""
     };
@@ -3360,12 +3378,12 @@ mod tests {
         insert_project(&built, "beta", false, WriteBack::Disabled);
         let refused = create_work(
             ctx,
-            json!({"kind": "chore", "title": "nope", "project": "beta", "reason": "test"}),
+            json!({"kind": "chore", "title": "nope", "project": "beta", "upstream": true, "reason": "test"}),
         )
         .unwrap_err();
         assert!(matches!(refused, VogtError::NotLinked(_)), "{refused}");
         assert!(
-            refused.message().contains("local_only: true"),
+            refused.message().contains("drop `upstream`"),
             "{}",
             refused.message()
         );
@@ -3386,7 +3404,7 @@ mod tests {
         insert_project(&built, "beta", true, WriteBack::Disabled);
         let refused = create_work(
             ctx,
-            json!({"kind": "chore", "title": "nope", "project": "beta", "reason": "test"}),
+            json!({"kind": "chore", "title": "nope", "project": "beta", "upstream": true, "reason": "test"}),
         )
         .unwrap_err();
         let VogtError::UpstreamWriteRefused(message) = &refused else {
@@ -3403,6 +3421,27 @@ mod tests {
         )
         .unwrap();
         assert_eq!(after["item"]["ref"], "WI-1");
+    }
+
+    #[test]
+    fn upstream_and_local_only_are_mutually_exclusive() {
+        let built = opened();
+        let Built::StepSequential(ctx) = &built else {
+            unreachable!("opened() builds a step clock");
+        };
+        let refused = create_work(
+            ctx,
+            json!({"kind": "chore", "title": "two-faced", "upstream": true, "local_only": true, "reason": "test"}),
+        )
+        .unwrap_err();
+        assert!(matches!(refused, VogtError::InvalidRequest(_)), "{refused}");
+        assert!(
+            refused
+                .message()
+                .contains("at most one of upstream or local_only"),
+            "{}",
+            refused.message()
+        );
     }
 
     #[test]
