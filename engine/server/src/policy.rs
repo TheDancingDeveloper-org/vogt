@@ -638,7 +638,8 @@ fn git_calls(command: &str, cwd: &Path) -> Calls {
         "GIT_CONFIG_SYSTEM",
     ]
     .iter()
-    .any(|v| command.contains(v));
+    .any(|v| command.contains(v))
+        || command_env(command);
     let mut walker = Walker {
         moved: redirected,
         configured,
@@ -867,7 +868,7 @@ impl Walker {
                     .iter()
                     .any(|d| d.contains(['$', '`']) || expand_home(d).is_none());
                 let hidden = simple.contains(['$', '`']) || elsewhere;
-                let aliased = self.configured || git_aliased(&words);
+                let aliased = self.configured || git_aliased(&words) || git_runs_command(&words);
                 self.out.calls.push(GitCall {
                     words,
                     cwd: state.dir.clone(),
@@ -1056,6 +1057,273 @@ fn git_aliased(words: &[String]) -> bool {
     false
 }
 
+/// Environment variables through which git (or the pager it starts) runs
+/// a command of the caller's choosing (WI-4001 round 4, blocker 4).
+const COMMAND_ENV: &[&str] = &[
+    "GIT_EXTERNAL_DIFF",
+    "GIT_PAGER",
+    "PAGER",
+    "GIT_EDITOR",
+    "GIT_SEQUENCE_EDITOR",
+    "EDITOR",
+    "VISUAL",
+    "GIT_SSH",
+    "GIT_SSH_COMMAND",
+    "GIT_ASKPASS",
+    "SSH_ASKPASS",
+    "GIT_PROXY_COMMAND",
+    "GIT_EXEC_PATH",
+    "GIT_TEMPLATE_DIR",
+    "LESSOPEN",
+    "LESSCLOSE",
+];
+
+/// Whether the line hands git a command through the environment: a
+/// [`COMMAND_ENV`] name assigned anything but a known-harmless program
+/// (`GIT_PAGER=cat`, `GIT_EDITOR=true`), or handed to a declaration
+/// builtin (`export NAME`, `printf -v NAME …`, `read NAME`), since its value
+/// then comes from somewhere this reading does not follow.
+fn command_env(command: &str) -> bool {
+    let bytes = command.as_bytes();
+    let ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    for name in COMMAND_ENV {
+        let mut from = 0;
+        while let Some(at) = command[from..].find(name) {
+            let start = from + at;
+            let end = start + name.len();
+            from = end;
+            if (start > 0 && ident(bytes[start - 1])) || bytes.get(end).is_some_and(|b| ident(*b)) {
+                continue;
+            }
+            // `$NAME` / `${NAME}` reads it; `unset NAME` takes it away.
+            let before = command[..start].trim_end_matches('{');
+            if before.ends_with('$') {
+                continue;
+            }
+            if command[..start].trim_end().ends_with("unset") {
+                continue;
+            }
+            if bytes.get(end) != Some(&b'=') {
+                // A bare mention (a commit message naming GIT_PAGER) sets
+                // nothing; a declaration builtin may give it a value from
+                // somewhere else (`export NAME`, `read NAME`, `printf -v`).
+                let word = command[..start]
+                    .trim_end()
+                    .rsplit(|c: char| c.is_whitespace() || matches!(c, ';' | '&' | '|' | '('))
+                    .next()
+                    .unwrap_or("");
+                if matches!(
+                    word,
+                    "export" | "declare" | "typeset" | "readonly" | "local" | "read" | "-v"
+                ) || word.starts_with('-')
+                {
+                    return true;
+                }
+                continue;
+            }
+            if !harmless_command(&assigned_value(&command[end + 1..]), name) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// The value an assignment's text starts with, its quotes removed: up to
+/// the first unquoted blank or command separator.
+fn assigned_value(text: &str) -> String {
+    let mut out = String::new();
+    let mut quote: Option<char> = None;
+    for c in text.chars() {
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(_) => out.push(c),
+            None if c == '\'' || c == '"' => quote = Some(c),
+            None if c.is_whitespace() || matches!(c, ';' | '&' | '|' | ')') => break,
+            None => out.push(c),
+        }
+    }
+    out
+}
+
+/// Whether `value`, given to the setting `key` that names a command, runs
+/// nothing but a known-harmless program: empty, `cat`, `less`/`more` with
+/// flags, `true`, `false`, `:`, or for an ssh setting `ssh` with flags. No
+/// expansion, separator or redirection. A hooks path is harmless only as
+/// `/dev/null`; the paths git searches for programs never are.
+fn harmless_command(value: &str, key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    if key.ends_with("hookspath") {
+        return value.is_empty() || value == "/dev/null";
+    }
+    if matches!(
+        key.as_str(),
+        "git_exec_path" | "git_template_dir" | "lessopen" | "lessclose"
+    ) {
+        return value.is_empty();
+    }
+    if key.contains("credential") && key.ends_with("helper") {
+        return matches!(value, "" | "store" | "cache");
+    }
+    if value.contains(['$', '`', ';', '&', '|', '<', '>', '(', ')', '\n', '\\', '!']) {
+        return false;
+    }
+    let words = shell_words(value);
+    let Some(program) = words.first() else {
+        return true;
+    };
+    let ssh = key.contains("ssh");
+    let safe = match program.as_str() {
+        "cat" | "less" | "more" | "true" | "false" | ":" => true,
+        "ssh" | "/usr/bin/ssh" => ssh,
+        _ => false,
+    };
+    safe && words[1..].iter().all(|w| w.starts_with('-') || ssh)
+}
+
+/// Whether a git config key names a command git runs (WI-4001 round 4,
+/// blocker 4): `diff.external`, `core.fsmonitor`, the pager and editor
+/// settings, ssh and askpass commands, credential helpers, the hooks
+/// path, filter and merge drivers, textconv and external diff drivers,
+/// difftool/mergetool commands, `gpg.program`, proxies and remote
+/// upload/receive programs.
+fn command_key(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    let last = key.rsplit('.').next().unwrap_or("");
+    matches!(
+        key.as_str(),
+        "diff.external"
+            | "core.fsmonitor"
+            | "core.pager"
+            | "core.editor"
+            | "sequence.editor"
+            | "core.sshcommand"
+            | "core.askpass"
+            | "core.hookspath"
+            | "core.gitproxy"
+            | "gpg.program"
+            | "interactive.difffilter"
+            | "uploadpack.packobjectshook"
+            | "credential.helper"
+    ) || key.starts_with("pager.")
+        || (key.starts_with("filter.") && matches!(last, "smudge" | "clean" | "process"))
+        || (key.starts_with("diff.") && matches!(last, "textconv" | "command"))
+        || (key.starts_with("merge.") && last == "driver")
+        || ((key.starts_with("difftool.") || key.starts_with("mergetool.")) && last == "cmd")
+        || (key.starts_with("credential.") && last == "helper")
+        || (key.starts_with("gpg.") && last == "program")
+        || (key.starts_with("remote.") && matches!(last, "uploadpack" | "receivepack" | "proxy"))
+        || key.starts_with("ssh.")
+}
+
+/// Whether a git call runs a command of the caller's choosing (WI-4001
+/// round 4, blocker 4), which may discard or write anything, like an alias
+/// does: a `-c`/`--config-env` that sets a [`command_key`] to anything but
+/// a harmless program, `--exec-path=<dir>`, a `git config` that sets one,
+/// `grep -O`/`--open-files-in-pager`, `difftool -x`/`--extcmd`, `rebase
+/// -x`/`--exec`, `bisect run` and `submodule foreach`.
+fn git_runs_command(words: &[String]) -> bool {
+    let mut rest = words.iter().skip(1);
+    while let Some(arg) = rest.next() {
+        let setting = match arg.as_str() {
+            "-c" => rest.next().map(String::as_str),
+            // The value comes from an environment variable this reading
+            // does not follow.
+            "--config-env" => {
+                if rest
+                    .next()
+                    .is_some_and(|s| command_key(s.split_once('=').map_or(s, |p| p.0)))
+                {
+                    return true;
+                }
+                None
+            }
+            _ if arg.starts_with("--config-env=") => {
+                let s = &arg["--config-env=".len()..];
+                if command_key(s.split_once('=').map_or(s, |p| p.0)) {
+                    return true;
+                }
+                None
+            }
+            _ if arg.starts_with("--exec-path=") => return true,
+            _ if arg.starts_with("-c") && arg.len() > 2 => arg.strip_prefix("-c"),
+            "-C" | "--git-dir" | "--work-tree" | "--namespace" => {
+                rest.next();
+                None
+            }
+            _ if arg.starts_with('-') => None,
+            _ => break,
+        };
+        let Some(setting) = setting else { continue };
+        let (key, value) = setting.split_once('=').unwrap_or((setting, ""));
+        if command_key(key) && !harmless_command(value, key) {
+            return true;
+        }
+    }
+    let args = git_args(words);
+    let Some(sub) = args.first().map(String::as_str) else {
+        return false;
+    };
+    let rest = &args[1..];
+    // Whether a short option `letter` is in a cluster, stopping at a letter
+    // in `valued` that takes the rest as its value; or a long option on
+    // the line is a prefix (git's abbreviation) of `long`.
+    let short = |letter: char, valued: &[char]| {
+        rest.iter().take_while(|a| *a != "--").any(|a| {
+            a.len() > 1
+                && a.starts_with('-')
+                && !a.starts_with("--")
+                && a[1..]
+                    .chars()
+                    .take_while(|c| *c == letter || !valued.contains(c))
+                    .any(|c| c == letter)
+        })
+    };
+    let long = |name: &str, min: usize| {
+        rest.iter().take_while(|a| *a != "--").any(|a| {
+            let flag = a.split_once('=').map_or(a.as_str(), |p| p.0);
+            flag.len() >= min && name.starts_with(flag)
+        })
+    };
+    match sub {
+        "grep" => {
+            short('O', &['e', 'f', 'A', 'B', 'C', 'm'])
+                || long("--open-files-in-pager", "--op".len())
+        }
+        "difftool" => short('x', &['t']) || long("--extcmd", "--ex".len()),
+        "rebase" => short('x', &['s', 'X', 'C']) || long("--exec", "--exe".len()),
+        "bisect" => rest.first().is_some_and(|a| a == "run"),
+        "submodule" => rest.iter().any(|a| a == "foreach"),
+        "config" => {
+            let reads = rest.iter().any(|a| {
+                matches!(
+                    a.as_str(),
+                    "--get"
+                        | "--get-all"
+                        | "--get-regexp"
+                        | "--get-urlmatch"
+                        | "--list"
+                        | "-l"
+                        | "get"
+                        | "list"
+                        | "--unset"
+                        | "--unset-all"
+                        | "unset"
+                )
+            });
+            if reads {
+                return false;
+            }
+            rest.iter().enumerate().any(|(i, a)| {
+                !a.starts_with('-')
+                    && command_key(a)
+                    && !harmless_command(rest.get(i + 1).map_or("", String::as_str), a)
+            })
+        }
+        _ => false,
+    }
+}
+
 /// Whether a substitution's pieces are exactly one literal `ssh-agent` call
 /// (`ssh-agent`, `ssh-agent -s`, `/usr/bin/ssh-agent -t 3600`): flags and
 /// numbers only, no expansion, no second command.
@@ -1074,22 +1342,57 @@ fn ssh_agent(pieces: &[Piece]) -> bool {
         })
 }
 
-/// The command a `su`, `runuser` or `script` call runs: the value of `-c`,
-/// `--command` / `--command=…`, or of a short-option cluster ending in `c`
-/// (`script -qc '…'`).
+/// The command a `su`, `runuser` or `script` call runs: the value of `-c`
+/// (as its own word, attached as `-c'…'`, or at the end of or inside a
+/// cluster: `-lc '…'`, `-qc'…'`), or of `--command` / `--session-command`
+/// by any unique prefix (`--comm=…`). A cluster stops at the first letter
+/// that takes a value, as getopt reads it.
 fn dash_c_payload(words: &[String]) -> Option<&str> {
+    let program = base(&words[0]);
+    // Short options that take a value other than `-c`.
+    let valued: &[char] = if program == "script" {
+        &['E', 'I', 'O', 'B', 'T', 'm', 'o']
+    } else {
+        &['s', 'g', 'G', 'w']
+    };
     let mut args = words[1..].iter();
     while let Some(arg) = args.next() {
-        if let Some(value) = arg.strip_prefix("--command=") {
-            return Some(value);
+        if arg == "--" {
+            return None;
         }
-        let cluster = arg.len() > 1
-            && arg.starts_with('-')
-            && !arg.starts_with("--")
-            && arg[1..].chars().all(|c| c.is_ascii_alphabetic())
-            && arg.ends_with('c');
-        if arg == "--command" || cluster {
-            return args.next().map(String::as_str);
+        if let Some(long) = arg.strip_prefix("--") {
+            let (name, value) = match long.split_once('=') {
+                Some((n, v)) => (n, Some(v)),
+                None => (long, None),
+            };
+            let runs = !name.is_empty()
+                && ("command".starts_with(name)
+                    || (program != "script"
+                        && name.len() > 1
+                        && "session-command".starts_with(name)));
+            if runs {
+                return value.or_else(|| args.next().map(String::as_str));
+            }
+            continue;
+        }
+        if arg.len() < 2 || !arg.starts_with('-') {
+            continue;
+        }
+        for (i, letter) in arg.char_indices().skip(1) {
+            let rest = &arg[i + letter.len_utf8()..];
+            if letter == 'c' {
+                return if rest.is_empty() {
+                    args.next().map(String::as_str)
+                } else {
+                    Some(rest)
+                };
+            }
+            if valued.contains(&letter) {
+                if rest.is_empty() {
+                    args.next();
+                }
+                break;
+            }
         }
     }
     None
@@ -2194,30 +2497,44 @@ fn command_words_ext(simple: &str) -> (Vec<String>, bool) {
                         words.remove(0);
                         continue;
                     }
-                    if !w.starts_with('-') {
+                    if !w.starts_with('-') || w == "-" {
                         break;
                     }
                     words.remove(0);
                     if w == "--" {
                         break;
                     }
-                    match w.as_str() {
+                    match env_option(&w) {
+                        EnvOption::Plain => {}
                         // `env -u NAME git …`: the name is not the program.
-                        "-u" | "--unset" => drop(&mut words, 1),
-                        // A changed directory or a split string: what runs,
-                        // and where, is not on the line as words.
-                        "-C" | "--chdir" | "-S" | "--split-string" => {
-                            opaque = true;
-                            drop(&mut words, 1);
+                        EnvOption::Unset(attached) => {
+                            if !attached {
+                                drop(&mut words, 1);
+                            }
                         }
-                        _ if w.starts_with("--chdir=")
-                            || w.starts_with("--split-string=")
-                            || (w.starts_with("-S") && w.len() > 2)
-                            || (w.starts_with("-C") && w.len() > 2) =>
-                        {
+                        // A changed directory: where it runs is not on the
+                        // line.
+                        EnvOption::Chdir(attached) => {
                             opaque = true;
+                            if !attached {
+                                drop(&mut words, 1);
+                            }
                         }
-                        _ => {}
+                        // `env -S 'rm a.txt'`, `env -S'rm a.txt'`, `env
+                        // --split-string=…`: the string is split into the
+                        // program and its arguments, ahead of the words
+                        // after it. Read it as the command it spells.
+                        EnvOption::Split(value) => {
+                            let value = match value {
+                                Some(v) => v,
+                                None if words.is_empty() => String::new(),
+                                None => words.remove(0),
+                            };
+                            let mut split = shell_words(&value);
+                            split.append(&mut words);
+                            words = split;
+                            break;
+                        }
                     }
                 }
             }
@@ -2225,6 +2542,48 @@ fn command_words_ext(simple: &str) -> (Vec<String>, bool) {
         }
     }
     (words, opaque)
+}
+
+/// One `env` option word, read as GNU env's getopt reads it: a cluster
+/// up to the first letter that takes a value (`-iS'rm a.txt'` is `-i -S
+/// 'rm a.txt'`), and a long option by any unique prefix (`--split=…`).
+enum EnvOption {
+    Plain,
+    /// `-u`/`--unset`; true when its value is attached.
+    Unset(bool),
+    /// `-C`/`--chdir`; true when its value is attached.
+    Chdir(bool),
+    /// `-S`/`--split-string`, with its value when attached.
+    Split(Option<String>),
+}
+
+fn env_option(word: &str) -> EnvOption {
+    if let Some(long) = word.strip_prefix("--") {
+        let (name, value) = match long.split_once('=') {
+            Some((n, v)) => (n, Some(v.to_string())),
+            None => (long, None),
+        };
+        let is = |full: &str| !name.is_empty() && full.starts_with(name);
+        return if is("split-string") {
+            EnvOption::Split(value)
+        } else if is("unset") {
+            EnvOption::Unset(value.is_some())
+        } else if is("chdir") {
+            EnvOption::Chdir(value.is_some())
+        } else {
+            EnvOption::Plain
+        };
+    }
+    for (i, letter) in word.char_indices().skip(1) {
+        let rest = &word[i + letter.len_utf8()..];
+        match letter {
+            'S' => return EnvOption::Split((!rest.is_empty()).then(|| rest.to_string())),
+            'u' => return EnvOption::Unset(!rest.is_empty()),
+            'C' => return EnvOption::Chdir(!rest.is_empty()),
+            _ => {}
+        }
+    }
+    EnvOption::Plain
 }
 
 fn is_assignment(word: &str) -> bool {
@@ -3631,6 +3990,18 @@ mod tests {
                 "git config --get core.pager",
                 "git --exec-path",
                 "git -c color.ui=never log -1",
+                "git commit -m 'fix GIT_PAGER handling'",
+                "echo $GIT_EDITOR; git status",
+                "unset GIT_PAGER; git log",
+            ],
+        );
+        assert_refused(
+            &p,
+            &root,
+            &[
+                "export GIT_EXTERNAL_DIFF; git diff",
+                "read GIT_PAGER < /tmp/p; git log",
+                "printf -v GIT_PAGER %s ./x; git log",
             ],
         );
         std::fs::remove_dir_all(&root).ok();
