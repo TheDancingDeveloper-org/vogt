@@ -3817,6 +3817,8 @@ mod tests {
             "${CARGO:-cargo} test",
             "\"$(command -v cargo)\" test",
             "git restore src/{a,b}.rs",
+            "GIT_EDITOR=vim git commit",
+            "git -c core.pager=delta log",
         ];
         assert_refused(&p, &root, &commands);
         let fresh = workspace(&[], Some("worktree"), &root);
