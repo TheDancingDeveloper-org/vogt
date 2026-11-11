@@ -272,6 +272,13 @@ pub struct SessionPolicy {
     /// The toplevel of the session's own work tree (WI-1326). Engine-filled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_path: Option<String>,
+    /// The session has no work tree of its own: its cwd was in no git
+    /// repository when its first command was checked (WI-4056). A git
+    /// command that would discard changes is then judged by its repo's
+    /// uncommitted changes at the moment it runs, all of which count as
+    /// someone else's. Engine-filled.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub discard_live_changes: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -28,15 +28,17 @@
 //! create|edit|merge`), which a `bash -c "git commit -m …"` still contains
 //! as text; a read such as `git log --grep` is never refused by it.
 //!
-//! Two rules read the session's workspace (WI-1326). The discard guard, after
-//! msp-klaudia's gitguard, refuses a git command or `rm` that would throw
+//! Two rules read the session's workspace (WI-1326). The discard guard
+//! refuses a git command or `rm` that would throw
 //! away a path in `discard_baseline` — the paths in the session's own tree
 //! that were already dirty when it started; `reset --hard`, `clean`, `stash`
 //! and a command whose paths cannot be read (a glob, an expansion, `xargs`,
 //! `eval`, a `cd` earlier on the line) count as reaching every one. An `rm`
 //! is judged by each path it deletes, canonicalised, not by the directory it
 //! was typed in. A fresh worktree has an empty baseline, so the guard is a
-//! no-op there. The protected-checkout rule holds only a `worktree` session:
+//! no-op there. A session with no workspace block is settled at its first
+//! check ([`settle`], WI-4056): a baseline from its cwd's repo, or, outside
+//! every repo, each repo's uncommitted changes at the time the command runs. The protected-checkout rule holds only a `worktree` session:
 //! it refuses a git write whose repo is a registered project checkout other
 //! than the session's own worktree, and a write whose repo the line hides
 //! (`GIT_DIR`, `--git-dir`, an unfollowed `cd`). Repos are resolved by `git
@@ -119,13 +121,21 @@ pub fn check(policy: &SessionPolicy, command: &str, cwd: &Path) -> Option<String
         }
     }
     let worktree = policy.workspace_kind.as_deref() == Some("worktree");
-    if policy.discard_baseline.is_empty() && !(worktree && !policy.protected_checkouts.is_empty()) {
+    let live = policy.discard_live_changes && policy.discard_baseline.is_empty();
+    if policy.discard_baseline.is_empty()
+        && !live
+        && !(worktree && !policy.protected_checkouts.is_empty())
+    {
         return None;
     }
     let calls = git_calls(command, cwd);
     let mut repos = Repos::default();
     if !policy.discard_baseline.is_empty() {
         if let Some(reason) = discard(policy, &calls, &mut repos) {
+            return Some(reason);
+        }
+    } else if live {
+        if let Some(reason) = discard_live(&calls, cwd, &mut repos) {
             return Some(reason);
         }
     }
@@ -469,8 +479,8 @@ fn git_output(dir: &Path, args: &[&str], timeout: Duration) -> Option<String> {
 /// captures that block before the child runs, and a wake passes the record's
 /// copy, so the session's own edits never become its baseline. With no
 /// block (a session from before WI-1324, or a cwd outside any repository)
-/// the policy is returned as it is: neither rule applies, and the agent's
-/// own guard (Klaudia's gitguard) stays the one that judges discards.
+/// the policy is returned as it is, and [`settle`] fills it in at the
+/// session's first checked command instead (WI-4056).
 pub fn with_workspace(
     policy: Option<SessionPolicy>,
     workspace: Option<&vogt_engine_contract::Workspace>,
@@ -488,6 +498,42 @@ pub fn with_workspace(
     Some(policy)
 }
 
+/// Whether `policy` already says what the discard guard judges a session
+/// by: a workspace block (its kind is set), or the record that the session
+/// started outside any repository (`discard_live_changes`). A session with
+/// neither — a record from before WI-1324, or one started before WI-4056 in
+/// a directory that was not a repository — is settled by [`settle`] at its
+/// first checked command.
+pub fn settled(policy: Option<&SessionPolicy>) -> bool {
+    policy.is_some_and(|p| p.workspace_kind.is_some() || p.discard_live_changes)
+}
+
+/// `policy` settled for a session that has no workspace block (WI-4056),
+/// from the session's own directory `cwd` at its first checked command. When
+/// `cwd` is in a git repository, that tree and the paths already dirty in it
+/// now become the session's workspace and baseline, exactly as a block taken
+/// at start would be; the session's edits before its first git, gh or rm
+/// command are rare and are then counted as pre-existing, which only ever
+/// refuses more. Otherwise the session has no tree of its own, and the
+/// discard guard judges every repository by its changes at the time each
+/// command runs (`discard_live_changes`).
+///
+/// `None` when `cwd` is not a directory here: a pod session's directory is
+/// on the pod's filesystem, not the engine's, and nothing here can read it.
+pub fn settle(policy: Option<SessionPolicy>, cwd: &Path) -> Option<SessionPolicy> {
+    if !cwd.is_dir() {
+        return None;
+    }
+    Some(match crate::git::capture_workspace(cwd, None) {
+        Some(ws) => with_workspace(policy, Some(&ws)).unwrap_or_default(),
+        None => {
+            let mut policy = policy.unwrap_or_default();
+            policy.discard_live_changes = true;
+            policy
+        }
+    })
+}
+
 /// How deep `bash -c`, `eval`, `xargs` and `$(…)` payloads are followed.
 /// Past it the line counts as one this check cannot read.
 const MAX_DEPTH: usize = 4;
@@ -495,7 +541,7 @@ const MAX_DEPTH: usize = 4;
 /// One git invocation on the line, with the directory it runs in as far as
 /// it can be read. A plain `rm` (or `unlink`) is one too, with `rm` set and
 /// `words` holding only the paths it deletes.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct GitCall {
     words: Vec<String>,
     /// The session cwd, or the target of a literal `cd` earlier on the line
@@ -522,7 +568,7 @@ struct GitCall {
 }
 
 /// What the line does, as far as this reading can tell.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 struct Calls {
     calls: Vec<GitCall>,
     /// Text this reading could not parse with certainty: an unbalanced quote
@@ -2066,7 +2112,7 @@ struct Reach {
     paths: Vec<String>,
 }
 
-/// The discard guard (WI-1326), after msp-klaudia's gitguard: refuse a git
+/// The discard guard (WI-1326): refuse a git
 /// command or `rm` that would throw away a path that had uncommitted changes
 /// when the session started. Only paths in the session's own repo count; a
 /// git call whose repo cannot be resolved is taken to be the session's own,
@@ -2145,6 +2191,139 @@ fn discard(policy: &SessionPolicy, calls: &Calls, repos: &mut Repos) -> Option<S
         }
     }
     None
+}
+
+/// How long reading a repository's uncommitted changes may take for the
+/// live discard guard. One that does not answer in time refuses the discard.
+const STATUS_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// The discard guard for a session that has no tree of its own (WI-4056):
+/// its directory was in no repository when it was settled. Each discarding
+/// git call or `rm` is judged against the repository it acts on, with that
+/// repository's uncommitted changes *now* as the baseline: none of them is
+/// known to be the session's, so none may be thrown away. A repository with
+/// no changes is never refused, so a fresh clone works as before.
+///
+/// What cannot be placed is judged against the repository `cwd` is in: a
+/// part of the line this check cannot read, a write to `.git/config` or
+/// hooks. A discarding git call whose repository the line hides (`GIT_DIR`,
+/// `--git-dir`, an unfollowed `cd`) and that `cwd` does not place is
+/// refused. A repository whose changes cannot be read in time refuses the
+/// discard rather than allowing it.
+fn discard_live(calls: &Calls, cwd: &Path, repos: &mut Repos) -> Option<String> {
+    let here = repos.top(&canonical(cwd));
+    let mut dirty: std::collections::HashMap<PathBuf, Option<Vec<String>>> =
+        std::collections::HashMap::new();
+    let mut judge = |root: &Path, calls: &Calls, repos: &mut Repos| -> Option<String> {
+        let paths = dirty
+            .entry(root.to_path_buf())
+            .or_insert_with(|| live_changes(root))
+            .clone();
+        let Some(paths) = paths else {
+            return Some(
+                "refusing: discard guard: the repository's uncommitted changes could not be \
+                 read, so this discard may throw some away; run it again"
+                    .to_string(),
+            );
+        };
+        if paths.is_empty() {
+            return None;
+        }
+        let policy = SessionPolicy {
+            discard_baseline: paths,
+            workspace_path: Some(root.to_string_lossy().into_owned()),
+            ..SessionPolicy::default()
+        };
+        discard(&policy, calls, repos)
+    };
+    if calls.blind_discard() || calls.git_internals {
+        match &here {
+            Some(here) => {
+                if let Some(reason) = judge(here, calls, repos) {
+                    return Some(reason);
+                }
+            }
+            // Outside every repository, a discard this check cannot read
+            // cannot be placed in one, so it may reach any.
+            None if calls.blind_discard() && mentions(&calls.line, DISCARD_WORDS) => {
+                return Some(
+                    "refusing: discard guard: a command this check cannot read may discard \
+                     uncommitted changes in a repository it cannot place; run it as a plain \
+                     command with a literal -C"
+                        .to_string(),
+                );
+            }
+            None => {}
+        }
+    }
+    for call in &calls.calls {
+        let one = Calls {
+            calls: vec![call.clone()],
+            ..Calls::default()
+        };
+        let mut roots = Vec::new();
+        if call.rm {
+            if let Some(top) = repos.top(&canonical(&call.cwd)) {
+                roots.push(top);
+            }
+            for operand in &call.words {
+                let Some(word) = expand_home(operand) else {
+                    continue;
+                };
+                let path = normalize(&resolve_dir(&word, &call.cwd));
+                // The repository the entry is in, and the one it is the top
+                // of (`rm -rf <clone>` deletes that clone's changes too).
+                let places = [path.parent().map(Path::to_path_buf), Some(path.clone())];
+                for place in places.into_iter().flatten() {
+                    if let Some(top) = repos.top(&canonical(&place)) {
+                        if !roots.contains(&top) {
+                            roots.push(top);
+                        }
+                    }
+                }
+            }
+        } else {
+            let args = git_args(&call.words);
+            let Some(sub) = args.first() else {
+                continue;
+            };
+            if spelled(sub) && !call.aliased && discards(sub, &args[1..]).is_none() {
+                continue;
+            }
+            if call.redirected {
+                return Some(format!(
+                    "refusing: discard guard: git {} names its repository in a way this \
+                     check cannot read (GIT_DIR, --git-dir, --work-tree or an unfollowed \
+                     cd), so it may discard uncommitted changes; run it with a literal -C",
+                    label(sub)
+                ));
+            }
+            // Not in a repository: git itself refuses it.
+            if let Some(top) = repos.top(&canonical(&git_dir(&call.words, &call.cwd))) {
+                roots.push(top);
+            }
+        }
+        for root in roots {
+            if let Some(reason) = judge(&root, &one, repos) {
+                return Some(reason);
+            }
+        }
+    }
+    None
+}
+
+/// The paths with uncommitted changes in the repository at `root`, as the
+/// workspace baseline reads them; `None` when git does not answer in time.
+fn live_changes(root: &Path) -> Option<Vec<String>> {
+    let status = git_output(
+        root,
+        &["status", "--porcelain=v1", "-z", "--untracked-files=normal"],
+        STATUS_TIMEOUT,
+    )?;
+    let mut paths = crate::git::porcelain_paths(&status);
+    paths.sort();
+    paths.dedup();
+    Some(paths)
 }
 
 /// How many baseline entries the repo-relative pathspecs reach.
@@ -3512,7 +3691,7 @@ mod tests {
     #[test]
     fn no_workspace_block_leaves_the_policy_as_it_is() {
         // A record from before WI-1324, or a start outside a repository: the
-        // engine adds nothing, and the agent's own guard keeps judging.
+        // block adds nothing; `settle` fills it in at the first check.
         assert_eq!(with_workspace(None, None), None);
         let bare = SessionPolicy::default();
         assert_eq!(with_workspace(Some(bare.clone()), None), Some(bare));
@@ -3857,6 +4036,187 @@ mod tests {
         std::fs::remove_dir_all(&clone).ok();
         std::fs::remove_dir_all(&wt).ok();
         std::fs::remove_dir_all(&main).ok();
+    }
+
+    // ---- WI-4056: sessions without a workspace record ----------------------
+
+    /// A directory under the temp dir that is in no git repository.
+    fn plain_dir(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("vogt-policy-plain-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A session with no workspace block (an older record) whose cwd is a
+    /// repository with a dirty file: its first checked command settles a
+    /// baseline from that cwd, so the discard guard protects the file once
+    /// Klaudia's gitguard is gone. Every discard verb is refused; a file the
+    /// session makes later is its own.
+    #[test]
+    fn a_recordless_session_in_a_dirty_repo_keeps_its_dirty_files() {
+        let root = repo("wi4056-recordless");
+        std::fs::write(root.join("f"), "operator's edit").unwrap();
+        std::fs::write(root.join("untracked"), "x").unwrap();
+        let older = SessionPolicy {
+            forbidden_text: vec!["SECRET".into()],
+            ..SessionPolicy::default()
+        };
+        assert!(!settled(Some(&older)));
+        assert!(!settled(None));
+        let p = settle(Some(older), &root).expect("a directory here settles");
+        assert!(settled(Some(&p)));
+        assert_eq!(p.forbidden_text, ["SECRET"], "the project policy is kept");
+        assert_eq!(p.workspace_kind.as_deref(), Some("checkout"));
+        assert_eq!(p.discard_baseline, ["f", "untracked"]);
+        assert!(!p.discard_live_changes);
+        // The session's own later file is not in the baseline.
+        std::fs::write(root.join("mine"), "x").unwrap();
+        for command in [
+            "git checkout -f",
+            "git checkout -- f",
+            "git restore f",
+            "git reset --hard",
+            "git clean -fd",
+            "git stash",
+            "git stash -u",
+            "rm f",
+            "rm -f untracked",
+        ] {
+            let reason = check(&p, command, &root).unwrap_or_else(|| panic!("{command} allowed"));
+            assert!(reason.contains("discard guard"), "{command}: {reason}");
+        }
+        for command in [
+            "git restore mine",
+            "rm mine",
+            "git add f mine",
+            "git status",
+        ] {
+            assert_eq!(check(&p, command, &root), None, "{command}");
+        }
+        // Settling also covers a session started with no policy at all.
+        let bare = settle(None, &root).unwrap();
+        assert!(check(&bare, "git reset --hard", &root).is_some());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A record-less session settled in a dirty repo still clones elsewhere
+    /// and stages and commits its own work there (the WI-3985 case).
+    #[test]
+    fn a_recordless_session_may_commit_in_a_clone_it_made_elsewhere() {
+        let root = repo("wi4056-recordless-home");
+        std::fs::write(root.join("f"), "dirty").unwrap();
+        let p = settle(None, &root).unwrap();
+        assert_eq!(p.discard_baseline, ["f"]);
+        let clone = repo("wi4056-recordless-clone");
+        std::fs::write(clone.join("f"), "edit").unwrap();
+        std::fs::write(clone.join("b"), "new").unwrap();
+        let c = clone.display();
+        for command in [
+            format!("cd {c} && git add f b"),
+            format!("git -C {c} add f b"),
+            format!("(cd {c} && git add f b)"),
+            format!("cd {c} && git commit -m x -- f b"),
+            format!("git -C {c} commit -m x"),
+            format!("bash -lc 'cd {c} && git commit -m x -- f b'"),
+        ] {
+            assert_eq!(check(&p, &command, &root), None, "{command}");
+        }
+        for command in ["git add f b", "git commit -m x -- f b", "git add -A"] {
+            assert_eq!(check(&p, command, &clone), None, "{command}");
+        }
+        assert!(check(&p, "git checkout -- f", &root).is_some());
+        std::fs::remove_dir_all(&clone).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A session whose cwd is in no repository has no tree of its own: a
+    /// discard against a repository is judged by that repository's changes
+    /// at the time it runs, and is never allowed to throw one away. A clean
+    /// repo, and staging and committing, are not refused.
+    #[test]
+    fn a_session_outside_any_repo_never_discards_dirty_files() {
+        let home = plain_dir("wi4056-home");
+        let p = settle(None, &home).unwrap();
+        assert!(p.discard_live_changes);
+        assert!(p.workspace_kind.is_none() && p.discard_baseline.is_empty());
+        assert!(settled(Some(&p)));
+        let dirty = repo("wi4056-live-dirty");
+        std::fs::write(dirty.join("f"), "someone's edit").unwrap();
+        std::fs::write(dirty.join("new"), "x").unwrap();
+        let d = dirty.display();
+        for command in [
+            format!("git -C {d} checkout -f"),
+            format!("git -C {d} checkout -- f"),
+            format!("git -C {d} restore f"),
+            format!("git -C {d} reset --hard"),
+            format!("git -C {d} clean -fd"),
+            format!("git -C {d} stash -u"),
+            format!("cd {d} && git restore f"),
+            format!("cd {d} && git reset --hard"),
+            format!("rm {d}/f"),
+            format!("rm -rf {d}"),
+            format!("rm -rf {d}/new"),
+            format!("GIT_DIR={d}/.git git checkout -- f"),
+        ] {
+            let reason = check(&p, &command, &home).unwrap_or_else(|| panic!("{command} allowed"));
+            assert!(reason.contains("discard guard"), "{command}: {reason}");
+        }
+        // The same commands with the repo's tree as the working directory.
+        for command in ["git checkout -- f", "git reset --hard", "rm f"] {
+            assert!(check(&p, command, &dirty).is_some(), "{command}");
+        }
+        // Not a discard, or not of a dirty file: allowed.
+        std::fs::write(dirty.join("g"), "x").unwrap();
+        for command in [
+            format!("git -C {d} add f new"),
+            format!("git -C {d} commit -m x"),
+            format!("cd {d} && git add -A && git commit -m x"),
+            format!("git -C {d} status"),
+            format!("git -C {d} restore --staged f"),
+        ] {
+            assert_eq!(check(&p, &command, &home), None, "{command}");
+        }
+        // A clean clone: every discard is allowed, as in a fresh worktree.
+        let clean = repo("wi4056-live-clean");
+        let c = clean.display();
+        for command in [
+            format!("git -C {c} reset --hard"),
+            format!("git -C {c} checkout -f"),
+            format!("rm -rf {c}"),
+            format!("cd {c} && git clean -fdx"),
+        ] {
+            assert_eq!(check(&p, &command, &home), None, "{command}");
+        }
+        // Plain commands outside every repo, and an unreadable line with no
+        // discard verb, are untouched.
+        for command in ["ls", "rm -rf scratch", "echo $(date)"] {
+            assert_eq!(check(&p, command, &home), None, "{command}");
+        }
+        // A discard this check cannot place is refused outside a repo.
+        assert!(check(&p, "eval \"$CMD\"; git checkout -- f", &home).is_some());
+        std::fs::remove_dir_all(&clean).ok();
+        std::fs::remove_dir_all(&dirty).ok();
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A session that already has a workspace block, or that was settled,
+    /// is never settled again: the baseline taken first stands.
+    #[test]
+    fn a_settled_policy_is_kept() {
+        let root = repo("wi4056-settled");
+        let ws = crate::git::capture_workspace(&root, None).unwrap();
+        let p = with_workspace(None, Some(&ws)).unwrap();
+        assert!(settled(Some(&p)));
+        let live = SessionPolicy {
+            discard_live_changes: true,
+            ..SessionPolicy::default()
+        };
+        assert!(settled(Some(&live)));
+        // A directory not on this filesystem (a pod's) is not settled.
+        assert_eq!(settle(None, Path::new("/no/such/vogt-dir")), None);
+        std::fs::remove_dir_all(&root).ok();
     }
 
     /// The lexer never panics, and fails closed on what it cannot balance.

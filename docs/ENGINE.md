@@ -1267,8 +1267,19 @@ the session's workspace block (above) into its policy before the child runs:
 toplevel) and `discard_baseline` from `baseline_dirty`. A wake copies the
 record's block, so it judges against the first start's baseline and never
 recaptures. A session with no block (one from before the workspace record,
-or a cwd outside any repository) gets neither rule; the agent's own guard
-(Klaudia's gitguard) still judges its discards. vogt-core adds `protected_checkouts`, every registered project's
+or a cwd outside any repository) is settled at its first policy check
+(WI-4056), once, and the result is kept on the session and in its record:
+when its cwd is now inside a git repository, that tree is captured as its
+workspace block would have been, and the paths dirty in it then become its
+baseline; otherwise its policy records `discard_live_changes`, and the
+discard guard judges each discarding git call or `rm` against the repository
+it acts on, with every path that repository has uncommitted *at that moment*
+as the baseline — a session with no tree of its own owns no one's changes.
+A clean repository (a fresh clone) is never refused; a discard whose
+repository the line hides (`GIT_DIR`, `--git-dir`, an unfollowed `cd`), whose
+repository's changes cannot be read in time, or that this check cannot read
+outside every repository, is refused. A pod session's cwd is on the pod's
+filesystem, so it is not settled by the engine. vogt-core adds `protected_checkouts`, every registered project's
 root, on a `worktree` or `cwd` start. A repo is resolved with `git rev-parse
 --show-toplevel` from the command's `-C` or the cwd:
 
