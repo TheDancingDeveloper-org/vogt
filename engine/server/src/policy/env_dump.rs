@@ -218,9 +218,12 @@ fn pipeline_is_quiet(
     if let Some(known) = memo[index] {
         return known;
     }
-    let quiet = match (after[index], pieces_.get(index + 1)) {
-        (Some(rest), Some(Piece::Cmd(next)))
-            if rest.starts_with('|') && !rest.starts_with("||") =>
+    // Only a stage that passes its input straight on can borrow the
+    // downstream stage's silence. `tee /dev/stderr` and `cat >&2` show the
+    // bytes even when a later `wc -c` consumes the pipe (WI-4061 review).
+    let quiet = match (pieces_.get(index), after[index], pieces_.get(index + 1)) {
+        (Some(Piece::Cmd(current)), Some(rest), Some(Piece::Cmd(next)))
+            if plain_filter(current) && rest.starts_with('|') && !rest.starts_with("||") =>
         {
             quiet_sink(next) || pipeline_is_quiet(index + 1, pieces_, after, memo)
         }
@@ -228,6 +231,38 @@ fn pipeline_is_quiet(
     };
     memo[index] = Some(quiet);
     quiet
+}
+
+/// Whether a pipeline stage passes its input to the next stage instead of
+/// showing it. `tee` writes a copy to a file or terminal, and a redirect to
+/// another descriptor (`>&2`, `2>&1`), a stderr stream or a device prints
+/// somewhere the pipe does not reach.
+fn plain_filter(simple: &str) -> bool {
+    let raw = shell_words(simple);
+    let (words, _, _) = command_words_assigning(simple);
+    if words.first().map(|w| base(w)) == Some("tee") {
+        return false;
+    }
+    !redirects_to_terminal(&raw)
+        && !raw
+            .iter()
+            .any(|word| descriptor_redirect(word) || stderr_redirect(word))
+}
+
+/// Whether `word` duplicates or moves output to another descriptor:
+/// `>&2`, `1>&2`, `2>&1`, `&>1`.
+fn descriptor_redirect(word: &str) -> bool {
+    let rest = word.trim_start_matches(|c: char| c.is_ascii_digit());
+    rest.starts_with(">&")
+        || rest.starts_with("&>")
+        || (rest.starts_with('>') && rest.contains('&'))
+}
+
+/// Whether `word` redirects stderr (`2>…`, `2>>…`), whose target the pipe
+/// does not carry.
+fn stderr_redirect(word: &str) -> bool {
+    let rest = word.trim_start_matches(|c: char| c.is_ascii_digit());
+    rest.len() != word.len() && rest.starts_with('>')
 }
 
 /// Whether `simple`, as the last stage of a pipe, does not show its input on
@@ -723,6 +758,11 @@ mod tests {
             "echo \"$VOGT_HTTP_TOKEN\" | xxd",
             "echo \"$VOGT_HTTP_TOKEN\" | grep -i token",
             "printf '%s\\n' \"$VOGT_HTTP_TOKEN\" | base64",
+            // A stage behind the pipe still shows it, whatever consumes the
+            // pipe after that.
+            "echo \"$VOGT_HTTP_TOKEN\" | tee /dev/stderr | wc -c",
+            "echo \"$VOGT_HTTP_TOKEN\" | tee /dev/tty | wc -c",
+            "echo \"$VOGT_HTTP_TOKEN\" | cat >&2 | wc -c",
             "env | cat",
             "printenv GITHUB_TOKEN > /tmp/x",
             // A redirect to a device that is the terminal.

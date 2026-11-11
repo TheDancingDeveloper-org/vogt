@@ -1439,7 +1439,10 @@ lets a harmless form through — `set -euo pipefail`, `set -- a b`,
 bare `set`, `export -p`, `declare -p`, `ps auxe`), a credential expansion,
 another language reading the environment, and any git/gh/destructive command
 stay refused. The allowlist is deliberately strict; a form it does not
-recognise keeps the fail-closed refusal. The same script is the
+recognise keeps the fail-closed refusal, and a segment that runs an
+interpreter (`python*`, `node`, `perl`, `ruby`, `awk`/`gawk`/`mawk`/`nawk`,
+`jq`, and the like) is refused outright: its own program can read the
+environment without any expansion on the line. The same script is the
 Codex session's managed `SessionStart` and `PreToolUse` hook, run as
 `vogt-policy-hook codex`: that argument translates Codex's `tool_input` — a
 `command`, a `cmd`, or a `shell` argv array — into the engine's request before
