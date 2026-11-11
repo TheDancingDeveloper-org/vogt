@@ -529,6 +529,9 @@ struct Calls {
     /// The whole line, for the verbs an opaque part may act on later in it
     /// (`alias g='git -C x'; g commit`).
     line: String,
+    /// A command writes into `.git/config` or `.git/hooks/`, whose contents
+    /// later git calls run.
+    git_internals: bool,
 }
 
 impl Calls {
@@ -629,6 +632,9 @@ fn git_calls(command: &str, cwd: &Path) -> Calls {
     .iter()
     .any(|v| command.contains(v))
         || command.to_ascii_lowercase().contains("core.worktree");
+    // The environment hands git configuration (`GIT_CONFIG_COUNT`, …): any
+    // subcommand may be an alias. The words are read too ([`env_command`]);
+    // this catches a name the walker never sees as a word.
     let configured = [
         "GIT_CONFIG_COUNT",
         "GIT_CONFIG_KEY_",
@@ -638,17 +644,24 @@ fn git_calls(command: &str, cwd: &Path) -> Calls {
         "GIT_CONFIG_SYSTEM",
     ]
     .iter()
-    .any(|v| command.contains(v))
-        || command_env(command);
+    .any(|v| command.contains(v));
     let mut walker = Walker {
         moved: redirected,
         configured,
+        env_command: false,
         out: Calls {
             line: command.to_string(),
             ..Calls::default()
         },
     };
     walker.walk(command, cwd, moved, 0);
+    if walker.env_command {
+        // A command handed through the environment runs in every git call
+        // on the line, before or after the assignment in the text.
+        for call in walker.out.calls.iter_mut().filter(|c| !c.rm) {
+            call.aliased = true;
+        }
+    }
     walker.out
 }
 
@@ -659,6 +672,9 @@ struct Walker {
     /// (`GIT_CONFIG_COUNT`/`_KEY_n`, `GIT_CONFIG_PARAMETERS`, `GIT_CONFIG`,
     /// `GIT_CONFIG_GLOBAL`/`_SYSTEM`): any subcommand may be an alias.
     configured: bool,
+    /// A simple command hands git a command through the environment
+    /// ([`env_command`]): every git call on the line may run it.
+    env_command: bool,
     out: Calls,
 }
 
@@ -721,14 +737,23 @@ impl Walker {
     }
 
     fn simple(&mut self, simple: &str, state: &mut State, depth: usize, subs: &[&[Piece]]) {
-        let (words, wrapped_opaque) = command_words_ext(simple);
+        let (words, wrapped_opaque, assigns) = command_words_assigning(simple);
         if wrapped_opaque {
             self.out.opaque.push(simple.to_string());
         }
         let Some(first) = words.first() else {
             return;
         };
-        if words.len() == 1 && is_assignment(first) {
+        let single = words.len() == 1 && is_assignment(first);
+        if single {
+            self.env_command |= env_command(&[], std::slice::from_ref(first));
+        } else {
+            self.env_command |= env_command(&words, &assigns);
+        }
+        if writes_git_internals(&shell_words(simple)) {
+            self.out.git_internals = true;
+        }
+        if single {
             // `X=$(…)` runs nothing itself; its substitution is walked as a
             // piece of its own.
             return;
@@ -1076,81 +1101,178 @@ const COMMAND_ENV: &[&str] = &[
     "GIT_TEMPLATE_DIR",
     "LESSOPEN",
     "LESSCLOSE",
+    "LESS",
+    "MORE",
+    "LESSEDIT",
+    "LESSHISTFILE",
 ];
 
-/// Whether the line hands git a command through the environment: a
-/// [`COMMAND_ENV`] name assigned anything but a known-harmless program
-/// (`GIT_PAGER=cat`, `GIT_EDITOR=true`), or handed to a declaration
-/// builtin (`export NAME`, `printf -v NAME …`, `read NAME`), since its value
-/// then comes from somewhere this reading does not follow.
-fn command_env(command: &str) -> bool {
-    let bytes = command.as_bytes();
-    let ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
-    for name in COMMAND_ENV {
-        let mut from = 0;
-        while let Some(at) = command[from..].find(name) {
-            let start = from + at;
-            let end = start + name.len();
-            from = end;
-            if (start > 0 && ident(bytes[start - 1])) || bytes.get(end).is_some_and(|b| ident(*b)) {
-                continue;
-            }
-            // `$NAME` / `${NAME}` reads it; `unset NAME` takes it away.
-            let before = command[..start].trim_end_matches('{');
-            if before.ends_with('$') {
-                continue;
-            }
-            if command[..start].trim_end().ends_with("unset") {
-                continue;
-            }
-            if bytes.get(end) != Some(&b'=') {
-                // A bare mention (a commit message naming GIT_PAGER) sets
-                // nothing; a declaration builtin may give it a value from
-                // somewhere else (`export NAME`, `read NAME`, `printf -v`).
-                let word = command[..start]
-                    .trim_end()
-                    .rsplit(|c: char| c.is_whitespace() || matches!(c, ';' | '&' | '|' | '('))
-                    .next()
-                    .unwrap_or("");
-                if matches!(
-                    word,
-                    "export" | "declare" | "typeset" | "readonly" | "local" | "read" | "-v"
-                ) || word.starts_with('-')
-                {
+/// Whether `name` is a [`COMMAND_ENV`] variable, or one less reads its
+/// key bindings from (`LESSKEY`, `LESSKEYIN`, `LESSKEY_CONTENT`, …).
+fn command_env_name(name: &str) -> bool {
+    COMMAND_ENV.contains(&name) || name.starts_with("LESSKEY")
+}
+
+/// Whether `name` is one of the variables through which the environment
+/// hands git configuration (`GIT_CONFIG_COUNT`/`_KEY_n`/`_VALUE_n`,
+/// `GIT_CONFIG_PARAMETERS`, `GIT_CONFIG`, `GIT_CONFIG_GLOBAL`/`_SYSTEM`).
+fn config_env_name(name: &str) -> bool {
+    name == "GIT_CONFIG" || name.starts_with("GIT_CONFIG_")
+}
+
+/// Whether the assignment `name=value` hands git a command or
+/// configuration through the environment: a [`command_env_name`] given
+/// anything but a [`harmless_command`], or any [`config_env_name`].
+fn unsafe_assignment(name: &str, value: &str) -> bool {
+    config_env_name(name)
+        || (command_env_name(name) && !harmless_command(value, &name.to_ascii_lowercase()))
+}
+
+/// Whether a simple command's words, after quote removal, hand git a
+/// command through the environment (WI-4001 round 5, blocker 3). Read are
+/// the assignments before the program (and after `env`), and the operands
+/// of the builtins that set a variable: `export`, `declare`, `typeset`,
+/// `local`, `readonly` (`NAME=value`, a bare `NAME`, whose value comes
+/// from elsewhere, or a nameref `-n`), `read NAME` and `printf -v NAME`. A
+/// name that is not a literal word (`export $X=…`) may be any of them. A
+/// commit message or format string that mentions `EDITOR=vim` is an
+/// argument, not an assignment, and sets nothing.
+fn env_command(words: &[String], assigns: &[String]) -> bool {
+    if assigns
+        .iter()
+        .filter_map(|w| assignment(w))
+        .any(|(name, value)| unsafe_assignment(name, value))
+    {
+        return true;
+    }
+    let Some(program) = words.first() else {
+        return false;
+    };
+    let literal = |w: &str| {
+        !w.is_empty()
+            && !w.starts_with(|c: char| c.is_ascii_digit())
+            && w.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    };
+    let named = |name: &str| !literal(name) || command_env_name(name) || config_env_name(name);
+    match program.as_str() {
+        "export" | "declare" | "typeset" | "local" | "readonly" => {
+            let mut nameref = false;
+            for w in &words[1..] {
+                if w.starts_with(['-', '+']) && !w.contains('=') {
+                    nameref |= w.starts_with('-') && w.contains('n');
+                    continue;
+                }
+                let (name, value) = match w.split_once('=') {
+                    Some((n, v)) => (n.strip_suffix('+').unwrap_or(n), Some(v)),
+                    None => (w.as_str(), None),
+                };
+                if !literal(name) {
                     return true;
                 }
-                continue;
+                match value {
+                    // `declare -n R=GIT_PAGER`: R now names the target.
+                    Some(v) if nameref => {
+                        if named(v) {
+                            return true;
+                        }
+                    }
+                    Some(v) => {
+                        if unsafe_assignment(name, v) {
+                            return true;
+                        }
+                    }
+                    None => {
+                        if command_env_name(name) || config_env_name(name) {
+                            return true;
+                        }
+                    }
+                }
             }
-            if !harmless_command(&assigned_value(&command[end + 1..]), name) {
+            false
+        }
+        "read" | "mapfile" | "readarray" => {
+            let mut skip = false;
+            words[1..].iter().any(|w| {
+                if skip {
+                    skip = false;
+                    return false;
+                }
+                if w.starts_with('-') {
+                    skip = matches!(w.as_str(), "-d" | "-n" | "-N" | "-p" | "-t" | "-u");
+                    return false;
+                }
+                named(w)
+            })
+        }
+        "printf" => words
+            .windows(2)
+            .any(|pair| pair[0] == "-v" && named(&pair[1])),
+        _ => false,
+    }
+}
+
+/// Whether `word` (a redirection, or an operand of a program that writes
+/// its operands) names git's own config file or hooks directory, whose
+/// contents git runs (`printf '[core]\n\tpager=…' >> .git/config`,
+/// `cp x .git/hooks/pre-commit`).
+fn git_internal_path(word: &str) -> bool {
+    let parts: Vec<&str> = word
+        .split('/')
+        .filter(|p| !p.is_empty() && *p != ".")
+        .collect();
+    parts
+        .windows(2)
+        .any(|w| w[0] == ".git" && matches!(w[1], "config" | "hooks" | "info"))
+        || parts.last() == Some(&".git")
+}
+
+/// Whether a simple command writes into git's config or hooks: a `>`/`>>`
+/// redirection to one, or `tee`, `cp`, `mv`, `install`, `ln`, `dd of=`,
+/// `sed -i`, `truncate` naming one.
+fn writes_git_internals(words: &[String]) -> bool {
+    let mut redirect_next = false;
+    for w in words {
+        if redirect_next {
+            redirect_next = false;
+            if git_internal_path(w) {
+                return true;
+            }
+            continue;
+        }
+        let r = w.trim_start_matches(|c: char| c.is_ascii_digit() || c == '&');
+        if let Some(target) = r.strip_prefix('>') {
+            let target = target.trim_start_matches(['>', '|']);
+            if target.is_empty() {
+                redirect_next = true;
+            } else if !target.starts_with('&') && git_internal_path(target) {
                 return true;
             }
         }
     }
-    false
-}
-
-/// The value an assignment's text starts with, its quotes removed: up to
-/// the first unquoted blank or command separator.
-fn assigned_value(text: &str) -> String {
-    let mut out = String::new();
-    let mut quote: Option<char> = None;
-    for c in text.chars() {
-        match quote {
-            Some(q) if c == q => quote = None,
-            Some(_) => out.push(c),
-            None if c == '\'' || c == '"' => quote = Some(c),
-            None if c.is_whitespace() || matches!(c, ';' | '&' | '|' | ')') => break,
-            None => out.push(c),
+    let Some(program) = words.first() else {
+        return false;
+    };
+    let operands: Vec<&String> = words[1..].iter().filter(|w| !w.starts_with('-')).collect();
+    match base(program) {
+        // The destination is the last operand: `cp .git/config /tmp/c` only
+        // reads it.
+        "cp" | "mv" | "install" | "ln" | "rsync" => {
+            operands.last().is_some_and(|w| git_internal_path(w))
         }
+        "tee" | "sed" | "truncate" => operands.iter().any(|w| git_internal_path(w)),
+        "dd" => operands
+            .iter()
+            .any(|w| w.strip_prefix("of=").is_some_and(git_internal_path)),
+        _ => false,
     }
-    out
 }
 
 /// Whether `value`, given to the setting `key` that names a command, runs
-/// nothing but a known-harmless program: empty, `cat`, `less`/`more` with
-/// flags, `true`, `false`, `:`, or for an ssh setting `ssh` with flags. No
-/// expansion, separator or redirection. A hooks path is harmless only as
-/// `/dev/null`; the paths git searches for programs never are.
+/// nothing but a known-harmless program: empty, `cat`, `true`, `false`,
+/// `:`, `less`/`more` with flags that write no file ([`pager_flags`]), or
+/// for an ssh setting `ssh` with flags that name no command or config
+/// file. No expansion, separator or redirection. A hooks path is harmless
+/// only as `/dev/null`; the paths git searches for programs never are.
 fn harmless_command(value: &str, key: &str) -> bool {
     let key = key.to_ascii_lowercase();
     if key.ends_with("hookspath") {
@@ -1158,105 +1280,211 @@ fn harmless_command(value: &str, key: &str) -> bool {
     }
     if matches!(
         key.as_str(),
-        "git_exec_path" | "git_template_dir" | "lessopen" | "lessclose"
-    ) {
+        "git_exec_path" | "git_template_dir" | "lessopen" | "lessclose" | "lessedit"
+    ) || key.starts_with("lesskey")
+    {
         return value.is_empty();
     }
-    if key.contains("credential") && key.ends_with("helper") {
-        return matches!(value, "" | "store" | "cache");
+    if key == "lesshistfile" {
+        return matches!(value, "" | "-" | "/dev/null");
     }
     if value.contains(['$', '`', ';', '&', '|', '<', '>', '(', ')', '\n', '\\', '!']) {
         return false;
     }
     let words = shell_words(value);
+    if matches!(key.as_str(), "less" | "more") {
+        // The options less reads before its command line.
+        return pager_flags(&words);
+    }
+    if key.contains("credential") && key.ends_with("helper") {
+        return matches!(value, "" | "store" | "cache");
+    }
     let Some(program) = words.first() else {
         return true;
     };
     let ssh = key.contains("ssh");
-    let safe = match program.as_str() {
-        "cat" | "less" | "more" | "true" | "false" | ":" => true,
-        "ssh" | "/usr/bin/ssh" => ssh,
+    match base(program) {
+        "cat" | "true" | "false" | ":" => words.len() == 1 || program == "cat",
+        "less" | "more" => pager_flags(&words[1..]),
+        "ssh" if ssh => words[1..].iter().all(|w| {
+            let lower = w.to_ascii_lowercase();
+            !lower.contains("command") && !w.starts_with("-F") && !w.starts_with("-E")
+        }),
         _ => false,
-    };
-    safe && words[1..].iter().all(|w| w.starts_with('-') || ssh)
+    }
 }
 
-/// Whether a git config key names a command git runs (WI-4001 round 4,
-/// blocker 4): `diff.external`, `core.fsmonitor`, the pager and editor
-/// settings, ssh and askpass commands, credential helpers, the hooks
-/// path, filter and merge drivers, textconv and external diff drivers,
-/// difftool/mergetool commands, `gpg.program`, proxies and remote
-/// upload/receive programs.
-fn command_key(key: &str) -> bool {
-    let key = key.to_ascii_lowercase();
-    let last = key.rsplit('.').next().unwrap_or("");
+/// Whether `less`/`more` options write nothing and run nothing: flag
+/// clusters only, none holding a letter that names an output, log or key
+/// file (`-o`, `-O`, `-k`), and no `--log-file`, `--LOG-FILE`,
+/// `--lesskey-*` or `+cmd` (WI-4001 round 5, blocker 5: `less -Oa.txt`
+/// writes a.txt).
+fn pager_flags(words: &[String]) -> bool {
+    words.iter().all(|w| {
+        if let Some(long) = w.strip_prefix("--") {
+            let name = long
+                .split_once('=')
+                .map_or(long, |p| p.0)
+                .to_ascii_lowercase();
+            return !name.is_empty() && !name.starts_with("log") && !name.starts_with("lesskey");
+        }
+        w.strip_prefix('-').is_some_and(|flags| {
+            !flags.is_empty()
+                && flags.chars().all(|c| c.is_ascii_alphanumeric())
+                && !flags.contains(['o', 'O', 'k'])
+        })
+    })
+}
+
+/// Git configuration keys that are safe to set to any value: they change
+/// what git shows or records, never which program it runs or what reaches
+/// the working tree (WI-4001 round 5, blocker 5). Matched lowercased, as a
+/// whole key or (ending in `.`) as a section.
+const SAFE_KEYS: &[&str] = &[
+    "advice.",
+    "color.",
+    "column.",
+    "user.",
+    "author.",
+    "committer.",
+    "safe.directory",
+    "init.defaultbranch",
+    "core.quotepath",
+    "core.abbrev",
+    "core.commentchar",
+    "core.commentstring",
+    "commit.gpgsign",
+    "commit.verbose",
+    "commit.status",
+    "commit.cleanup",
+    "tag.gpgsign",
+    "tag.sort",
+    "branch.sort",
+    "pull.rebase",
+    "pull.ff",
+    "push.default",
+    "push.autosetupremote",
+    "push.followtags",
+    "fetch.prune",
+    "fetch.prunetags",
+    "fetch.parallel",
+    "status.",
+    "log.",
+    "format.pretty",
+    "blame.",
+    "grep.linenumber",
+    "grep.column",
+    "grep.patterntype",
+    "grep.extendedregexp",
+    "grep.fullname",
+    "diff.noprefix",
+    "diff.mnemonicprefix",
+    "diff.relative",
+    "diff.renames",
+    "diff.renamelimit",
+    "diff.algorithm",
+    "diff.colormoved",
+    "diff.colormovedws",
+    "diff.context",
+    "diff.interhunkcontext",
+    "diff.indentheuristic",
+    "diff.statgraphwidth",
+    "diff.statnamewidth",
+    "diff.submodule",
+    "diff.ignoresubmodules",
+    "diff.suppressblankempty",
+    "diff.wserrorhighlight",
+    "merge.conflictstyle",
+    "merge.stat",
+    "merge.log",
+    "rebase.autosquash",
+    "rebase.stat",
+    "rebase.missingcommitscheck",
+    "rerere.enabled",
+    "gc.auto",
+    "gc.autodetach",
+    "maintenance.auto",
+    "i18n.",
+    "credential.username",
+];
+
+/// Settings whose value is a command: allowed only when the value is a
+/// [`harmless_command`] (`core.pager=cat`, `core.editor=true`).
+fn command_setting(key: &str) -> bool {
     matches!(
-        key.as_str(),
-        "diff.external"
-            | "core.fsmonitor"
-            | "core.pager"
+        key,
+        "core.pager"
             | "core.editor"
             | "sequence.editor"
             | "core.sshcommand"
-            | "core.askpass"
             | "core.hookspath"
-            | "core.gitproxy"
-            | "gpg.program"
-            | "interactive.difffilter"
-            | "uploadpack.packobjectshook"
             | "credential.helper"
     ) || key.starts_with("pager.")
-        || (key.starts_with("filter.") && matches!(last, "smudge" | "clean" | "process"))
-        || (key.starts_with("diff.") && matches!(last, "textconv" | "command"))
-        || (key.starts_with("merge.") && last == "driver")
-        || ((key.starts_with("difftool.") || key.starts_with("mergetool.")) && last == "cmd")
-        || (key.starts_with("credential.") && last == "helper")
-        || (key.starts_with("gpg.") && last == "program")
-        || (key.starts_with("remote.") && matches!(last, "uploadpack" | "receivepack" | "proxy"))
-        || key.starts_with("ssh.")
+}
+
+/// A config key spelled as a literal word: no expansion, quote or escape
+/// left in it (WI-4001 round 5, blocker 4: `git -c $K=restore`).
+fn literal_key(key: &str) -> bool {
+    !key.is_empty()
+        && key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '/' | ':' | '*'))
+}
+
+/// Whether setting git config `key` to `value` (unknown when `None`, as
+/// for `--config-env`) can run nothing of the caller's choosing and change
+/// no working-tree file: a [`SAFE_KEYS`] key; an `alias.*`, which
+/// [`git_aliased`] judges; or a [`command_setting`] given a harmless
+/// command. Every other key, and any key that is not a literal word, is
+/// not safe: this is an allowlist, so a newly found command-running key is
+/// refused without a new rule.
+fn safe_setting(key: &str, value: Option<&str>) -> bool {
+    if !literal_key(key) {
+        return false;
+    }
+    let key = key.to_ascii_lowercase();
+    if key.starts_with("alias.") {
+        return true;
+    }
+    if command_setting(&key) {
+        return value.is_some_and(|v| harmless_command(v, &key));
+    }
+    SAFE_KEYS.iter().any(|safe| {
+        if safe.ends_with('.') {
+            key.starts_with(safe)
+        } else {
+            key == *safe
+        }
+    })
 }
 
 /// Whether a git call runs a command of the caller's choosing (WI-4001
 /// round 4, blocker 4), which may discard or write anything, like an alias
-/// does: a `-c`/`--config-env` that sets a [`command_key`] to anything but
-/// a harmless program, `--exec-path=<dir>`, a `git config` that sets one,
+/// does: a `-c`/`--config-env` that sets a key [`safe_setting`] does not
+/// allow, `--exec-path=<dir>`, a `git config` that sets one,
 /// `grep -O`/`--open-files-in-pager`, `difftool -x`/`--extcmd`, `rebase
 /// -x`/`--exec`, `bisect run` and `submodule foreach`.
 fn git_runs_command(words: &[String]) -> bool {
     let mut rest = words.iter().skip(1);
     while let Some(arg) = rest.next() {
-        let setting = match arg.as_str() {
-            "-c" => rest.next().map(String::as_str),
+        let (setting, from_env) = match arg.as_str() {
+            "-c" => (rest.next().map(String::as_str), false),
             // The value comes from an environment variable this reading
             // does not follow.
-            "--config-env" => {
-                if rest
-                    .next()
-                    .is_some_and(|s| command_key(s.split_once('=').map_or(s, |p| p.0)))
-                {
-                    return true;
-                }
-                None
-            }
-            _ if arg.starts_with("--config-env=") => {
-                let s = &arg["--config-env=".len()..];
-                if command_key(s.split_once('=').map_or(s, |p| p.0)) {
-                    return true;
-                }
-                None
-            }
+            "--config-env" => (rest.next().map(String::as_str), true),
+            _ if arg.starts_with("--config-env=") => (arg.strip_prefix("--config-env="), true),
             _ if arg.starts_with("--exec-path=") => return true,
-            _ if arg.starts_with("-c") && arg.len() > 2 => arg.strip_prefix("-c"),
+            _ if arg.starts_with("-c") && arg.len() > 2 => (arg.strip_prefix("-c"), false),
             "-C" | "--git-dir" | "--work-tree" | "--namespace" => {
                 rest.next();
-                None
+                (None, false)
             }
-            _ if arg.starts_with('-') => None,
+            _ if arg.starts_with('-') => (None, false),
             _ => break,
         };
         let Some(setting) = setting else { continue };
         let (key, value) = setting.split_once('=').unwrap_or((setting, ""));
-        if command_key(key) && !harmless_command(value, key) {
+        if !safe_setting(key, (!from_env).then_some(value)) {
             return true;
         }
     }
@@ -1317,11 +1545,27 @@ fn git_runs_command(words: &[String]) -> bool {
             if reads {
                 return false;
             }
-            rest.iter().enumerate().any(|(i, a)| {
-                !a.starts_with('-')
-                    && command_key(a)
-                    && !harmless_command(rest.get(i + 1).map_or("", String::as_str), a)
-            })
+            // `git config [--global] [set] <key> <value>`: the key is the
+            // first operand. `-f`/`--file`/`--blob`/`--type` take a value.
+            let mut operands = Vec::new();
+            let mut it = rest.iter();
+            while let Some(a) = it.next() {
+                if matches!(
+                    a.as_str(),
+                    "-f" | "--file" | "--blob" | "--type" | "--default"
+                ) {
+                    it.next();
+                } else if !a.starts_with('-') {
+                    operands.push(a.as_str());
+                }
+            }
+            if operands.first() == Some(&"set") {
+                operands.remove(0);
+            }
+            match operands.first() {
+                Some(key) => !safe_setting(key, Some(operands.get(1).copied().unwrap_or(""))),
+                None => false,
+            }
         }
         _ => false,
     }
@@ -1826,6 +2070,9 @@ fn discard(policy: &SessionPolicy, calls: &Calls, repos: &mut Repos) -> Option<S
     if calls.blind_discard() {
         return refuse("a command this check cannot read", total);
     }
+    if calls.git_internals {
+        return refuse("a write to .git/config or .git/hooks", total);
+    }
     let own = policy
         .workspace_path
         .as_deref()
@@ -1994,8 +2241,8 @@ fn discards(sub: &str, args: &[String]) -> Option<Reach> {
     // `--pathspec-from-file` (and `checkout-index --stdin`) read the paths
     // from a file or stdin: what they name is not on the line.
     if opts.long("--pathspec-from-file") || (sub == "checkout-index" && opts.long("--stdin")) {
-        let staged_only = opts.safe(Some('S'), "--staged")
-            && !(opts.short('W') || opts.long("--worktree"));
+        let staged_only =
+            opts.safe(Some('S'), "--staged") && !(opts.short('W') || opts.long("--worktree"));
         match sub {
             "restore" if staged_only => return None,
             "rm" if opts.allow("--cached") => return None,
@@ -2194,7 +2441,7 @@ impl Opts {
             .iter()
             .rev()
             .find(|o| on(o) || off(o))
-            .is_some_and(|o| on(o))
+            .is_some_and(on)
     }
 }
 
@@ -2404,8 +2651,16 @@ fn command_words(simple: &str) -> Vec<String> {
 /// `time -p`, …) are stepped over like wrappers, so `if true; then git …`
 /// and `! git …` are judged as the git call they hold.
 fn command_words_ext(simple: &str) -> (Vec<String>, bool) {
+    let (words, opaque, _) = command_words_assigning(simple);
+    (words, opaque)
+}
+
+/// [`command_words_ext`], and the assignments it stepped over (`NAME=v`
+/// before the program or after `env`), quotes removed.
+fn command_words_assigning(simple: &str) -> (Vec<String>, bool, Vec<String>) {
     let mut words = shell_words(simple);
     let mut opaque = false;
+    let mut assigns = Vec::new();
     // Drop `n` words from the front, as long as one would be left.
     let drop = |words: &mut Vec<String>, n: usize| {
         let n = n.min(words.len());
@@ -2413,7 +2668,7 @@ fn command_words_ext(simple: &str) -> (Vec<String>, bool) {
     };
     loop {
         while words.len() > 1 && is_assignment(&words[0]) {
-            words.remove(0);
+            assigns.push(words.remove(0));
         }
         match words.first().map(|w| base(w)) {
             Some("!" | "{" | "}" | "then" | "else" | "elif" | "do" | "if" | "while" | "until") => {
@@ -2513,7 +2768,7 @@ fn command_words_ext(simple: &str) -> (Vec<String>, bool) {
                 words.remove(0);
                 while let Some(w) = words.first().cloned() {
                     if is_assignment(&w) {
-                        words.remove(0);
+                        assigns.push(words.remove(0));
                         continue;
                     }
                     if !w.starts_with('-') || w == "-" {
@@ -2560,7 +2815,7 @@ fn command_words_ext(simple: &str) -> (Vec<String>, bool) {
             _ => break,
         }
     }
-    (words, opaque)
+    (words, opaque, assigns)
 }
 
 /// One `env` option word, read as GNU env's getopt reads it: a cluster
@@ -2606,12 +2861,18 @@ fn env_option(word: &str) -> EnvOption {
 }
 
 fn is_assignment(word: &str) -> bool {
-    match word.split_once('=') {
-        Some((name, _)) => {
-            !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-        }
-        None => false,
-    }
+    assignment(word).is_some()
+}
+
+/// A shell assignment word, `NAME=value` or `NAME+=value`, as its name and
+/// value.
+fn assignment(word: &str) -> Option<(&str, &str)> {
+    let (name, value) = word.split_once('=')?;
+    let name = name.strip_suffix('+').unwrap_or(name);
+    (!name.is_empty()
+        && !name.starts_with(|c: char| c.is_ascii_digit())
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+    .then_some((name, value))
 }
 
 /// Split a command line into the simple commands a shell would run,
@@ -4099,7 +4360,11 @@ mod tests {
                 "git grep --ope x",
             ],
         );
-        assert_allowed(&p, &root, &["git rebase --onto main HEAD~1", "git rebase -i HEAD~2"]);
+        assert_allowed(
+            &p,
+            &root,
+            &["git rebase --onto main HEAD~1", "git rebase -i HEAD~2"],
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -4228,7 +4493,7 @@ mod tests {
                 "git -c core.pager=cat log",
                 "git -c core.pager='less -FRX' log",
                 "git -c pager.log=false log",
-                "git -c alias.st=status st",
+                "git -c alias.st=status status",
                 "LESS=-FRX git log",
                 "LESS='-R -S' git log",
                 "git config user.email x@y",
@@ -4255,6 +4520,16 @@ mod tests {
                 "git log --format='%H EDITOR=x'",
                 "echo GIT_PAGER=x",
                 "cat .git/config",
+                "cp .git/config /tmp/c",
+                "export PATH=$HOME/bin:$PATH; cargo test",
+                "export RUST_LOG=debug CARGO_BUILD_JOBS=4; cargo test",
+                "while read -r line; do echo $line; done < f",
+                "declare -a xs=(1 2); local n=1",
+                "printf -v n %s 1; echo $n",
+                "LESS=-R git log -1",
+                "GIT_PAGER=cat git log",
+                "git -c core.pager=cat log",
+                "git config user.name x",
                 "cd engine && cargo test",
                 "git -C /tmp log",
                 "eval \"$(ssh-agent -s)\"",
