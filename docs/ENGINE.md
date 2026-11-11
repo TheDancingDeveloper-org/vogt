@@ -1652,11 +1652,17 @@ Enter. Enter is pressed by default; `draft: true` (or an explicit
 call. The raw `POST /api/sessions/:id/input` is one write: `text`
 (JSON-escaped) plus `\r` when `submit` is true; an empty `text` with
 `submit: true` is a bare Enter. When the program has bracketed paste on, a
-non-empty `text` with no control character other than tab or a line break is
-sent inside one paste (`ESC[200~` … `ESC[201~`), so the TUI that receives it
-treats it as pasted text and the Enter after it submits rather than joining a
-"paste burst" as a newline (WI-4068). `text` that carries an escape sequence
-or another control byte is a key, and is written as typed.
+non-empty `text` is sent inside one paste (`ESC[200~` … `ESC[201~`), so the
+TUI that receives it treats it as pasted text and the Enter after it submits
+rather than joining a "paste burst" as a newline (WI-4068). Keys are not
+pasted: a one-character `text` (a dialog answer such as `1` or `y`, or a
+named key such as `\r` or `\t`), text made only of tabs and line breaks, and
+single-line text carrying another control byte or escape sequence are written
+as typed. So each named key vogt-core sends as its own write reaches the PTY
+as that key. An Esc inside a multi-line paste is removed, and either paste
+marker inside the text is dropped, so the body can neither lose the paste to
+a key classification nor close the paste early; line breaks in a paste are
+normalised to `\n`.
 
 **Safety rules.**
 
