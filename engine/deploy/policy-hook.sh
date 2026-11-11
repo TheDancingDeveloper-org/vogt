@@ -166,11 +166,16 @@ start = r"(^|[;&|(){}`\n!]|\b(then|do|else|eval|exec|command|builtin|sudo|env|ti
 wrapped = r"(^|[^\w-])(timeout|nice|stdbuf|setsid|ionice|doas|chronic|sudo|env|exec|command|builtin|nohup|time|xargs|watch|flock|su|script|busybox)\s+([^;&|\n]*?\s)?[\"\x27]*[$`]"
 # A brace expansion as the program (`{rm,a.txt}`, `{r,}m a.txt`).
 braced = start + r"[\"\x27]*\S*\{[^}\s]*,"
+# A command attached to its option (`env -S"rm a.txt"`, `su -c"…"`,
+# `script -qc"…"`): the word holding it starts with `-`, and the word test
+# below would read `-srm` as one word (WI-4001 round 4, blocker 3).
+attached = r"(^|[^\w-])(env|su|runuser|script|sudo|doas|busybox)\s+([^;&|\n]*?\s)?-[A-Za-z]*[Sc][^\s=]"
 if (
     re.search(start + r"[\"\x27]*[$`]", cmd)
     or re.search(start + r"\.\s", cmd)
     or re.search(wrapped, cmd)
     or re.search(braced, cmd)
+    or re.search(attached, cmd)
 ):
     sys.stdout.write("git")
     sys.exit(0)
