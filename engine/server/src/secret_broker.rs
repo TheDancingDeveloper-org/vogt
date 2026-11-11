@@ -824,8 +824,9 @@ impl SecretBroker {
         })
     }
 
-    /// Forget a session's token. A token a session was handed stays valid for
-    /// exactly as long as the engine remembers the session.
+    /// Forget a session's token. A token a session was handed stays valid
+    /// while its process runs: the exit hook, a hibernation and a remove all
+    /// revoke it (WI-4046).
     pub fn revoke(&self, session: Uuid) {
         self.grants.remove(&session);
         self.session_grants.remove(&session);
