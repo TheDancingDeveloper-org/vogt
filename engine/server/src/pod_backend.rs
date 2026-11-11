@@ -64,6 +64,9 @@ pub struct PodConfig {
     pub resource_requests:
         BTreeMap<String, k8s_openapi::apimachinery::pkg::api::resource::Quantity>,
     pub resource_limits: BTreeMap<String, k8s_openapi::apimachinery::pkg::api::resource::Quantity>,
+    /// Labels every session pod must carry (`ENGINE_POD_NODE_SELECTOR`,
+    /// comma-separated `KEY=VALUE`). A template policy may add keys; a key the
+    /// deployment set cannot be given a different value.
     pub node_selector: BTreeMap<String, String>,
     /// The cache claim and node are deployment policy rather than pod logic.
     pub cache_pvc: String,
@@ -303,6 +306,33 @@ fn hostname_requirement(operator: &str, nodes: &[String]) -> NodeSelectorRequire
     }
 }
 
+/// `key=value,key=value` labels every session pod must carry. A repeated key
+/// is refused rather than silently keeping the last value.
+fn parse_node_selector(raw: &str) -> Result<BTreeMap<String, String>> {
+    let bad = |item: &str| {
+        ApiError::Config(format!(
+            "ENGINE_POD_NODE_SELECTOR: {item:?} is not KEY=VALUE"
+        ))
+    };
+    let mut selector = BTreeMap::new();
+    for item in raw.split(',').map(str::trim).filter(|i| !i.is_empty()) {
+        let (key, value) = item.split_once('=').ok_or_else(|| bad(item))?;
+        let (key, value) = (key.trim(), value.trim());
+        if key.is_empty() || value.is_empty() {
+            return Err(bad(item));
+        }
+        if selector
+            .insert(key.to_string(), value.to_string())
+            .is_some()
+        {
+            return Err(ApiError::Config(format!(
+                "ENGINE_POD_NODE_SELECTOR: {key:?} is set more than once"
+            )));
+        }
+    }
+    Ok(selector)
+}
+
 /// `name:weight,name:weight` with weight 1..=100 (default 1 when omitted).
 fn parse_preferred_nodes(raw: &str) -> Result<Vec<(String, i32)>> {
     let bad = |item: &str| {
@@ -324,6 +354,22 @@ fn parse_preferred_nodes(raw: &str) -> Result<Vec<(String, i32)>> {
             Ok((name.to_string(), weight))
         })
         .collect()
+}
+
+/// The pod's labels: the deployment's hard selector, plus any key a template
+/// policy adds. Startup validation refuses a policy that changes a deployment
+/// key, so this keeps the deployment's value on a collision.
+fn merged_node_selector(
+    cfg: &PodConfig,
+    policy: Option<&PodTemplatePolicy>,
+) -> BTreeMap<String, String> {
+    let mut selector = cfg.node_selector.clone();
+    if let Some(policy_selector) = policy.and_then(|p| p.node_selector.as_ref()) {
+        for (key, value) in policy_selector {
+            selector.entry(key.clone()).or_insert_with(|| value.clone());
+        }
+    }
+    selector
 }
 
 /// The pod's affinity: the template policy's, plus the deployment's preferred
@@ -570,6 +616,9 @@ impl PodConfig {
         set_or_empty("ENGINE_POD_CACHE_SECRET", &mut cfg.cache_secret);
         set_or_empty("ENGINE_POD_KACHE_CONFIG_MAP", &mut cfg.kache_config_map);
         optional("ENGINE_POD_PRIORITY_CLASS", &mut cfg.priority_class);
+        if let Some(v) = text("ENGINE_POD_NODE_SELECTOR") {
+            cfg.node_selector = parse_node_selector(&v)?;
+        }
         if let Some(v) = text("ENGINE_POD_PREFERRED_NODES") {
             cfg.preferred_nodes = parse_preferred_nodes(&v)?;
         }
@@ -700,8 +749,37 @@ impl PodConfig {
                 cfg.cache_node
             )));
         }
+        if let Some(hostname) = cfg.node_selector.get("kubernetes.io/hostname") {
+            if cfg.excluded_nodes.contains(hostname) {
+                return Err(ApiError::Config(format!(
+                    "ENGINE_POD_NODE_SELECTOR sets kubernetes.io/hostname={hostname}, which \
+                     ENGINE_POD_EXCLUDED_NODES also lists; the pod could never be scheduled"
+                )));
+            }
+            if !cfg.cache_node.is_empty() && cfg.cache_node != *hostname {
+                return Err(ApiError::Config(format!(
+                    "ENGINE_POD_NODE_SELECTOR sets kubernetes.io/hostname={hostname} but \
+                     ENGINE_POD_CACHE_NODE={}; the pod is pinned by nodeName, which wins \
+                     over scheduling",
+                    cfg.cache_node
+                )));
+            }
+        }
         for (template, policy) in &cfg.template_policies {
             check_policy_against_node(template, policy, &cfg.cache_node)?;
+            if let Some(selector) = &policy.node_selector {
+                for (key, value) in selector {
+                    if let Some(configured) = cfg.node_selector.get(key) {
+                        if configured != value {
+                            return Err(ApiError::Config(format!(
+                                "ENGINE_POD_TEMPLATE_POLICIES[{template}]: node_selector \
+                                 {key}={value} conflicts with ENGINE_POD_NODE_SELECTOR \
+                                 {key}={configured}"
+                            )));
+                        }
+                    }
+                }
+            }
             if policy.active_deadline_seconds.is_some_and(|s| s <= 0) {
                 return Err(ApiError::Config(format!(
                     "ENGINE_POD_TEMPLATE_POLICIES: {template}.active_deadline_seconds \
@@ -1480,10 +1558,8 @@ pub fn pod_template(
                 ..Default::default()
             }),
             node_selector: {
-                let selector = policy
-                    .and_then(|p| p.node_selector.as_ref())
-                    .unwrap_or(&cfg.node_selector);
-                (!selector.is_empty()).then(|| selector.clone())
+                let selector = merged_node_selector(cfg, policy);
+                (!selector.is_empty()).then_some(selector)
             },
             affinity: merged_affinity(cfg, policy),
             tolerations: (!cfg.tolerations.is_empty()).then(|| cfg.tolerations.clone()),
@@ -4108,6 +4184,95 @@ mod tests {
         assert!(spec.tolerations.is_none());
         let plain = pod_template_for(&PodConfig::default()).spec.unwrap();
         assert!(plain.affinity.is_none() && plain.tolerations.is_none());
+        assert!(plain.node_selector.is_none());
+    }
+
+    #[test]
+    fn a_deployment_node_selector_pins_every_pod() {
+        let cfg = PodConfig::from_lookup(
+            lookup(&[
+                ("ENGINE_POD_CACHE_NODE", ""),
+                (
+                    "ENGINE_POD_NODE_SELECTOR",
+                    "kubernetes.io/hostname=winrarhost4, estate/host=bench",
+                ),
+            ]),
+            None,
+        )
+        .unwrap();
+        let spec = pod_template_for(&cfg).spec.unwrap();
+        assert!(spec.node_name.is_none());
+        let selector = spec.node_selector.unwrap();
+        assert_eq!(selector["kubernetes.io/hostname"], "winrarhost4");
+        assert_eq!(selector["estate/host"], "bench");
+        assert_eq!(selector.len(), 2);
+    }
+
+    #[test]
+    fn a_template_policy_adds_to_the_deployment_node_selector() {
+        let cfg = PodConfig::from_lookup(
+            lookup(&[
+                ("ENGINE_POD_CACHE_NODE", ""),
+                ("ENGINE_POD_NODE_SELECTOR", "estate/host=bench"),
+                (
+                    "ENGINE_POD_TEMPLATE_POLICIES",
+                    r#"{"Pod":{"node_selector":{"disk":"nvme"}}}"#,
+                ),
+            ]),
+            None,
+        )
+        .unwrap();
+        let selector = pod_template_for(&cfg).spec.unwrap().node_selector.unwrap();
+        assert_eq!(selector["estate/host"], "bench");
+        assert_eq!(selector["disk"], "nvme");
+        assert_eq!(selector.len(), 2);
+    }
+
+    #[test]
+    fn conflicting_deployment_placement_is_refused_at_config_time() {
+        let err = PodConfig::from_lookup(
+            lookup(&[
+                ("ENGINE_POD_CACHE_NODE", ""),
+                (
+                    "ENGINE_POD_NODE_SELECTOR",
+                    "kubernetes.io/hostname=winrarhost1",
+                ),
+                ("ENGINE_POD_EXCLUDED_NODES", "winrarhost1"),
+            ]),
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("ENGINE_POD_EXCLUDED_NODES"), "{err}");
+
+        let err = PodConfig::from_lookup(
+            lookup(&[
+                ("ENGINE_POD_CACHE_NODE", ""),
+                ("ENGINE_POD_NODE_SELECTOR", "estate/host=bench"),
+                (
+                    "ENGINE_POD_TEMPLATE_POLICIES",
+                    r#"{"Pod":{"node_selector":{"estate/host":"node-b"}}}"#,
+                ),
+            ]),
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("ENGINE_POD_NODE_SELECTOR"), "{err}");
+
+        // The same key and value on both is agreement, not a conflict.
+        assert!(PodConfig::from_lookup(
+            lookup(&[
+                ("ENGINE_POD_CACHE_NODE", ""),
+                ("ENGINE_POD_NODE_SELECTOR", "estate/host=bench"),
+                (
+                    "ENGINE_POD_TEMPLATE_POLICIES",
+                    r#"{"Pod":{"node_selector":{"estate/host":"bench"}}}"#,
+                ),
+            ]),
+            None,
+        )
+        .is_ok());
     }
 
     #[test]
@@ -4118,6 +4283,16 @@ mod tests {
             ("ENGINE_POD_PREFERRED_NODES", ":5"),
             ("ENGINE_POD_PREFERRED_NODES", "n:x"),
             ("ENGINE_POD_TOLERATIONS", "not json"),
+            ("ENGINE_POD_NODE_SELECTOR", "no-equals"),
+            ("ENGINE_POD_NODE_SELECTOR", "=winrarhost4"),
+            ("ENGINE_POD_NODE_SELECTOR", "estate/host="),
+            ("ENGINE_POD_NODE_SELECTOR", "a=1,a=2"),
+            // Default cache node winrarhost1 is pinned by nodeName; a hostname
+            // selector that disagrees can never schedule.
+            (
+                "ENGINE_POD_NODE_SELECTOR",
+                "kubernetes.io/hostname=winrarhost4",
+            ),
             // Default cache node winrarhost1 is pinned by nodeName.
             ("ENGINE_POD_EXCLUDED_NODES", "winrarhost1"),
         ] {
