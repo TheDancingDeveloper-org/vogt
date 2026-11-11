@@ -44,13 +44,16 @@
 //! for the first rule and not protected for the second.
 //!
 //! What this reading cannot parse with certainty fails closed rather than
-//! open: an alias or function definition, a `case`, a program that is an
-//! expansion (`$G checkout`), a shell fed a script on stdin, `env -C`/`-S`,
-//! an unbalanced quote or paren, or nesting past its bounds. When such a
-//! part names git, rm or another deleting verb, the discard guard counts it
-//! as reaching every baseline path, and when the line names a git write the
-//! protected-checkout rule refuses it. With an empty baseline neither
-//! applies, so a fresh clone is never refused for its shape.
+//! open: an alias or function definition, a `case`, `env -C`/`-S`, an
+//! unbalanced quote or paren, or nesting past its bounds. When such a part
+//! names git, rm or another deleting verb, the discard guard counts it as
+//! reaching every baseline path, and when the line names a git write the
+//! protected-checkout rule refuses it. A program that is a variable, a
+//! command substitution or a brace expansion, a shell fed its script on
+//! stdin or `<(…)`, and a git subcommand that may be an alias reach every
+//! baseline path whatever the line names (WI-4001); only `eval "$(ssh-agent
+//! -s)"` is read as safe. With an empty baseline neither rule applies, so a
+//! fresh clone is never refused for its shape.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -3368,6 +3371,23 @@ mod tests {
                 "script -q -c 'cargo test' /dev/null",
             ],
         );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The false positives docs/ENGINE.md names: refused with a non-empty
+    /// baseline, allowed in a fresh clone.
+    #[test]
+    fn round3_documented_false_positives() {
+        let (root, p) = round3("fp");
+        let commands = [
+            "$EDITOR f",
+            "${CARGO:-cargo} test",
+            "\"$(command -v cargo)\" test",
+            "git restore src/{a,b}.rs",
+        ];
+        assert_refused(&p, &root, &commands);
+        let fresh = workspace(&[], Some("worktree"), &root);
+        assert_allowed(&fresh, &root, &commands);
         std::fs::remove_dir_all(&root).ok();
     }
 }
