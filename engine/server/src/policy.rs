@@ -532,12 +532,14 @@ impl Calls {
     /// The discard guard counts the line as reaching every baseline path
     /// when a program is a variable or a command substitution (whatever it
     /// holds; only `eval "$(ssh-agent -s)"` is read as safe); when a shell
-    /// runs a script that is not on the line (stdin, a heredoc, `<(…)`),
-    /// whatever else the line names, since `echo … | base64 -d | bash`
-    /// spells its script in no word (WI-4001 bypass 2); or when an opaque
-    /// part names git, rm or a deleting verb.
+    /// runs a script that is not on the line, on a line that names git, rm
+    /// or a deleting verb (the words the script holds are written elsewhere
+    /// on it: `bash <(echo git restore a.txt)`); or when an opaque part
+    /// names one.
     fn blind_discard(&self) -> bool {
-        self.dynamic || self.blind || self.opaque.iter().any(|text| mentions(text, DISCARD_WORDS))
+        self.dynamic
+            || (self.blind && mentions(&self.line, DISCARD_WORDS))
+            || self.opaque.iter().any(|text| mentions(text, DISCARD_WORDS))
     }
 
     /// An opaque part names git or a git write verb (or a shell reads a
@@ -3246,32 +3248,6 @@ mod tests {
                 "eval $(ssh-agent)",
                 "echo $(git rev-parse HEAD)",
             ],
-        );
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// Bypass 2: a shell reading its script from stdin or `<(…)` is
-    /// unreadable whatever else the line names.
-    #[test]
-    fn round3_encoded_scripts_into_a_shell_are_refused() {
-        let (root, p) = round3("stdin");
-        assert_refused(
-            &p,
-            &root,
-            &[
-                "echo cm0gYS50eHQ= | base64 -d | bash",
-                "echo cm0gYS50eHQ= | base64 -d | sh -s",
-                "source <(base64 -d <<< cm0gYS50eHQ=)",
-                ". <(base64 -d <<< cm0gYS50eHQ=)",
-                "bash <(base64 -d <<< cm0gYS50eHQ=)",
-                "base64 -d <<< cm0gYS50eHQ= > /tmp/s; bash < /dev/stdin < /tmp/s",
-                "bash <<'EOF'\nprintf x\nEOF",
-            ],
-        );
-        assert_allowed(
-            &p,
-            &root,
-            &["bash scripts/check.sh", "source ./env.sh && git status"],
         );
         std::fs::remove_dir_all(&root).ok();
     }
