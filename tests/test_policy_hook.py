@@ -190,6 +190,54 @@ def test_a_plain_rm_is_asked_so_the_discard_guard_sees_it(tmp_path: Path) -> Non
         broker.close()
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "ls\ngit checkout -- README.md",
+        "ls\nrm README.md",
+        "ls\tgit checkout -- README.md",
+        "ls\r\ngit push",
+        "(git checkout -- README.md)",
+        'g""it checkout -- README.md',
+        "echo x | bash",
+    ],
+)
+def test_an_unreachable_engine_refuses_a_hidden_command(
+    tmp_path: Path, command: str
+) -> None:
+    """WI-1326 review: the filter reads the decoded command, so a newline
+    (`\\n` in the JSON) or tab before `git`/`rm` still asks the engine, and an
+    engine that cannot be asked refuses it."""
+    env = {
+        "VOGT_ENGINE_BROKER_URL": "http://127.0.0.1:1",
+        "VOGT_ENGINE_BROKER_TOKEN": "t",
+    }
+    payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
+    refused = run(tmp_path, payload, env)
+    assert refused.returncode == 2, command
+    assert "vogt policy check unavailable" in refused.stderr
+    codex = json.dumps({"tool_name": "exec_command", "tool_input": {"cmd": command}})
+    assert run(tmp_path, codex, env, mode="codex").returncode == 2, command
+
+
+def test_a_newline_separated_rm_is_asked(tmp_path: Path) -> None:
+    reason = "refusing: discard guard: rm would discard 1 path(s)"
+    broker = _Broker(200, json.dumps({"decision": "deny", "reason": reason}).encode())
+    try:
+        env = {"VOGT_ENGINE_BROKER_URL": broker.url, "VOGT_ENGINE_BROKER_TOKEN": "t"}
+        payload = json.dumps(
+            {"tool_name": "Bash", "tool_input": {"command": "ls\nrm README.md"}}
+        )
+        denied = run(tmp_path, payload, env)
+        assert len(broker.requests) == 1
+        sent = json.loads(broker.requests[0])
+        assert sent["tool_input"]["command"] == "ls\nrm README.md"
+        assert denied.returncode == 2
+        assert reason in denied.stderr
+    finally:
+        broker.close()
+
+
 def test_a_2xx_that_is_not_an_allow_refuses(tmp_path: Path) -> None:
     """Exit 0 only for a decision that is exactly "allow".
 

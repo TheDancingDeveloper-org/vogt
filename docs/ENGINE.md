@@ -1241,7 +1241,12 @@ Code's user settings. `ENGINE_AGENT_POLICY_HOOK=0` skips it. A session pod's ent
 it for a Claude session too (below). Before a shell command runs, the hook
 asks `POST /api/agent-auth/policy-check` with the session's broker token (a
 pod session, which has none, presents its stream credential), which names the
-session, so a session is only ever checked against its own policy. A command with no `git` or `gh` word is allowed without a request.
+session, so a session is only ever checked against its own policy. The hook
+decodes the command first, so a newline or tab (`\n` in the JSON) is a word
+boundary. A command naming none of `git`, `gh`, the deleting programs (`rm`,
+`unlink`, `mv`, `shred`, `truncate`), git's discarding verbs, a shell,
+`eval` or `xargs` is allowed without a request; a payload it cannot decode
+is asked.
 
 What is refused, and only for an agent session that carries a policy:
 
@@ -1264,20 +1269,42 @@ root, on a `worktree` or `cwd` start. A repo is resolved with `git rev-parse
 --show-toplevel` from the command's `-C` or the cwd:
 
 - **discard guard** — any session with a baseline: `git checkout [<ref>] --
-  <paths>`, `git checkout <path>`, `git restore`, `git rm -f`, `git clean -f`,
-  `git stash [push]`, `git reset --hard`, `git checkout -f` and `git switch
-  --discard-changes` in the session's own repo, when a path they reach is in
-  the baseline. `reset --hard`, `clean`, `stash` with no paths, and a command
-  whose paths cannot be read (a glob, an expansion, `xargs`, `eval`, a `cd`
-  earlier on the line) reach every one. A repo that cannot be resolved counts
-  as the session's own. `git restore --staged` only unstages and is allowed.
+  <paths>`, `git checkout <path>`, `git restore`, `git rm` (not `--cached`),
+  `git clean -f`, `git stash [push]`, `git reset --hard`, `git checkout -f`,
+  `git switch --discard-changes`, and a plain `rm`/`unlink`, when a path they
+  reach is in the baseline. A git command counts in the session's own repo; an
+  `rm` is judged per operand — `~/` expanded, made absolute, its parent
+  canonicalised so a symlinked spelling of the tree is the tree — wherever it
+  was typed, and an operand naming the tree or a directory above it reaches
+  every path. `reset --hard`, `clean`, `stash` with no paths, and a command
+  whose paths cannot be read (a glob, an expansion, brace expansion, `xargs`,
+  `eval`, a `cd` earlier on the line) reach every one, so with a dirty
+  baseline `rm *.log` (even in a scratch directory) and `cd X && rm f` are
+  refused; `rm -rf build`, `rm /tmp/scratch/x` and `rm` of the session's own
+  new files pass. A repo that cannot be resolved counts as the session's own.
+  `git restore --staged` only unstages and is allowed.
 - **protected checkout** — only a `worktree` session: a git write (`commit`,
   `push`, `merge`, `rebase`, `reset`, `checkout`, `switch`, `restore`, `clean`,
   `stash`, `add`, `rm`, `mv`, `cherry-pick`, `revert`, `am`, `branch
   -d/-D/-m`, `worktree remove/move/prune`) whose repo is a protected checkout
-  and not the session's own worktree. Reads are never refused, and a repo
-  that cannot be resolved is not protected. A `checkout` session (oversight, a
-  shell on the project root) is never held to it.
+  and not the session's own worktree, or whose repo the line hides
+  (`GIT_DIR=`, `GIT_WORK_TREE=`, `--git-dir`, `--work-tree`, `core.worktree`,
+  `-C "$X"`, a `cd` to a target that is not a literal path). Reads are never
+  refused, and a repo lookup that fails is not protected. A `checkout`
+  session (oversight, a shell on the project root) is never held to it.
+
+The line is read as a shell would run it: `;`, `&`, `&&`, `|`, `||`, `|&`
+and newlines separate commands, and `( … )`, `{ …; }`, `if`/`for`/`while`
+bodies, `$(…)`, backticks and `<(…)` are read as the commands they hold
+(a `cd` inside a subshell does not outlive it). Leading `!`, `time`, `env
+-u NAME`, `sudo -u USER`, `bash -c -- '…'` and the other wrappers are
+stepped over. What it cannot parse with certainty — an `alias` or function
+definition, `case`, a program that is an expansion (`$G checkout`), a shell
+reading a piped script, `env -C`/`-S`, an unbalanced quote or paren, nesting
+past its bounds — fails closed: if that part names git, rm or another
+deleting verb the discard guard counts every baseline path as reached, and
+if the line names a git write the protected-checkout rule refuses it. With
+an empty baseline (a fresh clone) the discard guard does not apply at all.
 
 Reasons name the rule and a path count, never a path's contents.
 
@@ -1292,8 +1319,9 @@ asking, and adds or relaxes no rule. opencode has no equivalent hook, so for it
 the policy stays guidance in the brief.
 
 This is a guardrail, not a boundary. The session runs as the same uid that
-owns the hook, so it can edit its own hook, and wrappers the parser does not
-see — `bash -c`, `eval`, `xargs`, `gh api` — pass unchecked.
+owns the hook, so it can edit its own hook, run a script file (`bash
+x.sh`), use `find -delete`, or overwrite a file with a non-shell tool; `gh
+api` passes unchecked.
 
 #### Activity states
 
