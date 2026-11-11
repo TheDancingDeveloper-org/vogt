@@ -25,7 +25,11 @@ FULL = "full"
 WORKER = "worker"
 
 #: What an implement or review session needs: read and update its work item,
-#: report progress or a block, ask a decision, and read the project brief.
+#: report progress or a block, ask a decision, read the project brief, and ask
+#: for a credential for its own session. The session-driving tools — listing,
+#: reading, typing into, waiting on or stopping another session — are
+#: deliberately absent (WI-4071): driving a peer is an oversight session's
+#: job, and a worker's profile must not list what that job needs.
 WORKER_TOOLS: frozenset[str] = frozenset(
     {
         "auth_whoami",
@@ -33,6 +37,7 @@ WORKER_TOOLS: frozenset[str] = frozenset(
         "decision_ask",
         "project_brief",
         "session_bind_work",
+        "session_grant_request",
         "session_report",
         "session_report_blocked",
         "session_report_unblocked",

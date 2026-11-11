@@ -35,11 +35,20 @@ _DEPLOYMENT_POLICY = (
 COMPANION_SUFFIX = ".guide.md"
 
 
-#: How a session reaches the others. Said once, in the companion, because a
-#: capability an agent is not told about is one it goes looking for in engine
-#: source.
+#: How a session reaches the others, when its MCP client lists them. Said
+#: once, in the companion, because a capability an agent is not told about is
+#: one it goes looking for in engine source. The opening sentence states the
+#: condition because the same companion is written for full-profile and
+#: oversight sessions only: a worker on the worker profile gets
+#: [`DRIVING_IS_OVERSIGHTS_JOB`] instead (WI-4071), since promising a worker
+#: tools its own profile hides is what that item was filed for.
 DRIVING_OTHER_SESSIONS = (
     "## Driving other sessions\n"
+    "\n"
+    "**This section applies when your MCP client lists the session tools** — "
+    'you run with the full vogt tool profile (`mcp_set="full"`), or you are '
+    "an oversight session. A worker on the worker profile does not get them, "
+    "and driving a peer is oversight's job.\n"
     "\n"
     "`session_list` shows every session (each has a `ses_…` id and an engine "
     "UUID; every session tool takes either). `session_screen` reads what a "
@@ -69,6 +78,25 @@ DRIVING_OTHER_SESSIONS = (
     "`work_item` to `session_start` (create the item first if there is "
     "none) — not the ref in the task text — so the item shows who is on it. "
     "A session already running is bound with `session_bind_work`.\n"
+)
+
+#: What a worker-profile session is told instead of the instructions above.
+#: It names no list/screen/input/wait/answer/stop tool at all — only the one
+#: session tool its profile does list, for a credential it was not started
+#: with — because a brief that implies a worker can stop a peer is the drift
+#: WI-4071 reported, and a test holds this text to the profile's tool list.
+DRIVING_IS_OVERSIGHTS_JOB = (
+    "## Driving other sessions\n"
+    "\n"
+    "Driving another terminal — listing sessions, reading one's screen or "
+    "output, typing into it, waiting on it, answering it, or stopping it — "
+    "is an oversight session's job, and this session's worker tool profile "
+    "does not list the tools for it, so keep to your own terminal. Do the "
+    "work your brief names; when something needs a peer driven or stopped, "
+    "report it with `session_report_blocked` and say what you need. A "
+    "credential this session was not started with is requested with "
+    "`session_grant_request` for this session (`read` and `work.write` cover "
+    "it); nothing is granted until a person approves it.\n"
 )
 
 #: How an agent says it needs a person. In every brief, because the
@@ -259,8 +287,15 @@ def _landing_section(project: Project, item: WorkItem | None) -> list[str]:
     ]
 
 
-def _companion(session_id: str, *, work_ref: str | None) -> str:
-    """The boilerplate, written once beside the brief instead of into it."""
+def _companion(
+    session_id: str, *, work_ref: str | None, full_tools: bool = True
+) -> str:
+    """The boilerplate, written once beside the brief instead of into it.
+
+    `full_tools` says whether the session's MCP client lists the session
+    tools: a worker on the worker profile gets the short "that is oversight's
+    job" paragraph instead of the driving instructions (WI-4071).
+    """
     bound = (
         f"This session is bound to {work_ref} (`VOGT_WORK_ITEM`). If you move "
         "on to a different item, rebind with `session_bind_work` so the items "
@@ -288,7 +323,7 @@ def _companion(session_id: str, *, work_ref: str | None) -> str:
         + "\n"
         + SECRETS_AND_ENVIRONMENT
         + "\n"
-        + DRIVING_OTHER_SESSIONS
+        + (DRIVING_OTHER_SESSIONS if full_tools else DRIVING_IS_OVERSIGHTS_JOB)
     )
 
 
@@ -582,6 +617,7 @@ def review_brief_for_work_item(
     session_id: str,
     *,
     project: Project | None = None,
+    full_tools: bool = True,
 ) -> ComposedBrief:
     """A reviewer's brief: the diff against the item's own "done means".
 
@@ -663,7 +699,7 @@ def review_brief_for_work_item(
     lines += _pointer(session_id, work_ref=item.ref)
     return ComposedBrief(
         text="\n".join(lines),
-        companion=_companion(session_id, work_ref=item.ref),
+        companion=_companion(session_id, work_ref=item.ref, full_tools=full_tools),
         charter="\n".join(charter),
     )
 
@@ -676,6 +712,7 @@ def brief_for_work_item(
     *,
     project: Project | None = None,
     decision_author: DecisionAuthor | None = None,
+    full_tools: bool = True,
 ) -> ComposedBrief:
     """The work item, as a page an agent can read before it starts.
 
@@ -762,7 +799,7 @@ def brief_for_work_item(
     lines += _pointer(session_id, work_ref=item.ref)
     return ComposedBrief(
         text="\n".join(lines),
-        companion=_companion(session_id, work_ref=item.ref),
+        companion=_companion(session_id, work_ref=item.ref, full_tools=full_tools),
         charter="\n".join(charter),
     )
 
@@ -773,6 +810,7 @@ def brief_for_project(
     session_id: str,
     *,
     project: Project | None = None,
+    full_tools: bool = True,
 ) -> ComposedBrief:
     """A terminal opened on a project, which is a plain shell with context.
 
@@ -804,13 +842,15 @@ def brief_for_project(
     ]
     return ComposedBrief(
         text="\n".join(lines),
-        companion=_companion(session_id, work_ref=None),
+        companion=_companion(session_id, work_ref=None, full_tools=full_tools),
         charter="\n".join(charter),
     )
 
 
 __all__ = [
     "AUTOPILOT",
+    "DRIVING_IS_OVERSIGHTS_JOB",
+    "DRIVING_OTHER_SESSIONS",
     "SECRETS_AND_ENVIRONMENT",
     "WHEN_BLOCKED",
     "ComposedBrief",

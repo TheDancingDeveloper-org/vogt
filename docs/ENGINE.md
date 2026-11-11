@@ -500,8 +500,12 @@ Every tool definition rides on every request, and the full estate set
 tokens of schema. A start names `mcp_set` on its `SessionSpec`:
 
 - `full` (or absent): the user's own registrations, unchanged.
-- `worker`: `vogt` on its worker tool profile (18 tools: work items,
-  `session_report*`, `decision_ask`, `project_brief`, …) and `cadastre`.
+- `worker`: `vogt` on its worker tool profile (19 tools: work items,
+  `session_report*`, `session_grant_request`, `decision_ask`,
+  `project_brief`, …) and `cadastre`. The session-driving tools — list,
+  screen, the output log, input, wait, answer, last reply, sweep, rename,
+  stop and remove — are deliberately absent (WI-4071): driving a session is
+  an oversight session's job, and a worker keeps to its own terminal.
 
 The engine never edits the shared home configs. Claude Code gets
 `--strict-mcp-config --mcp-config=<state>/agent-task-prompts/sessions/<id>.mcp.json`,
@@ -515,7 +519,12 @@ implement-careful, mechanical and review; `full` for investigate and design.
 
 The vogt tool profile trims `tools/list` only (header `X-Vogt-Tool-Profile`
 or `?profile=` on `/mcp`); `tools/call` still checks the grant alone, so a
-worker that needs another tool can still call it by name.
+worker that needs another tool can still call it by name. The profile is
+therefore a listing boundary, not an authorization one: keeping a worker off
+a peer's terminal is a separate rule, not what the profile does. The core
+writes the session companion for the list the session will actually see — a
+worker-profile session is told that driving a peer is oversight's job, not
+handed the full-profile driving instructions (WI-4071).
 
 ---
 
