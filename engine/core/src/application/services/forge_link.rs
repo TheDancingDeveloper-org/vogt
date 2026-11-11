@@ -91,6 +91,7 @@ where
         txn.update_project(
             &project_id,
             &ProjectUpdate {
+                default_branch: None,
                 link_state: Some(LinkState::Linked.to_string()),
                 ..ProjectUpdate::default()
             },

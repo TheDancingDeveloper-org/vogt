@@ -706,9 +706,11 @@ mod tests {
         let path = dir.join("declared.sqlite3");
         let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../src/vogt/storage/sqlite/migrations/declared");
+        // The fixture is the whole tree; the version is read from it, not pinned.
         let mut conn = connect(&path).unwrap();
         migrate(&mut conn, "declared", Some(&source), "main/1", NOW).unwrap();
-        assert_eq!(applied_version(&conn).unwrap(), 30);
+        let tree_version = applied_version(&conn).unwrap();
+        assert!(tree_version >= 31, "the tree is at or past 0031");
         conn.execute(
             "INSERT INTO meta (key, value) VALUES ('instance_id', 'inst_main')",
             [],
@@ -719,7 +721,7 @@ mod tests {
         let mut conn = connect_with(&path, false, "normal").unwrap();
         let report = migrate(&mut conn, "declared", None, "rust/1", NOW).unwrap();
         assert!(report.applied.is_empty());
-        assert_eq!(applied_version(&conn).unwrap(), 30);
+        assert_eq!(applied_version(&conn).unwrap(), tree_version);
         let instance: String = conn
             .query_row(
                 "SELECT value FROM meta WHERE key = 'instance_id'",
@@ -737,6 +739,52 @@ mod tests {
             .unwrap();
         assert!(comments_sql.contains("'verdict', 'verification'"));
         conn.prepare("SELECT mcp_extra FROM projects").unwrap();
+        conn.prepare("SELECT default_branch FROM projects").unwrap();
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_project_registered_before_0031_reads_back_with_no_recorded_branch() {
+        // WI-4026: a row written before 0031 existed upgrades to an empty
+        // default_branch, which the session path reads as "not recorded" and
+        // backfills, rather than as a branch named "".
+        let dir = scratch("default-branch-upgrade");
+        let path = dir.join("declared.sqlite3");
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../src/vogt/storage/sqlite/migrations/declared");
+        let mut conn = connect(&path).unwrap();
+        migrate(&mut conn, "declared", Some(&source), "main/1", NOW).unwrap();
+        // Put the database back at schema 30: no 0031 column and no 0031 record.
+        conn.execute_batch(
+            "ALTER TABLE projects DROP COLUMN default_branch; \
+             DELETE FROM migrations WHERE id = '0031_project_default_branch';",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO projects (id, slug, name, root_path, repo_url, lifecycle_state, \
+             compliance_status, agent_policy, write_back, link_state, exclusions, trust_state, \
+             created_at, updated_at, mcp_extra) VALUES ('prj_old', 'old', 'Old', '/w', \
+             'https://example.test/o/old.git', 'active', 'not_checked', '{}', 'none', \
+             'unlinked', '[]', 'unverified', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '[]')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let mut conn = connect_with(&path, false, "normal").unwrap();
+        let report = migrate(&mut conn, "declared", None, "rust/1", NOW).unwrap();
+        assert!(report
+            .applied
+            .contains(&"0031_project_default_branch".to_string()));
+        let branch: String = conn
+            .query_row(
+                "SELECT default_branch FROM projects WHERE id = 'prj_old'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(branch, "", "an upgraded row carries no recorded branch");
         drop(conn);
         let _ = std::fs::remove_dir_all(&dir);
     }

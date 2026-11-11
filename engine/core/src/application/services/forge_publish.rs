@@ -153,6 +153,7 @@ where
             txn.update_project(
                 &project_id,
                 &ProjectUpdate {
+                    default_branch: None,
                     repo_url: Some(web_url.clone()),
                     link_state: Some(LinkState::Linked.to_string()),
                     ..ProjectUpdate::default()

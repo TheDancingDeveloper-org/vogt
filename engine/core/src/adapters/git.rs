@@ -309,6 +309,41 @@ fn origin_head(
         .and_then(|text| text.split_whitespace().next().map(str::to_string))
 }
 
+/// The branch a remote's `HEAD` symbolically names, from `git ls-remote
+/// --symref <url> HEAD` output (`ref: refs/heads/<branch>\tHEAD`). `None` when
+/// the output names no branch (a detached or empty remote).
+pub fn parse_symref_head(output: &str) -> Option<String> {
+    output
+        .lines()
+        .find_map(|line| line.strip_prefix("ref: refs/heads/"))
+        .and_then(|rest| rest.split('\t').next())
+        .map(str::trim)
+        .filter(|branch| !branch.is_empty())
+        .map(str::to_string)
+}
+
+/// The default branch a remote names for `HEAD`, read live with no clone
+/// (WI-4026). Used to backfill a project registered before its branch was
+/// recorded. A failure is `None`, and the caller decides the fallback.
+pub fn remote_default_branch(
+    url: &str,
+    token: Option<&str>,
+    helper_dir: Option<&Path>,
+) -> Option<String> {
+    if url.starts_with('-') {
+        return None;
+    }
+    let helper = AskPass::new(token, helper_dir).ok()?;
+    let out = run_git(
+        &["ls-remote", "--symref", "--", url, "HEAD"],
+        Path::new("."),
+        Some(helper.env()),
+        GIT_TIMEOUT,
+    )
+    .ok()?;
+    parse_symref_head(&out)
+}
+
 /// Compare two remotes ignoring the ways git spells the same one.
 fn same_remote(left: &str, right: &str) -> bool {
     normalise(left) == normalise(right)
@@ -706,5 +741,25 @@ mod tests {
         drop(helper);
         assert!(!script.exists(), "the helper is removed after the call");
         let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod symref_tests {
+    use super::parse_symref_head;
+
+    #[test]
+    fn the_remotes_head_branch_is_read_from_symref_output() {
+        let out = "ref: refs/heads/master\tHEAD\n1111111111111111111111111111111111111111\tHEAD\n";
+        assert_eq!(parse_symref_head(out).as_deref(), Some("master"));
+    }
+
+    #[test]
+    fn a_remote_with_no_symbolic_head_names_no_branch() {
+        assert_eq!(parse_symref_head(""), None);
+        assert_eq!(
+            parse_symref_head("1111111111111111111111111111111111111111\tHEAD\n"),
+            None
+        );
     }
 }

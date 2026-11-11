@@ -38,6 +38,7 @@ pub const DECLARED: &[(&str, &str)] = &[
     ("0028_session_cold_wake", include_str!("../../../../../src/vogt/storage/sqlite/migrations/declared/0028_session_cold_wake.sql")),
     ("0029_comment_verdict", include_str!("../../../../../src/vogt/storage/sqlite/migrations/declared/0029_comment_verdict.sql")),
     ("0030_project_mcp_extra", include_str!("../../../../../src/vogt/storage/sqlite/migrations/declared/0030_project_mcp_extra.sql")),
+    ("0031_project_default_branch", include_str!("../../../../../src/vogt/storage/sqlite/migrations/declared/0031_project_default_branch.sql")),
 ];
 
 pub const OBSERVED: &[(&str, &str)] = &[

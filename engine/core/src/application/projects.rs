@@ -300,6 +300,9 @@ struct Registration {
     name: String,
     root_path: String,
     repo_url: Option<String>,
+    /// The remote's default branch, read at import (WI-4026); `None` when the
+    /// registration did not read it.
+    default_branch: Option<String>,
     lifecycle_state: String,
     exclusions: Option<Vec<String>>,
     adopts_contract: bool,
@@ -328,6 +331,7 @@ fn record_registration<C: Clock + 'static, I: IdFactory + 'static>(
             name: input.name.clone(),
             root_path: input.root_path,
             repo_url: input.repo_url,
+            default_branch: input.default_branch,
             lifecycle_state: parse_lifecycle(&input.lifecycle_state)?,
             current_version: None,
             contract_version: None,
@@ -398,6 +402,7 @@ fn register_project<C: Clock + 'static, I: IdFactory + 'static>(
             name: params.name,
             root_path: params.root_path,
             repo_url: params.repo_url,
+            default_branch: None,
             lifecycle_state: params.lifecycle_state,
             exclusions: params.exclusions,
             adopts_contract: false,
@@ -596,6 +601,7 @@ pub(crate) fn import_repository<C: Clock + 'static, I: IdFactory + 'static>(
             name,
             root_path: outcome.destination.display().to_string(),
             repo_url: Some(identity_provider.web_url(repo)),
+            default_branch: outcome.default_branch.clone(),
             lifecycle_state: request.lifecycle_state,
             exclusions: None,
             adopts_contract: false,
@@ -807,6 +813,7 @@ fn create_project<C: Clock + 'static, I: IdFactory + 'static>(
             name: params.name,
             root_path: root.display().to_string(),
             repo_url: params.repo_url,
+            default_branch: None,
             lifecycle_state: params.lifecycle_state,
             exclusions: None,
             adopts_contract: true,
@@ -1098,6 +1105,7 @@ fn apply_change<C: Clock + 'static, I: IdFactory + 'static>(
         txn.update_project(
             &project.id,
             &ProjectUpdate {
+                default_branch: None,
                 repo_url: change.repo_url.clone(),
                 exclusions: change.exclusions.clone(),
                 lifecycle_state: change.lifecycle_state.clone(),

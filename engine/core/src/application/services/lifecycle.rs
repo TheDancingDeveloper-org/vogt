@@ -483,6 +483,7 @@ pub fn clone_instance<C: Clock + 'static, I: IdFactory + 'static>(
                     txn.update_project(
                         &project.id,
                         &ProjectUpdate {
+                            default_branch: None,
                             write_back: Some("none".to_string()),
                             ..ProjectUpdate::default()
                         },
