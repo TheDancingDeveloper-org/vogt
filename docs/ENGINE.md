@@ -1243,10 +1243,14 @@ asks `POST /api/agent-auth/policy-check` with the session's broker token (a
 pod session, which has none, presents its stream credential), which names the
 session, so a session is only ever checked against its own policy. The hook
 decodes the command first, so a newline or tab (`\n` in the JSON) is a word
-boundary. A command naming none of `git`, `gh`, the deleting programs (`rm`,
-`unlink`, `mv`, `shred`, `truncate`), git's discarding verbs, a shell,
-`eval` or `xargs` is allowed without a request; a payload it cannot decode
-is asked.
+boundary, removes line continuations (backslash-newline), and also reads it
+with backslash escapes decoded, so `r\<newline>m` and `$'\x72m'` read as
+`rm`. A command naming none of `git`, `gh`, `rm`, `unlink`, git's
+discarding verbs, a shell, `eval`, `xargs` or `source`, with no program that
+is an expansion (`$R a.txt`) and no `. script`, is allowed without a
+request; a payload it cannot decode is asked. (`mv`, `shred` and `truncate`
+are asked about too, but the engine judges them only inside opaque text or
+a variable's line, not as discards of their own.)
 
 What is refused, and only for an agent session that carries a policy:
 
@@ -1303,15 +1307,27 @@ definition, `case`, a program that is an expansion (`$G checkout`), a shell
 reading a piped script, `env -C`/`-S`, an unbalanced quote or paren, nesting
 past its bounds — fails closed: if that part names git, rm or another
 deleting verb the discard guard counts every baseline path as reached, and
-if the line names a git write the protected-checkout rule refuses it. With
+if the line names a git write the protected-checkout rule refuses it.
+Line continuations are removed and ANSI-C strings (`$'\x72m'`) decoded
+before words are read. A program that is a variable (`$R a.txt`, `${R}m`,
+the `$CMD` of `eval "$CMD"` or `bash -c "$CMD"`) reaches every baseline
+path whatever the line says, since what it holds can be spelled any way;
+one that is a command substitution (`eval "$(…)"`) does when the line names
+a deleting verb. A shell or `source`/`.` reading its script from a process
+substitution, `/dev/stdin`, `/dev/fd/*` or a here-string reaches every
+path when the line names git, rm or a deleting verb. A git subcommand that
+is not a plain word (`git restore${IFS}a.txt`, `git $SUB`) is treated as a
+discard of every path and as a write, and a brace pattern in a pathspec is
+unreadable. With
 an empty baseline (a fresh clone) the discard guard does not apply at all.
 
 Reasons name the rule and a path count, never a path's contents.
 
 A denial exits 2 with the reason on stderr and the command does not run. When
 the engine cannot be reached, or answers anything but 2xx, the hook fails
-closed for that `git` or `gh` command (`vogt policy check unavailable;
-refusing git/gh write`) and allows everything else. The same script is the
+closed for any command it would have asked about (`vogt policy check
+unavailable; refusing a command the policy may cover`), a read such as `git
+status` included, and allows everything else. The same script is the
 Codex session's managed `SessionStart` and `PreToolUse` hook, run as
 `vogt-policy-hook codex`: that argument translates Codex's `tool_input` — a
 `command`, a `cmd`, or a `shell` argv array — into the engine's request before

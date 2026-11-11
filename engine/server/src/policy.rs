@@ -503,20 +503,35 @@ struct Calls {
     /// nesting past [`MAX_DEPTH`]. A git or rm word in it may be a call the
     /// walker never saw.
     opaque: Vec<String>,
-    /// A shell reads its script from stdin (`… | bash`): what it runs is
-    /// whatever the line pipes in.
+    /// A shell reads its script from somewhere other than the line: stdin
+    /// (`… | bash`, `bash <<< …`, `bash /dev/stdin`) or a process
+    /// substitution (`bash <(…)`, `source <(…)`). What it runs is not on
+    /// the line as words.
     blind: bool,
+    /// A program is a variable or holds one (`$R a.txt`, `${R}m`, `eval
+    /// "$CMD"`, `bash -c "$CMD"`): what it runs is decided when the line
+    /// runs, from text that can be spelled any way at all.
+    dynamic: bool,
+    /// A program is exactly a command substitution (`eval "$(ssh-agent
+    /// -s)"`): it runs what that command prints, and the command itself is
+    /// on the line.
+    substituted: bool,
     /// The whole line, for the verbs an opaque part may act on later in it
     /// (`alias g='git -C x'; g commit`).
     line: String,
 }
 
 impl Calls {
-    /// An opaque part names git, rm or another deleting verb, or a shell
-    /// reads a piped script on a line that does: the discard guard counts it
-    /// as reaching every baseline path.
+    /// The discard guard counts the line as reaching every baseline path
+    /// when a program is a variable (whatever it holds); when a shell runs a
+    /// script that is not on the line, or a program is a command
+    /// substitution, on a line that names git, rm or a deleting verb (the
+    /// words the script holds are written elsewhere on it: `bash <(echo git
+    /// restore a.txt)`); or when an opaque part names one.
     fn blind_discard(&self) -> bool {
-        (self.blind && mentions(&self.line, DISCARD_WORDS))
+        self.dynamic
+            || (self.blind && mentions(&self.line, DISCARD_WORDS))
+            || (self.substituted && mentions(&self.line, DISCARD_VERBS))
             || self.opaque.iter().any(|text| mentions(text, DISCARD_WORDS))
     }
 
@@ -539,6 +554,14 @@ impl Calls {
 const DISCARD_WORDS: &[&str] = &[
     "git", "rm", "mv", "unlink", "shred", "truncate", "checkout", "restore", "reset", "clean",
     "stash", "switch",
+];
+
+/// [`DISCARD_WORDS`] without `git` itself: no discard runs through git
+/// without one of these verbs, so `eval "$(ssh-agent -s)"; git push` stays
+/// allowed.
+const DISCARD_VERBS: &[&str] = &[
+    "rm", "mv", "unlink", "shred", "truncate", "checkout", "restore", "reset", "clean", "stash",
+    "switch",
 ];
 
 /// Git subcommands [`git_write`] counts as writes, as words.
@@ -566,14 +589,19 @@ const GIT_WRITE_WORDS: &[&str] = &[
 /// Whether `text`, lowercased and its quotes and backslashes removed (so
 /// `g""it` and `GIT` are `git`), contains one of `words` as a whole word.
 fn mentions(text: &str, words: &[&str]) -> bool {
-    let plain: String = text
-        .chars()
-        .filter(|c| !matches!(c, '\'' | '"' | '\\'))
-        .collect::<String>()
-        .to_ascii_lowercase();
-    plain
-        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
-        .any(|w| words.contains(&w))
+    let joined = text.replace("\\\n", "");
+    // As typed, with `$'…'` decoded, and with every backslash escape decoded
+    // (what `printf '\x72m'` or `echo -e` prints).
+    let unescaped = unescape(&mut joined.chars().peekable(), false);
+    [ansi_c_decoded(&joined), unescaped].iter().any(|spelling| {
+        spelling
+            .chars()
+            .filter(|c| !matches!(c, '\'' | '"' | '\\'))
+            .collect::<String>()
+            .to_ascii_lowercase()
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+            .any(|w| words.contains(&w))
+    })
 }
 
 /// Every git invocation and `rm` in `command`, following subshells, groups,
@@ -671,10 +699,24 @@ impl Walker {
         let Some(first) = words.first() else {
             return;
         };
+        if words.len() == 1 && is_assignment(first) {
+            // `X=$(…)` runs nothing itself; its substitution is walked as a
+            // piece of its own.
+            return;
+        }
+        let home = home_program(first);
+        let first = home.as_ref().unwrap_or(first);
         if first.contains(['$', '`']) {
-            // The program is an expansion (`$GIT checkout …`): what it runs
-            // is not on the line.
+            // The program is an expansion (`$GIT checkout …`, `${R}m`, or
+            // the `$CMD` an `eval`/`sh -c` payload holds): what it runs is
+            // not on the line. The lexer leaves a lone `$` where a command
+            // substitution stood.
             self.out.opaque.push(simple.to_string());
+            if first == "$" {
+                self.out.substituted = true;
+            } else {
+                self.out.dynamic = true;
+            }
             return;
         }
         match base(first) {
@@ -709,9 +751,19 @@ impl Walker {
                 // `bash file.sh`: the script is not on the line, and this
                 // check reads lines, not files.
                 Payload::File => {}
-                // `… | bash`: the script arrives on stdin.
+                // `… | bash`, `bash <(…)`, `bash /dev/stdin <<< …`: the
+                // script arrives from the line, out of sight.
                 Payload::Stdin => self.out.blind = true,
             },
+            // `source <(…)`, `. /dev/stdin`: this shell runs a script the
+            // line feeds it. A plain file is not read, as for `bash f.sh`.
+            "source" | "." => {
+                if words[1..].first().is_some_and(|w| reads_stdin(w))
+                    || words[1..].iter().any(|w| stdin_redirect(w))
+                {
+                    self.out.blind = true;
+                }
+            }
             "eval" => {
                 let payload = words[1..].join(" ");
                 let (pieces, opaque) = lex(&payload);
@@ -817,19 +869,26 @@ fn shell_payload(words: &[String]) -> Payload<'_> {
     let mut args = words.iter().skip(1);
     let mut command = false;
     let mut from_file = false;
+    let mut piped = false;
     while let Some(arg) = args.next() {
         if arg == "--" {
             break;
         }
         // A redirection: `bash < script.sh` reads a file, like `bash
         // script.sh`; `2>&1` and `>out` change nothing about the script.
+        // `bash < <(…)` and `bash </dev/stdin` read it from the line.
         let redirect = arg.trim_start_matches(|c: char| c.is_ascii_digit());
         if redirect.starts_with(['<', '>']) {
-            if redirect.starts_with('<') && !redirect.starts_with("<<") {
-                from_file = true;
-            }
+            let mut target = redirect.trim_start_matches(['<', '>', '&']).to_string();
             if matches!(redirect, "<" | ">" | ">>" | "<<<" | "&>" | ">&") {
-                args.next();
+                target = args.next().cloned().unwrap_or_default();
+            }
+            if redirect.starts_with('<') && !redirect.starts_with("<<") {
+                if reads_stdin(&target) {
+                    piped = true;
+                } else {
+                    from_file = true;
+                }
             }
             continue;
         }
@@ -851,16 +910,47 @@ fn shell_payload(words: &[String]) -> Payload<'_> {
         }
         return if command {
             Payload::Script(arg)
+        } else if reads_stdin(arg) || piped {
+            Payload::Stdin
         } else {
             Payload::File
         };
     }
     match args.next() {
         Some(arg) if command => Payload::Script(arg),
+        Some(arg) if reads_stdin(arg) || piped => Payload::Stdin,
         Some(_) => Payload::File,
+        None if piped => Payload::Stdin,
         None if from_file => Payload::File,
         None => Payload::Stdin,
     }
+}
+
+/// A script operand that is not a file on disk but what the line feeds in:
+/// a process substitution (the lexer spells it `/dev/fd/$`), stdin, or a
+/// file descriptor.
+fn reads_stdin(word: &str) -> bool {
+    word == "-"
+        || word.starts_with("/dev/fd/")
+        || word.starts_with("/proc/self/fd/")
+        || matches!(word, "/dev/stdin" | "/proc/self/fd/0")
+}
+
+/// A `<` redirection from a process substitution or stdin, attached to its
+/// word (`</dev/stdin`).
+fn stdin_redirect(word: &str) -> bool {
+    let w = word.trim_start_matches(|c: char| c.is_ascii_digit());
+    w.starts_with('<') && !w.starts_with("<<") && reads_stdin(w.trim_start_matches('<'))
+}
+
+/// A program spelled from `$HOME` (`$HOME/bin/tool`, `${HOME}/bin/tool`),
+/// with `$HOME` put in, so it is read as the program it names.
+fn home_program(word: &str) -> Option<String> {
+    let rest = word
+        .strip_prefix("$HOME/")
+        .or_else(|| word.strip_prefix("${HOME}/"))?;
+    let home = std::env::var("HOME").ok().filter(|h| !h.is_empty())?;
+    (!rest.contains(['$', '`'])).then(|| format!("{home}/{rest}"))
 }
 
 /// The command `xargs` runs, its own options removed.
@@ -973,11 +1063,37 @@ impl Lexer {
             }
             self.i += 1;
             match c {
+                // A backslash-newline is a line continuation: bash deletes
+                // both, so `gi\<newline>t` is `git`.
+                '\\' if self.peek(0) == Some('\n') => self.i += 1,
                 '\\' => {
                     cur.push(c);
                     if let Some(n) = self.peek(0) {
                         cur.push(n);
                         self.i += 1;
+                    }
+                }
+                // An ANSI-C string ends at the first quote no backslash
+                // escapes, so `$'\''` does not close early here either.
+                '$' if self.peek(0) == Some('\'') => {
+                    cur.push(c);
+                    cur.push('\'');
+                    self.i += 1;
+                    loop {
+                        let Some(n) = self.peek(0) else {
+                            self.opaque = true;
+                            break;
+                        };
+                        self.i += 1;
+                        cur.push(n);
+                        if n == '\\' {
+                            if let Some(e) = self.peek(0) {
+                                cur.push(e);
+                                self.i += 1;
+                            }
+                        } else if n == '\'' {
+                            break;
+                        }
                     }
                 }
                 '\'' => {
@@ -999,8 +1115,12 @@ impl Lexer {
                     self.i += 1;
                     self.sub(')', nest, &mut out, &mut cur);
                 }
+                // A process substitution expands to a `/dev/fd/N` path; the
+                // word keeps that spelling so a shell or `source` given one
+                // is known to read its script from the line.
                 '<' | '>' if self.peek(0) == Some('(') => {
                     self.i += 1;
+                    cur.push_str("/dev/fd/");
                     self.sub(')', nest, &mut out, &mut cur);
                 }
                 '`' => self.sub('`', nest, &mut out, &mut cur),
@@ -1076,6 +1196,7 @@ impl Lexer {
                     cur.push(c);
                     return;
                 }
+                '\\' if self.peek(0) == Some('\n') => self.i += 1,
                 '\\' => {
                     cur.push(c);
                     if let Some(n) = self.peek(0) {
@@ -1221,8 +1342,19 @@ fn discard(policy: &SessionPolicy, calls: &Calls, repos: &mut Repos) -> Option<S
         let Some(sub) = args.first() else {
             continue;
         };
-        let Some(reach) = discards(sub, &args[1..]) else {
-            continue;
+        // A subcommand this reading cannot spell (`git restore${IFS}a.txt`,
+        // `git $SUB a.txt`, `git {restore,x} a.txt`) may be any of them.
+        let spelled = spelled(sub);
+        let reach = if spelled {
+            match discards(sub, &args[1..]) {
+                Some(reach) => reach,
+                None => continue,
+            }
+        } else {
+            Reach {
+                all: true,
+                paths: Vec::new(),
+            }
         };
         let dir = canonical(&git_dir(&call.words, &call.cwd));
         let top = if call.unreadable {
@@ -1248,7 +1380,7 @@ fn discard(policy: &SessionPolicy, calls: &Calls, repos: &mut Repos) -> Option<S
             baseline_hits(policy, &specs)
         };
         if hits > 0 {
-            return refuse(&format!("git {sub}"), hits);
+            return refuse(&format!("git {}", label(sub)), hits);
         }
     }
     None
@@ -1459,9 +1591,26 @@ fn after_dashdash(args: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// A pathspec this reading can resolve: no glob, expansion or pathspec magic.
+/// A git subcommand spelled as a plain word, not an expansion or pattern.
+fn spelled(sub: &str) -> bool {
+    sub.chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// `sub` as a reason may name it: an unspelled word may hold a path, and a
+/// reason never names one.
+fn label(sub: &str) -> &str {
+    if spelled(sub) {
+        sub
+    } else {
+        "<unreadable subcommand>"
+    }
+}
+
+/// A pathspec this reading can resolve: no glob, expansion, brace pattern
+/// or pathspec magic.
 fn readable_spec(spec: &str) -> bool {
-    !spec.starts_with([':', '~']) && !spec.contains(['*', '?', '[', '$', '`'])
+    !spec.starts_with([':', '~']) && !spec.contains(['*', '?', '[', '$', '`', '{'])
 }
 
 /// `spec`, relative to `dir`, as a path relative to `root`; `""` is the
@@ -1526,9 +1675,10 @@ fn protected(policy: &SessionPolicy, calls: &Calls, repos: &mut Repos) -> Option
         let Some(sub) = args.first() else {
             continue;
         };
-        if !git_write(sub, &args[1..]) {
+        if spelled(sub) && !git_write(sub, &args[1..]) {
             continue;
         }
+        let sub = label(sub);
         if call.redirected {
             return Some(format!(
                 "refusing: protected checkout: git {sub} names its repo in a way this check \
@@ -1826,6 +1976,11 @@ fn shell_words(command: &str) -> Vec<String> {
                     cur.push(n);
                 }
             }
+            // `$'\x72m'` is `rm`: an ANSI-C string is decoded, not kept.
+            None if c == '$' && chars.peek() == Some(&'\'') => {
+                chars.next();
+                cur.push_str(&unescape(&mut chars, true));
+            }
             None if c == '"' || c == '\'' => quote = Some(c),
             None if c.is_whitespace() => {
                 if !cur.is_empty() {
@@ -1837,6 +1992,102 @@ fn shell_words(command: &str) -> Vec<String> {
     }
     if !cur.is_empty() {
         out.push(cur);
+    }
+    out
+}
+
+/// Up to `max` digits in `radix` from `chars`, as a number, or `None` when
+/// there is none.
+fn escape_digits(
+    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+    radix: u32,
+    max: usize,
+) -> Option<u32> {
+    let mut n: u32 = 0;
+    let mut read = 0;
+    while read < max {
+        let Some(d) = chars.peek().and_then(|c| c.to_digit(radix)) else {
+            break;
+        };
+        n = n.saturating_mul(radix).saturating_add(d);
+        chars.next();
+        read += 1;
+    }
+    (read > 0).then_some(n)
+}
+
+/// Backslash escapes decoded the way bash decodes an ANSI-C string (and
+/// `printf`/`echo -e` their argument), up to and including an unescaped `'`
+/// when `quoted` (the body of `$'…'`), else to the end. An escape this does
+/// not know is kept as written.
+fn unescape(chars: &mut std::iter::Peekable<std::str::Chars<'_>>, quoted: bool) -> String {
+    let mut out = String::new();
+    while let Some(c) = chars.next() {
+        if c == '\'' && quoted {
+            break;
+        }
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        let Some(e) = chars.next() else {
+            out.push('\\');
+            break;
+        };
+        let decoded = match e {
+            'a' => Some('\u{7}'),
+            'b' => Some('\u{8}'),
+            'e' | 'E' => Some('\u{1b}'),
+            'f' => Some('\u{c}'),
+            'n' => Some('\n'),
+            'r' => Some('\r'),
+            't' => Some('\t'),
+            'v' => Some('\u{b}'),
+            '\\' | '\'' | '"' | '?' => Some(e),
+            'x' => escape_digits(chars, 16, 2).and_then(char::from_u32),
+            'u' => escape_digits(chars, 16, 4).and_then(char::from_u32),
+            'U' => escape_digits(chars, 16, 8).and_then(char::from_u32),
+            'c' => chars
+                .next()
+                .and_then(|x| char::from_u32(u32::from(x) & 0x1f)),
+            '0'..='7' => {
+                // Up to three octal digits, this one included (`\162`).
+                let mut n = e.to_digit(8).unwrap_or(0);
+                for _ in 0..2 {
+                    match chars.peek().and_then(|c| c.to_digit(8)) {
+                        Some(d) => {
+                            n = n * 8 + d;
+                            chars.next();
+                        }
+                        None => break,
+                    }
+                }
+                char::from_u32(n & 0xff)
+            }
+            _ => None,
+        };
+        match decoded {
+            Some(d) => out.push(d),
+            None => {
+                out.push('\\');
+                out.push(e);
+            }
+        }
+    }
+    out
+}
+
+/// `text` with every ANSI-C string (`$'…'`) decoded in place.
+fn ansi_c_decoded(text: &str) -> String {
+    let mut out = String::new();
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '$' && chars.peek() == Some(&'\'') {
+            chars.next();
+            out.push_str(&unescape(&mut chars, true));
+        } else {
+            out.push(c);
+        }
     }
     out
 }
@@ -2388,6 +2639,71 @@ mod tests {
             let reason = check(&p, command, &root).unwrap_or_else(|| panic!("allowed: {command}"));
             assert!(reason.contains("discard guard"), "{command}: {reason}");
             assert!(!reason.contains("README"), "{reason}");
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Re-review blockers on c09846cc515ef: a line continuation, a variable
+    /// or ANSI-C string as the program, an expansion in a git subcommand or
+    /// pathspec, and a shell reading its script from a process substitution
+    /// or stdin. Each was allowed with `README.md` in the baseline.
+    #[test]
+    fn rereview_bypasses_are_refused() {
+        let root = repo("rereview");
+        let p = workspace(&["README.md"], Some("worktree"), &root);
+        for command in [
+            // 1. backslash-newline continuations
+            "git restore \\\nREADME.md",
+            "git \\\nrestore README.md",
+            "gi\\\nt restore README.md",
+            "rm \\\nREADME.md",
+            "r\\\nm README.md",
+            "git restore \"READ\\\nME.md\"",
+            // 2. a variable or ANSI-C string as the program, or as the
+            // payload of eval / sh -c
+            "R=rm; $R README.md",
+            "CMD='rm README.md'; $CMD",
+            "CMD='git restore README.md'; eval \"$CMD\"",
+            "CMD='git restore README.md'; eval $CMD",
+            "CMD='git restore README.md'; bash -c \"$CMD\"",
+            "G=git; S=restore; $G $S README.md",
+            "$'\\x72m' README.md",
+            "$'\\162m' README.md",
+            "$'g\\x69t' restore README.md",
+            "R=r; ${R}m README.md",
+            // 3. an expansion in the subcommand, a brace pattern
+            "git restore${IFS}README.md",
+            "git restore {README,x}.md",
+            "git $SUB README.md",
+            "git checkout -- {README,x}.md",
+            "git restore src/{a,b}.rs",
+            "R=$(printf 'r''m'); $R README.md",
+            "eval \"$(echo rm README.md)\"",
+            // 4. a shell reading its script from a process substitution or stdin
+            "bash <(echo git restore README.md)",
+            "source <(echo git restore README.md)",
+            ". <(echo git restore README.md)",
+            "bash /dev/stdin <<< 'git restore README.md'",
+            "bash < <(echo git restore README.md)",
+            "sh /dev/fd/3 3<<<'git restore README.md'",
+            "bash <(printf '\\x72m README.md')",
+        ] {
+            let reason =
+                check(&p, command, &root).unwrap_or_else(|| panic!("allowed: {command:?}"));
+            assert!(reason.contains("discard guard"), "{command}: {reason}");
+            assert!(!reason.contains("README"), "{reason}");
+        }
+        // What can still be read passes.
+        for command in [
+            "git restore \\\nsrc/own.rs",
+            "cargo test \\\n  -p vogt-engine-server",
+            "$'\\x72m' new.txt",
+            "$'g\\x69t' status",
+            "echo $HOME && git status",
+            "source ./env.sh && git status",
+            "eval \"$(ssh-agent -s)\"; git push",
+        ] {
+            assert_eq!(check(&p, command, &root), None, "{command:?}");
         }
         std::fs::remove_dir_all(&root).ok();
     }
