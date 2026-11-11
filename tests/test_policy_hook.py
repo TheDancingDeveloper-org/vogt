@@ -361,10 +361,82 @@ def test_env_wrapped_commands_are_asked_and_pass_on_allow(
         payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
         assert run(tmp_path, payload, env).returncode == 0, command
         assert len(broker.requests) == 1, command
+        # WI-4061: with the engine unreachable, the offline allowlist still
+        # recognises `env NAME=value cmd` as a wrapper that runs a program.
         broker.status = 500
-        assert run(tmp_path, payload, env).returncode == 2, command
+        assert run(tmp_path, payload, env).returncode == 0, command
     finally:
         broker.close()
+
+
+def test_an_unreachable_engine_allows_a_harmless_shell_prologue(
+    tmp_path: Path,
+) -> None:
+    """WI-4061: an outage must not block every command that merely names an
+    ambiguous environment word. These forms print nothing, and the offline
+    allowlist recognises them; a dump stays refused (next test)."""
+    env = {
+        "VOGT_ENGINE_BROKER_URL": "http://127.0.0.1:1",
+        "VOGT_ENGINE_BROKER_TOKEN": "t",
+    }
+    for command in [
+        "set -euo pipefail",
+        "set -o pipefail",
+        "set +x",
+        "set -- a b",
+        "export FOO=bar && cargo test",
+        'export PATH="$HOME/bin:$PATH"',
+        "export -n FOO",
+        "readonly X=1",
+        "local x=1",
+        "declare -A map",
+        "declare -f",
+        "ps aux",
+        "ps -ef",
+        "env FOO=bar cargo test",
+        "env -i PATH=/usr/bin cargo test",
+        "env -u FOO cargo test",
+        "grep -r env src/",
+    ]:
+        payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
+        result = run(tmp_path, payload, env)
+        assert result.returncode == 0, (command, result.stderr)
+
+
+def test_an_unreachable_engine_still_refuses_an_environment_dump(
+    tmp_path: Path,
+) -> None:
+    """WI-4061: the outage rule is fail-closed for a real dump and for git;
+    the allowlist above only covers harmless prologue forms."""
+    env = {
+        "VOGT_ENGINE_BROKER_URL": "http://127.0.0.1:1",
+        "VOGT_ENGINE_BROKER_TOKEN": "t",
+    }
+    for command in [
+        "env",
+        "env | cat",
+        "env VAR=1 printenv",
+        "printenv",
+        "printenv VOGT_HTTP_TOKEN",
+        "set",
+        "set | cat",
+        "export -p",
+        "declare -p",
+        "declare -x",
+        "ps auxe",
+        "ps eww",
+        "echo $VOGT_HTTP_TOKEN | cat",
+        "python3 -c 'import os; print(dict(os.environ))'",
+        "perl -e 'print %ENV'",
+        'cat <<< "$VOGT_HTTP_TOKEN"',
+        "timeout 5 env",
+        "nice env",
+        "git log --grep=environment",
+    ]:
+        payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
+        result = run(tmp_path, payload, env)
+        assert result.returncode == 2, (command, result.stderr)
+        assert "vogt policy check unavailable" in result.stderr, command
 
 
 @pytest.mark.parametrize(

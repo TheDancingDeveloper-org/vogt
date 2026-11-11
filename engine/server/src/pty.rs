@@ -1027,7 +1027,17 @@ pub(crate) fn is_per_child_engine_env(key: &str) -> bool {
 /// variables stripped — the base a child process should start from before its
 /// session/task variables are added.
 pub(crate) fn sanitized_child_env() -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
-    std::env::vars_os()
+    sanitized_from(std::env::vars_os())
+}
+
+/// [`sanitized_child_env`] over an explicit environment. The spawn builder
+/// copies exactly this list, so a test can prove the whole base a child is
+/// given, not only the name predicate.
+fn sanitized_from<I>(vars: I) -> Vec<(std::ffi::OsString, std::ffi::OsString)>
+where
+    I: IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+{
+    vars.into_iter()
         .filter(|(k, _)| match k.to_str() {
             Some(s) => !is_secret_env(s) && !is_per_child_engine_env(s),
             // A non-UTF-8 key cannot be one of our (ASCII-named) secrets.
@@ -2198,6 +2208,41 @@ mod secret_env_tests {
         ] {
             assert!(!is_per_child_engine_env(key), "{key} should pass through");
         }
+    }
+
+    #[test]
+    fn the_child_environment_is_built_without_any_secret() {
+        use super::sanitized_from;
+        use std::ffi::OsString;
+
+        // A synthetic engine environment with one variable of every secret
+        // family, a per-child artifact, and the ordinary variables a shell
+        // needs. The builder must keep only the ordinary ones.
+        let var = |k: &str, v: &str| (OsString::from(k), OsString::from(v));
+        let engine = vec![
+            var("PATH", "/usr/bin"),
+            var("HOME", "/home/agent"),
+            var("LANG", "C.UTF-8"),
+            var("ENGINE_TOKEN", "engine-secret"),
+            var("ENGINE_EXTRA_TOKENS_JSON", "scoped-secrets"),
+            var("VOGT_CORE_TOKEN", "core-secret"),
+            var("GITHUB_TOKEN", "gh-secret"),
+            var("INFISICAL_CLIENT_SECRET", "infisical-secret"),
+            var("TAILSCALE_AUTH_KEY", "tailscale-secret"),
+            var("VOGT_ENGINE_AGENT_TASK_PROMPT_FILE", "/tmp/another-brief"),
+        ];
+        let kept: Vec<(String, String)> = sanitized_from(engine)
+            .into_iter()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.to_string_lossy().into_owned(),
+                )
+            })
+            .collect();
+        let mut names: Vec<&str> = kept.iter().map(|(k, _)| k.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["HOME", "LANG", "PATH"]);
     }
 
     #[test]
