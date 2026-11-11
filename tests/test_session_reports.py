@@ -474,3 +474,56 @@ def test_a_refused_resume_leaves_the_chore_it_reused_open(
         start_session(wired, _unbound(wired, resume="conv-1"))
     item = get_work(wired, GetWorkParams(ref=first.session.work_item or "")).item
     assert item.state == "open"
+
+
+def test_the_chore_title_is_the_first_line_capped_not_the_whole_task(
+    wired: AppContext,
+) -> None:
+    long_first_line = "Tidy the release notes " + "and the changelog " * 20
+    task = f"{long_first_line}\nsecond line that must not reach the title\nthird"
+
+    result = start_session(wired, _unbound(wired, task=task))
+    item = get_work(wired, GetWorkParams(ref=result.session.work_item or "")).item
+
+    assert "\n" not in item.title
+    assert "second line" not in item.title
+    assert len(item.title) <= len("Session: ") + 80
+    assert item.title.startswith("Session: Tidy the release notes")
+
+
+def test_the_chore_title_redacts_a_credential_shaped_token(wired: AppContext) -> None:
+    token = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+    task = f"Rotate the deploy key {token} and update the runner"
+
+    result = start_session(wired, _unbound(wired, task=task))
+    item = get_work(wired, GetWorkParams(ref=result.session.work_item or "")).item
+
+    assert token not in item.title
+    assert "[REDACTED:token]" in item.title
+
+
+def test_the_chore_is_local_only_so_it_never_opens_a_forge_issue(
+    wired: AppContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import vogt.application.services.work as work_service
+
+    seen: list[CreateWorkParams] = []
+    real_create = work_service.create_work
+
+    def spy(ctx: AppContext, params: CreateWorkParams) -> object:
+        seen.append(params)
+        return real_create(ctx, params)
+
+    monkeypatch.setattr(work_service, "create_work", spy)
+    start_session(wired, _unbound(wired))
+
+    assert seen, "an unbound autopilot worker makes a chore"
+    assert all(p.local_only for p in seen)
+
+
+def test_work_create_says_a_default_create_opens_an_upstream_issue() -> None:
+    from vogt.application.models import CreateWorkParams as Params
+
+    description = Params.model_fields["local_only"].description or ""
+    assert "CREATES AN UPSTREAM ISSUE" in description
+    assert "forge-linked" in description
