@@ -151,6 +151,9 @@ pub struct Blocker {
 pub struct ProjectUpdate {
     pub lifecycle_state: Option<String>,
     pub repo_url: Option<String>,
+    /// Backfills the branch a project was registered without (WI-4026). Only
+    /// ever written when the stored value is empty.
+    pub default_branch: Option<String>,
     pub current_version: Option<String>,
     pub compliance_status: Option<String>,
     pub compliance_checked_at: Option<Moment>,

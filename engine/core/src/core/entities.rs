@@ -283,6 +283,10 @@ pub struct Project {
     pub name: String,
     pub root_path: String,
     pub repo_url: Option<String>,
+    /// The branch the project's source checks out by default, read from the
+    /// remote's HEAD at import (WI-4026). Empty when not recorded.
+    #[serde(default)]
+    pub default_branch: Option<String>,
     #[serde(default = "lifecycle_default")]
     pub lifecycle_state: ProjectLifecycle,
     pub current_version: Option<String>,
@@ -316,6 +320,7 @@ impl Project {
             name: name.to_string(),
             root_path: root_path.to_string(),
             repo_url: None,
+            default_branch: None,
             lifecycle_state: ProjectLifecycle::Active,
             current_version: None,
             contract_version: None,

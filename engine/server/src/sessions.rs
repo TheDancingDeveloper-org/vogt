@@ -268,6 +268,7 @@ fn reserved_pod_env_name(name: &str) -> bool {
 fn pod_carry_recorded(
     env: &[(String, String)],
     cwd: Option<&str>,
+    has_source: bool,
 ) -> (Vec<(String, String)>, Option<String>) {
     let carried = env
         .iter()
@@ -277,22 +278,47 @@ fn pod_carry_recorded(
                 .and_then(|mut one| one.pop())
         })
         .collect();
-    (carried, cwd.and_then(|dir| pod_work_dir(dir).ok()))
+    (
+        carried,
+        cwd.and_then(|dir| pod_work_dir_for(dir, has_source).ok())
+            .map(|resolved| resolved.work_dir),
+    )
+}
+
+/// Where a pod session starts, and whether the requested cwd was remapped.
+#[derive(Debug, PartialEq, Eq)]
+struct PodWorkDir {
+    work_dir: String,
+    /// The host cwd the caller asked for, when it was not inside the pod's
+    /// checkout and the session runs in the clone root instead (WI-4026).
+    remapped_from: Option<String>,
 }
 
 /// The pod-side working directory for a requested `cwd` (WI-3883): its place
 /// inside the git checkout the pod clones, re-rooted under the session agent's
-/// default work directory. The clone is the checkout itself, so a cwd equal to
-/// it is the clone root; a cwd outside any checkout cannot be honoured, and a
-/// cwd that would climb out of the checkout is refused rather than escaped.
-fn pod_work_dir(cwd: &str) -> Result<String> {
+/// default work directory. A cwd outside any checkout runs in the clone root
+/// when the project has a source the pod clones (WI-4026), and is refused with
+/// an actionable message otherwise. A cwd that would climb out of the checkout
+/// is refused rather than escaped.
+fn pod_work_dir_for(cwd: &str, has_source: bool) -> Result<PodWorkDir> {
     let dir = std::path::Path::new(cwd);
     let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
-    let root = git::worktree_top(&dir).ok_or_else(|| {
-        ApiError::BadRequest(format!(
-            "placement \"pod\" cannot start at cwd {cwd:?}: it is not inside a source checkout, and the pod clones that checkout itself"
-        ))
-    })?;
+    let Some(root) = git::worktree_top(&dir) else {
+        if !has_source {
+            return Err(ApiError::BadRequest(format!(
+                "placement \"pod\" cannot start at cwd {cwd:?}: the project has no source, so the pod has nothing to clone; register the project with a repository (repo_url) or start the session on the host"
+            )));
+        }
+        tracing::info!(
+            cwd = %cwd,
+            work_dir = vogt_session_agent::DEFAULT_WORK_DIR,
+            "pod session cwd is not in a source checkout; running in the clone root"
+        );
+        return Ok(PodWorkDir {
+            work_dir: vogt_session_agent::DEFAULT_WORK_DIR.to_string(),
+            remapped_from: Some(cwd.to_string()),
+        });
+    };
     let relative = dir.strip_prefix(&root).map_err(|_| {
         ApiError::BadRequest(format!(
             "placement \"pod\" cannot start at cwd {cwd:?}: it escapes the source checkout {root:?} the pod clones"
@@ -311,9 +337,12 @@ fn pod_work_dir(cwd: &str) -> Result<String> {
     // ("/work/"), which Codex's trust key does not match; a clone-root session
     // runs in the bare work directory.
     let work = work.to_string_lossy().into_owned();
-    Ok(match work.trim_end_matches('/') {
-        "" => work,
-        trimmed => trimmed.to_string(),
+    Ok(PodWorkDir {
+        work_dir: match work.trim_end_matches('/') {
+            "" => work,
+            trimmed => trimmed.to_string(),
+        },
+        remapped_from: None,
     })
 }
 
@@ -1313,11 +1342,16 @@ impl SessionRegistry {
             // it must not refuse now: a checkout removed since, or a name
             // this release tightened, drops that one field instead (WI-3883
             // review). A fresh start validates strictly and refuses.
+            let has_source = spec.source.is_some();
             let (agent_env, work_dir) = match recorded {
-                Some(_) => pod_carry_recorded(&base_env, spec.cwd.as_deref()),
+                Some(_) => pod_carry_recorded(&base_env, spec.cwd.as_deref(), has_source),
                 None => (
                     pod_carry_env(&base_env)?,
-                    spec.cwd.as_deref().map(pod_work_dir).transpose()?,
+                    spec.cwd
+                        .as_deref()
+                        .map(|dir| pod_work_dir_for(dir, has_source))
+                        .transpose()?
+                        .map(|resolved| resolved.work_dir),
                 ),
             };
             Some(crate::agent_stream::PodLaunch {
@@ -4168,6 +4202,40 @@ mod tests {
     }
 
     #[test]
+    fn pod_cwd_outside_a_checkout_remaps_to_the_clone_root_when_the_project_has_a_source() {
+        // The project's root is not a git checkout on this host (vogt-dev), but
+        // the project has a source the pod clones itself: the session runs in
+        // the clone root, and the remap is reported rather than refused.
+        let dir = std::env::temp_dir().join(format!("wi4026-noncheckout-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cwd = dir.to_string_lossy().into_owned();
+        let resolved = super::pod_work_dir_for(&cwd, true).unwrap();
+        assert_eq!(resolved.work_dir, vogt_session_agent::DEFAULT_WORK_DIR);
+        assert_eq!(resolved.remapped_from.as_deref(), Some(cwd.as_str()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pod_cwd_outside_a_checkout_without_a_source_fails_with_an_actionable_message() {
+        let dir = std::env::temp_dir().join(format!("wi4026-nosource-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cwd = dir.to_string_lossy().into_owned();
+        let error = super::pod_work_dir_for(&cwd, false)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("no source"), "{error}");
+        assert!(
+            error.contains("register the project with a repository"),
+            "{error}"
+        );
+        assert!(
+            !error.contains("the pod clones that checkout itself"),
+            "still the generic refusal: {error}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn pod_placement_refuses_a_worktree() {
         let error = validate_pod_placement_fields(true).unwrap_err();
         assert!(error.to_string().contains("worktree"), "{error}");
@@ -4227,7 +4295,7 @@ mod tests {
             ("GRAFT_ENDPOINT".to_string(), "http://old".to_string()),
         ];
         assert_eq!(
-            pod_carry_recorded(&env, Some("/no/such/checkout")),
+            pod_carry_recorded(&env, Some("/no/such/checkout"), false),
             (
                 vec![("CARGO_BUILD_JOBS".to_string(), "4".to_string())],
                 None

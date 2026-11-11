@@ -57,6 +57,7 @@ where
         txn.update_project(
             &id,
             &ProjectUpdate {
+                default_branch: None,
                 write_back: Some(policy.clone()),
                 ..ProjectUpdate::default()
             },

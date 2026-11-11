@@ -329,6 +329,7 @@ fn apply(
             txn.update_project(
                 &project_id,
                 &ProjectUpdate {
+                    default_branch: None,
                     current_version: Some(to),
                     ..ProjectUpdate::default()
                 },

@@ -1066,6 +1066,7 @@ where
     let (resolved, read_only, overrides) = resolve_purpose(ctx, params)?;
     let params = &resolved;
     let (started_by_session, started_by_kind) = started_by(ctx, engine)?;
+    backfill_default_branch(ctx, params)?;
     let mut writing = write_of(ctx);
     let session_id = fresh(&writing, "ses");
     let subject = subject_of(ctx, params, &session_id)?;
@@ -3092,7 +3093,15 @@ where
         }
         None => brief::brief_for_project(&project.slug, session_id, Some(&project)),
     };
-    let source = project_source(&project);
+    let (source, used_main) = project_source_with_fallback(&project);
+    if used_main {
+        // The last resort (WI-4026): no stated, recorded or backfilled branch,
+        // so the pod clones `main`. Say so, so a wrong branch is traceable.
+        tracing::warn!(
+            project = %project.slug,
+            "project has no recorded default branch; the pod clones main as a last resort"
+        );
+    }
     Ok(Subject {
         session_id: session_id.to_string(),
         project_id: project.id,
@@ -3107,9 +3116,118 @@ where
     })
 }
 
+/// What a backfill should write for a project whose branch is not recorded
+/// (WI-4026): the remote's HEAD when it names one, else `None` (the caller
+/// falls back to `main` and says so). A project with a recorded branch, or
+/// with no repository, is never backfilled.
+fn backfill_target(project: &crate::core::Project, remote_head: Option<String>) -> Option<String> {
+    let recorded = project
+        .default_branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|branch| !branch.is_empty());
+    if recorded.is_some()
+        || project
+            .repo_url
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or("")
+            .is_empty()
+    {
+        return None;
+    }
+    remote_head
+        .map(|branch| branch.trim().to_string())
+        .filter(|branch| !branch.is_empty())
+}
+
+/// Resolve and persist the default branch of a project registered before it
+/// was recorded (WI-4026). Reads the remote's HEAD with no clone, writes it
+/// through an audited update, and logs the choice. A remote that cannot be read
+/// is logged here; the session then runs on the logged `main` last resort.
+fn backfill_default_branch<C, I>(
+    ctx: &AppContext<C, I>,
+    params: &StartSessionParams,
+) -> Result<(), VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let Some(project_slug) = params.project.as_deref() else {
+        return Ok(());
+    };
+    let Some(project) = ctx.declared.read()?.project_by_slug(project_slug)? else {
+        return Ok(());
+    };
+    let recorded = project
+        .default_branch
+        .as_deref()
+        .is_some_and(|branch| !branch.trim().is_empty());
+    let Some(url) = project
+        .repo_url
+        .clone()
+        .filter(|url| !url.trim().is_empty())
+    else {
+        return Ok(());
+    };
+    if recorded {
+        return Ok(());
+    }
+    let remote_head = crate::adapters::git::remote_default_branch(&url, None, None);
+    let Some(branch) = backfill_target(&project, remote_head.clone()) else {
+        tracing::warn!(
+            project = %project.slug,
+            "project default branch is not recorded and the remote's HEAD could not be read; the session falls back to main"
+        );
+        return Ok(());
+    };
+    tracing::info!(
+        project = %project.slug,
+        branch = %branch,
+        "backfilled the project's default branch from the remote's HEAD"
+    );
+    let mut writing = write_of(ctx);
+    let project_id = project.id.clone();
+    let at = super::now_of(&ctx.clock);
+    audited_write(
+        &mut writing,
+        "project.default_branch.backfill",
+        "record the branch the remote names as HEAD (WI-4026)",
+        move |txn, _actor| {
+            txn.update_project(
+                &project_id,
+                &crate::storage::interface::ProjectUpdate {
+                    default_branch: Some(branch.clone()),
+                    ..crate::storage::interface::ProjectUpdate::default()
+                },
+                at,
+            )?;
+            Ok(WriteOutcome::new(
+                (),
+                "project",
+                &project_id,
+                json!({"default_branch": branch}),
+                "project.default_branch.backfilled",
+                json!({"project": project_id}),
+            ))
+        },
+    )?;
+    Ok(())
+}
+
 fn project_source(
     project: &crate::core::Project,
 ) -> Option<vogt_engine_contract::source::SourceDescriptor> {
+    project_source_with_fallback(project).0
+}
+
+/// The project's source descriptor, and whether its branch is the `main`
+/// last resort rather than a stated or recorded one (WI-4026). Precedence: an
+/// explicit landing source, then the landing `base_branch`, then the branch
+/// recorded at import, then `main`.
+fn project_source_with_fallback(
+    project: &crate::core::Project,
+) -> (Option<vogt_engine_contract::source::SourceDescriptor>, bool) {
     #[derive(serde::Deserialize)]
     struct Landing {
         #[serde(default)]
@@ -3125,38 +3243,47 @@ fn project_source(
         .as_ref()
         .and_then(|value| serde_json::from_value(value.clone()).ok());
     if let Some(source) = landing.as_ref().and_then(|landing| landing.source.clone()) {
-        return Some(source);
+        return (Some(source), false);
     }
-    let url = project.repo_url.as_deref()?.trim();
-    if url.is_empty() {
-        return None;
-    }
-    let (reference, mode) = landing
-        .map(|landing| {
-            let reference = if landing.base_branch.trim().is_empty() {
-                "main".to_string()
-            } else {
-                landing.base_branch
-            };
-            let mode = if landing.worker_lands_by == "open_pr" {
-                vogt_engine_contract::source::LandingMode::OpenPr
-            } else {
-                vogt_engine_contract::source::LandingMode::PushBranch
-            };
-            (reference, mode)
-        })
-        .unwrap_or((
-            "main".to_string(),
-            vogt_engine_contract::source::LandingMode::PushBranch,
-        ));
-    Some(vogt_engine_contract::source::SourceDescriptor {
-        location: vogt_engine_contract::source::SourceLocation::Git {
-            url: url.to_string(),
-            repo: url.to_string(),
-        },
-        reference,
-        landing: mode,
-    })
+    let Some(url) = project
+        .repo_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+    else {
+        return (None, false);
+    };
+    let mode = match landing.as_ref() {
+        Some(landing) if landing.worker_lands_by == "open_pr" => {
+            vogt_engine_contract::source::LandingMode::OpenPr
+        }
+        _ => vogt_engine_contract::source::LandingMode::PushBranch,
+    };
+    let stated = landing
+        .as_ref()
+        .map(|landing| landing.base_branch.trim().to_string())
+        .filter(|branch| !branch.is_empty());
+    let recorded = project
+        .default_branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|branch| !branch.is_empty())
+        .map(str::to_string);
+    let (reference, used_main) = match (stated, recorded) {
+        (Some(branch), _) | (None, Some(branch)) => (branch, false),
+        (None, None) => ("main".to_string(), true),
+    };
+    (
+        Some(vogt_engine_contract::source::SourceDescriptor {
+            location: vogt_engine_contract::source::SourceLocation::Git {
+                url: url.to_string(),
+                repo: url.to_string(),
+            },
+            reference,
+            landing: mode,
+        }),
+        used_main,
+    )
 }
 
 /// The scopes a session's own token carries, from the deployment's config.
@@ -4963,13 +5090,47 @@ mod tests {
     use crate::with_ctx;
 
     use super::{
-        answers_as_person, hibernate, input, project_source, relayed_overseer, remove_session_op,
-        rename_session_op, session_token_op, type_then_submit, wake, HibernateParams, InputParams,
-        WakeParams,
+        answers_as_person, hibernate, input, project_source, project_source_with_fallback,
+        relayed_overseer, remove_session_op, rename_session_op, session_token_op, type_then_submit,
+        wake, HibernateParams, InputParams, WakeParams,
     };
 
     #[test]
     fn project_source_defaults_a_repository_to_git_main() {
+        let now = Moment::from_unix(0, 0);
+        let mut project = Project::new("p", "a5", "A5", "/work", now);
+        project.repo_url = Some("https://github.com/octocat/Hello-World.git".to_string());
+        project.default_branch = Some("master".to_string());
+
+        let source = project_source(&project).expect("repository has a source");
+        assert_eq!(source.reference, "master");
+    }
+
+    #[test]
+    fn project_source_uses_the_stored_default_branch_not_main() {
+        let now = Moment::from_unix(0, 0);
+        let mut project = Project::new("p", "a5", "A5", "/work", now);
+        project.repo_url = Some("https://github.com/octocat/Hello-World.git".to_string());
+        project.default_branch = Some("master".to_string());
+
+        let (source, used_main) = project_source_with_fallback(&project);
+        assert_eq!(source.expect("repository has a source").reference, "master");
+        assert!(!used_main, "a recorded branch is not the main fallback");
+    }
+
+    #[test]
+    fn project_source_without_a_stored_branch_still_resolves_main_and_reports_it() {
+        let now = Moment::from_unix(0, 0);
+        let mut project = Project::new("p", "vogt", "Vogt", "/work", now);
+        project.repo_url = Some("https://github.com/indexarr/vogt.git".to_string());
+
+        let (source, fallback) = project_source_with_fallback(&project);
+        assert_eq!(source.expect("repository has a source").reference, "main");
+        assert!(fallback, "the main fallback must be reported, not silent");
+    }
+
+    #[test]
+    fn project_source_defaults_a_repository_to_git_main_when_unstated() {
         let now = Moment::from_unix(0, 0);
         let mut project = Project::new("p", "vogt", "Vogt", "/work", now);
         project.repo_url = Some("https://github.com/indexarr/vogt.git".to_string());

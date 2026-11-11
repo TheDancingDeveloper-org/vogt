@@ -565,6 +565,7 @@ fn record_adoption<C: Clock + 'static, I: IdFactory + 'static>(
             txn.update_project(
                 &project_id,
                 &crate::storage::interface::ProjectUpdate {
+                    default_branch: None,
                     contract_adopted_at: if adopted { Some(now) } else { None },
                     clear_contract_adopted_at: !adopted,
                     // Declining resets the verdict; adopting leaves it for the
@@ -787,6 +788,7 @@ fn record_check<C: Clock + 'static, I: IdFactory + 'static>(
         txn.update_project(
             &project_id,
             &crate::storage::interface::ProjectUpdate {
+                default_branch: None,
                 compliance_status: Some(status.clone()),
                 compliance_checked_at: Some(now),
                 ..crate::storage::interface::ProjectUpdate::default()
