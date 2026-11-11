@@ -459,8 +459,9 @@ def build_operations() -> list[Operation[Any, Any]]:
         Operation(
             name="project.list",
             summary=(
-                "List registered projects, each with `writable`: whether a "
-                "default work.create lands there now, and why not."
+                "List registered projects, each with `writable`: whether an "
+                "explicit upstream create (`work.create` with `upstream=true`) "
+                "lands there now, and why not."
             ),
             scope="read",
             mutating=False,
