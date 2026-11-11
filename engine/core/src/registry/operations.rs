@@ -116,7 +116,7 @@ pub fn build_operations() -> Vec<Operation> {
         ),
         Operation::new(
             "project.list",
-            "List registered projects, each with `writable`: whether a default work.create lands there now, and why not.",
+            "List registered projects, each with `writable`: whether an explicit upstream create (`work.create` with `upstream=true`) lands there now, and why not.",
             Scope::Read,
             false,
             HttpRoute::new(HttpMethod::Get, "/projects"),
