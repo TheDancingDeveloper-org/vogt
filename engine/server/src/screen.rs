@@ -174,18 +174,33 @@ pub struct Rendered {
 
 /// The bytes `/input` writes for `text`, then Enter when `submit`.
 ///
-/// Multi-line text typed raw into Claude Code lands as soft line breaks in
-/// its input box, and the Enter after it does not submit (WI-1870, seen
-/// live). When the program has bracketed paste on, multi-line text goes as
-/// one paste — newlines normalised to `\n`, and any paste-end marker inside
-/// it dropped so the text cannot close the paste early — and the Enter
-/// after it submits. Single-line text, and any text to a program without
-/// bracketed paste, is written as typed.
+/// Text to a program that asked for bracketed paste goes as one paste, single
+/// line or not: newlines normalised to `\n`, and any paste-end marker inside it
+/// dropped so the text cannot close the paste early. Multi-line text typed raw
+/// lands as soft line breaks in Claude Code's input box, and the Enter after it
+/// does not submit (WI-1870, seen live). A single line is a paste for the
+/// opposite reason (WI-4068): an agent TUI that classifies fast input through a
+/// "paste burst" detector — Codex does — reads a raw `text` followed at once by
+/// `\r` as one paste and turns the Enter into a newline inside it, so the
+/// prompt sits unsent in the composer and the session never starts a turn. An
+/// explicit paste ends that window, and a driver's `/input` is a paste, not
+/// typing. A `text` that carries a control character other than tab or a line
+/// break is not text: it is a key or an escape sequence a driver is sending
+/// (`\u001b` for Esc), and it is written as typed so the program still reads it
+/// as that key. An empty `text` (a bare Enter) and any text to a program
+/// without bracketed paste is written as typed too.
 pub fn input_bytes(text: &str, bracketed_paste: bool, submit: bool) -> Vec<u8> {
     const START: &str = "\x1b[200~";
     const END: &str = "\x1b[201~";
-    let multi_line = text.contains(['\n', '\r']);
-    let mut out = if bracketed_paste && multi_line {
+    // A paste is literal text, so a control byte inside it would lose its
+    // meaning: a driver's `\u001b` (Esc) must stay a key.
+    let keys = text
+        .chars()
+        .any(|c| c.is_control() && !matches!(c, '\t' | '\n' | '\r'));
+    let mut out = if bracketed_paste && !text.is_empty() && !keys {
+        // No control byte can reach here today, so neither marker can occur;
+        // dropping them keeps a paste body unable to close its own paste if
+        // that rule ever loosens.
         let body = text
             .replace("\r\n", "\n")
             .replace('\r', "\n")
@@ -870,14 +885,59 @@ mod tests {
         );
         assert_eq!(
             input_bytes("a\n\x1b[201~b", true, false),
-            b"\x1b[200~a\nb\x1b[201~".to_vec(),
-            "a paste-end inside the text cannot end the paste early"
+            b"a\n\x1b[201~b".to_vec(),
+            "a control byte makes it a key, not a paste to escape"
         );
-        assert_eq!(input_bytes("one line", true, true), b"one line\r".to_vec());
         assert_eq!(
             input_bytes("a\nb", false, true),
             b"a\nb\r".to_vec(),
             "no bracketed paste: written as typed"
+        );
+    }
+
+    #[test]
+    fn single_line_input_is_a_paste_too_so_the_enter_after_it_submits() {
+        // WI-4068: Codex's paste-burst detector reads a raw `text\r` burst as
+        // one paste and turns the Enter into a newline inside it, so the
+        // prompt stays in the composer and no turn starts. The paste markers
+        // end that window, and the Enter after them submits.
+        assert_eq!(
+            input_bytes("run `echo PONG`", true, true),
+            b"\x1b[200~run `echo PONG`\x1b[201~\r".to_vec()
+        );
+        assert_eq!(
+            input_bytes("run `echo PONG`", true, false),
+            b"\x1b[200~run `echo PONG`\x1b[201~".to_vec()
+        );
+        assert_eq!(
+            input_bytes("", true, true),
+            b"\r".to_vec(),
+            "a bare Enter is a key, not a paste"
+        );
+        assert_eq!(
+            input_bytes("", true, false),
+            b"".to_vec(),
+            "an empty input writes nothing"
+        );
+        assert_eq!(
+            input_bytes("one line", false, true),
+            b"one line\r".to_vec(),
+            "no bracketed paste: written as typed"
+        );
+        assert_eq!(
+            input_bytes("\u{1b}", true, true),
+            b"\x1b\r".to_vec(),
+            "an escape sequence is a key, not text to paste"
+        );
+        assert_eq!(
+            input_bytes("\u{1b}[A", true, false),
+            b"\x1b[A".to_vec(),
+            "an arrow key stays a key"
+        );
+        assert_eq!(
+            input_bytes("\u{3}", true, true),
+            b"\x03\r".to_vec(),
+            "ctrl-c stays a key"
         );
     }
 
