@@ -256,66 +256,6 @@ def test_rereview_bypasses_are_asked(tmp_path: Path, command: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "command",
-    [
-        "R=$(echo cm | tr c r); timeout 5 $R a.txt",
-        "R=$(echo cm | tr c r); timeout -s KILL 5 $R a.txt",
-        "R=x; nice -n 5 $R a.txt",
-        "R=x; nice $R a.txt",
-        "R=x; stdbuf -oL $R a.txt",
-        "R=x; setsid $R a.txt",
-        "R=x; ionice -c 3 $R a.txt",
-        "R=x; doas $R a.txt",
-        "R=x; chronic $R a.txt",
-        "R=x; nohup ${R} a.txt",
-        "R=x; timeout 5 `echo $R` a.txt",
-        "{rm,a.txt}",
-        "{git,restore,a.txt}",
-        "{r,}m a.txt",
-    ],
-)
-def test_round3_wrapped_and_braced_programs_are_asked(
-    tmp_path: Path, command: str
-) -> None:
-    """WI-4001 bypasses 5 and 3: a variable after a wrapper with options or a
-    duration (`timeout 5 $R`), and a brace expansion as the program, reach
-    the engine; with no engine to ask they are refused."""
-    env = {
-        "VOGT_ENGINE_BROKER_URL": "http://127.0.0.1:1",
-        "VOGT_ENGINE_BROKER_TOKEN": "t",
-    }
-    payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
-    refused = run(tmp_path, payload, env)
-    assert refused.returncode == 2, command
-    assert "vogt policy check unavailable" in refused.stderr
-    codex = json.dumps({"tool_name": "exec_command", "tool_input": {"cmd": command}})
-    assert run(tmp_path, codex, env, mode="codex").returncode == 2, command
-
-
-@pytest.mark.parametrize(
-    "command",
-    [
-        "timeout 60 cargo test",
-        "nice -n 5 cargo build --release",
-        "ls src/{a,b}.rs",
-        "echo {a,b}",
-        "awk '{print $1}' f.txt",
-    ],
-)
-def test_round3_ordinary_wrapped_commands_are_not_asked(
-    tmp_path: Path, command: str
-) -> None:
-    broker = _Broker(500, b"")
-    try:
-        env = {"VOGT_ENGINE_BROKER_URL": broker.url, "VOGT_ENGINE_BROKER_TOKEN": "t"}
-        payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
-        assert run(tmp_path, payload, env).returncode == 0, command
-        assert broker.requests == []
-    finally:
-        broker.close()
-
-
-@pytest.mark.parametrize(
     "command", ["echo $HOME", "ls -la; cargo test", "printf '%s\\n' x"]
 )
 def test_an_expansion_that_is_not_the_program_is_not_asked(

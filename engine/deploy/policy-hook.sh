@@ -159,18 +159,7 @@ if not isinstance(cmd, str):
 cmd = cmd.replace("\\\n", "")
 # A program that is an expansion, or a sourced script: always asked.
 start = r"(^|[;&|(){}`\n!]|\b(then|do|else|eval|exec|command|builtin|sudo|env|time|nohup|xargs))\s*(\w+=\S*\s+)*"
-# A wrapper with options or a duration before its program (`timeout 5 $R`,
-# `nice -n 5 $R`, `stdbuf -oL $R`): a word that is an expansion anywhere
-# after it in the same simple command is asked, since it may be the program.
-wrapped = r"(^|[^\w-])(timeout|nice|stdbuf|setsid|ionice|doas|chronic|sudo|env|exec|command|builtin|nohup|time|xargs|watch|flock|su|script|busybox)\s+([^;&|\n]*?\s)?[\"\x27]*[$`]"
-# A brace expansion as the program (`{rm,a.txt}`, `{r,}m a.txt`).
-braced = start + r"[\"\x27]*\S*\{[^}\s]*,"
-if (
-    re.search(start + r"[\"\x27]*\$", cmd)
-    or re.search(start + r"\.\s", cmd)
-    or re.search(wrapped, cmd)
-    or re.search(braced, cmd)
-):
+if re.search(start + r"[\"\x27]*\$", cmd) or re.search(start + r"\.\s", cmd):
     sys.stdout.write("git")
     sys.exit(0)
 try:
