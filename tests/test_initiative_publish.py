@@ -191,6 +191,7 @@ def ctx(tmp_path: Path, forge: TrackingForge) -> AppContext:
             title="First",
             project="demo",
             initiative="platform-epic",
+            upstream=True,
             reason=WHY,
         ),
     )
@@ -201,6 +202,7 @@ def ctx(tmp_path: Path, forge: TrackingForge) -> AppContext:
             title="Second",
             project="demo",
             initiative="platform-epic",
+            upstream=True,
             reason=WHY,
         ),
     )
@@ -283,7 +285,10 @@ def test_adding_a_member_via_work_update_re_renders_the_task_list(
     publish_initiative(ctx, PublishInitiativeParams(slug="platform-epic", reason=WHY))
     # A new issue not yet in the initiative.
     created = create_work(
-        ctx, CreateWorkParams(kind="feature", title="Third", project="demo", reason=WHY)
+        ctx,
+        CreateWorkParams(
+            kind="feature", title="Third", project="demo", upstream=True, reason=WHY
+        ),
     )
     sweep(ctx, SweepParams(reason=WHY))
     number = int(created.item.ref.rsplit("#", 1)[1])
@@ -318,6 +323,7 @@ def test_a_closed_initiative_proposes_the_tracking_issue_close(
             title="Only",
             project="demo",
             initiative="sunset-epic",
+            upstream=True,
             reason=WHY,
         ),
     )
@@ -348,6 +354,7 @@ def test_re_publishing_a_closed_initiative_does_not_pile_up_proposals(
             title="Only",
             project="demo",
             initiative="sunset",
+            upstream=True,
             reason=WHY,
         ),
     )
@@ -395,6 +402,7 @@ def test_a_cross_project_initiative_gets_one_issue_per_repo_cross_referenced(
             title="Here",
             project="demo",
             initiative="wide-epic",
+            upstream=True,
             reason=WHY,
         ),
     )
@@ -405,6 +413,7 @@ def test_a_cross_project_initiative_gets_one_issue_per_repo_cross_referenced(
             title="There",
             project="other",
             initiative="wide-epic",
+            upstream=True,
             reason=WHY,
         ),
     )

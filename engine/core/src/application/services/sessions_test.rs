@@ -1047,9 +1047,10 @@ fn full_mode_with_fields_slims_each_row_to_id_and_the_named_fields() {
 }
 
 /// WI-3987: a worker started on a bare project must not get a work item
-/// created for it. The Python line's autopilot chore ("Session: <task>") is
-/// not carried onto rust-2; this pins that a project-only start writes no
-/// item, so the junk cannot come back through the engine path.
+/// created for it, and its name must not become the task text. The Python
+/// line's autopilot chore ("Session: <task>") is not carried onto rust-2; this
+/// pins that a project-only start writes no item and names the session after
+/// the project slug, so the junk cannot come back through the engine path.
 #[test]
 fn a_project_only_worker_start_creates_no_work_item() {
     let script = script_with(vec![(
@@ -1063,7 +1064,20 @@ fn a_project_only_worker_start_creates_no_work_item() {
     };
     let mut params = start_params(Some("beta"), Some("Ship the thing\nsecond line"), "because");
     params.autopilot = Some(true);
-    start_session(ctx, &params).unwrap();
+    let started = start_session(ctx, &params).unwrap();
+    let name = started
+        .session
+        .name
+        .as_deref()
+        .expect("a started session has a name");
+    assert_eq!(
+        name, "beta",
+        "a task-only start names the session after the project slug"
+    );
+    assert!(
+        name.chars().count() <= 80,
+        "the session name is bounded: {name}"
+    );
     let items = ctx
         .declared
         .read()

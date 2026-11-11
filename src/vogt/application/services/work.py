@@ -3,8 +3,9 @@
 The write plane has two shapes, split by the project's persisted link state
 (decision 1):
 
-- **Linked project** — the work items are the upstream issues. `work.create`
-  writes through to the forge and the new issue's subject key is the item's
+- **Linked project** — the work items are the upstream issues. An explicit
+  `work.create` with `upstream=true` writes through to the forge and the new
+  issue's subject key is the item's
   identity; comments, label adds and open/close write through the same way,
   synchronously and fail-loud (decision 9): a provider failure raises a
   typed error and nothing local commits, so a caller can never hold a local
@@ -13,10 +14,10 @@ The write plane has two shapes, split by the project's persisted link state
   row and produce **zero** provider calls (decision 2).
 - **No project** — native declared items, exactly as before.
 - **Unlinked project** — the verbs that would *reach the forge* refuse with
-  `NotLinked` (decision 10): an upstreamed `work.create` and label writes,
-  which are shared vocabulary with the forge. Link the project or publish
-  it. A native item there (`work.create` with `local_only`) is a local
-  record: edits, comments and transitions land locally, so an item that
+  `NotLinked` (decision 10): an upstreamed `work.create` (`upstream=true`)
+  and label writes, which are shared vocabulary with the forge. Link the
+  project or publish it. A native item there (the default `work.create`) is a
+  local record: edits, comments and transitions land locally, so an item that
   could be created can also be discussed and closed (#770).
 """
 
@@ -133,7 +134,7 @@ UNLINKED_STILL_WORKS = (
 def _refuse_unlinked(project: Project, verb: str) -> NotLinked:
     """The decision-10 refusal, with both ways forward and what still works."""
     local = (
-        "; or pass `local_only: true` to keep a native item in this project"
+        "; or drop `upstream` (the default) to keep a native item in this project"
         if verb == "work.create"
         else ""
     )
@@ -209,13 +210,15 @@ def _gaps_for(
 def create_writability(
     ctx: AppContext, projects: list[Project]
 ) -> dict[str, tuple[bool, str]]:
-    """Per project id: would a default `work.create` land there now, and why.
+    """Per project id: would an explicit upstream create land now, and why.
 
-    The same gates `work.create` applies, evaluated without writing: the
-    decision-10 link check, then every write-through precondition. An agent
-    reads this from `project.list` before creating rather than learning it
-    from a `project_not_linked` or `upstream_write_refused` refusal. Nothing
-    here touches the network — credentials resolve from local configuration.
+    The same gates `work.create` with `upstream=true` applies, evaluated
+    without writing: the decision-10 link check, then every write-through
+    precondition. A default create is native now, so this is what a caller
+    checks before opting in to the forge. An agent reads this from
+    `project.list` before publishing rather than learning it from a
+    `project_not_linked` or `upstream_write_refused` refusal. Nothing here
+    touches the network — credentials resolve from local configuration.
     """
     with ctx.declared.read() as view:
         actor = view.actor_by_identity(ctx.principal.identity_ref)
@@ -224,24 +227,26 @@ def create_writability(
         if not upstream.is_linked(project):
             answers[project.id] = (
                 False,
-                "not forge-linked: work.create refuses with project_not_linked. "
-                "Pass local_only=true for a local record, or link "
-                "(`forge link`) or publish (`forge publish`) the project.",
+                "not forge-linked: an upstream work.create (upstream=true) "
+                "refuses with project_not_linked. Drop upstream for a native "
+                "record, or link (`forge link`) or publish (`forge publish`) "
+                "the project.",
             )
             continue
         gaps = _gaps_for(ctx, project, "create", actor)
         if gaps:
             answers[project.id] = (
                 False,
-                "linked, but work.create refuses with upstream_write_refused: "
+                "linked, but an upstream work.create refuses with "
+                "upstream_write_refused: "
                 + "; ".join(gaps)
-                + ". Or pass local_only=true for a local record.",
+                + ". Drop upstream for a native record.",
             )
         else:
             answers[project.id] = (
                 True,
-                "linked and write-back permits create: work.create opens the "
-                "issue upstream.",
+                "linked and write-back permits create: work.create with "
+                "upstream=true opens the issue upstream.",
             )
     return answers
 
@@ -260,14 +265,14 @@ def _require_permitted(
     a local half silently. Every gap in the write-back chain is named, not just
     the first, so following the advice cannot still fail on a gate the
     message never mentioned. `offer_local_only` adds the `work.create` escape
-    hatch to the message — the one verb with a sanctioned local-only path.
+    hatch to the message — the one verb whose upstream half is opt-in.
     """
     gaps = _write_through_gaps(ctx, project, action)
     if not gaps:
         return
     enumerated = "; ".join(f"({n}) {gap}" for n, gap in enumerate(gaps, start=1))
     tail = (
-        " Or pass `local_only` to create the item locally, without upstreaming it now."
+        " Or drop `upstream` to create the item locally, without upstreaming it now."
         if offer_local_only
         else ""
     )
@@ -370,27 +375,36 @@ def _merged_overlay(
 
 
 def create_work(ctx: AppContext, params: CreateWorkParams) -> WorkResult:
-    """Create a work item — upstream on a linked project.
+    """Create a work item — native by default, upstream only on request.
 
-    Split by the project named and by `local_only`:
+    Split by the project named and by `upstream`:
 
     - no project → a native declared item, unchanged;
-    - a project, `local_only` → a native declared item *in* that project,
-      the sanctioned local-only path: it carries no upstream subject yet and
-      is exactly the open native row a later `forge link`/`forge writeback`
-      migrates upstream. Reachable on linked and unlinked projects
-      alike, because it is the opt-in that neither the policy gate nor the
-      decision-10 refusal applies to;
-    - a linked project, default → `provider.create_issue` write-through, the
-      subject key becomes the ref, and an overlay row carries the vogt-local
-      fields;
-    - an unlinked project, default → the typed decision-10 refusal.
+    - a project, default (`upstream=False`) → a native declared item *in*
+      that project, linked or not: it carries no upstream subject yet and is
+      exactly the open native row a later `forge link`/`forge writeback`
+      migrates upstream. An oversight tracking item therefore never opens a
+      forge issue by surprise;
+    - a linked project, `upstream=True` → `provider.create_issue`
+      write-through, the subject key becomes the ref, and an overlay row
+      carries the vogt-local fields;
+    - an unlinked project, `upstream=True` → the typed decision-10 refusal.
+
+    `local_only` names the default explicitly; giving it with `upstream=True`
+    is a contradiction and is refused.
     """
+    if params.upstream and params.local_only:
+        raise InvalidRequest(
+            "give at most one of upstream or local_only: a create is either "
+            "published on the forge or kept native"
+        )
     if params.project is None:
+        if params.upstream:
+            raise InvalidRequest("upstream=true needs a project to publish the item to")
         return _create_native(ctx, params, project=None)
     with ctx.declared.read() as view:
         project = _resolve.project(view, params.project)
-    if params.local_only:
+    if not params.upstream:
         return _create_native(ctx, params, project=project)
     if not upstream.is_linked(project):
         raise _refuse_unlinked(project, "work.create")
