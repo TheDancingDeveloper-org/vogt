@@ -210,6 +210,14 @@ else
   fail "unsupported source kind: $source_kind"
 fi
 [ -d "$work_dir" ] || fail "the session's cwd is not in the clone: $work_dir"
+# /work is a per-pod emptyDir: kubelet gives it a root-owned mount point even
+# though the pod runs as uid 1000 (fsGroup only sets the group), so git refuses
+# it with "dubious ownership" (exit 128) and the git view below silently fails.
+# Trust exactly this clone path in the session user's own global config (HOME
+# is per-pod and writable). Never a wildcard. Best effort: the boot must go on.
+if ! git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$clone_dir"; then
+  git config --global --add safe.directory "$clone_dir" 2>/dev/null || true
+fi
 # WI-3356: give /work a read-only git view so `git log -1 -p`, `git diff` and
 # `git status` work in the pod (reviewers and most briefs assume git). graft
 # has no git export, so the view is built from the clone: a baseline commit of
