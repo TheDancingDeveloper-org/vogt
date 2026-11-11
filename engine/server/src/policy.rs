@@ -1267,7 +1267,10 @@ fn git_runs_command(words: &[String]) -> bool {
     let rest = &args[1..];
     // Whether a short option `letter` is in a cluster, stopping at a letter
     // in `valued` that takes the rest as its value; or a long option on
-    // the line is a prefix (git's abbreviation) of `long`.
+    // the line is a prefix (git's abbreviation) of `long`. Any prefix of one
+    // letter or more counts (WI-4001 round 5, blocker 1: `--ex` is `--exec`):
+    // an ambiguous one (`rebase --e`) is an error in git, so counting it only
+    // refuses a command git refuses too.
     let short = |letter: char, valued: &[char]| {
         rest.iter().take_while(|a| *a != "--").any(|a| {
             a.len() > 1
@@ -1288,10 +1291,10 @@ fn git_runs_command(words: &[String]) -> bool {
     match sub {
         "grep" => {
             short('O', &['e', 'f', 'A', 'B', 'C', 'm'])
-                || long("--open-files-in-pager", "--op".len())
+                || long("--open-files-in-pager", "--o".len())
         }
-        "difftool" => short('x', &['t']) || long("--extcmd", "--ex".len()),
-        "rebase" => short('x', &['s', 'X', 'C']) || long("--exec", "--exe".len()),
+        "difftool" => short('x', &['t']) || long("--extcmd", "--e".len()),
+        "rebase" => short('x', &['s', 'X', 'C']) || long("--exec", "--e".len()),
         "bisect" => rest.first().is_some_and(|a| a == "run"),
         "submodule" => rest.iter().any(|a| a == "foreach"),
         "config" => {
@@ -1991,7 +1994,7 @@ fn discards(sub: &str, args: &[String]) -> Option<Reach> {
     // `--pathspec-from-file` (and `checkout-index --stdin`) read the paths
     // from a file or stdin: what they name is not on the line.
     if opts.long("--pathspec-from-file") || (sub == "checkout-index" && opts.long("--stdin")) {
-        let staged_only = (opts.short('S') || opts.allow("--staged"))
+        let staged_only = opts.safe(Some('S'), "--staged")
             && !(opts.short('W') || opts.long("--worktree"));
         match sub {
             "restore" if staged_only => return None,
@@ -2030,7 +2033,7 @@ fn discards(sub: &str, args: &[String]) -> Option<Reach> {
             (!paths.is_empty()).then_some(Reach { all: false, paths })
         }
         "restore" => {
-            let staged = opts.short('S') || opts.allow("--staged");
+            let staged = opts.safe(Some('S'), "--staged");
             let worktree = opts.short('W') || opts.long("--worktree");
             if staged && !worktree {
                 return None; // unstages only; the working tree is left alone
@@ -2044,7 +2047,7 @@ fn discards(sub: &str, args: &[String]) -> Option<Reach> {
             })
         }
         "clean" => {
-            if opts.short('n') || opts.allow("--dry-run") {
+            if opts.safe(Some('n'), "--dry-run") {
                 return None;
             }
             force().then_some(Reach { all: false, paths })
@@ -2068,7 +2071,7 @@ fn discards(sub: &str, args: &[String]) -> Option<Reach> {
         "read-tree" => {
             let update = opts.short('u');
             let merges = opts.short('m') || opts.long("--reset") || opts.long("--prefix");
-            let dry = opts.short('n') || opts.allow("--dry-run");
+            let dry = opts.safe(Some('n'), "--dry-run");
             (update && merges && !dry).then_some(Reach {
                 all: true,
                 paths: Vec::new(),
@@ -2085,6 +2088,10 @@ struct Opts {
     /// Short option letters, every cluster taken apart up to the letter
     /// that takes a value.
     shorts: Vec<char>,
+    /// Every option in the order given: `-x` for a short letter, the long
+    /// name for a long one. A later option overrides an earlier one, so a
+    /// safe flag is read from the last of its spellings and negations.
+    order: Vec<String>,
     /// The positional words; everything after `--` among them.
     paths: Vec<String>,
     dashdash: bool,
@@ -2112,6 +2119,7 @@ impl Opts {
         let mut out = Opts {
             longs: Vec::new(),
             shorts: Vec::new(),
+            order: Vec::new(),
             paths: Vec::new(),
             dashdash: false,
         };
@@ -2130,10 +2138,12 @@ impl Opts {
                 if !value && name.len() > 2 && long_valued.iter().any(|v| v.starts_with(&name)) {
                     rest.next();
                 }
+                out.order.push(name.clone());
                 out.longs.push(name);
             } else if arg.len() > 1 && arg.starts_with('-') {
                 for (i, letter) in arg[1..].char_indices() {
                     out.shorts.push(letter);
+                    out.order.push(format!("-{letter}"));
                     if short_valued.contains(&letter) {
                         if i + letter.len_utf8() == arg.len() - 1 {
                             rest.next();
@@ -2164,18 +2174,27 @@ impl Opts {
     /// [`Opts::long`] for an option that makes the call safe: a later
     /// `--no-<name>` (by prefix) takes it back.
     fn allow(&self, name: &str) -> bool {
-        let neg = |l: &String| {
-            l.strip_prefix("--no-")
+        self.safe(None, name)
+    }
+
+    /// Whether the safe option `name`, or its short spelling `letter`, is
+    /// in force: given, and not taken back by a later `--no-<name>` (by
+    /// prefix). The last spelling wins, so `-n --no-dry-run` is not a dry
+    /// run and `--no-dry-run -n` is (WI-4001 round 5, blocker 2).
+    fn safe(&self, letter: Option<char>, name: &str) -> bool {
+        let on = |o: &String| {
+            letter.is_some_and(|c| *o == format!("-{c}"))
+                || (o.len() > 2 && !o.starts_with("--no-") && name.starts_with(o.as_str()))
+        };
+        let off = |o: &String| {
+            o.strip_prefix("--no-")
                 .is_some_and(|n| !n.is_empty() && name[2..].starts_with(n))
         };
-        match self
-            .longs
+        self.order
             .iter()
-            .rposition(|l| l.len() > 2 && name.starts_with(l.as_str()))
-        {
-            Some(at) => !self.longs[at..].iter().any(neg),
-            None => false,
-        }
+            .rev()
+            .find(|o| on(o) || off(o))
+            .is_some_and(|o| on(o))
     }
 }
 
@@ -4059,6 +4078,210 @@ mod tests {
                 "git read-tree -m HEAD",
                 "git read-tree -n -mu HEAD",
                 "git checkout -m mine.txt",
+            ],
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// WI-4001 round 5, blocker 1: git takes any unique prefix of a long
+    /// option, so `--ex` is `--exec`; an ambiguous one (`--e`) is an error.
+    #[test]
+    fn round5_exec_prefixes_are_refused() {
+        let (root, p) = round3("r5-exec");
+        assert_refused(
+            &p,
+            &root,
+            &[
+                "git rebase --ex='echo X>a.txt' HEAD~1",
+                "git rebase --autostash --ex='echo X>a.txt' HEAD~1",
+                "git rebase --ex 'echo X>a.txt' HEAD~1",
+                "git difftool --ext=./x.sh",
+                "git grep --ope x",
+            ],
+        );
+        assert_allowed(&p, &root, &["git rebase --onto main HEAD~1", "git rebase -i HEAD~2"]);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Blocker 2: a later `--no-<long>` takes back an earlier short safe
+    /// flag; the last one wins.
+    #[test]
+    fn round5_negated_safe_flags_are_refused() {
+        let (root, p) = round3("r5-neg");
+        assert_refused(
+            &p,
+            &root,
+            &[
+                "git clean -fn --no-dry-run",
+                "git clean -n -f --no-dry-run a.txt",
+                "git clean -fn --no-dry a.txt",
+                "git read-tree --reset -u -n --no-dry-run HEAD",
+                "git restore -S --no-staged a.txt",
+                "git rm --cached --no-cached a.txt",
+            ],
+        );
+        assert_allowed(
+            &p,
+            &root,
+            &[
+                "git clean -fn",
+                "git clean --no-dry-run -fn",
+                "git read-tree --reset -u --no-dry-run -n HEAD",
+                "git restore --no-staged -S a.txt",
+            ],
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Blocker 3: the environment a command runs with is read from its
+    /// words after quote removal, not from the text.
+    #[test]
+    fn round5_quoted_command_env_is_refused() {
+        let (root, p) = round3("r5-env");
+        assert_refused(
+            &p,
+            &root,
+            &[
+                "export GIT_PAG\"\"ER='sh -c \"echo P>a.txt\"'; git -p log",
+                "export GIT_PAG\\ER='sh -c \"echo P>a.txt\"'; git -p log",
+                "X=GIT_PAGER; export $X='sh -c x'; git -p log",
+                "export 'GIT_EXTERNAL_DIFF'='sh -c x'; git diff",
+                "GIT_EXTERNAL_DIFF+='sh -c x' git diff",
+                "export GIT_EXTERNAL_DIFF+=x; git diff",
+                "declare -x \"GIT_PAGER=sh -c x\"; git -p log",
+                "declare -n R=GIT_PAGER; R=./x; git -p log",
+                "env -u X GIT_PAGER=./x git log",
+                "eval 'export GIT_PAGER=./x'; git log",
+                "bash -c 'GIT_PAGER=./x git log'",
+                "export GIT_CONF\"\"IG_COUNT=1 GIT_CONFIG_KEY_0=alias.r GIT_CONFIG_VALUE_0=restore; git r a.txt",
+                "read -r $N; git log",
+            ],
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Blocker 4: a `-c` key that is not a literal word.
+    #[test]
+    fn round5_non_literal_config_keys_are_refused() {
+        let (root, p) = round3("r5-key");
+        assert_refused(
+            &p,
+            &root,
+            &[
+                "K=diff.external; git -c $K='sh -c x' diff",
+                "K=alias.r; git -c $K=restore r a.txt",
+                "K=alias.r; git -c \"$K\"=restore r a.txt",
+                "git -c `echo alias.r`=restore r a.txt",
+                "K=alias.r; git --config-env=$K=V r a.txt",
+                "K=alias.r; git config $K restore; git r a.txt",
+            ],
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Blocker 5: `-c`, `--config-env` and `git config` take only keys on an
+    /// allowlist; a pager is harmless only without an output file; `LESS`
+    /// and `LESSKEY*` are command environment.
+    #[test]
+    fn round5_config_allowlist() {
+        let (root, p) = round3("r5-allow");
+        assert_refused(
+            &p,
+            &root,
+            &[
+                "GIT_PAGER='less -Oa.txt' git -p log",
+                "PAGER='less -oa.txt' git -p log",
+                "git -c core.pager='less -Oa.txt' -p log",
+                "git -c core.pager='less --log-file=a.txt' -p log",
+                "git -c core.pager='less -RO a.txt' -p log",
+                "git -c core.pager='less --lesskey-file=k' -p log",
+                "LESS=-Oa.txt git -p log",
+                "LESSKEYIN=k git -p log",
+                "git -c trailer.x.cmd='sh -c x' interpret-trailers --trailer x=1",
+                "git -c trailer.x.command=./x commit --trailer x=1 -m y",
+                "git -c man.x.cmd=./x help -m git",
+                "git -c gpg.ssh.defaultKeyCommand=./x commit -S -m y",
+                "git -c protocol.ext.allow=always fetch 'ext::sh -c rm% a.txt'",
+                "git -c help.autocorrect=immediate restor a.txt",
+                "git -c remote.origin.vcs=x fetch",
+                "git -c core.alternateRefsCommand=./x fetch",
+                "git --config-env=core.pager=P log",
+                "git config protocol.ext.allow always",
+                "git config --global trailer.x.cmd ./x",
+            ],
+        );
+        assert_allowed(
+            &p,
+            &root,
+            &[
+                "git -c core.quotepath=off status",
+                "git -c color.ui=never log -1",
+                "git -c color.diff.meta=blue diff",
+                "git -c user.name=x -c user.email=y@z commit -m m",
+                "git -c commit.gpgsign=false commit -m m",
+                "git -c advice.detachedHead=false log",
+                "git -c safe.directory=/x status",
+                "git -c pull.rebase=true pull",
+                "git -c push.default=current push",
+                "git -c diff.noprefix=true diff",
+                "git -c log.showSignature=false log",
+                "git -c core.pager=cat log",
+                "git -c core.pager='less -FRX' log",
+                "git -c pager.log=false log",
+                "git -c alias.st=status st",
+                "LESS=-FRX git log",
+                "LESS='-R -S' git log",
+                "git config user.email x@y",
+                "git config core.pager cat",
+                "git config --get protocol.ext.allow",
+            ],
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Non-blocking from the round 5 brief: a commit message or format
+    /// string that mentions a command variable sets nothing; a redirect into
+    /// `.git/config` or `.git/hooks/` is refused.
+    #[test]
+    fn round5_mentions_pass_and_git_dir_writes_are_refused() {
+        let (root, p) = round3("r5-misc");
+        assert_allowed(
+            &p,
+            &root,
+            &[
+                "git commit -m \"mention EDITOR=vim\"",
+                "git commit -F - <<'X'\nfix: refuse GIT_PAGER=evil\nX",
+                "git commit -F - <<X\nfix: refuse GIT_PAGER=evil\nX",
+                "git log --format='%H EDITOR=x'",
+                "echo GIT_PAGER=x",
+                "cat .git/config",
+                "cd engine && cargo test",
+                "git -C /tmp log",
+                "eval \"$(ssh-agent -s)\"",
+                "git restore --staged a.txt",
+                "git push",
+            ],
+        );
+        assert_refused(
+            &p,
+            &root,
+            &[
+                "printf '[core]\\n\\tpager=./x\\n' >> .git/config; git log",
+                "echo x > .git/hooks/pre-commit",
+                "echo x >.git/hooks/pre-commit; chmod +x .git/hooks/pre-commit",
+                "tee .git/hooks/post-checkout < /tmp/h",
+                "cp /tmp/h .git/hooks/pre-commit",
+                "echo x 2>&1 >> ./.git/config",
+            ],
+        );
+        let fresh = workspace(&[], Some("worktree"), &root);
+        assert_allowed(
+            &fresh,
+            &root,
+            &[
+                "git -c core.pager=delta log",
+                "LESS=-Oa.txt git -p log",
+                "git commit -m \"mention EDITOR=vim\"",
             ],
         );
         std::fs::remove_dir_all(&root).ok();
