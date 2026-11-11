@@ -2295,6 +2295,10 @@ impl SessionRegistry {
             if session.is_hibernating() || shutting_down.load(Ordering::Acquire) {
                 return;
             }
+            // The broker token ends with the process too (WI-4046): a stop
+            // keeps the session for its scrollback, and a token that outlived
+            // the process would still authenticate as it.
+            broker.revoke(session.id);
             records.remove(&session.id);
             hibernation::remove(&state_dir, session.id);
             // The session's own credential ends with it (WI-926).

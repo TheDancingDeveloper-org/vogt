@@ -7790,6 +7790,83 @@ async fn a_session_is_handed_the_token_the_broker_honours() {
 }
 
 #[tokio::test]
+async fn a_sessions_broker_token_ends_with_its_process() {
+    // WI-4046: a stopped session stays in the registry for its scrollback,
+    // but the token it was handed must stop authenticating when it exits.
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = broker_config(&tmp, "LATER proj later ondemand\n");
+    let (base, state, _h) = boot_with_state(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let out = tmp.path().join("child-token");
+    let id = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({
+            "name": "exits",
+            "command": ["/bin/sh", "-c", "printenv VOGT_ENGINE_BROKER_TOKEN > \"$OUT\"; sleep 30"],
+            "env": [["OUT", out.to_string_lossy()]],
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let session: uuid::Uuid = id.parse().unwrap();
+    let token = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Ok(text) = std::fs::read_to_string(&out) {
+                if text.ends_with('\n') {
+                    break text.trim().to_string();
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("the child should write its broker token");
+    assert_eq!(
+        state.sessions.secret_broker().authenticate(&token),
+        Some(session)
+    );
+
+    let stop = client
+        .post(format!("{base}/api/sessions/{id}/kill"))
+        .send()
+        .await
+        .unwrap();
+    assert!(stop.status().is_success(), "{}", stop.status());
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while state
+            .sessions
+            .secret_broker()
+            .authenticate(&token)
+            .is_some()
+        {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("the stopped session's broker token should stop authenticating");
+    let r = reqwest::Client::new()
+        .post(format!("{base}/api/agent-auth/fetch/LATER"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 401);
+    let _ = client
+        .delete(format!("{base}/api/sessions/{id}"))
+        .send()
+        .await;
+}
+
+#[tokio::test]
 async fn bundle_route_refuses_an_oversize_body_unread_and_rate_limits_a_session() {
     let tmp = tempfile::tempdir().unwrap();
     let cfg = broker_config(&tmp, "RW proj rw ondemand,writable\n");
