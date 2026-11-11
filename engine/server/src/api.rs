@@ -640,8 +640,29 @@ pub async fn policy_check(
     let Ok(session) = state.sessions.get(id) else {
         return Json(allow).into_response();
     };
-    let Some(policy) = session.policy() else {
-        return Json(allow).into_response();
+    // A session without a workspace block is settled here, at its first
+    // checked command (WI-4056): reading its directory runs git, so it runs
+    // off the runtime, and a settle that does not finish is a refusal.
+    let settle = {
+        let state = Arc::clone(&state);
+        let session = Arc::clone(&session);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            tokio::task::spawn_blocking(move || state.sessions.settled_policy(&session)),
+        )
+        .await
+    };
+    let policy = match settle {
+        Ok(Ok(Some(policy))) => policy,
+        Ok(Ok(None)) => return Json(allow).into_response(),
+        Ok(Err(_)) | Err(_) => {
+            tracing::warn!(session = %id, event = "policy.timeout", "session policy could not be settled");
+            return Json(serde_json::json!({
+                "decision": "deny",
+                "reason": "policy check timed out",
+            }))
+            .into_response();
+        }
     };
     let cwd = if req.cwd.is_empty() {
         std::path::PathBuf::from(&session.cwd)

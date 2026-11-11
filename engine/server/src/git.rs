@@ -343,7 +343,7 @@ pub fn capture_workspace(dir: &Path, base_ref: Option<&str>) -> Option<Workspace
 
 /// The paths in `git status --porcelain=v1 -z` output: each entry's path,
 /// and for a rename or copy the source that follows it too.
-fn porcelain_paths(status: &str) -> Vec<String> {
+pub(crate) fn porcelain_paths(status: &str) -> Vec<String> {
     let mut paths = Vec::new();
     let mut fields = status.split('\0');
     while let Some(entry) = fields.next() {

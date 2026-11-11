@@ -3087,6 +3087,46 @@ impl SessionRegistry {
         }
     }
 
+    /// The policy the discard guard judges a live session by, settled at its
+    /// first checked command when it has no workspace block (WI-4056): see
+    /// [`crate::policy::settle`]. Settled once: the result is kept on the
+    /// session and in its record, so a wake does not take a new baseline that
+    /// would count the session's own edits as someone else's. A pod session
+    /// is returned as it is; its directory is not on this filesystem.
+    pub fn settled_policy(&self, session: &Session) -> Option<vogt_engine_contract::SessionPolicy> {
+        let current = session.policy();
+        if crate::policy::settled(current.as_ref()) || session.launcher() == "pod" {
+            return current;
+        }
+        let settled = crate::policy::settle(current, std::path::Path::new(&session.cwd))?;
+        // Two checks can race to settle; the first one stored wins.
+        static SETTLE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let lock = SETTLE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(stored) = session.policy().filter(|p| crate::policy::settled(Some(p))) {
+            return Some(stored);
+        }
+        session.set_policy(Some(settled.clone()));
+        let updated = self.records.get_mut(&session.id).map(|mut record| {
+            record.policy = Some(settled.clone());
+            record.clone()
+        });
+        drop(lock);
+        if let Some(record) = updated {
+            if let Err(e) = hibernation::write(&self.cfg.state_dir, &record) {
+                tracing::warn!(session = %session.id, error = %e, "could not write the session's settled policy");
+            }
+        }
+        tracing::info!(
+            session = %session.id,
+            live = settled.discard_live_changes,
+            baseline = settled.discard_baseline.len(),
+            "session policy settled at its first checked command"
+        );
+        Some(settled)
+    }
+
     /// Stamp that a live autopilot session's agent declared itself done
     /// (WI-1518), in the session and in its record so a wake keeps it. False
     /// when this turn already carries the declaration, so the caller publishes
