@@ -1669,21 +1669,14 @@ fn expand_home(word: &str) -> Option<String> {
 }
 
 /// Which discarding form `git <sub> <args>` is, if any. Mirrors gitguard's
-/// `discard`, minus its staging rules.
+/// `discard`, minus its staging rules. Options are read the way git's
+/// parse-options reads them: a long option by any unique prefix (`--har` is
+/// `--hard`), a short one anywhere in a cluster (`-qf`), up to a letter that
+/// takes a value (`-bfix` is `-b fix`).
 fn discards(sub: &str, args: &[String]) -> Option<Reach> {
-    let (flags, paths, dashdash) = split_args(args);
-    let has = |names: &[&str]| {
-        flags.iter().any(|f| {
-            names
-                .iter()
-                .any(|n| f == n || f.starts_with(&format!("{n}=")))
-        })
-    };
-    let short = |letter: char| {
-        flags
-            .iter()
-            .any(|f| f.len() > 1 && !f.starts_with("--") && f[1..].contains(letter))
-    };
+    let opts = Opts::parse(sub, args);
+    let paths = opts.paths.clone();
+    let dashdash = opts.dashdash;
     let all = || {
         Some(Reach {
             all: true,
@@ -1691,14 +1684,15 @@ fn discards(sub: &str, args: &[String]) -> Option<Reach> {
         })
     };
     let these = |paths: Vec<String>| Some(Reach { all: false, paths });
+    let force = || opts.short('f') || opts.long("--force");
     // `--pathspec-from-file` (and `checkout-index --stdin`) read the paths
     // from a file or stdin: what they name is not on the line.
-    if has(&["--pathspec-from-file", "--stdin"]) {
-        let staged_only =
-            (has(&["--staged", "-S"]) || short('S')) && !(has(&["--worktree", "-W"]) || short('W'));
+    if opts.long("--pathspec-from-file") || (sub == "checkout-index" && opts.long("--stdin")) {
+        let staged_only = (opts.short('S') || opts.allow("--staged"))
+            && !(opts.short('W') || opts.long("--worktree"));
         match sub {
             "restore" if staged_only => return None,
-            "rm" if has(&["--cached"]) => return None,
+            "rm" if opts.allow("--cached") => return None,
             "checkout" | "restore" | "rm" | "stash" | "checkout-index" => return all(),
             _ => {}
         }
@@ -1707,47 +1701,50 @@ fn discards(sub: &str, args: &[String]) -> Option<Reach> {
         // `git checkout-index -f` overwrites the working-tree file from the
         // index; `-a` every one. Without `-f` it leaves existing files.
         "checkout-index" => {
-            if !(has(&["-f", "--force"]) || short('f')) {
+            if !force() {
                 return None;
             }
-            if has(&["-a", "--all"]) || short('a') {
+            if opts.short('a') || opts.long("--all") {
                 return all();
             }
             these(paths)
         }
         // `git mv -f <src> <dst>` overwrites the destination.
-        "mv" => (has(&["-f", "--force"]) || short('f')).then_some(Reach { all: false, paths }),
+        "mv" => force().then_some(Reach { all: false, paths }),
         "checkout" => {
-            if has(&["-f", "--force"]) {
+            if force() {
                 return all();
             }
-            if has(&["-b", "-B", "--orphan"]) && !dashdash {
+            if (opts.short('b') || opts.short('B') || opts.allow("--orphan")) && !dashdash {
                 return None;
             }
             if dashdash {
                 return these(after_dashdash(args));
             }
             // `git checkout <x>` is a branch switch, which git refuses over
-            // local changes, or a path restore: every word may be a path.
+            // local changes, or a path restore (`-m`/`--merge` re-creates
+            // the file from the index): every word may be a path.
             (!paths.is_empty()).then_some(Reach { all: false, paths })
         }
         "restore" => {
-            let staged = has(&["--staged", "-S"]) || short('S');
-            let worktree = has(&["--worktree", "-W"]) || short('W');
+            let staged = opts.short('S') || opts.allow("--staged");
+            let worktree = opts.short('W') || opts.long("--worktree");
             if staged && !worktree {
                 return None; // unstages only; the working tree is left alone
             }
             these(paths)
         }
-        "reset" => has(&["--hard", "--merge", "--keep"]).then_some(Reach {
-            all: true,
-            paths: Vec::new(),
-        }),
+        "reset" => {
+            (opts.long("--hard") || opts.long("--merge") || opts.long("--keep")).then_some(Reach {
+                all: true,
+                paths: Vec::new(),
+            })
+        }
         "clean" => {
-            if has(&["-n", "--dry-run"]) || short('n') {
+            if opts.short('n') || opts.allow("--dry-run") {
                 return None;
             }
-            (has(&["-f", "--force"]) || short('f')).then_some(Reach { all: false, paths })
+            force().then_some(Reach { all: false, paths })
         }
         "stash" => match paths.first().map(String::as_str) {
             None | Some("push") => these(paths.into_iter().skip(1).collect()),
@@ -1757,49 +1754,126 @@ fn discards(sub: &str, args: &[String]) -> Option<Reach> {
             _ => None,
         },
         // `git rm` deletes the working-tree file too unless `--cached`.
-        "rm" => (!has(&["--cached"])).then_some(Reach { all: false, paths }),
-        "switch" => has(&["-f", "--force", "--discard-changes"]).then_some(Reach {
+        "rm" => (!opts.allow("--cached")).then_some(Reach { all: false, paths }),
+        "switch" => (force() || opts.long("--discard-changes")).then_some(Reach {
             all: true,
             paths: Vec::new(),
         }),
+        // `git read-tree -u` with `-m`, `--reset` or `--prefix` updates the
+        // working tree from the tree it reads (`--reset` over local
+        // changes); `-n` only checks.
+        "read-tree" => {
+            let update = opts.short('u');
+            let merges = opts.short('m') || opts.long("--reset") || opts.long("--prefix");
+            let dry = opts.short('n') || opts.allow("--dry-run");
+            (update && merges && !dry).then_some(Reach {
+                all: true,
+                paths: Vec::new(),
+            })
+        }
         _ => None,
     }
 }
 
-/// Flags and positional words, the value of an option that takes one
-/// consumed with it. Everything after `--` is positional.
-fn split_args(args: &[String]) -> (Vec<String>, Vec<String>, bool) {
-    const VALUED: &[&str] = &[
-        "-s",
-        "--source",
-        "-m",
-        "--message",
-        "-b",
-        "-B",
-        "--orphan",
-        "-e",
-        "--exclude",
-        "--pathspec-from-file",
-        "--conflict",
-    ];
-    let mut flags = Vec::new();
-    let mut paths = Vec::new();
-    let mut rest = args.iter();
-    while let Some(arg) = rest.next() {
-        if arg == "--" {
-            paths.extend(rest.cloned());
-            return (flags, paths, true);
-        }
-        if arg.starts_with('-') && arg != "-" {
-            flags.push(arg.clone());
-            if VALUED.contains(&arg.as_str()) {
-                rest.next();
+/// A git subcommand's arguments as its parse-options reads them.
+struct Opts {
+    /// Long options, their `=value` cut off (`--source=x` is `--source`).
+    longs: Vec<String>,
+    /// Short option letters, every cluster taken apart up to the letter
+    /// that takes a value.
+    shorts: Vec<char>,
+    /// The positional words; everything after `--` among them.
+    paths: Vec<String>,
+    dashdash: bool,
+}
+
+impl Opts {
+    fn parse(sub: &str, args: &[String]) -> Self {
+        // The options of `sub` that take a value as the next word (or, for a
+        // short one, the rest of its cluster).
+        let (short_valued, long_valued): (&[char], &[&str]) = match sub {
+            "checkout" => (
+                &['b', 'B'],
+                &["--orphan", "--conflict", "--pathspec-from-file"],
+            ),
+            "switch" => (
+                &['c', 'C'],
+                &["--create", "--force-create", "--orphan", "--conflict"],
+            ),
+            "restore" => (&['s'], &["--source", "--conflict", "--pathspec-from-file"]),
+            "stash" => (&['m'], &["--message", "--pathspec-from-file"]),
+            "clean" => (&['e'], &["--exclude"]),
+            "reset" | "rm" => (&[], &["--pathspec-from-file"]),
+            _ => (&[], &[]),
+        };
+        let mut out = Opts {
+            longs: Vec::new(),
+            shorts: Vec::new(),
+            paths: Vec::new(),
+            dashdash: false,
+        };
+        let mut rest = args.iter();
+        while let Some(arg) = rest.next() {
+            if arg == "--" {
+                out.paths.extend(rest.cloned());
+                out.dashdash = true;
+                break;
             }
-        } else {
-            paths.push(arg.clone());
+            if let Some(long) = arg.strip_prefix("--") {
+                let (name, value) = match long.split_once('=') {
+                    Some((name, _)) => (format!("--{name}"), true),
+                    None => (arg.clone(), false),
+                };
+                if !value && name.len() > 2 && long_valued.iter().any(|v| v.starts_with(&name)) {
+                    rest.next();
+                }
+                out.longs.push(name);
+            } else if arg.len() > 1 && arg.starts_with('-') {
+                for (i, letter) in arg[1..].char_indices() {
+                    out.shorts.push(letter);
+                    if short_valued.contains(&letter) {
+                        if i + letter.len_utf8() == arg.len() - 1 {
+                            rest.next();
+                        }
+                        break;
+                    }
+                }
+            } else {
+                out.paths.push(arg.clone());
+            }
+        }
+        out
+    }
+
+    fn short(&self, letter: char) -> bool {
+        self.shorts.contains(&letter)
+    }
+
+    /// Whether a long option on the line is `name` or a prefix of it, as
+    /// git takes it. An ambiguous prefix is an error in git, so counting it
+    /// as `name` only ever refuses a command git would refuse too.
+    fn long(&self, name: &str) -> bool {
+        self.longs
+            .iter()
+            .any(|l| l.len() > 2 && name.starts_with(l.as_str()))
+    }
+
+    /// [`Opts::long`] for an option that makes the call safe: a later
+    /// `--no-<name>` (by prefix) takes it back.
+    fn allow(&self, name: &str) -> bool {
+        let neg = |l: &String| {
+            l.strip_prefix("--no-")
+                .is_some_and(|n| !n.is_empty() && name[2..].starts_with(n))
+        };
+        match self
+            .longs
+            .iter()
+            .rposition(|l| l.len() > 2 && name.starts_with(l.as_str()))
+        {
+            Some(at) => !self.longs[at..].iter().any(neg),
+            None => false,
         }
     }
-    (flags, paths, false)
 }
 
 fn after_dashdash(args: &[String]) -> Vec<String> {
@@ -3388,6 +3462,232 @@ mod tests {
         assert_refused(&p, &root, &commands);
         let fresh = workspace(&[], Some("worktree"), &root);
         assert_allowed(&fresh, &root, &commands);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// WI-4001 round 4, blocker 1: git takes any unique prefix of a long
+    /// option, so `--har` is `--hard`.
+    #[test]
+    fn round4_long_option_prefixes_are_refused() {
+        let (root, p) = round3("r4-prefix");
+        assert_refused(
+            &p,
+            &root,
+            &[
+                "git reset --har",
+                "git reset --ha HEAD",
+                "git reset --kee",
+                "git checkout --forc HEAD",
+                "git checkout --f HEAD",
+                "git switch --discard master",
+                "git switch --forc master",
+                "git checkout-index --for --all",
+                "git checkout-index -f --al",
+                "git mv --forc b.txt a.txt",
+                "git clean --forc a.txt",
+                "git stash push --mess x",
+                "git restore --pathspec-from=/tmp/l",
+            ],
+        );
+        assert_allowed(
+            &p,
+            &root,
+            &[
+                "git restore --sta a.txt",
+                "git rm --cach a.txt",
+                "git reset --mixed",
+                "git reset --soft HEAD~1",
+                "git clean --dry -f a.txt",
+                "git checkout-index --al",
+                "git checkout --orph x",
+            ],
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Blocker 2: a `-f` inside a short-option cluster.
+    #[test]
+    fn round4_clustered_force_is_refused() {
+        let (root, p) = round3("r4-cluster");
+        assert_refused(
+            &p,
+            &root,
+            &[
+                "git checkout -qf HEAD",
+                "git checkout -fb x",
+                "git checkout -fB x",
+                "git switch -qf master",
+            ],
+        );
+        assert_allowed(
+            &p,
+            &root,
+            &[
+                "git checkout -qb x",
+                "git checkout -bfix",
+                "git switch -cfix",
+            ],
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Blocker 3: an option value attached to its letter (`-S'…'`, `-c'…'`).
+    #[test]
+    fn round4_attached_payloads_are_read() {
+        let (root, p) = round3("r4-attached");
+        assert_refused(
+            &p,
+            &root,
+            &[
+                "env -S'rm a.txt'",
+                "env -S'git restore a.txt'",
+                "env -iS'rm a.txt'",
+                "su -c'rm a.txt'",
+                "su -lc'rm a.txt'",
+                "runuser -c'git checkout -- a.txt'",
+                "script -qc'rm a.txt' /dev/null",
+                "su --comm='rm a.txt'",
+            ],
+        );
+        assert_allowed(
+            &p,
+            &root,
+            &[
+                "env -S'cargo test'",
+                "su -c'cargo test'",
+                "script -qc'ls' /dev/null",
+            ],
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Blocker 4: git configuration and environment that run a command.
+    #[test]
+    fn round4_command_config_is_refused() {
+        let (root, p) = round3("r4-config");
+        assert_refused(
+            &p,
+            &root,
+            &[
+                "git -c diff.external=./x.sh diff",
+                "git -c diff.external='cp b.txt a.txt' diff",
+                "GIT_EXTERNAL_DIFF=./x.sh git diff",
+                "env GIT_EXTERNAL_DIFF=./x.sh git diff",
+                "export GIT_EXTERNAL_DIFF=./x.sh; git diff",
+                "git -c core.fsmonitor='cp b.txt a.txt' status",
+                "git -c CORE.FSMONITOR=./x status",
+                "git grep -O'cp b.txt a.txt' x",
+                "git grep -O ./x x",
+                "git grep --open-files-in-pager=./x x",
+                "git grep --open x",
+                "git difftool -y -x ./x.sh",
+                "git difftool -yx ./x.sh",
+                "git difftool --extcmd=./x.sh",
+                "git -c core.pager='sh -c x' log",
+                "GIT_PAGER='cp b.txt a.txt' git log",
+                "PAGER=./x git log",
+                "git -c pager.log=./x log",
+                "git -c core.editor=./x commit",
+                "GIT_EDITOR=./x git commit",
+                "git -c sequence.editor=./x rebase -i HEAD~1",
+                "GIT_SEQUENCE_EDITOR=./x git rebase -i HEAD~1",
+                "GIT_SSH_COMMAND=./x git fetch",
+                "git -c core.sshCommand=./x fetch",
+                "git -c credential.helper='!./x' fetch",
+                "GIT_ASKPASS=./x git fetch",
+                "git -c core.askpass=./x fetch",
+                "git -c core.hooksPath=/tmp/h commit -m x",
+                "git -c filter.lfs.smudge=./x checkout HEAD -- f",
+                "git -c diff.x.textconv=./x diff",
+                "git -c merge.x.driver=./x merge y",
+                "git -c difftool.x.cmd=./x difftool",
+                "git rebase -x ./x HEAD~1",
+                "git rebase --exec=./x HEAD~1",
+                "git rebase -ix ./x HEAD~1",
+                "git bisect run ./x",
+                "git submodule foreach ./x",
+                "git --exec-path=/tmp/x status",
+                "git config core.pager ./x",
+                "git config --global diff.external ./x",
+                "LESSOPEN='|./x %s' git log",
+            ],
+        );
+        assert_allowed(
+            &p,
+            &root,
+            &[
+                "GIT_PAGER=cat git log",
+                "GIT_PAGER= git log",
+                "git -c core.pager=less log",
+                "git -c core.pager='less -FRX' log",
+                "GIT_EDITOR=true git commit --amend",
+                "GIT_SEQUENCE_EDITOR=: git rebase -i HEAD~2",
+                "git -c pager.log=false log",
+                "GIT_SSH_COMMAND='ssh -i ~/.ssh/k -o IdentitiesOnly=yes' git fetch",
+                "git -c core.hooksPath=/dev/null commit -m x",
+                "git grep -n TODO",
+                "git difftool -y",
+                "git config core.pager cat",
+                "git config --get core.pager",
+                "git --exec-path",
+                "git -c color.ui=never log -1",
+            ],
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Blocker 4, protected-checkout half: a config that runs a command
+    /// makes even a read a possible write.
+    #[test]
+    fn round4_command_config_does_not_escape_the_protected_checkout_rule() {
+        let (main, wt) = checkout_and_worktree("round4-config-pc");
+        let mut p = workspace(&[], Some("worktree"), &wt);
+        p.protected_checkouts = vec![main.display().to_string()];
+        let c = main.display();
+        for command in [
+            format!("git -C {c} -c core.fsmonitor=./x status"),
+            format!("GIT_EXTERNAL_DIFF=./x git -C {c} diff"),
+            format!("git -C {c} grep -O./x y"),
+        ] {
+            let reason = check(&p, &command, &wt).unwrap_or_else(|| panic!("allowed: {command}"));
+            assert!(reason.contains("protected checkout"), "{command}: {reason}");
+        }
+        assert_eq!(
+            check(&p, &format!("GIT_PAGER=cat git -C {c} log -1"), &wt),
+            None
+        );
+        std::fs::remove_dir_all(&wt).ok();
+        std::fs::remove_dir_all(&main).ok();
+    }
+
+    /// Blocker 5: `read-tree -u` with `--reset`/`-m`, and `checkout -m <path>`.
+    #[test]
+    fn round4_read_tree_and_checkout_merge_are_refused() {
+        let (root, p) = round3("r4-readtree");
+        assert_refused(
+            &p,
+            &root,
+            &[
+                "git read-tree --reset -u HEAD",
+                "git read-tree --res -u HEAD",
+                "git read-tree -mu HEAD",
+                "git read-tree -m -u HEAD",
+                "git read-tree -u --reset HEAD",
+                "git checkout -m a.txt",
+                "git checkout -m -- a.txt",
+                "git checkout -qm a.txt",
+            ],
+        );
+        assert_allowed(
+            &p,
+            &root,
+            &[
+                "git read-tree HEAD",
+                "git read-tree -m HEAD",
+                "git read-tree -n -mu HEAD",
+                "git checkout -m mine.txt",
+            ],
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 }
