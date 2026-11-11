@@ -62,6 +62,15 @@ use std::time::{Duration, Instant};
 use regex::Regex;
 use vogt_engine_contract::SessionPolicy;
 
+mod env_dump;
+
+/// `Some(reason)` when `command` would print the session's environment or a
+/// credential-named variable (WI-4046). Applies to every session, with or
+/// without a project policy; [`check`] also runs it.
+pub fn check_environment(command: &str) -> Option<String> {
+    env_dump::check(command)
+}
+
 /// How much of a `git commit -F` message file is read. A commit message past
 /// this is not one a person typed; refusing to read the rest bounds what a
 /// hostile path can make the engine do.
@@ -82,6 +91,11 @@ const BRANCH_LOOKUP_TIMEOUT: Duration = Duration::from_secs(2);
 /// core already rejects a pattern it knows the engine cannot compile, and one
 /// that still fails here must not turn every command into a denial.
 pub fn check(policy: &SessionPolicy, command: &str, cwd: &Path) -> Option<String> {
+    // Every session, whatever its project policy says: its environment holds
+    // its own credentials (WI-4046).
+    if let Some(reason) = env_dump::check(command) {
+        return Some(reason);
+    }
     if line_writes(command) {
         for pattern in &policy.forbidden_text {
             let Ok(re) = Regex::new(pattern) else {
