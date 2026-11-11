@@ -145,7 +145,15 @@ fi
 # because a variable or opaque text holding them is a possible discard. A
 # program that is an expansion (`$R a.txt`, `${R}m`) is always asked: what it
 # runs is not on the line. A payload that cannot be decoded is asked.
-words='git|gh|rm|unlink|mv|shred|truncate|checkout|restore|reset|clean|stash|switch|bash|sh|zsh|dash|ksh|eval|xargs|source'
+#
+# The environment guard (WI-4046) adds the programs that print the
+# environment (`env`, `printenv`, `set`, `export`, `readonly`, `declare`,
+# `typeset`, `local`, `ps`), `environ` for a read of /proc/<pid>/environ, and
+# — matched separately below — an expansion of a credential-named variable
+# (`$VOGT_HTTP_TOKEN`), an indirect expansion (`${!name}`), and a one-liner
+# naming `os.environ`, `process.env` or `%ENV`.
+words='git|gh|rm|unlink|mv|shred|truncate|checkout|restore|reset|clean|stash|switch|bash|sh|zsh|dash|ksh|eval|xargs|source|env|printenv|set|export|readonly|declare|typeset|local|ps|environ'
+envish='\$\{?!|\$\{?[a-z0-9_]*(token|secret|key|passw|credential|private)|os\.environ|process\.env|%env'
 decoded="$(printf '%s' "$input" | python3 -c 'import json, re, sys
 try:
     payload = json.load(sys.stdin)
@@ -186,7 +194,8 @@ except Exception:
 for text in (cmd, unescaped):
     sys.stdout.write(text.replace("\"", "").replace("\x27", "").replace("\\", "").lower() + "\n")' 2>/dev/null)" ||
     decoded="git"
-printf '%s' "$decoded" | grep -Eq "(^|[^[:alnum:]_-])($words)([^[:alnum:]_-]|\$)" || exit 0
+printf '%s' "$decoded" | grep -Eq "(^|[^[:alnum:]_-])($words)([^[:alnum:]_-]|\$)" ||
+    printf '%s' "$decoded" | grep -Eq "$envish" || exit 0
 
 url="${VOGT_ENGINE_BROKER_URL:-}"
 token="${VOGT_ENGINE_BROKER_TOKEN:-}"

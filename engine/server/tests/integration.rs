@@ -19212,12 +19212,58 @@ sleep 2
         assert_eq!(denied.json::<Value>().await.unwrap()["decision"], "deny");
         let allowed = check(stream_token.clone(), "ls").await;
         assert_eq!(allowed.json::<Value>().await.unwrap()["decision"], "allow");
+        // WI-4046: printing the environment is refused whatever the project
+        // policy says, and the reason does not repeat the variable.
+        let dumped: Value = check(stream_token.clone(), "printenv VOGT_HTTP_TOKEN")
+            .await
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(dumped["decision"], "deny");
+        assert!(!dumped["reason"]
+            .as_str()
+            .unwrap()
+            .contains("VOGT_HTTP_TOKEN"));
+        let safe = check(stream_token.clone(), "printenv HOME").await;
+        assert_eq!(safe.json::<Value>().await.unwrap()["decision"], "allow");
         // A made-up credential and a near miss are refused.
         for bearer in ["not-a-token".to_string(), format!("{stream_token}x")] {
             assert_eq!(
                 check(bearer, "gh pr merge 5").await.status(),
                 StatusCode::UNAUTHORIZED
             );
+        }
+    }
+
+    /// WI-4046: the environment guard holds a session that has no project
+    /// policy at all.
+    #[tokio::test]
+    async fn the_environment_guard_holds_a_session_without_a_policy() {
+        let mut h = harness(false).await;
+        let created: Value = h
+            .client
+            .post(format!("{}/api/sessions", h.base))
+            .json(&json!({"name": "unpoliced", "template": "pod"}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let id: Uuid = created["id"].as_str().unwrap().parse().unwrap();
+        let stream_token = h.session_token(id).await;
+        for (command, decision) in [("env", "deny"), ("ls", "allow"), ("env FOO=1 ls", "allow")] {
+            let body: Value = reqwest::Client::new()
+                .post(format!("{}/api/agent-auth/policy-check", h.base))
+                .bearer_auth(&stream_token)
+                .json(&json!({"tool_name": "Bash", "tool_input": {"command": command}}))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            assert_eq!(body["decision"], decision, "{command}");
         }
     }
 

@@ -631,6 +631,12 @@ pub async fn policy_check(
     if req.tool_name != "Bash" {
         return Json(allow).into_response();
     }
+    // The environment guard holds every session, with or without a project
+    // policy: a session's environment carries its own tokens (WI-4046).
+    if let Some(reason) = crate::policy::check_environment(&req.tool_input.command) {
+        tracing::warn!(session = %id, event = "policy.deny", "environment guard refused a command");
+        return Json(serde_json::json!({"decision": "deny", "reason": reason})).into_response();
+    }
     let Ok(session) = state.sessions.get(id) else {
         return Json(allow).into_response();
     };
