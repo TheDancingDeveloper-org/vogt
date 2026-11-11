@@ -243,6 +243,11 @@ pub fn companion(session_id: &str, work_ref: Option<&str>) -> String {
          actually got: it is stored, and it is what somebody reads later when \
          they ask why this changed.\n\
          \n\
+         Never print environment variables or tokens: no `env`, `printenv`, \
+         `set`, `export -p` or `/proc/*/environ`, and no `echo` of a token. \
+         Name the variable you need and check it with `test -n \"$NAME\"`. \
+         What a command prints lands in the transcript.\n\
+         \n\
          {bound}{WHEN_BLOCKED}\n{DRIVING_OTHER_SESSIONS}"
     )
 }
