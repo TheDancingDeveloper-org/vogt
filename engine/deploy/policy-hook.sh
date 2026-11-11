@@ -9,9 +9,11 @@
 #                                    # add the hook to Claude Code's user
 #                                    # settings, once (the entrypoint runs it)
 #
-# The hook only ever looks at commands that contain a `git` or `gh` word. A
-# command without one is allowed without a request, so a policy check can
-# never slow an ordinary tool call. With no broker credential to ask with it
+# The hook only ever asks about commands that contain a word the policy can
+# act on (`git`, `gh`, `rm` and the other deleting programs, the shells,
+# `eval`, `xargs`), read from the decoded command. A command without one is
+# allowed without a request, so a policy check rarely slows an ordinary tool
+# call. With no broker credential to ask with it
 # also allows, because there is no session policy to enforce.
 #
 # A denial prints the engine's reason on stderr and exits 2, which Claude Code
@@ -128,12 +130,29 @@ json.dump({"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": cwd}, sys
     }
 fi
 
-# No git and no gh means nothing the policy can refuse, so do not ask. This
-# reads the raw payload, not the translation: a Codex command may be a JSON
-# array, and the translated string escapes the newlines that separate words.
-# `rm` is asked too: a plain rm deletes the files a discard guard protects
-# (WI-1326), and the engine reads it as `git rm` for that rule.
-printf '%s' "$raw" | grep -Eq '(^|[^[:alnum:]_])(git|gh|rm)([^[:alnum:]_]|$)' || exit 0
+# A command that names nothing the policy can refuse is allowed without
+# asking. The test reads the *decoded* command, never the raw JSON: JSON
+# escapes a newline as `\n`, so a raw-text match would miss the `git` in
+# `ls\ngit checkout -- f` (WI-1326 review). Quotes and backslashes are
+# dropped and case folded first, so `g""it` and `\git` still read as git.
+# The words are the engine's: git and gh, the deleting programs the discard
+# guard reads (`rm`, `unlink`, `mv`, `shred`, `truncate`), git's discarding
+# verbs (for `$GIT checkout …`), and the shells, `eval` and `xargs` that can
+# run any of them out of sight. A payload that cannot be decoded is asked.
+words='git|gh|rm|unlink|mv|shred|truncate|checkout|restore|reset|clean|stash|switch|bash|sh|zsh|dash|ksh|eval|xargs'
+decoded="$(printf '%s' "$input" | python3 -c 'import json, sys
+try:
+    payload = json.load(sys.stdin)
+    cmd = payload.get("tool_input", {}).get("command", "")
+except Exception:
+    sys.exit(3)
+if isinstance(cmd, list):
+    cmd = "\n".join(str(part) for part in cmd)
+if not isinstance(cmd, str):
+    sys.exit(3)
+sys.stdout.write(cmd.replace("\"", "").replace("\x27", "").replace("\\", "").lower())' 2>/dev/null)" ||
+    decoded="git"
+printf '%s' "$decoded" | grep -Eq "(^|[^[:alnum:]_-])($words)([^[:alnum:]_-]|\$)" || exit 0
 
 url="${VOGT_ENGINE_BROKER_URL:-}"
 token="${VOGT_ENGINE_BROKER_TOKEN:-}"
