@@ -11,16 +11,22 @@
 #
 # The hook only ever asks about commands that contain a word the policy can
 # act on (`git`, `gh`, `rm` and the other deleting programs, the shells,
-# `eval`, `xargs`), read from the decoded command. A command without one is
-# allowed without a request, so a policy check rarely slows an ordinary tool
-# call. With no broker credential to ask with it
-# also allows, because there is no session policy to enforce.
+# `eval`, `xargs`), the environment programs the environment guard reads
+# (`env`, `printenv`, `set`, `export`, `readonly`, `declare`, `typeset`,
+# `local`, `ps`), `environ`, or a credential-named expansion, read from the
+# decoded command. A command without one is allowed without a request, so a
+# policy check rarely slows an ordinary tool call. With no broker credential
+# to ask with it also allows, because there is no session policy to enforce.
 #
 # A denial prints the engine's reason on stderr and exits 2, which Claude Code
 # treats as "do not run the tool". The engine being
 # unreachable, answering anything but 2xx, or answering a body whose decision
-# is not exactly "allow" fails closed for those git and gh commands: a check
-# that cannot be read is a refusal, not a pass.
+# is not exactly "allow" fails closed: a check that cannot be read is a
+# refusal, not a pass. The one exception is a command forwarded only for an
+# ambiguous environment word whose every use an offline allowlist recognises
+# as harmless (`set -euo pipefail`, `export FOO=bar`, `env FOO=bar cmd`); a
+# real dump, a credential expansion, and any git/gh/destructive command stay
+# refused.
 #
 # Credential: the session's own broker token (`VOGT_ENGINE_BROKER_TOKEN`),
 # which names the session by itself; a pod session, which has none, presents
@@ -153,6 +159,10 @@ fi
 # (`$VOGT_HTTP_TOKEN`), an indirect expansion (`${!name}`), and a one-liner
 # naming `os.environ`, `process.env` or `%ENV`.
 words='git|gh|rm|unlink|mv|shred|truncate|checkout|restore|reset|clean|stash|switch|bash|sh|zsh|dash|ksh|eval|xargs|source|env|printenv|set|export|readonly|declare|typeset|local|ps|environ'
+# The words that are an environment concern only. An outage may allow a
+# harmless use of one of these; a destructive word keeps the refusal.
+env_words='env|printenv|set|export|readonly|declare|typeset|local|ps|environ'
+destructive_words='git|gh|rm|unlink|mv|shred|truncate|checkout|restore|reset|clean|stash|switch|bash|sh|zsh|dash|ksh|eval|xargs|source'
 envish='\$\{?!|\$\{?[a-z0-9_]*(token|secret|key|passw|credential|private)|os\.environ|process\.env|%env'
 decoded="$(printf '%s' "$input" | python3 -c 'import json, re, sys
 try:
@@ -197,6 +207,19 @@ for text in (cmd, unescaped):
 printf '%s' "$decoded" | grep -Eq "(^|[^[:alnum:]_-])($words)([^[:alnum:]_-]|\$)" ||
     printf '%s' "$decoded" | grep -Eq "$envish" || exit 0
 
+# Whether the command was asked about only for an environment word (or an
+# environment-looking expansion). A destructive word, or the "git" sentinel
+# the decoded filter emits for a hidden program/brace/substitution, clears
+# this: the outage allowlist below never covers those.
+ask_env=0
+if printf '%s' "$decoded" | grep -Eq "(^|[^[:alnum:]_-])($env_words)([^[:alnum:]_-]|\$)" ||
+    printf '%s' "$decoded" | grep -Eq "$envish"; then
+    ask_env=1
+fi
+if printf '%s' "$decoded" | grep -Eq "(^|[^[:alnum:]_-])($destructive_words)([^[:alnum:]_-]|\$)"; then
+    ask_env=0
+fi
+
 url="${VOGT_ENGINE_BROKER_URL:-}"
 token="${VOGT_ENGINE_BROKER_TOKEN:-}"
 # A pod session has no broker token. Its stream credential, a 0600 file the
@@ -215,6 +238,189 @@ code="$(curl -sS --max-time 5 -o "$body" -w '%{http_code}' -X POST \
     -H 'Content-Type: application/json' --data-binary @- \
     "${url%/}/api/agent-auth/policy-check" <<<"$input" 2>/dev/null)" || code="000"
 if [[ "$code" != 2* ]]; then
+    # The engine cannot be asked. A command forwarded only because it names
+    # one of the ambiguous environment words (`set -euo pipefail`,
+    # `export FOO=bar && …`) is still allowed when an offline allowlist
+    # recognises every such use as harmless. Everything else keeps the
+    # existing fail-closed refusal: a real dump, another language reading the
+    # environment, a credential expansion, or any git/gh/destructive call.
+    if [[ "$ask_env" == 1 ]] && printf '%s' "$input" | python3 -c 'import json, re, shlex, sys
+
+try:
+    payload = json.load(sys.stdin)
+    cmd = payload.get("tool_input", {}).get("command", "")
+except Exception:
+    sys.exit(1)
+if isinstance(cmd, list):
+    cmd = "\n".join(str(part) for part in cmd)
+if not isinstance(cmd, str) or not cmd.strip():
+    sys.exit(1)
+
+SENSITIVE = {
+    "TOKEN", "TOKENS", "SECRET", "SECRETS", "PASSWORD", "PASSWORDS",
+    "PASSWD", "CREDENTIAL", "CREDENTIALS", "PRIVATE",
+}
+
+
+def credential(name):
+    n = name.upper()
+    if n == "KEY" or n in SENSITIVE:
+        return True
+    if n.endswith("_KEY") or "_KEY_" in n:
+        return True
+    return any(n.endswith("_" + w) or "_" + w + "_" in n for w in SENSITIVE)
+
+
+if re.search(
+    r"(^|[^A-Za-z0-9_-])(git|gh|rm|unlink|mv|shred|truncate|checkout|restore|reset|clean|stash|switch|bash|sh|zsh|dash|ksh|eval|xargs|source)([^A-Za-z0-9_-]|$)",
+    cmd,
+):
+    sys.exit(1)
+if re.search(r"/proc/[^ \t\n]*environ", cmd):
+    sys.exit(1)
+if re.search(r"(?i)(os\.environ|os\.getenv|process\.env|%env|\benviron\b|\$ENV\b|ENVIRON)", cmd):
+    sys.exit(1)
+if "<<<" in cmd:
+    sys.exit(1)
+for found in re.finditer(r"\$\{?(!?)([A-Za-z_][A-Za-z0-9_]*)", cmd):
+    if credential(found.group(2)):
+        sys.exit(1)
+
+
+def words_of(text):
+    try:
+        return shlex.split(text, posix=True)
+    except ValueError:
+        return None
+
+
+def strip_wrappers(words):
+    i = 0
+    while i < len(words):
+        word = words[i]
+        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", word):
+            i += 1
+            continue
+        name = word.rsplit("/", 1)[-1]
+        if name in ("sudo", "doas", "command", "exec", "nohup", "builtin",
+                    "setsid", "chronic", "busybox", "time"):
+            i += 1
+            continue
+        if name in ("nice", "ionice", "stdbuf"):
+            i += 1
+            while i < len(words) and words[i].startswith("-"):
+                takes = words[i] in ("-n", "--adjustment", "-c", "--class",
+                                     "-p", "-t", "-i", "-o", "-e")
+                i += 1
+                if takes and i < len(words) and not words[i].startswith("-"):
+                    i += 1
+            continue
+        if name == "timeout":
+            i += 1
+            while i < len(words) and words[i].startswith("-"):
+                takes = words[i] in ("-s", "--signal", "-k", "--kill-after")
+                i += 1
+                if takes:
+                    i += 1
+            if i < len(words) and not words[i].startswith("-"):
+                i += 1
+            continue
+        break
+    return words[i:]
+
+
+def env_runs_a_program(args, depth=0):
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "-" or arg.startswith("--"):
+            if arg == "--" or arg.startswith(("--unset=", "--chdir=")):
+                i += 1
+                continue
+            if arg == "--ignore-environment":
+                i += 1
+                continue
+            if arg in ("--unset", "--chdir"):
+                i += 2
+                continue
+            return False
+        if arg.startswith("-") and len(arg) > 1:
+            flag = arg[1:]
+            if "S" in flag:
+                return False
+            if flag in ("u", "C"):
+                i += 2
+                continue
+            if flag[-1] in ("u", "C"):
+                i += 1
+                continue
+            i += 1
+            continue
+        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", arg):
+            i += 1
+            continue
+        return depth < 8 and harmless(" ".join(args[i:]), depth + 1)
+    return False
+
+
+def harmless(seg, depth=0):
+    words = words_of(seg)
+    if words is None:
+        return False
+    words = strip_wrappers(words)
+    if not words:
+        return True
+    name = words[0].rsplit("/", 1)[-1]
+    args = words[1:]
+    flags = [a for a in args if a.startswith("-")]
+    operands = [a for a in args if not a.startswith(("-", "+"))]
+    if name == "set":
+        if not args:
+            return False
+        previous = ""
+        for arg in args:
+            if arg == "--":
+                return True
+            if arg.startswith(("-", "+")):
+                previous = arg
+                continue
+            if "o" in previous and not previous.startswith("+"):
+                previous = ""
+                continue
+            return False
+        return True
+    if name in ("export", "readonly", "local", "declare", "typeset"):
+        if any("p" in flag[1:] for flag in flags):
+            return False
+        if not operands:
+            functions_only = bool(flags) and all(
+                flag[1:] and set(flag[1:]) <= {"f", "F"} for flag in flags
+            )
+            return functions_only
+        return all(
+            re.match(r"^[A-Za-z_][A-Za-z0-9_]*(=.*)?$", a, re.S) for a in operands
+        )
+    if name == "env":
+        return env_runs_a_program(args, depth)
+    if name == "printenv":
+        return bool(operands) and all(
+            not credential(a) and "$" not in a and "`" not in a for a in operands
+        )
+    if name == "ps":
+        return not any(
+            not a.startswith("-") and a.isalpha() and "e" in a for a in args
+        )
+    return True
+
+
+for segment in re.split(r"&&|\|\||[;&|\n(){}]", cmd):
+    if segment.strip() and not harmless(segment):
+        sys.exit(1)
+sys.exit(0)
+' 2>/dev/null; then
+        rm -f "$body"
+        exit 0
+    fi
     rm -f "$body"
     echo "vogt policy check unavailable; refusing a command the policy may cover" >&2
     exit 2
