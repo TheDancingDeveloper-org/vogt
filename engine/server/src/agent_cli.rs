@@ -766,6 +766,48 @@ pub fn with_codex_providers(
     Some(out)
 }
 
+/// Haiku-class Codex launches get a 200k window. The global
+/// `model_context_window` (850k) belongs to the Opus/GPT path, so a Haiku
+/// child that inherited it would never auto-compact before the provider
+/// rejected the request (WI-3976). Returns the two `-c` overrides to insert
+/// after the Codex binary, or `None` when this is not a Codex launch, names
+/// no model, or the model is not Haiku-class.
+pub fn with_codex_model_window(command: &[String]) -> Option<Vec<String>> {
+    if agent_name(command).as_deref() != Some("codex") {
+        return None;
+    }
+    let model = codex_model(command)?;
+    if !is_haiku_class(&model) {
+        return None;
+    }
+    let (idx, _) = agent_binary(command);
+    let mut out = command.to_vec();
+    out.splice(
+        idx + 1..idx + 1,
+        [
+            "-c".to_string(),
+            format!("model_context_window={HAIKU_CONTEXT_WINDOW}"),
+            "-c".to_string(),
+            format!("model_auto_compact_token_limit={HAIKU_AUTO_COMPACT_TOKENS}"),
+        ],
+    );
+    Some(out)
+}
+
+/// Context window and auto-compact limit for a Haiku-class model (WI-3976).
+pub const HAIKU_CONTEXT_WINDOW: i64 = 200_000;
+pub const HAIKU_AUTO_COMPACT_TOKENS: i64 = 170_000;
+
+/// Whether a model slug names a Haiku-class model, matched on a dash-separated
+/// word so `claude-org-haiku` and `haiku-4-5` both match.
+fn is_haiku_class(model: &str) -> bool {
+    model
+        .to_ascii_lowercase()
+        .replace('.', "-")
+        .split('-')
+        .any(|word| word == "haiku")
+}
+
 /// Linux caps one argv entry at 128 KiB; a charter that would push Codex's
 /// `developer_instructions` past this stays in the brief alone.
 const MAX_CHARTER_ARG_BYTES: usize = 120 * 1024;
@@ -973,6 +1015,44 @@ mod tests {
         assert!(with_codex_providers(&bare, &providers).is_none());
         let claude: Vec<String> = ["claude", "-m", "o-model"].map(String::from).to_vec();
         assert!(with_codex_providers(&claude, &providers).is_none());
+    }
+
+    #[test]
+    fn haiku_codex_launch_gets_its_own_window_and_others_keep_the_global_one() {
+        // WI-3976: a Haiku-class child records 200k, not the inherited 850k.
+        let haiku: Vec<String> = ["codex", "-m", "claude-org-haiku", "--yolo"]
+            .map(String::from)
+            .to_vec();
+        let out = with_codex_model_window(&haiku).expect("haiku gets an override");
+        assert_eq!(out[0], "codex");
+        assert_eq!(out[1], "-c");
+        assert_eq!(out[2], "model_context_window=200000");
+        assert_eq!(out[3], "-c");
+        assert_eq!(out[4], "model_auto_compact_token_limit=170000");
+        assert_eq!(&out[5..], &haiku[1..]);
+
+        // The `--model=` spelling and a wrapped launch match too.
+        let wrapped: Vec<String> = ["vogt-agent-auth", "run", "--", "codex", "--model=haiku-4-5"]
+            .map(String::from)
+            .to_vec();
+        let out = with_codex_model_window(&wrapped).expect("wrapped haiku gets an override");
+        assert_eq!(out[4], "-c");
+        assert_eq!(out[5], "model_context_window=200000");
+
+        // Opus-low and GPT keep the global window: no override is added.
+        let opus: Vec<String> = ["codex", "-m", "claude-org-opus-low"]
+            .map(String::from)
+            .to_vec();
+        assert!(with_codex_model_window(&opus).is_none());
+        let gpt: Vec<String> = ["codex", "-m", "gpt-5.6-luna"].map(String::from).to_vec();
+        assert!(with_codex_model_window(&gpt).is_none());
+        // Not a Codex launch, or no model named: nothing to say.
+        let claude: Vec<String> = ["claude", "-m", "claude-org-haiku"]
+            .map(String::from)
+            .to_vec();
+        assert!(with_codex_model_window(&claude).is_none());
+        let bare: Vec<String> = vec!["codex".into()];
+        assert!(with_codex_model_window(&bare).is_none());
         assert!(with_codex_providers(&wrapped, &[]).is_none());
     }
 
