@@ -444,11 +444,11 @@ options:
   --assignee ASSIGNEE   Actor identity_ref, e.g. local:sprooty.
   --labels LABELS       Existing label names to attach.
   --local-only, --no-local-only
-                        Create the item locally without writing it upstream.
-                        A default create on a forge-linked project also opens
+                        Create the item locally without writing it upstream. A
+                        default create on a forge-linked project also opens
                         the upstream issue on the forge (a GitHub issue for a
-                        GitHub-linked project), and is refused when the
-                        write-back policy does not permit 'create'. Pass
+                        GitHub-linked project), and is refused when the write-
+                        back policy does not permit 'create'. Pass
                         local_only=true to create a native item here only:
                         nothing is sent to the forge, and a later `forge link`
                         or `forge writeback` migrates it upstream. On an
