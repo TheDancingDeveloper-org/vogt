@@ -275,16 +275,6 @@ pub struct Actor {
     pub created_at: Moment,
 }
 
-/// An unrecorded default branch serialises as `""`, not `null` (WI-4026). The
-/// Python core and the parity goldens hold the column's empty string as the
-/// value; `null` made the Rust core disagree with both.
-fn serialize_default_branch<S: serde::Serializer>(
-    branch: &Option<String>,
-    serializer: S,
-) -> Result<S::Ok, S::Error> {
-    serializer.serialize_str(branch.as_deref().unwrap_or(""))
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Project {
@@ -294,10 +284,15 @@ pub struct Project {
     pub root_path: String,
     pub repo_url: Option<String>,
     /// The branch the project's source checks out by default, read from the
-    /// remote's HEAD at import (WI-4026). Empty when not recorded; that is
-    /// `""` on the wire, never `null`, matching the Python core and the
-    /// `TEXT NOT NULL DEFAULT ''` column (migration 0031).
-    #[serde(default, serialize_with = "serialize_default_branch")]
+    /// remote's HEAD at import (WI-4026). Empty when not recorded.
+    ///
+    /// Storage-only: the Python `Project` entity has no such field, so the
+    /// project record on every transport omits it (WI-4043). It lives in the
+    /// `projects` row (migration 0031) and reaches the wire only through the
+    /// dump, which reads rows, not this struct. Serialising it here added
+    /// `default_branch` to every project answer and changed the audit
+    /// payload digests of project writes, breaking parity.
+    #[serde(default, skip_serializing)]
     pub default_branch: Option<String>,
     #[serde(default = "lifecycle_default")]
     pub lifecycle_state: ProjectLifecycle,
@@ -1096,10 +1091,10 @@ mod tests {
         );
     }
 
-    /// A field pydantic defaults must decode when the payload omits it.
+    /// The Python `Project` has no `default_branch`, so the project record
+    /// never carries it, recorded or not (WI-4043). It still decodes.
     #[test]
-    fn an_unrecorded_default_branch_serialises_as_empty_string() {
-        // A project with no recorded default branch serialises it as "".
+    fn a_project_record_never_serialises_default_branch() {
         let mut project = Project::new(
             "prj_1",
             "demo",
@@ -1107,12 +1102,18 @@ mod tests {
             "/work/demo",
             Moment::from_unix(0, 0),
         );
-        project.default_branch = None;
-        let json = serde_json::to_value(&project).unwrap();
-        assert_eq!(json["default_branch"], serde_json::json!(""));
-        project.default_branch = Some("main".to_owned());
-        let json = serde_json::to_value(&project).unwrap();
-        assert_eq!(json["default_branch"], serde_json::json!("main"));
+        for branch in [None, Some("main".to_owned())] {
+            project.default_branch = branch;
+            let json = serde_json::to_value(&project).unwrap();
+            assert!(
+                json.get("default_branch").is_none(),
+                "project record carried default_branch: {json}"
+            );
+        }
+        let mut json = serde_json::to_value(&project).unwrap();
+        json["default_branch"] = serde_json::json!("trunk");
+        let decoded: Project = serde_json::from_value(json).unwrap();
+        assert_eq!(decoded.default_branch.as_deref(), Some("trunk"));
     }
 
     /// A field pydantic defaults must decode when the payload omits it.

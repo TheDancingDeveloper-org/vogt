@@ -330,8 +330,6 @@ def test_round4_attached_payloads_are_asked(tmp_path: Path, command: str) -> Non
         "ls src/{a,b}.rs",
         "echo {a,b}",
         "awk '{print $1}' f.txt",
-        "env RUST_LOG=debug cargo test",
-        "env -i PATH=/usr/bin cargo test",
         "script -q /dev/null",
     ],
 )
@@ -344,6 +342,27 @@ def test_round3_ordinary_wrapped_commands_are_not_asked(
         payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
         assert run(tmp_path, payload, env).returncode == 0, command
         assert broker.requests == []
+    finally:
+        broker.close()
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["env RUST_LOG=debug cargo test", "env -i PATH=/usr/bin cargo test"],
+)
+def test_env_wrapped_commands_are_asked_and_pass_on_allow(
+    tmp_path: Path, command: str
+) -> None:
+    """WI-4046 made `env` an ask-word: the engine's environment guard tells
+    `env FOO=bar cmd` from `env`, so the hook asks and an allow passes."""
+    broker = _Broker(200, b'{"decision":"allow"}')
+    try:
+        env = {"VOGT_ENGINE_BROKER_URL": broker.url, "VOGT_ENGINE_BROKER_TOKEN": "t"}
+        payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
+        assert run(tmp_path, payload, env).returncode == 0, command
+        assert len(broker.requests) == 1, command
+        broker.status = 500
+        assert run(tmp_path, payload, env).returncode == 2, command
     finally:
         broker.close()
 
