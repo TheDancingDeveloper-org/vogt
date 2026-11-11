@@ -737,6 +737,13 @@ impl SessionRegistry {
                 spec.command = Some(rewritten);
             }
         }
+        // WI-3976. A Haiku-class launch gets its own 200k window and compact
+        // limit; the global 850k window stays for every other model.
+        if let Some(command) = spec.command.as_deref() {
+            if let Some(rewritten) = agent_cli::with_codex_model_window(command) {
+                spec.command = Some(rewritten);
+            }
+        }
         // WI-2038. The scope's charters ride in Codex's standing
         // instructions as well as in the brief, after the workspace guidance.
         if let (Some(command), Some(charter)) = (spec.command.as_deref(), spec.charter.as_deref()) {
