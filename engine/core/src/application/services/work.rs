@@ -327,6 +327,18 @@ fn parse_create(params: Value) -> Result<CreateParams, VogtError> {
                 .collect()
         })
         .unwrap_or_default();
+    // A string such as "true" is not the boolean the schema declares. The
+    // old as_bool().unwrap_or(false) turned it into a native create, which
+    // silently drops the upstream half (WI-4061 review).
+    let upstream = match map.get("upstream") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(value)) => *value,
+        Some(_) => {
+            return Err(VogtError::InvalidRequest(
+                "upstream must be a boolean".to_string(),
+            ))
+        }
+    };
     Ok(CreateParams {
         kind,
         title,
@@ -337,10 +349,7 @@ fn parse_create(params: Value) -> Result<CreateParams, VogtError> {
         initiative: text("initiative"),
         assignee: text("assignee"),
         labels,
-        upstream: map
-            .get("upstream")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
+        upstream,
         local_only: map
             .get("local_only")
             .and_then(Value::as_bool)
@@ -3300,6 +3309,35 @@ mod tests {
         .unwrap();
         assert_eq!(second["item"]["ref"], "WI-2");
         assert_eq!(second["item"]["state"], "open");
+    }
+
+    #[test]
+    fn a_non_boolean_upstream_is_refused_not_treated_as_native() {
+        let built = opened();
+        let Built::StepSequential(ctx) = &built else {
+            unreachable!("opened() builds a step clock");
+        };
+        let error = create_work(
+            ctx,
+            json!({
+                "kind": "chore",
+                "title": "one",
+                "upstream": "true",
+                "reason": "test",
+            }),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&error, VogtError::InvalidRequest(message) if message.contains("upstream")),
+            "{error}"
+        );
+        // Nothing was created: the native ref is still WI-1.
+        let native = create_work(
+            ctx,
+            json!({"kind": "chore", "title": "two", "reason": "test"}),
+        )
+        .unwrap();
+        assert_eq!(native["item"]["ref"], "WI-1");
     }
 
     #[test]
