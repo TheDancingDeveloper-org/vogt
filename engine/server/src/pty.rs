@@ -1009,12 +1009,27 @@ pub(crate) fn is_secret_env(key: &str) -> bool {
         || k.contains("API_KEY")
 }
 
-/// The engine's own environment with the secrets stripped — the base a child
-/// process should start from before its session/task variables are added.
+/// Whether an environment variable names one specific child's prompt or task
+/// artifact. The engine sets these per child (a session brief, a scheduled
+/// task run); they must never be copied from the engine's own environment,
+/// or a child that was given no brief inherits another run's brief path.
+pub(crate) fn is_per_child_engine_env(key: &str) -> bool {
+    matches!(
+        key,
+        "VOGT_ENGINE_AGENT_TASK_PROMPT_FILE"
+            | "VOGT_ENGINE_AGENT_TASK_CONTEXT_FILE"
+            | "VOGT_ENGINE_AGENT_TASK_ID"
+            | "VOGT_ENGINE_AGENT_TASK_RUN_ID"
+    )
+}
+
+/// The engine's own environment with the secrets and per-child artifact
+/// variables stripped — the base a child process should start from before its
+/// session/task variables are added.
 pub(crate) fn sanitized_child_env() -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
     std::env::vars_os()
         .filter(|(k, _)| match k.to_str() {
-            Some(s) => !is_secret_env(s),
+            Some(s) => !is_secret_env(s) && !is_per_child_engine_env(s),
             // A non-UTF-8 key cannot be one of our (ASCII-named) secrets.
             None => true,
         })
@@ -2158,7 +2173,32 @@ mod turn_tests {
 
 #[cfg(test)]
 mod secret_env_tests {
-    use super::{is_agent_auth_helper_env, is_secret_env};
+    use super::{is_agent_auth_helper_env, is_per_child_engine_env, is_secret_env};
+
+    #[test]
+    fn per_child_artifact_vars_are_never_inherited() {
+        // The engine sets these for one child (a brief or a task run). A
+        // child started without one must not receive another run's path,
+        // whichever way the engine itself was started.
+        for key in [
+            "VOGT_ENGINE_AGENT_TASK_PROMPT_FILE",
+            "VOGT_ENGINE_AGENT_TASK_CONTEXT_FILE",
+            "VOGT_ENGINE_AGENT_TASK_ID",
+            "VOGT_ENGINE_AGENT_TASK_RUN_ID",
+        ] {
+            assert!(is_per_child_engine_env(key), "{key} must be stripped");
+        }
+        // Ordinary variables, and the session identity the engine sets
+        // itself, still pass through.
+        for key in [
+            "PATH",
+            "HOME",
+            "VOGT_ENGINE_SESSION",
+            "VOGT_ENGINE_SESSION_ID",
+        ] {
+            assert!(!is_per_child_engine_env(key), "{key} should pass through");
+        }
+    }
 
     #[test]
     fn agent_auth_helper_regains_only_the_brokering_inputs() {
