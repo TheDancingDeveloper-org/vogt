@@ -1649,9 +1649,14 @@ Enter. Enter is pressed by default; `draft: true` (or an explicit
 (`\u001b`), `tab`,
 `up`/`down`/`right`/`left` (`\u001b[A`/`B`/`C`/`D`), `ctrl-c` (`\u0003`),
 `ctrl-d` (`\u0004`) and `backspace` (`\u007f`). At most 64 KiB of text per
-call. The raw `POST /api/sessions/:id/input` is one write of `text` (escape
-sequences included, JSON-escaped) plus `\r` when `submit` is true; an empty
-`text` with `submit: true` is a bare Enter.
+call. The raw `POST /api/sessions/:id/input` is one write: `text`
+(JSON-escaped) plus `\r` when `submit` is true; an empty `text` with
+`submit: true` is a bare Enter. When the program has bracketed paste on, a
+non-empty `text` with no control character other than tab or a line break is
+sent inside one paste (`ESC[200~` … `ESC[201~`), so the TUI that receives it
+treats it as pasted text and the Enter after it submits rather than joining a
+"paste burst" as a newline (WI-4068). `text` that carries an escape sequence
+or another control byte is a key, and is written as typed.
 
 **Safety rules.**
 
