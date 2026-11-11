@@ -98,6 +98,7 @@ run_case() {
   printf %s "$BOOT" >"$dir/boot"; printf %s "$SESSION" >"$dir/session"
   # The engine mounts the credential from a Secret; the pod env has the path.
   [ -e "$dir/bootstrap-token" ] || printf %s "$BOOT" >"$dir/bootstrap-token"
+  mkdir -p "$dir/home"
   env -i PATH="$dir/bin:/usr/bin:/bin" HOME="$dir/home" TMPDIR="$dir/tmp" CASE_DIR="$dir" \
     VOGT_ENGINE_URL=http://engine VOGT_SESSION_ID=s1 VOGT_BOOTSTRAP_TOKEN_FILE="$dir/bootstrap-token" \
     SOURCE_JSON='{"location":{"kind":"graft","endpoint":"http://graft","repo":"vogt"},"ref":"rust-2","landing":"line"}' \
@@ -126,6 +127,13 @@ git -C "$w" log -1 -p | grep -q '^-old$' || fail "git view: tip patch removal"
 [[ -z $(git -C "$w" status --porcelain) ]] || fail "git view: tree not clean"
 [[ -z $(git -C "$w" ls-files .graft .vogt) ]] || fail "git view: runtime state tracked"
 [[ -z $(git -C "$w" remote) ]] || fail "git view: a remote would allow a push"
+# WI-4040: /work is trusted by exactly its own path (no wildcard), so git in
+# the session does not refuse it with "dubious ownership".
+[[ $(HOME="$tmp/happy/home" git config --global --get-all safe.directory) == "$w" ]] \
+  || fail "safe.directory is not the exact clone path"
+! HOME="$tmp/happy/home" git config --global --get-all safe.directory | grep -q '^\*$' \
+  || fail "a wildcard safe.directory was added"
+HOME="$tmp/happy/home" git -C "$w" status --porcelain >/dev/null || fail "git status refused /work"
 [[ $(<"$w/a.txt") == new ]] || fail "git view: files changed"
 grep -q '^session-entrypoint: step git-view$' <<<"$out" || fail "git-view step marker"
 ! grep -q "$BOOT" "$tmp/happy/agent.env" || fail "bootstrap token reached the agent"
