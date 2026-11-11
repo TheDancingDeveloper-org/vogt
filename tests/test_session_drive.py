@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import re
 from typing import Any
 
 import pytest
@@ -46,9 +47,14 @@ from vogt.application.services import (
     start_session,
     stop_session,
 )
-from vogt.application.services._brief import DRIVING_OTHER_SESSIONS
+from vogt.application.services._brief import (
+    DRIVING_IS_OVERSIGHTS_JOB,
+    DRIVING_OTHER_SESSIONS,
+)
 from vogt.core.principal import Principal
 from vogt.errors import InvalidRequest, MissingReason, NotFound
+
+from tests.conftest import native_work_item
 
 WHY = "drive test"
 ROOT = "/srv/estate/vogt"
@@ -1020,6 +1026,110 @@ def test_a_session_is_told_where_the_engine_is(
     # The driving instructions moved to the companion; the brief only names it.
     assert ".guide.md" in create["body"]["prompt"]
     assert DRIVING_OTHER_SESSIONS in create["body"]["companion"]
+
+
+def test_a_worker_profile_session_is_told_driving_is_oversights_job(
+    wired: AppContext, engine: Engine
+) -> None:
+    """WI-4071: a worker is not handed instructions for tools it is not given.
+
+    The companion follows the list the session will see. A worker-profile
+    session gets the short paragraph, and it names none of the session-driving
+    tools, so it cannot imply the worker may stop a peer.
+    """
+    native_work_item(
+        wired, kind="bug", title="A bug to open a terminal on", project="vogt"
+    )
+    start_session(
+        wired, StartSessionParams(work_item="WI-1", purpose="review", reason=WHY)
+    )
+    create = next(
+        row
+        for row in engine.sent
+        if row["method"] == "POST" and row["path"] == "/api/sessions"
+    )
+    assert create["body"]["mcp_set"] == "worker"
+    companion = create["body"]["companion"]
+
+    assert DRIVING_IS_OVERSIGHTS_JOB in companion
+    assert DRIVING_OTHER_SESSIONS not in companion
+    assert "oversight session's job" in companion
+    for tool in (
+        "session_start",
+        "session_list",
+        "session_sweep",
+        "session_screen",
+        "session_input",
+        "session_wait",
+        "session_answer",
+        "session_log_tail",
+        "session_last_reply",
+        "session_stop",
+        "session_remove",
+        "session_rename",
+    ):
+        assert tool not in companion, f"the worker companion names {tool}"
+
+
+def test_a_bare_codex_start_gets_the_worker_companion(
+    wired: AppContext, engine: Engine
+) -> None:
+    """WI-4071: the engine's own default for Codex is the worker set.
+
+    A start that names no set gets `worker` on the engine side when the agent
+    is Codex, so its companion must be the worker one even though the core
+    sent no `mcp_set`.
+    """
+    start_session(
+        wired, StartSessionParams(project="vogt", template="codex", reason=WHY)
+    )
+    create = next(
+        row
+        for row in engine.sent
+        if row["method"] == "POST" and row["path"] == "/api/sessions"
+    )
+    assert "mcp_set" not in create["body"]
+    companion = create["body"]["companion"]
+    assert DRIVING_IS_OVERSIGHTS_JOB in companion
+    assert DRIVING_OTHER_SESSIONS not in companion
+
+
+def test_every_tool_the_worker_companion_names_is_in_the_worker_profile(
+    wired: AppContext, engine: Engine
+) -> None:
+    """WI-4071: the brief and the worker profile cannot drift apart again.
+
+    Every registered tool the worker-profile companion names must be in
+    `WORKER_TOOLS`; a name outside it is exactly the failure the item
+    reported.
+    """
+    from vogt.adapters.mcp.profiles import WORKER_TOOLS
+    from vogt.registry import default_registry
+
+    native_work_item(
+        wired, kind="bug", title="A bug to open a terminal on", project="vogt"
+    )
+    start_session(
+        wired, StartSessionParams(work_item="WI-1", purpose="review", reason=WHY)
+    )
+    create = next(
+        row
+        for row in engine.sent
+        if row["method"] == "POST" and row["path"] == "/api/sessions"
+    )
+    companion = create["body"]["companion"]
+    tools = {op.name.replace(".", "_") for op in default_registry()}
+    # Tool names are written in code spans; a bare English word that happens
+    # to be a tool name ("export -p") is not a tool reference.
+    spans = {span.strip() for span in re.findall(r"`([^`]+)`", companion)}
+    named = spans & tools
+
+    assert {
+        "session_bind_work",
+        "session_grant_request",
+        "session_report_blocked",
+    } <= named
+    assert not named - WORKER_TOOLS, sorted(named - WORKER_TOOLS)
 
 
 # -- session.answer (WI-917) ------------------------------------------------

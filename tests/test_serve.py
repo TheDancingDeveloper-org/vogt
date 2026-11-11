@@ -288,7 +288,25 @@ def test_the_worker_profile_lists_only_the_worker_tools(
     missing = WORKER_TOOLS - full
     assert not missing, f"worker profile names unknown tools: {missing}"
     assert {"work_get", "work_comment", "work_create"} <= by_header
-    assert "session_start" in full and "session_start" not in by_header
+    # A worker's one session tool for a credential it was not started with,
+    # and none of the tools that drive or stop a peer (WI-4071).
+    assert "session_grant_request" in by_header
+    driving = {
+        "session_start",
+        "session_list",
+        "session_sweep",
+        "session_screen",
+        "session_input",
+        "session_wait",
+        "session_answer",
+        "session_log_tail",
+        "session_last_reply",
+        "session_stop",
+        "session_remove",
+        "session_rename",
+    }
+    assert driving <= full, "the full list must still carry the driving tools"
+    assert not driving & by_header
     assert unknown == full
 
     # Trimmed from the list, not from the grant: a call still dispatches.
