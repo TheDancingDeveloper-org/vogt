@@ -829,6 +829,17 @@ impl Walker {
                 inner.unreadable = true;
                 self.pieces_from(&pieces, inner, depth + 1);
             }
+            // `su [user] -c '…'`, `runuser -c '…'`, `script -c '…' log`: a
+            // new shell runs the payload, read like `sh -c`.
+            "su" | "runuser" | "script" => {
+                if let Some(payload) = dash_c_payload(&words) {
+                    let (pieces, opaque) = lex(payload);
+                    if opaque {
+                        self.out.opaque.push(payload.to_string());
+                    }
+                    self.pieces_from(&pieces, state.clone(), depth + 1);
+                }
+            }
             // `trap 'rm a.txt' EXIT`: the action runs later in this shell,
             // after whatever `cd` the rest of the line makes (WI-4001
             // bypass 6). It is read like a `sh -c` payload whose relative
@@ -1058,6 +1069,27 @@ fn ssh_agent(pieces: &[Piece]) -> bool {
             (w.len() > 1 && w.starts_with('-') && w[1..].chars().all(|c| c.is_ascii_alphabetic()))
                 || w.chars().all(|c| c.is_ascii_digit())
         })
+}
+
+/// The command a `su`, `runuser` or `script` call runs: the value of `-c`,
+/// `--command` / `--command=…`, or of a short-option cluster ending in `c`
+/// (`script -qc '…'`).
+fn dash_c_payload(words: &[String]) -> Option<&str> {
+    let mut args = words[1..].iter();
+    while let Some(arg) = args.next() {
+        if let Some(value) = arg.strip_prefix("--command=") {
+            return Some(value);
+        }
+        let cluster = arg.len() > 1
+            && arg.starts_with('-')
+            && !arg.starts_with("--")
+            && arg[1..].chars().all(|c| c.is_ascii_alphabetic())
+            && arg.ends_with('c');
+        if arg == "--command" || cluster {
+            return args.next().map(String::as_str);
+        }
+    }
+    None
 }
 
 /// The action `trap` installs: its first operand after any `--`, unless
@@ -1656,7 +1688,32 @@ fn discards(sub: &str, args: &[String]) -> Option<Reach> {
         })
     };
     let these = |paths: Vec<String>| Some(Reach { all: false, paths });
+    // `--pathspec-from-file` (and `checkout-index --stdin`) read the paths
+    // from a file or stdin: what they name is not on the line.
+    if has(&["--pathspec-from-file", "--stdin"]) {
+        let staged_only =
+            (has(&["--staged", "-S"]) || short('S')) && !(has(&["--worktree", "-W"]) || short('W'));
+        match sub {
+            "restore" if staged_only => return None,
+            "rm" if has(&["--cached"]) => return None,
+            "checkout" | "restore" | "rm" | "stash" | "checkout-index" => return all(),
+            _ => {}
+        }
+    }
     match sub {
+        // `git checkout-index -f` overwrites the working-tree file from the
+        // index; `-a` every one. Without `-f` it leaves existing files.
+        "checkout-index" => {
+            if !(has(&["-f", "--force"]) || short('f')) {
+                return None;
+            }
+            if has(&["-a", "--all"]) || short('a') {
+                return all();
+            }
+            these(paths)
+        }
+        // `git mv -f <src> <dst>` overwrites the destination.
+        "mv" => (has(&["-f", "--force"]) || short('f')).then_some(Reach { all: false, paths }),
         "checkout" => {
             if has(&["-f", "--force"]) {
                 return all();
@@ -2016,7 +2073,7 @@ fn command_words_ext(simple: &str) -> (Vec<String>, bool) {
                     }
                 }
             }
-            Some("command" | "exec" | "nohup" | "builtin" | "setsid" | "chronic") => {
+            Some("command" | "exec" | "nohup" | "builtin" | "setsid" | "chronic" | "busybox") => {
                 words.remove(0);
                 while words.first().is_some_and(|w| w.starts_with('-')) {
                     let flag = words.remove(0);
@@ -3272,6 +3329,44 @@ mod tests {
             &p,
             &root,
             &["bash scripts/check.sh", "source ./env.sh && git status"],
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Cheap extras from the round-3 verdict.
+    #[test]
+    fn round3_extras_are_refused() {
+        let (root, p) = round3("extras");
+        assert_refused(
+            &p,
+            &root,
+            &[
+                "git checkout-index -f a.txt",
+                "git checkout-index -f -a",
+                "git checkout-index --force --all",
+                "git mv -f b.txt a.txt",
+                "git restore --pathspec-from-file=/tmp/list",
+                "git checkout --pathspec-from-file /tmp/list",
+                "git rm --pathspec-from-file=/tmp/list",
+                "git stash push --pathspec-from-file=/tmp/list",
+                "su -c 'rm a.txt'",
+                "su root -c 'git restore a.txt'",
+                "script -q -c 'rm a.txt' /dev/null",
+                "script -c 'git checkout -- a.txt'",
+                "busybox rm a.txt",
+                "busybox sh -c 'rm a.txt'",
+            ],
+        );
+        assert_allowed(
+            &p,
+            &root,
+            &[
+                "git checkout-index -a",
+                "git mv b.txt c.txt",
+                "git restore --staged --pathspec-from-file=/tmp/list",
+                "busybox ls",
+                "script -q -c 'cargo test' /dev/null",
+            ],
         );
         std::fs::remove_dir_all(&root).ok();
     }
