@@ -767,6 +767,19 @@ impl PodConfig {
         }
         for (template, policy) in &cfg.template_policies {
             check_policy_against_node(template, policy, &cfg.cache_node)?;
+            if let Some(hostname) = policy
+                .node_selector
+                .as_ref()
+                .and_then(|selector| selector.get("kubernetes.io/hostname"))
+            {
+                if cfg.excluded_nodes.contains(hostname) {
+                    return Err(ApiError::Config(format!(
+                        "ENGINE_POD_TEMPLATE_POLICIES[{template}]: node_selector \
+                         kubernetes.io/hostname={hostname}, which ENGINE_POD_EXCLUDED_NODES \
+                         also lists; the pod could never be scheduled"
+                    )));
+                }
+            }
             if let Some(selector) = &policy.node_selector {
                 for (key, value) in selector {
                     if let Some(configured) = cfg.node_selector.get(key) {
@@ -4259,6 +4272,21 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(err.contains("ENGINE_POD_NODE_SELECTOR"), "{err}");
+
+        let err = PodConfig::from_lookup(
+            lookup(&[
+                ("ENGINE_POD_CACHE_NODE", ""),
+                ("ENGINE_POD_EXCLUDED_NODES", "winrarhost2"),
+                (
+                    "ENGINE_POD_TEMPLATE_POLICIES",
+                    r#"{"Pod":{"node_selector":{"kubernetes.io/hostname":"winrarhost2"}}}"#,
+                ),
+            ]),
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("ENGINE_POD_EXCLUDED_NODES"), "{err}");
 
         // The same key and value on both is agreement, not a conflict.
         assert!(PodConfig::from_lookup(
