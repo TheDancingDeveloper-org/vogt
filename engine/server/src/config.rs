@@ -1,4 +1,8 @@
-use std::{net::SocketAddr, path::Path};
+use std::{
+    collections::BTreeMap,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -400,8 +404,11 @@ pub struct Config {
     /// The Codex home whose `sessions/<YYYY>/<MM>/<DD>/rollout-…-<conversation>.jsonl`
     /// rollouts a pod Codex session writes back are stored under (WI-3867), so
     /// `session_last_reply` finds them by conversation id as it does for a host
-    /// session. `ENGINE_CODEX_TRANSCRIPT_ROOT`, else `$CODEX_HOME`, else
-    /// `$HOME/.codex`. `None` turns the path off (no home could be resolved).
+    /// session. `ENGINE_CODEX_TRANSCRIPT_ROOT`, else the parent of the core's
+    /// `session_transcript_roots.codex` (WI-3865: the writer follows the reader
+    /// even when the engine's `$HOME` is not the deployment's transcript home),
+    /// else `$CODEX_HOME`, else `$HOME/.codex`. `None` turns the path off (no
+    /// home could be resolved).
     pub codex_transcript_root: Option<std::path::PathBuf>,
     /// `ENGINE_AGENT_AUTH_SECRETS`, parsed: what a deployment declared for
     /// sessions, and therefore the policy the on-demand secret broker
@@ -684,6 +691,9 @@ struct FileConfig {
     codex_session_id: Option<bool>,
     codex_approval_policy: Option<String>,
     codex_transcript_root: Option<String>,
+    /// Mirrors the core's `session_transcript_roots`, read so a pod Codex
+    /// write-back lands where `session.last_reply` reads (WI-3865).
+    session_transcript_roots: Option<BTreeMap<String, String>>,
     session_templates: Option<Vec<SessionTemplate>>,
     pod_backends_enabled: Option<bool>,
     assistant_api_key: Option<String>,
@@ -866,6 +876,11 @@ pub fn load(
             .or(from_file.codex_approval_policy.as_deref()),
     )?;
 
+    let session_roots = session_transcript_roots(
+        from_file.session_transcript_roots,
+        engine_env("VOGT_SESSION_TRANSCRIPT_ROOTS").ok(),
+    )?;
+    let home = dirs_home();
     let codex_transcript_root = engine_env("ENGINE_CODEX_TRANSCRIPT_ROOT")
         .ok()
         .map(|path| path.trim().to_string())
@@ -876,8 +891,13 @@ pub fn load(
                 .codex_transcript_root
                 .map(std::path::PathBuf::from)
         })
+        .or_else(|| {
+            session_roots
+                .get("codex")
+                .and_then(|root| codex_home_for_transcript_root(root, home.as_deref()))
+        })
         .or_else(|| std::env::var_os("CODEX_HOME").map(std::path::PathBuf::from))
-        .or_else(|| dirs_home().map(|home| home.join(".codex")));
+        .or_else(|| home.map(|home| home.join(".codex")));
 
     let auto_agent_auth = match engine_env("ENGINE_AUTO_AGENT_AUTH") {
         Ok(v) => Some(parse_bool_env("ENGINE_AUTO_AGENT_AUTH", &v)?),
@@ -2125,13 +2145,107 @@ fn parse_allowed_origins(file: Option<Vec<String>>, env: Option<String>) -> Vec<
     ]
 }
 
-fn dirs_home() -> Option<std::path::PathBuf> {
-    std::env::var_os("HOME").map(std::path::PathBuf::from)
+fn dirs_home() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
+}
+
+/// Merge the core's `session_transcript_roots` from the config file and
+/// `VOGT_SESSION_TRANSCRIPT_ROOTS`. The environment wins per agent, exactly as
+/// it does in the core, so a deployment may name only the root it changes.
+fn session_transcript_roots(
+    from_file: Option<BTreeMap<String, String>>,
+    from_env: Option<String>,
+) -> Result<BTreeMap<String, String>> {
+    let mut roots = from_file.unwrap_or_default();
+    let Some(raw) = from_env.filter(|value| !value.trim().is_empty()) else {
+        return Ok(roots);
+    };
+    let env: BTreeMap<String, String> = serde_json::from_str(&raw).map_err(|error| {
+        ApiError::Config(format!(
+            "VOGT_SESSION_TRANSCRIPT_ROOTS must be a JSON object of paths: {error}"
+        ))
+    })?;
+    roots.extend(env);
+    Ok(roots)
+}
+
+/// The Codex home a configured `session_transcript_roots.codex` directory
+/// lives under. The core reads rollouts as `<root>/<YYYY>/<MM>/<DD>/…` and a
+/// pod's write-back stores them as `<home>/sessions/<YYYY>/…`, so the writer's
+/// home is the configured root's parent (WI-3865). A path that does not name a
+/// `sessions` directory cannot be mapped onto that contract and yields `None`,
+/// leaving the caller's later fallbacks in charge.
+fn codex_home_for_transcript_root(root: &str, home: Option<&Path>) -> Option<PathBuf> {
+    let path = match Path::new(root.trim()).strip_prefix("~") {
+        Ok(rest) => home?.join(rest),
+        Err(_) => PathBuf::from(root.trim()),
+    };
+    if path.file_name().is_some_and(|name| name == "sessions") {
+        path.parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .map(Path::to_path_buf)
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// WI-3865: a pod Codex write-back must land where the core reads. The
+    /// live mismatch was a deployment that set `VOGT_SESSION_TRANSCRIPT_ROOTS`
+    /// to the host mount while the engine image's own `$HOME` was `/home/vogt`;
+    /// the writer stored under the latter and `session.last_reply` read the
+    /// former. The configured root is the single source of truth.
+    #[test]
+    fn the_codex_writeback_home_follows_the_configured_transcript_root() {
+        assert_eq!(
+            codex_home_for_transcript_root(
+                "/home/sprooty/.codex/sessions",
+                Some(Path::new("/home/vogt"))
+            ),
+            Some(PathBuf::from("/home/sprooty/.codex"))
+        );
+        // A `~` root expands against the process home, not the target home.
+        assert_eq!(
+            codex_home_for_transcript_root("~/.codex/sessions", Some(Path::new("/home/vogt"))),
+            Some(PathBuf::from("/home/vogt/.codex"))
+        );
+        // Anything else is not a sessions directory and cannot satisfy the
+        // write-back contract; the caller's own-home fallback stays in charge.
+        assert_eq!(
+            codex_home_for_transcript_root("/srv/transcripts", None),
+            None
+        );
+        assert_eq!(
+            codex_home_for_transcript_root("~/.codex/sessions", None),
+            None
+        );
+        assert_eq!(codex_home_for_transcript_root("sessions", None), None);
+    }
+
+    #[test]
+    fn session_roots_from_the_environment_merge_over_the_file() {
+        let mut file = BTreeMap::new();
+        file.insert("claude".to_string(), "~/.claude/projects".to_string());
+        let roots = session_transcript_roots(
+            Some(file),
+            Some(r#"{"codex":"/mnt/vogt/.codex/sessions"}"#.to_string()),
+        )
+        .unwrap();
+        assert_eq!(
+            roots.get("claude").map(String::as_str),
+            Some("~/.claude/projects")
+        );
+        assert_eq!(
+            roots.get("codex").map(String::as_str),
+            Some("/mnt/vogt/.codex/sessions")
+        );
+        // A malformed value is a startup error, never a silent fallback to a
+        // different root than the core will read.
+        assert!(session_transcript_roots(None, Some("not json".to_string())).is_err());
+    }
 
     #[test]
     fn parses_scrollback_bytes_env() {
