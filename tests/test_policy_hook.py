@@ -297,11 +297,42 @@ def test_round3_wrapped_and_braced_programs_are_asked(
 @pytest.mark.parametrize(
     "command",
     [
+        "env -S'rm a.txt'",
+        'env -S"rm a.txt"',
+        "env -iS'rm a.txt'",
+        "env -Srm\\ a.txt",
+        "su -c'rm a.txt'",
+        "su -lc'rm a.txt'",
+        "runuser -c'unlink a.txt'",
+        "script -qc'rm a.txt' /dev/null",
+    ],
+)
+def test_round4_attached_payloads_are_asked(tmp_path: Path, command: str) -> None:
+    """WI-4001 round 4, blocker 3: a payload attached to `env -S` or `su
+    -c` (`-S'rm a.txt'`) reaches the engine; with no engine it is refused."""
+    env = {
+        "VOGT_ENGINE_BROKER_URL": "http://127.0.0.1:1",
+        "VOGT_ENGINE_BROKER_TOKEN": "t",
+    }
+    payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
+    refused = run(tmp_path, payload, env)
+    assert refused.returncode == 2, command
+    assert "vogt policy check unavailable" in refused.stderr
+    codex = json.dumps({"tool_name": "exec_command", "tool_input": {"cmd": command}})
+    assert run(tmp_path, codex, env, mode="codex").returncode == 2, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
         "timeout 60 cargo test",
         "nice -n 5 cargo build --release",
         "ls src/{a,b}.rs",
         "echo {a,b}",
         "awk '{print $1}' f.txt",
+        "env RUST_LOG=debug cargo test",
+        "env -i PATH=/usr/bin cargo test",
+        "script -q /dev/null",
     ],
 )
 def test_round3_ordinary_wrapped_commands_are_not_asked(
