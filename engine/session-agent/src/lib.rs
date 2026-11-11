@@ -1037,6 +1037,23 @@ pub fn codex_permission_flags(
 /// the fixed prefix counts too, so the backed-off limit is a total.
 pub const CODEX_COMPACT_SCOPE: &str = "total";
 
+/// Haiku-class models are launched with this window rather than the
+/// deployment's global `model_context_window` (WI-3998, the rust-2 port of the
+/// WI-3976 override). Haiku's real window is 200k; the global 850k would let it
+/// reach the provider limit without compacting.
+pub const HAIKU_CONTEXT_WINDOW: u64 = 200_000;
+/// The total-scope auto-compact limit for a Haiku-class launch (about 85% of
+/// [`HAIKU_CONTEXT_WINDOW`], leaving room for one large tool result).
+pub const HAIKU_COMPACT_LIMIT: u64 = 170_000;
+
+/// Whether the model a launch runs is Haiku-class: its name carries `haiku`
+/// (`claude-org-haiku`, `claude-haiku-4-5`, a bare `haiku`).
+fn haiku_class(model: Option<&str>) -> bool {
+    model
+        .map(str::trim)
+        .is_some_and(|model| model.to_ascii_lowercase().contains("haiku"))
+}
+
 /// The MCP servers whose tools a driven Codex may call without a per-call
 /// approval prompt. This is the same operator-approved list the host's
 /// `mcp-bootstrap.sh` writes into `config.toml` (WI-3882); `komodo` is
@@ -1211,7 +1228,25 @@ pub fn codex_args(args: &CodexArgs<'_>) -> Result<Vec<String>, String> {
     let selected = args
         .provider
         .and_then(|name| args.providers.iter().find(|p| p.name == name));
-    if let Some(window) = selected.and_then(|p| p.context_window) {
+    // The model a launch runs: `-m` when named, else the registry's model.
+    let effective_model = args
+        .model
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .or_else(|| {
+            args.config_model
+                .map(str::trim)
+                .filter(|model| !model.is_empty())
+        });
+    let haiku = haiku_class(effective_model);
+    if haiku {
+        // One window for the key: the provider's own window would be a second
+        // `model_context_window`, and Codex takes the last one.
+        argv.extend([
+            "-c".to_string(),
+            format!("model_context_window={HAIKU_CONTEXT_WINDOW}"),
+        ]);
+    } else if let Some(window) = selected.and_then(|p| p.context_window) {
         argv.extend(["-c".to_string(), format!("model_context_window={window}")]);
     }
     if let Some(cwd) = args.trust_cwd.map(str::trim).filter(|cwd| !cwd.is_empty()) {
@@ -1278,19 +1313,28 @@ pub fn codex_args(args: &CodexArgs<'_>) -> Result<Vec<String>, String> {
     // engine backoff (computed from that base in `sessions`) may only raise
     // it. Emitting a second, lower value here would silently win, since Codex
     // takes the last `-c` for a key.
-    let compact_limit = [
-        selected.and_then(|provider| provider.auto_compact_token_limit),
-        args.compact_limit,
-    ]
-    .into_iter()
-    .flatten()
-    .max();
+    let compact_limit = if haiku {
+        // A backoff may still raise a Haiku launch, but never past the ceiling
+        // at which Codex stops compacting for this window.
+        let backoff = args
+            .compact_limit
+            .map_or(0, |limit| limit.min(HAIKU_CONTEXT_WINDOW / 10 * 9));
+        Some(HAIKU_COMPACT_LIMIT.max(backoff))
+    } else {
+        [
+            selected.and_then(|provider| provider.auto_compact_token_limit),
+            args.compact_limit,
+        ]
+        .into_iter()
+        .flatten()
+        .max()
+    };
     if let Some(limit) = compact_limit {
         argv.extend([
             "-c".to_string(),
             format!("model_auto_compact_token_limit={limit}"),
         ]);
-        if args.compact_limit.is_some() {
+        if args.compact_limit.is_some() || haiku {
             argv.extend([
                 "-c".to_string(),
                 format!("model_auto_compact_token_limit_scope=\"{CODEX_COMPACT_SCOPE}\""),
@@ -3454,5 +3498,105 @@ mod tests {
         assert_eq!(response.text().await.unwrap(), "ok");
         server.await.unwrap();
         std::env::remove_var("VOGT_EXTRA_CA_FILE");
+    }
+}
+
+#[cfg(test)]
+mod haiku_window_tests {
+    use super::*;
+
+    fn provider(window: u64, compact: u64) -> CodexProvider {
+        CodexProvider {
+            name: "litellm".into(),
+            base_url: "http://router.invalid/v1".into(),
+            wire_api: "chat".into(),
+            env_key: "KEY".into(),
+            context_window: Some(window),
+            auto_compact_token_limit: Some(compact),
+        }
+    }
+
+    fn argv(model: Option<&str>, compact_limit: Option<u64>) -> Vec<String> {
+        let providers = [provider(850_000, 800_000)];
+        codex_args(&CodexArgs {
+            command_args: &[],
+            resume: None,
+            session_id: None,
+            model,
+            config_model: None,
+            effort: None,
+            permission_mode: None,
+            approval_policy: "never",
+            exec: false,
+            compact_limit,
+            provider: Some("litellm"),
+            providers: &providers,
+            catalog: None,
+            trust_cwd: None,
+            guidance: None,
+            charter: None,
+            mcp_servers: &[],
+            mcp_args: &[],
+            prompt: None,
+        })
+        .unwrap()
+    }
+
+    /// The value Codex would take for `key`: its last `-c key=value` pair.
+    fn last_value(argv: &[String], key: &str) -> Option<String> {
+        let prefix = format!("{key}=");
+        argv.windows(2)
+            .rfind(|pair| pair[0] == "-c" && pair[1].starts_with(&prefix))
+            .map(|pair| pair[1][prefix.len()..].to_string())
+    }
+
+    #[test]
+    fn a_haiku_launch_gets_its_own_window_and_compact_limit() {
+        let args = argv(Some("claude-org-haiku"), None);
+        assert_eq!(
+            last_value(&args, "model_context_window").as_deref(),
+            Some("200000")
+        );
+        assert_eq!(
+            last_value(&args, "model_auto_compact_token_limit").as_deref(),
+            Some("170000")
+        );
+        assert_eq!(
+            last_value(&args, "model_auto_compact_token_limit_scope").as_deref(),
+            Some("\"total\"")
+        );
+        // One window key only: the provider's 850k must not also be emitted.
+        assert!(!args.iter().any(|a| a == "model_context_window=850000"));
+    }
+
+    #[test]
+    fn a_haiku_backoff_may_raise_but_not_past_the_window_ceiling() {
+        let raised = argv(Some("haiku"), Some(175_000));
+        assert_eq!(
+            last_value(&raised, "model_auto_compact_token_limit").as_deref(),
+            Some("175000")
+        );
+        let capped = argv(Some("haiku"), Some(999_999));
+        assert_eq!(
+            last_value(&capped, "model_auto_compact_token_limit").as_deref(),
+            Some("180000")
+        );
+    }
+
+    #[test]
+    fn other_models_keep_the_provider_window_and_limit() {
+        let args = argv(Some("grok"), None);
+        assert_eq!(
+            last_value(&args, "model_context_window").as_deref(),
+            Some("850000")
+        );
+        assert_eq!(
+            last_value(&args, "model_auto_compact_token_limit").as_deref(),
+            Some("800000")
+        );
+        assert_eq!(
+            last_value(&argv(None, None), "model_context_window").as_deref(),
+            Some("850000")
+        );
     }
 }
