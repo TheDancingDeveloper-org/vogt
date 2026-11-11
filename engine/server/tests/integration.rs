@@ -9526,6 +9526,29 @@ async fn startup_closes_out_history_rows_left_unfinished_by_a_restart() {
 // Hibernation (WI-912)
 // ---------------------------------------------------------------------------
 
+/// The scrollback once it has grown past `len`, after a short settle so the
+/// echo of the bytes that caused the growth is all present.
+async fn wait_for_scrollback_growth(
+    client: &reqwest::Client,
+    base: &str,
+    id: &str,
+    len: usize,
+) -> String {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let printed = session_scrollback(client, base, id).await;
+        if printed.len() > len {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            return session_scrollback(client, base, id).await;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "session {id} printed nothing new; got {printed:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 /// Poll a live session's scrollback until it holds every `expected` string.
 async fn live_output_containing(
     client: &reqwest::Client,
@@ -9535,18 +9558,7 @@ async fn live_output_containing(
 ) -> String {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     loop {
-        let detail: SessionDetail = client
-            .get(format!("{base}/api/sessions/{id}"))
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
-        let snapshot = base64::engine::general_purpose::STANDARD
-            .decode(detail.scrollback_base64.as_bytes())
-            .unwrap();
-        let printed = String::from_utf8_lossy(&snapshot).into_owned();
+        let printed = session_scrollback(client, base, id).await;
         if expected.iter().all(|want| printed.contains(want)) {
             return printed;
         }
@@ -13893,6 +13905,105 @@ async fn a_live_session_accepts_input_resize_and_stop_without_blocking() {
     .await
     .expect("input, resize and stop remain responsive while the child exits");
     ws.close(None).await.ok();
+}
+
+/// WI-4068: vogt-core sends `text`, then each named key as its own `/input`
+/// write, so `keys: ["enter"]` arrives here as `text: "\r"` and
+/// `keys: ["tab"]` as `text: "\t"`. A program that asked for bracketed paste
+/// must still receive those as keys, not as pasted newline/tab text; only
+/// text that is actually pasted (and the Enter after or appended to it) is
+/// wrapped. A wrapper around a key would reach the PTY literally, which
+/// `cat -v` shows.
+#[tokio::test]
+async fn session_input_keys_reach_a_bracketed_paste_program_as_keys() {
+    let (base, _h) = boot().await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let id = create_session_with(
+        &client,
+        &base,
+        json!({
+            "name": "paste-mode-cat",
+            "command": [
+                "/bin/sh",
+                "-c",
+                // Turn bracketed paste on before `cat`, then say so, so the
+                // first input below is sent while the mode is live.
+                "printf '\\033[?2004h'; printf 'ready\\n'; exec cat -v",
+            ],
+        }),
+    )
+    .await;
+    live_output_containing(&client, &base, &id, &["ready"]).await;
+    // The scrollback is appended just before the grid parses the same bytes,
+    // and the grid is where bracketed paste is tracked. Give the parse that
+    // follows "ready" a moment to land before relying on the mode.
+    tokio::time::sleep(Duration::from_millis(250)).await;
+
+    // `keys: ["enter"]` is one `text: "\r"` write. It must reach the PTY as
+    // a key: the terminal echo shows a pasted marker as `^[[200~`.
+    let before = session_scrollback(&client, &base, &id).await;
+    client
+        .post(format!("{base}/api/sessions/{id}/input"))
+        .json(&json!({ "text": "\r" }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    let printed = wait_for_scrollback_growth(&client, &base, &id, before.len()).await;
+    let typed = &printed[before.len()..];
+    assert!(
+        typed.contains('\n'),
+        "Enter did not reach the PTY: {typed:?}"
+    );
+    assert!(
+        !typed.contains("^[[200~") && !typed.contains("^[[201~"),
+        "Enter was written as pasted text: {typed:?}"
+    );
+
+    // `keys: ["tab"]` is one `text: "\t"` write, for completion menus.
+    let before = session_scrollback(&client, &base, &id).await;
+    client
+        .post(format!("{base}/api/sessions/{id}/input"))
+        .json(&json!({ "text": "\t" }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    let printed = wait_for_scrollback_growth(&client, &base, &id, before.len()).await;
+    let typed = &printed[before.len()..];
+    assert!(typed.contains('\t'), "Tab did not reach the PTY: {typed:?}");
+    assert!(
+        !typed.contains("^[[200~") && !typed.contains("^[[201~"),
+        "Tab was written as pasted text: {typed:?}"
+    );
+
+    // The text+Enter shape is still one paste (WI-4068), so Codex's paste
+    // burst window ends before the Enter that follows it.
+    let before = session_scrollback(&client, &base, &id).await;
+    client
+        .post(format!("{base}/api/sessions/{id}/input"))
+        .json(&json!({ "text": "hello", "submit": true }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    let printed = wait_for_scrollback_growth(&client, &base, &id, before.len()).await;
+    let typed = &printed[before.len()..];
+    assert!(
+        typed.contains("^[[200~hello^[[201~"),
+        "the text was not one paste: {typed:?}"
+    );
+    assert!(
+        typed.contains('\n'),
+        "the Enter after the paste did not reach the PTY: {typed:?}"
+    );
+    kill_session(&client, &base, &id).await;
 }
 
 #[tokio::test]

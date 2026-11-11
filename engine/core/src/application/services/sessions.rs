@@ -5381,6 +5381,68 @@ mod tests {
     }
 
     #[test]
+    fn named_keys_are_their_own_writes_and_text_submits_after_it() {
+        // vogt-core, not the engine, turns named keys into bytes and orders
+        // the writes: Enter and Tab are one write each, and text is a write
+        // with a separate Enter after it. The engine's `/input` sees exactly
+        // these; its own paste rules must keep each one a key (WI-4068).
+        let (_dir, built, seen) = context("keys", person(), None, |_| {}, vec![]);
+        record_session(&built, "ses_1", "eng-1");
+        with_ctx!(&built, |ctx| {
+            for key in ["enter", "tab"] {
+                input(
+                    ctx,
+                    &InputParams {
+                        id: "ses_1".to_string(),
+                        text: None,
+                        keys: Some(vec![key.to_string()]),
+                        submit: false,
+                        reason: "pressing a key".to_string(),
+                        confirm: false,
+                        wake_timeout_s: 120,
+                    },
+                )
+                .unwrap();
+            }
+            input(
+                ctx,
+                &InputParams {
+                    id: "ses_1".to_string(),
+                    text: Some("hello".to_string()),
+                    keys: None,
+                    submit: true,
+                    reason: "typing".to_string(),
+                    confirm: false,
+                    wake_timeout_s: 120,
+                },
+            )
+            .unwrap();
+        });
+        let calls = seen.lock().unwrap();
+        let writes: Vec<(String, bool)> = calls
+            .iter()
+            .filter(|(method, path, _)| method == "POST" && path.ends_with("/input"))
+            .map(|(_, _, body)| {
+                let body: serde_json::Value = serde_json::from_str(body).unwrap();
+                (
+                    body["text"].as_str().unwrap().to_string(),
+                    body["submit"].as_bool().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            writes,
+            vec![
+                ("\r".to_string(), false),
+                ("\t".to_string(), false),
+                ("hello".to_string(), false),
+                (String::new(), true),
+            ],
+            "{calls:?}"
+        );
+    }
+
+    #[test]
     fn codex_input_left_in_the_composer_is_resubmitted() {
         fn screen(activity: &str, text: &str) -> Vec<u8> {
             serde_json::to_vec(&json!({

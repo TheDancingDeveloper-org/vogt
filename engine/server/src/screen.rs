@@ -174,8 +174,8 @@ pub struct Rendered {
 
 /// The bytes `/input` writes for `text`, then Enter when `submit`.
 ///
-/// Text to a program that asked for bracketed paste goes as one paste, single
-/// line or not: newlines normalised to `\n`, and any paste-end marker inside it
+/// Text to a program that asked for bracketed paste goes as one paste, one line
+/// or several: newlines normalised to `\n`, and any paste marker inside it
 /// dropped so the text cannot close the paste early. Multi-line text typed raw
 /// lands as soft line breaks in Claude Code's input box, and the Enter after it
 /// does not submit (WI-1870, seen live). A single line is a paste for the
@@ -184,28 +184,39 @@ pub struct Rendered {
 /// `\r` as one paste and turns the Enter into a newline inside it, so the
 /// prompt sits unsent in the composer and the session never starts a turn. An
 /// explicit paste ends that window, and a driver's `/input` is a paste, not
-/// typing. A `text` that carries a control character other than tab or a line
-/// break is not text: it is a key or an escape sequence a driver is sending
-/// (`\u001b` for Esc), and it is written as typed so the program still reads it
-/// as that key. An empty `text` (a bare Enter) and any text to a program
-/// without bracketed paste is written as typed too.
+/// typing.
+///
+/// A key is not text. A one-character `text` is an answer to a dialog (`1`,
+/// `y`) or a named key (Enter, Tab), and text made only of line breaks and tabs
+/// is a run of keys; both are written as typed. So is a control character
+/// other than tab or a line break on a single line — an escape sequence or
+/// key chord (`\u001b` for Esc, arrows) — because a paste would make it literal
+/// text instead. In a multi-line paste an Esc byte has no literal text form, so
+/// Esc bytes are removed rather than turning the whole body into a raw key sequence;
+/// this keeps WI-1870's paste behaviour. An empty `text` (a bare Enter) and any
+/// text to a program without bracketed paste is written as typed too.
 pub fn input_bytes(text: &str, bracketed_paste: bool, submit: bool) -> Vec<u8> {
     const START: &str = "\x1b[200~";
     const END: &str = "\x1b[201~";
-    // A paste is literal text, so a control byte inside it would lose its
-    // meaning: a driver's `\u001b` (Esc) must stay a key.
-    let keys = text
+    let single = text.chars().count() == 1;
+    let keys_only = text.chars().all(|c| matches!(c, '\t' | '\n' | '\r'));
+    let key_sequence = text
         .chars()
-        .any(|c| c.is_control() && !matches!(c, '\t' | '\n' | '\r'));
-    let mut out = if bracketed_paste && !text.is_empty() && !keys {
-        // No control byte can reach here today, so neither marker can occur;
-        // dropping them keeps a paste body unable to close its own paste if
-        // that rule ever loosens.
+        .any(|c| c.is_control() && !matches!(c, '\t' | '\n' | '\r'))
+        && !text.contains('\n')
+        && !text.contains('\r');
+    let paste = bracketed_paste && !text.is_empty() && !single && !keys_only && !key_sequence;
+    let mut out = if paste {
+        // An Esc inside a paste is a literal byte the program would read as
+        // an escape prefix, so it is dropped. Removing it after the
+        // markers keeps neither marker in the body, including one that
+        // arrived inside the text itself.
         let body = text
             .replace("\r\n", "\n")
             .replace('\r', "\n")
             .replace(END, "")
-            .replace(START, "");
+            .replace(START, "")
+            .replace('\x1b', "");
         format!("{START}{body}{END}").into_bytes()
     } else {
         text.as_bytes().to_vec()
@@ -885,8 +896,8 @@ mod tests {
         );
         assert_eq!(
             input_bytes("a\n\x1b[201~b", true, false),
-            b"a\n\x1b[201~b".to_vec(),
-            "a control byte makes it a key, not a paste to escape"
+            b"\x1b[200~a\nb\x1b[201~".to_vec(),
+            "a paste-end marker inside a multi-line paste is dropped, not typed"
         );
         assert_eq!(
             input_bytes("a\nb", false, true),
@@ -938,6 +949,52 @@ mod tests {
             input_bytes("\u{3}", true, true),
             b"\x03\r".to_vec(),
             "ctrl-c stays a key"
+        );
+    }
+
+    #[test]
+    fn named_keys_and_single_characters_are_typed_not_pasted() {
+        // vogt-core sends each named key as its own `/input` write:
+        // `keys: ["enter"]` is `text: "\r"`, `keys: ["tab"]` is `text: "\t"`.
+        // A paste wrapper would make the key literal paste text instead.
+        for key in ["\r", "\n", "\t"] {
+            assert_eq!(
+                input_bytes(key, true, false),
+                key.as_bytes(),
+                "{key:?} is a key, not a paste"
+            );
+        }
+        assert_eq!(
+            input_bytes("\r\n\t", true, false),
+            b"\r\n\t".to_vec(),
+            "text made only of keys is typed"
+        );
+        // A one-character answer to a dialog (`1`, `y`) is a key press.
+        for answer in ["1", "y"] {
+            assert_eq!(
+                input_bytes(answer, true, false),
+                answer.as_bytes(),
+                "{answer:?} is an answer, not a paste"
+            );
+        }
+        // A multi-character escape sequence is still one key.
+        assert_eq!(input_bytes("\x1b[A", true, false), b"\x1b[A".to_vec());
+        assert_eq!(input_bytes("\x03", true, false), b"\x03".to_vec());
+    }
+
+    #[test]
+    fn multi_line_text_with_an_escape_is_pasted_without_the_escape() {
+        // A lone Esc inside multi-line text has no literal text form. The
+        // paste must still happen (WI-1870), so the Esc is removed rather
+        // than making the whole body a raw key sequence.
+        assert_eq!(
+            input_bytes("one\n\x1b two\nthree", true, false),
+            b"\x1b[200~one\n two\nthree\x1b[201~".to_vec()
+        );
+        assert_eq!(
+            input_bytes("a\n\x1b[200~b\n\x1b[201~c", true, true),
+            b"\x1b[200~a\nb\nc\x1b[201~\r".to_vec(),
+            "neither paste marker can appear inside the body"
         );
     }
 
