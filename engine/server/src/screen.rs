@@ -321,8 +321,67 @@ pub fn claude_posture(lines: &[String]) -> Option<&'static str> {
 /// opencode draws no prompt glyph at all, so it has its own test
 /// ([`shows_opencode_prompt`]); without it an opencode session was never
 /// `ready` and a driver waiting for it never re-prompted it (WI-949).
+///
+/// A plain shell draws none of those, so it has one too
+/// ([`shows_shell_prompt`]); without it a shell session was never `ready`
+/// and `session_wait(until=ready)` on one timed out at its prompt (WI-826).
 pub fn shows_prompt(lines: &[String]) -> bool {
-    shows_glyph_prompt(lines) || shows_opencode_prompt(lines)
+    shows_glyph_prompt(lines) || shows_opencode_prompt(lines) || shows_shell_prompt(lines)
+}
+
+/// Whether the bottom of the screen is a plain shell's prompt.
+///
+/// bash, sh, zsh and fish end their prompt with `$` (a user) or `#` (root);
+/// zsh's default also ends with `%`. The render trims trailing spaces, so
+/// `bash-5.3$ ` arrives as `bash-5.3$`. These are heuristics like the glyph
+/// ones, kept conservative because a false `ready` invites a driver to type
+/// into a program that is not listening:
+///
+/// - only the last non-blank row counts, and only when the session is
+///   otherwise at rest (the caller checks activity);
+/// - a working line (`esc to interrupt`) rules the screen out, as it does
+///   for the agent glyphs;
+/// - `%` must be set off by a space (or be the whole row), so progress
+///   output such as `100%` is not a prompt;
+/// - a sigil right after a label (`cost: $`, `SHELL=$`) is output, not a
+///   prompt.
+fn shows_shell_prompt(lines: &[String]) -> bool {
+    const SIGILS: [char; 3] = ['$', '#', '%'];
+    /// Longer than any sane prompt; a wrapped line of output is not one.
+    const MAX_CHARS: usize = 200;
+    if bottom_lines(lines, 10)
+        .iter()
+        .any(|l| l.to_lowercase().contains("esc to interrupt"))
+    {
+        return false;
+    }
+    let Some(row) = lines.iter().rev().find(|l| !l.trim().is_empty()) else {
+        return false;
+    };
+    let row = row.trim_end();
+    if row.chars().count() > MAX_CHARS {
+        return false;
+    }
+    // bash's `select` menu asks `#? ` and waits for a number: a shell prompt
+    // of its own kind, and the one a driver answering a menu meets.
+    if row.ends_with("#?") {
+        return true;
+    }
+    let Some(sigil) = row.chars().last() else {
+        return false;
+    };
+    if !SIGILS.contains(&sigil) {
+        return false;
+    }
+    if sigil == '%' {
+        // `100%` and `50%` are progress, `~/src %` and a bare `%` are prompts.
+        let preceded_by_space = row[..row.len() - sigil.len_utf8()].ends_with(' ');
+        if !(preceded_by_space || row == "%") {
+            return false;
+        }
+    }
+    let body = row[..row.len() - sigil.len_utf8()].trim_end();
+    !(body.ends_with(':') || body.ends_with('='))
 }
 
 fn shows_glyph_prompt(lines: &[String]) -> bool {
@@ -863,6 +922,69 @@ mod tests {
         ));
         assert!(!shows_prompt(&["->x".to_string()]));
         assert!(!shows_prompt(&[]));
+    }
+
+    #[test]
+    fn recognises_a_plain_shell_prompt() {
+        // The prompts a shell draws at rest (WI-826).
+        for prompt in [
+            "bash-5.3$",
+            "user@host:~/src$",
+            "[root@host ~]#",
+            "~/src %",
+            "$",
+            "#",
+            "%",
+            "#?",
+        ] {
+            assert!(
+                shows_prompt(&[prompt.to_string()]),
+                "{prompt:?} is a shell prompt"
+            );
+        }
+        // Output that merely ends with a sigil is not one.
+        for output in [
+            "compiling foo v0.1.0",
+            "100%",
+            "sale: 50%",
+            "Total cost: $",
+            "SHELL=$",
+            "✻ Running… (12s · esc to interrupt)",
+        ] {
+            assert!(
+                !shows_prompt(&[output.to_string()]),
+                "{output:?} is output, not a prompt"
+            );
+        }
+        // Only the last non-blank row decides: an earlier prompt scrolled
+        // above a program that is still printing is not where input goes.
+        assert!(!shows_prompt(&[
+            "bash-5.3$".to_string(),
+            "npm run build".to_string(),
+        ]));
+        // A shell prompt is readiness on an idle live session, the same as
+        // an agent's prompt, and never on one that has ended.
+        assert!(is_ready(
+            ActivityState::Idle,
+            true,
+            &screen(&["bash-5.3$"]),
+            None,
+            None
+        ));
+        assert!(!is_ready(
+            ActivityState::Running,
+            true,
+            &screen(&["bash-5.3$"]),
+            None,
+            None
+        ));
+        assert!(!is_ready(
+            ActivityState::Exited,
+            false,
+            &screen(&["bash-5.3$"]),
+            None,
+            None
+        ));
     }
 
     fn screen(lines: &[&str]) -> Vec<String> {

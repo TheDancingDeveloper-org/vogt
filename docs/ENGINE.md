@@ -1518,9 +1518,14 @@ stripped. This route instead answers with what the terminal shows now:
 - `ready` — the program is waiting for input: the session is alive and
   either `activity` is `waiting-for-input`, or it is `idle` and one of the
   lowest ten non-blank lines, box border stripped, starts with a prompt glyph
-  (`>`, `❯`, `›`, `>>>`) — Claude Code's input box, Codex's composer, a REPL.
-  `running` is never ready, because those TUIs keep drawing their input box
-  while they work; nor is `awaiting-approval`, where typing answers a dialog.
+  (`>`, `❯`, `›`, `>>>`) — Claude Code's input box, Codex's composer, a REPL —
+  or its last non-blank line ends with a shell's prompt sigil (`$`, `#`, `%`),
+  which is how bash, sh, zsh and fish show they are listening. The shell form
+  is deliberately narrow: `%` must be set off by a space (`~/src %`, not
+  `100%`) and a sigil after a label (`cost: $`, `SHELL=$`) is output, not a
+  prompt. `running` is never ready, because those TUIs keep drawing their
+  input box while they work; nor is `awaiting-approval`, where typing answers
+  a dialog.
 - `scrollback` — with `?scrollback_lines=N`, up to N lines that scrolled off
   the top of the screen, oldest first (bounded by the replayed 1 MiB). Absent
   otherwise.
