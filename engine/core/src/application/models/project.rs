@@ -189,13 +189,13 @@ pub struct ListProjectsParams {
     pub offset: i64,
 }
 
-/// A project, plus whether `work.create` would land there right now.
+/// A project, plus whether an explicit upstream create would land now.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[schemars(extend("additionalProperties" = false))]
 pub struct ProjectListing {
     #[serde(flatten)]
     pub project: Project,
-    /// Whether a default `work.create` (no `local_only`) succeeds on this project now: it is forge-linked, its write-back policy permits `create`, a forge credential resolves and its repo_url parses. False means the create refuses with `project_not_linked` or `upstream_write_refused`; `writable_reason` says which and how to fix it.
+    /// Whether an explicit `work.create` with `upstream=true` would land on the forge now: it is forge-linked, its write-back policy permits `create`, a forge credential resolves and its repo_url parses. False means the create refuses with `project_not_linked` or `upstream_write_refused`; `writable_reason` says which and how to fix it.
     pub writable: bool,
     /// Why `writable` is what it is, naming the way forward.
     pub writable_reason: String,

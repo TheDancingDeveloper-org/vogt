@@ -223,8 +223,9 @@ SCRIPT: list[tuple[str, StepParams]] = [
             "reason": WHY,
         },
     ),
-    # Write-through create on the linked project: the stand-in forge mints
+    # Explicit upstream create on the linked project: the stand-in forge mints
     # issue #1, and the subject key comes back as the ref on every surface.
+    # The default create is native (WI-3987), so the write-through is opt-in.
     (
         "work.create",
         {
@@ -233,13 +234,13 @@ SCRIPT: list[tuple[str, StepParams]] = [
             "body": "created through the forge",
             "project": "parity-project",
             "labels": ["parity"],
+            "upstream": True,
             "reason": WHY,
         },
     ),
-    # The explicit local-only create: on a linked project this makes a
-    # native declared item that carries no upstream subject yet — no forge call,
-    # the same receipt on every surface. It is the opt-in that neither the
-    # policy gate nor the decision-10 refusal applies to.
+    # The explicit local-only create: the same native path as the default, and
+    # kept as a recorded alias. It carries no upstream subject yet — no forge
+    # call — and gets the same receipt on every surface.
     (
         "work.create",
         {
