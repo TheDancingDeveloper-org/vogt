@@ -523,10 +523,6 @@ struct Calls {
     /// "$CMD"`, `bash -c "$CMD"`): what it runs is decided when the line
     /// runs, from text that can be spelled any way at all.
     dynamic: bool,
-    /// A program is exactly a command substitution (`eval "$(ssh-agent
-    /// -s)"`): it runs what that command prints, and the command itself is
-    /// on the line.
-    substituted: bool,
     /// The whole line, for the verbs an opaque part may act on later in it
     /// (`alias g='git -C x'; g commit`).
     line: String,
@@ -534,15 +530,15 @@ struct Calls {
 
 impl Calls {
     /// The discard guard counts the line as reaching every baseline path
-    /// when a program is a variable (whatever it holds); when a shell runs a
-    /// script that is not on the line, or a program is a command
-    /// substitution, on a line that names git, rm or a deleting verb (the
-    /// words the script holds are written elsewhere on it: `bash <(echo git
-    /// restore a.txt)`); or when an opaque part names one.
+    /// when a program is a variable or a command substitution (whatever it
+    /// holds; only `eval "$(ssh-agent -s)"` is read as safe); when a shell
+    /// runs a script that is not on the line, on a line that names git, rm
+    /// or a deleting verb (the words the script holds are written elsewhere
+    /// on it: `bash <(echo git restore a.txt)`); or when an opaque part
+    /// names one.
     fn blind_discard(&self) -> bool {
         self.dynamic
             || (self.blind && mentions(&self.line, DISCARD_WORDS))
-            || (self.substituted && mentions(&self.line, DISCARD_VERBS))
             || self.opaque.iter().any(|text| mentions(text, DISCARD_WORDS))
     }
 
@@ -565,14 +561,6 @@ impl Calls {
 const DISCARD_WORDS: &[&str] = &[
     "git", "rm", "mv", "unlink", "shred", "truncate", "checkout", "restore", "reset", "clean",
     "stash", "switch",
-];
-
-/// [`DISCARD_WORDS`] without `git` itself: no discard runs through git
-/// without one of these verbs, so `eval "$(ssh-agent -s)"; git push` stays
-/// allowed.
-const DISCARD_VERBS: &[&str] = &[
-    "rm", "mv", "unlink", "shred", "truncate", "checkout", "restore", "reset", "clean", "stash",
-    "switch",
 ];
 
 /// Git subcommands [`git_write`] counts as writes, as words.
@@ -702,22 +690,35 @@ impl Walker {
         }
         // A `( … )` subshell's cd does not outlive it.
         let mut saved: Vec<State> = Vec::new();
+        // The substitutions in the simple command being read: the lexer
+        // emits them just before the command that holds them.
+        let mut subs: Vec<&[Piece]> = Vec::new();
         for piece in pieces {
             match piece {
-                Piece::Open => saved.push(state.clone()),
+                Piece::Open => {
+                    subs.clear();
+                    saved.push(state.clone());
+                }
                 Piece::Close => {
+                    subs.clear();
                     if let Some(outer) = saved.pop() {
                         state = outer;
                     }
                 }
                 // A substitution runs in a subshell from the same directory.
-                Piece::Sub(inner) => self.pieces_from(inner, state.clone(), depth + 1),
-                Piece::Cmd(simple) => self.simple(simple, &mut state, depth),
+                Piece::Sub(inner) => {
+                    subs.push(inner);
+                    self.pieces_from(inner, state.clone(), depth + 1);
+                }
+                Piece::Cmd(simple) => {
+                    self.simple(simple, &mut state, depth, &subs);
+                    subs.clear();
+                }
             }
         }
     }
 
-    fn simple(&mut self, simple: &str, state: &mut State, depth: usize) {
+    fn simple(&mut self, simple: &str, state: &mut State, depth: usize, subs: &[&[Piece]]) {
         let (words, wrapped_opaque) = command_words_ext(simple);
         if wrapped_opaque {
             self.out.opaque.push(simple.to_string());
@@ -741,16 +742,13 @@ impl Walker {
             return;
         }
         if first.contains(['$', '`']) {
-            // The program is an expansion (`$GIT checkout …`, `${R}m`, or
-            // the `$CMD` an `eval`/`sh -c` payload holds): what it runs is
-            // not on the line. The lexer leaves a lone `$` where a command
-            // substitution stood.
+            // The program is an expansion (`$GIT checkout …`, `${R}m`, the
+            // `$CMD` an `eval`/`sh -c` payload holds, or a command
+            // substitution, which the lexer leaves as a lone `$`): what it
+            // runs is not on the line. `$(printf %s%s r m) a.txt` prints its
+            // program out of pieces no word names (WI-4001 bypass 1).
             self.out.opaque.push(simple.to_string());
-            if first == "$" {
-                self.out.substituted = true;
-            } else {
-                self.out.dynamic = true;
-            }
+            self.out.dynamic = true;
             return;
         }
         match base(first) {
@@ -800,6 +798,13 @@ impl Walker {
             }
             "eval" => {
                 let payload = words[1..].join(" ");
+                // `eval "$(ssh-agent -s)"`: the one substitution whose output
+                // is known to be variable assignments, spelled literally.
+                // Anything else a substitution feeds eval is unreadable.
+                if payload == "$" && subs.len() == 1 && ssh_agent(subs[0]) {
+                    state.unreadable = true;
+                    return;
+                }
                 let (pieces, opaque) = lex(&payload);
                 if opaque {
                     self.out.opaque.push(payload.clone());
@@ -1037,6 +1042,24 @@ fn git_aliased(words: &[String]) -> bool {
         return names && !reads;
     }
     false
+}
+
+/// Whether a substitution's pieces are exactly one literal `ssh-agent` call
+/// (`ssh-agent`, `ssh-agent -s`, `/usr/bin/ssh-agent -t 3600`): flags and
+/// numbers only, no expansion, no second command.
+fn ssh_agent(pieces: &[Piece]) -> bool {
+    let [Piece::Cmd(simple)] = pieces else {
+        return false;
+    };
+    if simple.contains(['$', '`', '<', '>', '\\', '\'', '"']) {
+        return false;
+    }
+    let words = shell_words(simple);
+    words.first().is_some_and(|w| base(w) == "ssh-agent")
+        && words[1..].iter().all(|w| {
+            (w.len() > 1 && w.starts_with('-') && w[1..].chars().all(|c| c.is_ascii_alphabetic()))
+                || w.chars().all(|c| c.is_ascii_digit())
+        })
 }
 
 /// The action `trap` installs: its first operand after any `--`, unless
@@ -3192,5 +3215,40 @@ mod tests {
         );
         std::fs::remove_dir_all(&wt).ok();
         std::fs::remove_dir_all(&main).ok();
+    }
+
+    /// Bypass 1: a command substitution as the program runs whatever it
+    /// prints. Only a plain `ssh-agent` substitution under `eval` is kept.
+    #[test]
+    fn round3_substituted_programs_are_refused() {
+        let (root, p) = round3("subst");
+        assert_refused(
+            &p,
+            &root,
+            &[
+                "$(printf %s%s r m) a.txt",
+                "`printf %s%s r m` a.txt",
+                "\"$(printf %s%s r m)\" a.txt",
+                "eval \"$(echo cm0gYS50eHQ= | base64 -d)\"",
+                "eval `echo cm0gYS50eHQ= | base64 -d`",
+                "bash -c \"$(cat /tmp/s)\"",
+                "sh -c \"`cat /tmp/s`\"",
+                "eval \"$(ssh-agent -s; cat /tmp/s)\"",
+                "eval \"$(ssh-agent -s)$(cat /tmp/s)\"",
+                "eval \"$(ssh-agent $X)\"",
+            ],
+        );
+        assert_allowed(
+            &p,
+            &root,
+            &[
+                "eval \"$(ssh-agent -s)\"; git push",
+                "eval \"$(ssh-agent -s)\" && ssh-add ~/.ssh/k",
+                "eval `ssh-agent -s`",
+                "eval $(ssh-agent)",
+                "echo $(git rev-parse HEAD)",
+            ],
+        );
+        std::fs::remove_dir_all(&root).ok();
     }
 }
