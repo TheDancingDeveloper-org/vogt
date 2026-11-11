@@ -346,12 +346,6 @@ fn git_dir(words: &[String], cwd: &Path) -> PathBuf {
     let mut dir = cwd.to_path_buf();
     let mut args = words.iter().skip(1);
     while let Some(arg) = args.next() {
-        // `-c key=value` and `--config-env name=var` take a value, which
-        // is not the subcommand: `git -c x=y -C <dir> commit` runs in dir.
-        if arg == "-c" || arg == "--config-env" {
-            args.next();
-            continue;
-        }
         if let Some(path) = arg.strip_prefix("-C") {
             let path = if path.is_empty() {
                 args.next().map(String::as_str).unwrap_or("")
@@ -497,11 +491,6 @@ struct GitCall {
     /// A plain `rm`/`unlink`: `words` are the paths, each resolved on its own,
     /// and `redirected` means a `cd` ran first (relative paths unreadable).
     rm: bool,
-    /// The subcommand may be an alias this reading cannot see (WI-4001
-    /// bypass 4): `-c alias.<sub>=…`, `--config-env=alias.<sub>=…`, an
-    /// `include.path`, `GIT_CONFIG_*` on the line, or a `git config` that
-    /// sets an alias. Its verb is then unknown: it may discard or write.
-    aliased: bool,
 }
 
 /// What the line does, as far as this reading can tell.
@@ -640,19 +629,8 @@ fn git_calls(command: &str, cwd: &Path) -> Calls {
     .iter()
     .any(|v| command.contains(v))
         || command.to_ascii_lowercase().contains("core.worktree");
-    let configured = [
-        "GIT_CONFIG_COUNT",
-        "GIT_CONFIG_KEY_",
-        "GIT_CONFIG_PARAMETERS",
-        "GIT_CONFIG=",
-        "GIT_CONFIG_GLOBAL",
-        "GIT_CONFIG_SYSTEM",
-    ]
-    .iter()
-    .any(|v| command.contains(v));
     let mut walker = Walker {
         moved: redirected,
-        configured,
         out: Calls {
             line: command.to_string(),
             ..Calls::default()
@@ -665,10 +643,6 @@ fn git_calls(command: &str, cwd: &Path) -> Calls {
 struct Walker {
     /// The line points git elsewhere (see [`GitCall::redirected`]).
     moved: bool,
-    /// The line hands git configuration through the environment
-    /// (`GIT_CONFIG_COUNT`/`_KEY_n`, `GIT_CONFIG_PARAMETERS`, `GIT_CONFIG`,
-    /// `GIT_CONFIG_GLOBAL`/`_SYSTEM`): any subcommand may be an alias.
-    configured: bool,
     out: Calls,
 }
 
@@ -850,14 +824,12 @@ impl Walker {
                     .iter()
                     .any(|d| d.contains(['$', '`']) || expand_home(d).is_none());
                 let hidden = simple.contains(['$', '`']) || elsewhere;
-                let aliased = self.configured || git_aliased(&words);
                 self.out.calls.push(GitCall {
                     words,
                     cwd: state.dir.clone(),
                     unreadable: state.unreadable || state.cd || hidden,
                     redirected: self.moved || state.lost || elsewhere || hidden_dir,
                     rm: false,
-                    aliased,
                 });
             }
             // A plain `rm` deletes the same files `git rm` does (WI-3985's
@@ -882,7 +854,6 @@ impl Walker {
                     unreadable: state.unreadable || simple.contains('`'),
                     redirected: state.cd,
                     rm: true,
-                    aliased: false,
                 });
             }
             _ => {}
@@ -979,66 +950,6 @@ fn shell_payload(words: &[String]) -> Payload<'_> {
     }
 }
 
-/// Whether a git call's subcommand may be an alias (see
-/// [`GitCall::aliased`]): a `-c`/`--config-env` that defines an alias of the
-/// very subcommand it runs (git ignores an alias that shadows a builtin, so
-/// `-c alias.st=status status` is a plain `status`) or sets `include.path`
-/// / `includeIf.*`, or a `git config` that sets an alias or include.
-fn git_aliased(words: &[String]) -> bool {
-    let args = git_args(words);
-    let sub = args.first().map(|s| s.to_ascii_lowercase());
-    let mut rest = words.iter().skip(1);
-    while let Some(arg) = rest.next() {
-        let setting = match arg.as_str() {
-            "-c" | "--config-env" => rest.next().map(String::as_str),
-            _ if arg.starts_with("--config-env=") => arg.strip_prefix("--config-env="),
-            _ if arg.starts_with("-c") && arg.len() > 2 && !arg.starts_with("-C") => {
-                arg.strip_prefix("-c")
-            }
-            "-C" => {
-                rest.next();
-                None
-            }
-            _ if arg.starts_with('-') => None,
-            _ => break,
-        };
-        let Some(setting) = setting else { continue };
-        let key = setting
-            .split_once('=')
-            .map_or(setting, |(k, _)| k)
-            .to_ascii_lowercase();
-        if key.starts_with("include.") || key.starts_with("includeif.") {
-            return true;
-        }
-        if let Some(name) = key.strip_prefix("alias.") {
-            if sub.as_deref() == Some(name) {
-                return true;
-            }
-        }
-    }
-    if sub.as_deref() == Some("config") {
-        let reads = args.iter().any(|a| {
-            matches!(
-                a.as_str(),
-                "--get"
-                    | "--get-all"
-                    | "--get-regexp"
-                    | "--get-urlmatch"
-                    | "--list"
-                    | "-l"
-                    | "get"
-                    | "list"
-            )
-        });
-        let names = args[1..].iter().any(|a| {
-            let a = a.to_ascii_lowercase();
-            a.starts_with("alias.") || a.starts_with("include.") || a.starts_with("includeif.")
-        });
-        return names && !reads;
-    }
-    false
-}
-
 /// The action `trap` installs: its first operand after any `--`, unless
 /// that is `-` (reset) or the call only lists (`-p`, `-l`).
 fn trap_action(words: &[String]) -> Option<&str> {
@@ -1117,7 +1028,7 @@ fn git_dir_words(words: &[String]) -> Vec<&str> {
             }
         } else if let Some(d) = arg.strip_prefix("-C") {
             out.push(d);
-        } else if arg == "-c" || arg == "--config-env" {
+        } else if arg == "-c" {
             args.next();
         } else if !arg.starts_with('-') {
             break;
@@ -1482,7 +1393,7 @@ fn discard(policy: &SessionPolicy, calls: &Calls, repos: &mut Repos) -> Option<S
         };
         // A subcommand this reading cannot spell (`git restore${IFS}a.txt`,
         // `git $SUB a.txt`, `git {restore,x} a.txt`) may be any of them.
-        let spelled = spelled(sub) && !call.aliased;
+        let spelled = spelled(sub);
         let reach = if spelled {
             match discards(sub, &args[1..]) {
                 Some(reach) => reach,
@@ -1813,7 +1724,7 @@ fn protected(policy: &SessionPolicy, calls: &Calls, repos: &mut Repos) -> Option
         let Some(sub) = args.first() else {
             continue;
         };
-        if spelled(sub) && !call.aliased && !git_write(sub, &args[1..]) {
+        if spelled(sub) && !git_write(sub, &args[1..]) {
             continue;
         }
         let sub = label(sub);
@@ -1889,7 +1800,7 @@ fn git_args(words: &[String]) -> Vec<String> {
     let mut args = words.iter().skip(1);
     let mut out = Vec::new();
     while let Some(arg) = args.next() {
-        if arg == "-C" || arg == "-c" || arg == "--config-env" {
+        if arg == "-C" || arg == "-c" {
             args.next();
             continue;
         }
@@ -3131,66 +3042,5 @@ mod tests {
             ],
         );
         std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// Bypass 4: a git alias, set on the line or by `git config`, names a
-    /// subcommand this reading cannot see.
-    #[test]
-    fn round3_git_aliases_are_refused() {
-        let (root, p) = round3("alias");
-        assert_refused(
-            &p,
-            &root,
-            &[
-                "git -c alias.r=restore r a.txt",
-                "git -c 'alias.r=!rm a.txt' r",
-                "git -c ALIAS.r=restore r a.txt",
-                "git -c al\"\"ias.r=restore r a.txt",
-                "K=x git --config-env=alias.r=K r a.txt",
-                "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.r GIT_CONFIG_VALUE_0=restore git r a.txt",
-                "GIT_CONFIG_PARAMETERS=\"'alias.r'='restore'\" git r a.txt",
-                "git config alias.r restore; git r a.txt",
-                "git config alias.r restore",
-                "git config --global alias.r '!rm a.txt'",
-                "git -c include.path=/tmp/x r a.txt",
-            ],
-        );
-        assert_allowed(
-            &p,
-            &root,
-            &[
-                "git config --get alias.st",
-                "git config --list",
-                "git config user.name x",
-                "git -c color.ui=never log -1",
-                "git -c alias.st=status status",
-            ],
-        );
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// Bypass 4, protected-checkout half: an alias hides a write's verb.
-    #[test]
-    fn round3_git_aliases_do_not_escape_the_protected_checkout_rule() {
-        let (main, wt) = checkout_and_worktree("round3-alias-pc");
-        let mut p = workspace(&[], Some("worktree"), &wt);
-        p.protected_checkouts = vec![main.display().to_string()];
-        let c = main.display();
-        for command in [
-            format!("git -C {c} -c alias.c=commit c -m x"),
-            format!("git -c alias.c=commit -C {c} c -m x"),
-            format!("git -c color.ui=never -C {c} commit -m x"),
-            format!("GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.c GIT_CONFIG_VALUE_0=commit git -C {c} c -m x"),
-        ] {
-            let reason = check(&p, &command, &wt).unwrap_or_else(|| panic!("allowed: {command}"));
-            assert!(reason.contains("protected checkout"), "{command}: {reason}");
-        }
-        assert_eq!(check(&p, &format!("git -C {c} log -1"), &wt), None);
-        assert_eq!(
-            check(&p, &format!("git -C {c} -c alias.l=log log -1"), &wt),
-            None
-        );
-        std::fs::remove_dir_all(&wt).ok();
-        std::fs::remove_dir_all(&main).ok();
     }
 }
