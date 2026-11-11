@@ -107,7 +107,10 @@ pub struct CreateWorkParams {
     /// Existing label names to attach.
     #[serde(default)]
     pub labels: Option<Vec<String>>,
-    /// Create the item locally without writing it upstream. A default create on a forge-linked project also opens the upstream issue on the forge (a GitHub issue for a GitHub-linked project), and is refused when the write-back policy does not permit 'create'. Pass local_only=true to create a native item here only: nothing is sent to the forge, and a later `forge link` or `forge writeback` migrates it upstream. On an unlinked project a default create is refused, so local_only is the way to create there. Default off.
+    /// Create the item on the forge as well: on a forge-linked project, open the upstream issue (a GitHub issue for a GitHub-linked project), key the local overlay by its subject, and record the write-back. It requires the project to be forge-linked and its write-back policy to permit 'create'. Default off: a create is a native item (WI-n) and nothing is sent to the forge; a later `forge link` or `forge writeback` migrates it upstream.
+    #[serde(default)]
+    pub upstream: bool,
+    /// Create the item locally without writing it upstream. This is the default for every project, and the flag is kept so a caller can state it explicitly; it conflicts with upstream=true. The item carries no upstream subject yet and is exactly what a later `forge link` or `forge writeback` migrates upstream.
     #[serde(default)]
     pub local_only: bool,
     #[schemars(length(min = 1))]

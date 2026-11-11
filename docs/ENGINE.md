@@ -4273,7 +4273,7 @@ can affect the forge; the same approval gate and core writeback policy apply.
 | `project.create` | Operator-only | Unavailable: Creates host directories and files; use project setup outside the assistant. |
 | `project.import` | Operator-only | Unavailable: Clones into host paths and performs bulk import; use project setup. |
 | `project.get` | Voice-readable | Available: Fetch one project by slug. |
-| `project.list` | Voice-readable | Available: List registered projects, each with whether work.create lands there now. |
+| `project.list` | Voice-readable | Available: List registered projects, each with whether an upstream work.create lands there now. |
 | `project.brief` | Voice-readable | Available: The per-repo view: state, work, bugs, version, compliance. |
 | `project.update` | Confirmation-gated | Available after approval: Correct a project's declared repo URL or exclusions. |
 | `project.transition` | Confirmation-gated | Available after approval: Move a project through its lifecycle states. |

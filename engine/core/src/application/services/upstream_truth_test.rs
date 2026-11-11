@@ -94,16 +94,16 @@ fn vogt_only_changes_produce_zero_provider_calls() {
     assert_eq!(work["item"]["state"], "in_progress");
 }
 
-/// The default create on an unlinked project is the typed refusal, and it names
-/// both ways forward and what still works, so an agent does not conclude its
-/// native items cannot be commented on or closed.
+/// An outright `upstream` create on an unlinked project is the typed refusal,
+/// and it names both ways forward and what still works, so an agent does not
+/// conclude its native items cannot be commented on or closed.
 #[test]
 fn create_on_an_unlinked_project_is_the_typed_refusal() {
     let (built, _) = forgejo_with(four_issues(), false);
     add_folder(&built);
     let refused = create_op(
         &built,
-        json!({"kind": "bug", "title": "Nope", "project": "folder", "reason": WHY}),
+        json!({"kind": "bug", "title": "Nope", "project": "folder", "upstream": true, "reason": WHY}),
     );
     let message = match refused {
         Err(VogtError::NotLinked(message)) => message,
@@ -113,8 +113,32 @@ fn create_on_an_unlinked_project_is_the_typed_refusal() {
         message.contains("forge link") && message.contains("publish"),
         "{message}"
     );
-    assert!(message.contains("local_only: true"), "{message}");
+    assert!(message.contains("drop `upstream`"), "{message}");
     assert!(message.contains("comments, transitions"), "{message}");
+}
+
+/// WI-3987: a default create on a linked project is a native item. The
+/// oversight-style call that names a project and no flags must not open a
+/// forge issue by surprise.
+#[test]
+fn a_default_create_on_a_linked_project_is_native() {
+    let (built, forgejo) = forgejo_with(four_issues(), true);
+    let created = create_op(
+        &built,
+        json!({"kind": "chore", "title": "Track the sweep", "project": SLUG, "reason": WHY}),
+    )
+    .unwrap();
+    let reference = reference(&created);
+    assert!(
+        reference.starts_with("WI-"),
+        "a native ref, not an upstream subject key: {reference}"
+    );
+    assert_eq!(created["item"]["origin"], "created");
+    assert!(
+        forgejo.mutations().is_empty(),
+        "a default create sent nothing upstream: {:?}",
+        forgejo.mutations()
+    );
 }
 
 /// What `local_only` can create on an unlinked project, it can also discuss and
@@ -321,18 +345,18 @@ fn local_only_create_succeeds_under_policy_none() {
     assert_eq!(pending, vec![reference]);
 }
 
-/// Without `local_only`, a create on a linked policy-`none` project refuses
-/// before anything is sent, and the refusal names the escape hatch.
+/// An `upstream` create on a linked policy-`none` project refuses before
+/// anything is sent, and the refusal names the escape hatch.
 #[test]
-fn default_create_on_linked_none_still_refuses() {
+fn upstream_create_on_linked_none_still_refuses() {
     let (built, forgejo) = forgejo_with(four_issues(), true);
     let refused = create_op(
         &built,
-        json!({"kind": "bug", "title": "Refused", "project": SLUG, "reason": WHY}),
+        json!({"kind": "bug", "title": "Refused", "project": SLUG, "upstream": true, "reason": WHY}),
     );
     match refused {
         Err(VogtError::UpstreamWriteRefused(message)) => {
-            assert!(message.contains("local_only"), "{message}");
+            assert!(message.contains("drop `upstream`"), "{message}");
         }
         other => panic!("expected the refusal, got {other:?}"),
     }
@@ -353,7 +377,7 @@ fn refusal_enumerates_every_missing_gate() {
     }
     let refused = create_op(
         &built,
-        json!({"kind": "bug", "title": "Refused", "project": SLUG, "reason": WHY}),
+        json!({"kind": "bug", "title": "Refused", "project": SLUG, "upstream": true, "reason": WHY}),
     );
     let message = match refused {
         Err(VogtError::UpstreamWriteRefused(message)) => message,
@@ -368,18 +392,18 @@ fn refusal_enumerates_every_missing_gate() {
         message.contains("forge account link"),
         "the credential gate is named: {message}"
     );
-    assert!(message.contains("local_only"), "{message}");
+    assert!(message.contains("drop `upstream`"), "{message}");
     assert!(forgejo.mutations().is_empty());
 }
 
-/// `local_only` is the sanctioned opt-in past the unlinked refusal too.
+/// A native create is the default past the unlinked refusal too.
 #[test]
 fn local_only_create_works_on_an_unlinked_project() {
     let (built, forgejo) = forgejo_with(four_issues(), false);
     add_folder(&built);
     let refused = create_op(
         &built,
-        json!({"kind": "bug", "title": "Nope", "project": "folder", "reason": WHY}),
+        json!({"kind": "bug", "title": "Nope", "project": "folder", "upstream": true, "reason": WHY}),
     );
     assert!(
         matches!(refused, Err(VogtError::NotLinked(_))),
@@ -559,17 +583,17 @@ fn overlay(built: &Built, subject: &str) -> Option<crate::core::WorkOverlay> {
     ctx.declared.read().unwrap().work_overlay(subject).unwrap()
 }
 
-/// A create on a linked project opens the issue upstream, and its subject key
-/// is the ref; the overlay carries the vogt-local fields and the ledger records
-/// the write.
+/// An `upstream` create on a linked project opens the issue, and its subject
+/// key is the ref; the overlay carries the vogt-local fields and the ledger
+/// records the write.
 #[test]
-fn create_on_linked_opens_the_issue_and_keys_the_overlay() {
+fn an_upstream_create_opens_the_issue_and_keys_the_overlay() {
     let (built, forgejo) = armed();
     create_label_op(&built, json!({"name": "bug-ish", "reason": WHY})).unwrap();
     let created = create_op(
         &built,
         json!({"kind": "bug", "title": "Retries forever", "body": "The loop never backs off.",
-               "priority": "p1", "project": SLUG, "labels": ["bug-ish"], "reason": WHY}),
+               "priority": "p1", "project": SLUG, "labels": ["bug-ish"], "upstream": true, "reason": WHY}),
     )
     .unwrap();
 
@@ -625,7 +649,7 @@ fn a_failed_create_raises_and_commits_nothing() {
     }));
     let refused = create_op(
         &built,
-        json!({"kind": "bug", "title": "Lost", "project": SLUG, "reason": WHY}),
+        json!({"kind": "bug", "title": "Lost", "project": SLUG, "upstream": true, "reason": WHY}),
     );
     assert!(
         matches!(refused, Err(VogtError::UpstreamWriteFailed(_))),

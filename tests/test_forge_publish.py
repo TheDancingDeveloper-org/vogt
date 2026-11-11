@@ -255,10 +255,12 @@ def test_a_published_project_is_upstream_truth_thereafter(
     publish_project(publishable, ForgePublishParams(project="demo", reason=WHY))
     created = create_work(
         publishable,
-        CreateWorkParams(kind="bug", title="First", project="demo", reason=WHY),
+        CreateWorkParams(
+            kind="bug", title="First", project="demo", upstream=True, reason=WHY
+        ),
     )
     assert created.item.ref == "gh:acme/demo#1", (
-        "work.create on the published project writes through"
+        "an upstream work.create on the published project writes through"
     )
     onboard(publishable, OnboardParams(project="demo", reason=WHY))
     fetched = get_work(publishable, GetWorkParams(ref="gh:acme/demo#1"))
