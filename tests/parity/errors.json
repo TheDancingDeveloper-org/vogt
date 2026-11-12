@@ -133,7 +133,7 @@
     }
   },
   "generated_by": "scripts/parity.py errors",
-  "golden": "c030526",
+  "golden": "4fca843",
   "steps": [
     {
       "cli": {
