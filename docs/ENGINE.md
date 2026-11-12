@@ -985,6 +985,15 @@ engine turns them into that CLI's own flags (`agent_cli.rs`):
 | `claude` | `--model <id>` | `--effort <level>` |
 | `codex` | `-m <id>` | `-c model_reasoning_effort=<level>` |
 
+When the provider registry (§9) lists known models, a requested `model` must
+be one of them. A model no entry lists is refused before any worktree or pod
+exists, with `400` and a stable code:
+`{"error": "unknown model: ...", "code": "unknown_model"}`. The message names
+the requested model only — never a provider, a secret, or a value.
+`ENGINE_LLM_MODEL_ALLOWLIST` admits a model the registry does not list. A
+launch with no `model`, and an instance whose registry lists no models at all,
+are not checked.
+
 **Codex's default model is the estate LiteLLM router** (WI-1147). The estate Codex fork speaks the Chat Completions wire as well as Responses (WI-1286), and grok returns tool calls only over chat, so `vogt-mcp-bootstrap` writes `[model_providers.litellm]` into `~/.codex/config.toml` (`${CODEX_HOME}` when set) with `base_url = "http://100.92.54.45:4000/v1"`, `wire_api = "chat"` and `env_key = "HOMELAB_LITELLM_SESSION_KEY"`. The key is that environment variable, exported by the agent-auth manifest (§9); the config never contains it. When `model` and `model_provider` are absent, or already name this bundle (`litellm`, or `theclawbay` with model `grok` / `grok-4.7`), bootstrap sets `model_provider = "litellm"` and `model = "grok"` — the router's `grok` group, not a pinned model id. grok has no entry in Codex's bundled model catalog, whose fallback metadata offers no apply_patch tool, so bootstrap also writes `vogt-model-catalog.json` beside the config — one entry per LiteLLM group that answers a chat completion with the session key (WI-1592): `grok`, `code`, `small`, `reasoning`, `vision`, `or-deepseek-flash`, `or-gemini-flash`, `or-glm-5-3`, and the DLab models whose plan serves them (`dlab-deepseek-v4-pro`, `dlab-deepseek-v4-1-flash`, `dlab-grok-4-5`, `dlab-grok-4-6`, `dlab-grok-4-7`, `dlab-gemini-3-8-flash`, `dlab-glm-5-3`, `dlab-glm-5-3-flash`, `dlab-glm-5-3-flashx`, `dlab-kimi-k3`), plus `premium` hidden from the picker. Each entry has `apply_patch_tool_type` `freeform` and omits `tool_mode` so code mode stays off. Priority is that order, so the fork's ascending sort keeps `grok` as the default. Not listed, because a completion does not succeed: `or-deepseek` (blocked on OpenRouter), `qwen3-coder`, `qwen3-8-27b` and `gpt-oss-120b` (they fail inside LiteLLM — a 408 or a hang; re-adding them is WI-1631), Bedrock (the router has no bedrock model — it needs a LiteLLM provider entry before Codex can offer it, and no credentials are added here), `dlab-gemini-3-1-pro-preview` and `dlab-gemini-3-6-flash` (not on the DLab plan), `dlab-claude-haiku-4-5` (unavailable), and the `gpt-6-*-free` aliases (auth error). Bootstrap sets `model_catalog_json` to that file. That key is set only when absent or when it already names this file; a catalog an operator chose is left alone, and so is the file. A session that passes `-m <id>` still overrides `model` for that process. `[model_providers.theclawbay]` is written as a fallback profile with no bearer token; a profile an operator already wrote under that name (one carrying `experimental_bearer_token`) is left untouched, as is any other provider and model an operator set. The rewrite uses the same flock and atomic rename as the read-only server tables, and a config that does not parse is left alone. The manifest line that exports `HOMELAB_LITELLM_SESSION_KEY` is an ops overlay change (Forgejo `indexarr/ops` pull 52), not part of this repository.
 | `opencode` | `--model <provider/id>` | *refused — it has no effort control* |
 
@@ -4904,7 +4913,7 @@ secret_project = "<secrets-manager project id>"
 secret_name = "HOMELAB_LITELLM_DEEPSEEK_KEY"
 context_window = 1000000                 # optional Codex model_context_window
 auto_compact_token_limit = 500000        # optional Codex auto-compact threshold
-models = ["deepseek-chat"]               # informational
+models = ["deepseek-chat"]               # the models this entry serves
 ```
 
 At each launch the registry does three things, and nothing else:
@@ -4980,11 +4989,16 @@ key. To add a provider live:
 **Choosing an entry.** The requested model selects its provider: a session
 started with `grok-4.7` uses the entry whose `models` list names
 `grok-4.7`, not whichever entry happens to be first. When two entries list
-the same model the entry named `litellm` wins; a model no entry lists keeps
-the previous rule (the `litellm` entry, else the first), so a caller naming a
-router group the registry does not list still launches. Selection happens on
-each launch from the registry as it stands then, so modifying the file takes
-effect for the next session without restarting the engine.
+the same model the entry named `litellm` wins. A requested model that no
+entry lists is refused before the session starts (`400`, code
+`unknown_model`), naming the model only and creating no pod.
+`ENGINE_LLM_MODEL_ALLOWLIST` admits a model the registry does not list; an
+allowlisted model keeps the previous fallback when selecting an entry (the
+`litellm` entry, else the first). A launch with no `model` is unchanged. A
+registry whose entries list no models at all states no known models, so the
+launch is not checked. Selection happens on each launch from the registry as
+it stands then, so modifying the file takes effect for the next session
+without restarting the engine.
 
 **A missing secret refuses the launch.** Before a Codex session starts, the
 engine resolves the selected provider's secret through the live agent-auth

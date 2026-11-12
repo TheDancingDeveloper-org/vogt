@@ -1027,7 +1027,60 @@ impl SessionRegistry {
     }
 
     pub fn create(&self, spec: SessionSpec) -> Result<Arc<Session>> {
+        self.check_requested_model(
+            spec.model.as_deref(),
+            &spec.command,
+            spec.template.as_deref(),
+        )?;
         self.create_inner(spec, Creating::Fresh(Origin::Api), None)
+    }
+
+    /// Refuse a requested model that no known-model source lists (WI-4138).
+    ///
+    /// The LLM provider registry is the engine's own known-model source: a
+    /// Codex or Claude launch may ask for any model the registry's `models`
+    /// lists. A deployment with no such list has nothing to validate against
+    /// and keeps its old behaviour. `ENGINE_LLM_MODEL_ALLOWLIST` is the
+    /// explicit extension for a provider that serves a model without listing
+    /// it, or a template whose models live outside the registry.
+    ///
+    /// The refusal names the requested model only; it never names a provider,
+    /// a secret, or a value.
+    fn check_requested_model(
+        &self,
+        model: Option<&str>,
+        command: &Option<Vec<String>>,
+        template: Option<&str>,
+    ) -> Result<()> {
+        let Some(model) = model.map(str::trim).filter(|model| !model.is_empty()) else {
+            return Ok(());
+        };
+        let Some(agent) = self.agent_of(command, template) else {
+            return Ok(());
+        };
+        if !matches!(agent.as_str(), "codex" | "claude") {
+            return Ok(());
+        }
+        let providers = self.secret_broker.providers();
+        let known: Vec<&str> = providers
+            .iter()
+            .flat_map(|provider| provider.models.iter().map(String::as_str))
+            .collect();
+        if known.is_empty() || known.contains(&model) {
+            return Ok(());
+        }
+        if self
+            .cfg
+            .llm_model_allowlist
+            .iter()
+            .any(|allowed| allowed == model)
+        {
+            return Ok(());
+        }
+        Err(ApiError::UnknownModel(format!(
+            "{model:?} is not a model this engine can serve for a {agent} session; \
+             add it to the provider registry's `models` or ENGINE_LLM_MODEL_ALLOWLIST"
+        )))
     }
 
     /// Hand the registry vogt-core, once the client exists (WI-926).
@@ -1046,6 +1099,11 @@ impl SessionRegistry {
     /// token, because the person at it is a person. A session vogt-core
     /// started arrives with its own token and is left alone.
     pub async fn create_launched(&self, mut spec: SessionSpec) -> Result<Arc<Session>> {
+        self.check_requested_model(
+            spec.model.as_deref(),
+            &spec.command,
+            spec.template.as_deref(),
+        )?;
         let id = Uuid::new_v4();
         if let Some(env) = self
             .agent_identity(
@@ -1174,6 +1232,11 @@ impl SessionRegistry {
     /// A session for an agent-task run: like [`Self::create`], but never
     /// recorded for hibernation — the run's runner owns its lifetime.
     pub async fn create_for_task(&self, spec: SessionSpec) -> Result<Arc<Session>> {
+        self.check_requested_model(
+            spec.model.as_deref(),
+            &spec.command,
+            spec.template.as_deref(),
+        )?;
         self.check_provider_secret(Uuid::new_v4(), &spec).await?;
         self.create_inner(spec, Creating::Fresh(Origin::AgentTask), None)
     }

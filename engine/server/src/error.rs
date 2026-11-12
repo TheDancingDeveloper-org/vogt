@@ -9,6 +9,11 @@ pub enum ApiError {
     NotFound,
     #[error("bad request: {0}")]
     BadRequest(String),
+    /// A launch asked for a model no known-model source lists (WI-4138).
+    /// Its own variant so the response carries a stable machine-readable
+    /// `code` and the message names the model, never a secret or a provider.
+    #[error("unknown model: {0}")]
+    UnknownModel(String),
     #[error("unauthorized")]
     Unauthorized,
     #[error("conflict: {0}")]
@@ -43,6 +48,7 @@ impl ApiError {
         match self {
             ApiError::NotFound => StatusCode::NOT_FOUND,
             ApiError::BadRequest(_) => StatusCode::BAD_REQUEST,
+            ApiError::UnknownModel(_) => StatusCode::BAD_REQUEST,
             ApiError::Unauthorized => StatusCode::UNAUTHORIZED,
             ApiError::Conflict(_) => StatusCode::CONFLICT,
             ApiError::AtCapacity(_) => StatusCode::TOO_MANY_REQUESTS,
@@ -60,7 +66,11 @@ impl ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
         let status = self.status();
-        let body = Json(json!({ "error": self.to_string() }));
+        let mut body = json!({ "error": self.to_string() });
+        if matches!(self, ApiError::UnknownModel(_)) {
+            body["code"] = json!("unknown_model");
+        }
+        let body = Json(body);
         (status, body).into_response()
     }
 }

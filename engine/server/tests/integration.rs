@@ -49,6 +49,7 @@ fn test_config() -> Config {
         agent_auth_secrets: vec![],
         agent_auth_secrets_file: None,
         llm_providers_file: None,
+        llm_model_allowlist: vec![],
         agent_grant_projects: vec![],
         // The synthetic agent CLI is registered as a session preset in the
         // *test* config — never the production defaults — so agent-task
@@ -17895,6 +17896,241 @@ fn provider_request_with_secret(name: &str, env_key: &str, secret_name: &str) ->
         "secret_name": secret_name,
         "models": ["test-model"]
     })
+}
+
+fn model_test_template(name: &str, agent: &str) -> SessionTemplate {
+    SessionTemplate {
+        name: name.into(),
+        description: format!("pod-backed {agent}"),
+        command: Some(vec![agent.into()]),
+        cwd: None,
+        env: vec![],
+        backend: "pod".into(),
+        host_capable: false,
+        pod_capable: false,
+        account: None,
+        default_name: None,
+        match_repo_names: vec![],
+        match_path_prefixes: vec![],
+        tags: vec![],
+    }
+}
+
+fn write_model_registry(path: &std::path::Path) {
+    std::fs::write(
+        path,
+        r#"
+[[provider]]
+name = "litellm-deepseek"
+base_url = "http://litellm:4000/v1"
+wire_api = "chat"
+env_key = "DEEPSEEK_PROVIDER_KEY"
+secret_project = "proj-a"
+secret_name = "DEEPSEEK_SECRET"
+models = ["deepseek/deepseek-v4-flash"]
+
+[[provider]]
+name = "litellm-claude"
+base_url = "http://litellm:4000/v1"
+wire_api = "chat"
+env_key = "CLAUDE_PROVIDER_KEY"
+secret_project = "proj-a"
+secret_name = "CLAUDE_SECRET"
+models = ["claude-org-sonnet"]
+"#,
+    )
+    .unwrap();
+}
+
+fn model_test_helper(path: &std::path::Path) {
+    std::fs::write(
+        path,
+        "#!/bin/sh\n[ \"$1\" = get ] || exit 64\nprintf 'value-for-%s' \"$2\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+fn model_test_manifest() -> Vec<vogt_engine_server::secret_broker::ManifestSecret> {
+    vogt_engine_server::secret_broker::parse_manifest(
+        "MANIFEST_DEEPSEEK proj-a DEEPSEEK_SECRET optional\nMANIFEST_CLAUDE proj-a CLAUDE_SECRET optional",
+    )
+    .unwrap()
+}
+
+/// A requested model the provider registry does not list is refused before a
+/// Codex pod exists, with a stable code that names the model (WI-4138).
+#[tokio::test]
+async fn an_unknown_model_is_refused_for_a_codex_launch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let registry = tmp.path().join("llm-providers.toml");
+    let helper = tmp.path().join("agent-auth");
+    model_test_helper(&helper);
+    let reg = registry.clone();
+    let helper_path = helper.clone();
+    let mut h = pod_stream::harness_cfg(
+        false,
+        Some(vec![model_test_template("codex-pod", "codex")]),
+        move |cfg| {
+            cfg.llm_providers_file = Some(reg);
+            cfg.agent_auth_helper = helper_path;
+            cfg.agent_auth_secrets = model_test_manifest();
+        },
+    )
+    .await;
+    write_model_registry(&registry);
+
+    let response = reqwest::Client::new()
+        .post(format!("{}/api/sessions", h.base))
+        .headers(auth())
+        .json(&json!({
+            "name": "unknown-codex-model",
+            "template": "codex-pod",
+            "placement": "pod",
+            "model": "acceptance/definitely-not-a-model",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["code"].as_str(), Some("unknown_model"), "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("acceptance/definitely-not-a-model"),
+        "{body}"
+    );
+    assert!(
+        h.created.try_recv().is_err(),
+        "a refused launch made a pod: {body}"
+    );
+}
+
+/// The same guard covers a Claude template: the model must be one the engine
+/// can serve, and the refusal happens before the pod is created (WI-4138).
+#[tokio::test]
+async fn an_unknown_model_is_refused_for_a_claude_launch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let registry = tmp.path().join("llm-providers.toml");
+    let reg = registry.clone();
+    let mut h = pod_stream::harness_cfg(
+        false,
+        Some(vec![model_test_template("claude-pod", "claude")]),
+        move |cfg| {
+            cfg.llm_providers_file = Some(reg);
+        },
+    )
+    .await;
+    write_model_registry(&registry);
+
+    let response = reqwest::Client::new()
+        .post(format!("{}/api/sessions", h.base))
+        .headers(auth())
+        .json(&json!({
+            "name": "unknown-claude-model",
+            "template": "claude-pod",
+            "placement": "pod",
+            "model": "claude-definitely-not-a-model",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["code"].as_str(), Some("unknown_model"), "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("claude-definitely-not-a-model"),
+        "{body}"
+    );
+    assert!(
+        h.created.try_recv().is_err(),
+        "a refused launch made a pod: {body}"
+    );
+}
+
+/// A registered model and an omitted model still launch; the guard only
+/// refuses a model the registry cannot serve (WI-4138).
+#[tokio::test]
+async fn known_and_default_models_still_launch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let registry = tmp.path().join("llm-providers.toml");
+    let helper = tmp.path().join("agent-auth");
+    model_test_helper(&helper);
+    let reg = registry.clone();
+    let helper_path = helper.clone();
+    let mut h = pod_stream::harness_cfg(
+        false,
+        Some(vec![
+            model_test_template("codex-pod", "codex"),
+            model_test_template("claude-pod", "claude"),
+        ]),
+        move |cfg| {
+            cfg.llm_providers_file = Some(reg);
+            cfg.agent_auth_helper = helper_path;
+            cfg.agent_auth_secrets = model_test_manifest();
+        },
+    )
+    .await;
+    write_model_registry(&registry);
+
+    for body in [
+        json!({
+            "name": "known-codex",
+            "template": "codex-pod",
+            "placement": "pod",
+            "model": "deepseek/deepseek-v4-flash",
+        }),
+        json!({
+            "name": "default-codex",
+            "template": "codex-pod",
+            "placement": "pod",
+        }),
+        json!({
+            "name": "known-claude",
+            "template": "claude-pod",
+            "placement": "pod",
+            "model": "claude-org-sonnet",
+        }),
+    ] {
+        let id = h.start_body(body.clone()).await;
+        let (created, _token) = h.created.recv().await.expect("the pod is created");
+        assert_eq!(created, id, "{body}");
+    }
+}
+
+/// The documented allowlist admits a model the registry entry does not name,
+/// for a deployment whose provider serves it without listing it (WI-4138).
+#[tokio::test]
+async fn the_model_allowlist_admits_an_unregistered_model() {
+    let tmp = tempfile::tempdir().unwrap();
+    let registry = tmp.path().join("llm-providers.toml");
+    let reg = registry.clone();
+    let mut h = pod_stream::harness_cfg(
+        false,
+        Some(vec![model_test_template("claude-pod", "claude")]),
+        move |cfg| {
+            cfg.llm_providers_file = Some(reg);
+            cfg.llm_model_allowlist = vec!["estate-private-model".into()];
+        },
+    )
+    .await;
+    write_model_registry(&registry);
+
+    let id = h
+        .start_body(json!({
+            "name": "allowlisted-claude",
+            "template": "claude-pod",
+            "placement": "pod",
+            "model": "estate-private-model",
+        }))
+        .await;
+    let (created, _token) = h.created.recv().await.expect("the pod is created");
+    assert_eq!(created, id);
 }
 
 #[tokio::test]
