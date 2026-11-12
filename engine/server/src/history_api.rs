@@ -13,7 +13,7 @@ use uuid::Uuid;
 use crate::{
     app::AppState,
     error::{ApiError, Result},
-    history::{SearchResult, SessionLogPreview, SessionMetadata},
+    history::{SearchResult, SessionHistory, SessionLogPreview, SessionMetadata},
 };
 
 #[derive(Debug, Deserialize)]
@@ -145,6 +145,10 @@ pub async fn search_sessions(
                 }
             }
         }
+    }
+
+    for result in &mut results {
+        SessionHistory::redact_result(result);
     }
 
     Ok(Json(results))
