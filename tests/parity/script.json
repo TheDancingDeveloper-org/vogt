@@ -7,6 +7,7 @@
       "agent-token": "vogt_agent_bootstrap_secret_long_enough_4567",
       "ada-password": "correct horse battery",
       "ada-passphrase": "another passphrase",
+      "forge-token": "not-a-token",
       "instance/repos/broken/.git": "gitdir: {root}/nowhere\n"
     },
     "env": {
@@ -617,6 +618,11 @@
       "expect": {
         "exit": 1,
         "error_code": "invalid_request"
+      },
+      "cli_params": {
+        "host": "no.such.host",
+        "token_file": "{root}/forge-token",
+        "reason": "parity harness"
       }
     },
     {
