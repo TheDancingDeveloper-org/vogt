@@ -64,8 +64,13 @@ DEFAULT_PROD_HOSTNAMES = ("vogt.sprooty.com",)
 #: after its purpose is caught even on a hostname not listed above.
 PROD_HOSTNAME_MARKERS = ("vogt-prod",)
 STATE_VERSION = 1
+MAP_VERSION = 1
 PAGE = 200
 WORK_REF = re.compile(r"^WI-(\d+)$")
+#: The first line of an item this tool created in remap mode.  A target item
+#: carrying it is the same source item, so a resumed run never duplicates it.
+IMPORT_MARKER = re.compile(r"^Imported from prod: (WI-\d+)\s*$")
+PROD_IMPORT_LABEL = "prod-import"
 
 #: Hops `work_transition walk=true` takes from `open` to each state in the
 #: default workflow. Every kind shares the graph (`workflow.list`).
@@ -157,6 +162,17 @@ def _objects(value: object, where: str) -> list[JsonObject]:
     if not isinstance(value, list):
         raise ImportFailure(f"{where} is not a list")
     return [_object(entry, f"{where}[]") for entry in value]
+
+
+def _string_mapping(value: object, where: str) -> dict[str, str]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ImportFailure(f"{where} is not an object")
+    return {
+        _text(key, f"{where}.key"): _text(entry, f"{where}[{key}]")
+        for key, entry in value.items()
+    }
 
 
 def slugify(name: str) -> str:
@@ -586,6 +602,8 @@ class TargetState:
     initiatives: dict[str, JsonObject] = field(default_factory=dict)
     actors: dict[str, JsonObject] = field(default_factory=dict)
     items: dict[str, JsonObject] = field(default_factory=dict)
+    #: source WI-n -> the target ref whose body's first line names it.
+    markers: dict[str, str] = field(default_factory=dict)
     declared_work_items: int = 0
 
     def ref_numbers(self) -> list[int]:
@@ -649,6 +667,7 @@ def read_target(
     source: Source | None = None,
     *,
     url: str = "",
+    ref_mode: str = "preserve",
     prod_hosts: Sequence[str] = (),
     allow_prod_hostname: bool = False,
 ) -> TargetState:
@@ -689,15 +708,38 @@ def read_target(
         state.initiatives[_text(row.get("slug"), "initiative.slug")] = row
     for row in _paged(client, "actor_list", "actors"):
         state.actors[_text(row.get("identity_ref"), "actor.identity_ref")] = row
-    for row in _paged(
+    # Remap mode needs each body to read the import marker, which summary rows
+    # omit.  Preserve mode keeps the cheaper summary read it always used.
+    rows = _paged(
         client,
         "work_list",
         "items",
-        {"include_finished": True, "mode": "summary"},
-    ):
+        {
+            "include_finished": True,
+            "mode": "full" if ref_mode == "remap" else "summary",
+        },
+    )
+    for row in rows:
         ref = row.get("ref")
         if isinstance(ref, str):
             state.items[ref] = row
+        body = row.get("body")
+        if not isinstance(body, str):
+            continue
+        first_line = body.splitlines()[0].strip() if body.splitlines() else ""
+        match = IMPORT_MARKER.match(first_line)
+        if match is None:
+            continue
+        source_ref = match.group(1)
+        if source_ref in state.markers:
+            raise Refused(
+                f"{source_ref} is marked imported on both "
+                f"{state.markers[source_ref]} and {ref}; refusing to guess "
+                "which copy a resumed run should use"
+            )
+        if not isinstance(ref, str):
+            raise Refused(f"a work item marked {source_ref} has no ref")
+        state.markers[source_ref] = ref
     return state
 
 
@@ -732,6 +774,83 @@ def _paged_names(client: McpClient, tool: str, key: str, field: str) -> list[str
 
 
 # ---------------------------------------------------------------------------
+# Reference map: prod WI-n -> the native WI-n the target minted for it
+# ---------------------------------------------------------------------------
+
+
+def default_map_path() -> Path:
+    return Path.home() / "Working" / "notes" / "vogt-dev-prod-ref-map.json"
+
+
+def default_remap_plan_path() -> Path:
+    return Path.home() / "Working" / "notes" / "vogt-dev-remap-plan.json"
+
+
+@dataclass
+class RefMap:
+    """The persisted source-ref -> target-ref mapping of a remap import.
+
+    Marker detection is the safety net; this file is what lets relations and
+    comments resolve without re-reading every imported body, and what keeps a
+    resumed apply stable while the target keeps minting refs.
+    """
+
+    path: Path
+    source_instance_id: str
+    target_url: str
+    items: dict[str, str] = field(default_factory=dict)
+    projects: dict[str, str] = field(default_factory=dict)
+
+    @classmethod
+    def open(cls, path: Path, *, source: Source, target_url: str) -> RefMap:
+        if not path.exists():
+            return cls(
+                path=path, source_instance_id=source.instance_id, target_url=target_url
+            )
+        raw: Any = json.loads(path.read_text(encoding="utf-8"))
+        data = _object(raw, "map")
+        if data.get("version") != MAP_VERSION:
+            raise ImportFailure(f"{path}: unsupported map version")
+        if data.get("source_instance_id") != source.instance_id:
+            raise ImportFailure(
+                f"{path} belongs to source {data.get('source_instance_id')!r}, "
+                f"not {source.instance_id!r}"
+            )
+        if data.get("target") != target_url:
+            raise ImportFailure(
+                f"{path} belongs to target {data.get('target')!r}, not {target_url!r}"
+            )
+        return cls(
+            path=path,
+            source_instance_id=source.instance_id,
+            target_url=target_url,
+            items=_string_mapping(data.get("items"), "map.items"),
+            projects=_string_mapping(data.get("projects"), "map.projects"),
+        )
+
+    def record_item(self, source_ref: str, target_ref: str) -> None:
+        self.items[source_ref] = target_ref
+
+    def record_project(self, source_slug: str, target_slug: str) -> None:
+        self.projects[source_slug] = target_slug
+
+    def save(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "version": MAP_VERSION,
+            "source_instance_id": self.source_instance_id,
+            "target": self.target_url,
+            "items": dict(sorted(self.items.items())),
+            "projects": dict(sorted(self.projects.items())),
+        }
+        temporary = self.path.with_suffix(self.path.suffix + ".tmp")
+        temporary.write_text(
+            json.dumps(payload, indent=1, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        temporary.replace(self.path)
+
+
+# ---------------------------------------------------------------------------
 # Plan
 # ---------------------------------------------------------------------------
 
@@ -741,8 +860,14 @@ class Plan:
     source: Source
     target: TargetState
     project_root: str | None
+    ref_mode: str = "preserve"
+    map_path: Path | None = None
+    ref_map: RefMap | None = None
     projects_new: list[Project] = field(default_factory=list)
     projects_existing: list[Project] = field(default_factory=list)
+    project_slug_map: dict[str, str] = field(default_factory=dict)
+    project_names: dict[str, str] = field(default_factory=dict)
+    project_collisions: list[tuple[str, str, str]] = field(default_factory=list)
     write_back_forced: list[str] = field(default_factory=list)
     link_state_forced: list[str] = field(default_factory=list)
     labels_new: list[Label] = field(default_factory=list)
@@ -756,6 +881,10 @@ class Plan:
     replace_wi1: bool = False
     first_new_ref: int = 1
     ref_aligned: bool = True
+    #: remap only: source WI-n -> the target ref it already has (map/marker).
+    existing_refs: dict[str, str] = field(default_factory=dict)
+    #: remap only: the ref a sequential create is predicted to mint next.
+    predicted_refs: dict[str, str] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
 
     @property
@@ -812,6 +941,9 @@ class Plan:
                 "actors_new": len(self.actors_new),
                 "work_items": len(self.source.items),
                 "work_items_new": len(self.items_new),
+                "work_items_already_imported": (
+                    len(self.items_existing) if self.ref_mode == "remap" else 0
+                ),
                 "superseded": len(self.superseded),
                 "relations": len(self.relations),
                 "comments": len(self.comments),
@@ -825,10 +957,28 @@ class Plan:
                 ),
             },
             "refs": {
-                "policy": "sequence" if self.ref_aligned else "fresh",
+                "policy": (
+                    "remap"
+                    if self.ref_mode == "remap"
+                    else ("sequence" if self.ref_aligned else "fresh")
+                ),
+                "ref_mode": self.ref_mode,
                 "replace_wi1": self.replace_wi1,
                 "first_new_ref": self.first_new_ref,
                 "last_ref": max((item.seq for item in self.source.items), default=0),
+                "map_out": str(self.map_path) if self.map_path is not None else None,
+                "predicted_new_refs": (
+                    dict(self.predicted_refs) if self.ref_mode == "remap" else {}
+                ),
+            },
+            "remap": {
+                "project_slug_map": (
+                    dict(self.project_slug_map) if self.ref_mode == "remap" else {}
+                ),
+                "project_collisions": [
+                    {"source": source, "target": target, "name": name}
+                    for source, target, name in self.project_collisions
+                ],
             },
             "estimate": {
                 "mcp_calls": calls,
@@ -845,19 +995,38 @@ def build_plan(
     *,
     project_root: str | None,
     ref_policy: str,
+    ref_mode: str = "preserve",
+    ref_map: RefMap | None = None,
+    map_path: Path | None = None,
     superseded_policy: str = "wont_do",
     limit_items: int | None = None,
     include_observed: bool = False,
 ) -> Plan:
-    plan = Plan(source=source, target=target, project_root=project_root)
-    _plan_projects(plan)
-    _plan_entities(plan)
-    _plan_items(
-        plan,
-        ref_policy=ref_policy,
-        superseded_policy=superseded_policy,
-        include_observed=include_observed,
+    plan = Plan(
+        source=source,
+        target=target,
+        project_root=project_root,
+        ref_mode=ref_mode,
+        map_path=map_path,
+        ref_map=ref_map,
     )
+    if ref_mode == "remap":
+        _plan_projects_remap(plan)
+        _plan_entities(plan, remap=True)
+        _plan_items_remap(
+            plan,
+            superseded_policy=superseded_policy,
+            include_observed=include_observed,
+        )
+    else:
+        _plan_projects(plan)
+        _plan_entities(plan)
+        _plan_items(
+            plan,
+            ref_policy=ref_policy,
+            superseded_policy=superseded_policy,
+            include_observed=include_observed,
+        )
     if limit_items is not None:
         plan.items_new = plan.items_new[:limit_items]
         plan.warnings.append(
@@ -904,10 +1073,133 @@ def _plan_projects(plan: Plan) -> None:
         )
 
 
-def _plan_entities(plan: Plan) -> None:
+def _plan_projects_remap(plan: Plan) -> None:
+    """Assign target project slugs without ever reusing an existing dev row.
+
+    A source slug that is free on the target keeps its identity.  A slug that
+    already exists is suffixed deterministically (`-prod`, `-prod-2`, ...)
+    and registered under a matching display name, because `project.register`
+    derives the slug from the name.  A project recorded in the ref map from an
+    earlier run is reused and checked for forge safety; a collision with a
+    project this importer did not create is never merged, edited or deleted.
+    """
+
+    mapped = plan.ref_map.projects if plan.ref_map is not None else {}
+    claimed: set[str] = set(plan.target.projects)
+    assigned: dict[str, str] = {}
+    names: dict[str, str] = {}
+    reused: list[Project] = []
+    new: list[Project] = []
+    collisions: list[tuple[str, str, str]] = []
+    seen: set[str] = set()
+
+    for project in plan.source.projects:
+        if slugify(project.name) != project.slug:
+            raise ImportFailure(
+                f"project {project.slug!r} would register as "
+                f"{slugify(project.name)!r}; the target derives the slug from "
+                "the name, so this project cannot keep its identity"
+            )
+        if project.slug in seen:
+            raise ImportFailure(
+                f"the export has two projects with slug {project.slug!r}"
+            )
+        seen.add(project.slug)
+        if project.write_back != "none":
+            plan.write_back_forced.append(project.slug)
+        if project.link_state != "unlinked":
+            plan.link_state_forced.append(project.slug)
+
+    for project in plan.source.projects:
+        target_slug = mapped.get(project.slug)
+        if target_slug is None:
+            continue
+        existing = plan.target.projects.get(target_slug)
+        if existing is None:
+            raise Refused(
+                f"the map says project {project.slug!r} is {target_slug!r}, "
+                "but the target does not list that project"
+            )
+        for name, wanted in (("write_back", "none"), ("link_state", "unlinked")):
+            actual = existing.get(name)
+            if actual != wanted:
+                raise Refused(
+                    f"target project {target_slug!r} has {name}={actual!r}; "
+                    "an imported project must stay unlinked with write-back none"
+                )
+        assigned[project.slug] = target_slug
+        claimed.add(target_slug)
+        reused.append(project)
+
+    # Reserve every free source slug before suffixing a collision, so a source
+    # project literally named `vogt-prod` keeps that slug.
+    for project in plan.source.projects:
+        if project.slug in assigned:
+            continue
+        if project.slug not in claimed:
+            assigned[project.slug] = project.slug
+            names[project.slug] = project.name
+            claimed.add(project.slug)
+            new.append(project)
+
+    for project in plan.source.projects:
+        if project.slug in assigned:
+            continue
+        number = 1
+        while True:
+            target_slug = (
+                f"{project.slug}-prod"
+                if number == 1
+                else f"{project.slug}-prod-{number}"
+            )
+            target_name = (
+                f"{project.name} prod"
+                if number == 1
+                else f"{project.name} prod {number}"
+            )
+            if slugify(target_name) != target_slug:
+                raise ImportFailure(
+                    f"project {project.slug!r} cannot be suffixed to "
+                    f"{target_slug!r}: {target_name!r} registers as "
+                    f"{slugify(target_name)!r}"
+                )
+            if target_slug not in claimed:
+                assigned[project.slug] = target_slug
+                names[project.slug] = target_name
+                claimed.add(target_slug)
+                new.append(project)
+                collisions.append((project.slug, target_slug, target_name))
+                break
+            number += 1
+
+    plan.projects_new = new
+    plan.projects_existing = reused
+    plan.project_slug_map = assigned
+    plan.project_names = names
+    plan.project_collisions = collisions
+    if not plan.target.import_root:
+        plan.warnings.append(
+            "target status did not report an import root; pass --project-root "
+            "explicitly in apply mode"
+        )
+
+
+def _plan_entities(plan: Plan, *, remap: bool = False) -> None:
     for label in plan.source.labels:
         if label.name not in plan.target.labels:
             plan.labels_new.append(label)
+    if (
+        remap
+        and PROD_IMPORT_LABEL not in plan.target.labels
+        and not any(label.name == PROD_IMPORT_LABEL for label in plan.labels_new)
+    ):
+        plan.labels_new.append(
+            Label(
+                id=f"synthetic:{PROD_IMPORT_LABEL}",
+                name=PROD_IMPORT_LABEL,
+                color=None,
+            )
+        )
     for initiative in plan.source.initiatives:
         if slugify(initiative.title) != initiative.slug:
             raise ImportFailure(
@@ -923,6 +1215,91 @@ def _plan_entities(plan: Plan) -> None:
     for identity in sorted(needed_assignees):
         if identity not in plan.target.actors:
             plan.actors_new.append(identity)
+
+
+def _plan_items_remap(
+    plan: Plan,
+    *,
+    superseded_policy: str,
+    include_observed: bool,
+) -> None:
+    """Plan every source item that the target does not already hold.
+
+    There is no sequence guard in this mode: the target mints each new ref and
+    the map (or the body marker) records which one it gave.  An item the
+    target already carries is never created again, and an item with neither a
+    map entry nor a marker is new.
+    """
+
+    items = [
+        item
+        for item in plan.source.items
+        if include_observed or item.origin != "observed"
+    ]
+    if len(items) != len(plan.source.items):
+        plan.warnings.append(
+            f"ignored {len(plan.source.items) - len(items)} observed-only rows; "
+            "an export from the declared store should not contain them"
+        )
+    assert all(item.origin != "observed" for item in items)
+    items.sort(key=lambda item: item.seq)
+    target_numbers = plan.target.ref_numbers()
+    if plan.target.declared_work_items != len(plan.target.items):
+        raise Refused(
+            "the target reports "
+            f"{plan.target.declared_work_items} declared work items but lists "
+            f"{len(plan.target.items)}; it may hold superseded rows this tool "
+            "cannot see. Reset the target or copy the database instead."
+        )
+
+    existing_refs: dict[str, str] = {}
+    new: list[WorkItem] = []
+    for item in items:
+        mapped = plan.ref_map.items.get(item.ref) if plan.ref_map is not None else None
+        marked = plan.target.markers.get(item.ref)
+        if mapped is not None and marked is not None and mapped != marked:
+            raise Refused(
+                f"the map says {item.ref} is {mapped}, but the target body marker "
+                f"says {marked}; inspect the target before resuming"
+            )
+        target_ref = mapped or marked
+        if target_ref is None:
+            new.append(item)
+            continue
+        if target_ref not in plan.target.items:
+            raise Refused(
+                f"the map or marker says {item.ref} is {target_ref}, but the "
+                "target does not list that ref"
+            )
+        if item.ref in existing_refs:
+            raise ImportFailure(f"the export repeats {item.ref}")
+        existing_refs[item.ref] = target_ref
+
+    plan.items_existing = [item for item in items if item.ref in existing_refs]
+    plan.items_new = new
+    plan.existing_refs = existing_refs
+    plan.ref_aligned = False
+    plan.replace_wi1 = False
+    plan.superseded = [item for item in items if item.superseded_by is not None]
+    if superseded_policy == "skip" and plan.superseded:
+        skipped = {item.id for item in plan.superseded}
+        plan.items_new = [item for item in plan.items_new if item.id not in skipped]
+        plan.warnings.append(
+            f"--superseded-policy skip dropped {len(skipped)} retired items"
+        )
+    if plan.superseded:
+        plan.warnings.append(
+            f"{len(plan.superseded)} superseded items become wont_do on the "
+            "target; their upstream successor subject is in the body"
+        )
+
+    next_number = max(target_numbers, default=0) + 1
+    plan.first_new_ref = next_number
+    predicted: dict[str, str] = {}
+    for item in plan.items_new:
+        predicted[item.ref] = f"WI-{next_number}"
+        next_number += 1
+    plan.predicted_refs = predicted
 
 
 def _plan_items(
@@ -1086,7 +1463,9 @@ class State:
     data: JsonObject
 
     @classmethod
-    def open(cls, path: Path, *, source: Source, target_url: str) -> State:
+    def open(
+        cls, path: Path, *, source: Source, target_url: str, ref_mode: str = "preserve"
+    ) -> State:
         if path.exists():
             raw: Any = json.loads(path.read_text(encoding="utf-8"))
             data = _object(raw, "state")
@@ -1102,6 +1481,10 @@ class State:
                     f"{path} belongs to target {data.get('target')!r}, "
                     f"not {target_url!r}"
                 )
+            if data.setdefault("ref_mode", "preserve") != ref_mode:
+                raise ImportFailure(
+                    f"{path} is a {data['ref_mode']!r} run, not {ref_mode!r}"
+                )
             for key in (
                 "items",
                 "relations",
@@ -1116,6 +1499,7 @@ class State:
             "version": STATE_VERSION,
             "source_instance_id": source.instance_id,
             "target": target_url,
+            "ref_mode": ref_mode,
             "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "items": {},
             "relations": {},
@@ -1156,10 +1540,13 @@ class State:
         self.data["comments"][comment_id] = True
 
 
-def default_state_path(source: Source, target_url: str) -> Path:
-    digest = hashlib.sha256(f"{source.instance_id}\0{target_url}".encode()).hexdigest()[
-        :16
-    ]
+def default_state_path(
+    source: Source, target_url: str, ref_mode: str = "preserve"
+) -> Path:
+    seed = f"{source.instance_id}\0{target_url}"
+    if ref_mode != "preserve":
+        seed = f"{seed}\0{ref_mode}"
+    digest = hashlib.sha256(seed.encode()).hexdigest()[:16]
     return Path.home() / ".local" / "state" / "vogt-snapshot-import" / f"{digest}.json"
 
 
@@ -1180,6 +1567,8 @@ class Importer:
         comment_provenance: bool,
         strict_comments: bool,
         project_root: str,
+        ref_mode: str = "preserve",
+        ref_map: RefMap | None = None,
         log: Callable[[str], None],
     ) -> None:
         self._client = client
@@ -1190,11 +1579,25 @@ class Importer:
         self._comment_provenance = comment_provenance
         self._strict_comments = strict_comments
         self._project_root = project_root
+        self._ref_mode = ref_mode
+        self._ref_map = ref_map
         self._log = log
         self.written = 0
         self.failed_comments = 0
 
     def run(self) -> JsonObject:
+        if self._ref_mode == "remap":
+            if self._ref_map is None:
+                raise ImportFailure("remap mode needs a reference map")
+            for source_ref, target_ref in self._plan.existing_refs.items():
+                recorded = self._ref_map.items.get(source_ref)
+                if recorded is not None and recorded != target_ref:
+                    raise Refused(
+                        f"the map says {source_ref} is {recorded}, but the target "
+                        f"reports {target_ref}; inspect the target before resuming"
+                    )
+                self._ref_map.record_item(source_ref, target_ref)
+            self._ref_map.save()
         self._write_projects()
         self._check_forge_safety()
         self._write_labels()
@@ -1212,14 +1615,16 @@ class Importer:
 
     def _write_projects(self) -> None:
         for project in self._plan.projects_new:
-            root = str(Path(self._project_root) / project.slug)
-            self._record_write(
+            target_slug = self._plan.project_slug_map.get(project.slug, project.slug)
+            target_name = self._plan.project_names.get(project.slug, project.name)
+            root = str(Path(self._project_root) / target_slug)
+            result = self._record_write(
                 f"project {project.slug}",
                 functools.partial(
                     self._client.tool,
                     "project_register",
                     {
-                        "name": project.name,
+                        "name": target_name,
                         "root_path": root,
                         "repo_url": project.repo_url,
                         "lifecycle_state": project.lifecycle_state,
@@ -1228,16 +1633,28 @@ class Importer:
                     },
                 ),
             )
-            self._state.data["projects"][project.slug] = "created"
+            if self._ref_mode == "remap":
+                row = _object(result.get("project"), f"project {target_slug}")
+                if row.get("slug") != target_slug:
+                    raise Refused(
+                        f"project {project.slug!r} registered as "
+                        f"{row.get('slug')!r}, not the mapped {target_slug!r}"
+                    )
+                assert self._ref_map is not None
+                self._ref_map.record_project(project.slug, target_slug)
+                self._ref_map.save()
+            self._state.data["projects"][target_slug] = "created"
             self._state.save()
 
     def _check_forge_safety(self) -> None:
-        for project in self._plan.source.projects:
-            result = self._client.tool("project_get", {"slug": project.slug})
-            row = _object(result.get("project"), f"project {project.slug}")
+        checked = [*self._plan.projects_existing, *self._plan.projects_new]
+        for project in checked:
+            target_slug = self._plan.project_slug_map.get(project.slug, project.slug)
+            result = self._client.tool("project_get", {"slug": target_slug})
+            row = _object(result.get("project"), f"project {target_slug}")
             if row.get("write_back") != "none" or row.get("link_state") != "unlinked":
                 raise Refused(
-                    f"project {project.slug!r} came back write_back="
+                    f"project {target_slug!r} came back write_back="
                     f"{row.get('write_back')!r}, link_state={row.get('link_state')!r}; "
                     "refusing to write work that could comment upstream"
                 )
@@ -1307,6 +1724,25 @@ class Importer:
             self._state.save()
 
     def _sync_existing(self, item: WorkItem) -> None:
+        if self._ref_mode == "remap":
+            ref = self._plan.existing_refs.get(item.ref)
+            if ref is None:
+                raise Refused(
+                    f"{item.ref} is neither in the ref map nor marked on the "
+                    "target; refusing to touch an existing item"
+                )
+            desired = "wont_do" if item.superseded_by is not None else item.state
+            current = self._current_state(ref, item)
+            if current != desired:
+                self._transition(ref, desired)
+            entry = _object(
+                self._state.data["items"].setdefault(item.id, {}), "state item"
+            )
+            entry["ref"] = ref
+            entry["state"] = desired
+            assert self._ref_map is not None
+            self._ref_map.record_item(item.ref, ref)
+            return
         if (
             item.seq == 1
             and self._plan.replace_wi1
@@ -1342,6 +1778,9 @@ class Importer:
 
     def _create_item(self, item: WorkItem) -> None:
         body = item.body
+        if self._ref_mode == "remap":
+            marker = f"Imported from prod: {item.ref}"
+            body = f"{marker}\n\n{body}" if body else marker
         superseded = (
             item.superseded_by is not None and self._superseded_policy != "skip"
         )
@@ -1356,7 +1795,11 @@ class Importer:
         )
         returned = _object(result.get("item") or result, "work_create")
         ref = _text(returned.get("ref"), "work_create.ref")
-        if self._plan.ref_aligned and ref != item.ref:
+        if self._ref_mode == "remap":
+            assert self._ref_map is not None
+            self._ref_map.record_item(item.ref, ref)
+            self._ref_map.save()
+        elif self._plan.ref_aligned and ref != item.ref:
             raise Refused(
                 f"{item.ref} was created as {ref}; sequence preservation is "
                 "broken. Stop, inspect the target, and resume only after the "
@@ -1380,9 +1823,14 @@ class Importer:
             "mode": "compact",
         }
         if item.project_slug is not None:
-            arguments["project"] = item.project_slug
-        if item.labels:
-            arguments["labels"] = list(item.labels)
+            arguments["project"] = self._plan.project_slug_map.get(
+                item.project_slug, item.project_slug
+            )
+        labels = list(item.labels)
+        if self._ref_mode == "remap" and PROD_IMPORT_LABEL not in labels:
+            labels.append(PROD_IMPORT_LABEL)
+        if labels:
+            arguments["labels"] = labels
         if item.initiative_slug is not None:
             arguments["initiative"] = item.initiative_slug
         if item.effort is not None:
@@ -1450,16 +1898,18 @@ class Importer:
             key = f"{source_ref}|{kind}|{target_ref}"
             if self._state.has_relation(key):
                 continue
+            mapped_source = self._resolve_ref(source_ref)
+            mapped_target = self._resolve_ref(target_ref)
             try:
                 self._record_write(
-                    f"{source_ref} {kind} {target_ref}",
+                    f"{mapped_source} {kind} {mapped_target}",
                     functools.partial(
                         self._client.tool,
                         "work_relate",
                         {
-                            "ref": source_ref,
+                            "ref": mapped_source,
                             "kind": kind,
-                            "target": target_ref,
+                            "target": mapped_target,
                             "reason": self._reason,
                         },
                     ),
@@ -1467,7 +1917,7 @@ class Importer:
             except McpFailure as err:
                 if err.code != "conflict":
                     raise
-                self._log(f"{source_ref} {kind} {target_ref} already present")
+                self._log(f"{mapped_source} {kind} {mapped_target} already present")
             self._state.record_relation(key)
             self._state.save()
 
@@ -1489,7 +1939,7 @@ class Importer:
                 f"_prod comment by {comment.author} at {comment.created_at}_\n\n{body}"
             )
         arguments: JsonObject = {
-            "ref": comment.work_item_ref,
+            "ref": self._resolve_ref(comment.work_item_ref),
             "body": body,
             "kind": comment.kind,
             "reason": self._reason,
@@ -1522,6 +1972,18 @@ class Importer:
                 f"> {comment.kind} imported as a note ({err.code}).\n\n{body}"
             )
             self._client.tool("work_comment", fallback)
+
+    def _resolve_ref(self, source_ref: str) -> str:
+        if self._ref_mode != "remap":
+            return source_ref
+        assert self._ref_map is not None
+        target_ref = self._ref_map.items.get(source_ref)
+        if target_ref is None:
+            raise Refused(
+                f"{source_ref} has no target ref in the map; refusing to guess "
+                "which item a relation or comment belongs to"
+            )
+        return target_ref
 
     def _record_write(self, what: str, call: Callable[[], JsonObject]) -> JsonObject:
         result = call()
@@ -1581,6 +2043,24 @@ def _parser() -> argparse.ArgumentParser:
         "--ref-policy", choices=("sequence", "fresh"), default="sequence"
     )
     parser.add_argument(
+        "--ref-mode",
+        choices=("preserve", "remap"),
+        default="preserve",
+        help=(
+            "preserve keeps the source WI numbers (the tested default); remap "
+            "lets the target mint new WI numbers and records prod ref -> dev "
+            "ref in --map-out"
+        ),
+    )
+    parser.add_argument(
+        "--map-out",
+        type=Path,
+        help=(
+            "remap mode's persisted prod-ref -> dev-ref map (default "
+            "~/Working/notes/vogt-dev-prod-ref-map.json)"
+        ),
+    )
+    parser.add_argument(
         "--superseded-policy",
         choices=("wont_do", "skip"),
         default="wont_do",
@@ -1615,6 +2095,9 @@ def _log(message: str) -> None:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     source = load_source(args.source)
+    if args.ref_mode == "remap" and args.ref_policy != "sequence":
+        _log("--ref-policy is not used with --ref-mode remap; drop it")
+        return 2
     if args.apply:
         if not args.confirm:
             _log("--apply needs --confirm: this run would write to the target")
@@ -1637,6 +2120,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 client,
                 source,
                 url=args.target_url,
+                ref_mode=args.ref_mode,
                 prod_hosts=args.prod_host,
                 allow_prod_hostname=args.i_know_this_is_not_prod,
             )
@@ -1656,12 +2140,27 @@ def main(argv: Sequence[str] | None = None) -> int:
     if project_root is None and args.apply:
         _log("apply needs --project-root (the target did not report one)")
         return 2
+    map_path = (
+        (args.map_out or default_map_path()) if args.ref_mode == "remap" else None
+    )
+    ref_map: RefMap | None = None
+    if map_path is not None:
+        try:
+            ref_map = RefMap.open(
+                map_path, source=source, target_url=args.target_url or ""
+            )
+        except ImportFailure as err:
+            _log(str(err))
+            return 1
     try:
         plan = build_plan(
             source,
             target,
             project_root=project_root,
             ref_policy=args.ref_policy,
+            ref_mode=args.ref_mode,
+            ref_map=ref_map,
+            map_path=map_path,
             superseded_policy=args.superseded_policy,
             limit_items=args.limit_items,
         )
@@ -1673,9 +2172,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.skip_comments:
         plan.comments = []
     summary = plan.summary(latency_ms=args.latency_ms, comments=not args.skip_comments)
-    if args.plan_out:
-        args.plan_out.parent.mkdir(parents=True, exist_ok=True)
-        args.plan_out.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+    plan_out = args.plan_out
+    if plan_out is None and args.ref_mode == "remap":
+        plan_out = default_remap_plan_path()
+    if plan_out is not None:
+        plan_out.parent.mkdir(parents=True, exist_ok=True)
+        summary["plan_out"] = str(plan_out)
+        plan_out.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     if not args.apply:
         if args.json:
             print(json.dumps(summary, indent=2))
@@ -1684,9 +2187,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     assert client is not None
     assert project_root is not None
-    state_path = args.state_file or default_state_path(source, args.target_url or "")
+    state_path = args.state_file or default_state_path(
+        source, args.target_url or "", args.ref_mode
+    )
     try:
-        state = State.open(state_path, source=source, target_url=args.target_url or "")
+        state = State.open(
+            state_path,
+            source=source,
+            target_url=args.target_url or "",
+            ref_mode=args.ref_mode,
+        )
     except ImportFailure as err:
         _log(str(err))
         return 1
@@ -1699,6 +2209,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         comment_provenance=not args.no_comment_provenance,
         strict_comments=args.strict_comments,
         project_root=project_root,
+        ref_mode=args.ref_mode,
+        ref_map=ref_map,
         log=_log,
     )
     try:
@@ -1742,6 +2254,26 @@ def _print_plan(summary: JsonObject) -> None:
         "  refs: {policy}, first new WI-{first_new_ref}, WI-1 replaced: {replace_wi1}, "
         "last WI-{last_ref}".format(**refs)
     )
+    if refs.get("ref_mode") == "remap":
+        print(
+            "  remap: {already} already imported, {new} new; map: {map_out}; "
+            "plan: {plan_out}".format(
+                already=counts.get("work_items_already_imported", 0),
+                new=counts.get("work_items_new", 0),
+                map_out=refs.get("map_out"),
+                plan_out=summary.get("plan_out"),
+            )
+        )
+        remap = summary.get("remap")
+        if isinstance(remap, dict):
+            collisions = remap.get("project_collisions") or []
+            print(f"  project collisions: {len(collisions)}")
+            for row in collisions[:40]:
+                if isinstance(row, dict):
+                    print(
+                        f"    - {row.get('source')} -> {row.get('target')} "
+                        f"({row.get('name')})"
+                    )
     print(
         "  estimate: {mcp_calls} MCP calls, about {seconds}s at "
         "{assumed_latency_ms}ms".format(**estimate)

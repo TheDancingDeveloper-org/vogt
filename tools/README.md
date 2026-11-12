@@ -69,6 +69,62 @@ Useful switches:
 | `--no-comment-provenance` | omit the `_prod comment by … at …_` prefix |
 | `--superseded-policy wont_do` | default: keep the WI number of a retired item, as `wont_do` with a note |
 | `--ref-policy fresh` | do not require or check WI alignment; every item gets a new id and ref |
+| `--ref-mode remap` | target mints new WI numbers; each item carries `Imported from prod: WI-n`, the `prod-import` label and an entry in `--map-out` |
+| `--map-out PATH` | remap mode's persisted prod-ref -> dev-ref map (default `~/Working/notes/vogt-dev-prod-ref-map.json`) |
+
+### Remap mode (import beside existing dev work)
+
+`--ref-mode remap` is for a target that already has its own tracker data and
+must keep it untouched. Preserve mode stays the default and keeps every guard
+it had; remap mode replaces only the contiguous-sequence guard:
+
+- the target instance id must still differ from the snapshot's source, the
+  production hostname refusal still applies, and `--apply` still needs a
+  reported instance id;
+- every source item is created through the normal `work.create` path, so the
+  target mints the next native `WI-n`; the item's body starts with
+  `Imported from prod: WI-n` and it carries the `prod-import` label;
+- `--map-out` records `prod WI-n -> dev WI-n` and `prod slug -> dev slug`;
+  relations and comments resolve through it;
+- a resumed run reads the body markers (and the map) and skips an item that
+  already exists, so it is never duplicated;
+- a project slug that already exists on the target is suffixed
+  deterministically (`-prod`, `-prod-2`, ...) and registered under a matching
+  name; an existing dev project is never edited, merged or deleted;
+- every imported/reused project is re-read and must still be
+  `write_back=none` / `link_state=unlinked` before work is written.
+
+Keep the map file with the state file: losing it is recoverable through the
+markers, but a project registration whose map entry was lost could be
+suffixed a second time.
+
+```bash
+# dry run: prints counts, project collisions and the full plan JSON
+uv run python tools/vogt_snapshot_import.py \
+  --source /path/to/export.json \
+  --target-url https://vogt-dev.example \
+  --token-file /path/to/dev-token \
+  --ref-mode remap \
+  --plan-out /tmp/vogt-remap-plan.json
+
+# pilot: create the first 20 missing items only
+uv run python tools/vogt_snapshot_import.py \
+  --source /path/to/export.json \
+  --target-url https://vogt-dev.example \
+  --token-file /path/to/dev-token \
+  --ref-mode remap --limit-items 20 \
+  --apply --confirm \
+  --reason "WI-4125: approved prod snapshot import (pilot)"
+
+# full apply: the same command without --limit-items
+uv run python tools/vogt_snapshot_import.py \
+  --source /path/to/export.json \
+  --target-url https://vogt-dev.example \
+  --token-file /path/to/dev-token \
+  --ref-mode remap \
+  --apply --confirm \
+  --reason "WI-4125: approved prod snapshot import"
+```
 
 ### The prod guard
 
@@ -99,7 +155,7 @@ stamps `created_at` and `updated_at` itself.
 
 | field | result |
 | --- | --- |
-| `WI-` reference | **preserved** when the source refs are contiguous from WI-1 (all current prod rows are). An existing WI-1 is updated in place and the rest are created in order; the tool aborts if the target hands back any other ref. |
+| `WI-` reference | preserve mode: **preserved** when the source refs are contiguous from WI-1 (all current prod rows are). An existing WI-1 is updated in place and the rest are created in order; the tool aborts if the target hands back any other ref. Remap mode: a new native ref, recorded in the map and in the body marker. |
 | `wrk_` id | new |
 | `created_at` / `updated_at` | import time |
 | title, body, kind, state, priority, effort, labels, initiative, project | preserved |
