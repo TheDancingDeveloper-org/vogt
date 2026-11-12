@@ -143,14 +143,14 @@ pub struct PodConfig {
     /// restart before the pod is given up as lost.
     #[serde(default = "default_reconnect_timeout")]
     pub reconnect_timeout: Duration,
-    /// Names this engine deployment. Every pod it creates carries it as the
-    /// `vogt.engine` label, and the reconciler lists and deletes only pods
-    /// that carry its own, so engines sharing a namespace (dev and prod, or an
-    /// old process during a rollout) never touch each other's pods. Keep it
     /// The read-only workspace tree every session pod gets (WI-3373/WI-3374);
     /// unset keeps the pre-feature spec.
     #[serde(default)]
     pub workspace: Option<PodWorkspace>,
+    /// Names this engine deployment. Every pod it creates carries it as the
+    /// `vogt.engine` label, and the reconciler lists and deletes only pods
+    /// that carry its own, so engines sharing a namespace (dev and prod, or an
+    /// old process during a rollout) never touch each other's pods. Keep it
     /// stable for a deployment and distinct between deployments.
     #[serde(default = "default_engine_id")]
     pub engine_id: String,
@@ -159,20 +159,23 @@ pub struct PodConfig {
 /// writable per-pod clone beneath it (WI-3374). Off unless
 /// `ENGINE_POD_WORKSPACE=1`: a deployment that does not opt in keeps the
 /// pre-feature pod spec exactly.
+///
+/// The tree is the engine's own installed workspace (`source`), served to the
+/// pod as a filtered tarball (WI-4127). The pod never clones a repository: the
+/// private configuration repository and the Forgejo skills repository cannot
+/// be read anonymously, and their credentials must not reach a session pod.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct PodWorkspace {
     /// Where the tree is mounted in the session container. The clone goes in
     /// `session/` beneath it, on its own writable emptyDir, so the workspace
     /// files are ancestors of the session's cwd as they are on a host.
     pub dir: String,
-    /// The workspace-configuration repository, at a pinned commit. Both
-    /// sources are public, so the init container needs no deploy key, token or
-    /// Infisical identity and none can reach the session container.
-    pub config_repo: String,
-    pub config_commit: String,
-    /// The shared-skills repository, at a pinned commit.
-    pub skills_repo: String,
-    pub skills_commit: String,
+    /// Absolute path, on the engine's own filesystem, of the installed
+    /// workspace tree to snapshot. The engine's `agent-workspace-config` init
+    /// container writes it into the shared agent-config `emptyDir`.
+    pub source: String,
+    /// Cap on the uncompressed snapshot, enforced by the engine.
+    pub max_bytes: u64,
 }
 
 /// The workspace tree's default mount path, beside the image's empty
@@ -182,10 +185,6 @@ pub const DEFAULT_WORKSPACE_DIR: &str = "/home/vogt/Working";
 /// container creates it in the workspace volume, so the nested writable mount
 /// has a mount point; the session container only ever sees it writable.
 pub const WORKSPACE_SESSION_DIR: &str = "session";
-pub const DEFAULT_WORKSPACE_CONFIG_REPO: &str =
-    "https://github.com/TheDancingDeveloper-org/agent-workspace-config.git";
-pub const DEFAULT_WORKSPACE_SKILLS_REPO: &str =
-    "https://repo.indexarr.net/indexarr/UsefulClaudeSkills.git";
 
 impl PodWorkspace {
     /// The clone root: `<dir>/session`.
@@ -218,16 +217,23 @@ fn validate_workspace_dir(raw: &str) -> Result<()> {
     Ok(())
 }
 
-/// A full commit id, so a deployment cannot follow a branch whose content
-/// changes between pods.
-fn validate_pinned_commit(name: &str, value: &str) -> Result<()> {
-    if value.len() == 40 && value.chars().all(|c| c.is_ascii_hexdigit()) {
-        Ok(())
-    } else {
+/// The engine-side source of the workspace snapshot is a normalised absolute
+/// path. It is not required to exist yet at config time: the engine reports an
+/// unavailable snapshot if the installed tree is missing.
+fn validate_workspace_source(raw: &str) -> Result<()> {
+    let bad = |why: &str| {
         Err(ApiError::Config(format!(
-            "{name} must be a full 40-character commit id, got {value:?}"
+            "ENGINE_POD_WORKSPACE_SOURCE {why}: {raw:?}"
         )))
+    };
+    let Some(rest) = raw.strip_prefix('/') else {
+        return bad("must be an absolute path");
+    };
+    let rest = rest.strip_suffix('/').unwrap_or(rest);
+    if rest.is_empty() || rest.split('/').any(|s| matches!(s, "" | "." | "..")) {
+        return bad("must be a normalised path");
     }
+    Ok(())
 }
 
 /// Where a node's seed directories may live unless the deployment says so.
@@ -811,38 +817,41 @@ impl PodConfig {
             }
         };
         if workspace_enabled {
-            // Both commits are required and pinned: a pod's guidance must not
-            // change because a branch moved between two launches.
-            let pinned = |name: &str| -> Result<String> {
-                let value = text(name).filter(|v| !v.is_empty()).ok_or_else(|| {
-                    ApiError::Config(format!(
-                        "{name} is required when ENGINE_POD_WORKSPACE is enabled"
-                    ))
+            // The tree the engine snapshots: its own installed workspace, not
+            // a pod-side clone. Required and absolute, so there is never a
+            // guess about which directory is served.
+            let source = text("ENGINE_POD_WORKSPACE_SOURCE")
+                .filter(|v| !v.is_empty())
+                .ok_or_else(|| {
+                    ApiError::Config(
+                        "ENGINE_POD_WORKSPACE_SOURCE is required when ENGINE_POD_WORKSPACE is enabled"
+                            .into(),
+                    )
                 })?;
-                validate_pinned_commit(name, &value)?;
-                Ok(value)
-            };
+            validate_workspace_source(&source)?;
             let dir = text("ENGINE_POD_WORKSPACE_DIR")
                 .filter(|v| !v.is_empty())
                 .unwrap_or_else(|| DEFAULT_WORKSPACE_DIR.to_string());
             validate_workspace_dir(&dir)?;
-            let repo = |name: &str, default: &str| {
-                text(name)
-                    .filter(|v| !v.is_empty())
-                    .unwrap_or_else(|| default.to_string())
+            let max_bytes = match text("ENGINE_POD_WORKSPACE_MAX_BYTES").filter(|v| !v.is_empty()) {
+                Some(value) => value.parse::<u64>().map_err(|_| {
+                    ApiError::Config(format!(
+                        "ENGINE_POD_WORKSPACE_MAX_BYTES must be a whole number of bytes, \
+                         got {value:?}"
+                    ))
+                })?,
+                None => crate::workspace_snapshot::DEFAULT_MAX_SNAPSHOT_BYTES,
             };
+            if max_bytes == 0 || max_bytes > crate::workspace_snapshot::HARD_MAX_SNAPSHOT_BYTES {
+                return Err(ApiError::Config(format!(
+                    "ENGINE_POD_WORKSPACE_MAX_BYTES must be between 1 and {} bytes",
+                    crate::workspace_snapshot::HARD_MAX_SNAPSHOT_BYTES
+                )));
+            }
             cfg.workspace = Some(PodWorkspace {
                 dir,
-                config_repo: repo(
-                    "ENGINE_POD_WORKSPACE_CONFIG_REPO",
-                    DEFAULT_WORKSPACE_CONFIG_REPO,
-                ),
-                config_commit: pinned("ENGINE_POD_WORKSPACE_CONFIG_COMMIT")?,
-                skills_repo: repo(
-                    "ENGINE_POD_WORKSPACE_SKILLS_REPO",
-                    DEFAULT_WORKSPACE_SKILLS_REPO,
-                ),
-                skills_commit: pinned("ENGINE_POD_WORKSPACE_SKILLS_COMMIT")?,
+                source,
+                max_bytes,
             });
         }
         if let Some(v) = text("ENGINE_POD_SEED_ALLOWED_PREFIXES") {
@@ -1689,10 +1698,14 @@ pub fn pod_template(
             ..Default::default()
         },
         spec: Some(PodSpec {
-            init_containers: cfg
-                .workspace
-                .as_ref()
-                .map(|workspace| vec![workspace_init_container(workspace, image)]),
+            init_containers: cfg.workspace.as_ref().map(|workspace| {
+                vec![workspace_init_container(
+                    workspace,
+                    &cfg.engine_endpoint,
+                    id,
+                    image,
+                )]
+            }),
             containers: vec![Container {
                 name: SESSION_CONTAINER.into(),
                 image: Some(image.into()),
@@ -1757,40 +1770,69 @@ pub fn pod_template(
         ..Default::default()
     }
 }
-/// Builds the read-only workspace tree once per pod (WI-3373). It runs before
-/// the session container and exits; only this container can reach the clone
-/// sources, and both are public, so it needs no secret at all.
+/// Fetches the engine's filtered workspace snapshot into the pod-local tree
+/// (WI-3373/WI-3374, redesigned by WI-4127). It runs before the session
+/// container and exits.
+///
+/// The credential is the pod's existing one-use bootstrap token, mounted from
+/// the same per-pod Secret as before and presented from a 0600 curl config
+/// file, never on a command line. The route's check does not consume it, so
+/// the session container's bootstrap still works. A failed fetch is
+/// best-effort: the session keeps the pre-workspace tree instead of failing to
+/// boot.
 const WORKSPACE_INIT_SCRIPT: &str = r#"set -eu
 umask 077
 root=${WORKSPACE_ROOT:?WORKSPACE_ROOT is required}
+url=${WORKSPACE_SNAPSHOT_URL:?WORKSPACE_SNAPSHOT_URL is required}
+token_file=${WORKSPACE_TOKEN_FILE:?WORKSPACE_TOKEN_FILE is required}
 mkdir -p "$root/session"
-clone_at() {
-  repo=$1; commit=$2; dir=$3
-  rm -rf "$dir"
-  git clone --quiet --no-checkout "$repo" "$dir"
-  git -C "$dir" -c advice.detachedHead=false checkout --quiet "$commit"
-  rm -rf "$dir/.git"
-}
-# Both repositories are public, so this clone needs no deploy key, token or
-# Infisical identity: no credential exists that could reach the session.
-if ! clone_at "$WORKSPACE_CONFIG_REPO" "$WORKSPACE_CONFIG_COMMIT" "$root/agent-workspace-config"; then
-  echo 'workspace-init: could not clone the workspace configuration; continuing without it' >&2
+if [ ! -r "$token_file" ]; then
+  echo 'workspace-init: bootstrap credential is not readable; continuing without the workspace tree' >&2
   exit 0
 fi
-if ! clone_at "$WORKSPACE_SKILLS_REPO" "$WORKSPACE_SKILLS_COMMIT" "$root/UsefulClaudeSkills"; then
-  echo 'workspace-init: could not clone the shared skills; continuing without them' >&2
+token=$(cat "$token_file")
+if [ -z "$token" ]; then
+  echo 'workspace-init: bootstrap credential is empty; continuing without the workspace tree' >&2
   exit 0
 fi
-if ! WORKSPACE_ROOT="$root" "$root/agent-workspace-config/bootstrap/install.sh" --manifest=/dev/null; then
-  echo 'workspace-init: install.sh failed; continuing without the workspace assets' >&2
+archive=/tmp/workspace-snapshot.tar.gz
+auth=/tmp/workspace-curl.conf
+printf 'header = "Authorization: Bearer %s"\n' "$token" >"$auth"
+chmod 600 "$auth"
+unset token
+# Retry a connection the engine has not started accepting yet (pod network
+# not ready; curl 6/7/28/35/52/55/56), like the session entrypoint's bootstrap.
+backoff_ms=250; waited_ms=0; max_wait_ms=15000
+while :; do
+  rc=0
+  curl --silent --show-error --fail --connect-timeout 5 --max-time 120 --config "$auth" -o "$archive" "$url" || rc=$?
+  [ "$rc" -eq 0 ] && break
+  case "$rc" in 6|7|28|35|52|55|56) [ "$waited_ms" -lt "$max_wait_ms" ] || break ;; *) break ;; esac
+  sleep "$(awk -v ms="$backoff_ms" 'BEGIN { printf "%.3f", ms / 1000 }')"
+  waited_ms=$((waited_ms + backoff_ms)); backoff_ms=$((backoff_ms * 2)); [ "$backoff_ms" -le 2000 ] || backoff_ms=2000
+done
+rm -f "$auth"
+if [ "$rc" -ne 0 ]; then
+  rm -f "$archive"
+  echo "workspace-init: could not fetch the workspace snapshot (curl exit $rc); continuing without it" >&2
   exit 0
 fi
-rm -rf "$root/agent-workspace-config"
+if ! tar -xzf "$archive" -C "$root" --no-same-owner --no-same-permissions; then
+  rm -f "$archive"
+  echo 'workspace-init: could not unpack the workspace snapshot; continuing without it' >&2
+  exit 0
+fi
+rm -f "$archive"
 printf 'workspace-init: workspace tree ready at %s
 ' "$root" >&2
 "#;
 
-fn workspace_init_container(workspace: &PodWorkspace, image: &str) -> Container {
+fn workspace_init_container(
+    workspace: &PodWorkspace,
+    engine_endpoint: &str,
+    id: Uuid,
+    image: &str,
+) -> Container {
     let env = |name: &str, value: &str| EnvVar {
         name: name.into(),
         value: Some(value.into()),
@@ -1806,10 +1848,14 @@ fn workspace_init_container(workspace: &PodWorkspace, image: &str) -> Container 
         args: Some(vec![WORKSPACE_INIT_SCRIPT.into()]),
         env: Some(vec![
             env("WORKSPACE_ROOT", &workspace.dir),
-            env("WORKSPACE_CONFIG_REPO", &workspace.config_repo),
-            env("WORKSPACE_CONFIG_COMMIT", &workspace.config_commit),
-            env("WORKSPACE_SKILLS_REPO", &workspace.skills_repo),
-            env("WORKSPACE_SKILLS_COMMIT", &workspace.skills_commit),
+            env(
+                "WORKSPACE_SNAPSHOT_URL",
+                &format!(
+                    "{}/api/agent-auth/sessions/{id}/workspace",
+                    engine_endpoint.trim_end_matches('/')
+                ),
+            ),
+            env("WORKSPACE_TOKEN_FILE", BOOTSTRAP_TOKEN_PATH),
         ]),
         volume_mounts: Some(vec![
             VolumeMount {
@@ -1817,7 +1863,16 @@ fn workspace_init_container(workspace: &PodWorkspace, image: &str) -> Container 
                 mount_path: workspace.dir.clone(),
                 ..Default::default()
             },
-            // Writable paths for git's global config; the container root is
+            // The pod's existing one-use bootstrap token, read-only. It is
+            // the same Secret the session container mounts; this adds no
+            // workspace credential.
+            VolumeMount {
+                name: BOOTSTRAP_VOLUME.into(),
+                mount_path: BOOTSTRAP_MOUNT_DIR.into(),
+                read_only: Some(true),
+                ..Default::default()
+            },
+            // Writable HOME for curl's temporary files; the container root is
             // read-only like the session container's.
             VolumeMount {
                 name: "session-home".into(),
@@ -3920,15 +3975,13 @@ mod tests {
         .is_err());
     }
 
-    const CONFIG_COMMIT: &str = "f0115632e9c789e585606f156b8c5c621a04c258";
-    const SKILLS_COMMIT: &str = "d93c350828148975a273132242dae935362f4145";
+    const WORKSPACE_SOURCE: &str = "/home/sprooty/Working";
 
     fn workspace_cfg() -> PodConfig {
         PodConfig::from_lookup(
             lookup(&[
                 ("ENGINE_POD_WORKSPACE", "1"),
-                ("ENGINE_POD_WORKSPACE_CONFIG_COMMIT", CONFIG_COMMIT),
-                ("ENGINE_POD_WORKSPACE_SKILLS_COMMIT", SKILLS_COMMIT),
+                ("ENGINE_POD_WORKSPACE_SOURCE", WORKSPACE_SOURCE),
             ]),
             None,
         )
@@ -3936,7 +3989,7 @@ mod tests {
     }
 
     #[test]
-    fn the_workspace_is_off_by_default_and_pinned_when_on() {
+    fn the_workspace_is_off_by_default_and_needs_an_engine_side_source() {
         let cfg = PodConfig::default();
         assert!(cfg.workspace.is_none());
         assert_eq!(cfg.work_dir(), vogt_session_agent::DEFAULT_WORK_DIR);
@@ -3944,38 +3997,51 @@ mod tests {
         let cfg = workspace_cfg();
         let workspace = cfg.workspace.as_ref().unwrap();
         assert_eq!(workspace.dir, DEFAULT_WORKSPACE_DIR);
-        assert_eq!(workspace.config_repo, DEFAULT_WORKSPACE_CONFIG_REPO);
-        assert_eq!(workspace.config_commit, CONFIG_COMMIT);
-        assert_eq!(workspace.skills_repo, DEFAULT_WORKSPACE_SKILLS_REPO);
-        assert_eq!(workspace.skills_commit, SKILLS_COMMIT);
+        assert_eq!(workspace.source, WORKSPACE_SOURCE);
+        assert_eq!(
+            workspace.max_bytes,
+            crate::workspace_snapshot::DEFAULT_MAX_SNAPSHOT_BYTES
+        );
         assert_eq!(cfg.work_dir(), "/home/vogt/Working/session");
 
         let enabled = |pairs: &[(&str, &str)]| {
             let mut all = vec![
                 ("ENGINE_POD_WORKSPACE", "true"),
-                ("ENGINE_POD_WORKSPACE_CONFIG_COMMIT", CONFIG_COMMIT),
-                ("ENGINE_POD_WORKSPACE_SKILLS_COMMIT", SKILLS_COMMIT),
+                ("ENGINE_POD_WORKSPACE_SOURCE", WORKSPACE_SOURCE),
             ];
             all.extend_from_slice(pairs);
             PodConfig::from_lookup(lookup(&all), None)
         };
-        // A branch is not a pin.
-        let error = enabled(&[("ENGINE_POD_WORKSPACE_CONFIG_COMMIT", "main")]).unwrap_err();
-        assert!(error.to_string().contains("40-character"), "{error}");
-        assert!(enabled(&[("ENGINE_POD_WORKSPACE_CONFIG_COMMIT", "")]).is_err());
-        assert!(enabled(&[("ENGINE_POD_WORKSPACE_SKILLS_COMMIT", "rust-2")]).is_err());
+        // No source, no tree: the engine never guesses which of its
+        // directories to serve.
+        assert!(enabled(&[("ENGINE_POD_WORKSPACE_SOURCE", "")]).is_err());
+        assert!(enabled(&[("ENGINE_POD_WORKSPACE_SOURCE", "relative/Working")]).is_err());
+        assert!(enabled(&[("ENGINE_POD_WORKSPACE_SOURCE", "/home/x/../etc")]).is_err());
+        assert!(enabled(&[("ENGINE_POD_WORKSPACE_SOURCE", "/")]).is_err());
+        let error =
+            PodConfig::from_lookup(lookup(&[("ENGINE_POD_WORKSPACE", "true")]), None).unwrap_err();
+        assert!(
+            error.to_string().contains("ENGINE_POD_WORKSPACE_SOURCE"),
+            "{error}"
+        );
         // The mount must stay under the session home.
         assert!(enabled(&[("ENGINE_POD_WORKSPACE_DIR", "/etc/workspace")]).is_err());
         assert!(enabled(&[("ENGINE_POD_WORKSPACE_DIR", "/home/vogt")]).is_err());
         assert!(enabled(&[("ENGINE_POD_WORKSPACE_DIR", "/home/vogt/../etc")]).is_err());
         let moved = enabled(&[("ENGINE_POD_WORKSPACE_DIR", "/home/vogt/tree/")]).unwrap();
         assert_eq!(moved.work_dir(), "/home/vogt/tree/session");
+        // The cap is bounded; the builder holds the snapshot in memory.
+        assert!(enabled(&[("ENGINE_POD_WORKSPACE_MAX_BYTES", "0")]).is_err());
+        assert!(enabled(&[("ENGINE_POD_WORKSPACE_MAX_BYTES", "-1")]).is_err());
+        assert!(enabled(&[("ENGINE_POD_WORKSPACE_MAX_BYTES", "999999999999")]).is_err());
+        let capped = enabled(&[("ENGINE_POD_WORKSPACE_MAX_BYTES", "1048576")]).unwrap();
+        assert_eq!(capped.workspace.unwrap().max_bytes, 1024 * 1024);
         // An unusable flag value is refused, not read as off.
         assert!(PodConfig::from_lookup(lookup(&[("ENGINE_POD_WORKSPACE", "yes")]), None).is_err());
     }
 
     #[test]
-    fn a_workspace_pod_builds_a_read_only_tree_without_credentials() {
+    fn a_workspace_pod_fetches_the_engine_snapshot_without_new_credentials() {
         let cfg = workspace_cfg();
         let pod = pod_template_for(&cfg);
         let spec = pod.spec.as_ref().unwrap();
@@ -3997,17 +4063,23 @@ mod tests {
                 .read_only_root_filesystem,
             Some(true)
         );
-        // It builds the tree, so it writes the workspace volume...
-        let init_mount = workspace_init
-            .volume_mounts
-            .as_ref()
-            .unwrap()
+        // It unpacks the tree, so it writes the workspace volume...
+        let init_mounts = workspace_init.volume_mounts.as_ref().unwrap();
+        let init_mount = init_mounts
             .iter()
             .find(|m| m.name == WORKSPACE_VOLUME)
             .unwrap();
         assert_eq!(init_mount.mount_path, DEFAULT_WORKSPACE_DIR);
         assert_eq!(init_mount.read_only, None);
-        // ...and names the pins as data, never a credential.
+        // ...and it reads the pod's existing bootstrap credential, the same
+        // per-pod Secret the session container mounts. No workspace secret.
+        let bootstrap = init_mounts
+            .iter()
+            .find(|m| m.name == BOOTSTRAP_VOLUME)
+            .unwrap();
+        assert_eq!(bootstrap.mount_path, BOOTSTRAP_MOUNT_DIR);
+        assert_eq!(bootstrap.read_only, Some(true));
+        // It fetches from this engine, never from a repository.
         let init_env: BTreeMap<_, _> = workspace_init
             .env
             .as_ref()
@@ -4015,13 +4087,32 @@ mod tests {
             .iter()
             .map(|e| (e.name.as_str(), e.value.clone().unwrap_or_default()))
             .collect();
-        assert_eq!(init_env["WORKSPACE_CONFIG_COMMIT"], CONFIG_COMMIT);
-        assert_eq!(init_env["WORKSPACE_SKILLS_COMMIT"], SKILLS_COMMIT);
+        assert_eq!(init_env["WORKSPACE_ROOT"], DEFAULT_WORKSPACE_DIR);
+        assert_eq!(
+            init_env["WORKSPACE_SNAPSHOT_URL"],
+            format!(
+                "{}/api/agent-auth/sessions/{}/workspace",
+                cfg.engine_endpoint,
+                Uuid::nil()
+            )
+        );
+        assert_eq!(init_env["WORKSPACE_TOKEN_FILE"], BOOTSTRAP_TOKEN_PATH);
         assert!(init_env
             .values()
-            .all(|v| !v.contains("TOKEN") && !v.contains("KEY")));
+            .all(|v| !v.contains("DEPLOY") && !v.contains("FORGEJO") && !v.contains("KEY")));
+        let script = workspace_init.args.as_ref().unwrap().join(" ");
+        assert!(
+            script.contains("curl "),
+            "the init container fetches: {script}"
+        );
+        assert!(
+            !script.contains("git clone"),
+            "the pod no longer clones a private repository"
+        );
+        assert!(script.contains("--config \"$auth\""));
+        assert!(script.contains("--no-same-owner"));
 
-        // The session container reads it, never writes it.
+        // The session container reads the tree, never writes it.
         let container = &spec.containers[0];
         let mounts = container.volume_mounts.as_ref().unwrap();
         let mount = mounts.iter().find(|m| m.name == WORKSPACE_VOLUME).unwrap();
@@ -4054,9 +4145,10 @@ mod tests {
         assert_eq!(env["VOGT_WORK_DIR"], "/home/vogt/Working/session");
         assert_eq!(env["VOGT_WORKSPACE_ROOT"], DEFAULT_WORKSPACE_DIR);
         assert!(!env.contains_key("VOGT_BOOTSTRAP_TOKEN"));
+        assert!(!env.contains_key("WORKSPACE_TOKEN_FILE"));
 
         // No new Secret: the only secret volume is the bootstrap credential
-        // file, mounted into the session container as before.
+        // file, and the main container has no workspace secret mount.
         let secret_volumes: Vec<_> = spec
             .volumes
             .as_ref()
