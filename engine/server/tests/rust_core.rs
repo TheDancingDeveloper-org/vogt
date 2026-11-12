@@ -47,7 +47,8 @@ fn binary() -> PathBuf {
     path
 }
 
-fn boot_core() -> Core {
+/// Run `vogt-core init` on a fresh data dir and return it.
+fn init_core() -> tempfile::TempDir {
     let bin = binary();
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("core-token"), SECRET).unwrap();
@@ -80,30 +81,95 @@ fn boot_core() -> Core {
         status.success(),
         "vogt-core init failed: {status}\n{stderr}"
     );
+    dir
+}
 
-    // The core announces the port it was given, not the one the kernel
-    // chose, so port 0 comes back as http://127.0.0.1:0. Pick a free port.
+/// How long a live `vogt-core serve` may take to answer `/health/ready`.
+///
+/// Generous on purpose (WI-4173): on a loaded runner a debug core spawned
+/// alongside eight others has taken more than ten seconds to come up. The
+/// wait costs nothing when the core is quick, because readiness is polled
+/// every 50 ms, and a core that dies is reported at once, not at the
+/// deadline, because the child is checked on every poll.
+const READY_DEADLINE: Duration = Duration::from_secs(120);
+
+/// How many fresh ports to try when `serve` exits before it is ready.
+///
+/// The core announces the port it was given, not the one the kernel chose,
+/// so the test picks a free port by binding and releasing it. Another test
+/// in this binary can take that port before the core binds it; the core
+/// then exits. That is a lost race, not a broken core, so it gets a new
+/// port. A core that keeps exiting fails with its own stderr.
+const SERVE_ATTEMPTS: usize = 5;
+
+/// Init a core, serve it on a free port and wait until it is ready.
+async fn start_core() -> Core {
+    let dir = init_core();
+    let mut last_exit = String::new();
+    for _ in 0..SERVE_ATTEMPTS {
+        match serve_core(dir.path()).await {
+            Ok((child, url)) => {
+                return Core {
+                    child,
+                    url,
+                    _dir: dir,
+                }
+            }
+            Err(exit) => last_exit = exit,
+        }
+    }
+    panic!(
+        "vogt-core serve exited before it was ready on {SERVE_ATTEMPTS} ports; last: {last_exit}"
+    );
+}
+
+/// Spawn `serve` and wait for `/health/ready`. `Err` carries the exit status
+/// and stderr of a child that exited first; a child that is alive but not
+/// ready by `READY_DEADLINE` panics.
+async fn serve_core(dir: &std::path::Path) -> Result<(Child, String), String> {
     let port = {
         let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         probe.local_addr().unwrap().port()
     };
-    let child = Command::new(&bin)
+    // stderr goes to a file, not a pipe: nothing drains a pipe while the
+    // core runs, and a full pipe would block it.
+    let log = dir.join(format!("serve-{port}.log"));
+    let mut child = Command::new(binary())
         .args(["serve", "--host", "127.0.0.1", "--port", &port.to_string()])
         .arg("--data-dir")
-        .arg(dir.path())
-        .env(
-            "VOGT_BOOTSTRAP_CORE_TOKEN_FILE",
-            dir.path().join("core-token"),
-        )
+        .arg(dir)
+        .env("VOGT_BOOTSTRAP_CORE_TOKEN_FILE", dir.join("core-token"))
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(std::fs::File::create(&log).unwrap())
         .spawn()
         .unwrap();
     let url = format!("http://127.0.0.1:{port}");
-    Core {
-        child,
-        url,
-        _dir: dir,
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
+    let started = Instant::now();
+    loop {
+        if client
+            .get(format!("{url}/health/ready"))
+            .send()
+            .await
+            .map(|response| response.status().is_success())
+            .unwrap_or(false)
+        {
+            return Ok((child, url));
+        }
+        if let Some(status) = child.try_wait().unwrap() {
+            let stderr = std::fs::read_to_string(&log).unwrap_or_default();
+            return Err(format!("{status} on {url}\n{stderr}"));
+        }
+        if started.elapsed() > READY_DEADLINE {
+            let _ = child.kill();
+            let _ = child.wait();
+            let stderr = std::fs::read_to_string(&log).unwrap_or_default();
+            panic!("vogt-core never became ready at {url} within {READY_DEADLINE:?}\n{stderr}");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -218,30 +284,9 @@ fn bearer() -> reqwest::header::HeaderMap {
     headers
 }
 
-async fn wait_ready(url: &str) {
-    let client = reqwest::Client::new();
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if client
-            .get(format!("{url}/health/ready"))
-            .send()
-            .await
-            .map(|response| response.status().is_success())
-            .unwrap_or(false)
-        {
-            return;
-        }
-        if Instant::now() > deadline {
-            panic!("vogt-core never became ready at {url}");
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-}
-
 #[tokio::test]
 async fn the_front_door_resolves_the_stack_secret_through_the_rust_core() {
-    let core = boot_core();
-    wait_ready(&core.url).await;
+    let core = start_core().await;
     let door = boot_door(config_against(&core.url)).await;
     let client = reqwest::Client::new();
 
@@ -277,8 +322,7 @@ async fn the_followers_cursor_sees_a_write_made_after_it_started() {
     // The follower's own client and cursor logic, against the Rust feed: the
     // cursor starts at the head, a write lands while the follower is running,
     // and the next poll from the cursor returns that write and moves it on.
-    let core = boot_core();
-    wait_ready(&core.url).await;
+    let core = start_core().await;
     let follower = vogt_engine_server::vogt_core::VogtCore::from_config(&config_against(&core.url))
         .expect("the follower has a core client");
     let (_, mut cursor) = follower.events_after(0, 1).await.expect("head poll");
@@ -324,8 +368,7 @@ async fn the_followers_cursor_sees_a_write_made_after_it_started() {
 
 #[tokio::test]
 async fn a_dead_rust_core_is_an_outage_not_a_rejected_credential() {
-    let core = boot_core();
-    wait_ready(&core.url).await;
+    let core = start_core().await;
     let door = boot_door(config_against(&core.url)).await;
     // Kill it after the door has resolved it once, so the cache is warm and
     // the next miss is an outage of a core that was real.
@@ -345,8 +388,7 @@ async fn a_dead_rust_core_is_an_outage_not_a_rejected_credential() {
 async fn a_dead_rust_core_refuses_whoami_as_an_outage() {
     // Bearer resolution is not a proxy. A core that cannot be asked is 503,
     // never 401: a restart must not look like a bad credential.
-    let core = boot_core();
-    wait_ready(&core.url).await;
+    let core = start_core().await;
     let door = boot_door(config_against(&core.url)).await;
     drop(core);
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -370,14 +412,80 @@ async fn a_dead_rust_core_refuses_whoami_as_an_outage() {
     assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
+/// A pass-through between the door and the core that reports when the
+/// event follower has made a page read of the feed.
+///
+/// The follower finds the head with `limit=1` reads and then polls pages
+/// with a larger limit, so the first page read means the head is fixed and
+/// a later write is past it. Returns the relay's URL and a flag that turns
+/// true after that read has been answered.
+async fn recording_relay(core: String) -> (String, tokio::sync::watch::Receiver<bool>) {
+    use axum::{body::Body, extract::Request, response::Response};
+    let (drained, seen) = tokio::sync::watch::channel(false);
+    let drained = std::sync::Arc::new(drained);
+    let client = reqwest::Client::new();
+    let app = axum::Router::new().fallback(move |request: Request| {
+        let core = core.clone();
+        let client = client.clone();
+        let drained = std::sync::Arc::clone(&drained);
+        async move {
+            let (parts, body) = request.into_parts();
+            let path = parts
+                .uri
+                .path_and_query()
+                .map(|pq| pq.as_str().to_string())
+                .unwrap_or_default();
+            let page_read = parts.uri.path().ends_with("/events")
+                && parts.uri.query().is_some_and(|query| {
+                    query
+                        .split('&')
+                        .any(|pair| pair.starts_with("limit=") && pair != "limit=1")
+                });
+            let body = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+            let mut outbound = client.request(parts.method, format!("{core}{path}"));
+            for (name, value) in parts.headers.iter() {
+                if name != axum::http::header::HOST {
+                    outbound = outbound.header(name, value);
+                }
+            }
+            let Ok(answer) = outbound.body(body).send().await else {
+                return Response::builder()
+                    .status(StatusCode::BAD_GATEWAY)
+                    .body(Body::empty())
+                    .unwrap();
+            };
+            let mut response = Response::builder().status(answer.status());
+            for (name, value) in answer.headers().iter() {
+                if name != axum::http::header::TRANSFER_ENCODING
+                    && name != axum::http::header::CONTENT_LENGTH
+                {
+                    response = response.header(name, value);
+                }
+            }
+            let ok = answer.status().is_success();
+            let bytes = answer.bytes().await.unwrap_or_default();
+            if page_read && ok {
+                drained.send_replace(true);
+            }
+            response.body(Body::from(bytes)).unwrap()
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (format!("http://{addr}"), seen)
+}
+
 #[tokio::test]
 async fn the_sse_stream_carries_a_core_write_made_after_the_door_started() {
     // The live half of the event path (WI-1075 deferred this to I1): the
     // follower reads the Rust core's feed with the stack secret, republishes
     // each change onto the bus, and a browser's `/api/events` stream gets it.
-    let core = boot_core();
-    wait_ready(&core.url).await;
-    let door = boot_door(config_against(&core.url)).await;
+    let core = start_core().await;
+    let (relay, mut drained) = recording_relay(core.url.clone()).await;
+    let door = boot_door(config_against(&relay)).await;
     let client = reqwest::Client::new();
     let mut stream = client
         .get(format!("{door}/api/events"))
@@ -386,10 +494,15 @@ async fn the_sse_stream_carries_a_core_write_made_after_the_door_started() {
         .await
         .unwrap();
     assert_eq!(stream.status(), StatusCode::OK);
-    // The follower takes the core's head on its first poll, which runs as
-    // soon as the door boots. The write has to land after that poll, or it
-    // becomes the head and the follower never sees it.
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    // The follower takes the core's head first, with one-event reads. The
+    // write has to land after that, or it becomes the head and the follower
+    // never sees it. A fixed sleep guessed at that (WI-4173: it lost on a
+    // loaded runner); the relay says when the follower has made its first
+    // page read, which it only does once the head is fixed.
+    tokio::time::timeout(READY_DEADLINE, drained.wait_for(|seen| *seen))
+        .await
+        .expect("the event follower never polled the core's feed")
+        .unwrap();
     let status = Command::new(binary())
         .arg("--data-dir")
         .arg(core._dir.path())
@@ -411,14 +524,14 @@ async fn the_sse_stream_carries_a_core_write_made_after_the_door_started() {
 
     // The follower polls every five seconds, so the event is due within one
     // interval; the deadline leaves room for a slow CI runner.
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + Duration::from_secs(60);
     let mut seen = String::new();
     while !(seen.contains("vogt-changed") && seen.contains("project.registered")) {
         let remaining = deadline.saturating_duration_since(Instant::now());
         let chunk = tokio::time::timeout(remaining, stream.chunk())
             .await
             .unwrap_or_else(|_| {
-                panic!("no vogt-changed/project.registered on /api/events within 30s; saw: {seen}")
+                panic!("no vogt-changed/project.registered on /api/events within 60s; saw: {seen}")
             })
             .expect("the SSE read failed")
             .expect("the SSE stream ended");
@@ -428,8 +541,7 @@ async fn the_sse_stream_carries_a_core_write_made_after_the_door_started() {
 
 #[tokio::test]
 async fn the_event_follower_reads_the_rust_core_with_the_stack_secret() {
-    let core = boot_core();
-    wait_ready(&core.url).await;
+    let core = start_core().await;
     let door = boot_door(config_against(&core.url)).await;
     let client = reqwest::Client::new();
     // The follower is the engine's own poll, not a browser request, so this
@@ -460,8 +572,7 @@ async fn the_event_follower_reads_the_rust_core_with_the_stack_secret() {
 
 #[tokio::test]
 async fn mcp_reaches_the_rust_core() {
-    let core = boot_core();
-    wait_ready(&core.url).await;
+    let core = start_core().await;
     let door = boot_door(config_against(&core.url)).await;
     let client = reqwest::Client::new();
     let response = client
@@ -485,8 +596,7 @@ async fn vogt_tools_lists_and_calls_the_real_rust_core() {
     // The assistant's tool client, pointed at a real vogt-core rather than
     // the stub in vogt_tools::stub. tools/list has to come back with the
     // curated reads, and a tools/call has to be answered by the core.
-    let core = boot_core();
-    wait_ready(&core.url).await;
+    let core = start_core().await;
     let mut cfg = config_against(&core.url);
     let tools = vogt_engine_server::vogt_tools::VogtTools::from_config(&cfg).expect("tools client");
     let _ = &mut cfg;
@@ -589,8 +699,7 @@ async fn an_assistant_turn_reads_the_real_rust_core() {
     // The assistant's tool loop against a real vogt-core, not the stub core
     // the assistant's unit tests use. The model asks for `vogt_status`; the
     // answer that goes back to it must be the Rust core's own status.
-    let core = boot_core();
-    wait_ready(&core.url).await;
+    let core = start_core().await;
     let model = std::sync::Arc::new(std::sync::Mutex::new(Model {
         script: vec![
             serde_json::json!({
