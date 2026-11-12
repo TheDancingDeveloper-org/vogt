@@ -81,10 +81,8 @@ the example does: compiled defaults are not portable operator choices.
 | `ENGINE_POD_SCCACHE_ENDPOINT` | Optional validated sccache endpoint. |
 | `ENGINE_POD_WORKSPACE` | Opt in (`true`/`1`) to the read-only workspace tree in every session pod; off by default. |
 | `ENGINE_POD_WORKSPACE_DIR` | Mount path of the tree, default `/home/vogt/Working`; must be under `/home/vogt`. The clone goes in `session/` beneath it. |
-| `ENGINE_POD_WORKSPACE_CONFIG_REPO` | Workspace-configuration repository, default the public `agent-workspace-config` HTTPS URL. |
-| `ENGINE_POD_WORKSPACE_CONFIG_COMMIT` | Required full 40-character commit id when the workspace is on. |
-| `ENGINE_POD_WORKSPACE_SKILLS_REPO` | Shared-skills repository, default the public `UsefulClaudeSkills` HTTPS URL. |
-| `ENGINE_POD_WORKSPACE_SKILLS_COMMIT` | Required full 40-character commit id when the workspace is on. |
+| `ENGINE_POD_WORKSPACE_SOURCE` | Required when the workspace is on: absolute path on the engine's filesystem to the installed tree it snapshots (the engine's `agent-workspace-config` `emptyDir`, e.g. `/home/sprooty/Working`). |
+| `ENGINE_POD_WORKSPACE_MAX_BYTES` | Cap on the uncompressed snapshot, default 64 MiB (hard maximum 512 MiB). |
 
 The `ENGINE_SOURCE_GRAFT_*` names are the graft source provider's; the older
 `ENGINE_POD_GRAFT_*` and `ENGINE_GRAFT_MINT_TOKEN_FILE` names are read as
@@ -95,10 +93,12 @@ needed for per-session graft minting; mount the token only in the engine.
 Minting stays off until the flag is set, so existing pod sessions keep their
 current authentication. See [session pod boot](ENGINE.md#session-pod-boot)
 for bootstrap, revocation and account write-back. The workspace tree
-(`ENGINE_POD_WORKSPACE`, WI-3373/WI-3374) is read-only, pod-local and built at
-boot from pinned public sources; it is workspace configuration, not session
-persistence. Cache seeds (WI-3164/WI-3354) are not shared writable homes or
-workspace persistence.
+(`ENGINE_POD_WORKSPACE`, WI-3373/WI-3374) is read-only, pod-local and
+snapshotted at boot from the engine's own installed tree through an
+authenticated engine route (WI-4127); it is workspace configuration, not
+session persistence, and no repository credential reaches a session pod.
+Cache seeds (WI-3164/WI-3354) are not shared writable homes or workspace
+persistence.
 
 An engine restart re-adopts surviving pod sessions when their record and kept
 stream credential are on the state volume (WI-3205). Startup, shutdown and the

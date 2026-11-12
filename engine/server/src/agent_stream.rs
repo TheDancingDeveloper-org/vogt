@@ -652,6 +652,17 @@ impl AgentAuth {
         let g = self.source_credentials.lock().await.remove(&id)?;
         (g.expires > Instant::now()).then_some(g.handle)
     }
+    /// Whether `candidate` is the unspent bootstrap credential for `id` —
+    /// the read-only counterpart of [`Self::consume`]. The workspace
+    /// snapshot's init container presents the same credential to fetch its
+    /// tarball before the session container's one bootstrap request takes it
+    /// (WI-4127), so that fetch must not spend it.
+    pub async fn bootstrap_ok(&self, id: Uuid, candidate: &[u8]) -> bool {
+        let pending = self.pending.lock().await;
+        pending.get(&id).is_some_and(|entry| {
+            entry.expires > Instant::now() && bool::from(entry.token.as_slice().ct_eq(candidate))
+        })
+    }
     pub(crate) async fn consume(&self, id: Uuid, candidate: &[u8]) -> bool {
         let mut p = self.pending.lock().await;
         let Some(entry) = p.get(&id) else {
