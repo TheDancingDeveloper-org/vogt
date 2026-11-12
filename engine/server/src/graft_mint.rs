@@ -358,7 +358,7 @@ mod tests {
     use tonic::codegen::{http, Body, StdError};
 
     fn session() -> String {
-        "ses_01M76WJECNPXTPV2NKQQNBA8DA".to_string()
+        "ses_01ARZ3NDEKTSV4RRFFQ69G5FAV".to_string()
     }
 
     #[test]
@@ -374,10 +374,10 @@ mod tests {
             ]
         );
         let req = g.request();
-        assert_eq!(req.subject, "vogt-session-ses_01M76WJECNPXTPV2NKQQNBA8DA");
+        assert_eq!(req.subject, "vogt-session-ses_01ARZ3NDEKTSV4RRFFQ69G5FAV");
         assert_eq!(
             req.session.as_deref(),
-            Some("ses_01M76WJECNPXTPV2NKQQNBA8DA")
+            Some("ses_01ARZ3NDEKTSV4RRFFQ69G5FAV")
         );
         assert_eq!(req.work_item.as_deref(), Some("WI-3229"));
         // Another line gives another land scope and nothing broader.

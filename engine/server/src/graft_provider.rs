@@ -763,7 +763,7 @@ mod tests {
         let minter = Arc::new(FakeMinter::default());
         let p = GraftProvider::new(tmp.path(), Some(minter));
         let mut request = CredentialRequest::for_session(Uuid::new_v4());
-        request.session_ref = Some("ses_01M76WJECNPXTPV2NKQQNBA8DA".into());
+        request.session_ref = Some("ses_01ARZ3NDEKTSV4RRFFQ69G5FAV".into());
         p.mint_credential(&source(), &request).await.unwrap();
         // The FakeMinter's scopes are all it records; the grant's own
         // session id is asserted through the real minter in graft_mint's
