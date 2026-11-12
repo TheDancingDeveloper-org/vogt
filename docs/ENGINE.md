@@ -1073,7 +1073,7 @@ the end of the old one is then ignored, because an `ended` report unlinks only
 the session's current conversation. A session that is hibernating ignores
 reports, so an agent's exit as the engine stops it cannot change what the
 record resumes. Verified on vogt-dev on 2026-10-07: the hook fires for a
-`claude` (2.1.289) typed into an engine shell and sees
+`claude` typed into an engine shell and sees
 `VOGT_ENGINE_SESSION_ID`, the broker URL and token. It does not see
 `VOGT_SESSION_ID`, which only a session vogt-core started has.
 
