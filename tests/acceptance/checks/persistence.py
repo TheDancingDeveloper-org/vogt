@@ -15,6 +15,27 @@ def _kubectl_json(ctx: Context, *arguments: str) -> dict[str, Any]:
     return kubectl(ctx, *arguments)
 
 
+def _covering_mount(
+    state_dir: str, mounts: list[tuple[str, str, str]]
+) -> tuple[str, str, str] | None:
+    """The mount that actually holds ``state_dir``.
+
+    A container can mount a parent directory and a more specific child (the
+    live engine pod mounts an emptyDir at ``/home/sprooty`` and the state PVC
+    at ``/home/sprooty/.local/share/vogt-engine``). The child is the mount the
+    state dir resolves through, so match the longest path prefix, never the
+    first one that happens to be an ancestor.
+    """
+    covering = [
+        (container, name, path)
+        for container, name, path in mounts
+        if path and (state_dir == path or state_dir.startswith(path.rstrip("/") + "/"))
+    ]
+    if not covering:
+        return None
+    return max(covering, key=lambda row: len(row[2]))
+
+
 def state_on_a_pvc(ctx: Context) -> Check:
     ctx.require_kubectl()
     pvcs = _kubectl_json(ctx, "-n", "vogt-dev", "get", "pvc", "-o", "json")
@@ -58,12 +79,8 @@ def state_on_a_pvc(ctx: Context) -> Check:
             return "emptyDir"
         return "other"
 
-    state_mounts = [
-        row
-        for row in mounts
-        if state_dir == row[2] or state_dir.startswith(row[2].rstrip("/") + "/")
-    ]
-    if not state_mounts:
+    state_mount = _covering_mount(state_dir, mounts)
+    if state_mount is None:
         # The engine reports the path its own user resolves, which can differ
         # from the deployment's mount (the classic failure is HOME=/home/a in
         # the image and the PVC mounted under /home/b). Name the near miss so
@@ -86,19 +103,16 @@ def state_on_a_pvc(ctx: Context) -> Check:
             "mount path may disagree",
             bound=bound,
         )
-    not_pvc = [
-        f"{container}:{name}:{path} ({_kind(name)})"
-        for container, name, path in state_mounts
-        if _kind(name) != "pvc"
-    ]
-    if not_pvc:
+    container, name, path = state_mount
+    if _kind(name) != "pvc":
         return failed(
-            f"engine state ({state_dir}) is not on a PersistentVolumeClaim: {not_pvc}",
+            f"engine state ({state_dir}) resolves through {path} on "
+            f"{container}:{name} ({_kind(name)}), not a PersistentVolumeClaim",
             bound=bound,
         )
-    mounted = ", ".join(f"{container}:{name}" for container, name, _ in state_mounts)
     return passed(
-        f"PVCs Bound: {bound}; state_dir {state_dir} is on {mounted} "
+        f"PVCs Bound: {bound}; state_dir {state_dir} is on {container}:{name} "
+        f"at {path} "
         f"({len(pods.get('items') or [])} engine pod(s))"
     )
 

@@ -14,10 +14,11 @@ from ..harness import (
 )
 from ..policy import SESSION_MODEL, session_start_arguments
 
-#: Provider states the engine reports as usable. The Rust registry currently
-#: emits `active` (and `dropped` when an env key clashes with the manifest),
-#: while older/other surfaces used `ready`/`ok`.
-_READY_STATES = frozenset({None, "active", "ready", "ok"})
+#: Provider states the engine reports as usable. The Rust registry emits
+#: `active` (and `dropped` when an env key clashes with the manifest), while
+#: older/other surfaces used `ready`/`ok`. A missing state is not evidence
+#: that the provider is ready: P1 must not pass on a row that says nothing.
+_READY_STATES = frozenset({"active", "ready", "ok"})
 #: States that report a secret the launch path would have to fetch.
 _BROKEN_SECRET_STATES = frozenset(
     {
