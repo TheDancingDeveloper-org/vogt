@@ -1575,6 +1575,15 @@ stripped. This route instead answers with what the terminal shows now:
 - `turn_started_at`, `last_output_at`, `approval` — as in `SessionSummary`
   (below).
 
+The text this route serves is a transcript, so credential-shaped values are
+masked before it is returned: private-key blocks, JWT and provider-token
+shapes, auth headers, URL userinfo and credential-named assignments (whole
+underscore words, so `WIN_SSH_KEY=…` is masked and `KEY_COUNT=…` is not) in
+`lines`, `scrollback`, `title` and an approval's `question`/`command_excerpt`
+(WI-3988). Masking is a guardrail over shapes, not a boundary; the raw
+byte-stream routes (`GET /api/sessions/:id`, attach
+and `/api/history/:id/download`) still carry exactly what the program wrote.
+
 **Turn timing.** `SessionSummary`, the screen and the `activity` event carry
 `turn_started_at` — when the session last went `running` from `idle` or
 `waiting-for-input` (or was spawned); an answered permission dialog continues
@@ -1673,7 +1682,8 @@ ready → read → answer → stop.** Over MCP (the core's tools, preferred):
    and current, from its own Claude Code / Codex transcript (redacted), and
    is the best read of what an agent *said*; `session_screen.lines` is what
    the terminal shows now (`scrollback_lines` for more); `session_log_tail`
-   is the raw history of what it printed. `session_list` carries a
+   is the history of what it printed, with credential-shaped values masked.
+   `session_list` carries a
    `last_reply_excerpt` for each live agent session.
 4. **Answer.** `session_input` with `text` to type a follow-up (Enter is
    pressed by default; `draft: true` types without sending); `keys: ["esc"]`
@@ -3712,7 +3722,9 @@ empty on older rows.
   default. `truncated` is how a client knows it is not looking at the whole
   run. `strip_ansi` (default false) removes the escape sequences a terminal
   consumes without printing, so `text` is readable plain text; the byte
-  counters still describe the raw tail window that was read.
+  counters still describe the raw tail window that was read. `text` is
+  redacted like `/screen`: a log tail is a transcript (WI-3988). Search
+  snippets are redacted the same way.
 - `GET /api/history/:id/download` -> the whole log, streamed, as an attachment
   named for the session.
 - `DELETE /api/history/:id` -> `{"ok": true}`, `404` if it was already gone

@@ -676,9 +676,59 @@ pub async fn kept_screen(
     })
 }
 
+/// Mask credential-shaped text in a screen before a read route serves it.
+///
+/// A screen is a transcript: an agent that prints a key puts it on the grid,
+/// and `/screen`, the sweep and the PWA read it back (WI-3988). The live grid
+/// and the raw byte streams (attach, the history download) stay untouched —
+/// this masks what is served as text, not what the terminal renders.
+pub fn redact_screen(screen: &mut SessionScreen) {
+    for line in screen.lines.iter_mut().chain(screen.scrollback.iter_mut()) {
+        *line = crate::redaction::redact(line);
+    }
+    if let Some(title) = screen.title.as_mut() {
+        *title = crate::redaction::redact(title);
+    }
+    if let Some(approval) = screen.approval.as_mut() {
+        approval.question = crate::redaction::redact(&approval.question);
+        approval.command_excerpt = crate::redaction::redact(&approval.command_excerpt);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_served_screen_masks_a_printed_key() {
+        let mut screen = SessionScreen {
+            id: uuid::Uuid::nil(),
+            cols: 80,
+            rows: 2,
+            lines: vec![
+                "-----BEGIN OPENSSH PRIVATE KEY-----".into(),
+                "b3BlbnNzaC1rZXktdjEAAAAA".into(),
+            ],
+            cursor: ScreenCursor { row: 1, col: 0 },
+            title: Some("WIN_SSH_KEY=abcd1234".into()),
+            activity: ActivityState::Idle,
+            alive: true,
+            ready: false,
+            scrollback: vec!["export WIN_SSH_KEY=abcd1234".into()],
+            turn_started_at: None,
+            last_output_at: None,
+            approval: None,
+            blocked: None,
+        };
+        redact_screen(&mut screen);
+        let served = format!(
+            "{:?}{:?}{:?}",
+            screen.lines, screen.scrollback, screen.title
+        );
+        assert!(!served.contains("BEGIN OPENSSH PRIVATE KEY"), "{served}");
+        assert!(!served.contains("abcd1234"), "{served}");
+        assert!(served.contains("[redacted]"), "{served}");
+    }
 
     #[test]
     fn claude_posture_reads_the_footer_below_any_blank_rows() {

@@ -62,7 +62,11 @@ use super::{
 
 /// The hint every refusal ends with.
 const HINT: &str = "never print environment variables or tokens; name the variable you \
-                    need and check it with `test -n \"$NAME\"`";
+                    need and check it with `test -n \"$NAME\"`. An unset name is not \
+                    necessarily missing: a name listed in `AGENT_AUTH_ONDEMAND` is fetched \
+                    with `vogt-agent-auth fetch NAME`, a name in `AGENT_AUTH_GRANTED` is \
+                    already exported, and only a name in neither is truly absent — report \
+                    that, naming the variable";
 
 /// How deep `sh -c` / `eval` payloads are followed before the line counts as
 /// unreadable.
@@ -1067,6 +1071,14 @@ mod tests {
         ] {
             assert_eq!(check(command), None, "{command}");
         }
+    }
+
+    #[test]
+    fn a_refusal_says_how_to_tell_on_demand_from_missing() {
+        let reason = check("printenv WIN_SSH_KEY").expect("refused");
+        assert!(reason.contains("AGENT_AUTH_ONDEMAND"), "{reason}");
+        assert!(reason.contains("AGENT_AUTH_GRANTED"), "{reason}");
+        assert!(reason.contains("vogt-agent-auth fetch"), "{reason}");
     }
 
     #[test]
