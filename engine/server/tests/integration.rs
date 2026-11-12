@@ -19072,6 +19072,22 @@ mod pod_stream {
             .unwrap();
     }
 
+    /// Plays the agent's half of a stop's salvage (WI-4132): every stop of an
+    /// attached pod asks for a `Salvage` first and waits for `Salvaged`
+    /// before it signals the child, so an agent that ignores it stalls the
+    /// stop for the engine's whole salvage timeout.
+    async fn answer_salvage(ws: &mut Agent) {
+        put(
+            ws,
+            Frame::Salvaged {
+                ok: true,
+                files: 0,
+                reason: None,
+            },
+        )
+        .await;
+    }
+
     async fn take(ws: &mut Agent) -> Frame {
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
@@ -20852,19 +20868,22 @@ sleep 2
             }
         );
 
-        let kill = h
-            .client
-            .post(format!("{}/api/sessions/{id}/kill", h.base))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(kill.status(), StatusCode::OK);
+        // The kill salvages the checkout before it signals the child, and
+        // waits for the agent's answer, so it is sent alongside.
+        let kill = tokio::spawn({
+            let client = h.client.clone();
+            let url = format!("{}/api/sessions/{id}/kill", h.base);
+            async move { client.post(url).send().await.unwrap() }
+        });
+        assert_eq!(take(&mut agent).await, Frame::Salvage);
+        answer_salvage(&mut agent).await;
         assert_eq!(
             take(&mut agent).await,
             Frame::Signal {
                 signal: "kill".into()
             }
         );
+        assert_eq!(kill.await.unwrap().status(), StatusCode::OK);
 
         // The agent reports the child's exit; the session ends with it and
         // the pod is removed.
@@ -21933,8 +21952,8 @@ sleep 2
     }
 
     /// Plays the agent through a hibernation: stores the newer transcript when
-    /// asked to flush, confirms, then reports the child's exit when told to
-    /// stop.
+    /// asked to flush, confirms, answers the salvage, then reports the child's
+    /// exit when told to stop.
     async fn agent_hibernates(
         h: &Harness,
         agent: &mut Agent,
@@ -21959,6 +21978,7 @@ sleep 2
                         .expect("write-back accepted");
                     put(agent, Frame::Flushed { ok: true }).await;
                 }
+                Frame::Salvage => answer_salvage(agent).await,
                 Frame::Signal { signal } if signal == "kill" => {
                     put(agent, Frame::Exited { status: Some(0) }).await;
                     return;
