@@ -59,6 +59,7 @@ pub mod pty;
 pub mod push;
 pub mod push_api;
 pub mod push_fcm;
+pub mod redaction;
 pub mod resources;
 pub mod screen;
 pub mod scrollback;

@@ -705,7 +705,8 @@ impl SessionHistory {
     /// printing are removed from `text` (the same stripper the archive path
     /// uses), so an agent reading over MCP gets plain text rather than a wall
     /// of `\x1b[` noise. The byte counters still describe the raw tail window
-    /// that was read from disk — `text` is the rendered view of it.
+    /// that was read from disk — `text` is the rendered view of it, with
+    /// credential-shaped values masked (WI-3988): a log tail is a transcript.
     pub async fn read_log_preview(
         &self,
         id: Uuid,
@@ -748,11 +749,16 @@ impl SessionHistory {
 
         Ok(SessionLogPreview {
             session_id: id.to_string(),
-            text,
+            text: crate::redaction::redact(&text),
             bytes,
             total_bytes,
             truncated: total_bytes > bytes,
         })
+    }
+
+    /// Mask credential-shaped text in a search snippet before it is served.
+    pub fn redact_result(result: &mut SearchResult) {
+        result.match_snippet = crate::redaction::redact(&result.match_snippet);
     }
 
     /// Clean up old sessions beyond retention period
@@ -975,6 +981,49 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" ");
         assert_eq!(query_tokens(&many).len(), 16);
+    }
+
+    #[tokio::test]
+    async fn a_log_preview_masks_a_printed_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let history = SessionHistory::new(dir.path()).await.unwrap();
+        let id = Uuid::new_v4();
+        let body = "export WIN_SSH_KEY=abcd1234\n\
+                    -----BEGIN OPENSSH PRIVATE KEY-----\n\
+                    b3BlbnNzaC1rZXktdjEAAAAA\n\
+                    -----END OPENSSH PRIVATE KEY-----\n";
+        std::fs::write(history.log_path(id), body).unwrap();
+        let preview = history.read_log_preview(id, 4096, true).await.unwrap();
+        assert!(!preview.text.contains("abcd1234"), "{}", preview.text);
+        assert!(
+            !preview.text.contains("BEGIN OPENSSH PRIVATE KEY"),
+            "{}",
+            preview.text
+        );
+        assert!(preview.text.contains("[redacted]"), "{}", preview.text);
+    }
+
+    #[test]
+    fn a_search_snippet_masks_a_printed_key() {
+        let mut result = SearchResult {
+            session_id: "s".into(),
+            session_name: "worker".into(),
+            created_at: "2026-11-12T00:00:00Z".into(),
+            match_snippet: "WIN_SSH_KEY=abcd1234 was printed".into(),
+            rank: 0.0,
+            live: true,
+        };
+        SessionHistory::redact_result(&mut result);
+        assert!(
+            !result.match_snippet.contains("abcd1234"),
+            "{}",
+            result.match_snippet
+        );
+        assert!(
+            result.match_snippet.contains("was printed"),
+            "{}",
+            result.match_snippet
+        );
     }
 
     #[test]
