@@ -6,8 +6,8 @@
 //! MCP advertises as `inputSchema`), not from a second hand-written list.
 //!
 //! Exit codes match the Python adapter: `0` success, `1` a domain error,
-//! `2` usage. A field that holds a secret (`password`, or a name ending in
-//! `_password`) never becomes a plain flag: it takes `--<name>-file` and
+//! `2` usage. A field that holds a secret (`password`, `token`, or a name
+//! ending in `_password`) never becomes a plain flag: it takes `--<name>-file` and
 //! `--<name>-stdin` instead.
 
 use std::collections::BTreeMap;
@@ -857,8 +857,10 @@ fn secret_name(field: &str) -> Option<&str> {
     None
 }
 
+/// Mirrors Python's `SECRET_FIELDS`: `token` is `forge.account_link`'s PAT
+/// (WI-3393, WI-4132).
 fn is_secret(name: &str) -> bool {
-    name == "password" || name.ends_with("_password")
+    matches!(name, "password" | "token") || name.ends_with("_password")
 }
 
 fn read_secret_file(path: &str) -> Result<String, String> {
@@ -1443,9 +1445,12 @@ fn usage_flags(schema: &Value) -> Vec<String> {
             // A secret's two flags are a mutually exclusive group, so the
             // usage line offers one or the other. The file dest is
             // `<name>__file`, which is what argparse uppercases for the metavar.
-            let file_flag = flag.replace(" PATH", " PASSWORD__FILE");
+            let file_flag = flag.replace(" PATH", &format!(" {}__FILE", base.to_uppercase()));
             let stdin_flag = flags[index + 1].0.clone();
-            parts.push(format!("[{file_flag} | {stdin_flag}]"));
+            // argparse 3.13 keeps each action of the group a usage part of
+            // its own, so the line may wrap between the two.
+            parts.push(format!("[{file_flag} |"));
+            parts.push(format!("{stdin_flag}]"));
             index += 2;
             continue;
         }
@@ -1507,7 +1512,7 @@ fn flag_help(schema: &Value) -> Vec<(String, String)> {
         let dashed = name.replace('_', "-");
         if is_secret(name) {
             lines.push((
-                format!("--{dashed}-file PASSWORD__FILE"),
+                format!("--{dashed}-file {}__FILE", name.to_uppercase()),
                 format!("Read the {dashed} from this file (never pass it in argv)."),
             ));
             lines.push((
@@ -1890,6 +1895,81 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         assert_eq!(result.exit_code, EXIT_OK, "{}", result.stderr);
         assert_eq!(seen.expect("dispatched")["password"], "s3cret");
+    }
+
+    #[test]
+    fn forge_token_is_a_secret_read_from_a_file_or_stdin_never_argv() {
+        let registry = default_registry();
+        let help = at_eighty(
+            &argv(&["forge", "account", "link", "--help"]),
+            &registry,
+            "test",
+            &mut no_dispatch,
+        );
+        assert_eq!(help.exit_code, EXIT_OK, "{}", help.stderr);
+        assert!(help.stdout.contains("--token-file"), "{}", help.stdout);
+        assert!(help.stdout.contains("--token-stdin"), "{}", help.stdout);
+        assert!(!help.stdout.contains("--token TOKEN"), "{}", help.stdout);
+        assert!(
+            help.stdout.contains("--token-file TOKEN__FILE"),
+            "{}",
+            help.stdout
+        );
+
+        let refused = at_eighty(
+            &argv(&[
+                "forge",
+                "account",
+                "link",
+                "--host",
+                "github.com",
+                "--token",
+                "ghp_leakcheck",
+                "--reason",
+                "because",
+            ]),
+            &registry,
+            "test",
+            &mut no_dispatch,
+        );
+        assert_eq!(refused.exit_code, EXIT_USAGE, "{}", refused.stderr);
+        assert!(
+            !refused.stderr.contains("ghp_leakcheck"),
+            "{}",
+            refused.stderr
+        );
+        assert!(
+            !refused.stdout.contains("ghp_leakcheck"),
+            "{}",
+            refused.stdout
+        );
+
+        let path = std::env::temp_dir().join("vogt-cli-forge-token-test");
+        std::fs::write(&path, "ghp_fromfile\n").unwrap();
+        let mut seen: Option<Value> = None;
+        let mut dispatch = |_operation: &Operation, params: Value| {
+            seen = Some(params);
+            Ok(Value::Null)
+        };
+        let result = at_eighty(
+            &argv(&[
+                "forge",
+                "account",
+                "link",
+                "--host",
+                "github.com",
+                "--token-file",
+                path.to_str().unwrap(),
+                "--reason",
+                "because",
+            ]),
+            &registry,
+            "test",
+            &mut dispatch,
+        );
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(result.exit_code, EXIT_OK, "{}", result.stderr);
+        assert_eq!(seen.expect("dispatched")["token"], "ghp_fromfile");
     }
 
     #[test]
