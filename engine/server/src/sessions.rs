@@ -1877,6 +1877,7 @@ impl SessionRegistry {
         // moment at which the engine runs a hibernatable session it would
         // forget on a SIGKILL. A failed write is logged, not fatal: the
         // session runs; it is only not recoverable.
+        let fresh = matches!(&creating, Creating::Fresh(_));
         let record = match creating {
             Creating::Fresh(Origin::AgentTask) => None,
             Creating::Fresh(Origin::Api) => {
@@ -1959,6 +1960,22 @@ impl SessionRegistry {
             self.records.insert(id, record);
         }
         self.sessions.insert(session.id, Arc::clone(&session));
+        // A fresh session given a brief must actually start its first turn
+        // (WI-4068). Start the confirmation before the caller's request
+        // returns, so a session that never submits surfaces as blocked rather
+        // than idling at zero turns.
+        if fresh
+            && brief.is_some()
+            && session
+                .agent()
+                .is_some_and(|agent| crate::first_turn::FIRST_TURN_AGENTS.contains(&agent.as_str()))
+        {
+            crate::first_turn::watch(
+                self.bus.clone(),
+                Arc::clone(&session),
+                crate::first_turn::Policy::default(),
+            );
+        }
         if capture_opencode {
             self.capture_opencode_conversation(&session);
         }
