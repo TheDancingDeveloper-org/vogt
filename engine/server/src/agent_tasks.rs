@@ -1461,41 +1461,44 @@ impl AgentTaskRegistry {
         }
 
         let session_name = format!("[Task] {}", task.name);
-        let session = self.sessions.create_for_task(SessionSpec {
-            name: session_name.clone(),
-            command: Some(command),
-            template: None,
-            placement: None,
-            cwd: task.cwd.clone(),
-            env: Some(env),
-            // A task run has already written its own prompt file above, with
-            // the context and run history a session brief knows nothing
-            // about, and has just named it in `env`. Asking the registry for
-            // a second one would write the brief twice.
-            prompt: None,
-            model: None,
-            effort: None,
-            resume: None,
-            permission_mode: None,
-            mcp_set: None,
-            mcp_extra: None,
-            account: None,
-            autopilot: false,
-            policy: None,
-            role: Default::default(),
-            // The rail shows the item a run works on, like any session's
-            // (WI-998).
-            work_item: task.vogt_work_item.clone(),
-            session_ref: None,
-            worktree: None,
-            cols: Some(100),
-            rows: Some(30),
-            scrollback_bytes: None,
-            companion: None,
-            charter: None,
-            budget: None,
-            source: None,
-        })?;
+        let session = self
+            .sessions
+            .create_for_task(SessionSpec {
+                name: session_name.clone(),
+                command: Some(command),
+                template: None,
+                placement: None,
+                cwd: task.cwd.clone(),
+                env: Some(env),
+                // A task run has already written its own prompt file above, with
+                // the context and run history a session brief knows nothing
+                // about, and has just named it in `env`. Asking the registry for
+                // a second one would write the brief twice.
+                prompt: None,
+                model: None,
+                effort: None,
+                resume: None,
+                permission_mode: None,
+                mcp_set: None,
+                mcp_extra: None,
+                account: None,
+                autopilot: false,
+                policy: None,
+                role: Default::default(),
+                // The rail shows the item a run works on, like any session's
+                // (WI-998).
+                work_item: task.vogt_work_item.clone(),
+                session_ref: None,
+                worktree: None,
+                cols: Some(100),
+                rows: Some(30),
+                scrollback_bytes: None,
+                companion: None,
+                charter: None,
+                budget: None,
+                source: None,
+            })
+            .await?;
 
         // Capture the run's starting git position in its own workspace, so the
         // conclusion can report the final sha of the bound branch and the diff
