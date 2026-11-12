@@ -44,7 +44,12 @@ pub struct CredentialHandle {
 /// or time-limit it by.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialRequest {
+    /// The engine's session id: the local handle the credential is kept under.
     pub session: uuid::Uuid,
+    /// The core's session id, when the caller supplied one. A provider that
+    /// binds a credential to a session uses this, so it names the same session
+    /// as the worker's brief and commits (WI-4124).
+    pub session_ref: Option<String>,
     pub work_item: Option<String>,
     pub budget: Option<vogt_engine_contract::SessionBudget>,
 }
@@ -53,6 +58,7 @@ impl CredentialRequest {
     pub fn for_session(session: uuid::Uuid) -> Self {
         Self {
             session,
+            session_ref: None,
             work_item: None,
             budget: None,
         }

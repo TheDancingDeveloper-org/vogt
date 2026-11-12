@@ -6,8 +6,8 @@ use std::sync::{
 use dashmap::DashMap;
 use uuid::Uuid;
 use vogt_engine_contract::{
-    ActivityState, AgentConversation, ConversationReport, HibernateTrigger, Hibernation,
-    SessionRole,
+    source::SourceKind, ActivityState, AgentConversation, ConversationReport, HibernateTrigger,
+    Hibernation, SessionRole,
 };
 
 use crate::secret_broker::SecretBroker;
@@ -442,6 +442,23 @@ enum Creating {
     Wake(Box<Record>),
 }
 
+/// A pod that cannot be given a session graft token still starts: its clone
+/// and any later `g` command fail, and the session output says why. No token
+/// value is ever part of the note.
+fn note_graft_token_unavailable(link: &crate::agent_stream::PodLink, id: Uuid, why: &str) {
+    tracing::warn!(
+        target: "vogt::audit",
+        session = %id,
+        reason = why,
+        "session graft token unavailable; the session continues without one"
+    );
+    let note = format!(
+        "\r\nsession graft token unavailable: {why}; \
+         `g` clone and land will fail in this session\r\n"
+    );
+    let _ = link.ingest(link.next_offset(), note.as_bytes());
+}
+
 impl SessionRegistry {
     pub fn new(cfg: Arc<Config>, bus: EventBus, history: Option<Arc<SessionHistory>>) -> Self {
         let account_dirs = cfg
@@ -664,9 +681,20 @@ impl SessionRegistry {
         });
         let request = crate::source_provider::CredentialRequest {
             session: id,
+            session_ref: spec.session_ref.clone(),
             work_item: spec.work_item.clone(),
             budget: spec.budget.clone(),
         };
+        // A project that names a graft source is the only one that earns a
+        // repo-scoped token. The deployment default is a compatibility
+        // fallback for what to clone, not a mapping that grants landing
+        // rights in the deployment's repository (WI-4124). A git project has
+        // no graft credential to mint, so it gets neither a token nor a note.
+        let graft_source = spec
+            .source
+            .as_ref()
+            .is_some_and(|s| s.kind() == SourceKind::Graft);
+        let git_source = spec.source.is_some() && !graft_source;
         tokio::spawn(async move {
             let auth = crate::agent_stream::global();
             let mut minted: Option<crate::source_provider::CredentialHandle> = None;
@@ -682,14 +710,30 @@ impl SessionRegistry {
                 // bootstrap token. The provider keeps it so the pod's teardown
                 // can revoke it, even after an engine restart adopted the pod.
                 let created = async {
-                    if provider.mints_credentials() {
-                        let handle = provider
-                            .mint_credential(&source, &request)
-                            .await
-                            .map_err(|e| ApiError::Internal(format!("source credential: {e}")))?;
-                        auth.stash_source_credential(id, handle.clone()).await;
-                        minted = Some(handle);
-                    } else if provider.shared_credential().is_some() {
+                    if provider.mints_credentials() && !git_source && !graft_source {
+                        note_graft_token_unavailable(
+                            &link,
+                            id,
+                            "the project names no graft source",
+                        );
+                    } else if provider.mints_credentials() && graft_source {
+                        // A mint failure must not take sessions down with the
+                        // graft server: the pod starts, without a token, and
+                        // the session says why. A missing token fails the
+                        // clone loudly rather than widening to the shared one.
+                        match provider.mint_credential(&source, &request).await {
+                            Ok(handle) => {
+                                auth.stash_source_credential(id, handle.clone()).await;
+                                if let Some(session_ref) = request.session_ref.as_deref() {
+                                    auth.issue_graft_session(id, session_ref.to_owned()).await;
+                                }
+                                minted = Some(handle);
+                            }
+                            Err(e) => {
+                                note_graft_token_unavailable(&link, id, &e.to_string());
+                            }
+                        }
+                    } else if !git_source && provider.shared_credential().is_some() {
                         tracing::warn!(
                             session = %id,
                             "the source provider mints no per-session credential: \
@@ -1924,6 +1968,7 @@ impl SessionRegistry {
                 record.budget = spec.budget.clone();
                 record.role = spec.role;
                 record.work_item = spec.work_item.clone();
+                record.session_ref = spec.session_ref.clone();
                 record.workspace = workspace.clone();
                 record.keep_awake = session.keep_awake();
                 record.conversation = conversation.clone();
@@ -2803,6 +2848,7 @@ impl SessionRegistry {
             policy: record.policy.clone(),
             role: record.role,
             work_item: record.work_item.clone(),
+            session_ref: record.session_ref.clone(),
             // A wake returns to the worktree the first start already cut; it
             // does not cut another (WI-1298).
             worktree: None,

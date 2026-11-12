@@ -33,6 +33,7 @@ if [ -n "${REFUSE_FIRST:-}" ]; then
 fi
 [ "${BOOT_MODE:-ok}" != 401 ] || { echo unauthorized >&2; exit 22; }
 graft=""; [ -z "${GRAFT_TOKEN:-}" ] || graft=$(printf ',"source_token":"%s"' "$GRAFT_TOKEN")
+[ -z "${GRAFT_SESSION:-}" ] || graft="$graft,$(printf '"graft_session":"%s"' "$GRAFT_SESSION")"
 [ -z "${MCP_CONFIG:-}" ] || graft="$graft,\"mcp_config\":$MCP_CONFIG"
 [ -z "${CODEX_CONFIG:-}" ] || graft="$graft,\"codex_config\":$(printf %s "$CODEX_CONFIG" | jq -Rs .)"
 [ -z "${OPENCODE_CONFIG:-}" ] || graft="$graft,\"opencode_config\":$OPENCODE_CONFIG"
@@ -109,7 +110,7 @@ run_case() {
 
 # shellcheck disable=SC2016 # ${VOGT_HTTP_TOKEN} is Claude Code's to expand
 MCP='{"mcpServers":{"vogt":{"type":"http","url":"https://e/mcp","headers":{"Authorization":"Bearer ${VOGT_HTTP_TOKEN}"}}}}'
-out=$(run_case "$tmp/happy" VOGT_SESSION_COMMAND='["sleep","1"]' GRAFT_TOKEN=graft-secret-value MCP_CONFIG="$MCP" VOGT_EXTRA_CA_FILE=/etc/ca.pem VOGT_CLAUDE_SETTINGS_FILE=off 2>&1) || fail "happy path: $out"
+out=$(run_case "$tmp/happy" VOGT_SESSION_COMMAND='["sleep","1"]' GRAFT_TOKEN=graft-secret-value GRAFT_SESSION=ses_TEST MCP_CONFIG="$MCP" VOGT_EXTRA_CA_FILE=/etc/ca.pem VOGT_CLAUDE_SETTINGS_FILE=off 2>&1) || fail "happy path: $out"
 grep -q "agent:$tmp/happy/work:hello brief" <<<"$out" || fail "agent did not receive bootstrap state"
 jq -e '.session_id=="s1" and .source.location.kind=="graft" and .source.location.repo=="vogt" and .source.ref=="rust-2" and .cli=="claude"' \
   "$tmp/happy/request.json" >/dev/null || fail "bootstrap request body"
@@ -150,14 +151,31 @@ for step in bootstrap session-token account-bundle brokered-env claude-config so
   grep -q "^session-entrypoint: step $step$" <<<"$out" || fail "step marker $step"
 done
 grep -Eq '^vogt_session_boot_seconds [0-9]+$' <<<"$out" || fail "boot seconds metric"
-# A graft token in the bootstrap response is kept in its own 0600 file beside
-# the session token and is what graft clones with.
-[[ $(<"$tmp/happy/run/graft-token") == graft-secret-value ]] || fail "graft token content"
-[[ $(stat -c %a "$tmp/happy/run/graft-token") == 600 ]] || fail "graft token mode"
+# A graft token in the bootstrap response is kept where `g` reads it: the
+# session's own directory under the graft config, mode 0600, with a config that
+# names the same endpoint and token file. This is what graft clones with.
+graft_home="$tmp/happy/home/.config/graft"
+graft_token="$graft_home/sessions/ses_TEST/trial-1.token"
+[[ $(<"$graft_token") == graft-secret-value ]] || fail "graft token content"
+[[ $(stat -c %a "$graft_token") == 600 ]] || fail "graft token mode"
+[[ $(stat -c %a "$graft_home/sessions/ses_TEST") == 700 ]] || fail "graft session dir mode"
+[[ $(stat -c %a "$graft_home/config.toml") == 600 ]] || fail "graft config mode"
+grep -q '^default_server = "vogt-session"$' "$graft_home/config.toml" || fail "graft config server"
+grep -q '^endpoint = "http://graft"$' "$graft_home/config.toml" || fail "graft config endpoint"
+grep -q "^token_file = \"$graft_token\"$" "$graft_home/config.toml" || fail "graft config token file"
+! grep -q 'graft-secret-value' "$graft_home/config.toml" || fail "graft token value in the config"
 [[ $(<"$tmp/happy/graft.token") == graft-secret-value ]] || fail "clone did not use the graft token"
 grep -q 'clone vogt '"$tmp/happy/work"' --line rust-2' "$tmp/happy/graft.args" || fail "default project clone scope"
-grep -q "^VOGT_GRAFT_TOKEN_FILE=$tmp/happy/run/graft-token$" "$tmp/happy/agent.env" || fail "graft token file not exported"
+grep -q "^VOGT_GRAFT_TOKEN_FILE=$graft_token$" "$tmp/happy/agent.env" || fail "graft token file not exported"
+grep -q '^GRAFT_SESSION_ID=ses_TEST$' "$tmp/happy/agent.env" || fail "graft session id not exported"
 ! grep -v '^GRAFT_TOKEN=' "$tmp/happy/agent.env" | grep -q 'graft-secret-value' || fail "graft token value reached the agent env"
+# Without a session id from the core, the token dir falls back to the pod's
+# session id so the path still matches what `g` reads there.
+run_case "$tmp/graft-nosession" GRAFT_TOKEN=graft-secret-value >/dev/null 2>&1 || fail "graft token without a session ref"
+[[ $(<"$tmp/graft-nosession/home/.config/graft/sessions/s1/trial-1.token") == graft-secret-value ]] || fail "fallback graft token path"
+grep -q '^GRAFT_SESSION_ID=s1$' "$tmp/graft-nosession/agent.env" || fail "fallback graft session id not exported"
+if run_case "$tmp/graft-unsafe" GRAFT_TOKEN=graft-secret-value GRAFT_SESSION='../../escape' >"$tmp/graft-unsafe.out" 2>&1; then fail "unsafe graft session id succeeded"; fi
+grep -q 'unsafe graft session id' "$tmp/graft-unsafe.out" || fail "unsafe graft session id not reported"
 # A Claude session's MCP config lands in its own 0600 file beside the session
 # token and is named to the session agent; both hooks are installed once.
 [[ $(stat -c %a "$tmp/happy/run/mcp.json") == 600 ]] || fail "mcp config mode"
