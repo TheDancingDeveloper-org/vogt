@@ -29,6 +29,9 @@
 #   PRE_LAND_RUST_PACKAGES     space-separated crates for --rust (when the
 #                              committed draft diff cannot be read)
 #   PRE_LAND_FORCE_FAIL=<id>   make one gate fail (used by --self-test)
+#   PRE_LAND_FORCE_FAIL_STEP=<id>
+#                              make one command inside a gate fail (used by
+#                              --self-test to prove the gate propagates it)
 
 set -uo pipefail
 
@@ -81,6 +84,39 @@ if [ "$SELF_TEST" -eq 1 ]; then
         exit 1
     fi
     echo "self-test: ok (forced cargo-deny failure exited $rc)"
+
+    # The parity gate is a sequence of commands. A gate that only returns the
+    # last command's status hides a failure in the middle. Stub the expensive
+    # commands and force the third parity command to fail: the gate must stop
+    # there, name the step, and never reach the success line.
+    stub_dir=$(mktemp -d "${TMPDIR:-/tmp}/vogt-pre-land-stub.XXXXXX") || exit 1
+    printf '#!/bin/sh\nexit 0\n' >"$stub_dir/cargo"
+    printf '#!/bin/sh\nexit 0\n' >"$stub_dir/uv"
+    chmod +x "$stub_dir/cargo" "$stub_dir/uv"
+    output=$(PATH="$stub_dir:$PATH" PRE_LAND_FORCE_FAIL_STEP=parity-python-mcp \
+        "$0" --quick 2>&1)
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+        echo "self-test: a forced middle-of-parity failure exited 0" >&2
+        printf '%s\n' "$output" >&2
+        exit 1
+    fi
+    if ! printf '%s\n' "$output" | grep -q 'FAIL parity'; then
+        echo "self-test: the parity failure was not reported as FAIL parity:" >&2
+        printf '%s\n' "$output" >&2
+        exit 1
+    fi
+    if ! printf '%s\n' "$output" | grep -q 'parity-python-mcp'; then
+        echo "self-test: the failing parity command was not named:" >&2
+        printf '%s\n' "$output" >&2
+        exit 1
+    fi
+    if printf '%s\n' "$output" | grep -q 'every gate passed'; then
+        echo "self-test: a failed parity command still reported every gate passed" >&2
+        printf '%s\n' "$output" >&2
+        exit 1
+    fi
+    echo "self-test: ok (forced parity-python-mcp failure exited $rc)"
     exit 0
 fi
 
@@ -89,7 +125,10 @@ fi
 gate_reason() {
     local log="$1"
     local reason
-    reason=$(grep -E '^(error:|Error:|FAILED|Traceback|KeyError|[A-Za-z]+Error|.*: error:)' "$log" | tail -n 1)
+    reason=$(grep -E '^pre-land: step failed:' "$log" | tail -n 1)
+    if [ -z "$reason" ]; then
+        reason=$(grep -E '^(error:|Error:|FAILED|Traceback|KeyError|[A-Za-z]+Error|.*: error:)' "$log" | tail -n 1)
+    fi
     if [ -z "$reason" ]; then
         reason=$(grep -v '^[[:space:]]*$' "$log" | tail -n 1)
     fi
@@ -120,42 +159,61 @@ run_gate() {
     exit 1
 }
 
+# Run one command of a multi-command gate. A non-zero exit is reported with
+# the step's name and returned to the gate, so the gate cannot accidentally
+# return the status of a later command instead.
+run_step() {
+    local step="$1"
+    shift
+    if [ "${PRE_LAND_FORCE_FAIL_STEP:-}" = "$step" ]; then
+        echo "pre-land: step failed: $step (forced failure)" >&2
+        return 1
+    fi
+    "$@"
+    local rc=$?
+    if [ "$rc" -ne 0 ]; then
+        echo "pre-land: step failed: $step (exit $rc)" >&2
+        return 1
+    fi
+    return 0
+}
+
 cargo_deny_gate() {
     cd "$ROOT/engine" || return 1
-    "${NICE[@]}" cargo deny --all-features check
+    "${NICE[@]}" cargo deny --all-features check || return 1
 }
 
 disposition_gate() {
     cd "$ROOT/engine" || return 1
     # The CI step is `cargo test -p vogt-core`; this is its one test, without
     # building every integration target of the package.
-    "${NICE[@]}" cargo test -p vogt-core --bin vogt-core every_python_test_has_one_disposition
+    "${NICE[@]}" cargo test -p vogt-core --bin vogt-core every_python_test_has_one_disposition || return 1
 }
 
 rust_core_image_gate() {
     cd "$ROOT" || return 1
-    "${NICE[@]}" python3 scripts/check_rust_core_dockerfile.py
+    "${NICE[@]}" python3 scripts/check_rust_core_dockerfile.py || return 1
 }
 
 engine_parity_gate() {
     cd "$ROOT" || return 1
     uv sync --locked || return 1
-    "${NICE[@]}" uv run --no-sync pytest tests/test_engine_parity.py --no-cov -q
+    "${NICE[@]}" uv run --no-sync pytest tests/test_engine_parity.py --no-cov -q || return 1
 }
 
 ruff_check_gate() {
     cd "$ROOT" || return 1
-    "${NICE[@]}" uv run --no-sync ruff check .
+    "${NICE[@]}" uv run --no-sync ruff check . || return 1
 }
 
 ruff_format_gate() {
     cd "$ROOT" || return 1
-    "${NICE[@]}" uv run --no-sync ruff format --check .
+    "${NICE[@]}" uv run --no-sync ruff format --check . || return 1
 }
 
 mypy_gate() {
     cd "$ROOT" || return 1
-    "${NICE[@]}" uv run --no-sync mypy
+    "${NICE[@]}" uv run --no-sync mypy || return 1
 }
 
 golden_for_parity() {
@@ -196,6 +254,11 @@ print(best[1])
 PY
 }
 
+build_vogt_core() (
+    cd "$ROOT/engine" || return 1
+    "${NICE[@]}" cargo build --locked -p vogt-core || return 1
+)
+
 parity_gate() {
     cd "$ROOT" || return 1
     local golden
@@ -205,25 +268,25 @@ parity_gate() {
     }
     echo "using golden $golden" >&2
     export VOGT_PARITY_PYTHON_BIN="$ROOT/.venv/bin/vogt"
-    "${NICE[@]}" uv run --no-sync python scripts/parity.py check --impl python --golden "$golden"
-    "${NICE[@]}" uv run --no-sync python scripts/parity.py check --impl python --transport http --golden "$golden"
-    "${NICE[@]}" uv run --no-sync python scripts/parity.py check --impl python --transport mcp --golden "$golden"
-    "${NICE[@]}" uv run --no-sync python scripts/parity.py check --impl python --golden "$golden" --only actor
-    "${NICE[@]}" uv run --no-sync python scripts/parity.py check --impl python --golden "$golden" --only schema
-    "${NICE[@]}" uv run --no-sync python scripts/parity.py selftest --golden "$golden"
-    "${NICE[@]}" uv run --no-sync python scripts/parity.py errors --golden "$golden" --check
-    "${NICE[@]}" uv run --no-sync python scripts/parity.py contract --impl python
+    run_step parity-python-cli "${NICE[@]}" uv run --no-sync python scripts/parity.py check --impl python --golden "$golden" || return 1
+    run_step parity-python-http "${NICE[@]}" uv run --no-sync python scripts/parity.py check --impl python --transport http --golden "$golden" || return 1
+    run_step parity-python-mcp "${NICE[@]}" uv run --no-sync python scripts/parity.py check --impl python --transport mcp --golden "$golden" || return 1
+    run_step parity-python-actor "${NICE[@]}" uv run --no-sync python scripts/parity.py check --impl python --golden "$golden" --only actor || return 1
+    run_step parity-python-schema "${NICE[@]}" uv run --no-sync python scripts/parity.py check --impl python --golden "$golden" --only schema || return 1
+    run_step parity-python-selftest "${NICE[@]}" uv run --no-sync python scripts/parity.py selftest --golden "$golden" || return 1
+    run_step parity-python-errors "${NICE[@]}" uv run --no-sync python scripts/parity.py errors --golden "$golden" --check || return 1
+    run_step parity-python-contract "${NICE[@]}" uv run --no-sync python scripts/parity.py contract --impl python || return 1
 
     if [ ! -x "$ROOT/engine/target/debug/vogt-core" ]; then
-        ( cd "$ROOT/engine" && "${NICE[@]}" cargo build --locked -p vogt-core ) || return 1
+        run_step parity-rust-build build_vogt_core || return 1
     fi
     export VOGT_PARITY_RUST_BIN="$ROOT/engine/target/debug/vogt-core"
-    "${NICE[@]}" uv run --no-sync python scripts/parity.py check --impl rust --transport http --golden "$golden"
-    "${NICE[@]}" uv run --no-sync python scripts/parity.py check --impl rust --transport mcp --golden "$golden"
-    "${NICE[@]}" uv run --no-sync python scripts/parity.py check --impl rust --golden "$golden" --only dump
-    "${NICE[@]}" uv run --no-sync python scripts/parity.py check --impl rust --golden "$golden" --only schema
-    "${NICE[@]}" uv run --no-sync python scripts/parity.py crossopen --writer python --reader rust
-    "${NICE[@]}" uv run --no-sync python scripts/parity.py contract --impl rust
+    run_step parity-rust-http "${NICE[@]}" uv run --no-sync python scripts/parity.py check --impl rust --transport http --golden "$golden" || return 1
+    run_step parity-rust-mcp "${NICE[@]}" uv run --no-sync python scripts/parity.py check --impl rust --transport mcp --golden "$golden" || return 1
+    run_step parity-rust-dump "${NICE[@]}" uv run --no-sync python scripts/parity.py check --impl rust --golden "$golden" --only dump || return 1
+    run_step parity-rust-schema "${NICE[@]}" uv run --no-sync python scripts/parity.py check --impl rust --golden "$golden" --only schema || return 1
+    run_step parity-rust-crossopen "${NICE[@]}" uv run --no-sync python scripts/parity.py crossopen --writer python --reader rust || return 1
+    run_step parity-rust-contract "${NICE[@]}" uv run --no-sync python scripts/parity.py contract --impl rust || return 1
 }
 
 changed_engine_files() {
@@ -311,7 +374,7 @@ rust_gate() {
         ;;
     esac
     # shellcheck disable=SC2086  # the -p list is cargo's own words on purpose
-    "${NICE[@]}" cargo nextest run --locked $scope --no-fail-fast
+    "${NICE[@]}" cargo nextest run --locked $scope --no-fail-fast || return 1
 }
 
 echo "pre-land: $MODE mode, CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS, nice $NICE_LEVEL"
