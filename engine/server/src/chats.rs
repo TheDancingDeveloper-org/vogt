@@ -1700,47 +1700,7 @@ fn sweep_orphans(chats: &Path) {
 /// provider error that echoes a key or a header must not land in a
 /// searchable transcript.
 pub fn redact(text: &str) -> String {
-    static PREFIXED: once_cell::sync::Lazy<Vec<regex::Regex>> = once_cell::sync::Lazy::new(|| {
-        [
-            r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]{8,}",
-            r#"(?i)((?:api[_-]?key|token|secret|password|authorization)["']?\s*[:=]\s*["']?)[^\s"',;]{6,}"#,
-        ]
-        .iter()
-        .map(|p| regex::Regex::new(p).expect("redaction pattern"))
-        .collect()
-    });
-    static BARE: once_cell::sync::Lazy<Vec<regex::Regex>> = once_cell::sync::Lazy::new(|| {
-        [r"\b(?:sk|pk|rk|ghp|gho|ghs|github_pat|xox[abp])[-_][A-Za-z0-9_-]{12,}"]
-            .iter()
-            .map(|p| regex::Regex::new(p).expect("redaction pattern"))
-            .collect()
-    });
-    let mut out = text.to_string();
-    for pattern in PREFIXED.iter() {
-        out = pattern.replace_all(&out, "${1}[redacted]").into_owned();
-    }
-    for pattern in BARE.iter() {
-        out = pattern.replace_all(&out, "[redacted]").into_owned();
-    }
-    // A long token mixing upper case, lower case and digits reads as a key;
-    // a git SHA or a long identifier in one case does not, and stays.
-    static LONG: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
-        regex::Regex::new(r"\b[A-Za-z0-9_\-+/=]{32,}").expect("pattern")
-    });
-    out = LONG
-        .replace_all(&out, |m: &regex::Captures<'_>| {
-            let t = &m[0];
-            let mixed = t.chars().any(|c| c.is_ascii_uppercase())
-                && t.chars().any(|c| c.is_ascii_lowercase())
-                && t.chars().any(|c| c.is_ascii_digit());
-            if mixed {
-                "[redacted]".to_string()
-            } else {
-                t.to_string()
-            }
-        })
-        .into_owned();
-    out
+    crate::redaction::redact(text)
 }
 
 fn kill_group(pid: Option<u32>) {

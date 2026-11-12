@@ -2736,7 +2736,7 @@ async fn archived_history_log_preview_and_download_work() {
             "command": [
                 "/bin/sh",
                 "-lc",
-                "printf 'first line\\nsecond line\\nthird line\\n'; exit 0",
+                "printf 'first line\\nWIN_SSH_KEY=abcd1234\\nsecond line\\nthird line\\n'; exit 0",
             ],
         }))
         .send()
@@ -2791,6 +2791,20 @@ async fn archived_history_log_preview_and_download_work() {
             .contains("third line"),
         "preview should contain tail output: {preview:?}"
     );
+
+    // WI-3988: the log tail is a transcript; a secret printed into it is
+    // masked before it is served.
+    let preview: Value = client
+        .get(format!("{base}/api/history/{id}/log?tail_bytes=4096"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let text = preview["text"].as_str().unwrap_or("");
+    assert!(!text.contains("abcd1234"), "a printed key survived: {text}");
+    assert!(text.contains("[redacted]"), "{text}");
 
     let download = client
         .get(format!("{base}/api/history/{id}/download"))
@@ -8851,6 +8865,63 @@ async fn a_permission_dialog_reads_awaiting_approval_with_its_command() {
         .await
         .unwrap();
     assert_eq!(too_many.status(), StatusCode::BAD_REQUEST);
+
+    client
+        .delete(format!("{base}/api/sessions/{id}"))
+        .send()
+        .await
+        .unwrap();
+}
+
+/// WI-3988: a screen read masks a secret a worker printed.
+#[tokio::test]
+async fn session_screen_masks_a_printed_secret() {
+    let (base, _h) = boot().await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let id = create_session_with(
+        &client,
+        &base,
+        json!({
+            "name": "screen-secret",
+            "cols": 100,
+            "rows": 6,
+            "command": [
+                "/bin/sh",
+                "-c",
+                "printf 'WIN_SSH_KEY=abcd1234\\n'; sleep 30",
+            ],
+        }),
+    )
+    .await;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let screen: Value = client
+            .get(format!("{base}/api/sessions/{id}/screen"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let lines = screen["lines"].to_string();
+        if lines.contains("WIN_SSH_KEY") {
+            assert!(
+                !lines.contains("abcd1234"),
+                "a printed key survived: {lines}"
+            );
+            assert!(lines.contains("[redacted]"), "{lines}");
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "screen never showed the line: {screen:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 
     client
         .delete(format!("{base}/api/sessions/{id}"))
