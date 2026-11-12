@@ -520,15 +520,32 @@ impl Session {
         // would deadlock (parking_lot mutexes are not re-entrant).
         let exit_code = self.exit_code();
         let sb = self.scrollback.lock();
+        // An exited child is terminal whatever the cached state says: the
+        // exit waiter stores the code a moment before it moves the activity,
+        // and a summary read in between said `idle` beside an exit code.
+        let activity = crate::activity::terminal_state(exit_code, self.stop_requested())
+            .unwrap_or_else(|| *self.activity.lock());
+        // A provider refused the turn and the CLI came back to its prompt: the
+        // report the agent wrote is absent, so the screen is the only witness
+        // (WI-4119). Reported through the same field, so the screen, digest and
+        // oversight table all read `blocked` instead of `idle`.
+        let blocked = self.blocked().or_else(|| {
+            matches!(
+                activity,
+                ActivityState::Idle | ActivityState::WaitingForInput
+            )
+            .then(|| crate::provider_error::detect(sb.tail(crate::provider_error::TAIL_BYTES)))
+            .flatten()
+            .map(|reason| vogt_engine_contract::BlockedReport {
+                reason,
+                items: Vec::new(),
+                since: format_rfc3339(*self.activity_changed_at.lock()),
+            })
+        });
         SessionSummary {
             id: self.id,
             name: self.name.lock().clone(),
-            // An exited child is terminal whatever the cached state says:
-            // the exit waiter stores the code a moment before it moves the
-            // activity, and a summary read in between said `idle` beside an
-            // exit code.
-            activity: crate::activity::terminal_state(exit_code, self.stop_requested())
-                .unwrap_or_else(|| *self.activity.lock()),
+            activity,
             exit_code,
             alive: exit_code.is_none(),
             scrollback_bytes: sb.total_written(),
@@ -541,7 +558,7 @@ impl Session {
             last_event_at: None,
             last_person_input_at: self.last_person_input_at.lock().map(format_rfc3339),
             approval: self.approval_prompt(),
-            blocked: self.blocked(),
+            blocked,
             conversation: self.conversation(),
             hibernation: None,
             keep_awake: self.keep_awake(),
