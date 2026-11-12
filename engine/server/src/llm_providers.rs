@@ -375,20 +375,36 @@ auto_compact_token_limit = {v}")).unwrap_or_default()
 
 /// The complete Codex config fragment for a pod launch. Root keys must precede
 /// the provider tables or Codex will interpret them as table members.
-/// Select the provider and model for a Codex launch. Prefer the explicitly
-/// named `litellm` provider for compatibility with the shared deployment, but
-/// fall back to the first registered provider (whose name is the actual TOML
-/// table key). A provider's first model is its fallback model.
+/// Select the provider and model for a Codex launch.
+///
+/// A provider registers the models it serves, so the requested model picks
+/// its provider: a session started with `grok-4.7` uses the entry whose
+/// `models` list names it, not whichever entry happens to be first. When two
+/// entries register the same model, the entry named `litellm` wins, matching
+/// the shared deployment's preference. A model no entry registers keeps the
+/// previous rule (the `litellm` entry, else the first) so a caller naming a
+/// router group the registry does not list still launches. A provider's first
+/// model is its fallback model.
 pub fn codex_selection<'a>(
     requested_model: Option<&str>,
     providers: &'a [Provider],
 ) -> Option<(String, &'a Provider)> {
-    let provider = providers
-        .iter()
-        .find(|p| p.name == "litellm")
+    let requested = requested_model.filter(|model| !model.is_empty());
+    let by_model = requested.and_then(|model| {
+        let matches: Vec<&Provider> = providers
+            .iter()
+            .filter(|provider| provider.models.iter().any(|known| known == model))
+            .collect();
+        matches
+            .iter()
+            .find(|provider| provider.name == "litellm")
+            .copied()
+            .or_else(|| matches.first().copied())
+    });
+    let provider = by_model
+        .or_else(|| providers.iter().find(|p| p.name == "litellm"))
         .or_else(|| providers.first())?;
-    let model = requested_model
-        .filter(|model| !model.is_empty())
+    let model = requested
         .map(str::to_owned)
         .or_else(|| provider.models.first().cloned())
         .unwrap_or_else(|| "grok".to_owned());
@@ -680,6 +696,72 @@ models = ["deepseek-chat"]
             let text = DEEPSEEK.replace("context_window = 1000000", &format!("{field} = 0"));
             assert!(parse(&text).is_err(), "accepted zero {field}");
         }
+    }
+
+    #[test]
+    fn a_requested_model_selects_the_provider_that_registers_it() {
+        let providers = parse(
+            r#"
+[[provider]]
+name = "litellm"
+base_url = "http://litellm:4000/v1"
+wire_api = "chat"
+env_key = "DEEPSEEK_PROVIDER_KEY"
+secret_project = "proj-a"
+secret_name = "DEEPSEEK_SECRET"
+models = ["deepseek/deepseek-v4-flash"]
+
+[[provider]]
+name = "grok"
+base_url = "http://litellm:4000/v1"
+wire_api = "chat"
+env_key = "CLAWBAY_PROVIDER_KEY"
+secret_project = "proj-a"
+secret_name = "CLAWBAY_SECRET"
+models = ["grok-4.7"]
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            codex_selection(Some("grok-4.7"), &providers)
+                .map(|(model, provider)| (model, provider.name.as_str())),
+            Some(("grok-4.7".into(), "grok"))
+        );
+        // A model no entry registers keeps the old preference, so a caller
+        // naming a router group the registry does not list still launches.
+        assert_eq!(
+            codex_selection(Some("unregistered"), &providers)
+                .map(|(model, provider)| (model, provider.name.as_str())),
+            Some(("unregistered".into(), "litellm"))
+        );
+        // With no request, the preferred provider's first model still wins.
+        assert_eq!(
+            codex_selection(None, &providers)
+                .map(|(model, provider)| (model, provider.name.as_str())),
+            Some(("deepseek/deepseek-v4-flash".into(), "litellm"))
+        );
+    }
+
+    #[test]
+    fn a_model_registered_twice_prefers_the_litellm_entry() {
+        let provider = |name: &str| {
+            parse(
+                &DEEPSEEK
+                    .replace("name = \"deepseek\"", &format!("name = {name:?}"))
+                    .replace(
+                        "\nmodels = [\"deepseek-chat\"]",
+                        "\nmodels = [\"grok-4.7\"]",
+                    ),
+            )
+            .unwrap()
+            .remove(0)
+        };
+        let providers = [provider("first"), provider("litellm")];
+        assert_eq!(
+            codex_selection(Some("grok-4.7"), &providers)
+                .map(|(model, provider)| (model, provider.name.as_str())),
+            Some(("grok-4.7".into(), "litellm"))
+        );
     }
 
     #[test]

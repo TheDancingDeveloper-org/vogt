@@ -962,7 +962,32 @@ impl SessionRegistry {
             merged.extend(spec.env.take().unwrap_or_default());
             spec.env = Some(merged);
         }
+        self.check_provider_secret(id, &spec).await?;
         self.create_inner(spec, Creating::Fresh(Origin::Api), Some(id))
+    }
+
+    /// Refuse a Codex launch whose selected provider's secret cannot be
+    /// resolved now, on this launch, through the live agent-auth manifest (or
+    /// a live grant). The message names the secret, never its value
+    /// (WI-4119).
+    pub async fn check_provider_secret(&self, id: Uuid, spec: &SessionSpec) -> Result<()> {
+        if self
+            .agent_of(&spec.command, spec.template.as_deref())
+            .as_deref()
+            != Some("codex")
+        {
+            return Ok(());
+        }
+        let providers = self.secret_broker.providers();
+        let Some((_, provider)) =
+            crate::llm_providers::codex_selection(spec.model.as_deref(), &providers)
+        else {
+            return Ok(());
+        };
+        self.secret_broker
+            .provider_secret_ready(id, provider)
+            .await
+            .map_err(ApiError::BadRequest)
     }
 
     /// The agent CLI a session would run, from its command or its template.
@@ -1050,7 +1075,8 @@ impl SessionRegistry {
 
     /// A session for an agent-task run: like [`Self::create`], but never
     /// recorded for hibernation — the run's runner owns its lifetime.
-    pub fn create_for_task(&self, spec: SessionSpec) -> Result<Arc<Session>> {
+    pub async fn create_for_task(&self, spec: SessionSpec) -> Result<Arc<Session>> {
+        self.check_provider_secret(Uuid::new_v4(), &spec).await?;
         self.create_inner(spec, Creating::Fresh(Origin::AgentTask), None)
     }
 
@@ -2773,6 +2799,7 @@ impl SessionRegistry {
             req.cols,
             req.rows,
         );
+        self.check_provider_secret(id, &spec).await?;
         let session = self.create_inner(spec, Creating::Wake(Box::new(record)), None)?;
         self.bus.publish(ServerEvent::SessionWoken { id });
         if fresh.is_some() {
