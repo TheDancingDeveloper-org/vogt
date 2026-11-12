@@ -110,6 +110,22 @@ restore. Hibernation flushes account/transcript state before teardown; wake
 starts a fresh clone. Land code first: account write-back is not a backup of
 unlanded files.
 
+**Reported pods are never auto-removed.** This includes a pod whose session
+finished while the engine was not watching, and one an engine restart could
+not adopt. Reporting is deliberate: the pod may still hold unlanded work, and
+only the session's own teardown may remove it. To clear one, list this
+engine's pods and delete the one you have checked:
+
+```bash
+kubectl -n <namespace> get pods -l vogt.session -L vogt.engine
+kubectl -n <namespace> delete pod <pod-name>
+```
+
+Deleting the pod also lets the cluster's garbage collector remove its
+per-pod Secret and workspace volume. Check the session first if its agent may
+have left uncommitted work in the clone; a reported pod is evidence, not
+garbage.
+
 Compose still supports local sessions on this line. What single-host Compose
 runs after removal of that backend remains open (roadmap §6); this chapter
 does not silently require all Compose operators to install Kubernetes.

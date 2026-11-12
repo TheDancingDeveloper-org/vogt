@@ -37,6 +37,7 @@ class FakeTarget:
         projects: dict[str, JSON] | None = None,
         write_back: str = "none",
         link_state: str = "unlinked",
+        instance_id: str = "ins_dev",
     ) -> None:
         self.items: dict[str, JSON] = dict(items or {})
         self.projects: dict[str, JSON] = dict(projects or {})
@@ -50,6 +51,7 @@ class FakeTarget:
         self.fail_after: int | None = None
         self.initial_write_back = write_back
         self.initial_link_state = link_state
+        self.instance_id = instance_id
 
     # -- transport ---------------------------------------------------------
     def tool(self, name: str, arguments: JSON | None = None) -> JSON:
@@ -65,6 +67,7 @@ class FakeTarget:
 
     def _status(self, arguments: JSON) -> JSON:
         return {
+            "instance_id": self.instance_id,
             "disk": {"path": "/srv/vogt/repos"},
             "counts": {"work_items": len(self.items)},
         }
@@ -405,6 +408,59 @@ def write_source(tmp_path: Path, payload: JSON | None = None) -> Path:
     path = tmp_path / "export.json"
     path.write_text(json.dumps(payload or source_payload()), encoding="utf-8")
     return path
+
+
+def test_read_target_refuses_the_snapshot_source_instance(tmp_path: Path) -> None:
+    source = load_source(write_source(tmp_path))
+    target = FakeTarget(instance_id=source.instance_id)
+    with pytest.raises(Refused, match="instance"):
+        read_target(target, source, url="http://127.0.0.1:8700")  # type: ignore[arg-type]
+
+
+def test_the_not_prod_override_cannot_write_back_to_the_source_instance(
+    tmp_path: Path,
+) -> None:
+    source = load_source(write_source(tmp_path))
+    target = FakeTarget(instance_id=source.instance_id)
+    with pytest.raises(Refused, match="instance"):
+        read_target(  # type: ignore[arg-type]
+            target,
+            source,
+            url="http://127.0.0.1:8700",
+            allow_prod_hostname=True,
+        )
+
+
+def test_read_target_refuses_a_production_hostname(tmp_path: Path) -> None:
+    source = load_source(write_source(tmp_path))
+    for url in (
+        "https://vogt.sprooty.com",
+        "https://vogt-prod.sprooty.com",
+        "https://vogt-prod.example.net:8443",
+    ):
+        with pytest.raises(Refused, match="production"):
+            read_target(FakeTarget(), source, url=url)  # type: ignore[arg-type]
+
+
+def test_the_not_prod_override_allows_a_foreign_production_hostname(
+    tmp_path: Path,
+) -> None:
+    source = load_source(write_source(tmp_path))
+    state = read_target(  # type: ignore[arg-type]
+        FakeTarget(instance_id="ins_other"),
+        source,
+        url="https://vogt.sprooty.com",
+        allow_prod_hostname=True,
+    )
+    assert state.instance_id == "ins_other"
+
+
+def test_read_target_allows_a_normal_dev_target(tmp_path: Path) -> None:
+    source = load_source(write_source(tmp_path))
+    state = read_target(  # type: ignore[arg-type]
+        FakeTarget(instance_id="ins_dev"), source, url="https://vogt-dev.sprooty.com"
+    )
+    assert state.instance_id == "ins_dev"
 
 
 def target_with_wi1(*, kind: str = "chore") -> FakeTarget:
