@@ -191,7 +191,11 @@ mod tests {
                     "url": "https://192.168.1.75:18197/mcp",
                     "headers": {"Authorization": "Bearer ${VOGT_HTTP_TOKEN}"}
                 },
-                "cadastre": {"type": "http", "url": "https://cadastre.example.test/mcp"}
+                "cadastre": {
+                    "type": "http",
+                    "url": "https://cadastre.example.test/mcp",
+                    "headers": {"Authorization": "Bearer ${CADASTRE_HTTP_TOKEN}"}
+                }
             }})
         );
     }
@@ -223,14 +227,19 @@ mod tests {
             "[mcp_servers.vogt]\nurl = \"https://192.168.1.75:18197/mcp\"\nbearer_token_env_var = \"VOGT_HTTP_TOKEN\"\n"
         ));
         assert!(
-            codex.contains("[mcp_servers.cadastre]\nurl = \"https://cadastre.example.test/mcp\"\n")
+            codex.contains(
+                "[mcp_servers.cadastre]\nurl = \"https://cadastre.example.test/mcp\"\nbearer_token_env_var = \"CADASTRE_HTTP_TOKEN\"\n"
+            ),
+            "{codex}"
         );
+        assert!(!codex.contains("value-of"));
         assert_eq!(
             opencode_mcp_config(&endpoints, true),
             json!({"mcp": {
                 "vogt": {"type": "remote", "url": "https://192.168.1.75:18197/mcp",
                          "headers": {"Authorization": "Bearer {env:VOGT_HTTP_TOKEN}"}},
-                "cadastre": {"type": "remote", "url": "https://cadastre.example.test/mcp"}
+                "cadastre": {"type": "remote", "url": "https://cadastre.example.test/mcp",
+                             "headers": {"Authorization": "Bearer {env:CADASTRE_HTTP_TOKEN}"}}
             }})
         );
         assert!(!codex_mcp_config(&endpoints, false).contains("mcp_servers.vogt"));
