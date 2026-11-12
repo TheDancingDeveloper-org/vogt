@@ -1245,6 +1245,13 @@ components:
             A configured session template, by name (case-insensitive) or tag
             (an `agent`-tagged template wins an ambiguous tag). Ignored when
             `command` is given; an unknown name is 400.
+        placement:
+          type: string
+          enum: [host, pod, auto]
+          description: >-
+            Where the session runs. `host` and `pod` must be available for the
+            template; `auto` (and an omitted value) uses the template's default
+            placement. Codex is pod-only, so `host` is refused for it.
         cwd:
           type: string
           description: Resolved against the workspace root; escaping it is 400.

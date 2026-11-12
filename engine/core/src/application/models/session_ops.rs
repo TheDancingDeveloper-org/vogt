@@ -48,7 +48,7 @@ pub struct StartSessionParams {
     #[serde(default)]
     #[schemars(schema_with = "optional_string")]
     pub template: Option<String>,
-    /// Where to run the session: `host` uses the engine host, `pod` uses its configured pod backend. Omitted uses the deployment's template/default placement; the requested placement must be available.
+    /// Where to run the session: `host` uses the engine host, `pod` uses its configured pod backend, and `auto` uses the deployment's template/default placement. Omitted is `auto`; an explicit `host` or `pod` must be available for the template.
     #[serde(default)]
     #[schemars(schema_with = "optional_start_session_params_placement")]
     pub placement: Option<StartSessionParamsPlacement>,
@@ -138,10 +138,11 @@ pub struct StartSessionParams {
 pub enum StartSessionParamsPlacement {
     Host,
     Pod,
+    Auto,
 }
 
 fn optional_start_session_params_placement(_: &mut SchemaGenerator) -> Schema {
-    json_schema!({"anyOf":[{"enum":["host","pod"],"type":"string"},{"type":"null"}]})
+    json_schema!({"anyOf":[{"enum":["host","pod","auto"],"type":"string"},{"type":"null"}]})
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]

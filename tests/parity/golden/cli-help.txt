@@ -1446,7 +1446,7 @@ options:
 $ vogt session start --help
 [exit 0]
 usage: vogt session start [-h] [--work-item WORK_ITEM] [--project PROJECT]
-                          [--template TEMPLATE] [--placement {host,pod}]
+                          [--template TEMPLATE] [--placement {host,pod,auto}]
                           [--task TASK] [--files FILES] [--symbols SYMBOLS]
                           [--done DONE] [--gates GATES]
                           [--repo-map | --no-repo-map]
@@ -1476,11 +1476,12 @@ options:
                         to *do* something in a session names one here. Omitted
                         means a plain shell, which does nothing until typed
                         into.
-  --placement {host,pod}
+  --placement {host,pod,auto}
                         Where to run the session: `host` uses the engine host,
-                        `pod` uses its configured pod backend. Omitted uses
-                        the deployment's template/default placement; the
-                        requested placement must be available.
+                        `pod` uses its configured pod backend, and `auto` uses
+                        the deployment's template/default placement. Omitted
+                        is `auto`; an explicit `host` or `pod` must be
+                        available for the template.
   --task TASK           What the session's agent should do, in the user's
                         words. Folded into the brief as its Task section; an
                         agent template (Claude Code, Codex, OpenCode) is
