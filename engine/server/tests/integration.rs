@@ -17930,13 +17930,22 @@ secret_name = "DEEPSEEK_SECRET"
 models = ["deepseek/deepseek-v4-flash"]
 
 [[provider]]
+name = "litellm-grok"
+base_url = "http://litellm:4000/v1"
+wire_api = "chat"
+env_key = "GROK_PROVIDER_KEY"
+secret_project = "proj-a"
+secret_name = "GROK_SECRET"
+models = ["grok-4.7", "grok-4.6"]
+
+[[provider]]
 name = "litellm-claude"
 base_url = "http://litellm:4000/v1"
 wire_api = "chat"
 env_key = "CLAUDE_PROVIDER_KEY"
 secret_project = "proj-a"
 secret_name = "CLAUDE_SECRET"
-models = ["claude-org-sonnet"]
+models = ["claude-org-haiku", "claude-org-sonnet", "claude-org-opus"]
 "#,
     )
     .unwrap();
@@ -17953,7 +17962,9 @@ fn model_test_helper(path: &std::path::Path) {
 
 fn model_test_manifest() -> Vec<vogt_engine_server::secret_broker::ManifestSecret> {
     vogt_engine_server::secret_broker::parse_manifest(
-        "MANIFEST_DEEPSEEK proj-a DEEPSEEK_SECRET optional\nMANIFEST_CLAUDE proj-a CLAUDE_SECRET optional",
+        "MANIFEST_DEEPSEEK proj-a DEEPSEEK_SECRET optional\n\
+         MANIFEST_GROK proj-a GROK_SECRET optional\n\
+         MANIFEST_CLAUDE proj-a CLAUDE_SECRET optional",
     )
     .unwrap()
 }
@@ -18008,8 +18019,8 @@ async fn an_unknown_model_is_refused_for_a_codex_launch() {
     );
 }
 
-/// The same guard covers a Claude template: the model must be one the engine
-/// can serve, and the refusal happens before the pod is created (WI-4138).
+/// A name Claude Code would never resolve and no provider lists is still
+/// refused for a Claude template, before the pod is created (WI-4138).
 #[tokio::test]
 async fn an_unknown_model_is_refused_for_a_claude_launch() {
     let tmp = tempfile::tempdir().unwrap();
@@ -18032,7 +18043,7 @@ async fn an_unknown_model_is_refused_for_a_claude_launch() {
             "name": "unknown-claude-model",
             "template": "claude-pod",
             "placement": "pod",
-            "model": "claude-definitely-not-a-model",
+            "model": "not-a-model-xyz",
         }))
         .send()
         .await
@@ -18044,13 +18055,110 @@ async fn an_unknown_model_is_refused_for_a_claude_launch() {
         body["error"]
             .as_str()
             .unwrap_or_default()
-            .contains("claude-definitely-not-a-model"),
+            .contains("not-a-model-xyz"),
         "{body}"
     );
     assert!(
         h.created.try_recv().is_err(),
         "a refused launch made a pod: {body}"
     );
+}
+
+/// Vogt's own dispatch profiles send Claude Code's native names on the
+/// `claude` template: the aliases `opus`, `sonnet` and `haiku`, and
+/// `claude-…` ids, each optionally with Claude Code's `[1m]` context suffix.
+/// Those are names Claude Code resolves itself and no provider registry ever
+/// lists, so a registry that lists other models must not refuse them
+/// (WI-4138).
+#[tokio::test]
+async fn claude_native_models_are_accepted_against_a_listing_registry() {
+    let tmp = tempfile::tempdir().unwrap();
+    let registry = tmp.path().join("llm-providers.toml");
+    let reg = registry.clone();
+    let mut h = pod_stream::harness_cfg(
+        false,
+        Some(vec![model_test_template("claude-pod", "claude")]),
+        move |cfg| {
+            cfg.llm_providers_file = Some(reg);
+        },
+    )
+    .await;
+    write_model_registry(&registry);
+
+    for model in [
+        "opus",
+        "sonnet",
+        "haiku",
+        "fable",
+        "claude-opus-5-5",
+        "claude-sonnet-5-5",
+        "claude-haiku-4-5",
+        "opus[1m]",
+        "sonnet[1m]",
+        "claude-sonnet-4-5[1m]",
+    ] {
+        let id = h
+            .start_body(json!({
+                "name": "claude-native-model",
+                "template": "claude-pod",
+                "placement": "pod",
+                "model": model,
+            }))
+            .await;
+        let (created, _token) = h.created.recv().await.expect("the pod is created");
+        assert_eq!(created, id, "{model}");
+    }
+}
+
+/// Every model Vogt's own dispatch profiles and templates send is admitted by
+/// a registry shaped the way `docs/DEPLOYMENT.md` recommends (WI-4131): the
+/// Codex template's LiteLLM ids and the Claude template's `claude-org-*`
+/// router groups (WI-4138).
+#[tokio::test]
+async fn models_vogt_sends_are_accepted_by_the_recommended_registry() {
+    let tmp = tempfile::tempdir().unwrap();
+    let registry = tmp.path().join("llm-providers.toml");
+    let helper = tmp.path().join("agent-auth");
+    model_test_helper(&helper);
+    let reg = registry.clone();
+    let helper_path = helper.clone();
+    let mut h = pod_stream::harness_cfg(
+        false,
+        Some(vec![
+            model_test_template("codex-pod", "codex"),
+            model_test_template("claude-pod", "claude"),
+        ]),
+        move |cfg| {
+            cfg.llm_providers_file = Some(reg);
+            cfg.agent_auth_helper = helper_path;
+            cfg.agent_auth_secrets = model_test_manifest();
+        },
+    )
+    .await;
+    write_model_registry(&registry);
+
+    for (template, model) in [
+        ("codex-pod", "deepseek/deepseek-v4-flash"),
+        ("codex-pod", "grok-4.7"),
+        ("codex-pod", "grok-4.6"),
+        ("codex-pod", "claude-org-haiku"),
+        ("codex-pod", "claude-org-sonnet"),
+        ("codex-pod", "claude-org-opus"),
+        ("claude-pod", "claude-org-haiku"),
+        ("claude-pod", "claude-org-sonnet"),
+        ("claude-pod", "claude-org-opus"),
+    ] {
+        let id = h
+            .start_body(json!({
+                "name": "vogt-model",
+                "template": template,
+                "placement": "pod",
+                "model": model,
+            }))
+            .await;
+        let (created, _token) = h.created.recv().await.expect("the pod is created");
+        assert_eq!(created, id, "{template} {model}");
+    }
 }
 
 /// A registered model and an omitted model still launch; the guard only

@@ -485,6 +485,29 @@ fn note_graft_token_unavailable(link: &crate::agent_stream::PodLink, id: Uuid, w
     let _ = link.ingest(link.next_offset(), note.as_bytes());
 }
 
+/// The model names Claude Code resolves itself: the aliases `opus`,
+/// `sonnet`, `haiku` and `fable`, and a `claude-…` id, each optionally with
+/// Claude Code's `[1m]` context-window suffix. A model outside this set on
+/// the `claude` template is routed through a provider registry entry, so it
+/// is the registry's to know (WI-4138).
+fn is_claude_cli_model(model: &str) -> bool {
+    let model = model.strip_suffix("[1m]").unwrap_or(model);
+    matches!(model, "opus" | "sonnet" | "haiku" | "fable")
+        || model
+            .strip_prefix("claude-")
+            .is_some_and(|id| !id.is_empty())
+}
+
+/// The requested model as the launch will run it: trimmed, with an empty
+/// value meaning none (WI-4138). The refusal check and the launch read this
+/// one value, so `" known"` cannot pass as `known` and then run as
+/// `" known"`.
+fn normalize_requested_model(model: Option<String>) -> Option<String> {
+    model
+        .map(|model| model.trim().to_string())
+        .filter(|model| !model.is_empty())
+}
+
 impl SessionRegistry {
     pub fn new(cfg: Arc<Config>, bus: EventBus, history: Option<Arc<SessionHistory>>) -> Self {
         let account_dirs = cfg
@@ -1026,7 +1049,8 @@ impl SessionRegistry {
         &self.secret_broker
     }
 
-    pub fn create(&self, spec: SessionSpec) -> Result<Arc<Session>> {
+    pub fn create(&self, mut spec: SessionSpec) -> Result<Arc<Session>> {
+        spec.model = normalize_requested_model(spec.model);
         self.check_requested_model(
             spec.model.as_deref(),
             &spec.command,
@@ -1039,10 +1063,15 @@ impl SessionRegistry {
     ///
     /// The LLM provider registry is the engine's own known-model source: a
     /// Codex or Claude launch may ask for any model the registry's `models`
-    /// lists. A deployment with no such list has nothing to validate against
-    /// and keeps its old behaviour. `ENGINE_LLM_MODEL_ALLOWLIST` is the
-    /// explicit extension for a provider that serves a model without listing
-    /// it, or a template whose models live outside the registry.
+    /// lists. Claude Code's own model names (`opus`, `sonnet`, `haiku`,
+    /// `fable`, and `claude-…` ids, with or without `[1m]`) are resolved by
+    /// Claude Code itself and are never registry entries, so a Claude launch
+    /// asking for one is accepted without one (WI-4138). Every other model on
+    /// either template is routed through a provider, so the registry must
+    /// list it. A deployment with no such list has nothing to validate
+    /// against and keeps its old behaviour. `ENGINE_LLM_MODEL_ALLOWLIST` is
+    /// the explicit extension for a provider that serves a model without
+    /// listing it, or a template whose models live outside the registry.
     ///
     /// The refusal names the requested model only; it never names a provider,
     /// a secret, or a value.
@@ -1059,6 +1088,9 @@ impl SessionRegistry {
             return Ok(());
         };
         if !matches!(agent.as_str(), "codex" | "claude") {
+            return Ok(());
+        }
+        if agent == "claude" && is_claude_cli_model(model) {
             return Ok(());
         }
         let providers = self.secret_broker.providers();
@@ -1099,6 +1131,7 @@ impl SessionRegistry {
     /// token, because the person at it is a person. A session vogt-core
     /// started arrives with its own token and is left alone.
     pub async fn create_launched(&self, mut spec: SessionSpec) -> Result<Arc<Session>> {
+        spec.model = normalize_requested_model(spec.model);
         self.check_requested_model(
             spec.model.as_deref(),
             &spec.command,
@@ -1231,7 +1264,8 @@ impl SessionRegistry {
 
     /// A session for an agent-task run: like [`Self::create`], but never
     /// recorded for hibernation — the run's runner owns its lifetime.
-    pub async fn create_for_task(&self, spec: SessionSpec) -> Result<Arc<Session>> {
+    pub async fn create_for_task(&self, mut spec: SessionSpec) -> Result<Arc<Session>> {
+        spec.model = normalize_requested_model(spec.model);
         self.check_requested_model(
             spec.model.as_deref(),
             &spec.command,
@@ -4409,11 +4443,48 @@ fn wake_settings_file<'a>(
 #[cfg(test)]
 mod tests {
     use super::{
-        normalize_session_name, pod_carry_env, pod_carry_recorded, validate_codex_placement,
-        validate_placement_template_requirement, validate_pod_placement_fields,
-        validate_requested_placement, validate_template_placement,
+        is_claude_cli_model, normalize_requested_model, normalize_session_name, pod_carry_env,
+        pod_carry_recorded, validate_codex_placement, validate_placement_template_requirement,
+        validate_pod_placement_fields, validate_requested_placement, validate_template_placement,
     };
     use crate::config::SessionTemplate;
+
+    #[test]
+    fn claude_cli_model_names_are_the_aliases_ids_and_the_1m_suffix() {
+        for good in [
+            "opus",
+            "sonnet",
+            "haiku",
+            "fable",
+            "claude-opus-5-5",
+            "claude-sonnet-4-5-20250929",
+            "opus[1m]",
+            "sonnet[1m]",
+            "claude-sonnet-4-5[1m]",
+        ] {
+            assert!(is_claude_cli_model(good), "{good:?} is a Claude model");
+        }
+        for bad in [
+            "not-a-model-xyz",
+            "gpt-5.6",
+            "claude-",
+            "opus[2m]",
+            "OPUS",
+            " claude-opus",
+        ] {
+            assert!(!is_claude_cli_model(bad), "{bad:?} is not a Claude model");
+        }
+    }
+
+    #[test]
+    fn a_requested_model_is_normalised_once_for_the_check_and_the_launch() {
+        assert_eq!(
+            normalize_requested_model(Some("  opus ".into())),
+            Some("opus".to_string())
+        );
+        assert_eq!(normalize_requested_model(Some("   ".into())), None);
+        assert_eq!(normalize_requested_model(None), None);
+    }
 
     #[test]
     fn a_registered_model_gets_a_per_session_catalog_without_touching_the_shared_one() {
