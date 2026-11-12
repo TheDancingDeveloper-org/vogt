@@ -1597,6 +1597,17 @@ pub fn command_line(config: &Config) -> Result<String, AgentError> {
             let cwd = config.cwd.as_deref().unwrap_or(DEFAULT_WORK_DIR);
             let base = config.codex.template_args.as_slice();
             let pin = conversation.filter(|_| !config.resume && base.is_empty());
+            // The brief is the session's first prompt, as it is for Claude
+            // Code and for a host Codex (WI-3355, WI-4068). The entrypoint
+            // wrote the file before this process started; leaving it unread
+            // opened a task session at an empty composer, so a session with
+            // autopilot off never started a turn at all.
+            let prompt = config
+                .claude
+                .brief
+                .as_deref()
+                .filter(|_| !config.resume)
+                .map(brief_instruction);
             let args = codex_args(&CodexArgs {
                 command_args: base,
                 resume: conversation.filter(|_| config.resume),
@@ -1616,7 +1627,7 @@ pub fn command_line(config: &Config) -> Result<String, AgentError> {
                 charter: config.codex.charter.as_deref(),
                 mcp_servers: &file.mcp_servers,
                 mcp_args: &[],
-                prompt: None,
+                prompt: prompt.as_deref(),
             })
             .map_err(AgentError::Pty)?;
             let mut line = codex_provider_key_prefix(&file.providers);
@@ -2793,6 +2804,36 @@ mod tests {
         // No brief, no prompt.
         let argv = argv_of(&command_line(&claude_config(ClaudeLaunch::default(), false)).unwrap());
         assert_eq!(argv, ["--session-id", "abc-123", "--add-dir=/work"]);
+    }
+
+    /// WI-4068: pod Codex had the same gap Claude Code had in WI-3355. The
+    /// engine's rewritten argv (which carries the brief pointer) is dropped
+    /// for an agent template, and the pod rebuilt the line with `prompt:
+    /// None`, so a task session opened at an empty composer. With autopilot
+    /// off nothing ever typed into it and the session sat at 0 turns.
+    #[test]
+    fn a_fresh_codex_is_given_its_brief_as_the_prompt() {
+        let brief = PathBuf::from("/work/.vogt/brief.md");
+        let mut config = claude_config(
+            ClaudeLaunch {
+                brief: Some(brief.clone()),
+                ..ClaudeLaunch::default()
+            },
+            false,
+        );
+        config.cli = "codex".into();
+        let argv = argv_of_cli("codex", &command_line(&config).unwrap());
+        assert_eq!(argv.last().unwrap(), &brief_instruction(&brief), "{argv:?}");
+        // A resume already names the conversation and must not also give the
+        // CLI a fresh first prompt.
+        config.resume = true;
+        let argv = argv_of_cli("codex", &command_line(&config).unwrap());
+        assert!(!argv.iter().any(|a| a.contains("brief")), "{argv:?}");
+        // No brief, no prompt.
+        config.resume = false;
+        config.claude.brief = None;
+        let argv = argv_of_cli("codex", &command_line(&config).unwrap());
+        assert!(!argv.iter().any(|a| a.contains("brief")), "{argv:?}");
     }
 
     #[test]

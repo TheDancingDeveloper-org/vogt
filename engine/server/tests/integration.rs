@@ -16911,6 +16911,117 @@ fn a_quiet_working_codex_session_does_not_starve_the_runtime() {
         .expect("the engine runtime stalled: the activity watcher is spinning");
 }
 
+/// Spawn a fake agent named `codex` in its own PTY, the same shape a pod
+/// session runs: a TUI that draws a composer and announces `codex: ready`.
+fn spawn_fake_codex(
+    dir: &std::path::Path,
+    body: &str,
+    bus: &vogt_engine_server::events::EventBus,
+) -> Arc<vogt_engine_server::pty::Session> {
+    let codex = dir.join("codex");
+    std::fs::write(&codex, body).unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let spec = vogt_engine_contract::SessionSpec {
+        name: "fake-codex".into(),
+        command: Some(vec![codex.to_string_lossy().into_owned()]),
+        prompt: Some("# task\n\nRun it.\n".into()),
+        ..Default::default()
+    };
+    vogt_engine_server::pty::spawn(
+        Uuid::new_v4(),
+        &spec,
+        vogt_engine_server::pty::SpawnDefaults {
+            default_shell: "/bin/sh",
+            auto_agent_auth: false,
+            agent_auth_helper: std::path::Path::new("/usr/local/bin/vogt-agent-auth"),
+            default_cwd: dir,
+            scrollback_bytes: 64 * 1024,
+            activity_idle_after_ms: 200,
+            secret_broker: None,
+            agent_auth_manifest: None,
+            on_exit: None,
+        },
+        bus.clone(),
+        None,
+    )
+    .unwrap()
+    .session
+}
+
+fn first_turn_policy() -> vogt_engine_server::first_turn::Policy {
+    vogt_engine_server::first_turn::Policy {
+        ready_within: Duration::from_secs(5),
+        turn_within: Duration::from_millis(500),
+    }
+}
+
+/// WI-4068: a TUI at its composer with the brief queued is given one Enter.
+/// The fake swallows nothing about the prompt itself — it starts the turn when
+/// the Enter arrives — which is exactly the "the text is in the box but the
+/// submit did not take" state the watchdog exists for.
+#[tokio::test]
+async fn a_queued_first_prompt_is_submitted_by_the_watchdog_and_starts_a_turn() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bus = vogt_engine_server::events::EventBus::new(64);
+    let session = spawn_fake_codex(
+        tmp.path(),
+        "#!/bin/sh\n\
+         printf '\\033]0;codex: ready\\007'\n\
+         printf '> '\n\
+         read _line\n\
+         printf '\\033]0;codex: working\\007'\n\
+         printf 'TURN STARTED\\n'\n\
+         exec sleep 30\n",
+        &bus,
+    );
+    vogt_engine_server::first_turn::watch(bus, Arc::clone(&session), first_turn_policy())
+        .await
+        .unwrap();
+    assert!(
+        session.blocked().is_none(),
+        "a turn started, so nothing is blocked: {:?}",
+        session.blocked()
+    );
+    let (screen, _) = session.render_screen(0);
+    assert!(
+        screen
+            .lines
+            .iter()
+            .any(|line| line.contains("TURN STARTED")),
+        "{:?}",
+        screen.lines
+    );
+    session.kill().unwrap();
+}
+
+/// WI-4068: a session that never submits its first prompt must not sit in the
+/// list at zero turns. After the one Enter it is reported blocked, with a
+/// reason the operator can act on.
+#[tokio::test]
+async fn a_first_prompt_that_never_submits_is_reported_blocked_after_one_enter() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bus = vogt_engine_server::events::EventBus::new(64);
+    let session = spawn_fake_codex(
+        tmp.path(),
+        "#!/bin/sh\n\
+         printf '\\033]0;codex: ready\\007'\n\
+         printf '> '\n\
+         exec sleep 30\n",
+        &bus,
+    );
+    vogt_engine_server::first_turn::watch(bus, Arc::clone(&session), first_turn_policy())
+        .await
+        .unwrap();
+    let blocked = session
+        .blocked()
+        .expect("a stuck first prompt needs a person");
+    assert!(
+        blocked.reason.contains("first prompt never started a turn"),
+        "{blocked:?}"
+    );
+    session.kill().unwrap();
+}
+
 /// WI-1812: a session launched through the real `agent-auth.sh` while the
 /// secrets manager is unreachable still starts, says so in its terminal, and
 /// shows in `/api/status`; once the secrets manager answers again, the next
