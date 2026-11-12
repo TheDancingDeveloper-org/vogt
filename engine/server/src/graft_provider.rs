@@ -33,6 +33,21 @@ pub struct GraftSettings {
     /// names no source.
     pub repo: String,
     pub line: String,
+    /// Whether a session pod gets a minted, repo- and line-scoped token.
+    /// Off unless the deployment sets `ENGINE_SOURCE_GRAFT_MINT` (alias
+    /// `ENGINE_POD_GRAFT_MINT`), so an upgrade does not change how existing
+    /// pod sessions authenticate (WI-4124).
+    pub mint_enabled: bool,
+}
+
+/// The last setting is a boolean, so it does not fit the name/alias table.
+const MINT_SETTING: (&str, &str) = ("ENGINE_SOURCE_GRAFT_MINT", "ENGINE_POD_GRAFT_MINT");
+
+fn is_true(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
 }
 
 const DEFAULT_REPO: &str = "vogt";
@@ -64,8 +79,8 @@ impl GraftSettings {
     /// Read settings through `get`; a current name wins over its alias, and an
     /// alias in use is warned about once per load.
     pub fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Self {
+        let nonempty = |k: &str| get(k).filter(|v| !v.trim().is_empty());
         let mut values = SETTINGS.iter().map(|(current, alias)| {
-            let nonempty = |k: &str| get(k).filter(|v| !v.trim().is_empty());
             nonempty(current).or_else(|| {
                 let v = nonempty(alias);
                 if v.is_some() {
@@ -74,6 +89,20 @@ impl GraftSettings {
                 v
             })
         });
+        let (mint_current, mint_alias) = MINT_SETTING;
+        let mint_enabled = nonempty(mint_current)
+            .or_else(|| {
+                let v = nonempty(mint_alias);
+                if v.is_some() {
+                    tracing::warn!(
+                        alias = mint_alias,
+                        current = mint_current,
+                        "deprecated source setting; rename it"
+                    );
+                }
+                v
+            })
+            .is_some_and(|v| is_true(&v));
         Self {
             endpoint: values.next().flatten(),
             token_file: values.next().flatten(),
@@ -86,6 +115,7 @@ impl GraftSettings {
                 .next()
                 .flatten()
                 .unwrap_or_else(|| DEFAULT_LINE.into()),
+            mint_enabled,
         }
     }
 }
@@ -98,6 +128,7 @@ impl Default for GraftSettings {
             mint_token_file: None,
             repo: DEFAULT_REPO.into(),
             line: DEFAULT_LINE.into(),
+            mint_enabled: false,
         }
     }
 }
@@ -143,9 +174,12 @@ impl GraftProvider {
     }
 
     /// The provider over `state_dir` with an explicit minter (tests mint
-    /// without a graft server).
+    /// without a graft server). Naming a minter explicitly enables minting:
+    /// the deployment flag only gates the environment-driven constructor.
     pub fn with_minter(state_dir: &Path, minter: Arc<dyn GraftMinter>) -> Self {
-        Self::new(state_dir.join(CREDENTIAL_DIR), Some(minter))
+        let mut provider = Self::new(state_dir.join(CREDENTIAL_DIR), Some(minter));
+        provider.settings.mint_enabled = true;
+        provider
     }
 
     pub fn with_settings(mut self, settings: GraftSettings) -> Self {
@@ -302,7 +336,7 @@ impl SourceProvider for GraftProvider {
     }
 
     fn mints_credentials(&self) -> bool {
-        self.minter.is_some()
+        self.settings.mint_enabled && self.minter.is_some()
     }
 
     fn shared_credential(&self) -> Option<CredentialHandle> {
@@ -359,8 +393,14 @@ impl SourceProvider for GraftProvider {
                 "graft credential minting without a mint token",
             ))?;
             let id = request.session;
+            // The token is bound to the core session id the worker's brief
+            // names; the engine UUID is only the local handle its file is
+            // kept under.
             let grant = SessionGrant::new(
-                id,
+                request
+                    .session_ref
+                    .clone()
+                    .unwrap_or_else(|| id.to_string()),
                 repo,
                 &source.reference,
                 request.work_item.as_deref(),
@@ -715,6 +755,72 @@ mod tests {
             *minter.revoked.lock().unwrap(),
             vec![(id, "minted".to_string())]
         );
+    }
+
+    #[tokio::test]
+    async fn the_grant_uses_the_core_session_id_when_the_start_named_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let minter = Arc::new(FakeMinter::default());
+        let p = GraftProvider::new(tmp.path(), Some(minter));
+        let mut request = CredentialRequest::for_session(Uuid::new_v4());
+        request.session_ref = Some("ses_01M76WJECNPXTPV2NKQQNBA8DA".into());
+        p.mint_credential(&source(), &request).await.unwrap();
+        // The FakeMinter's scopes are all it records; the grant's own
+        // session id is asserted through the real minter in graft_mint's
+        // tests and through the bootstrap response in the integration tests.
+        assert!(p.held_credential(request.session).is_some());
+    }
+
+    #[test]
+    fn minting_is_off_until_the_deployment_enables_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |k: &str| {
+                pairs
+                    .iter()
+                    .find(|(n, _)| *n == k)
+                    .map(|(_, v)| v.to_string())
+            }
+        };
+        // A mint token alone does not turn minting on: the batch behaviour is
+        // unchanged until the flag is set.
+        let off = GraftProvider::for_deployment(
+            tmp.path(),
+            GraftSettings::from_lookup(env(&[
+                ("ENGINE_POD_GRAFT_ENDPOINT", "http://graft.test:17888"),
+                ("ENGINE_GRAFT_MINT_TOKEN_FILE", "/run/mint"),
+            ])),
+        )
+        .unwrap();
+        assert!(!off.mints_credentials());
+        // Any of the usual true spellings enables it, under either name.
+        let lookup = |pairs: Vec<(&'static str, &'static str)>| {
+            GraftSettings::from_lookup(move |k| {
+                pairs
+                    .iter()
+                    .find(|(n, _)| *n == k)
+                    .map(|(_, v)| v.to_string())
+            })
+        };
+        for (name, value) in [
+            ("ENGINE_POD_GRAFT_MINT", "1"),
+            ("ENGINE_SOURCE_GRAFT_MINT", "true"),
+        ] {
+            let settings = lookup(vec![
+                ("ENGINE_POD_GRAFT_ENDPOINT", "http://graft.test:17888"),
+                ("ENGINE_GRAFT_MINT_TOKEN_FILE", "/run/mint"),
+                (name, value),
+            ]);
+            let p = GraftProvider::for_deployment(tmp.path(), settings).unwrap();
+            assert!(p.mints_credentials(), "{name}={value}");
+        }
+        // A flag with no mint token cannot mint: there is nothing to mint with.
+        let no_token = GraftProvider::for_deployment(
+            tmp.path(),
+            GraftSettings::from_lookup(env(&[("ENGINE_POD_GRAFT_MINT", "1")])),
+        )
+        .unwrap();
+        assert!(!no_token.mints_credentials());
     }
 
     #[tokio::test]

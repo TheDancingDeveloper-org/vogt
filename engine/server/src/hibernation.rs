@@ -152,6 +152,10 @@ pub struct Record {
     /// The work item it serves (WI-998); a wake and a redeploy keep it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_item: Option<String>,
+    /// The core's own session id (WI-4124); a wake keeps it so the replacement
+    /// graft token is bound to the same session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_ref: Option<String>,
     /// Its git tree and the baseline taken at the first start (WI-1324); a
     /// wake reuses it rather than taking the baseline again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -248,6 +252,7 @@ impl Record {
             budget_session_secs: 0,
             role: SessionRole::Worker,
             work_item: None,
+            session_ref: None,
             workspace: None,
             superseded_by: None,
             hibernation: None,

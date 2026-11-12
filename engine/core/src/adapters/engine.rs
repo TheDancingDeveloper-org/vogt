@@ -150,6 +150,12 @@ impl EngineClient {
         if let Some(work_item) = &spec.work_item {
             body.insert("work_item".to_string(), Value::String(work_item.clone()));
         }
+        if let Some(session_ref) = &spec.session_ref {
+            body.insert(
+                "session_ref".to_string(),
+                Value::String(session_ref.clone()),
+            );
+        }
         // An empty account or companion is left off, as the Python client does.
         if let Some(account) = spec.account.as_ref().filter(|text| !text.is_empty()) {
             body.insert("account".to_string(), Value::String(account.clone()));
@@ -1226,6 +1232,9 @@ pub struct CreateSession {
     pub autopilot: bool,
     pub role: String,
     pub work_item: Option<String>,
+    /// The core's own session id, so a provider credential can be bound to
+    /// the id the worker's brief and commits use (WI-4124).
+    pub session_ref: Option<String>,
     /// A Claude Code account name from the engine's allowlist.
     pub account: Option<String>,
     /// The standing guide written beside the brief; the engine writes the text.
@@ -1257,6 +1266,7 @@ impl CreateSession {
             autopilot: false,
             role: "worker".to_string(),
             work_item: None,
+            session_ref: None,
             account: None,
             companion: None,
             policy: None,

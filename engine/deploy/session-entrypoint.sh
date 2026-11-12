@@ -191,8 +191,38 @@ step=source-token; say source-token
 # without one the session token is tried.
 source_token_file=$token_file
 if [ -n "$(jq -r '.source_token // .graft_token // empty' "$response")" ]; then
-  source_token_file="${VOGT_GRAFT_TOKEN_FILE:-$(dirname "$token_file")/graft-token}"
-  jq -j '.source_token // .graft_token' "$response" >"$source_token_file"; chmod 600 "$source_token_file"
+  graft_session=$(jq -r '.graft_session // empty' "$response")
+  # A graft token goes where `g` reads it: its user config, in the session's
+  # own directory, with a server entry that names the same endpoint and token
+  # file. A worker then runs plain `g clone`/`g land`; no path has to be known
+  # and no token is in an argument or an environment value.
+  if [ "$source_kind" = graft ]; then
+    [ -n "$graft_session" ] || graft_session=$VOGT_SESSION_ID
+    case "$graft_session" in ''|[!A-Za-z0-9]*|*[!A-Za-z0-9._-]*) fail 'bootstrap returned an unsafe graft session id' ;; esac
+    graft_home="${XDG_CONFIG_HOME:-$HOME/.config}/graft"
+    graft_dir="$graft_home/sessions/$graft_session"
+    mkdir -p "$graft_dir"
+    chmod 700 "$graft_home" "$graft_dir"
+    source_token_file="$graft_dir/trial-1.token"
+    jq -j '.source_token // .graft_token' "$response" >"$source_token_file"; chmod 600 "$source_token_file"
+    graft_endpoint=$(jq -r '.source.location.endpoint // empty' "$response")
+    [ -n "$graft_endpoint" ] || graft_endpoint=${GRAFT_ENDPOINT:-}
+    # A quote or a newline cannot be represented in the small config below, and
+    # no legitimate endpoint carries one. Without it the token file is still
+    # exported, so `g --token-file` keeps working.
+    case "$graft_endpoint" in *\"*|*'
+'*) graft_endpoint= ;; esac
+    if [ -n "$graft_endpoint" ]; then
+      printf 'default_server = "vogt-session"\n\n[servers.vogt-session]\nendpoint = "%s"\ntoken_file = "%s"\n' \
+        "$graft_endpoint" "$source_token_file" >"$graft_home/config.toml"
+      chmod 600 "$graft_home/config.toml"
+    fi
+    export GRAFT_SESSION_ID="$graft_session"
+    [ -z "$graft_endpoint" ] || export GRAFT_ENDPOINT="$graft_endpoint"
+  else
+    source_token_file="$(dirname "$token_file")/graft-token"
+    jq -j '.source_token // .graft_token' "$response" >"$source_token_file"; chmod 600 "$source_token_file"
+  fi
   export VOGT_GRAFT_TOKEN_FILE="$source_token_file"
 fi
 step=clone; say clone

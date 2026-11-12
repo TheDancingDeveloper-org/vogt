@@ -55,6 +55,7 @@ the example does: compiled defaults are not portable operator choices.
 | `ENGINE_SOURCE_GRAFT_REPO` | Repository to clone; choose explicitly. |
 | `ENGINE_SOURCE_GRAFT_LINE` | Clone line; default `rust-2`. |
 | `ENGINE_SOURCE_GRAFT_ENDPOINT` | Graft URL reachable from sessions. |
+| `ENGINE_SOURCE_GRAFT_MINT` | Enable per-session graft minting (`1`); default off. |
 | `ENGINE_SOURCE_GRAFT_TOKEN_FILE` | Shared-token fallback file on engine; prefer minting. |
 | `ENGINE_POD_CLI` | Fallback CLI (default `codex`); agent templates select their CLI. |
 | `ENGINE_POD_EXTRA_CA_FILE` | Additional CA path in the session image; ensure it exists there. |
@@ -89,8 +90,10 @@ The `ENGINE_SOURCE_GRAFT_*` names are the graft source provider's; the older
 `ENGINE_POD_GRAFT_*` and `ENGINE_GRAFT_MINT_TOKEN_FILE` names are read as
 aliases for one release, with a deprecation warning.
 
-`ENGINE_SOURCE_GRAFT_MINT_TOKEN_FILE` is also needed for per-session graft minting;
-mount it only in the engine. See [session pod boot](ENGINE.md#session-pod-boot)
+`ENGINE_SOURCE_GRAFT_MINT_TOKEN_FILE` and `ENGINE_SOURCE_GRAFT_MINT=1` are both
+needed for per-session graft minting; mount the token only in the engine.
+Minting stays off until the flag is set, so existing pod sessions keep their
+current authentication. See [session pod boot](ENGINE.md#session-pod-boot)
 for bootstrap, revocation and account write-back. The workspace tree
 (`ENGINE_POD_WORKSPACE`, WI-3373/WI-3374) is read-only, pod-local and built at
 boot from pinned public sources; it is workspace configuration, not session
