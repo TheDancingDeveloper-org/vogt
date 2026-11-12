@@ -1,0 +1,98 @@
+# Live-instance acceptance suite (WI-4135).
+#
+# Manual dispatch only. This is NOT a required check and must not become one:
+# it needs a credential for a running dev instance, and a missing or expired
+# credential must never block a pull request. The offline fake run
+# (`python3 tests/acceptance/run.py --fake`) is what PRs can rely on; this
+# workflow is the operator's button for the real thing.
+#
+# The token arrives through the `VOGT_DEV_TOKEN` repository secret. It is
+# written to a 0600 file under the runner's temp directory and passed to the
+# suite by path only — never on argv, never in the environment of the suite
+# process, and never printed. The file is removed on the way out even when a
+# check fails.
+#
+# See docs/ACCEPTANCE.md for the suite, its safety model and its groups.
+
+name: acceptance
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: Target Vogt dev instance (production is refused by the suite)
+        required: false
+        default: https://vogt-dev.sprooty.com
+      with_sessions:
+        description: Start throwaway pod sessions (always stopped again)
+        type: boolean
+        default: false
+      allow_writes:
+        description: Run the throwaway-project work-tracking checks
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: acceptance-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  acceptance:
+    name: live dev acceptance (manual)
+    # Static selector, per the runner-policy gate. No docker label: the suite
+    # speaks HTTP and the Kubernetes API, it builds nothing.
+    runs-on: [self-hosted]
+    timeout-minutes: 30
+    env:
+      BASE_URL: ${{ inputs.base_url }}
+      WITH_SESSIONS: ${{ inputs.with_sessions }}
+      ALLOW_WRITES: ${{ inputs.allow_writes }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: write the token to a private file
+        env:
+          VOGT_DEV_TOKEN: ${{ secrets.VOGT_DEV_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${VOGT_DEV_TOKEN:-}" ]; then
+            echo "::error::VOGT_DEV_TOKEN is not set; nothing to authenticate with"
+            exit 1
+          fi
+          umask 077
+          token_file="$RUNNER_TEMP/vogt-dev-token"
+          printf '%s\n' "$VOGT_DEV_TOKEN" > "$token_file"
+          chmod 600 "$token_file"
+          test -s "$token_file"
+
+      - name: run the acceptance suite
+        run: |
+          set -euo pipefail
+          token_file="$RUNNER_TEMP/vogt-dev-token"
+          trap 'rm -f "$token_file"' EXIT
+          args=(
+            --base-url "$BASE_URL"
+            --token-file "$token_file"
+            --report acceptance.md
+            --json acceptance.json
+          )
+          if [ "$WITH_SESSIONS" = "true" ]; then
+            args+=(--with-sessions)
+          fi
+          if [ "$ALLOW_WRITES" = "true" ]; then
+            args+=(--allow-writes)
+          fi
+          python3 tests/acceptance/run.py "${args[@]}"
+
+      - name: upload the reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: acceptance-${{ github.run_id }}
+          path: |
+            acceptance.md
+            acceptance.json
+          if-no-files-found: warn
