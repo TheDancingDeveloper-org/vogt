@@ -39187,7 +39187,7 @@
   },
   "py": {
    "ok": false,
-   "text": "invalid arguments for session.start:\n1 validation error for StartSessionParams\nplacement\n  Input should be 'host' or 'pod' [type=literal_error, input_value='zzz-bad', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "text": "invalid arguments for session.start:\n1 validation error for StartSessionParams\nplacement\n  Input should be 'host', 'pod' or 'auto' [type=literal_error, input_value='zzz-bad', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
    "sent": "{\"reason\": \"x\", \"placement\": \"zzz-bad\"}",
    "errors": [
     {
@@ -39208,7 +39208,7 @@
   },
   "py": {
    "ok": false,
-   "text": "invalid arguments for session.start:\n1 validation error for StartSessionParams\nplacement\n  Input should be 'host' or 'pod' [type=literal_error, input_value='HOST', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "text": "invalid arguments for session.start:\n1 validation error for StartSessionParams\nplacement\n  Input should be 'host', 'pod' or 'auto' [type=literal_error, input_value='HOST', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
    "sent": "{\"reason\": \"x\", \"placement\": \"HOST\"}",
    "errors": [
     {
@@ -39229,7 +39229,7 @@
   },
   "py": {
    "ok": false,
-   "text": "invalid arguments for session.start:\n1 validation error for StartSessionParams\nplacement\n  Input should be 'host' or 'pod' [type=literal_error, input_value=5, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "text": "invalid arguments for session.start:\n1 validation error for StartSessionParams\nplacement\n  Input should be 'host', 'pod' or 'auto' [type=literal_error, input_value=5, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
    "sent": "{\"reason\": \"x\", \"placement\": 5}",
    "errors": [
     {
@@ -39250,7 +39250,7 @@
   },
   "py": {
    "ok": false,
-   "text": "invalid arguments for session.start:\n1 validation error for StartSessionParams\nplacement\n  Input should be 'host' or 'pod' [type=literal_error, input_value=True, input_type=bool]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "text": "invalid arguments for session.start:\n1 validation error for StartSessionParams\nplacement\n  Input should be 'host', 'pod' or 'auto' [type=literal_error, input_value=True, input_type=bool]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
    "sent": "{\"reason\": \"x\", \"placement\": true}",
    "errors": [
     {
@@ -39271,7 +39271,7 @@
   },
   "py": {
    "ok": false,
-   "text": "invalid arguments for session.start:\n1 validation error for StartSessionParams\nplacement\n  Input should be 'host' or 'pod' [type=literal_error, input_value='é😀', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
+   "text": "invalid arguments for session.start:\n1 validation error for StartSessionParams\nplacement\n  Input should be 'host', 'pod' or 'auto' [type=literal_error, input_value='é😀', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error",
    "sent": "{\"reason\": \"x\", \"placement\": \"é😀\"}",
    "errors": [
     {
