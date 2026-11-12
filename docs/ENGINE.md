@@ -986,8 +986,13 @@ engine turns them into that CLI's own flags (`agent_cli.rs`):
 | `codex` | `-m <id>` | `-c model_reasoning_effort=<level>` |
 
 When the provider registry (§9) lists known models, a requested `model` must
-be one of them. A model no entry lists is refused before any worktree or pod
-exists, with `400` and a stable code:
+be one of them — except on the `claude` template, where Claude Code's own
+names are always accepted: the aliases `opus`, `sonnet`, `haiku` and `fable`,
+and any `claude-…` id, each with an optional trailing `[1m]` (Claude Code's
+1M-context suffix). Claude Code resolves those names itself and no registry
+entry lists them; every other model on either template is routed through a
+provider and must be listed. A model no entry lists is refused before any
+worktree or pod exists, with `400` and a stable code:
 `{"error": "unknown model: ...", "code": "unknown_model"}`. The message names
 the requested model only — never a provider, a secret, or a value.
 `ENGINE_LLM_MODEL_ALLOWLIST` admits a model the registry does not list. A
@@ -4991,7 +4996,9 @@ started with `grok-4.7` uses the entry whose `models` list names
 `grok-4.7`, not whichever entry happens to be first. When two entries list
 the same model the entry named `litellm` wins. A requested model that no
 entry lists is refused before the session starts (`400`, code
-`unknown_model`), naming the model only and creating no pod.
+`unknown_model`), naming the model only and creating no pod. A `claude`
+template launch is the exception above: Claude Code's own aliases and
+`claude-…` ids never need an entry.
 `ENGINE_LLM_MODEL_ALLOWLIST` admits a model the registry does not list; an
 allowlisted model keeps the previous fallback when selecting an entry (the
 `litellm` entry, else the first). A launch with no `model` is unchanged. A

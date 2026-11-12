@@ -593,13 +593,19 @@ pub(crate) fn validate(field: &str, value: &str) -> Result<()> {
              CLI as another flag rather than as a value"
         )));
     }
-    if !value
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/' | ':'))
+    // Claude Code's 1M-context suffix is part of a Claude model name
+    // (`sonnet[1m]`, `claude-sonnet-4-5[1m]`). It is one argv word and is
+    // neither a flag nor shell syntax, so the id before it is held to the
+    // same vocabulary (WI-4138).
+    let id = value.strip_suffix("[1m]").unwrap_or(value);
+    if id.is_empty()
+        || !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/' | ':'))
     {
         return Err(ApiError::BadRequest(format!(
-            "{field} {value:?} is not a model id: letters, digits and . _ - / : \
-             only"
+            "{field} {value:?} is not a model id: letters, digits, . _ - / :, \
+             and an optional trailing [1m] only"
         )));
     }
     Ok(())
@@ -850,10 +856,18 @@ mod tests {
             "qwen/qwen3-coder",
             "openai:gpt-5.6",
             "gpt_4o_mini",
+            "sonnet[1m]",
+            "claude-sonnet-4-5[1m]",
         ] {
             assert!(
                 apply(Some(&cmd(&["claude"])), Some(good), None).is_ok(),
                 "{good:?} is a real model id and was refused"
+            );
+        }
+        for bad in ["[1m]", "opus[2m]", "opus[1m]x", "opus [1m]"] {
+            assert!(
+                apply(Some(&cmd(&["claude"])), Some(bad), None).is_err(),
+                "{bad:?} is not a model id and was accepted"
             );
         }
     }
