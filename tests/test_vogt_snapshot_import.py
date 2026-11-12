@@ -423,8 +423,8 @@ def test_the_not_prod_override_cannot_write_back_to_the_source_instance(
     source = load_source(write_source(tmp_path))
     target = FakeTarget(instance_id=source.instance_id)
     with pytest.raises(Refused, match="instance"):
-        read_target(  # type: ignore[arg-type]
-            target,
+        read_target(
+            target,  # type: ignore[arg-type]
             source,
             url="http://127.0.0.1:8700",
             allow_prod_hostname=True,
@@ -446,8 +446,8 @@ def test_the_not_prod_override_allows_a_foreign_production_hostname(
     tmp_path: Path,
 ) -> None:
     source = load_source(write_source(tmp_path))
-    state = read_target(  # type: ignore[arg-type]
-        FakeTarget(instance_id="ins_other"),
+    state = read_target(
+        FakeTarget(instance_id="ins_other"),  # type: ignore[arg-type]
         source,
         url="https://vogt.sprooty.com",
         allow_prod_hostname=True,
@@ -457,8 +457,10 @@ def test_the_not_prod_override_allows_a_foreign_production_hostname(
 
 def test_read_target_allows_a_normal_dev_target(tmp_path: Path) -> None:
     source = load_source(write_source(tmp_path))
-    state = read_target(  # type: ignore[arg-type]
-        FakeTarget(instance_id="ins_dev"), source, url="https://vogt-dev.sprooty.com"
+    state = read_target(
+        FakeTarget(instance_id="ins_dev"),  # type: ignore[arg-type]
+        source,
+        url="https://vogt-dev.sprooty.com",
     )
     assert state.instance_id == "ins_dev"
 
