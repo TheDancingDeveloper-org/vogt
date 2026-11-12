@@ -20,7 +20,9 @@ def _digest_matches(actual: str, expected: str) -> tuple[bool, str]:
     The engine reports the full `sha256:…` digest. Operators routinely pass
     the short source prefix printed by the rollout (`f09829df`), so compare
     the hex bodies and require an exact match or a prefix of at least seven
-    characters. A bare `sha256:` or a shorter prefix is not evidence.
+    characters. A bare `sha256:` or a shorter prefix is not evidence, and
+    neither is a truncated reported digest: only the expected side may be
+    short.
     """
     actual_hex = actual.strip().lower().removeprefix("sha256:")
     expected_hex = expected.strip().lower().removeprefix("sha256:")
@@ -34,8 +36,6 @@ def _digest_matches(actual: str, expected: str) -> tuple[bool, str]:
             f"expected prefix {expected_hex!r} is shorter than {_MIN_DIGEST_PREFIX}",
         )
     if actual_hex.startswith(expected_hex):
-        return True, "prefix"
-    if len(actual_hex) >= _MIN_DIGEST_PREFIX and expected_hex.startswith(actual_hex):
         return True, "prefix"
     return False, "mismatch"
 

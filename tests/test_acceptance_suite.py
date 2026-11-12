@@ -19,7 +19,9 @@ import pytest
 from tests.acceptance import harness, policy, report, run
 from tests.acceptance.checks.health import _digest_matches
 from tests.acceptance.checks.persistence import _covering_mount
+from tests.acceptance.checks.providers import deepseek_flash_registered
 from tests.acceptance.fake_server import FakeServer
+from tests.acceptance.policy import SESSION_MODEL
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -72,6 +74,50 @@ def test_image_digest_accepts_a_deployed_prefix_only() -> None:
     # match even though one string starts with the other.
     assert _digest_matches(full, "f09")[0] is False
     assert _digest_matches(full, "f09829dg")[0] is False
+
+
+def test_image_digest_refuses_a_truncated_reported_digest() -> None:
+    """Only the expected side may be a prefix; a short reported digest is not
+    evidence that the full expected image is running."""
+    full = "sha256:f09829dfe9c53b3ce531f968e87359fc7af4ad0ea0115e1b13de8b4e71c1ea2f"
+    assert _digest_matches("sha256:f09829df", full) == (False, "mismatch")
+    assert _digest_matches("f09829dfe9c5", full)[0] is False
+
+
+class _ProviderClient:
+    def __init__(self, providers: list[dict[str, Any]]) -> None:
+        self.providers = providers
+
+    def tool(
+        self, name: str, arguments: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        assert name == "llm_provider_list"
+        return {"providers": self.providers}
+
+
+class _ProviderContext:
+    def __init__(self, providers: list[dict[str, Any]]) -> None:
+        self.client = _ProviderClient(providers)
+
+
+@pytest.mark.parametrize(
+    ("row", "verdict"),
+    [
+        ({}, "FAIL"),
+        ({"state": None}, "FAIL"),
+        ({"state": ""}, "FAIL"),
+        ({"state": "missing-secret"}, "FAIL"),
+        ({"state": "active"}, "PASS"),
+        ({"state": "ready"}, "PASS"),
+    ],
+)
+def test_provider_without_a_ready_state_fails(
+    row: dict[str, Any], verdict: str
+) -> None:
+    """P1 must not pass on a provider row that does not say it is ready."""
+    provider = {"name": "deepseek", "models": [SESSION_MODEL], **row}
+    check = deepseek_flash_registered(_ProviderContext([provider]))  # type: ignore[arg-type]
+    assert check.verdict == verdict
 
 
 def test_state_mount_is_the_most_specific_ancestor() -> None:
