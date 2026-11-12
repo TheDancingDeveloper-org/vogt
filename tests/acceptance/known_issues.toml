@@ -1,0 +1,20 @@
+# Failures that are already known, so they are reported but do not fail a run.
+#
+# `test` is a case id. `match`, when present, must appear in the failure's
+# evidence for the exemption to apply — that way a case that fails for a new
+# reason is a real failure, not swallowed by an old entry. `ref` names the work
+# item that owns the issue; a report without one is not acceptable.
+
+[[known_issue]]
+test = "H2"
+match = "local/dev"
+ref = "WI-3866"
+reason = "The deployed build reported `local/dev` instead of its source identity; A5 gate 1 tracks it."
+
+# Example of the shape to use when a new known failure is found:
+#
+# [[known_issue]]
+# test = "S10"
+# match = "node is winrarhost"
+# ref = "WI-4069"
+# reason = "Placement fix landed in ops but this instance predates the repin."

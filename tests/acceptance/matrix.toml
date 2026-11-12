@@ -1,0 +1,311 @@
+# The requirement matrix this suite reports coverage against.
+# Source: ~/Working/notes/vogt-dev-functional-coverage-2026-11-12.md (2026-11-12).
+# Keep the ids stable; tests name them in their `requirement` field.
+
+[[requirement]]
+id = "S1"
+title = "Start a Codex session in a pod with a task"
+status = "WORKS"
+evidence = "A pod appeared in vogt-sessions. The agent read `/work/.vogt/brief.md` and replied."
+items = "WI-3169"
+
+[[requirement]]
+id = "S2"
+title = "Hibernate/wake a Codex pod session with the conversation resumed"
+status = "WORKS"
+evidence = "hibernate then wake brought back `codex: ready`. After the wake the agent recalled WI-1's title without calling a tool."
+items = "WI-3873 (review)"
+
+[[requirement]]
+id = "S3"
+title = "Stop a session and leave no orphan pod"
+status = "WORKS"
+evidence = "After `session_stop`, vogt-sessions listed no pods."
+
+[[requirement]]
+id = "S4"
+title = "Claude Code sessions in a pod"
+status = "MISSING"
+evidence = "The template is host-only, so the server refuses it in a pod. Claude pods worked on 11-06 with a different template set. The acct2 credentials were never reached."
+items = "WI-3334, WI-3159, WI-3152, WI-3645"
+
+[[requirement]]
+id = "S5"
+title = "opencode sessions in a pod"
+status = "MISSING"
+evidence = "The template is host-only, so the server refuses it in a pod. The binary is present inside the pod."
+items = "WI-3389, WI-3675"
+
+[[requirement]]
+id = "S6"
+title = "Choose host or pod placement per session"
+status = "MISSING"
+evidence = "Codex is pod-only and every other template is host-only, so placement can't be chosen."
+items = "WI-3645, WI-3675"
+
+[[requirement]]
+id = "S7"
+title = "Reliable delivery of the first task"
+status = "PARTIAL"
+evidence = "It was delivered today (n=1). On 11-11, 1 of 2 runs failed. The fix is in rust-2 but has not been checked across many runs."
+items = "WI-4068"
+
+[[requirement]]
+id = "S8"
+title = "Time to first turn"
+status = "PARTIAL"
+evidence = "`session_wait` was ready in about 12 s after input. Bench 11-11 measured about 70 s to the first turn after a cold start."
+items = "bench note"
+
+[[requirement]]
+id = "S9"
+title = "Sessions survive an engine restart"
+status = "UNKNOWN"
+evidence = "The re-adopt fix is reported as landed but has not been checked. WI-3405 says the engine deletes pods when it restarts."
+items = "WI-3405, WI-3205"
+
+[[requirement]]
+id = "S10"
+title = "Pods placed off Node B and winrarhost1"
+status = "UNKNOWN"
+evidence = "ops PR #589 (b129) carries the placement fix, and its merge state was not checked today."
+items = "WI-4069/4087"
+
+[[requirement]]
+id = "S11"
+title = "Model/provider selection (LiteLLM deepseek, grok)"
+status = "PARTIAL"
+evidence = "`litellm-deepseek` (deepseek-v4-flash) is the only provider. There's no grok and no Claude/Anthropic provider, and `llm_provider_set` gives a 500."
+items = "WI-3644, WI-3672, WI-4067"
+
+[[requirement]]
+id = "S12"
+title = "Pod clones the session's own project"
+status = "UNKNOWN"
+evidence = "worktree=false was used; WI-3612 says rust-2 adds this."
+items = "WI-3369, WI-3643"
+
+[[requirement]]
+id = "S13"
+title = "Oversight and interactive sessions run as pods"
+status = "MISSING"
+items = "WI-3170"
+
+[[requirement]]
+id = "W1"
+title = "vogt MCP available in the pod"
+status = "WORKS"
+evidence = "The agent listed `vogt` and `codex_worktrees` and used vogt `work_get`."
+
+[[requirement]]
+id = "W2"
+title = "cadastre MCP available in the pod"
+status = "MISSING"
+evidence = "Agent: \"No cadastre\"."
+items = "WI-4114, WI-4116/4121 (in flight)"
+
+[[requirement]]
+id = "W3"
+title = "Workspace skills, rules and `.agent-tools` in the pod"
+status = "MISSING"
+evidence = "`~/.codex/skills` is empty, there is no `~/.claude/skills`, and `~/Working` is empty."
+items = "WI-3373/3374, WI-4115/4120 (in flight)"
+
+[[requirement]]
+id = "W4"
+title = "Repo AGENTS.md read by the agent"
+status = "WORKS"
+evidence = "The cwd's AGENTS.md is the Vogt header."
+
+[[requirement]]
+id = "W5"
+title = "Claude memory and unlanded work survive a pod stop"
+status = "MISSING"
+items = "WI-3371, WI-3370"
+
+[[requirement]]
+id = "W6"
+title = "Second repo, or a non-graft repo, in a session"
+status = "MISSING"
+items = "WI-3372"
+
+[[requirement]]
+id = "T1"
+title = "Read work items from a session"
+status = "WORKS"
+evidence = "`work_get WI-1` worked from the pod and through the API."
+
+[[requirement]]
+id = "T2"
+title = "Write work items from a session"
+status = "PARTIAL"
+evidence = "`work_update`, `work_comment`, `work_transition` and `session_report` are exposed but weren't called. Write tools need `reason`."
+
+[[requirement]]
+id = "T3"
+title = "Real work data on dev"
+status = "MISSING"
+evidence = "Dev has one item (WI-1, the smoke). The operator's backlog is in prod Vogt."
+items = "WI-3172/3173 (prod→dev import), WI-2588 (rust-2 can't open a current DB)"
+
+[[requirement]]
+id = "T4"
+title = "Forge link and write-back"
+status = "MISSING"
+evidence = "`forge_repos`: \"no forge credential\". `forge_account_status`: `accounts: []`."
+items = "WI-799, WI-3393, WI-3385"
+
+[[requirement]]
+id = "T5"
+title = "Inbox includes session reports"
+status = "MISSING"
+evidence = "Per ROADMAP 5.1."
+items = "WI-2664/2665"
+
+[[requirement]]
+id = "G1"
+title = "`g`/graft CLI in the pod"
+status = "WORKS"
+evidence = "`g --help` ran from `/usr/local/bin`."
+
+[[requirement]]
+id = "G2"
+title = "Per-session graft token, so a pod can `g clone`/`g land`"
+status = "MISSING"
+evidence = "The pod has no `~/.config/graft*` and nothing but brief.md in `/work/.vogt`."
+items = "WI-3229, WI-3986, WI-3478"
+
+[[requirement]]
+id = "C1"
+title = "Pod bootstrap credential and provider key on demand"
+status = "WORKS"
+evidence = "The DeepSeek key was used, so the model answered."
+items = "WI-3886"
+
+[[requirement]]
+id = "C2"
+title = "Approved-secret allowlist"
+status = "WORKS"
+evidence = "A5 gate 4"
+
+[[requirement]]
+id = "C3"
+title = "Claude account leases and caps"
+status = "UNKNOWN"
+evidence = "Not reachable because of S4."
+items = "WI-3159"
+
+[[requirement]]
+id = "F1"
+title = "GitHub from the pod"
+status = "WORKS"
+evidence = "`git ls-remote` on the vogt repo succeeded."
+
+[[requirement]]
+id = "F2"
+title = "Forgejo from the pod"
+status = "UNKNOWN"
+evidence = "`git.indexarr.net` gave a 522 (Cloudflare). The host was not confirmed with cadastre, so the URL may be wrong."
+
+[[requirement]]
+id = "F3"
+title = "Forge push token in the pod"
+status = "UNKNOWN"
+
+[[requirement]]
+id = "U1"
+title = "PWA loads"
+status = "WORKS"
+evidence = "`/` returns `<title>Vogt`."
+
+[[requirement]]
+id = "U2"
+title = "Terminal attach, input and resize in the PWA for pod sessions"
+status = "WORKS"
+evidence = "ROADMAP 3.2"
+
+[[requirement]]
+id = "U3"
+title = "PWA session-switch performance"
+status = "PARTIAL"
+evidence = "One xterm/WebGL context leaks per session, which costs 2–4 s per switch."
+items = "WI-3129, WI-2328"
+
+[[requirement]]
+id = "U4"
+title = "Voice on k8s dev"
+status = "UNKNOWN"
+evidence = "There's no voice sidecar evidence on k8s."
+items = "gh#188/#191/#622"
+
+[[requirement]]
+id = "D1"
+title = "Drive sessions through MCP (input, wait, screen, last_reply)"
+status = "WORKS"
+evidence = "Input was `delivered`, wait returned `ready`, and last_reply gave clean text."
+items = "WI-826"
+
+[[requirement]]
+id = "D2"
+title = "Readable `session_screen`"
+status = "PARTIAL"
+evidence = "Lines wrap at 80 columns and come out garbled."
+items = "WI-831"
+
+[[requirement]]
+id = "O1"
+title = "healthz, engine_status, version identity"
+status = "WORKS"
+evidence = "healthz is 200 and `source_ref=graft/batch-129`."
+
+[[requirement]]
+id = "O2"
+title = "Deployed-version lane view"
+status = "MISSING"
+evidence = "\"deploy_lanes is not configured\"."
+
+[[requirement]]
+id = "O3"
+title = "Prometheus metrics for the engine"
+status = "PARTIAL"
+evidence = "`/metrics` returns 200, and is publicly reachable. Nobody has checked whether Prometheus scrapes it."
+items = "D8"
+
+[[requirement]]
+id = "P1"
+title = "State on a PVC"
+status = "WORKS"
+evidence = "`vogt-dev-state` is 20Gi and Bound."
+
+[[requirement]]
+id = "P2"
+title = "Daily backup"
+status = "PARTIAL"
+evidence = "CronJob `k8s-backup` runs daily at 02:45 Sydney and its last runs Completed. It uses an older engine digest (`70322644`), and no restore has been tested."
+
+[[requirement]]
+id = "R1"
+title = "Upgrade by CI image plus digest repin through Argo"
+status = "WORKS"
+evidence = "Batch 124 and batch 129 were deployed this way."
+items = "WI-4111"
+
+[[requirement]]
+id = "R2"
+title = "Post-rollout A5 gate on batch 129"
+status = "PARTIAL"
+evidence = "Today's checks match gates 0–3 for Codex, but the formal gate run hasn't been done."
+items = "WI-3866"
+
+[[requirement]]
+id = "B1"
+title = "Per-session economics"
+status = "PARTIAL"
+evidence = "`context_tokens` is 31009, but `turns` is 0 and `usage_measured` is false."
+items = "WI-3865/3867–3869"
+
+[[requirement]]
+id = "B2"
+title = "Usage board (accounts, LiteLLM keys)"
+status = "MISSING"
+evidence = "\"usage_accounts and usage_litellm_keys are not configured\"."
