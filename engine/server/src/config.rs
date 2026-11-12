@@ -2225,6 +2225,59 @@ mod tests {
         assert_eq!(codex_home_for_transcript_root("sessions", None), None);
     }
 
+    /// The plumbing, not just the helper: a deployment sets the transcript
+    /// root in the same `VOGT_SESSION_TRANSCRIPT_ROOTS` the core reads, and the
+    /// engine's write-back home must follow it. Only names no sibling test
+    /// touches are mutated, so this stays safe under parallel test execution.
+    #[test]
+    fn load_puts_the_codex_writeback_where_the_transcript_root_points() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_path = dir.path().join("engine.toml");
+        std::fs::write(
+            &cfg_path,
+            format!(
+                "workspace_root = \"{}\"\ntoken = \"engine-token-0123456789\"\n\
+                 [session_transcript_roots]\ncodex = \"{}/file/.codex/sessions\"\n",
+                dir.path().display(),
+                dir.path().display()
+            ),
+        )
+        .unwrap();
+        let clear = || {
+            std::env::remove_var("VOGT_SESSION_TRANSCRIPT_ROOTS");
+            std::env::remove_var("ENGINE_CODEX_TRANSCRIPT_ROOT");
+        };
+        clear();
+
+        // The config file alone is enough: no deployment needs to state the
+        // Codex home separately from the root its core reads.
+        let cfg = load(Some(&cfg_path), None, None).unwrap();
+        assert_eq!(
+            cfg.codex_transcript_root,
+            Some(dir.path().join("file/.codex"))
+        );
+
+        // The environment is the core's own source, and it wins over the file
+        // exactly as it does there.
+        let env_root = format!("{}/env/.codex/sessions", dir.path().display());
+        std::env::set_var(
+            "VOGT_SESSION_TRANSCRIPT_ROOTS",
+            serde_json::json!({"claude": "/unused", "codex": env_root}).to_string(),
+        );
+        let cfg = load(Some(&cfg_path), None, None).unwrap();
+        assert_eq!(
+            cfg.codex_transcript_root,
+            Some(dir.path().join("env/.codex"))
+        );
+
+        // An explicit Codex home still outranks the derived one.
+        let explicit = dir.path().join("explicit");
+        std::env::set_var("ENGINE_CODEX_TRANSCRIPT_ROOT", &explicit);
+        let cfg = load(Some(&cfg_path), None, None).unwrap();
+        assert_eq!(cfg.codex_transcript_root, Some(explicit));
+        clear();
+    }
+
     #[test]
     fn session_roots_from_the_environment_merge_over_the_file() {
         let mut file = BTreeMap::new();
