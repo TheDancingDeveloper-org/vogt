@@ -392,6 +392,17 @@ impl std::fmt::Display for FetchFailure {
     }
 }
 
+/// Why a fetch failed, without the helper's stderr (which may quote a value a
+/// broken helper printed). Safe for a launch refusal.
+fn fetch_failure_kind(failure: &FetchFailure) -> &'static str {
+    match failure {
+        FetchFailure::Spawn(_) => "the agent-auth helper could not be started",
+        FetchFailure::Timeout => "the agent-auth helper did not answer in time",
+        FetchFailure::Failed { .. } => "the agent-auth helper refused it",
+        FetchFailure::Empty => "the agent-auth helper returned an empty value",
+    }
+}
+
 /// What a `store` did, as the helper reported it on stdout. Audited;
 /// never carries a value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -627,6 +638,51 @@ impl SecretBroker {
                 !clash
             })
             .collect()
+    }
+
+    /// Check that the secret `provider` names can be resolved for `session`
+    /// right now, and say why not. The value is fetched through the live
+    /// agent-auth manifest (or a live grant for that variable) and then
+    /// discarded: this decides whether a launch may start, and names only the
+    /// secret, never its value (WI-4119).
+    pub async fn provider_secret_ready(
+        &self,
+        session: Uuid,
+        provider: &crate::llm_providers::Provider,
+    ) -> Result<(), String> {
+        if !self.enabled() {
+            return Ok(());
+        }
+        let entry = self
+            .manifest()
+            .into_iter()
+            .find(|entry| {
+                entry.var == provider.env_key
+                    && entry.project_id == provider.secret_project
+                    && entry.secret_name == provider.secret_name
+            })
+            .or_else(|| {
+                self.grant_for_var(session, &provider.env_key, time::OffsetDateTime::now_utc())
+                    .filter(|held| {
+                        held.grant.project_id == provider.secret_project
+                            && held.grant.secret_name == provider.secret_name
+                    })
+                    .map(|held| held.entry())
+            });
+        let Some(entry) = entry else {
+            return Err(format!(
+                "model provider {} cannot start: secret {} is not in the agent-auth manifest",
+                provider.name, provider.secret_name
+            ));
+        };
+        self.fetch(&entry).await.map(|_| ()).map_err(|failure| {
+            format!(
+                "model provider {} cannot start: secret {} could not be resolved ({})",
+                provider.name,
+                provider.secret_name,
+                fetch_failure_kind(&failure)
+            )
+        })
     }
 
     /// The deploy-time entries plus the manifest file's, without the

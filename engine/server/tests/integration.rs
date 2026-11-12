@@ -17049,6 +17049,69 @@ fn a_quiet_working_codex_session_does_not_starve_the_runtime() {
         .expect("the engine runtime stalled: the activity watcher is spinning");
 }
 
+/// Spawn a stub agent that prints `body`, then rests. The summary is read
+/// from its own output, exactly as the overseer table and digest do.
+async fn summary_of_a_stub_that_prints(body: &str) -> vogt_engine_contract::SessionSummary {
+    let tmp = tempfile::tempdir().unwrap();
+    let script = tmp.path().join("agent");
+    std::fs::write(&script, body).unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let spec = vogt_engine_contract::SessionSpec {
+        name: "provider-error".into(),
+        command: Some(vec![script.to_string_lossy().into_owned()]),
+        ..Default::default()
+    };
+    let spawned = vogt_engine_server::pty::spawn(
+        Uuid::new_v4(),
+        &spec,
+        vogt_engine_server::pty::SpawnDefaults {
+            default_shell: "/bin/sh",
+            auto_agent_auth: false,
+            agent_auth_helper: std::path::Path::new("/usr/local/bin/vogt-agent-auth"),
+            default_cwd: tmp.path(),
+            scrollback_bytes: 64 * 1024,
+            activity_idle_after_ms: 200,
+            secret_broker: None,
+            agent_auth_manifest: None,
+            on_exit: None,
+        },
+        vogt_engine_server::events::EventBus::new(64),
+        None,
+    )
+    .unwrap();
+    let session = spawned.session;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let summary = session.summary();
+    session.kill().unwrap();
+    summary
+}
+
+#[tokio::test]
+async fn a_resting_session_whose_output_names_a_provider_failure_reads_as_blocked() {
+    let summary = summary_of_a_stub_that_prints(
+        "#!/bin/sh\nprintf 'Error: 402 Insufficient Balance\\n> '\nexec sleep 30\n",
+    )
+    .await;
+    let blocked = summary
+        .blocked
+        .clone()
+        .unwrap_or_else(|| panic!("provider failure left the session idle: {summary:?}"));
+    assert!(
+        blocked.reason.contains("Insufficient Balance"),
+        "{blocked:?}"
+    );
+    assert!(blocked.items.is_empty());
+}
+
+#[tokio::test]
+async fn ordinary_session_output_does_not_read_as_blocked() {
+    let summary = summary_of_a_stub_that_prints(
+        "#!/bin/sh\nprintf 'the 429 handler returns 402\\nreconnecting the client\\n> '\nexec sleep 30\n",
+    )
+    .await;
+    assert!(summary.blocked.is_none(), "{summary:?}");
+}
+
 /// Spawn a fake agent named `codex` in its own PTY, the same shape a pod
 /// session runs: a TUI that draws a composer and announces `codex: ready`.
 fn spawn_fake_codex(
@@ -17563,8 +17626,21 @@ async fn a_registered_llm_provider_reaches_the_next_codex_launch_and_leaves_with
         tags: vec![],
     };
     let reg = registry.clone();
+    let helper = tmp.path().join("agent-auth");
+    std::fs::write(
+        &helper,
+        "#!/bin/sh\n[ \"$1\" = get ] || exit 64\nprintf 'value-for-%s' \"$2\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let helper_path = helper.clone();
     let mut h = pod_stream::harness_cfg(false, Some(vec![template]), move |cfg| {
         cfg.llm_providers_file = Some(reg);
+        cfg.agent_auth_helper = helper_path;
+        cfg.agent_auth_secrets = vogt_engine_server::secret_broker::parse_manifest(
+            "MANIFEST_DS proj-a ds-secret optional",
+        )
+        .unwrap();
     })
     .await;
 
@@ -17630,6 +17706,183 @@ async fn a_registered_llm_provider_reaches_the_next_codex_launch_and_leaves_with
 
 fn provider_request(name: &str, env_key: &str) -> Value {
     provider_request_with_secret(name, env_key, "PROVIDER_KEY")
+}
+
+/// A Codex launch picks the provider whose `models` list names the requested
+/// model, not the first registered one (WI-4119), and resolves that provider's
+/// secret at launch through the agent-auth broker.
+#[tokio::test]
+async fn a_codex_pod_launch_selects_the_provider_that_registers_its_model() {
+    let tmp = tempfile::tempdir().unwrap();
+    let registry = tmp.path().join("llm-providers.toml");
+    let helper = tmp.path().join("agent-auth");
+    std::fs::write(
+        &helper,
+        "#!/bin/sh\n[ \"$1\" = get ] || exit 64\nprintf 'value-for-%s' \"$2\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let template = SessionTemplate {
+        name: "codex-pod".into(),
+        description: "pod-backed Codex".into(),
+        command: Some(vec!["codex".into()]),
+        cwd: None,
+        env: vec![],
+        backend: "pod".into(),
+        host_capable: false,
+        pod_capable: false,
+        account: None,
+        default_name: None,
+        match_repo_names: vec![],
+        match_path_prefixes: vec![],
+        tags: vec![],
+    };
+    let reg = registry.clone();
+    let helper_path = helper.clone();
+    let mut h = pod_stream::harness_cfg(false, Some(vec![template]), move |cfg| {
+        cfg.llm_providers_file = Some(reg);
+        cfg.agent_auth_helper = helper_path;
+        cfg.agent_auth_secrets = vogt_engine_server::secret_broker::parse_manifest(
+            "MANIFEST_DEEPSEEK proj-a DEEPSEEK_SECRET optional\nMANIFEST_CLAWBAY proj-a CLAWBAY_SECRET optional",
+        )
+        .unwrap();
+    })
+    .await;
+    std::fs::write(
+        &registry,
+        r#"
+[[provider]]
+name = "litellm"
+base_url = "http://litellm:4000/v1"
+wire_api = "chat"
+env_key = "DEEPSEEK_PROVIDER_KEY"
+secret_project = "proj-a"
+secret_name = "DEEPSEEK_SECRET"
+models = ["deepseek/deepseek-v4-flash"]
+
+[[provider]]
+name = "grok"
+base_url = "http://litellm:4000/v1"
+wire_api = "chat"
+env_key = "CLAWBAY_PROVIDER_KEY"
+secret_project = "proj-a"
+secret_name = "CLAWBAY_SECRET"
+models = ["grok-4.7"]
+"#,
+    )
+    .unwrap();
+
+    let id = h
+        .start_body(json!({
+            "name": "grok-model",
+            "template": "codex-pod",
+            "placement": "pod",
+            "model": "grok-4.7",
+        }))
+        .await;
+    let (created, token) = h.created.recv().await.expect("a pod is created");
+    assert_eq!(created, id);
+    let bootstrap: Value = reqwest::Client::new()
+        .post(format!("{}/api/agent-auth/bootstrap", h.base))
+        .bearer_auth(String::from_utf8_lossy(&token))
+        .json(&json!({
+            "session_id": id.to_string(),
+            "graft_repo": "vogt",
+            "graft_line": "rust-2",
+            "cli": "codex",
+            "model": "grok-4.7",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let config: toml::Table = toml::from_str(bootstrap["codex_config"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        config["model_provider"].as_str(),
+        Some("grok"),
+        "{bootstrap}"
+    );
+    assert_eq!(config["model"].as_str(), Some("grok-4.7"));
+    assert!(!bootstrap.to_string().contains("value-for-"), "{bootstrap}");
+}
+
+/// A provider whose secret cannot be resolved refuses the launch before a pod
+/// exists, and the refusal names the secret — never a value (WI-4119).
+#[tokio::test]
+async fn a_codex_pod_launch_is_refused_when_the_provider_secret_is_missing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let registry = tmp.path().join("llm-providers.toml");
+    let helper = tmp.path().join("agent-auth");
+    std::fs::write(
+        &helper,
+        "#!/bin/sh\n[ \"$1\" = get ] || exit 64\nprintf 'the secret %s is missing\\n' \"$2\" >&2\nexit 3\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let template = SessionTemplate {
+        name: "codex-pod".into(),
+        description: "pod-backed Codex".into(),
+        command: Some(vec!["codex".into()]),
+        cwd: None,
+        env: vec![],
+        backend: "pod".into(),
+        host_capable: false,
+        pod_capable: false,
+        account: None,
+        default_name: None,
+        match_repo_names: vec![],
+        match_path_prefixes: vec![],
+        tags: vec![],
+    };
+    let reg = registry.clone();
+    let helper_path = helper.clone();
+    let mut h = pod_stream::harness_cfg(false, Some(vec![template]), move |cfg| {
+        cfg.llm_providers_file = Some(reg);
+        cfg.agent_auth_helper = helper_path;
+        cfg.agent_auth_secrets = vogt_engine_server::secret_broker::parse_manifest(
+            "MANIFEST_CLAWBAY proj-a CLAWBAY_SECRET optional",
+        )
+        .unwrap();
+    })
+    .await;
+    std::fs::write(
+        &registry,
+        r#"
+[[provider]]
+name = "grok"
+base_url = "http://litellm:4000/v1"
+wire_api = "chat"
+env_key = "CLAWBAY_PROVIDER_KEY"
+secret_project = "proj-a"
+secret_name = "CLAWBAY_SECRET"
+models = ["grok-4.7"]
+"#,
+    )
+    .unwrap();
+
+    let response = reqwest::Client::new()
+        .post(format!("{}/api/sessions", h.base))
+        .headers(auth())
+        .json(&json!({
+            "name": "grok-missing-secret",
+            "template": "codex-pod",
+            "placement": "pod",
+            "model": "grok-4.7",
+        }))
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = response.text().await.unwrap();
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("CLAWBAY_SECRET"), "{body}");
+    assert!(!body.contains("value-for-"), "{body}");
+    assert!(
+        h.created.try_recv().is_err(),
+        "a refused launch made a pod: {body}"
+    );
 }
 
 fn provider_request_with_secret(name: &str, env_key: &str, secret_name: &str) -> Value {
@@ -17716,7 +17969,7 @@ async fn llm_provider_handler_returns_bad_request_for_registry_collisions() {
     let tmp = tempfile::tempdir().unwrap();
     let registry = tmp.path().join("llm-providers.toml");
     let mut cfg = test_config();
-    cfg.llm_providers_file = Some(registry);
+    cfg.llm_providers_file = Some(registry.clone());
     cfg.agent_auth_secrets = vogt_engine_server::secret_broker::parse_manifest(
         "PROVIDER_KEY approved-project PROVIDER_KEY ondemand",
     )
@@ -17758,6 +18011,11 @@ async fn llm_provider_handler_returns_bad_request_for_registry_collisions() {
             .unwrap()
             .contains("already another provider"));
     }
+    // A refused request leaves the registry exactly as it was: a bad request
+    // never half-writes a registry the engine would then refuse to load.
+    let written = std::fs::read_to_string(&registry).unwrap();
+    assert!(written.contains("first"));
+    assert!(!written.contains("same-key") && !written.contains("same-secret"));
 }
 
 #[tokio::test]

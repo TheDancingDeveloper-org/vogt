@@ -54,6 +54,7 @@ pub mod pod_reconcile;
 pub mod policy;
 pub mod product;
 pub mod prompt_files;
+pub mod provider_error;
 pub mod pty;
 pub mod push;
 pub mod push_api;

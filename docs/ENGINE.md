@@ -763,6 +763,16 @@ than these routes.
   the agent's "blocked on a person" report, which rides on the summary and
   screen as `blocked`, publishes a `session-blocked` event and (when set)
   sends a push. Cleared when the session exits. Requires `sessions`.
+  A resting session whose own recent output names a provider refusal — an
+  `Insufficient Balance` / `insufficient_quota` message, a `402`, `429` or
+  `5xx` provider error, `Reconnecting N/5`, `exceeded retry limit`, or
+  `No deployments available` — is reported `blocked` even when the agent
+  wrote no report of its own (WI-4119). That keeps the screen, digest and
+  oversight table from reading `idle` for a worker that died on its provider.
+  The reason is the matched line, credential-redacted and clipped to 200
+  characters. The match is case-insensitive and limited to the last dozen
+  non-blank lines; ordinary output that merely mentions a status code or
+  "reconnecting" is not one.
 - `PATCH /api/sessions/:id` `{"name": "..."}` -> `OkResponse` (requires the
   `sessions` capability). MCP: `session_rename`.
 - `POST /api/sessions/:id/kill` `{"reason"?, "by"?}` -> `OkResponse`
@@ -4916,6 +4926,66 @@ providers with one name or one `env_key`, or a field that would add a second
 manifest line all make the whole registry invalid. An invalid registry
 registers nothing and is logged. The file holds names and addresses, never a
 key. To add a provider live:
+
+**Choosing an entry.** The requested model selects its provider: a session
+started with `grok-4.7` uses the entry whose `models` list names
+`grok-4.7`, not whichever entry happens to be first. When two entries list
+the same model the entry named `litellm` wins; a model no entry lists keeps
+the previous rule (the `litellm` entry, else the first), so a caller naming a
+router group the registry does not list still launches. Selection happens on
+each launch from the registry as it stands then, so modifying the file takes
+effect for the next session without restarting the engine.
+
+**A missing secret refuses the launch.** Before a Codex session starts, the
+engine resolves the selected provider's secret through the live agent-auth
+manifest (or a live grant for that variable) and discards the value. If the
+secret is not declared, or the helper cannot read it, the start is refused
+with `400` and a message naming the secret — never its value — and no pod is
+created. A session therefore fails at the launch that has the wrong key,
+rather than at its first turn.
+
+**Recommended entries.** The estate's working routes all go through the
+LiteLLM router, so the registry holds addresses and secret *names*; the key
+values stay in the secrets manager and never appear in this file.
+
+```toml
+[[provider]]
+name = "litellm-deepseek"
+base_url = "http://litellm:4000/v1"
+wire_api = "chat"
+env_key = "HOMELAB_LITELLM_DEEPSEEK_KEY"
+secret_project = "<project id from this deployment's manifest>"
+secret_name = "HOMELAB_LITELLM_DEEPSEEK_KEY"
+models = ["deepseek/deepseek-v4-flash"]
+
+[[provider]]
+name = "litellm-grok"
+base_url = "http://litellm:4000/v1"
+wire_api = "chat"
+env_key = "HOMELAB_LITELLM_CLAWBAY_KEY"
+secret_project = "<project id from this deployment's manifest>"
+secret_name = "HOMELAB_LITELLM_CLAWBAY_KEY"
+models = ["grok-4.7", "grok-4.6"]
+
+[[provider]]
+name = "litellm-claude"
+base_url = "http://litellm:4000/v1"
+wire_api = "chat"
+env_key = "HOMELAB_LITELLM_CLAUDE_ORG_KEY"
+secret_project = "<project id from this deployment's manifest>"
+secret_name = "HOMELAB_LITELLM_CLAUDE_ORG_KEY"
+models = ["claude-org-haiku", "claude-org-sonnet", "claude-org-opus"]
+```
+
+Each `secret_name` must be an exact `project_id`/`secret_name` pair the live
+manifest already approves (or a project opened by
+`ENGINE_AGENT_GRANT_PROJECTS`). The Claude entry names its own LiteLLM
+virtual key because one secret reference is exclusive to one provider; the
+router still holds the Anthropic credential, and the exact key name depends
+on what the operator issued. Fallback between those model groups is
+LiteLLM router configuration in the ops repository, not an engine concern:
+the engine selects one registered entry per launch and does not retry a
+different provider when that one refuses a turn.
 
 1. Create the key, for example a LiteLLM virtual key, and store it in the
    secrets manager.
