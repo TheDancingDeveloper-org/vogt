@@ -17,6 +17,8 @@ from typing import Any
 import pytest
 
 from tests.acceptance import harness, policy, report, run
+from tests.acceptance.checks.health import _digest_matches
+from tests.acceptance.checks.persistence import _covering_mount
 from tests.acceptance.fake_server import FakeServer
 
 REPO = Path(__file__).resolve().parents[1]
@@ -57,6 +59,37 @@ def test_allowlist_and_prod_refusal() -> None:
             policy.validate_base_url(url)
     with pytest.raises(policy.PolicyRefusal):
         policy.validate_instance(instance_id="prod", prod_instance_id="prod")
+
+
+def test_image_digest_accepts_a_deployed_prefix_only() -> None:
+    """The rollout prints a short source prefix; the engine reports sha256:…."""
+    full = "sha256:f09829dfe9c53b3ce531f968e87359fc7af4ad0ea0115e1b13de8b4e71c1ea2f"
+    assert _digest_matches(full, "f09829df") == (True, "prefix")
+    assert _digest_matches(full, full) == (True, "exact")
+    assert _digest_matches(full, full.removeprefix("sha256:")) == (True, "exact")
+    assert _digest_matches(full, "deadbeef")[0] is False
+    # A one-character prefix, or a digest from a different image, is not a
+    # match even though one string starts with the other.
+    assert _digest_matches(full, "f09")[0] is False
+    assert _digest_matches(full, "f09829dg")[0] is False
+
+
+def test_state_mount_is_the_most_specific_ancestor() -> None:
+    """K1 must pick the nested state PVC, not the emptyDir on its parent."""
+    state_dir = "/home/sprooty/.local/share/vogt-engine"
+    mounts = [
+        ("engine", "agent-config", "/home/sprooty"),
+        ("engine", "state", state_dir),
+    ]
+    assert _covering_mount(state_dir, mounts) == ("engine", "state", state_dir)
+    # Without the nested mount, the parent is the mount that holds state.
+    assert _covering_mount(state_dir, mounts[:1]) == (
+        "engine",
+        "agent-config",
+        "/home/sprooty",
+    )
+    # A sibling path that only shares a string prefix is not inside the mount.
+    assert _covering_mount("/home/sprooty2/vogt-engine", mounts) is None
 
 
 def test_token_file_must_be_private(tmp_path: Path) -> None:

@@ -62,11 +62,12 @@ skips when that context is unavailable.
   `permission_mode=default`, and a reason carrying the run's unique tag.
   Durable/expensive models and host placement are not reachable from the
   suite.
-- **Cleanup is layered.** A case's own cleanup runs in `finally`; the runner
-  stops every session the case tracked; and an `atexit` sweep stops any
-  session whose reason still carries the run tag, so a killed process does
-  not leave a pod behind. The full run's cleanup list is also executed once
-  after the last check (the throwaway project is archived there).
+- **Cleanup is layered.** A case's own cleanup runs in `finally`; a session a
+  case tracks lives until the end of the run, so later cases can assert
+  against it, and is stopped once after the last case; an `atexit` sweep
+  stops any session whose reason still carries the run tag, so a killed
+  process does not leave a pod behind. The full run's cleanup list also
+  archives the throwaway project there.
 - **The suite never runs `env`/`printenv` to inspect a session.** S12 instead
   proves the engine's environment guard refuses `env | head`, by asking the
   agent to run it and reading the documented refusal.
@@ -143,8 +144,9 @@ entry is not special-cased: the entry simply never applies.
 The dev token at `~/.config/vogt-a5/token` works as of 2026-11-12. The suite
 has been run live against `https://vogt-dev.sprooty.com`: read-only, then
 `--allow-writes --only work`, then `--with-sessions --only sessions`, and
-finally the full `--with-sessions --allow-writes` run. That last run reported
-**70 checks: 53 PASS, 2 FAIL, 1 FAIL-known, 14 SKIP** in about nine minutes.
+finally full `--with-sessions --allow-writes` runs. The latest, with
+`--expect-digest f09829df`, reported **70 checks: 60 PASS, 0 FAIL, 1
+FAIL-known, 9 SKIP** in 85 seconds.
 
 Everything is still executed against the in-process fake (`--fake`) first, and
 the suite's plumbing has pytest coverage in `tests/test_acceptance_suite.py`.
@@ -153,38 +155,38 @@ every branch that does not need a real cluster or a deployed feature. It is
 not live evidence: a fake pass is not a live pass, and every report says which
 target it ran against.
 
-**Open live findings (not exempted; they fail the run).**
+**Corrections since the 40/22 run.** Only `H2` was a product failure; the
+other reds were suite defects, fixed without weakening the assertions:
 
-- `K1` — the engine reports `state_dir=/home/vogt/.local/share/vogt-engine`,
-  but the live Deployment mounts the state PVC at
-  `/home/sprooty/.local/share/vogt-engine` and sets no `HOME`. The ops tree
-  (`apps/vogt-dev/deployment.yaml`) does set `HOME=/home/sprooty`, so the
-  running Deployment most likely predates that ops change and the image's
-  default home wins. The check now names the near-miss mount.
-- `P2` — `session_start` accepts an unknown model id
-  (`acceptance/definitely-not-a-model`), starts a pod, and the session reaches
-  ready with a Codex model warning. `docs/ENGINE.md` calls a provider's
-  `models` list informational, so nothing validates the model at launch; the
-  matrix row S11 wants a 4xx naming the model before a pod exists.
+- `K1` used the first ancestor mount, so the emptyDir at `/home/sprooty`
+  hid the state PVC nested at `/home/sprooty/.local/share/vogt-engine`. It
+  now selects the longest covering mount and fails any non-PVC winner.
+- `H5` compared a short rollout prefix (`f09829df`) with the full
+  `sha256:…` digest. It now compares the hex bodies, accepts an exact match
+  or a prefix of at least seven characters, and still rejects a mismatch.
+- `P1` accepts the live `active` state and now requires an explicit usable
+  state; `P3` treats only explicit missing/broken-secret states as broken,
+  so a healthy `active` provider is no longer mistaken for a broken one.
+- Session cleanup is run-scoped: S1's pod survives S2–S13 and is stopped by
+  S14 and the run-level/atexit cleanup.
+- `W2`–`W8` read a write's compact `{ref, state, title, updated_at}`
+  summary back through `work_get`, and relations through `related_ref`.
 
-Add an entry to `known_issues.toml` only when a work item owns one of these;
-without a `ref` the failure is meant to stay red.
+The unknown-model launch (`P2`) now refuses with a 4xx naming the model, so
+it is no longer an open finding.
 
 **Exempted, with a work item.** `H2` (`version=local/dev`, WI-3866). The live
-instance answered `source_ref=graft/batch-129`,
-`source_sha=c481074b…` — a real graft commit — so only the human-facing
+instance answered `source_ref=graft/batch-134`,
+`source_sha=c81eb71d…` — a real graft commit — so only the human-facing
 version string is wrong.
 
-**Skipped live, and why.** `H5` (no `--expect-digest`), `A3` (no read-only
-token on this host), `S15`/`S16` (Claude Code and opencode templates are
-host-only on this instance), `S17` (no `--allow-restart`), `P3` (no broken
-provider to exercise), `P4` (WI-4131 has not landed), `T4` (no prod-to-dev
-import tool yet), `E1` (usage board not configured), and `S8`–`S12` in the
-final run because the Codex agent declined the credential-adjacent shell
-probes. The guard itself (`S12`) and the vogt MCP registration (`S11`) did
-pass on earlier runs of the same suite, so those skips are agent
-nondeterminism, not product evidence either way. A session probe the agent
-refuses to run is a SKIP with the refusal quoted; it is never a pass.
+**Skipped live, and why.** `A3` (no read-only token on this host), `S17` (no
+`--allow-restart`), `P3` (no broken provider to exercise), `P4` (WI-4131 has
+not landed), `T4` (no prod-to-dev import tool yet), `E1` (usage board not
+configured), `S8` (no workspace volume; ENGINE_POD_WORKSPACE off or WI-4120
+not deployed), `S9` (no per-session graft credential; WI-3229/WI-3986), and
+`S10` (cadastre MCP not registered; WI-4121 in flight). A session probe the
+agent refuses to run is a SKIP with the refusal quoted; it is never a pass.
 
 Run the groups in this order once a token exists:
 
