@@ -41,26 +41,59 @@ def state_on_a_pvc(ctx: Context) -> Check:
     )
     spec = ((deployment.get("spec") or {}).get("template") or {}).get("spec") or {}
     volumes = {str(volume.get("name")): volume for volume in spec.get("volumes") or []}
-    state_mounts: list[tuple[str, str, str]] = []
+    mounts: list[tuple[str, str, str]] = []
     for container in spec.get("containers") or []:
         for mount in container.get("volumeMounts") or []:
             path = str(mount.get("mountPath") or "")
-            if path and (
-                state_dir == path or state_dir.startswith(path.rstrip("/") + "/")
-            ):
-                state_mounts.append(
+            if path:
+                mounts.append(
                     (str(container.get("name")), str(mount.get("name")), path)
                 )
-    if not state_mounts:
-        return failed(f"no container mounts the engine state_dir {state_dir!r}")
-    ephemeral = [
-        f"{container}:{name}:{path}"
-        for container, name, path in state_mounts
-        if "emptyDir" in volumes.get(name, {})
+
+    def _kind(volume_name: str) -> str:
+        volume = volumes.get(volume_name, {})
+        if "persistentVolumeClaim" in volume:
+            return "pvc"
+        if "emptyDir" in volume:
+            return "emptyDir"
+        return "other"
+
+    state_mounts = [
+        row
+        for row in mounts
+        if state_dir == row[2] or state_dir.startswith(row[2].rstrip("/") + "/")
     ]
-    if ephemeral:
+    if not state_mounts:
+        # The engine reports the path its own user resolves, which can differ
+        # from the deployment's mount (the classic failure is HOME=/home/a in
+        # the image and the PVC mounted under /home/b). Name the near miss so
+        # that mismatch is visible instead of being guessed at.
+        basename = state_dir.rstrip("/").rsplit("/", 1)[-1]
+        near = [
+            f"{path} ({name}, {_kind(name)})"
+            for _container, name, path in mounts
+            if path.rstrip("/").rsplit("/", 1)[-1] == basename
+        ]
+        pvc_paths = [
+            f"{path} ({name})"
+            for _container, name, path in mounts
+            if _kind(name) == "pvc"
+        ]
         return failed(
-            f"engine state ({state_dir}) is mounted from emptyDir: {ephemeral}",
+            f"no container mounts the engine state_dir {state_dir!r}; "
+            f"PVC-backed mounts: {pvc_paths or 'none'}; same-basename mounts: "
+            f"{near or 'none'} — the engine user's HOME and the deployment's "
+            "mount path may disagree",
+            bound=bound,
+        )
+    not_pvc = [
+        f"{container}:{name}:{path} ({_kind(name)})"
+        for container, name, path in state_mounts
+        if _kind(name) != "pvc"
+    ]
+    if not_pvc:
+        return failed(
+            f"engine state ({state_dir}) is not on a PersistentVolumeClaim: {not_pvc}",
             bound=bound,
         )
     mounted = ", ".join(f"{container}:{name}" for container, name, _ in state_mounts)

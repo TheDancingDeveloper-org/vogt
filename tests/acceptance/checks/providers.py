@@ -14,6 +14,22 @@ from ..harness import (
 )
 from ..policy import SESSION_MODEL, session_start_arguments
 
+#: Provider states the engine reports as usable. The Rust registry currently
+#: emits `active` (and `dropped` when an env key clashes with the manifest),
+#: while older/other surfaces used `ready`/`ok`.
+_READY_STATES = frozenset({None, "active", "ready", "ok"})
+#: States that report a secret the launch path would have to fetch.
+_BROKEN_SECRET_STATES = frozenset(
+    {
+        "missing-secret",
+        "missing_secret",
+        "secret-missing",
+        "secret_missing",
+        "broken",
+        "failed",
+    }
+)
+
 
 def deepseek_flash_registered(ctx: Context) -> Check:
     payload = ctx.client.tool("llm_provider_list")
@@ -29,7 +45,7 @@ def deepseek_flash_registered(ctx: Context) -> Check:
             f"{[(row.get('name'), row.get('models')) for row in providers]}"
         )
     row = with_model[0]
-    if row.get("state") not in {"ready", "ok", None}:
+    if row.get("state") not in _READY_STATES:
         return failed(
             f"{row.get('name')} is {row.get('state')!r}: {row.get('detail')!r}"
         )
@@ -57,16 +73,25 @@ def unknown_model_refused(ctx: Context) -> Check:
     identifier = str(session.get("id") or session.get("session_id") or "")
     if identifier:
         ctx.stop_session(identifier)
-    return failed("an unknown model was accepted and a session was started")
+    return failed(
+        "session_start accepted the unknown model 'acceptance/definitely-not-a-"
+        f"model' and started {identifier or 'a session'}; the provider registry "
+        "lists `models` as informational (docs/ENGINE.md), so nothing refuses a "
+        "model id the instance cannot serve at launch — the acceptance intent "
+        "(matrix S11) is a 4xx naming the model before a pod is created"
+    )
 
 
 def missing_secret_names_the_secret(ctx: Context) -> Check:
     payload = ctx.client.tool("llm_provider_list")
     providers = [row for row in payload.get("providers") or [] if isinstance(row, dict)]
-    broken = [row for row in providers if row.get("state") not in {"ready", "ok", None}]
+    broken = [row for row in providers if row.get("state") in _BROKEN_SECRET_STATES]
     if not broken:
+        states = {str(row.get("state")) for row in providers}
         return skipped(
-            "no provider reports a missing/broken secret, so there is nothing to refuse"
+            "no provider reports a missing/broken secret "
+            f"(states={sorted(states)}), so the launch refusal cannot be "
+            "exercised without removing a secret"
         )
     candidate = broken[0]
     secret_name = str(candidate.get("secret_name") or "")

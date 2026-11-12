@@ -89,8 +89,8 @@ in stdout and in the report.
 | `health` | H1–H6 | `/healthz`, `/readyz`, real `source_ref`/`source_sha`/`version`, diagnostics engine check, optional image digest, `/api/config` identity |
 | `auth` | A1–A4 | no bearer is 401 on every protected route and `/mcp`; a bogus bearer is 401; a read-only token cannot write; the credential resolves to a named identity |
 | `mcp` | M1–M7 | `tools/list` equals `tests/parity/golden/mcp-tools.json`; initialize; unknown tool; `registry_dump`; every checked-in minimal read call avoids 5xx; bad arguments are data, not a crash; `auth_whoami` |
-| `work` | W1–W10 | create/update/comment/transition/walk/relate/search on a throwaway local-only project, ref preservation, priority and labels, an unlinked project refuses `upstream=true`, archive cleanup |
-| `sessions` | S1–S17 | Codex pod start, first task, PONG reply, screen, second input, hibernate/wake, placement off Node B, workspace content and secret absence, graft clone, cadastre and vogt MCP registration, environment guard, secret redaction, stop with no orphan pod, Claude Code/opencode pod probes, restart durability (operator-gated) |
+| `work` | W1–W11 | create/update/comment/transition/walk/relate/search on a throwaway local-only project, ref preservation, priority and labels, a label edit on an unlinked project is refused, an unlinked project refuses `upstream=true`, archive cleanup |
+| `sessions` | S1–S18 | Codex pod start, default listing, first task, PONG reply, screen, second input, hibernate/wake, placement off Node B, workspace content and secret absence, graft clone, cadastre and vogt MCP registration, environment guard, secret redaction, stop with no orphan pod, Claude Code/opencode pod probes, restart durability (operator-gated) |
 | `providers` | P1–P4 | deepseek flash registered; unknown model refused by name; a broken provider refuses launch naming only the secret name; provider-failure visibility (WI-4131, skips) |
 | `tracker` | T1–T4 | every project has `write_back=none`; forge accounts unlinked unless stated; `forge_repos` refuses cleanly; prod-import refusal (skips until WI-3172/3173) |
 | `security` | X1–X3 | `/metrics` and `/api/status` exposure reported (not changed), CORS does not allow an arbitrary origin, every answer has `X-Request-Id` |
@@ -140,20 +140,53 @@ entry is not special-cased: the entry simply never applies.
 
 ## What has been verified, and what has not
 
-As of 2026-11-12 `~/.config/vogt-a5/token` is refused with 401, so **no live
-result exists yet**. Everything in this suite has been executed against the
-in-process fake (`--fake`), and the suite's plumbing has pytest coverage in
-`tests/test_acceptance_suite.py`. The fake proves MCP framing, auth handling,
-redaction, cleanup, reporting and every branch that does not need a real
-cluster or a deployed feature. It does **not** prove any claim about vogt-dev:
-a fake pass is not a live pass, and the report labels it.
+The dev token at `~/.config/vogt-a5/token` works as of 2026-11-12. The suite
+has been run live against `https://vogt-dev.sprooty.com`: read-only, then
+`--allow-writes --only work`, then `--with-sessions --only sessions`, and
+finally the full `--with-sessions --allow-writes` run. That last run reported
+**70 checks: 53 PASS, 2 FAIL, 1 FAIL-known, 14 SKIP** in about nine minutes.
 
-The checks that skip in a fake run are H5 (needs `--expect-digest`), K1–K3
-and S7 (cluster reads), S9/S10/S17 (graft credential, cadastre registration and
-restart durability are deployment/operator facts), and P4/T4 (features that
-have not landed). Every other pass is still fake evidence, not live evidence.
+Everything is still executed against the in-process fake (`--fake`) first, and
+the suite's plumbing has pytest coverage in `tests/test_acceptance_suite.py`.
+The fake proves MCP framing, auth handling, redaction, cleanup, reporting and
+every branch that does not need a real cluster or a deployed feature. It is
+not live evidence: a fake pass is not a live pass, and every report says which
+target it ran against.
 
-Once a dev token exists, the first run should be read-only:
+**Open live findings (not exempted; they fail the run).**
+
+- `K1` — the engine reports `state_dir=/home/vogt/.local/share/vogt-engine`,
+  but the live Deployment mounts the state PVC at
+  `/home/sprooty/.local/share/vogt-engine` and sets no `HOME`. The ops tree
+  (`apps/vogt-dev/deployment.yaml`) does set `HOME=/home/sprooty`, so the
+  running Deployment most likely predates that ops change and the image's
+  default home wins. The check now names the near-miss mount.
+- `P2` — `session_start` accepts an unknown model id
+  (`acceptance/definitely-not-a-model`), starts a pod, and the session reaches
+  ready with a Codex model warning. `docs/ENGINE.md` calls a provider's
+  `models` list informational, so nothing validates the model at launch; the
+  matrix row S11 wants a 4xx naming the model before a pod exists.
+
+Add an entry to `known_issues.toml` only when a work item owns one of these;
+without a `ref` the failure is meant to stay red.
+
+**Exempted, with a work item.** `H2` (`version=local/dev`, WI-3866). The live
+instance answered `source_ref=graft/batch-129`,
+`source_sha=c481074b…` — a real graft commit — so only the human-facing
+version string is wrong.
+
+**Skipped live, and why.** `H5` (no `--expect-digest`), `A3` (no read-only
+token on this host), `S15`/`S16` (Claude Code and opencode templates are
+host-only on this instance), `S17` (no `--allow-restart`), `P3` (no broken
+provider to exercise), `P4` (WI-4131 has not landed), `T4` (no prod-to-dev
+import tool yet), `E1` (usage board not configured), and `S8`–`S12` in the
+final run because the Codex agent declined the credential-adjacent shell
+probes. The guard itself (`S12`) and the vogt MCP registration (`S11`) did
+pass on earlier runs of the same suite, so those skips are agent
+nondeterminism, not product evidence either way. A session probe the agent
+refuses to run is a SKIP with the refusal quoted; it is never a pass.
+
+Run the groups in this order once a token exists:
 
 ```console
 python3 tests/acceptance/run.py \
@@ -164,7 +197,9 @@ python3 tests/acceptance/run.py \
 
 Then add `--allow-writes`, and finally `--with-sessions` on a quiet instance.
 The run tag is printed for a with-sessions run; any session still carrying it
-is a leak and is stopped by the next run's sweep.
+is a leak and is stopped by the next run's sweep. A tracked session now lives
+for the whole run: S1 starts the pod the later session cases assert against,
+and the run-level cleanup (and the atexit sweep) stops it.
 
 ## CI
 

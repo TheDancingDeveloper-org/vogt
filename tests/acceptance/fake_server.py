@@ -93,6 +93,16 @@ def _work_public(item: dict[str, Any]) -> dict[str, Any]:
     return public
 
 
+def _work_summary(item: dict[str, Any]) -> dict[str, Any]:
+    """A write result as the live surface returns it: a compact summary.
+
+    `work_create`, `work_update` and `work_transition` answer with these four
+    fields, not the whole item; a caller that needs priority or labels reads
+    the item back with `work_get`.
+    """
+    return {key: item.get(key) for key in ("ref", "state", "title", "updated_at")}
+
+
 class FakeHandler(BaseHTTPRequestHandler):
     server_version = "vogt-acceptance-fake/1"
     protocol_version = "HTTP/1.1"
@@ -500,14 +510,15 @@ class FakeHandler(BaseHTTPRequestHandler):
                 "kind": arguments.get("kind"),
                 "state": "open",
                 "priority": arguments.get("priority", "p2"),
-                "project": arguments.get("project"),
+                "project_slug": arguments.get("project"),
                 "labels": list(arguments.get("labels") or []),
                 "comments": [],
                 "relations": [],
                 "body": arguments.get("body", ""),
+                "updated_at": "2026-01-01T00:00:00Z",
             }
             state.work[ref] = item
-            return {"item": _work_public(item)}
+            return _work_summary(item)
         if name == "work_get":
             ref = str(arguments.get("ref") or arguments.get("id"))
             found = state.work.get(ref)
@@ -533,6 +544,11 @@ class FakeHandler(BaseHTTPRequestHandler):
             found = state.work.get(ref)
             if found is None:
                 raise _ToolRefusal("not_found: no such work item")
+            if arguments.get("add_labels") or arguments.get("remove_labels"):
+                raise _ToolRefusal(
+                    "project_not_linked: work.update with labels needs a "
+                    "forge-linked project"
+                )
             for key in ("priority", "title", "body", "assignee"):
                 if key in arguments and arguments[key] is not None:
                     found[key] = arguments[key]
@@ -540,7 +556,7 @@ class FakeHandler(BaseHTTPRequestHandler):
                 found["labels"] = list(found["labels"]) + [
                     str(label) for label in arguments["add_labels"]
                 ]
-            return {"item": _work_public(found)}
+            return _work_summary(found)
         if name == "work_comment":
             ref = str(arguments.get("ref"))
             found = state.work.get(ref)
@@ -558,16 +574,19 @@ class FakeHandler(BaseHTTPRequestHandler):
             if found is None:
                 raise _ToolRefusal("not_found: no such work item")
             found["state"] = arguments.get("to_state")
-            return {"item": _work_public(found)}
+            return _work_summary(found)
         if name == "work_relate":
             ref = str(arguments.get("ref"))
             found = state.work.get(ref)
             if found is None:
                 raise _ToolRefusal("not_found: no such work item")
             found["relations"].append(
-                {"kind": arguments.get("kind"), "target": arguments.get("target")}
+                {
+                    "kind": arguments.get("kind"),
+                    "related_ref": arguments.get("target"),
+                }
             )
-            return {"item": _work_public(found)}
+            return {"item": _work_public(found), "comments": list(found["comments"])}
         if name == "session_template_list":
             # SessionTemplateRow: name, agent, placements, default_placement.
             return {
@@ -603,7 +622,7 @@ class FakeHandler(BaseHTTPRequestHandler):
                         "secret_project": "apps",
                         "secret_name": "DEEPSEEK_API_KEY",
                         "models": ["deepseek/deepseek-v4-flash"],
-                        "state": "ready",
+                        "state": "active",
                         "detail": None,
                     },
                     {
@@ -614,6 +633,8 @@ class FakeHandler(BaseHTTPRequestHandler):
                         "secret_project": "apps",
                         "secret_name": "ANTHROPIC_API_KEY",
                         "models": ["claude-acceptance-probe"],
+                        # Synthetic: the live engine emits active/dropped
+                        # today. This state exercises P3's refusal branch.
                         "state": "secret_missing",
                         "detail": "the secret ANTHROPIC_API_KEY is not set",
                     },
@@ -630,7 +651,25 @@ class FakeHandler(BaseHTTPRequestHandler):
             session = self._start_session(arguments)
             return {"session": session}
         if name == "session_list":
-            return {"sessions": list(state.sessions.values())}
+            # The live result splits the modes: `digest` fills `digests` and
+            # leaves `sessions` empty, `full` does the reverse. A caller that
+            # reads only `sessions` therefore sees an empty live list, which
+            # is exactly the mistake S18 exists to avoid.
+            mode = str(arguments.get("mode") or "digest")
+            if mode == "full":
+                return {"sessions": list(state.sessions.values()), "digests": []}
+            digests = [
+                {
+                    "id": session.get("id"),
+                    "name": None,
+                    "work_item": None,
+                    "activity": session.get("activity"),
+                    "attention": "unknown",
+                    "ready": False,
+                }
+                for session in state.sessions.values()
+            ]
+            return {"sessions": [], "digests": digests, "total": len(digests)}
         if name == "session_sweep":
             return {
                 # The live result nests the summary under `session`

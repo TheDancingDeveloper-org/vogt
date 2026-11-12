@@ -10,6 +10,7 @@ from ..harness import (
     failed,
     passed,
     redact,
+    run_shared_cleanup,
 )
 from ..policy import (
     SESSION_MODEL,
@@ -94,10 +95,17 @@ def cleanup_runs_after_failure(ctx: Context) -> Check:
         return failed(f"cleanup reported problems: {problems}")
     if order != ["second", "first"]:
         return failed(f"cleanup did not run in reverse order: {order}")
+    if client.stopped:
+        return failed(
+            f"the case cleanup stopped a run-scoped session: {client.stopped}"
+        )
+    shared = run_shared_cleanup()
+    if shared:
+        return failed(f"shared cleanup reported problems: {shared}")
     if client.stopped != ["ses_fake_cleanup"]:
-        return failed(f"the tracked session was not stopped: {client.stopped}")
+        return failed(f"the run cleanup did not stop the session: {client.stopped}")
     return passed(
-        "cleanup hooks ran in reverse order and the tracked session was stopped"
+        "case hooks ran in reverse order and the run-scoped session was stopped"
     )
 
 
