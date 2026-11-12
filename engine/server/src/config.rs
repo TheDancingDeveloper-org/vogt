@@ -434,6 +434,12 @@ pub struct Config {
     /// the agent-auth manifest and a Codex session gets its `model_providers`
     /// table, so a provider is added or removed with no restart.
     pub llm_providers_file: Option<std::path::PathBuf>,
+    /// `ENGINE_LLM_MODEL_ALLOWLIST`: model ids a launch may request beyond
+    /// the ones the LLM provider registry's `models` lists name, comma- or
+    /// space-separated (WI-4138). The registry is the known-model source; this
+    /// is the explicit escape hatch for a provider that serves a model without
+    /// listing it, and for a template whose models live outside that registry.
+    pub llm_model_allowlist: Vec<String>,
     /// `ENGINE_AGENT_GRANT_PROJECTS`: secrets-manager projects, beyond the
     /// ones the manifest already names, that a person-approved grant may
     /// fetch from (WI-973). Space- or comma-separated project ids.
@@ -991,6 +997,14 @@ pub fn load(
         .map(|path| path.trim().to_string())
         .filter(|path| !path.is_empty())
         .map(std::path::PathBuf::from);
+    let llm_model_allowlist = engine_env("ENGINE_LLM_MODEL_ALLOWLIST")
+        .map(|text| {
+            text.split(|c: char| c == ',' || c.is_whitespace())
+                .filter(|model| !model.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
     let agent_auth_secrets_file = engine_env("ENGINE_AGENT_AUTH_SECRETS_FILE")
         .ok()
         .map(|path| path.trim().to_string())
@@ -1098,6 +1112,7 @@ pub fn load(
         agent_auth_secrets,
         agent_auth_secrets_file,
         llm_providers_file,
+        llm_model_allowlist,
         agent_grant_projects: engine_env("ENGINE_AGENT_GRANT_PROJECTS")
             .map(|text| {
                 text.split(|c: char| c == ',' || c.is_whitespace())

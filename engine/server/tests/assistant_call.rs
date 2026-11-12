@@ -221,6 +221,7 @@ fn test_config(stub: &str) -> Config {
         agent_auth_secrets: vec![],
         agent_auth_secrets_file: None,
         llm_providers_file: None,
+        llm_model_allowlist: vec![],
         agent_grant_projects: vec![],
         session_templates: vec![],
         assistant_api_key: Some("sk-test".into()),
