@@ -53,6 +53,21 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
+      # The token is only ever sent to the dev instance (WI-4141). The input
+      # is matched exactly, so no other host, port, userinfo or path (and no
+      # production host) gets VOGT_DEV_TOKEN. This runs before the secret is
+      # read.
+      - name: refuse any host but vogt-dev
+        run: |
+          set -euo pipefail
+          case "$BASE_URL" in
+            https://vogt-dev.sprooty.com|https://vogt-dev.sprooty.com/) ;;
+            *)
+              echo "::error::base_url must be https://vogt-dev.sprooty.com; refusing to send VOGT_DEV_TOKEN to another host"
+              exit 1
+              ;;
+          esac
+
       - name: write the token to a private file
         env:
           VOGT_DEV_TOKEN: ${{ secrets.VOGT_DEV_TOKEN }}

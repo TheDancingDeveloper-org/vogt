@@ -163,7 +163,8 @@ fn finish(
     } = finished;
     let carried: u64 = untracked_files.iter().map(|f| f.bytes.len() as u64).sum();
     let mut patch = patch;
-    if patch.len() as u64 > limits.max_repo_bytes || patch.len() as u64 > *budget {
+    let left = budget.saturating_sub(carried);
+    if patch.len() as u64 > limits.max_repo_bytes || patch.len() as u64 > left {
         patch.clear();
         truncated = true;
     }
@@ -301,6 +302,8 @@ fn plan_git(
     }
     let mut untracked_files = Vec::new();
     let mut untracked = Vec::new();
+    // Untracked bytes count against the pod-wide total, not only the server's.
+    let mut remaining = *budget;
     for path in untracked_paths {
         if is_secret_path(&path) {
             skipped.push(SalvageSkip {
@@ -310,17 +313,36 @@ fn plan_git(
             continue;
         }
         let full = repo.join(&path);
-        let too_large =
-            fs::metadata(&full).map(|m| m.len()).unwrap_or(0) > limits.max_untracked_file_bytes;
-        if too_large {
+        // lstat, never stat: a link (to the pod's service-account or graft
+        // token, say) is not carried, and its target is never read.
+        let Ok(meta) = fs::symlink_metadata(&full) else {
+            skipped.push(SalvageSkip {
+                path,
+                reason: SkipReason::Unreadable,
+            });
+            continue;
+        };
+        if !meta.file_type().is_file() {
+            skipped.push(SalvageSkip {
+                path,
+                reason: SkipReason::Unreadable,
+            });
+            continue;
+        }
+        if meta.len() > limits.max_untracked_file_bytes || meta.len() > remaining {
             skipped.push(SalvageSkip {
                 path,
                 reason: SkipReason::TooLarge,
             });
             continue;
         }
-        match fs::read(&full) {
+        match read_no_follow(&full) {
+            Ok(bytes) if bytes.len() as u64 > remaining => skipped.push(SalvageSkip {
+                path,
+                reason: SkipReason::TooLarge,
+            }),
             Ok(bytes) => {
+                remaining -= bytes.len() as u64;
                 untracked.push(path.clone());
                 untracked_files.push(SalvageUntrackedFile {
                     path,
@@ -361,6 +383,20 @@ fn plan_git(
         limits,
         budget,
     ))
+}
+
+/// Read a regular file without following a final-component symlink, so a
+/// link swapped in after the lstat is refused rather than read through.
+fn read_no_follow(path: &Path) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 /// Paths from `git status --porcelain=v1 -z`: (tracked changes, untracked).
@@ -544,6 +580,58 @@ mod tests {
             .skipped
             .iter()
             .any(|s| s.path == "big.bin" && s.reason == SkipReason::TooLarge));
+    }
+
+    #[test]
+    fn a_symlink_is_never_followed_into_the_archive() {
+        let dir = fixture("symlink");
+        // A secret-like file outside the work tree, as the pod's
+        // service-account or graft token would be.
+        let outside = scratch("symlink-outside");
+        fs::write(outside.join("token"), "SA-TOKEN-BYTES\n").unwrap();
+        fs::create_dir_all(outside.join("secrets")).unwrap();
+        fs::write(outside.join("secrets/graft.token"), "GRAFT-TOKEN\n").unwrap();
+        std::os::unix::fs::symlink(outside.join("token"), dir.join("notes.txt")).unwrap();
+        std::os::unix::fs::symlink(outside.join("secrets"), dir.join("linked")).unwrap();
+        fs::write(dir.join("real.txt"), "real\n").unwrap();
+
+        let outcome = plan(&dir, &SalvageLimits::default());
+        let repo = &outcome.upload.repos[0];
+        let names: Vec<&str> = repo
+            .untracked_files
+            .iter()
+            .map(|f| f.path.as_str())
+            .collect();
+        assert_eq!(names, vec!["real.txt"]);
+        for file in &repo.untracked_files {
+            let bytes = BASE64.decode(&file.bytes).unwrap();
+            let text = String::from_utf8_lossy(&bytes);
+            assert!(!text.contains("TOKEN"), "{}: {text}", file.path);
+        }
+        assert!(!repo.untracked.iter().any(|p| p.starts_with("linked/")));
+        assert!(repo
+            .skipped
+            .iter()
+            .any(|s| s.path == "notes.txt" && s.reason == SkipReason::Unreadable));
+    }
+
+    #[test]
+    fn untracked_files_count_toward_the_total_budget() {
+        let dir = fixture("total-cap");
+        fs::write(dir.join("a.bin"), vec![b'a'; 40]).unwrap();
+        fs::write(dir.join("b.bin"), vec![b'b'; 40]).unwrap();
+        let limits = SalvageLimits {
+            max_total_bytes: 50,
+            ..SalvageLimits::default()
+        };
+        let outcome = plan(&dir, &limits);
+        let repo = &outcome.upload.repos[0];
+        assert_eq!(repo.untracked_files.len(), 1, "{:?}", repo.skipped);
+        assert_eq!(repo.untracked_files[0].path, "a.bin");
+        assert!(repo
+            .skipped
+            .iter()
+            .any(|s| s.path == "b.bin" && s.reason == SkipReason::TooLarge));
     }
 
     #[test]
