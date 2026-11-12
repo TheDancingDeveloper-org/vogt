@@ -305,6 +305,15 @@ jq -e '.mcp.vogt.url=="https://e/mcp"' "$tmp/ocfg/xdg/opencode/opencode.json" >/
 [[ $(stat -c %a "$tmp/ocfg/xdg/opencode/opencode.json") == 600 ]] || fail "opencode config mode"
 [[ $(<"$tmp/no-graft-token/graft.token") == "$SESSION" ]] || fail "clone should fall back to the session token"
 
+# WI-4130: no account bundle is not a crash. The pod starts and names the
+# missing login, for each pod-capable agent, before the CLI's own screen.
+out=$(run_case "$tmp/no-creds" BUNDLE_JSON='{}' 2>&1) || fail "claude pod without credentials: $out"
+grep -q 'no Claude Code credentials' <<<"$out" || fail "claude signed-out warning missing: $out"
+grep -q 'agent:' <<<"$out" || fail "claude agent did not start without credentials"
+out=$(run_case "$tmp/no-creds-oc" VOGT_CLI=opencode BUNDLE_JSON='{}' 2>&1) || fail "opencode pod without credentials: $out"
+grep -q 'no opencode login' <<<"$out" || fail "opencode signed-out warning missing: $out"
+grep -q 'agent:' <<<"$out" || fail "opencode agent did not start without credentials"
+
 # Force-tracked files can be ignored by the checkout's .gitignore. The git
 # view must still include them in both the parent and tip commits.
 run_case "$tmp/ignored" DIFF_IGNORED=1 >/dev/null 2>&1 || fail "ignored-file path"

@@ -348,6 +348,13 @@ to a config directory itself, and refuses an unknown name or a command that is
 not Claude Code (`400`). It shows on session rows and on `session.economics` as
 `account`. See [`ENGINE.md`, "Claude accounts"](ENGINE.md#claude-accounts).
 
+`session.start` takes `placement` (`host`, `pod` or `auto`): `host` runs on
+the engine host, `pod` on its configured pod backend, and `auto` — the
+default — uses the template's own placement. A placement the deployment or
+template cannot provide is refused with `400` naming it. Codex is pod-only,
+so `placement=host` on the Codex template is refused; the built-in Claude Code
+and opencode templates are host-default and pod-capable.
+
 `session.answer` (`work.write`, audited) answers the dialog a session
 shows. The session must be `awaiting-approval`, which covers permission
 dialogs and the startup gates `folder-trust`, `external-imports` and

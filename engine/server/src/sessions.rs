@@ -92,7 +92,9 @@ fn validate_template_placement(
     pod_backends_enabled: bool,
 ) -> Result<()> {
     match placement {
-        None => Ok(()),
+        // `auto` is the caller saying the template or deployment default
+        // decides, so it carries no requirement of its own.
+        None | Some("auto") => Ok(()),
         Some("host") if template_agent(template).as_deref() == Some("codex") => {
             Err(ApiError::BadRequest(
                 "Codex runs in a session pod; placement=host is not supported".into(),
@@ -111,7 +113,7 @@ fn validate_template_placement(
         ))),
         Some("host" | "pod") => Ok(()),
         Some(other) => Err(ApiError::BadRequest(format!(
-            "invalid placement {other:?}; expected \"host\" or \"pod\""
+            "invalid placement {other:?}; expected \"host\", \"pod\" or \"auto\""
         ))),
     }
 }
@@ -125,13 +127,13 @@ fn template_agent(template: &crate::config::SessionTemplate) -> Option<String> {
 
 fn validate_requested_placement(placement: Option<&str>, pod_backends_enabled: bool) -> Result<()> {
     match placement {
-        None | Some("host") => Ok(()),
+        None | Some("host") | Some("auto") => Ok(()),
         Some("pod") if pod_backends_enabled => Ok(()),
         Some("pod") => Err(ApiError::BadRequest(
             "requested placement \"pod\" is not available: pod backends are disabled".into(),
         )),
         Some(other) => Err(ApiError::BadRequest(format!(
-            "invalid placement {other:?}; expected \"host\" or \"pod\""
+            "invalid placement {other:?}; expected \"host\", \"pod\" or \"auto\""
         ))),
     }
 }
@@ -4520,6 +4522,48 @@ mod tests {
         assert!(validate_template_placement(&template, Some("pod"), true).is_ok());
         assert!(validate_template_placement(&template, Some("host"), true).is_ok());
         assert!(validate_template_placement(&template, None, true).is_ok());
+    }
+
+    /// WI-4130: the shipped agent templates carry their placement. Claude
+    /// Code and opencode keep a host default and opt into a pod; Codex stays
+    /// pod-only; `auto` (and an omitted placement) follows the template, and
+    /// the invalid-value refusal names every accepted value.
+    #[test]
+    fn built_in_agent_templates_state_their_placements() {
+        let templates = SessionTemplate::default_templates();
+        let find = |name: &str| templates.iter().find(|t| t.name == name).unwrap();
+
+        for name in ["Claude Code (protected)", "OpenCode (protected)"] {
+            let template = find(name);
+            assert!(template.supports_host(), "{name} keeps the host");
+            assert!(template.supports_pod(), "{name} may run in a pod");
+            assert!(validate_template_placement(template, Some("host"), true).is_ok());
+            assert!(validate_template_placement(template, Some("pod"), true).is_ok());
+            assert!(validate_template_placement(template, Some("auto"), true).is_ok());
+            assert!(validate_template_placement(template, None, true).is_ok());
+        }
+
+        let codex = find("Codex (protected)");
+        assert!(!codex.supports_host(), "Codex is still pod-only");
+        assert!(validate_template_placement(codex, Some("pod"), true).is_ok());
+        assert!(validate_template_placement(codex, Some("auto"), true).is_ok());
+        let error = validate_template_placement(codex, Some("host"), true).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("placement=host is not supported"),
+            "{error}"
+        );
+
+        let error = validate_requested_placement(Some("sidecar"), true).unwrap_err();
+        let message = error.to_string();
+        for expected in ["host", "pod", "auto"] {
+            assert!(
+                message.contains(expected),
+                "missing {expected} in: {message}"
+            );
+        }
+        assert!(validate_requested_placement(Some("auto"), false).is_ok());
     }
 
     #[test]

@@ -248,7 +248,11 @@ impl SessionTemplate {
                 account: None,
                 backend: default_session_backend(),
                 host_capable: false,
-                pod_capable: false,
+                // The pod image carries Claude Code at the repo pin and the
+                // entrypoint seeds its account bundle and MCP config, so a
+                // deployment can ask for `placement=pod` without moving the
+                // default off the host (WI-4130).
+                pod_capable: true,
             },
             SessionTemplate {
                 name: "Codex (protected)".to_string(),
@@ -292,7 +296,10 @@ impl SessionTemplate {
                 account: None,
                 backend: default_session_backend(),
                 host_capable: false,
-                pod_capable: false,
+                // opencode is baked into the same pod image and the entrypoint
+                // writes its MCP config, so the host default can also be
+                // asked for as a pod (WI-4130).
+                pod_capable: true,
             },
             SessionTemplate {
                 name: "Python Env".to_string(),
@@ -2714,12 +2721,25 @@ mod prefix_tests {
         assert_eq!(codex.backend, "pod");
         assert!(codex.supports_pod());
         assert!(!codex.supports_host(), "Codex must be pod-only");
+        // Claude Code and opencode are pod-capable without moving their
+        // default: a deployment that does not opt the built-ins into pods
+        // still starts them on the host, and `placement=pod` is available.
         let claude = cfg
             .session_templates
             .iter()
             .find(|t| t.name == "Claude Code (protected)")
             .unwrap();
-        assert!(!claude.supports_pod(), "only Codex opted in");
+        assert_eq!(claude.backend, "local");
+        assert!(claude.supports_host(), "the default stays the host");
+        assert!(claude.supports_pod(), "Claude Code may run in a pod");
+        let opencode = cfg
+            .session_templates
+            .iter()
+            .find(|t| t.name == "OpenCode (protected)")
+            .unwrap();
+        assert_eq!(opencode.backend, "local");
+        assert!(opencode.supports_host(), "the default stays the host");
+        assert!(opencode.supports_pod(), "opencode may run in a pod");
         unsafe {
             std::env::set_var("VOGT_ENGINE_SESSION_BACKEND", "pod");
             std::env::set_var("ENGINE_POD_BACKENDS_ENABLED", "true");
