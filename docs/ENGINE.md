@@ -3613,6 +3613,22 @@ The built-in templates (used when the config file lists none) run on
 refuses to start the engine. A template's own `backend` in the config file is
 kept as written.
 
+The built-in agent templates state both placements: `Claude Code (protected)`
+and `OpenCode (protected)` keep `local` as their default backend and are
+pod-capable, so `placement=pod` starts them in a pod without moving an
+existing start off the host; `Codex (protected)` stays pod-only. The pod image
+carries both CLIs at the pins in `engine/agent-versions.env`, and the
+entrypoint seeds the Claude account bundle, the account's onboarding state and
+the Vogt/Cadastre MCP registrations it receives from the bootstrap response.
+A pod with no account bundle still starts: the entrypoint names the missing
+login and the CLI shows its own signed-out state rather than the pod failing.
+
+`session_start` (and `POST /api/sessions`) takes `placement=host|pod|auto`.
+`auto` is the default and follows the template's own backend; an explicit
+placement the template or deployment cannot provide is refused with a `400`
+naming it. Codex's pod-only rule is a refusal, not a default that silently
+moves: `placement=host` for Codex is `400`.
+
 A pod template whose command names an agent CLI (`claude`, `codex` or
 `opencode`, bare or behind `vogt-agent-auth run --`) sets the pod's
 `VOGT_CLI` to that CLI and passes no argv. The session agent builds the

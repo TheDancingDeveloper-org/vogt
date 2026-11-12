@@ -70,6 +70,12 @@ while IFS="$(printf '\t')" read -r path encoded; do
   mkdir -p "$(dirname "$dest")"; chmod 700 "$(dirname "$dest")"
   printf '%s' "$encoded" | base64 -d >"$dest" || fail 'bootstrap returned invalid bundle data'; chmod 600 "$dest"
 done <"$tmp_dir/bundle.tsv"
+# A pod with no account bundle must still start: the CLI's own signed-out
+# state is the honest answer, not a crash. Say which login is missing so the
+# pod's log names it before the CLI's onboarding screen appears (WI-4130).
+if [ "$VOGT_CLI" = claude ] && [ -z "$(find "$CLAUDE_CONFIG_DIR" -name .credentials.json -type f -print -quit 2>/dev/null)" ]; then
+  printf 'session-entrypoint: no Claude Code credentials in the session bundle; Claude Code starts signed out (log in inside the session, or configure ENGINE_AGENT_CLAUDE_ACCOUNTS)\n' >&2
+fi
 step=brokered-env; say brokered-env
 # WI-3886: a name declared ondemand is fetched around the CLI that needs it,
 # never exported into this shell. A bootstrap response that also carries a
@@ -180,6 +186,15 @@ if [ "$VOGT_CLI" = opencode ] && jq -e '.opencode_config | type == "object"' "$r
   oc_dir=${XDG_CONFIG_HOME:-$HOME/.config}/opencode; mkdir -p "$oc_dir"; chmod 700 "$oc_dir"
   jq '.opencode_config' "$response" >"$oc_dir/opencode.json"; chmod 600 "$oc_dir/opencode.json"
   printf 'session-entrypoint: opencode posture: mcp-config\n' >&2
+fi
+# Same rule as Claude above: opencode has no credential in the image, so a
+# pod without a brokered provider key or stored login starts signed out rather
+# than failing before its first turn.
+if [ "$VOGT_CLI" = opencode ]; then
+  oc_auth="${XDG_DATA_HOME:-$HOME/.local/share}/opencode/auth.json"
+  if [ ! -s "$oc_auth" ] && [ -z "${ANTHROPIC_API_KEY:-}${OPENAI_API_KEY:-}${OPENROUTER_API_KEY:-}${GEMINI_API_KEY:-}${GOOGLE_GENERATIVE_AI_API_KEY:-}${DEEPSEEK_API_KEY:-}" ]; then
+    printf 'session-entrypoint: no opencode login or provider key in the session environment; opencode starts signed out\n' >&2
+  fi
 fi
 source_kind=$(jq -r '.source.location.kind' "$response")
 source_repo=$(jq -r '.source.location.repo' "$response")

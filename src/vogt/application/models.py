@@ -4447,13 +4447,13 @@ class StartSessionParams(Params):
             "Omitted means a plain shell, which does nothing until typed into."
         ),
     )
-    placement: Literal["host", "pod"] | None = Field(
+    placement: Literal["host", "pod", "auto"] | None = Field(
         default=None,
         description=(
             "Where to run the session: `host` uses the engine host, `pod` "
-            "uses its configured pod backend. Omitted uses the deployment's "
-            "template/default placement; the requested placement must be "
-            "available."
+            "uses its configured pod backend, and `auto` uses the "
+            "deployment's template/default placement. Omitted is `auto`; an "
+            "explicit `host` or `pod` must be available for the template."
         ),
     )
     task: str | None = Field(

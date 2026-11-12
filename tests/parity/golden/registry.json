@@ -32484,7 +32484,8 @@
               {
                 "enum": [
                   "host",
-                  "pod"
+                  "pod",
+                  "auto"
                 ],
                 "type": "string"
               },
@@ -32493,7 +32494,7 @@
               }
             ],
             "default": null,
-            "description": "Where to run the session: `host` uses the engine host, `pod` uses its configured pod backend. Omitted uses the deployment's template/default placement; the requested placement must be available.",
+            "description": "Where to run the session: `host` uses the engine host, `pod` uses its configured pod backend, and `auto` uses the deployment's template/default placement. Omitted is `auto`; an explicit `host` or `pod` must be available for the template.",
             "title": "Placement"
           },
           "task": {

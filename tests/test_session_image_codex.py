@@ -29,6 +29,27 @@ def test_session_image_uses_the_stack_codex_policy_and_pins() -> None:
     assert "klaudia" not in dockerfile.lower()
 
 
+def test_session_image_installs_the_pinned_agent_clis_with_version_guards() -> None:
+    """WI-4130: the pod image carries claude and opencode at the repo pins.
+
+    The pins come from `agent-versions.env`, the same file the stack image
+    reads, so the two images cannot drift apart. The `--version` guards are
+    the stack image's: an npm install that resolves but leaves a stub must
+    fail the build instead of producing a pod whose CLI cannot start.
+    """
+    dockerfile = (ENGINE / "Dockerfile.pod").read_text()
+    assert ". /usr/local/share/vogt/agent-versions.env" in dockerfile
+    assert "ARG CLAUDE_CODE_VERSION=" not in dockerfile
+    assert "ARG OPENCODE_VERSION=" not in dockerfile
+    assert '"@anthropic-ai/claude-code@${claude_code_version}"' in dockerfile
+    assert '"opencode-ai@${opencode_version}"' in dockerfile
+    assert "/usr/local/bin/claude --version" in dockerfile
+    assert "/usr/local/bin/opencode --version" in dockerfile
+    assert dockerfile.index("COPY agent-versions.env") < dockerfile.index(
+        '"@anthropic-ai/claude-code@${claude_code_version}"'
+    ), "the pins must be copied before the install reads them"
+
+
 def test_session_image_codex_wires_the_shared_policy_hook() -> None:
     """The Codex launch spec runs the same policy hook a Claude session does.
 

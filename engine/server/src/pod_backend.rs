@@ -3310,6 +3310,87 @@ mod tests {
         assert_eq!(env["VOGT_SESSION_COMMAND"], r#"["bash","-l"]"#);
     }
 
+    /// WI-4130: the shipped Claude Code and opencode templates build a pod
+    /// spec that names their CLI and carries no credential value: the account
+    /// is a label, and the bootstrap token is a mounted file path. A pod
+    /// without an account bundle still starts; it reports signed out rather
+    /// than failing in the entrypoint.
+    #[test]
+    fn claude_and_opencode_templates_build_pod_specs_without_credentials() {
+        let cfg = PodConfig::default();
+        let templates = SessionTemplate::default_templates();
+        for (name, cli, account) in [
+            ("Claude Code (protected)", "claude", Some("acct2")),
+            ("OpenCode (protected)", "opencode", None),
+        ] {
+            let template = templates.iter().find(|t| t.name == name).unwrap();
+            assert!(template.supports_pod(), "{name} must be pod-capable");
+            let pod = pod_template(
+                &cfg,
+                template,
+                Uuid::nil(),
+                &default_source(&cfg),
+                &[],
+                "session",
+                account,
+                None,
+                None,
+                None,
+                vogt_session_agent::CODEX_APPROVAL_DEFAULT,
+                template.command.as_deref().unwrap_or(&[]),
+            );
+            let container = &pod.spec.as_ref().unwrap().containers[0];
+            let env = container
+                .env
+                .clone()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|e| (e.name, e.value.unwrap_or_default()))
+                .collect::<BTreeMap<_, _>>();
+            assert_eq!(env["VOGT_CLI"], cli, "{name}");
+            assert!(
+                !env.contains_key("VOGT_SESSION_COMMAND"),
+                "{name}: the agent's argv is built in the pod"
+            );
+            assert_eq!(
+                env["VOGT_BOOTSTRAP_TOKEN_FILE"], BOOTSTRAP_TOKEN_PATH,
+                "{name}: only the credential's path is in the spec"
+            );
+            for secret_name in [
+                "VOGT_HTTP_TOKEN",
+                "VOGT_BOOTSTRAP_TOKEN",
+                "CLAUDE_CONFIG_DIR",
+                "ANTHROPIC_API_KEY",
+                "OPENAI_API_KEY",
+            ] {
+                assert!(
+                    !env.contains_key(secret_name),
+                    "{name}: {secret_name} must not be in the pod spec"
+                );
+            }
+            if let Some(account) = account {
+                assert_eq!(
+                    pod.metadata.labels.as_ref().unwrap().get("vogt.account"),
+                    Some(&account.to_string())
+                );
+            }
+            let bootstrap = pod
+                .spec
+                .as_ref()
+                .unwrap()
+                .volumes
+                .as_ref()
+                .unwrap()
+                .iter()
+                .find(|v| v.name == BOOTSTRAP_VOLUME)
+                .unwrap();
+            assert!(
+                bootstrap.secret.is_some(),
+                "{name}: the token is a Secret mount"
+            );
+        }
+    }
+
     /// WI-3864, WI-3881: the pod's session agent builds the agent line itself,
     /// so the launch inputs the engine validated have to reach it in the env.
     /// The default posture is left out so the pod's own default applies.
