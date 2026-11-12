@@ -25,6 +25,10 @@ run a PTY beside the engine. A pod has its own graft clone, not the engine's
 shared workspace. Read the pod sections in `docs/ENGINE.md` before relying
 on host paths. Deliver through graft on this line, not the historical
 integration-branch instructions below (process reconciliation: WI-3377).
+Before `g land`, run `scripts/pre-land-check.sh`; add `--rust` when the change
+touches `engine/`. It runs the rust-2 CI gates a local test loop misses
+(`cargo deny`, the disposition ledger, engine/MCP parity, ruff, mypy and the
+parity goldens) and stops at the first failure with one line.
 
 - This file applies repository-wide. Before changing `engine/`, `web/`, or
   `mobile/`, also read `engine/AGENTS.md`; its more specific rules supplement
