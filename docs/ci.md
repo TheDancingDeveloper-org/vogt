@@ -210,10 +210,16 @@ not run any git-dependent test. A normal checkout uses the selector
 unchanged. `PRE_LAND_PARITY_GOLDEN=<dir>` overrides either choice, and
 `PRE_LAND_BASE=<ref>` overrides the git base `--rust` diffs against.
 
-The `--self-test` mode forces the first gate to fail through
-`PRE_LAND_FORCE_FAIL` and asserts that the script reports `FAIL cargo-deny`
-and exits non-zero. The quick set is a few minutes on a warm checkout; the
-first run also syncs the Python environment and builds `vogt-core`.
+The `--self-test` mode proves both failure paths. It forces the first gate to
+fail through `PRE_LAND_FORCE_FAIL` and asserts the script reports
+`FAIL cargo-deny` and exits non-zero. It also stubs the expensive commands
+and forces the third parity command (`parity-python-mcp`) to fail, asserting
+that the inside-gate failure is reported as `FAIL parity`, names the step,
+exits non-zero, and never prints `every gate passed`. Every command in every
+gate is checked with `|| return 1`, so a failure in the middle of the parity
+sequence cannot be hidden by a later command's success. The quick set is a
+few minutes on a warm checkout; the first run also syncs the Python
+environment and builds `vogt-core`.
 
 ## Landing
 
