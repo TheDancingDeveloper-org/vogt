@@ -10,8 +10,9 @@ Read the repository's rules and the supplied brief instead of assuming a
 shared `~/Working`. Engine loopback is not reachable as pod loopback: use
 the supplied engine endpoint and credentials, never copy a host token.
 Land uncommitted work before teardown. Account/transcript write-back is not
-a workspace backup; hibernate wakes into a fresh clone and an engine restart
-currently loses running pod links (WI-3205).
+a workspace backup; hibernate wakes into a fresh clone. An engine restart
+re-adopts a running pod when its record and stream credential survived, and
+never deletes it (WI-3205, WI-4126).
 
 You are an agent, and this guide is for you. It is not about developing Vogt —
 [`../AGENTS.md`](../AGENTS.md), [`../engine/AGENTS.md`](../engine/AGENTS.md) and
