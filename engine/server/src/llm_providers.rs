@@ -353,7 +353,7 @@ pub fn manifest_entries(providers: &[Provider]) -> Vec<ManifestSecret> {
 
 /// The same providers as `config.toml` tables, for a pod's `codex_config`.
 pub fn codex_config_tables(providers: &[Provider]) -> String {
-    let s = crate::codex_guidance::toml_basic_string;
+    let s = vogt_session_agent::codex_guidance::toml_basic_string;
     providers
         .iter()
         .map(|p| {
@@ -400,8 +400,8 @@ pub fn codex_config(requested_model: Option<&str>, providers: &[Provider]) -> St
         .expect("codex config requires at least one provider");
     format!(
         "model_provider = {}\nmodel = {}\n\n{}",
-        crate::codex_guidance::toml_basic_string(&provider.name),
-        crate::codex_guidance::toml_basic_string(&model),
+        vogt_session_agent::codex_guidance::toml_basic_string(&provider.name),
+        vogt_session_agent::codex_guidance::toml_basic_string(&model),
         codex_config_tables(providers)
     )
 }

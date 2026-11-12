@@ -4,6 +4,7 @@
 //! never listens for an engine connection. See the crate README for the wire
 //! protocol.
 
+pub mod codex_guidance;
 pub mod codex_policy;
 
 use std::{
@@ -375,6 +376,10 @@ pub struct Config {
     /// Where Codex keeps its session rollouts (`$CODEX_HOME`, else
     /// `$HOME/.codex`); a Codex pod has no Claude directory at all.
     pub codex_home: Option<PathBuf>,
+    /// The read-only workspace tree the pod mounts (`VOGT_WORKSPACE_ROOT`,
+    /// WI-3373). Unset means a pod with no workspace, which gets no pod-side
+    /// guidance (the engine's host-computed body is used if it carried one).
+    pub workspace_root: Option<PathBuf>,
     pub account: Option<String>,
     pub conversation_id: Option<String>,
     /// Resume the conversation from the transcript the engine seeded into the
@@ -612,6 +617,9 @@ impl Config {
                 .or_else(|| {
                     std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex"))
                 }),
+            workspace_root: std::env::var_os("VOGT_WORKSPACE_ROOT")
+                .filter(|root| !root.is_empty())
+                .map(PathBuf::from),
             account: std::env::var("VOGT_SESSION_ACCOUNT").ok(),
             conversation_id: std::env::var("VOGT_SESSION_CONVERSATION_ID")
                 .ok()
@@ -1195,6 +1203,22 @@ pub fn codex_developer_instructions(
     Some(value)
 }
 
+/// Codex guidance for a pod that mounts the workspace tree (WI-3374). The
+/// engine gathers a host session's body from its own filesystem, but a pod's
+/// tree lives in a per-pod emptyDir it cannot see, so the pod's agent gathers
+/// it here from the mount it does see. The tree is the top of the walk: a pod
+/// has none of the host `$HOME` assets, and every pointer stays inside the
+/// read-only mount the container can open. A cwd outside the tree gets
+/// nothing, and the engine's body (if it sent one) still applies.
+fn pod_workspace_guidance(config: &Config, cwd: &str) -> Option<String> {
+    let root = config.workspace_root.as_deref()?;
+    let cwd = Path::new(cwd);
+    if !cwd.starts_with(root) {
+        return None;
+    }
+    crate::codex_guidance::developer_instructions(cwd, Some(root))
+}
+
 /// Codex's arguments after the binary, in the host launcher's canonical order
 /// (WI-3882). Both a host launch and a pod's `command_line` call this.
 pub fn codex_args(args: &CodexArgs<'_>) -> Result<Vec<String>, String> {
@@ -1612,6 +1636,7 @@ pub fn command_line(config: &Config) -> Result<String, AgentError> {
             // arguments arrive in `VOGT_CODEX_LAUNCH_B64`.
             let file = codex_file_config(&config.codex, config.codex_home.as_deref())?;
             let cwd = config.cwd.as_deref().unwrap_or(DEFAULT_WORK_DIR);
+            let workspace_guidance = pod_workspace_guidance(config, cwd);
             let base = config.codex.template_args.as_slice();
             let pin = conversation.filter(|_| !config.resume && base.is_empty());
             // The brief is the session's first prompt, as it is for Claude
@@ -1640,7 +1665,9 @@ pub fn command_line(config: &Config) -> Result<String, AgentError> {
                 providers: &file.providers,
                 catalog: None,
                 trust_cwd: Some(cwd),
-                guidance: config.codex.guidance.as_deref(),
+                guidance: workspace_guidance
+                    .as_deref()
+                    .or(config.codex.guidance.as_deref()),
                 charter: config.codex.charter.as_deref(),
                 mcp_servers: &file.mcp_servers,
                 mcp_args: &[],
@@ -2063,6 +2090,7 @@ mod tests {
             buffer_bytes: 1024,
             claude_config_dir: None,
             codex_home: None,
+            workspace_root: None,
             account: None,
             conversation_id: None,
             resume: false,
@@ -2091,6 +2119,7 @@ mod tests {
             buffer_bytes: 1024,
             claude_config_dir: None,
             codex_home: None,
+            workspace_root: None,
             account: None,
             conversation_id: None,
             resume: false,
@@ -2431,6 +2460,7 @@ mod tests {
             buffer_bytes: 1024,
             claude_config_dir: None,
             codex_home: None,
+            workspace_root: None,
             account: None,
             conversation_id: None,
             resume: false,
@@ -2464,6 +2494,7 @@ mod tests {
             buffer_bytes: 1024,
             claude_config_dir: None,
             codex_home: None,
+            workspace_root: None,
             account: None,
             conversation_id: Some("abc-123".into()),
             resume: false,
@@ -2504,6 +2535,62 @@ mod tests {
         config.conversation_id = Some("x; rm -rf /".into());
         let argv = argv_of_cli("codex", &command_line(&config).unwrap());
         assert!(!argv.iter().any(|a| a == "--session-id"), "{argv:?}");
+    }
+
+    /// WI-3374: a pod with a workspace tree gathers its Codex guidance from
+    /// that tree, because the engine cannot see a per-pod emptyDir. The
+    /// checkout's own file is inlined; the workspace files above it are named.
+    #[test]
+    fn a_workspace_pod_gathers_codex_guidance_from_its_own_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("Working");
+        let session = root.join("session");
+        std::fs::create_dir_all(&session).unwrap();
+        std::fs::create_dir_all(root.join(".claude/skills/ci-log")).unwrap();
+        std::fs::create_dir_all(root.join(".claude/rules")).unwrap();
+        std::fs::write(root.join("AGENTS.md"), "workspace agents body").unwrap();
+        std::fs::write(root.join("CLAUDE.md"), "workspace claude body").unwrap();
+        std::fs::write(
+            root.join(".claude/rules/redact-before-print.md"),
+            "redact rule",
+        )
+        .unwrap();
+        std::fs::write(session.join("CLAUDE.md"), "checkout claude body").unwrap();
+        std::fs::write(root.join(".claude/skills/ci-log/SKILL.md"), "# ci-log").unwrap();
+
+        let mut config = claude_config(ClaudeLaunch::default(), false);
+        config.cli = "codex".into();
+        config.cwd = Some(session.display().to_string());
+        config.workspace_root = Some(root.clone());
+        let argv = argv_of_cli("codex", &command_line(&config).unwrap());
+        let value = argv
+            .iter()
+            .find_map(|arg| arg.strip_prefix("developer_instructions="))
+            .unwrap_or_else(|| panic!("no guidance in {argv:?}"));
+        let parsed: toml::Table = toml::from_str(&format!("v = {value}")).unwrap();
+        let body = parsed["v"].as_str().unwrap();
+        assert!(body.contains("checkout claude body"), "{body}");
+        assert!(
+            body.contains(root.to_str().unwrap()),
+            "workspace root named: {body}"
+        );
+        assert!(body.contains("AGENTS.md"), "{body}");
+        assert!(body.contains(".claude/rules"), "{body}");
+        assert!(body.contains(".claude/skills"), "{body}");
+        assert!(
+            !body.contains("workspace agents body"),
+            "workspace files are named, not inlined: {body}"
+        );
+
+        // Without the workspace the launch keeps whatever the engine sent.
+        config.workspace_root = None;
+        config.codex.guidance = Some("engine body".into());
+        let argv = argv_of_cli("codex", &command_line(&config).unwrap());
+        assert!(
+            argv.iter()
+                .any(|arg| arg.contains("developer_instructions=") && arg.contains("engine body")),
+            "{argv:?}"
+        );
     }
 
     /// WI-3886: the provider key names reach the launch line; the values do
@@ -2763,6 +2850,7 @@ mod tests {
             buffer_bytes: 1024,
             claude_config_dir: None,
             codex_home: None,
+            workspace_root: None,
             account: None,
             conversation_id: Some("abc-123".into()),
             resume: false,
@@ -2859,6 +2947,7 @@ mod tests {
             buffer_bytes: 1024,
             claude_config_dir: None,
             codex_home: None,
+            workspace_root: None,
             account: None,
             conversation_id: Some("abc-123".into()),
             resume,
@@ -2958,6 +3047,7 @@ mod tests {
             buffer_bytes: 1024,
             claude_config_dir: None,
             codex_home: None,
+            workspace_root: None,
             account: None,
             conversation_id: None,
             resume: false,
@@ -3178,6 +3268,7 @@ mod tests {
             buffer_bytes: 1024,
             claude_config_dir: None,
             codex_home: None,
+            workspace_root: None,
             account: None,
             conversation_id: None,
             resume: false,
@@ -3257,6 +3348,7 @@ mod tests {
             buffer_bytes: 1024,
             claude_config_dir: None,
             codex_home: None,
+            workspace_root: None,
             account: None,
             conversation_id: None,
             resume: false,
@@ -3347,6 +3439,7 @@ mod tests {
             buffer_bytes: 1024,
             claude_config_dir: None,
             codex_home: None,
+            workspace_root: None,
             account: None,
             conversation_id: None,
             resume: false,

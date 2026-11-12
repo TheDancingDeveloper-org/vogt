@@ -168,6 +168,14 @@ if [ "$VOGT_CLI" = codex ] && [ -n "$(jq -r '.codex_config // empty' "$response"
   export VOGT_CODEX_CONFIG_FILE="$codex_fragment"
   printf 'session-entrypoint: codex posture: mcp-config\n' >&2
 fi
+# WI-3374: a workspace pod's shared Codex skills live in the read-only tree,
+# while CODEX_HOME is the pod's own writable home. Copy them in when the home
+# does not have them yet, and never replace one the engine's bundle seeded.
+if [ "$VOGT_CLI" = codex ] && [ -n "${VOGT_WORKSPACE_ROOT:-}" ] && [ -d "$VOGT_WORKSPACE_ROOT/.codex/skills" ]; then
+  mkdir -p "$codex_home/skills"
+  cp -R "$VOGT_WORKSPACE_ROOT/.codex/skills/." "$codex_home/skills/" 2>/dev/null ||
+    printf 'session-entrypoint: could not copy the workspace Codex skills; continuing\n' >&2
+fi
 if [ "$VOGT_CLI" = opencode ] && jq -e '.opencode_config | type == "object"' "$response" >/dev/null 2>&1; then
   oc_dir=${XDG_CONFIG_HOME:-$HOME/.config}/opencode; mkdir -p "$oc_dir"; chmod 700 "$oc_dir"
   jq '.opencode_config' "$response" >"$oc_dir/opencode.json"; chmod 600 "$oc_dir/opencode.json"
