@@ -6,6 +6,7 @@
 
 pub mod codex_guidance;
 pub mod codex_policy;
+pub mod salvage;
 
 use std::{
     collections::VecDeque,
@@ -252,6 +253,18 @@ pub enum Frame {
     },
     /// Engine to agent: write the account bundle back now and say when done.
     Flush,
+    /// Engine to agent: build a salvage of the checkout under `/work` and
+    /// upload it, before the pod is deleted (WI-4132).
+    Salvage,
+    /// Agent to engine: the salvage upload finished. `files` counts what was
+    /// sent; the engine's archive report is authoritative for what it kept.
+    Salvaged {
+        ok: bool,
+        #[serde(default)]
+        files: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
     /// Agent to engine: the write-back finished. `ok` is false when the
     /// conversation transcript could not be stored.
     Flushed {
@@ -718,6 +731,190 @@ fn http_client(tls: Arc<rustls::ClientConfig>) -> Result<reqwest::Client, AgentE
         .map_err(AgentError::HttpClient)
 }
 
+/// The root a salvage walks: the pod's clone root, not the session's cwd
+/// subdirectory, so a checkout in a sibling directory is not missed.
+fn salvage_root() -> PathBuf {
+    std::env::var_os("VOGT_CLONE_DIR")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            let work = PathBuf::from(DEFAULT_WORK_DIR);
+            work.is_dir().then_some(work)
+        })
+        .or_else(|| std::env::var_os("VOGT_SESSION_CWD").map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_WORK_DIR))
+}
+
+/// Build and upload the salvage; never fails the stop. A failure is reported
+/// to the engine so the session record says `salvage_failed` and why.
+async fn salvage_and_upload(
+    config: &Config,
+    tls: &Arc<rustls::ClientConfig>,
+) -> vogt_engine_contract::salvage::SalvageAck {
+    use vogt_engine_contract::salvage::{SalvageAck, SalvageLimits};
+    let root = salvage_root();
+    let limits = SalvageLimits::default();
+    let plan = tokio::task::spawn_blocking(move || salvage::plan(&root, &limits)).await;
+    let outcome = match plan {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            return SalvageAck {
+                ok: false,
+                files: 0,
+                reason: Some(format!("the salvage task did not finish: {e}")),
+            }
+        }
+    };
+    if outcome.is_empty() && outcome.failed.is_empty() {
+        return SalvageAck {
+            ok: true,
+            files: 0,
+            reason: None,
+        };
+    }
+    let Ok(client) = http_client(tls.clone()) else {
+        return SalvageAck {
+            ok: false,
+            files: 0,
+            reason: Some("the client for the engine could not be built".into()),
+        };
+    };
+    let mut url = config.engine_url.clone();
+    url.push_str("/api/agent-auth/store/bundle/salvage");
+    let files = outcome
+        .upload
+        .repos
+        .iter()
+        .map(|r| 1 + r.untracked_files.len() as u64)
+        .sum();
+    match client
+        .post(&url)
+        .bearer_auth(&config.token)
+        .json(&outcome.upload)
+        .send()
+        .await
+    {
+        Ok(reply) if reply.status().is_success() => SalvageAck {
+            ok: true,
+            files,
+            reason: (!outcome.failed.is_empty()).then(|| outcome.failed.join("; ")),
+        },
+        Ok(reply) => SalvageAck {
+            ok: false,
+            files: 0,
+            reason: Some(format!(
+                "the engine refused the salvage: HTTP {}",
+                reply.status()
+            )),
+        },
+        Err(e) => SalvageAck {
+            ok: false,
+            files: 0,
+            reason: Some(format!("the salvage upload failed: {e}")),
+        },
+    }
+}
+
+/// `ENGINE_POD_PERSIST_MEMORY` is off unless the engine turned it on.
+fn persist_memory() -> bool {
+    std::env::var("ENGINE_POD_PERSIST_MEMORY")
+        .is_ok_and(|v| matches!(v.trim(), "1" | "true" | "yes" | "on"))
+}
+
+/// The project the memory belongs to, as the engine named it.
+fn memory_project() -> Option<String> {
+    std::env::var("VOGT_PROJECT")
+        .ok()
+        .map(|v| v.trim().to_owned())
+        .filter(|v| !v.is_empty())
+}
+
+/// Every regular file under `<claude>/projects/*/memory`, relative to the
+/// memory directory, without following symlinks.
+fn memory_files(root: &Path) -> Vec<(PathBuf, PathBuf)> {
+    let projects = root.join("projects");
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(&projects) else {
+        return out;
+    };
+    for project in entries.flatten() {
+        let memory = project.path().join("memory");
+        if !memory.is_dir() {
+            continue;
+        }
+        for entry in walkdir::WalkDir::new(&memory)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(Result::ok)
+        {
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let Ok(rel) = entry.path().strip_prefix(&memory) else {
+                continue;
+            };
+            out.push((entry.path().to_path_buf(), rel.to_path_buf()));
+        }
+    }
+    out
+}
+
+/// Upload project memory when the deployment enabled it. Keyed by project,
+/// not by the pod's path or the leased account (WI-3371): the next session on
+/// the same project, on any account, reads it back.
+async fn flush_memory(
+    config: &Config,
+    tls: &Arc<rustls::ClientConfig>,
+    seen: &mut std::collections::HashMap<PathBuf, [u8; 32]>,
+) -> bool {
+    let (Some(root), Some(project)) = (config.claude_config_dir.as_deref(), memory_project())
+    else {
+        return true;
+    };
+    if !persist_memory() {
+        return true;
+    }
+    let Ok(client) = http_client(tls.clone()) else {
+        return false;
+    };
+    let mut url = config.engine_url.clone();
+    url.push_str("/api/agent-auth/store/bundle/memory");
+    for (path, relative) in memory_files(root) {
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        if bytes.len() > vogt_engine_contract::salvage::DEFAULT_MAX_UNTRACKED_FILE_BYTES as usize {
+            continue;
+        }
+        let marker = bundle_marker(&bytes);
+        if seen.get(&path).copied() == Some(marker) {
+            continue;
+        }
+        let name = relative.to_string_lossy().replace('\\', "/");
+        if !salvage::safe_relative(&name) || vogt_engine_contract::salvage::is_secret_path(&name) {
+            continue;
+        }
+        let body = serde_json::json!({
+            "project": project,
+            "path": name,
+            "bytes": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes),
+        });
+        if let Ok(reply) = client
+            .post(&url)
+            .bearer_auth(&config.token)
+            .json(&body)
+            .send()
+            .await
+        {
+            let status = reply.status();
+            if !(status.as_u16() == 429 || status.is_server_error()) {
+                seen.insert(path, marker);
+            }
+        }
+    }
+    true
+}
+
 /// Write the bundle files that changed back to the engine. Returns false when
 /// the conversation transcript could not be stored, so a caller that must not
 /// lose it (hibernation) can tell. A file the engine refuses with a status
@@ -741,6 +938,9 @@ async fn flush_bundle(
         _ => None,
     };
     let conversation = config.conversation_id.as_deref().unwrap_or("");
+    if persist_memory() {
+        let _ = flush_memory(config, tls, seen).await;
+    }
     if claude.is_none() && (conversation.is_empty() || config.codex_home.is_none()) {
         return true;
     }
@@ -1901,6 +2101,14 @@ pub async fn run(config: Config) -> Result<(), AgentError> {
                                     Frame::Flush => {
                                         let ok = flush_bundle(&config, &tls, &mut bundle_seen, &mut transcript_offsets).await;
                                         send_frame(&mut sink, &Frame::Flushed { ok }).await?;
+                                    },
+                                    Frame::Salvage => {
+                                        let ack = salvage_and_upload(&config, &tls).await;
+                                        send_frame(&mut sink, &Frame::Salvaged {
+                                            ok: ack.ok,
+                                            files: ack.files,
+                                            reason: ack.reason,
+                                        }).await?;
                                     },
                                     _ => {},
                                 }

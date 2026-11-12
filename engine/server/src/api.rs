@@ -1288,10 +1288,17 @@ pub async fn kill_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
     body: Option<Json<vogt_engine_contract::StopRequest>>,
-) -> Result<Json<OkResponse>> {
+) -> Result<Json<vogt_engine_contract::salvage::StopResponse>> {
     let request = body.map(|Json(r)| r).unwrap_or_default();
+    // Save the pod's uncommitted work before the stop deletes it (WI-4132).
+    // A host session, or a failed salvage, is not the stop's problem: the
+    // report says what happened, and the stop goes on.
+    let salvage = state.sessions.salvage_pod(id).await;
     state.sessions.stop(id, request)?;
-    Ok(Json(OkResponse::new(true)))
+    Ok(Json(vogt_engine_contract::salvage::StopResponse {
+        ok: true,
+        salvage,
+    }))
 }
 
 /// Mirrors the WebSocket input cap (`ws::MAX_INPUT_BYTES`).

@@ -546,6 +546,16 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
             crate::workspace_snapshot::WORKSPACE_ROUTE,
             get(crate::workspace_snapshot::workspace),
         )
+        // A pod's salvage upload (WI-4132) and its project memory (WI-3371):
+        // the same per-pod bootstrap credential the bundle uses.
+        .route(
+            crate::pod_salvage::SALVAGE_STORE_ROUTE,
+            post(crate::pod_salvage::upload),
+        )
+        .route(
+            "/api/agent-auth/store/bundle/memory",
+            post(crate::pod_salvage::memory_upload),
+        )
         .with_state(Arc::clone(&state));
 
     let broker_routes = Router::new()
