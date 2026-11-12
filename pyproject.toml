@@ -104,6 +104,9 @@ known-local-folder = ["tests"]
 # A frozen table of 64-character migration checksums: the id + hash literals
 # necessarily exceed the line length.
 "tests/test_migration_freeze.py" = ["E501"]
+# The acceptance runner is a script entry point: it must put the repo root on
+# sys.path before it can import the `tests.acceptance` package.
+"tests/acceptance/run.py" = ["E402"]
 # These four handle arbitrary JSON-shaped data by design: a digest over any
 # payload, a renderer over any result, argparse specs over any field
 # annotation, and settings overrides. `Any` is the honest annotation.

@@ -280,6 +280,15 @@ digests and provenance. Run it on a real host whose Docker daemon shares the
 host's filesystem and loopback; the containerised runners cannot, which is why
 CI gates only the resolve-and-render parts.
 
+### The live acceptance suite
+
+[`tests/acceptance/`](../tests/acceptance/) is the black-box check of a
+running dev instance: health and version identity, auth, the MCP surface, work
+tracking on a throwaway project, pod sessions, providers, tracker safety, PWA
+delivery, persistence and economics. It is read-only by default and refuses
+production; `docs/ACCEPTANCE.md` has the command, the safety model and the
+coverage table.
+
 ## 6. The public forge fixture
 
 The forge adapter is normally tested against a fake HTTP transport
