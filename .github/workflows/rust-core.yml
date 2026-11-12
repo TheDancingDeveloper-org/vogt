@@ -24,7 +24,8 @@ on:
     # No `paths:` here (WI-4158). The three jobs branch protection requires
     # (fmt, clippy, test; cargo deny and cargo audit; parity) must report on
     # every pull request, or a batch with no Rust change waits forever on
-    # contexts that never register. The `changes` job holds the path list;
+    # contexts that never register. The `changes` job skips them only when
+    # every changed path is on a docs/acceptance allowlist (fail closed);
     # a skipped required job counts as passing.
     branches: [rust-core, rust-2, wi-1443-main-sync]
   # The live suite and coverage run here, not on every push (WI-2677).
@@ -66,8 +67,14 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: classifier self-test
+        run: bash scripts/test_rust_core_changes.sh
+
       - id: classify
-        # The base ref is passed through the environment, not interpolated
+        # Fail closed (WI-4158): the required jobs skip only when every
+        # changed path is on the allowlist in scripts/rust_core_changes.sh.
+        # Any other event, a failed diff, or an empty diff runs them. The
+        # base ref is passed through the environment, not interpolated
         # into the script.
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -81,16 +88,7 @@ jobs:
             echo "could not diff against origin/${BASE_REF}; running everything"
             echo "rust=true" >> "$GITHUB_OUTPUT"; exit 0
           fi
-          rust=false
-          while IFS= read -r f; do
-            case "$f" in
-              engine/core/*|engine/server/*|engine/Dockerfile|engine/deploy/*|\
-              deny.toml|Cargo.toml|*/Cargo.toml|Cargo.lock|*/Cargo.lock|\
-              tests/parity/*|src/vogt/*|.github/workflows/rust-core.yml)
-                echo "rust-core path changed: $f"; rust=true ;;
-            esac
-          done <<< "$files"
-          echo "rust=$rust" >> "$GITHUB_OUTPUT"
+          printf '%s\n' "$files" | bash scripts/rust_core_changes.sh >> "$GITHUB_OUTPUT"
 
   rust:
     name: fmt, clippy, test
