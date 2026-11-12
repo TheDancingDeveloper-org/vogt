@@ -1960,8 +1960,8 @@ impl SessionRegistry {
             self.records.insert(id, record);
         }
         self.sessions.insert(session.id, Arc::clone(&session));
-        // A fresh session given a brief must actually start its first turn
-        // (WI-4068). Start the confirmation before the caller's request
+        // A fresh Codex session given a brief must actually start its first
+        // turn (WI-4068). Start the confirmation before the caller's request
         // returns, so a session that never submits surfaces as blocked rather
         // than idling at zero turns.
         if fresh
