@@ -21,18 +21,12 @@ on:
     # rust-core cutover) must not start this workflow. Fast jobs have no
     # if:, so listing main spent a rust job on every core-touching PR.
     # Paths stay narrow for the long-lived integration branches.
+    # No `paths:` here (WI-4158). The three jobs branch protection requires
+    # (fmt, clippy, test; cargo deny and cargo audit; parity) must report on
+    # every pull request, or a batch with no Rust change waits forever on
+    # contexts that never register. The `changes` job holds the path list;
+    # a skipped required job counts as passing.
     branches: [rust-core, rust-2, wi-1443-main-sync]
-    paths:
-      - "engine/core/**"
-      - "engine/server/**"
-      - "engine/Dockerfile"
-      - "engine/deploy/**"
-      - "deny.toml"
-      - "**/Cargo.toml"
-      - "**/Cargo.lock"
-      - "tests/parity/**"
-      - "src/vogt/**"
-      - ".github/workflows/rust-core.yml"
   # The live suite and coverage run here, not on every push (WI-2677).
   merge_group:
   schedule:
@@ -57,9 +51,55 @@ permissions:
 env:
   UV_PYTHON: "3.13"
 
+# A required job runs unless this is a pull request that `changes` cleared.
+# If `changes` fails or is skipped, the required jobs run: an unknown
+# classification never skips a check.
 jobs:
+  changes:
+    name: classify rust-core changes
+    runs-on: [self-hosted]
+    timeout-minutes: 10
+    outputs:
+      rust: ${{ steps.classify.outputs.rust }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+
+      - id: classify
+        # The base ref is passed through the environment, not interpolated
+        # into the script.
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            echo "rust=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if ! files=$(git diff --name-only "origin/${BASE_REF}...HEAD"); then
+            echo "could not diff against origin/${BASE_REF}; running everything"
+            echo "rust=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          rust=false
+          while IFS= read -r f; do
+            case "$f" in
+              engine/core/*|engine/server/*|engine/Dockerfile|engine/deploy/*|\
+              deny.toml|Cargo.toml|*/Cargo.toml|Cargo.lock|*/Cargo.lock|\
+              tests/parity/*|src/vogt/*|.github/workflows/rust-core.yml)
+                echo "rust-core path changed: $f"; rust=true ;;
+            esac
+          done <<< "$files"
+          echo "rust=$rust" >> "$GITHUB_OUTPUT"
+
   rust:
     name: fmt, clippy, test
+    needs: changes
+    if: >-
+      !cancelled() &&
+      (github.event_name != 'pull_request' ||
+       needs.changes.result != 'success' ||
+       needs.changes.outputs.rust == 'true')
     # `bigmem` is node-b-gha-public-bigmem, the same runner CodeQL uses for
     # the Rust analysis. A label no online runner advertises queues forever.
     runs-on: [self-hosted, bigmem]
@@ -145,6 +185,12 @@ jobs:
 
   supply-chain:
     name: cargo deny and cargo audit
+    needs: changes
+    if: >-
+      !cancelled() &&
+      (github.event_name != 'pull_request' ||
+       needs.changes.result != 'success' ||
+       needs.changes.outputs.rust == 'true')
     # On every push, with rust and parity (WI-2674). cargo-deny reads deny.toml
     # at the repo root. cargo audit uses the same reasoned ignores as ci.yml.
     runs-on: [self-hosted, bigmem]
@@ -284,6 +330,12 @@ jobs:
 
   parity:
     name: parity
+    needs: changes
+    if: >-
+      !cancelled() &&
+      (github.event_name != 'pull_request' ||
+       needs.changes.result != 'success' ||
+       needs.changes.outputs.rust == 'true')
     # Proves the harness against both cores. The Rust binary is built in this
     # job, because the rust job runs on a different runner and its target
     # directory is not here. This job only checks committed goldens; it never
@@ -419,7 +471,14 @@ jobs:
       - name: install cargo-llvm-cov
         # Pinned. A floating install would make the floor depend on whichever
         # release crates.io served that morning.
-        run: cargo install cargo-llvm-cov --version 0.6.16 --locked
+        # The self-hosted runner keeps ~/.cargo/bin between jobs, and a plain
+        # cargo install refuses a binary that is already there (WI-4158).
+        run: |
+          if cargo llvm-cov --version 2>/dev/null | grep -qx 'cargo-llvm-cov 0.6.16'; then
+            echo "cargo-llvm-cov 0.6.16 already installed"
+          else
+            cargo install cargo-llvm-cov --version 0.6.16 --locked --force
+          fi
 
       - name: line coverage
         working-directory: engine
