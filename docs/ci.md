@@ -41,6 +41,16 @@ be attributed to one member (`engine/Cargo.toml`, a new crate, another
 that resolves to nothing. `cargo fmt`, the rust-version check and
 `cargo audit` read the whole manifest tree and are never scoped.
 
+`deploy/rust-core.Dockerfile` is built only by `rust-core.yml`'s compose and
+Playwright jobs, which run on a schedule, a manual dispatch, or the one
+rust-core-to-main pull request. A normal batch PR skips them, so a path
+dependency the Dockerfile forgets to copy stayed hidden until that cut PR.
+The engine job now runs `python3 scripts/check_rust_core_dockerfile.py` on
+every pull request that reaches it: the check reads the Dockerfile, its
+`.dockerignore` and the Cargo manifests, and fails when a local path
+dependency of `vogt-core`, transitively, is not in the build context. It
+does not need a Docker daemon or a built image.
+
 Only the queue and `main` run these:
 
 - Python **3.11**, the declared floor. A PR runs 3.13 only.
@@ -170,12 +180,15 @@ and stops at the first failure with one line and a log path:
    gate).
 2. `cargo test -p vogt-core --bin vogt-core
    every_python_test_has_one_disposition` (the ledger test).
-3. `pytest tests/test_engine_parity.py` (every engine route has an MCP
+3. `python3 scripts/check_rust_core_dockerfile.py` (the Rust core image
+   copies every local path dependency of `vogt-core` and its ignore file
+   does not exclude them).
+4. `pytest tests/test_engine_parity.py` (every engine route has an MCP
    counterpart or a reason).
-4. `ruff check .`.
-5. `ruff format --check .`.
-6. `mypy`.
-7. The parity checks against the committed `tests/parity/golden` directory:
+5. `ruff check .`.
+6. `ruff format --check .`.
+7. `mypy`.
+8. The parity checks against the committed `tests/parity/golden` directory:
    the Python CLI, HTTP and MCP recordings; the Rust CLI, HTTP and MCP
    recordings; the actor and schema probes; `crossopen`, `selftest`,
    `errors`, and both `contract` checks. The record-twice-and-diff
