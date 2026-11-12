@@ -1,0 +1,729 @@
+"""Group 5 — sessions: a Codex pod, its conversation, and pod-level checks.
+
+Everything here needs ``--with-sessions``. A session is started by S1 in the
+pinned shape (pod, worktree off, deepseek flash) and stopped by S14 and by the
+case/atexit cleanup. Later checks reuse that one session so a run costs one
+pod, not one per assertion. A check that cannot observe its subject (no
+cluster access, a feature not deployed) says SKIP with the reason.
+"""
+
+from __future__ import annotations
+
+import json
+import subprocess
+import time
+from typing import Any, cast
+
+from ..harness import (
+    Case,
+    Check,
+    Context,
+    HttpStatusError,
+    SkipCase,
+    ToolError,
+    failed,
+    passed,
+    skipped,
+)
+from ..policy import (
+    SESSION_MODEL,
+    SESSION_PROJECT,
+    SESSION_TEMPLATE,
+    session_start_arguments,
+)
+
+PONG_TASK = (
+    "Run exactly this shell command: echo PONG\n"
+    "Then reply with the single word PONG and nothing else."
+)
+
+
+def _session(ctx: Context, key: str = "sessions.codex") -> str:
+    identifier = ctx.state.get(key)
+    if not isinstance(identifier, str):
+        raise SkipCase(
+            "the Codex acceptance session was not started by an earlier check"
+        )
+    return identifier
+
+
+def _session_row(ctx: Context, identifier: str) -> dict[str, Any]:
+    listing = ctx.client.tool("session_list")
+    for row in listing.get("sessions") or []:
+        if isinstance(row, dict) and identifier in {
+            row.get("id"),
+            row.get("session_id"),
+        }:
+            return row
+    return {}
+
+
+def _start(
+    ctx: Context, *, template: str, model: str | None, task: str
+) -> dict[str, Any]:
+    arguments = session_start_arguments(ctx.tag, task=task)
+    arguments["template"] = template
+    if model is None:
+        arguments.pop("model", None)
+    payload = ctx.client.tool("session_start", arguments)
+    session = (
+        payload.get("session") if isinstance(payload.get("session"), dict) else payload
+    )
+    identifier = str(session.get("id") or session.get("session_id") or "")
+    if not identifier:
+        raise AssertionError(f"session_start returned no id: {payload!r}")
+    ctx.track_session(identifier)
+    return cast(dict[str, Any], session)
+
+
+def _last_replies(ctx: Context, identifier: str) -> str:
+    payload = ctx.client.tool("session_last_reply", {"id": identifier, "n": 5})
+    messages = [
+        message
+        for message in payload.get("messages") or []
+        if isinstance(message, dict)
+    ]
+    if not messages:
+        return ""
+    return str(messages[-1].get("text", ""))
+
+
+def _all_replies(ctx: Context, identifier: str) -> str:
+    payload = ctx.client.tool("session_last_reply", {"id": identifier, "n": 20})
+    messages = [
+        message
+        for message in payload.get("messages") or []
+        if isinstance(message, dict)
+    ]
+    return "\n".join(str(message.get("text", "")) for message in messages)
+
+
+def _poll_reply(
+    ctx: Context, identifier: str, needle: str, *, timeout_s: int = 120
+) -> tuple[bool, str]:
+    deadline = time.monotonic() + timeout_s
+    text = ""
+    while time.monotonic() < deadline:
+        text = _last_replies(ctx, identifier)
+        if needle in text:
+            return True, text
+        time.sleep(2)
+    return False, text
+
+
+def _ask(
+    ctx: Context, identifier: str, prompt: str, needle: str, *, timeout_s: int = 120
+) -> tuple[bool, str]:
+    ctx.client.tool(
+        "session_input",
+        {"id": identifier, "text": prompt, "reason": f"{ctx.tag}: acceptance probe"},
+    )
+    return _poll_reply(ctx, identifier, needle, timeout_s=timeout_s)
+
+
+def start_codex(ctx: Context) -> Check:
+    ctx.require_sessions()
+    session = _start(
+        ctx, template=SESSION_TEMPLATE, model=SESSION_MODEL, task=PONG_TASK
+    )
+    identifier = str(session.get("id") or session.get("session_id"))
+    ctx.state["sessions.codex"] = identifier
+    ctx.state["sessions.codex.engine"] = session.get("engine_session_id")
+    if session.get("placement") not in (None, "pod"):
+        return failed(f"session started with placement {session.get('placement')!r}")
+    if session.get("model") not in (None, SESSION_MODEL):
+        return failed(f"session started with model {session.get('model')!r}")
+    if session.get("project") not in (None, SESSION_PROJECT):
+        return failed(f"session started in project {session.get('project')!r}")
+    return passed(
+        f"started {identifier} ({session.get('engine_session_id')}) as a pod "
+        f"with {SESSION_MODEL}"
+    )
+
+
+def first_task_delivered(ctx: Context) -> Check:
+    ctx.require_sessions()
+    identifier = _session(ctx)
+    payload = ctx.client.tool(
+        "session_wait", {"id": identifier, "until": "ready", "timeout_s": 180}
+    )
+    outcome = payload.get("outcome")
+    if outcome != "ready":
+        return failed(
+            f"session_wait ended in {outcome!r}: {payload.get('screen_tail')!r}"
+        )
+    return passed(f"session {identifier} became ready; first task was delivered")
+
+
+def pong_reply(ctx: Context) -> Check:
+    ctx.require_sessions()
+    identifier = _session(ctx)
+    found, text = _poll_reply(ctx, identifier, "PONG", timeout_s=180)
+    if not found:
+        return failed(f"no PONG in the last replies after 180s: {text[-400:]!r}")
+    return passed(f"last_reply contains PONG: {text.strip()[-160:]!r}")
+
+
+def screen_readable(ctx: Context) -> Check:
+    ctx.require_sessions()
+    identifier = _session(ctx)
+    payload = ctx.client.tool(
+        "session_screen", {"id": identifier, "scrollback_lines": 40}
+    )
+    lines = [str(line) for line in payload.get("lines") or []]
+    text = "\n".join(lines)
+    if not text.strip():
+        return failed("session_screen returned no lines")
+    lowered = text.lower()
+    if "bwrap" in lowered:
+        return failed("the screen shows a bwrap error (A5 gate 3 failed)")
+    if "do you trust the files" in lowered or (
+        "approval" in lowered and "required" in lowered
+    ):
+        return failed(
+            "the screen is showing a startup approval menu; the session is "
+            "not driveable"
+        )
+    return passed(
+        f"screen has {len(lines)} lines at "
+        f"{payload.get('cols')}x{payload.get('rows')}; "
+        "no bwrap/approval fault"
+    )
+
+
+def input_queueing(ctx: Context) -> Check:
+    ctx.require_sessions()
+    identifier = _session(ctx)
+    result = ctx.client.tool(
+        "session_input",
+        {
+            "id": identifier,
+            "text": "Run exactly: echo QUEUED\nThen reply with the single word QUEUED.",
+            "reason": f"{ctx.tag}: queue probe",
+        },
+    )
+    delivery = str(result.get("delivery"))
+    if delivery in {"stuck", "wedged"}:
+        return failed(
+            f"input delivery was {delivery!r}: {result.get('delivery_evidence')!r}"
+        )
+    found, text = _poll_reply(ctx, identifier, "QUEUED", timeout_s=180)
+    if not found:
+        return failed(
+            f"second input (delivery {delivery!r}) produced no QUEUED reply: "
+            f"{text[-300:]!r}"
+        )
+    return passed(f"second input delivery={delivery}; reply contains QUEUED")
+
+
+def hibernate_and_wake(ctx: Context) -> Check:
+    ctx.require_sessions()
+    identifier = _session(ctx)
+    ctx.client.tool(
+        "session_hibernate", {"id": identifier, "reason": f"{ctx.tag}: hibernate"}
+    )
+    row = _session_row(ctx, identifier)
+    if row.get("activity") not in {"hibernated", "stopped"}:
+        return failed(f"hibernate left activity {row.get('activity')!r}")
+    ctx.client.tool("session_wake", {"id": identifier, "reason": f"{ctx.tag}: wake"})
+    waited = ctx.client.tool(
+        "session_wait", {"id": identifier, "until": "ready", "timeout_s": 180}
+    )
+    if waited.get("outcome") != "ready":
+        return failed(f"wake did not reach ready: {waited.get('outcome')!r}")
+    text = _all_replies(ctx, identifier)
+    if "PONG" not in text:
+        return failed(f"the reply did not survive hibernate/wake: {text[-300:]!r}")
+    return passed("hibernated, woke, became ready, and the PONG conversation survived")
+
+
+def kubectl(ctx: Context, *arguments: str) -> dict[str, Any]:
+    ctx.require_kubectl()
+    command = ["kubectl", "--context", ctx.options.kube_context, *arguments]
+    try:
+        proc = subprocess.run(
+            command, capture_output=True, text=True, timeout=30, check=False
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        raise SkipCase(f"kubectl unavailable: {type(exc).__name__}") from None
+    if proc.returncode != 0:
+        raise SkipCase(f"kubectl failed: {proc.stderr.strip().splitlines()[-1:]!r}")
+    try:
+        payload = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        raise SkipCase("kubectl did not return JSON") from None
+    if not isinstance(payload, dict):
+        raise SkipCase("kubectl returned a non-object JSON document")
+    return payload
+
+
+def placement(ctx: Context) -> Check:
+    ctx.require_sessions()
+    identifier = _session(ctx)
+    row = _session_row(ctx, identifier)
+    engine_id = str(
+        row.get("engine_session_id") or ctx.state.get("sessions.codex.engine") or ""
+    )
+    if not engine_id:
+        return failed("cannot read the session's engine id for the pod lookup")
+    payload = kubectl(
+        ctx,
+        "-n",
+        "vogt-sessions",
+        "get",
+        "pods",
+        "-l",
+        f"vogt.session={engine_id}",
+        "-o",
+        "json",
+    )
+    pods = payload.get("items") or []
+    if not pods:
+        return failed("no session pod exists for a live pod session")
+    pod = pods[0]
+    node = str((pod.get("spec") or {}).get("nodeName") or "")
+    labels = (pod.get("metadata") or {}).get("labels") or {}
+    if node in {"winrarhost", "winrarhost1", "winrarhost3"}:
+        return failed(f"session pod is on {node}, an excluded node (A5 gate 2)")
+    affinity = json.dumps((pod.get("spec") or {}).get("affinity") or {})
+    selector = json.dumps((pod.get("spec") or {}).get("nodeSelector") or {})
+    if "NotIn" not in affinity and "node-role.kubernetes.io/etcd" not in selector:
+        return failed(
+            "pod placement is a preference, not a guarantee: "
+            f"affinity={affinity[:200]} selector={selector[:200]}"
+        )
+    return passed(
+        f"pod on {node}; labels={labels}; affinity/selector pins the session node"
+    )
+
+
+def workspace_content(ctx: Context) -> Check:
+    ctx.require_sessions()
+    identifier = _session(ctx)
+    prompt = (
+        "Run these shell commands and reply with their output verbatim, nothing else:\n"
+        "test -f ~/Working/AGENTS.md && echo WS_AGENTS_OK || echo WS_AGENTS_MISSING\n"
+        "test -d ~/.claude/rules && echo WS_RULES_OK || echo WS_RULES_MISSING\n"
+        "for f in settings.local.json auth.json .git-credentials .netrc; do echo "
+        '"$f $(find ~ -maxdepth 4 -name "$f" 2>/dev/null | wc -l)"; done\n'
+        "echo \"ssh_keys $(find ~/.ssh -maxdepth 1 -name 'id_*' "
+        '2>/dev/null | wc -l)"\n'
+        "echo WS_SCAN_DONE"
+    )
+    found, text = _ask(ctx, identifier, prompt, "WS_SCAN_DONE", timeout_s=180)
+    if not found:
+        return skipped(
+            f"the agent did not complete the workspace scan: {text[-200:]!r}"
+        )
+    if "WS_AGENTS_MISSING" in text or "WS_RULES_MISSING" in text:
+        return skipped(
+            "the pod has no workspace volume (W3: ENGINE_POD_WORKSPACE off or "
+            "WI-4120 not deployed)"
+        )
+    leaks: list[str] = []
+    for name in ("settings.local.json", "auth.json", ".git-credentials", ".netrc"):
+        for line in text.splitlines():
+            if line.startswith(name):
+                parts = line.split()
+                if len(parts) > 1 and parts[1].isdigit() and int(parts[1]) > 0:
+                    leaks.append(f"{name} x{parts[1]}")
+    for line in text.splitlines():
+        if line.startswith("ssh_keys"):
+            parts = line.split()
+            if len(parts) > 1 and parts[1].isdigit() and int(parts[1]) > 0:
+                leaks.append(f"ssh keys x{parts[1]}")
+    if leaks:
+        return failed("the pod workspace contains credentials: " + ", ".join(leaks))
+    return passed(
+        "workspace has AGENTS.md and .claude/rules, and no "
+        "settings.local.json/auth.json/.git-credentials/.netrc/ssh keys"
+    )
+
+
+def graft_token(ctx: Context) -> Check:
+    ctx.require_sessions()
+    identifier = _session(ctx)
+    prompt = (
+        "Run this and reply with the output verbatim:\n"
+        "if [ -d ~/.config/graft ]; then echo GRAFT_TOKEN_PRESENT; "
+        "else echo GRAFT_TOKEN_MISSING; fi"
+    )
+    found, text = _ask(ctx, identifier, prompt, "GRAFT_TOKEN", timeout_s=120)
+    if not found:
+        return skipped(
+            f"the agent did not answer the graft-token probe: {text[-200:]!r}"
+        )
+    if "GRAFT_TOKEN_MISSING" in text:
+        return skipped("the pod has no graft credential (G2: WI-3229/WI-3986)")
+    clone = (
+        f"g clone vogt /tmp/{ctx.tag} --line rust-2 >/dev/null 2>&1 "
+        "&& echo GRAFT_CLONE_OK || echo GRAFT_CLONE_FAIL"
+    )
+    found, text = _ask(
+        ctx,
+        identifier,
+        f"Run this and reply with the output verbatim:\n{clone}",
+        "GRAFT_CLONE_",
+        timeout_s=240,
+    )
+    if not found:
+        return failed(f"the graft clone probe never answered: {text[-200:]!r}")
+    if "GRAFT_CLONE_FAIL" in text:
+        return failed(
+            "a pod session with a graft credential could not clone the sandbox repo"
+        )
+    return skipped(
+        "clone succeeded; landing was not exercised: no sandbox repo is configured "
+        "(tests/acceptance has no sandbox_repo, and landing in the real line is "
+        "out of scope)"
+    )
+
+
+def cadastre_mcp(ctx: Context) -> Check:
+    ctx.require_sessions()
+    identifier = _session(ctx)
+    prompt = (
+        "Run this and reply with the output verbatim:\n"
+        "grep -q cadastre ~/.codex/config.toml 2>/dev/null && echo CADASTRE_OK "
+        "|| echo CADASTRE_MISSING"
+    )
+    found, text = _ask(ctx, identifier, prompt, "CADASTRE_", timeout_s=120)
+    if not found:
+        return skipped(f"the agent did not answer the cadastre probe: {text[-200:]!r}")
+    if "CADASTRE_MISSING" in text:
+        return skipped("cadastre is not registered in the pod (W2: WI-4121 in flight)")
+    return passed("cadastre is registered in the pod's ~/.codex/config.toml")
+
+
+def mcp_registrations(ctx: Context) -> Check:
+    ctx.require_sessions()
+    identifier = _session(ctx)
+    prompt = (
+        "Run this and reply with the output verbatim:\n"
+        "grep -q vogt ~/.codex/config.toml 2>/dev/null && echo VOGT_MCP_OK "
+        "|| echo VOGT_MCP_MISSING"
+    )
+    found, text = _ask(ctx, identifier, prompt, "VOGT_MCP_", timeout_s=120)
+    if not found:
+        return skipped(
+            f"the agent did not answer the MCP-config probe: {text[-200:]!r}"
+        )
+    if "VOGT_MCP_MISSING" in text:
+        return failed(
+            "the vogt MCP server is not registered in the pod's ~/.codex/config.toml"
+        )
+    return passed("vogt is registered in the pod's ~/.codex/config.toml")
+
+
+def env_guard(ctx: Context) -> Check:
+    ctx.require_sessions()
+    identifier = _session(ctx)
+    found, text = _ask(
+        ctx,
+        identifier,
+        "Run exactly this shell command and report the result verbatim: env | head",
+        "environment guard",
+        timeout_s=180,
+    )
+    if not found:
+        if _looks_like_env_dump(text):
+            return failed(
+                "the agent printed the environment instead of being refused (WI-4046)"
+            )
+        return failed(f"no environment-guard refusal within 180s: {text[-300:]!r}")
+    if _looks_like_env_dump(text):
+        return failed(
+            "both the refusal and environment-shaped output appeared on the screen"
+        )
+    return passed(
+        f"the environment guard refused `env | head`: {text.strip()[-200:]!r}"
+    )
+
+
+def _looks_like_env_dump(text: str) -> bool:
+    lines = [line for line in text.splitlines() if "=" in line]
+    shaped = [
+        line
+        for line in lines
+        if line.split("=", 1)[0].strip().replace("_", "").isalnum()
+    ]
+    return len(shaped) >= 5
+
+
+def secret_redaction(ctx: Context) -> Check:
+    ctx.require_sessions()
+    identifier = _session(ctx)
+    sentinel = "sk-test-ACCEPTANCESENTINEL123456"
+    prompt = (
+        "Run exactly this shell command and reply with its output verbatim:\n"
+        f"printf '%s\\n' '{sentinel}'"
+    )
+    # The reply is served redacted, so the sentinel disappearing is the
+    # success signal: waiting for `sk-` would wait forever and turn a working
+    # mask into a SKIP. Wait for a new reply that carries a mask marker.
+    mask_markers = ("[redacted]", "<redacted>", "sk-***", "sk-<redacted>")
+    before = _last_replies(ctx, identifier)
+    ctx.client.tool(
+        "session_input",
+        {"id": identifier, "text": prompt, "reason": f"{ctx.tag}: redaction probe"},
+    )
+    deadline = time.monotonic() + 180
+    text = before
+    while time.monotonic() < deadline:
+        text = _last_replies(ctx, identifier)
+        if sentinel in text:
+            return failed(
+                "the secret-shaped sentinel appeared unmasked in the session reply"
+            )
+        if (
+            text
+            and text != before
+            and (any(marker in text.lower() for marker in mask_markers))
+        ):
+            break
+        if text and text != before and "redacted" in text.lower():
+            break
+        time.sleep(2)
+    screen = ctx.client.tool(
+        "session_screen", {"id": identifier, "scrollback_lines": 40}
+    )
+    screen_text = "\n".join(str(line) for line in screen.get("lines") or [])
+    both = text + "\n" + screen_text
+    if sentinel in both:
+        return failed(
+            "the secret-shaped sentinel appeared unmasked in the reply or screen"
+        )
+    if text == before:
+        return skipped(
+            f"the agent produced no new reply for the redaction probe: {text[-200:]!r}"
+        )
+    masked = any(marker in both.lower() for marker in mask_markers) or (
+        "redacted" in both.lower()
+    )
+    if not masked:
+        return failed(
+            "the sentinel was removed without a visible mask; redaction is not "
+            "evidenced"
+        )
+    return passed(
+        "the secret-shaped sentinel is masked in the session reply and screen"
+    )
+
+
+def stop_session(ctx: Context) -> Check:
+    ctx.require_sessions()
+    identifier = _session(ctx)
+    ctx.stop_session(identifier)
+    row = _session_row(ctx, identifier)
+    if row and row.get("activity") not in {None, "stopped", "exited"}:
+        return failed(f"session_stop left activity {row.get('activity')!r}")
+    engine_id = str(
+        ctx.state.get("sessions.codex.engine") or row.get("engine_session_id") or ""
+    )
+    if engine_id:
+        try:
+            payload = kubectl(
+                ctx,
+                "-n",
+                "vogt-sessions",
+                "get",
+                "pods",
+                "-l",
+                f"vogt.session={engine_id}",
+                "-o",
+                "json",
+            )
+        except SkipCase:
+            return passed(
+                f"{identifier} stopped; pod absence not checked (no cluster access)"
+            )
+        if payload.get("items"):
+            return failed("session_stop left an orphan pod (A5 gate 4)")
+        return passed(f"{identifier} stopped and its pod is gone")
+    return passed(f"{identifier} stopped")
+
+
+def _template_named(ctx: Context, needle: str) -> dict[str, Any] | None:
+    payload = ctx.client.tool("session_template_list")
+    templates = payload.get("templates") or payload.get("session_templates") or []
+    for template in templates:
+        if not isinstance(template, dict):
+            continue
+        haystack = (
+            f"{template.get('name')} {template.get('agent')} "
+            f"{template.get('placements')} {template.get('tags')}"
+        ).lower()
+        if needle in haystack:
+            return template
+    return None
+
+
+def _probe_template(ctx: Context, needle: str, label: str, key: str) -> Check:
+    ctx.require_sessions()
+    template = _template_named(ctx, needle)
+    if template is None:
+        return skipped(f"no {label} template is configured on this instance")
+    name = str(template.get("name"))
+    try:
+        session = _start(
+            ctx, template=name, model=None, task="Reply with READY and do nothing else."
+        )
+    except (ToolError, HttpStatusError) as exc:
+        text = str(exc).lower()
+        if "host-only" in text or "host only" in text or "placement" in text:
+            return skipped(f"{label} is host-only on this instance: {exc}")
+        return failed(f"{label} pod start failed for another reason: {exc}")
+    identifier = str(session.get("id") or session.get("session_id"))
+    ctx.state[key] = identifier
+    ctx.stop_session(identifier)
+    return passed(f"{label} started in a pod as {identifier} and was stopped")
+
+
+def claude_template(ctx: Context) -> Check:
+    return _probe_template(ctx, "claude", "Claude Code", "sessions.claude")
+
+
+def opencode_template(ctx: Context) -> Check:
+    return _probe_template(ctx, "opencode", "opencode", "sessions.opencode")
+
+
+def survives_restart(ctx: Context) -> Check:
+    ctx.require_sessions()
+    ctx.require_restart()
+    return skipped(
+        "the suite cannot restart the engine through the API; this check needs an "
+        "operator-driven redeploy (WI-3405/WI-3205)"
+    )
+
+
+CASES = [
+    Case(
+        "S1",
+        "sessions",
+        "S1",
+        "critical",
+        "start a Codex session in a pod",
+        start_codex,
+    ),
+    Case(
+        "S2",
+        "sessions",
+        "S7",
+        "high",
+        "the first task is delivered and the session is ready",
+        first_task_delivered,
+    ),
+    Case(
+        "S3",
+        "sessions",
+        "S1",
+        "critical",
+        "last_reply returns the PONG answer",
+        pong_reply,
+    ),
+    Case("S4", "sessions", "D2", "high", "session_screen is readable", screen_readable),
+    Case(
+        "S5",
+        "sessions",
+        "D1",
+        "high",
+        "a second input is delivered and answered",
+        input_queueing,
+    ),
+    Case(
+        "S6",
+        "sessions",
+        "S2",
+        "critical",
+        "hibernate then wake keeps the conversation",
+        hibernate_and_wake,
+    ),
+    Case(
+        "S7",
+        "sessions",
+        "S10",
+        "critical",
+        "the pod is on an allowed node and never Node B",
+        placement,
+    ),
+    Case(
+        "S8",
+        "sessions",
+        "W3",
+        "high",
+        "the pod has workspace rules and no credentials",
+        workspace_content,
+    ),
+    Case(
+        "S9",
+        "sessions",
+        "G2",
+        "high",
+        "a pod session can clone with its graft credential",
+        graft_token,
+    ),
+    Case(
+        "S10",
+        "sessions",
+        "W2",
+        "high",
+        "cadastre is registered in the pod",
+        cadastre_mcp,
+    ),
+    Case(
+        "S11",
+        "sessions",
+        "W1",
+        "high",
+        "the vogt MCP server is registered in the pod",
+        mcp_registrations,
+    ),
+    Case(
+        "S12",
+        "sessions",
+        "R2",
+        "critical",
+        "the environment guard refuses env | head",
+        env_guard,
+    ),
+    Case(
+        "S13",
+        "sessions",
+        "O3",
+        "critical",
+        "secret-shaped output is masked in screen/reply",
+        secret_redaction,
+    ),
+    Case(
+        "S14",
+        "sessions",
+        "S3",
+        "critical",
+        "stop leaves no live session or pod",
+        stop_session,
+    ),
+    Case(
+        "S15",
+        "sessions",
+        "S4",
+        "medium",
+        "Claude Code runs in a pod or is refused for a named reason",
+        claude_template,
+    ),
+    Case(
+        "S16",
+        "sessions",
+        "S5",
+        "medium",
+        "opencode runs in a pod or is refused for a named reason",
+        opencode_template,
+    ),
+    Case(
+        "S17",
+        "sessions",
+        "S9",
+        "medium",
+        "a session survives an engine restart",
+        survives_restart,
+    ),
+]
