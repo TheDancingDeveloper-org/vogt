@@ -84,6 +84,10 @@ pub struct Session {
     approval: Mutex<Option<crate::approval::Pending>>,
     /// The agent's own report that it is blocked on a person.
     blocked: Mutex<Option<vogt_engine_contract::BlockedReport>>,
+    /// What the engine kept of this pod's uncommitted work before deleting
+    /// it (WI-4132). Survives the stop so the list and the stop result can
+    /// show the path.
+    salvage: Mutex<Option<vogt_engine_contract::salvage::SalvageReport>>,
     /// The agent conversation this session runs, when its id is known
     /// (set by the registry right after spawn).
     conversation: Mutex<Option<vogt_engine_contract::AgentConversation>>,
@@ -561,6 +565,7 @@ impl Session {
             blocked,
             conversation: self.conversation(),
             hibernation: None,
+            salvage: self.salvage.lock().clone(),
             keep_awake: self.keep_awake(),
             autopilot: self.autopilot(),
             autopilot_nudges: self.autopilot_nudges(),
@@ -703,6 +708,17 @@ impl Session {
     /// Record (or, with `None`, clear) the agent's blocked report and
     /// announce the change. Refused for a session whose child has exited:
     /// nothing is left to unblock.
+    /// Record the archive made of this pod's uncommitted work (WI-4132).
+    /// The session is usually already stopping; this is state for the list
+    /// and the stop result, not a lifecycle change.
+    pub fn set_salvage(&self, report: vogt_engine_contract::salvage::SalvageReport) {
+        *self.salvage.lock() = Some(report);
+    }
+
+    pub fn salvage(&self) -> Option<vogt_engine_contract::salvage::SalvageReport> {
+        self.salvage.lock().clone()
+    }
+
     pub fn set_blocked(
         &self,
         report: Option<vogt_engine_contract::BlockedReport>,
@@ -1395,6 +1411,7 @@ fn assemble_session(
         last_output_at: Mutex::new(None),
         approval: Mutex::new(None),
         blocked: Mutex::new(None),
+        salvage: Mutex::new(None),
         conversation: Mutex::new(None),
         keep_awake: AtomicBool::new(false),
         autopilot: AtomicBool::new(false),

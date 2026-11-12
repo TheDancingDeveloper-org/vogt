@@ -1869,7 +1869,7 @@ fn bundle_conversation<'a>(
 /// grant first, else the stream credential a pod's bootstrap handed it
 /// (WI-3334, WI-3884). The registry is asked as well, so a session it has
 /// forgotten is refused even if a token was somehow not withdrawn.
-async fn presenting_session(state: &AppState, presented: &str) -> Option<Uuid> {
+pub(crate) async fn presenting_session(state: &AppState, presented: &str) -> Option<Uuid> {
     let session = match state.sessions.secret_broker().authenticate(presented) {
         Some(id) => Some(id),
         None => {

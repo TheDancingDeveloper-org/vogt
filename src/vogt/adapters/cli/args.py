@@ -93,10 +93,11 @@ def spec_for(name: str, field: FieldInfo) -> ArgSpec:
 
 
 #: Fields that hold a secret a person chooses. They never become a plain
-#: flag: a password on the command line is a password in every process
-#: listing and shell history. Each gets `--<name>-file PATH` and
-#: `--<name>-stdin` instead, and a terminal falls back to a hidden prompt.
-SECRET_FIELDS = frozenset({"password"})
+#: flag: a password or a personal access token on the command line is one in
+#: every process listing and shell history. Each gets `--<name>-file PATH`
+#: and `--<name>-stdin` instead, and a terminal falls back to a hidden prompt.
+#: `token` is `forge.account_link`'s PAT (WI-3393, WI-4132).
+SECRET_FIELDS = frozenset({"password", "token"})
 
 
 def is_secret_field(name: str) -> bool:

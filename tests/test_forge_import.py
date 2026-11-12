@@ -457,3 +457,50 @@ def test_forge_import_rejects_an_unconfigured_host(tmp_path: Path) -> None:
                 owner="octo-actor", name="rustnzb", host="gitlab.com", reason=WHY
             ),
         )
+
+
+def test_import_and_account_link_never_arm_write_back(tmp_path: Path) -> None:
+    """Adoption is not permission (WI-3393, WI-4132).
+
+    `forge.import` registers the project upstream-truth, and linking an
+    account arms *that actor's* upstream writes. Neither may set a project's
+    write-back policy: it stays `none` until `forge.writeback` names it.
+    """
+    forge = ForgejoImport()
+    token = tmp_path / "forgejo-token"
+    token.write_text("frg_file_token", encoding="utf-8")
+    ctx = _instance(
+        tmp_path,
+        cloner=RecordingCloner(),
+        key_file=_key_file(tmp_path),
+        forge_transport=forge,
+    )
+    ctx = dataclasses.replace(
+        ctx,
+        config=ctx.config.model_copy(
+            update={"forge_token_files": {"forge.example.net": token}}
+        ),
+    )
+
+    imported = import_forge_repo(
+        ctx,
+        ForgeImportParams(
+            host="forge.example.net",
+            owner="acme",
+            name="fuelwatchx",
+            reason=WHY,
+        ),
+    )
+    assert imported.project.write_back == "none"
+
+    link_forge_account(
+        ctx,
+        ForgeAccountLinkParams(
+            host="forge.example.net",
+            token="frg_actor_pat",
+            reason=WHY,
+        ),
+    )
+    projects = list_projects(ctx, ListProjectsParams())
+    assert projects.projects
+    assert {p.write_back for p in projects.projects} == {"none"}

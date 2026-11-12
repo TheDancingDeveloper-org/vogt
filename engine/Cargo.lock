@@ -4934,6 +4934,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "vogt-engine-contract",
  "walkdir",
 ]
 
