@@ -63,7 +63,7 @@ only-include = ["src/vogt", "README.md", "LICENSE", "NOTICE", "pyproject.toml"]
 [tool.ruff]
 line-length = 88
 target-version = "py311"
-src = ["src", "tests", "scripts"]
+src = ["src", "tests", "scripts", "tools"]
 
 [tool.ruff.lint]
 select = [
@@ -111,6 +111,9 @@ known-local-folder = ["tests"]
 "src/vogt/adapters/cli/render.py" = ["ANN401"]
 "src/vogt/adapters/cli/args.py" = ["ANN401"]
 "src/vogt/config.py" = ["ANN401"]
+# The operator tools read export and MCP JSON, which is `Any` at the
+# boundary for the same reason as the JSON adapters above.
+"tools/*" = ["ANN401"]
 # JSON and TOML boundaries: a parsed document is `Any` and pretending
 # otherwise would be a cast, not a type.
 "src/vogt/adapters/github/client.py" = ["ANN401"]
@@ -129,11 +132,11 @@ known-local-folder = ["tests"]
 [tool.mypy]
 python_version = "3.11"
 strict = true
-files = ["src", "tests", "scripts"]
+files = ["src", "tests", "scripts", "tools"]
 # `scripts/` holds standalone modules, not a package; this lets a test import
 # one by its bare name (`import load`) resolve to `scripts/load.py`, the same
 # way `pythonpath` below makes it importable at runtime.
-mypy_path = "scripts"
+mypy_path = "scripts:."
 warn_unreachable = true
 enable_error_code = ["redundant-expr", "truthy-bool", "ignore-without-code"]
 
@@ -142,7 +145,7 @@ testpaths = ["tests"]
 # `scripts/` is not a package, so its standalone modules are imported by bare
 # name in the tests that pin their contract (`import load`); this puts it on
 # the import path, matching `mypy_path` above.
-pythonpath = ["scripts"]
+pythonpath = ["scripts", "."]
 addopts = [
   "--strict-markers",
   "--strict-config",
