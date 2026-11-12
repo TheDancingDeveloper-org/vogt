@@ -147,10 +147,89 @@ pub struct PodConfig {
     /// `vogt.engine` label, and the reconciler lists and deletes only pods
     /// that carry its own, so engines sharing a namespace (dev and prod, or an
     /// old process during a rollout) never touch each other's pods. Keep it
+    /// The read-only workspace tree every session pod gets (WI-3373/WI-3374);
+    /// unset keeps the pre-feature spec.
+    #[serde(default)]
+    pub workspace: Option<PodWorkspace>,
     /// stable for a deployment and distinct between deployments.
     #[serde(default = "default_engine_id")]
     pub engine_id: String,
 }
+/// The read-only workspace tree every session pod gets (WI-3373) and the
+/// writable per-pod clone beneath it (WI-3374). Off unless
+/// `ENGINE_POD_WORKSPACE=1`: a deployment that does not opt in keeps the
+/// pre-feature pod spec exactly.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct PodWorkspace {
+    /// Where the tree is mounted in the session container. The clone goes in
+    /// `session/` beneath it, on its own writable emptyDir, so the workspace
+    /// files are ancestors of the session's cwd as they are on a host.
+    pub dir: String,
+    /// The workspace-configuration repository, at a pinned commit. Both
+    /// sources are public, so the init container needs no deploy key, token or
+    /// Infisical identity and none can reach the session container.
+    pub config_repo: String,
+    pub config_commit: String,
+    /// The shared-skills repository, at a pinned commit.
+    pub skills_repo: String,
+    pub skills_commit: String,
+}
+
+/// The workspace tree's default mount path, beside the image's empty
+/// `/home/vogt/Working` it replaces.
+pub const DEFAULT_WORKSPACE_DIR: &str = "/home/vogt/Working";
+/// Where the session's clone lives inside the workspace tree. The init
+/// container creates it in the workspace volume, so the nested writable mount
+/// has a mount point; the session container only ever sees it writable.
+pub const WORKSPACE_SESSION_DIR: &str = "session";
+pub const DEFAULT_WORKSPACE_CONFIG_REPO: &str =
+    "https://github.com/TheDancingDeveloper-org/agent-workspace-config.git";
+pub const DEFAULT_WORKSPACE_SKILLS_REPO: &str =
+    "https://repo.indexarr.net/indexarr/UsefulClaudeSkills.git";
+
+impl PodWorkspace {
+    /// The clone root: `<dir>/session`.
+    pub fn session_dir(&self) -> String {
+        format!("{}/{WORKSPACE_SESSION_DIR}", self.dir.trim_end_matches('/'))
+    }
+}
+
+/// A workspace mount is an absolute, normalised path strictly under the
+/// session home: the home itself is the writable emptyDir the nested session
+/// mount hangs from, and a path outside it would make the guidance walk and
+/// the nested mount disagree with the image's layout.
+fn validate_workspace_dir(raw: &str) -> Result<()> {
+    let bad = |why: &str| {
+        Err(ApiError::Config(format!(
+            "ENGINE_POD_WORKSPACE_DIR {why}: {raw:?}"
+        )))
+    };
+    let Some(rest) = raw.strip_prefix('/') else {
+        return bad("must be an absolute path");
+    };
+    let rest = rest.strip_suffix('/').unwrap_or(rest);
+    if rest.is_empty() || rest.split('/').any(|s| matches!(s, "" | "." | "..")) {
+        return bad("must be a normalised path");
+    }
+    let path = format!("/{rest}");
+    if path == HOME_MOUNT || !under(&path, HOME_MOUNT) {
+        return bad("must be under the session home (/home/vogt)");
+    }
+    Ok(())
+}
+
+/// A full commit id, so a deployment cannot follow a branch whose content
+/// changes between pods.
+fn validate_pinned_commit(name: &str, value: &str) -> Result<()> {
+    if value.len() == 40 && value.chars().all(|c| c.is_ascii_hexdigit()) {
+        Ok(())
+    } else {
+        Err(ApiError::Config(format!(
+            "{name} must be a full 40-character commit id, got {value:?}"
+        )))
+    }
+}
+
 /// Where a node's seed directories may live unless the deployment says so.
 fn default_seed_allowed_prefixes() -> Vec<String> {
     [
@@ -564,6 +643,7 @@ impl Default for PodConfig {
             pending_timeout: default_pending_timeout(),
             session_deadline: default_session_deadline(),
             reconnect_timeout: default_reconnect_timeout(),
+            workspace: None,
             engine_id: default_engine_id(),
         }
     }
@@ -721,6 +801,50 @@ impl PodConfig {
             }
         }
         optional("ENGINE_POD_MCP_URL", &mut cfg.mcp_url);
+        let workspace_enabled = match text("ENGINE_POD_WORKSPACE").as_deref() {
+            None | Some("") | Some("false") | Some("0") => false,
+            Some("true") | Some("1") => true,
+            Some(other) => {
+                return Err(ApiError::Config(format!(
+                    "ENGINE_POD_WORKSPACE must be true or false, got {other:?}"
+                )))
+            }
+        };
+        if workspace_enabled {
+            // Both commits are required and pinned: a pod's guidance must not
+            // change because a branch moved between two launches.
+            let pinned = |name: &str| -> Result<String> {
+                let value = text(name).filter(|v| !v.is_empty()).ok_or_else(|| {
+                    ApiError::Config(format!(
+                        "{name} is required when ENGINE_POD_WORKSPACE is enabled"
+                    ))
+                })?;
+                validate_pinned_commit(name, &value)?;
+                Ok(value)
+            };
+            let dir = text("ENGINE_POD_WORKSPACE_DIR")
+                .filter(|v| !v.is_empty())
+                .unwrap_or_else(|| DEFAULT_WORKSPACE_DIR.to_string());
+            validate_workspace_dir(&dir)?;
+            let repo = |name: &str, default: &str| {
+                text(name)
+                    .filter(|v| !v.is_empty())
+                    .unwrap_or_else(|| default.to_string())
+            };
+            cfg.workspace = Some(PodWorkspace {
+                dir,
+                config_repo: repo(
+                    "ENGINE_POD_WORKSPACE_CONFIG_REPO",
+                    DEFAULT_WORKSPACE_CONFIG_REPO,
+                ),
+                config_commit: pinned("ENGINE_POD_WORKSPACE_CONFIG_COMMIT")?,
+                skills_repo: repo(
+                    "ENGINE_POD_WORKSPACE_SKILLS_REPO",
+                    DEFAULT_WORKSPACE_SKILLS_REPO,
+                ),
+                skills_commit: pinned("ENGINE_POD_WORKSPACE_SKILLS_COMMIT")?,
+            });
+        }
         if let Some(v) = text("ENGINE_POD_SEED_ALLOWED_PREFIXES") {
             cfg.seed_allowed_prefixes = v
                 .split(',')
@@ -812,6 +936,15 @@ impl PodConfig {
         Ok(cfg)
     }
 
+    /// The clone root a session pod uses: `<workspace>/session` when the
+    /// workspace is on (WI-3374), else the image's `/work`.
+    pub fn work_dir(&self) -> String {
+        match &self.workspace {
+            Some(workspace) => workspace.session_dir(),
+            None => vogt_session_agent::DEFAULT_WORK_DIR.to_string(),
+        }
+    }
+
     /// `from_lookup` over the process environment.
     pub fn from_env(endpoint: Option<String>) -> Result<Self> {
         Self::from_lookup(|name| std::env::var(name).ok(), endpoint)
@@ -896,8 +1029,11 @@ const PRIVATE_CACHE_DIR: &str = "/cache";
 /// directory the bootstrap writes its token and MCP files to.
 const HOME_MOUNT: &str = "/home/vogt";
 const TMP_MOUNT: &str = "/tmp";
-const WORK_MOUNT: &str = vogt_session_agent::DEFAULT_WORK_DIR;
 const RUNTIME_MOUNT: &str = "/run/vogt";
+/// The pod-local emptyDir that carries a pod's read-only workspace tree
+/// (WI-3373) and the init container that builds it.
+const WORKSPACE_VOLUME: &str = "session-workspace";
+const WORKSPACE_INIT_CONTAINER: &str = "workspace-config";
 /// The shared per-node claim, read-only. Sessions can read a seed an operator
 /// put there but can never write it; nothing in the image reads it by default.
 const SHARED_CACHE_VOLUME: &str = "session-cache-seed";
@@ -1067,21 +1203,31 @@ fn pod_env(
         },
         // The clone root: the entrypoint checks the project's source out here,
         // and a caller's cwd, carried through the bootstrap response, is a
-        // path inside it (WI-3883).
+        // path inside it (WI-3883). With a workspace tree (WI-3374) the clone
+        // sits under it, so the workspace files are ancestors of the session.
         EnvVar {
             name: "VOGT_CLONE_DIR".into(),
-            value: Some(vogt_session_agent::DEFAULT_WORK_DIR.into()),
+            value: Some(cfg.work_dir()),
             ..Default::default()
         },
         // The session's working directory. The bootstrap response replaces it
         // with the caller's cwd inside the clone; with no cwd it stays the
-        // clone root. Keep both sourced from one pod-side constant.
+        // clone root.
         EnvVar {
             name: "VOGT_WORK_DIR".into(),
-            value: Some(vogt_session_agent::DEFAULT_WORK_DIR.into()),
+            value: Some(cfg.work_dir()),
             ..Default::default()
         },
     ];
+    // The session agent gathers Codex guidance from the pod's own workspace
+    // tree (WI-3374); the engine cannot read a per-pod emptyDir.
+    if let Some(workspace) = &cfg.workspace {
+        env.push(EnvVar {
+            name: "VOGT_WORKSPACE_ROOT".into(),
+            value: Some(workspace.dir.clone()),
+            ..Default::default()
+        });
+    }
     // The session agent builds the pod's Codex line itself, so the posture the
     // engine validated and would have put on a host argv has to travel with
     // the pod (WI-3864). The default posture is the CLI default: leave the
@@ -1381,6 +1527,24 @@ pub fn pod_template(
     }
     let mut mounts = Vec::new();
     let mut volumes = Vec::new();
+    // The workspace tree (WI-3373) is a pod-local emptyDir built by an init
+    // container and mounted read-only here. The session's clone keeps its own
+    // writable emptyDir at `<dir>/session`, a nested mount beneath the
+    // read-only tree, so the workspace files are ancestors of the session's
+    // cwd exactly as they are on a host.
+    if let Some(workspace) = &cfg.workspace {
+        mounts.push(VolumeMount {
+            name: WORKSPACE_VOLUME.into(),
+            mount_path: workspace.dir.clone(),
+            read_only: Some(true),
+            ..Default::default()
+        });
+        volumes.push(Volume {
+            name: WORKSPACE_VOLUME.into(),
+            empty_dir: Some(EmptyDirVolumeSource::default()),
+            ..Default::default()
+        });
+    }
     // The tool caches are private to the pod: an emptyDir that goes with it.
     // The shared per-node claim is mounted read-only beside it, never at the
     // path a tool writes to (WI-3242).
@@ -1471,14 +1635,14 @@ pub fn pod_template(
     // storage. CODEX_HOME, CLAUDE_CONFIG_DIR and XDG_CONFIG_HOME default
     // under HOME, so the home mount covers them too.
     for (name, dir) in [
-        ("session-home", HOME_MOUNT),
-        ("session-tmp", TMP_MOUNT),
-        ("session-work", WORK_MOUNT),
-        ("session-run", RUNTIME_MOUNT),
+        ("session-home", HOME_MOUNT.to_string()),
+        ("session-tmp", TMP_MOUNT.to_string()),
+        ("session-work", cfg.work_dir()),
+        ("session-run", RUNTIME_MOUNT.to_string()),
     ] {
         mounts.push(VolumeMount {
             name: name.into(),
-            mount_path: dir.into(),
+            mount_path: dir,
             ..Default::default()
         });
         volumes.push(Volume {
@@ -1525,6 +1689,10 @@ pub fn pod_template(
             ..Default::default()
         },
         spec: Some(PodSpec {
+            init_containers: cfg
+                .workspace
+                .as_ref()
+                .map(|workspace| vec![workspace_init_container(workspace, image)]),
             containers: vec![Container {
                 name: SESSION_CONTAINER.into(),
                 image: Some(image.into()),
@@ -1589,6 +1757,123 @@ pub fn pod_template(
         ..Default::default()
     }
 }
+/// Builds the read-only workspace tree once per pod (WI-3373). It runs before
+/// the session container and exits; only this container can reach the clone
+/// sources, and both are public, so it needs no secret at all.
+const WORKSPACE_INIT_SCRIPT: &str = r#"set -eu
+umask 077
+root=${WORKSPACE_ROOT:?WORKSPACE_ROOT is required}
+mkdir -p "$root/session"
+clone_at() {
+  repo=$1; commit=$2; dir=$3
+  rm -rf "$dir"
+  git clone --quiet --no-checkout "$repo" "$dir"
+  git -C "$dir" -c advice.detachedHead=false checkout --quiet "$commit"
+  rm -rf "$dir/.git"
+}
+# Both repositories are public, so this clone needs no deploy key, token or
+# Infisical identity: no credential exists that could reach the session.
+if ! clone_at "$WORKSPACE_CONFIG_REPO" "$WORKSPACE_CONFIG_COMMIT" "$root/agent-workspace-config"; then
+  echo 'workspace-init: could not clone the workspace configuration; continuing without it' >&2
+  exit 0
+fi
+if ! clone_at "$WORKSPACE_SKILLS_REPO" "$WORKSPACE_SKILLS_COMMIT" "$root/UsefulClaudeSkills"; then
+  echo 'workspace-init: could not clone the shared skills; continuing without them' >&2
+  exit 0
+fi
+if ! WORKSPACE_ROOT="$root" "$root/agent-workspace-config/bootstrap/install.sh" --manifest=/dev/null; then
+  echo 'workspace-init: install.sh failed; continuing without the workspace assets' >&2
+  exit 0
+fi
+rm -rf "$root/agent-workspace-config"
+printf 'workspace-init: workspace tree ready at %s
+' "$root" >&2
+"#;
+
+fn workspace_init_container(workspace: &PodWorkspace, image: &str) -> Container {
+    let env = |name: &str, value: &str| EnvVar {
+        name: name.into(),
+        value: Some(value.into()),
+        ..Default::default()
+    };
+    Container {
+        name: WORKSPACE_INIT_CONTAINER.into(),
+        image: Some(image.into()),
+        // The image is the session image, so git, python3 and the installer's
+        // shell are the pinned ones, and the admission policy that pins the
+        // session image covers this container too.
+        command: Some(vec!["sh".into(), "-c".into()]),
+        args: Some(vec![WORKSPACE_INIT_SCRIPT.into()]),
+        env: Some(vec![
+            env("WORKSPACE_ROOT", &workspace.dir),
+            env("WORKSPACE_CONFIG_REPO", &workspace.config_repo),
+            env("WORKSPACE_CONFIG_COMMIT", &workspace.config_commit),
+            env("WORKSPACE_SKILLS_REPO", &workspace.skills_repo),
+            env("WORKSPACE_SKILLS_COMMIT", &workspace.skills_commit),
+        ]),
+        volume_mounts: Some(vec![
+            VolumeMount {
+                name: WORKSPACE_VOLUME.into(),
+                mount_path: workspace.dir.clone(),
+                ..Default::default()
+            },
+            // Writable paths for git's global config; the container root is
+            // read-only like the session container's.
+            VolumeMount {
+                name: "session-home".into(),
+                mount_path: HOME_MOUNT.into(),
+                ..Default::default()
+            },
+            VolumeMount {
+                name: "session-tmp".into(),
+                mount_path: TMP_MOUNT.into(),
+                ..Default::default()
+            },
+        ]),
+        resources: Some(ResourceRequirements {
+            requests: Some(BTreeMap::from([
+                (
+                    "cpu".into(),
+                    k8s_openapi::apimachinery::pkg::api::resource::Quantity("50m".into()),
+                ),
+                (
+                    "memory".into(),
+                    k8s_openapi::apimachinery::pkg::api::resource::Quantity("64Mi".into()),
+                ),
+                (
+                    "ephemeral-storage".into(),
+                    k8s_openapi::apimachinery::pkg::api::resource::Quantity("64Mi".into()),
+                ),
+            ])),
+            limits: Some(BTreeMap::from([
+                (
+                    "cpu".into(),
+                    k8s_openapi::apimachinery::pkg::api::resource::Quantity("500m".into()),
+                ),
+                (
+                    "memory".into(),
+                    k8s_openapi::apimachinery::pkg::api::resource::Quantity("256Mi".into()),
+                ),
+                (
+                    "ephemeral-storage".into(),
+                    k8s_openapi::apimachinery::pkg::api::resource::Quantity("512Mi".into()),
+                ),
+            ])),
+            claims: None,
+        }),
+        security_context: Some(SecurityContext {
+            allow_privilege_escalation: Some(false),
+            read_only_root_filesystem: Some(true),
+            capabilities: Some(Capabilities {
+                drop: Some(vec!["ALL".into()]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
 #[derive(Clone)]
 pub struct PodBackendFactory {
     pub cfg: Arc<PodConfig>,
@@ -3633,6 +3918,186 @@ mod tests {
             None
         )
         .is_err());
+    }
+
+    const CONFIG_COMMIT: &str = "f0115632e9c789e585606f156b8c5c621a04c258";
+    const SKILLS_COMMIT: &str = "d93c350828148975a273132242dae935362f4145";
+
+    fn workspace_cfg() -> PodConfig {
+        PodConfig::from_lookup(
+            lookup(&[
+                ("ENGINE_POD_WORKSPACE", "1"),
+                ("ENGINE_POD_WORKSPACE_CONFIG_COMMIT", CONFIG_COMMIT),
+                ("ENGINE_POD_WORKSPACE_SKILLS_COMMIT", SKILLS_COMMIT),
+            ]),
+            None,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn the_workspace_is_off_by_default_and_pinned_when_on() {
+        let cfg = PodConfig::default();
+        assert!(cfg.workspace.is_none());
+        assert_eq!(cfg.work_dir(), vogt_session_agent::DEFAULT_WORK_DIR);
+
+        let cfg = workspace_cfg();
+        let workspace = cfg.workspace.as_ref().unwrap();
+        assert_eq!(workspace.dir, DEFAULT_WORKSPACE_DIR);
+        assert_eq!(workspace.config_repo, DEFAULT_WORKSPACE_CONFIG_REPO);
+        assert_eq!(workspace.config_commit, CONFIG_COMMIT);
+        assert_eq!(workspace.skills_repo, DEFAULT_WORKSPACE_SKILLS_REPO);
+        assert_eq!(workspace.skills_commit, SKILLS_COMMIT);
+        assert_eq!(cfg.work_dir(), "/home/vogt/Working/session");
+
+        let enabled = |pairs: &[(&str, &str)]| {
+            let mut all = vec![
+                ("ENGINE_POD_WORKSPACE", "true"),
+                ("ENGINE_POD_WORKSPACE_CONFIG_COMMIT", CONFIG_COMMIT),
+                ("ENGINE_POD_WORKSPACE_SKILLS_COMMIT", SKILLS_COMMIT),
+            ];
+            all.extend_from_slice(pairs);
+            PodConfig::from_lookup(lookup(&all), None)
+        };
+        // A branch is not a pin.
+        let error = enabled(&[("ENGINE_POD_WORKSPACE_CONFIG_COMMIT", "main")]).unwrap_err();
+        assert!(error.to_string().contains("40-character"), "{error}");
+        assert!(enabled(&[("ENGINE_POD_WORKSPACE_CONFIG_COMMIT", "")]).is_err());
+        assert!(enabled(&[("ENGINE_POD_WORKSPACE_SKILLS_COMMIT", "rust-2")]).is_err());
+        // The mount must stay under the session home.
+        assert!(enabled(&[("ENGINE_POD_WORKSPACE_DIR", "/etc/workspace")]).is_err());
+        assert!(enabled(&[("ENGINE_POD_WORKSPACE_DIR", "/home/vogt")]).is_err());
+        assert!(enabled(&[("ENGINE_POD_WORKSPACE_DIR", "/home/vogt/../etc")]).is_err());
+        let moved = enabled(&[("ENGINE_POD_WORKSPACE_DIR", "/home/vogt/tree/")]).unwrap();
+        assert_eq!(moved.work_dir(), "/home/vogt/tree/session");
+        // An unusable flag value is refused, not read as off.
+        assert!(PodConfig::from_lookup(lookup(&[("ENGINE_POD_WORKSPACE", "yes")]), None).is_err());
+    }
+
+    #[test]
+    fn a_workspace_pod_builds_a_read_only_tree_without_credentials() {
+        let cfg = workspace_cfg();
+        let pod = pod_template_for(&cfg);
+        let spec = pod.spec.as_ref().unwrap();
+        let init = spec.init_containers.as_ref().unwrap();
+        assert_eq!(init.len(), 1);
+        let workspace_init = &init[0];
+        assert_eq!(workspace_init.name, WORKSPACE_INIT_CONTAINER);
+        // The session image and its digest pin, which the namespace's
+        // admission policy checks for every container.
+        assert_eq!(
+            workspace_init.image.as_deref(),
+            Some(cfg.default_image.as_str())
+        );
+        assert_eq!(
+            workspace_init
+                .security_context
+                .as_ref()
+                .unwrap()
+                .read_only_root_filesystem,
+            Some(true)
+        );
+        // It builds the tree, so it writes the workspace volume...
+        let init_mount = workspace_init
+            .volume_mounts
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|m| m.name == WORKSPACE_VOLUME)
+            .unwrap();
+        assert_eq!(init_mount.mount_path, DEFAULT_WORKSPACE_DIR);
+        assert_eq!(init_mount.read_only, None);
+        // ...and names the pins as data, never a credential.
+        let init_env: BTreeMap<_, _> = workspace_init
+            .env
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|e| (e.name.as_str(), e.value.clone().unwrap_or_default()))
+            .collect();
+        assert_eq!(init_env["WORKSPACE_CONFIG_COMMIT"], CONFIG_COMMIT);
+        assert_eq!(init_env["WORKSPACE_SKILLS_COMMIT"], SKILLS_COMMIT);
+        assert!(init_env
+            .values()
+            .all(|v| !v.contains("TOKEN") && !v.contains("KEY")));
+
+        // The session container reads it, never writes it.
+        let container = &spec.containers[0];
+        let mounts = container.volume_mounts.as_ref().unwrap();
+        let mount = mounts.iter().find(|m| m.name == WORKSPACE_VOLUME).unwrap();
+        assert_eq!(mount.mount_path, DEFAULT_WORKSPACE_DIR);
+        assert_eq!(mount.read_only, Some(true));
+        let work = mounts.iter().find(|m| m.name == "session-work").unwrap();
+        assert_eq!(work.mount_path, "/home/vogt/Working/session");
+        assert_ne!(work.read_only, Some(true));
+        // The workspace volume is pod-local: never a claim, host path or NFS
+        // share another session could also mount.
+        let volume = spec
+            .volumes
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|v| v.name == WORKSPACE_VOLUME)
+            .unwrap();
+        assert!(volume.empty_dir.is_some());
+        assert!(shared_writable_volumes(&pod).is_empty());
+
+        // The clone root and the guidance root travel to the session.
+        let env: BTreeMap<_, _> = container
+            .env
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|e| (e.name.as_str(), e.value.clone().unwrap_or_default()))
+            .collect();
+        assert_eq!(env["VOGT_CLONE_DIR"], "/home/vogt/Working/session");
+        assert_eq!(env["VOGT_WORK_DIR"], "/home/vogt/Working/session");
+        assert_eq!(env["VOGT_WORKSPACE_ROOT"], DEFAULT_WORKSPACE_DIR);
+        assert!(!env.contains_key("VOGT_BOOTSTRAP_TOKEN"));
+
+        // No new Secret: the only secret volume is the bootstrap credential
+        // file, mounted into the session container as before.
+        let secret_volumes: Vec<_> = spec
+            .volumes
+            .as_ref()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.secret.as_ref().and_then(|s| s.secret_name.as_deref()))
+            .collect();
+        assert_eq!(secret_volumes.len(), 1);
+        assert!(secret_volumes[0].ends_with("-bootstrap"));
+    }
+
+    #[test]
+    fn a_pod_without_the_workspace_flag_keeps_the_old_spec() {
+        let cfg = PodConfig::default();
+        let pod = pod_template_for(&cfg);
+        let spec = pod.spec.as_ref().unwrap();
+        assert!(spec.init_containers.is_none());
+        let container = &spec.containers[0];
+        assert!(!container
+            .volume_mounts
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|m| m.name == WORKSPACE_VOLUME));
+        let work = container
+            .volume_mounts
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|m| m.name == "session-work")
+            .unwrap();
+        assert_eq!(work.mount_path, vogt_session_agent::DEFAULT_WORK_DIR);
+        let env: BTreeMap<_, _> = container
+            .env
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|e| (e.name.as_str(), e.value.clone().unwrap_or_default()))
+            .collect();
+        assert_eq!(env["VOGT_CLONE_DIR"], vogt_session_agent::DEFAULT_WORK_DIR);
+        assert!(!env.contains_key("VOGT_WORKSPACE_ROOT"));
     }
 
     fn lookup(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {

@@ -269,6 +269,7 @@ fn pod_carry_recorded(
     env: &[(String, String)],
     cwd: Option<&str>,
     has_source: bool,
+    work_root: &str,
 ) -> (Vec<(String, String)>, Option<String>) {
     let carried = env
         .iter()
@@ -280,7 +281,7 @@ fn pod_carry_recorded(
         .collect();
     (
         carried,
-        cwd.and_then(|dir| pod_work_dir_for(dir, has_source).ok())
+        cwd.and_then(|dir| pod_work_dir_for(dir, has_source, work_root).ok())
             .map(|resolved| resolved.work_dir),
     )
 }
@@ -295,12 +296,13 @@ struct PodWorkDir {
 }
 
 /// The pod-side working directory for a requested `cwd` (WI-3883): its place
-/// inside the git checkout the pod clones, re-rooted under the session agent's
-/// default work directory. A cwd outside any checkout runs in the clone root
+/// inside the git checkout the pod clones, re-rooted under the pod's clone
+/// root (`work_root`: `/work`, or `<workspace>/session` when the pod has a
+/// workspace tree, WI-3374). A cwd outside any checkout runs in the clone root
 /// when the project has a source the pod clones (WI-4026), and is refused with
 /// an actionable message otherwise. A cwd that would climb out of the checkout
 /// is refused rather than escaped.
-fn pod_work_dir_for(cwd: &str, has_source: bool) -> Result<PodWorkDir> {
+fn pod_work_dir_for(cwd: &str, has_source: bool, work_root: &str) -> Result<PodWorkDir> {
     let dir = std::path::Path::new(cwd);
     let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
     let Some(root) = git::worktree_top(&dir) else {
@@ -311,11 +313,11 @@ fn pod_work_dir_for(cwd: &str, has_source: bool) -> Result<PodWorkDir> {
         }
         tracing::info!(
             cwd = %cwd,
-            work_dir = vogt_session_agent::DEFAULT_WORK_DIR,
+            work_dir = work_root,
             "pod session cwd is not in a source checkout; running in the clone root"
         );
         return Ok(PodWorkDir {
-            work_dir: vogt_session_agent::DEFAULT_WORK_DIR.to_string(),
+            work_dir: work_root.to_string(),
             remapped_from: Some(cwd.to_string()),
         });
     };
@@ -332,7 +334,7 @@ fn pod_work_dir_for(cwd: &str, has_source: bool) -> Result<PodWorkDir> {
             "placement \"pod\" cannot start at cwd {cwd:?}: it escapes the source checkout {root:?} the pod clones"
         )));
     }
-    let work = std::path::Path::new(vogt_session_agent::DEFAULT_WORK_DIR).join(relative);
+    let work = std::path::Path::new(work_root).join(relative);
     // WI-4025: `join` with an empty relative path leaves a trailing slash
     // ("/work/"), which Codex's trust key does not match; a clone-root session
     // runs in the bare work directory.
@@ -1343,13 +1345,16 @@ impl SessionRegistry {
             // this release tightened, drops that one field instead (WI-3883
             // review). A fresh start validates strictly and refuses.
             let has_source = spec.source.is_some();
+            let work_root = self.pod_config()?.work_dir();
             let (agent_env, work_dir) = match recorded {
-                Some(_) => pod_carry_recorded(&base_env, spec.cwd.as_deref(), has_source),
+                Some(_) => {
+                    pod_carry_recorded(&base_env, spec.cwd.as_deref(), has_source, &work_root)
+                }
                 None => (
                     pod_carry_env(&base_env)?,
                     spec.cwd
                         .as_deref()
-                        .map(|dir| pod_work_dir_for(dir, has_source))
+                        .map(|dir| pod_work_dir_for(dir, has_source, &work_root))
                         .transpose()?
                         .map(|resolved| resolved.work_dir),
                 ),
@@ -1540,7 +1545,12 @@ impl SessionRegistry {
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| self.cfg.default_cwd.clone());
         let codex_guidance = codex_agent
-            .then(|| crate::codex_guidance::developer_instructions(&codex_cwd, home.as_deref()))
+            .then(|| {
+                vogt_session_agent::codex_guidance::developer_instructions(
+                    &codex_cwd,
+                    home.as_deref(),
+                )
+            })
             .flatten();
         let codex_provider = codex_selection
             .as_ref()
@@ -4270,7 +4280,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("wi4026-noncheckout-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let cwd = dir.to_string_lossy().into_owned();
-        let resolved = super::pod_work_dir_for(&cwd, true).unwrap();
+        let resolved =
+            super::pod_work_dir_for(&cwd, true, vogt_session_agent::DEFAULT_WORK_DIR).unwrap();
         assert_eq!(resolved.work_dir, vogt_session_agent::DEFAULT_WORK_DIR);
         assert_eq!(resolved.remapped_from.as_deref(), Some(cwd.as_str()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -4281,7 +4292,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("wi4026-nosource-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let cwd = dir.to_string_lossy().into_owned();
-        let error = super::pod_work_dir_for(&cwd, false)
+        let error = super::pod_work_dir_for(&cwd, false, vogt_session_agent::DEFAULT_WORK_DIR)
             .unwrap_err()
             .to_string();
         assert!(error.contains("no source"), "{error}");
@@ -4356,7 +4367,12 @@ mod tests {
             ("GRAFT_ENDPOINT".to_string(), "http://old".to_string()),
         ];
         assert_eq!(
-            pod_carry_recorded(&env, Some("/no/such/checkout"), false),
+            pod_carry_recorded(
+                &env,
+                Some("/no/such/checkout"),
+                false,
+                vogt_session_agent::DEFAULT_WORK_DIR,
+            ),
             (
                 vec![("CARGO_BUILD_JOBS".to_string(), "4".to_string())],
                 None
