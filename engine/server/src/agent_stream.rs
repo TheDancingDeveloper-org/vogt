@@ -77,6 +77,9 @@ pub struct AgentAuth {
     /// forgotten). Handles only: the value stays in the provider's file.
     source_credentials: Mutex<HashMap<Uuid, PendingCredential>>,
     sources: Mutex<HashMap<Uuid, SourceDescriptor>>,
+    /// The core session id a minted graft token is bound to, held until the
+    /// pod's bootstrap request writes the token under that name.
+    graft_sessions: Mutex<HashMap<Uuid, String>>,
     sessions: Mutex<HashMap<Uuid, SessionCredential>>,
     /// The attached agent's command channel, beside the link it belongs to so
     /// attach/detach can update the connection state under one lock.
@@ -436,6 +439,11 @@ pub struct BootstrapResponse {
     /// when the provider has none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_token: Option<String>,
+    /// The core session id the source token is bound to, when the core
+    /// supplied one: the entrypoint writes the token under that name and
+    /// exports `GRAFT_SESSION_ID` so commits attribute to the same session.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub graft_session: Option<String>,
     /// The `--mcp-config` file a pod-backed Claude Code session is started
     /// with (WI-3243): the engine's MCP endpoints as Claude Code reads them.
     /// The bearer is an environment reference to `VOGT_HTTP_TOKEN`, which the
@@ -594,6 +602,15 @@ impl AgentAuth {
         self.pending.lock().await.remove(&id);
         self.launches.lock().await.remove(&id);
         self.source_credentials.lock().await.remove(&id);
+        self.graft_sessions.lock().await.remove(&id);
+    }
+    /// Hold the core session id the session's graft token is bound to, for
+    /// the bootstrap response that writes the token into the pod.
+    pub async fn issue_graft_session(&self, id: Uuid, session_ref: String) {
+        self.graft_sessions.lock().await.insert(id, session_ref);
+    }
+    pub async fn take_graft_session(&self, id: Uuid) -> Option<String> {
+        self.graft_sessions.lock().await.remove(&id)
     }
     /// Hold what the session spec asked the pod to carry, for the bootstrap
     /// response to take once the pod presents its credential.
@@ -944,6 +961,7 @@ pub async fn bootstrap(
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
     let minted = state.agent_auth.take_source_credential(id).await;
+    let graft_session = state.agent_auth.take_graft_session(id).await;
     let source_token = match resolve_source_token(
         minted,
         provider.mints_credentials(),
@@ -1147,6 +1165,7 @@ pub async fn bootstrap(
         agent_env,
         source,
         source_token,
+        graft_session,
         mcp_config,
         codex_config,
         opencode_config,

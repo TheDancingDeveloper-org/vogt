@@ -3582,6 +3582,7 @@ where
     spec.permission_mode = Some(params.permission_mode.clone());
     spec.role = params.role.clone();
     spec.work_item = subject.work_item_ref.clone();
+    spec.session_ref = Some(subject.session_id.clone());
     spec.source = subject.source.clone();
     spec.autopilot = autopilot;
     spec.prompt = Some(brief_with_task(

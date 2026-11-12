@@ -5236,25 +5236,41 @@ not in either cloned repository, so a pod does not get `.agent-tools/bin`.
 | `ENGINE_SOURCE_GRAFT_REPO` (alias `ENGINE_POD_GRAFT_REPO`) | graft repository the session clones |
 | `ENGINE_SOURCE_GRAFT_LINE` (alias `ENGINE_POD_GRAFT_LINE`) | line it clones (default `rust-2`); the entrypoint runs `g clone <repo> <workdir> --line <line>`, so the working copy starts on that line |
 | `ENGINE_SOURCE_GRAFT_ENDPOINT` (alias `ENGINE_POD_GRAFT_ENDPOINT`) | graft server URL, passed to the pod as `GRAFT_ENDPOINT`; it must be reachable from the session namespace |
-| `ENGINE_SOURCE_GRAFT_MINT_TOKEN_FILE` (alias `ENGINE_GRAFT_MINT_TOKEN_FILE`) | file (a mounted secret, `0400`) holding the engine's graft *mint* token: a service-kind graft token (subject `vogt-engine`, scopes `repo:<repo>:read`, `:write`, `:drafts` and `:land:<line>`). Needs `ENGINE_SOURCE_GRAFT_ENDPOINT` (alias `ENGINE_POD_GRAFT_ENDPOINT`)`. When set, the engine mints a graft token per session pod (below) and never hands the mint token, or the shared token, to a pod. Read on every mint, so a rotation (the token expires; rotation is a re-mint) needs no restart |
+| `ENGINE_SOURCE_GRAFT_MINT_TOKEN_FILE` (alias `ENGINE_GRAFT_MINT_TOKEN_FILE`) | file (a mounted secret, `0400`) holding the engine's graft *mint* token: a service-kind graft token (subject `vogt-engine`, scopes `repo:<repo>:read`, `:write`, `:drafts` and `:land:<line>`). Needs `ENGINE_SOURCE_GRAFT_ENDPOINT` (alias `ENGINE_POD_GRAFT_ENDPOINT`)`. When set — together with `ENGINE_SOURCE_GRAFT_MINT=1` — the engine mints a graft token per session pod (below) and never hands the mint token, or the shared token, to a pod. Read on every mint, so a rotation (the token expires; rotation is a re-mint) needs no restart |
+| `ENGINE_SOURCE_GRAFT_MINT` (alias `ENGINE_POD_GRAFT_MINT`) | `1`/`true`/`yes`/`on` enables per-session graft minting; unset or any other value leaves it off, so an upgrade does not change how pod sessions authenticate. Needs the mint token file below and `ENGINE_SOURCE_GRAFT_ENDPOINT` |
 | `ENGINE_SOURCE_GRAFT_TOKEN_FILE` (alias `ENGINE_POD_GRAFT_TOKEN_FILE`) | **fallback** when no mint token is configured: a file (a mounted secret) holding one graft token shared by every pod. The engine reads it when it answers the bootstrap request and returns it as `source_token`, and logs a warning at each pod create. The value is never in config or the pod spec. Unset too, the entrypoint clones with the session token |
 
-**Per-session graft token** (`graft_mint.rs`). At pod create the engine calls
-graft's `AdminService.MintToken` (gRPC, `graft-protocol` 0.1, the mint token as
-the bearer) for a token with subject `vogt-session-<session id>`, that session
-id and the session's work item (when graft accepts the label: short, no
-whitespace) stamped on it, and exactly four scopes: the repo's `read`, `write`
-and `drafts`, and `land` on the session's line only. Graft refuses any scope the
+**Per-session graft token** (`graft_mint.rs`). When
+`ENGINE_SOURCE_GRAFT_MINT` is on and the session's project names a graft source,
+at pod create the engine calls graft's `AdminService.MintToken` (gRPC,
+`graft-protocol` 0.1, the mint token as the bearer) for a token with subject
+`vogt-session-<session id>`, that session id and the session's work item (when
+graft accepts the label: short, no whitespace) stamped on it, and exactly four
+scopes: the repo's `read`, `write` and `drafts`, and `land` on the session's
+line only. The session id is the core's `ses_...` id when the start carried one
+(`session_ref`) and the engine's UUID otherwise: graft compares it with
+`agent.session` on every write, so it must be the id the worker's brief and
+commits use. Only a project source earns a token — the deployment's
+`ENGINE_SOURCE_GRAFT_REPO`/`LINE` say what to clone, not a mapping that grants
+landing rights — so a session whose project names no source starts with no
+token and a note. Graft refuses any scope the
 mint token does not hold, so the engine cannot hand out more than it has. The
 TTL is the session's whole-session clock budget (`session_wall_clock_minutes`)
 plus 30 minutes, capped at graft's 12 h `max_token_ttl_s`; a session with no such
 budget gets the 12 h cap. A woken session gets a new pod and a new token. The
 token travels like the session token: held in memory until the pod's single
-bootstrap request, returned as `graft_token`, written `0600` by the entrypoint.
-It is never a pod env value, an argument, a Secret or a log field. If the mint
-fails (graft unreachable, mint token refused or unreadable) the pod is not
-created, the bootstrap credential is withdrawn and the session ends with the
-error. When the session's pod is torn down (stop, kill, exit, remove, hibernate, or a
+bootstrap request, returned as `graft_token` with `graft_session` naming the
+core id, and written by the entrypoint where `g` reads it:
+`$XDG_CONFIG_HOME/graft/sessions/<graft_session>/trial-1.token` (`0600`, its
+directories `0700`), beside a `config.toml` naming a `vogt-session` server with
+the endpoint and that token file. The entrypoint also exports
+`GRAFT_SESSION_ID` (the same id) and `GRAFT_ENDPOINT`, so a worker runs plain
+`g clone`/`g land` without naming a credential path. `VOGT_GRAFT_TOKEN_FILE`
+names the same file. The token is never a pod env value, an argument, a Secret
+or a log field. If the mint fails (graft unreachable, mint token refused or
+unreadable) the pod is still created, without a token; the session continues
+and prints `session graft token unavailable: <reason>` (never a token value),
+and clone or land then fails loudly rather than widening to a shared token. When the session's pod is torn down (stop, kill, exit, remove, hibernate, or a
 pod that could not be created) the engine calls graft's `AdminService.RevokeToken`
 with its mint credential for that token (WI-3235), after the teardown is marked
 complete: graft then refuses the token for writes from that moment. A revoke
@@ -5366,9 +5382,12 @@ bootstrap refusal quotes the engine's one-line reason only). In order:
    it prints `session-entrypoint: codex posture: mcp-config`. For
    `VOGT_CLI=opencode`, `opencode_config` is written to
    `$XDG_CONFIG_HOME/opencode/opencode.json` (WI-3882).
-7. `graft-token` — a returned `graft_token` (the one minted for this pod) is written `0600` beside the
-   session token (`VOGT_GRAFT_TOKEN_FILE`, default `graft-token` in the same
-   directory) and exported as a path only.
+7. `source-token` — a returned `source_token`/`graft_token` (the one minted
+   for this pod) is written `0600` where `g`: under
+   `$XDG_CONFIG_HOME/graft/sessions/<graft_session>/trial-1.token`, with a
+   `config.toml` naming the `vogt-session` server, or beside the session token
+   for a non-graft source. `GRAFT_SESSION_ID` and `VOGT_GRAFT_TOKEN_FILE` are
+   exported as ids and paths only.
 8. `clone` — `graft --token-file <file> clone ...` into `VOGT_CLONE_DIR`
    (default `/work`). The agent's work directory is `VOGT_WORK_DIR`, which is
    the clone root unless the bootstrap response carried a `cwd` inside the
