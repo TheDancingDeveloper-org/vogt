@@ -18369,16 +18369,20 @@ mod pod_stream {
         }
 
         pub(super) async fn start_body(&self, body: Value) -> Uuid {
-            let created: Value = self
+            let response = self
                 .client
                 .post(format!("{}/api/sessions", self.base))
                 .json(&body)
                 .send()
                 .await
-                .unwrap()
-                .json()
-                .await
                 .unwrap();
+            let status = response.status();
+            let text = response.text().await.unwrap();
+            let created: Value = serde_json::from_str(&text).expect("a JSON session reply");
+            assert!(
+                created["id"].is_string(),
+                "start failed ({status}) for {body}: {text}"
+            );
             created["id"].as_str().unwrap().parse().unwrap()
         }
 
@@ -20676,9 +20680,11 @@ sleep 2
     async fn stopping_a_session_revokes_its_graft_token_at_graft() {
         let graft = FakeGraft::default();
         let (minter, _dir) = real_minter(graft.clone()).await;
-        let mut h = harness(false).await;
+        let mut h = core_harness(false).await;
         install_minter(&h, minter);
-        let id = h.start().await;
+        let id = h
+            .start_with(json!({ "source": graft_source(), "session_ref": "ses_stop" }))
+            .await;
         let (_, boot) = h.created.recv().await.unwrap();
         let body: Value = h.bootstrap(id, &boot).await.json().await.unwrap();
         let token = body["source_token"].as_str().unwrap().to_string();
@@ -20692,7 +20698,8 @@ sleep 2
             );
             assert_eq!(
                 g.minted[0].1.session.as_deref(),
-                Some(id.to_string().as_str())
+                Some("ses_stop"),
+                "the mint binds the core session id when the start named one"
             );
             assert!(
                 g.revokes.is_empty(),
@@ -20716,20 +20723,13 @@ sleep 2
     #[tokio::test]
     async fn a_failed_revoke_is_audited_and_the_stop_still_completes() {
         const SECRET: &str = "fake-minted-1";
-        let logs = LogCapture::default();
-        let _logging = tracing::subscriber::set_default(
-            tracing_subscriber::fmt()
-                .with_writer(logs.clone())
-                .with_ansi(false)
-                .with_max_level(tracing::Level::TRACE)
-                .finish(),
-        );
+        let logs = global_logs();
         let graft = FakeGraft::default();
         graft.0.lock().unwrap().revoke_fails = Some(tonic::Code::Internal);
         let (minter, _dir) = real_minter(graft.clone()).await;
-        let mut h = harness(false).await;
+        let mut h = core_harness(false).await;
         install_minter(&h, minter);
-        let id = h.start().await;
+        let id = h.start_with(json!({ "source": graft_source() })).await;
         let _ = h.created.recv().await.unwrap();
 
         // The stop completes: the session exits and its pod is deleted.
@@ -20743,10 +20743,10 @@ sleep 2
         })
         .await;
         until("the audit line", || {
-            String::from_utf8_lossy(&logs.0.lock().unwrap()).contains("could not revoke")
+            String::from_utf8_lossy(&logs.lock().unwrap()).contains("could not revoke")
         })
         .await;
-        let logged = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+        let logged = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
         assert!(logged.contains("vogt::audit"), "{logged}");
         assert!(logged.contains(&id.to_string()), "{logged}");
         assert!(!logged.contains(SECRET), "graft token in the logs");
@@ -20761,9 +20761,9 @@ sleep 2
     async fn a_pod_create_that_fails_after_the_mint_still_revokes_the_token() {
         let graft = FakeGraft::default();
         let (minter, _dir) = real_minter(graft.clone()).await;
-        let h = harness(true).await;
+        let h = core_harness(true).await;
         install_minter(&h, minter);
-        let _id = h.start().await;
+        let _id = h.start_with(json!({ "source": graft_source() })).await;
         until("the revoke", || !graft.0.lock().unwrap().revokes.is_empty()).await;
         assert_eq!(graft.0.lock().unwrap().revokes[0].1, "fake-minted-1");
     }
@@ -20786,22 +20786,68 @@ sleep 2
         }
     }
 
+    /// One process-wide capture for log assertions. A thread-local subscriber
+    /// alone loses events under parallel tests: `tracing`'s callsite interest
+    /// and max-level cache are global, so a sibling installing or dropping its
+    /// own subscriber can cache this callsite as "never" while it runs.
+    fn global_logs() -> Arc<Mutex<Vec<u8>>> {
+        static LOGS: std::sync::OnceLock<Arc<Mutex<Vec<u8>>>> = std::sync::OnceLock::new();
+        LOGS.get_or_init(|| {
+            let logs = Arc::new(Mutex::new(Vec::new()));
+            let _ = tracing::subscriber::set_global_default(
+                tracing_subscriber::fmt()
+                    .with_writer(LogCapture(logs.clone()))
+                    .with_ansi(false)
+                    .with_max_level(tracing::Level::TRACE)
+                    .finish(),
+            );
+            logs
+        })
+        .clone()
+    }
+
+    /// A source is named by vogt-core alone (`require_source_authority`), so
+    /// the graft tests start as the stack secret rather than break-glass.
+    const GRAFT_CORE_TOKEN: &str = "stack-secret-for-graft-mint-1234567890";
+
+    async fn core_harness(fail: bool) -> Harness {
+        let mut h = harness_cfg(fail, None, |cfg| {
+            cfg.vogt_core_token = Some(GRAFT_CORE_TOKEN.into())
+        })
+        .await;
+        h.client = client_for(GRAFT_CORE_TOKEN);
+        h
+    }
+
+    /// A project-owned graft source, the one case that earns a session token.
+    fn graft_source() -> Value {
+        json!({
+            "location": {"kind": "graft", "endpoint": "http://graft.test:17888", "repo": "vogt"},
+            "ref": "rust-2",
+            "landing": "line"
+        })
+    }
+
     impl Harness {
         async fn start_with(&self, extra: Value) -> Uuid {
             let mut body = json!({ "name": "pod-session", "template": "pod" });
             body.as_object_mut()
                 .unwrap()
                 .extend(extra.as_object().unwrap().clone());
-            let created: Value = self
+            let response = self
                 .client
                 .post(format!("{}/api/sessions", self.base))
                 .json(&body)
                 .send()
                 .await
-                .unwrap()
-                .json()
-                .await
                 .unwrap();
+            let status = response.status();
+            let text = response.text().await.unwrap();
+            let created: Value = serde_json::from_str(&text).expect("a JSON session reply");
+            assert!(
+                created["id"].is_string(),
+                "start failed ({status}) for {body}: {text}"
+            );
             created["id"].as_str().unwrap().parse().unwrap()
         }
     }
@@ -20809,20 +20855,15 @@ sleep 2
     #[tokio::test]
     async fn a_pod_gets_its_own_scoped_graft_token_that_never_leaks() {
         const SECRET: &str = "minted-graft-token-SECRET-1234";
-        let logs = LogCapture::default();
-        let _logging = tracing::subscriber::set_default(
-            tracing_subscriber::fmt()
-                .with_writer(logs.clone())
-                .with_ansi(false)
-                .with_max_level(tracing::Level::TRACE)
-                .finish(),
-        );
-        let mut h = harness(false).await;
+        let logs = global_logs();
+        let mut h = core_harness(false).await;
         let minter = FakeMinter::new(Ok(SECRET));
         install_minter(&h, minter.clone());
         let id = h
             .start_with(json!({
                 "work_item": "WI-3229",
+                "session_ref": "ses_01M76WJECNPXTPV2NKQQNBA8DA",
+                "source": graft_source(),
                 "budget": { "session_wall_clock_minutes": 60 },
             }))
             .await;
@@ -20833,7 +20874,9 @@ sleep 2
         // living for the session budget plus slack.
         let grants = minter.grants.lock().unwrap().clone();
         assert_eq!(grants.len(), 1);
-        assert_eq!(grants[0].session, id);
+        // Bound to the core's session id: that is the id the worker's brief
+        // names and the id its commits carry.
+        assert_eq!(grants[0].session, "ses_01M76WJECNPXTPV2NKQQNBA8DA");
         assert_eq!(grants[0].work_item.as_deref(), Some("WI-3229"));
         assert_eq!(grants[0].ttl_s, 60 * 60 + 30 * 60);
         assert_eq!(
@@ -20855,6 +20898,7 @@ sleep 2
         assert_eq!(boot.status(), StatusCode::OK);
         let body: Value = boot.json().await.unwrap();
         assert_eq!(body["source_token"], SECRET);
+        assert_eq!(body["graft_session"], "ses_01M76WJECNPXTPV2NKQQNBA8DA");
         assert!(!body["env"].to_string().contains(SECRET));
         assert!(!body["bundle"].to_string().contains(SECRET));
         assert_eq!(
@@ -20868,58 +20912,121 @@ sleep 2
             .contains(SECRET));
         let out = String::from_utf8_lossy(&h.scrollback(id).await).into_owned();
         assert!(!out.contains(SECRET));
-        let logged = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+        let logged = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
         assert!(
             logged.contains("minted the session's graft token"),
             "{logged}"
         );
+        // The line is this session's, not some sibling test's.
+        assert!(logged.contains(&id.to_string()), "{logged}");
         assert!(!logged.contains(SECRET), "graft token in the logs");
     }
 
     #[tokio::test]
-    async fn a_failed_mint_fails_the_pod_create_and_withdraws_the_bootstrap_token() {
-        let mut h = harness(false).await;
+    async fn an_unreachable_mint_still_starts_the_pod_without_a_token() {
+        let mut h = core_harness(false).await;
         let minter = FakeMinter::new(Err("graft could not be reached to mint a session token"));
         install_minter(&h, minter.clone());
-        let id = h.start().await;
-        // The exit code can land before the note reaches the scrollback, and
-        // the note can arrive in more than one chunk. Poll for the text itself,
-        // not for a non-empty scrollback (WI-3289, the same race as WI-3286).
-        let sid = id.to_string();
-        let exited = super::session_output_after_exit(
-            &h.client,
-            &h.base,
-            &sid,
-            &[
-                "session pod could not be created",
-                "graft could not be reached",
-            ],
-        )
-        .await;
-        let out = &exited.printed;
-        assert_eq!(
-            exited.exit_code,
-            Some(1),
-            "a failed mint ends the session with exit 1; got {out:?}"
-        );
-        assert!(out.contains("session pod could not be created"), "{out}");
+        let id = h
+            .start_with(json!({ "source": graft_source(), "session_ref": "ses_mint_failed" }))
+            .await;
+        // The pod starts anyway: a graft outage must not make sessions
+        // unavailable. The token is absent and the session says why.
+        let (created_id, token) = h.created.recv().await.expect("a pod is created");
+        assert_eq!(created_id, id);
+        let body: Value = h.bootstrap(id, &token).await.json().await.unwrap();
+        assert!(body.get("source_token").is_none(), "{body}");
+        assert!(body.get("graft_session").is_none(), "{body}");
+        let out = String::from_utf8_lossy(&h.scrollback(id).await).into_owned();
+        assert!(out.contains("session graft token unavailable"), "{out}");
         assert!(out.contains("graft could not be reached"), "{out}");
         assert_eq!(minter.grants.lock().unwrap().len(), 1);
-        // No pod was made, and nothing is left that could bootstrap one.
-        assert!(h.launcher.pods.lock().unwrap().is_empty());
-        assert!(h.created.try_recv().is_err());
-        assert!(
-            !vogt_engine_server::agent_stream::global()
-                .bootstrap_pending(id)
-                .await
-        );
+        assert_eq!(h.detail(id).await.summary.exit_code, None);
+    }
+
+    #[tokio::test]
+    async fn a_project_without_a_graft_source_earns_no_graft_token() {
+        // No project source: the deployment default only names what to clone,
+        // it is not a mapping that earns a repo-scoped landing token.
+        let mut h = harness(false).await;
+        let minter = FakeMinter::new(Ok("minted-graft-token"));
+        install_minter(&h, minter.clone());
+        let id = h.start().await;
+        let (created_id, token) = h.created.recv().await.expect("a pod is created");
+        assert_eq!(created_id, id);
+        let body: Value = h.bootstrap(id, &token).await.json().await.unwrap();
+        assert!(body.get("source_token").is_none(), "{body}");
+        assert!(minter.grants.lock().unwrap().is_empty());
+        let out = String::from_utf8_lossy(&h.scrollback(id).await).into_owned();
+        assert!(out.contains("names no graft source"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn a_git_project_neither_mints_nor_earns_a_graft_denial_note() {
+        let mut h = core_harness(false).await;
+        let minter = FakeMinter::new(Ok("minted-graft-token"));
+        install_minter(&h, minter.clone());
+        let id = h
+            .start_with(json!({
+                "source": {
+                    "location": {"kind": "git", "url": "https://example.invalid/vogt.git", "repo": "vogt"},
+                    "ref": "main",
+                    "landing": "open_pr"
+                }
+            }))
+            .await;
+        let (_, token) = h.created.recv().await.expect("a pod is created");
+        let body: Value = h.bootstrap(id, &token).await.json().await.unwrap();
+        assert!(body.get("source_token").is_none(), "{body}");
+        assert!(minter.grants.lock().unwrap().is_empty());
+        let out = String::from_utf8_lossy(&h.scrollback(id).await).into_owned();
+        assert!(!out.contains("session graft token unavailable"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn sibling_sessions_each_get_their_own_graft_token() {
+        // Oversight starts children through the same session.start path, so
+        // each one mints its own token rather than sharing the parent's.
+        let mut h = core_harness(false).await;
+        let minter = FakeMinter::new(Ok("minted-graft-token"));
+        install_minter(&h, minter.clone());
+        let first = h
+            .start_with(json!({ "source": graft_source(), "session_ref": "ses_first" }))
+            .await;
+        let (_, first_token) = h.created.recv().await.expect("first pod");
+        let second = h
+            .start_with(json!({ "source": graft_source(), "session_ref": "ses_second" }))
+            .await;
+        let (_, second_token) = h.created.recv().await.expect("second pod");
+        assert_ne!(first_token, second_token);
+        let sessions: Vec<String> = minter
+            .grants
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|g| g.session.clone())
+            .collect();
+        assert_eq!(sessions, ["ses_first", "ses_second"]);
+        for (id, token) in [(first, first_token), (second, second_token)] {
+            let body: Value = h.bootstrap(id, &token).await.json().await.unwrap();
+            assert_eq!(
+                body["graft_session"],
+                if id == first {
+                    "ses_first"
+                } else {
+                    "ses_second"
+                }
+            );
+        }
     }
 
     #[tokio::test]
     async fn a_pod_create_that_fails_after_the_mint_leaves_no_token_behind() {
-        let h = harness(true).await;
+        let h = core_harness(true).await;
         install_minter(&h, FakeMinter::new(Ok("minted-token")));
-        let id = h.start().await;
+        let id = h
+            .start_with(json!({ "source": graft_source(), "session_ref": "ses_failed_create" }))
+            .await;
         tokio::time::timeout(Duration::from_secs(10), async {
             while h.detail(id).await.summary.exit_code != Some(1) {
                 tokio::time::sleep(Duration::from_millis(25)).await;
@@ -20939,8 +21046,8 @@ sleep 2
         // No minter installed and no ENGINE_GRAFT_MINT_TOKEN_FILE: the
         // fallback path. (The shared-file half is covered by the
         // resolve_graft_token unit tests.)
-        let mut h = harness(false).await;
-        let id = h.start().await;
+        let mut h = core_harness(false).await;
+        let id = h.start_with(json!({ "source": graft_source() })).await;
         let (_, token) = h.created.recv().await.unwrap();
         let body: Value = h.bootstrap(id, &token).await.json().await.unwrap();
         assert!(body.get("source_token").is_none(), "{body}");
@@ -20948,10 +21055,10 @@ sleep 2
 
     #[tokio::test]
     async fn the_revoke_hook_runs_when_the_session_ends() {
-        let mut h = harness(false).await;
+        let mut h = core_harness(false).await;
         let minter = FakeMinter::new(Ok("minted-token"));
         install_minter(&h, minter.clone());
-        let id = h.start().await;
+        let id = h.start_with(json!({ "source": graft_source() })).await;
         let _ = h.created.recv().await.unwrap();
         let kill = h
             .client

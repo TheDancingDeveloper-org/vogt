@@ -106,7 +106,11 @@ impl std::fmt::Debug for GraftToken {
 /// What a session's graft token must allow: its repo and line, its identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionGrant {
-    pub session: Uuid,
+    /// The session the token is bound to: the core's `ses_...` id when the
+    /// start carried one, else the engine's UUID. Graft compares it with
+    /// `agent.session` on every write, so it must be the id the worker's
+    /// brief names (WI-4124).
+    pub session: String,
     pub repo: String,
     pub line: String,
     pub work_item: Option<String>,
@@ -114,16 +118,21 @@ pub struct SessionGrant {
 }
 
 impl SessionGrant {
-    /// The grant for one session's pod. `repo` and `line` must be plain names:
-    /// they are spliced into scope strings.
+    /// The grant for one session's pod. The session id, `repo` and `line` must
+    /// be plain names: they are spliced into the subject and scope strings.
     pub fn new(
-        session: Uuid,
+        session: impl Into<String>,
         repo: &str,
         line: &str,
         work_item: Option<&str>,
         budget: Option<&SessionBudget>,
     ) -> Result<Self> {
-        for (what, value) in [("repo", repo), ("line", line)] {
+        let session = session.into();
+        for (what, value) in [
+            ("session", session.as_str()),
+            ("repo", repo),
+            ("line", line),
+        ] {
             if !is_plain_name(value) {
                 return Err(ApiError::BadRequest(format!(
                     "graft {what} {value:?} is not a plain name"
@@ -169,7 +178,7 @@ impl SessionGrant {
             subject: self.subject(),
             scopes: self.scopes(),
             ttl_s: self.ttl_s,
-            session: Some(self.session.to_string()),
+            session: Some(self.session.clone()),
             work_item: self.work_item.clone(),
         }
     }
@@ -348,8 +357,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use tonic::codegen::{http, Body, StdError};
 
-    fn session() -> Uuid {
-        Uuid::parse_str("11111111-2222-3333-4444-555555555555").unwrap()
+    fn session() -> String {
+        "ses_01M76WJECNPXTPV2NKQQNBA8DA".to_string()
     }
 
     #[test]
@@ -365,13 +374,10 @@ mod tests {
             ]
         );
         let req = g.request();
-        assert_eq!(
-            req.subject,
-            "vogt-session-11111111-2222-3333-4444-555555555555"
-        );
+        assert_eq!(req.subject, "vogt-session-ses_01M76WJECNPXTPV2NKQQNBA8DA");
         assert_eq!(
             req.session.as_deref(),
-            Some("11111111-2222-3333-4444-555555555555")
+            Some("ses_01M76WJECNPXTPV2NKQQNBA8DA")
         );
         assert_eq!(req.work_item.as_deref(), Some("WI-3229"));
         // Another line gives another land scope and nothing broader.
@@ -399,6 +405,7 @@ mod tests {
         for bad in ["", "a:b", "a b", "a\nb", "-x", "a/b", &"x".repeat(65)] {
             assert!(SessionGrant::new(session(), bad, "rust-2", None, None).is_err());
             assert!(SessionGrant::new(session(), "vogt", bad, None, None).is_err());
+            assert!(SessionGrant::new(bad, "vogt", "rust-2", None, None).is_err());
         }
     }
 
@@ -554,7 +561,7 @@ mod tests {
         assert_eq!(req.scopes, grant.scopes());
         assert_eq!(req.ttl_s, 90 * 60 + TTL_SLACK_S);
         assert_eq!(req.subject, grant.subject());
-        assert_eq!(req.session.as_deref(), Some(session().to_string().as_str()));
+        assert_eq!(req.session.as_deref(), Some(session().as_str()));
         assert_eq!(req.work_item.as_deref(), Some("WI-3229"));
     }
 
