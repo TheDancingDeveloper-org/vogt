@@ -4,11 +4,18 @@ Main keeps moving while the port lives on `rust-core`. Once a week:
 
 1. `git fetch origin && git rebase origin/main` on `rust-core` (or merge, per
    the branch's current sync rule).
-2. Re-record the goldens into a directory named for the new base:
-   `uv run python scripts/parity.py record --impl python --out tests/parity/golden/<merge-base-sha7>`.
-   CI selects `tests/parity/golden/${merge-base:0:7}` (see the parity step in
-   `.github/workflows/rust-core.yml`), so the name must match the merge base.
-3. Delete the previous golden directory. Only the one CI selects is kept;
+2. Record the golden through CI, never from a worker checkout. Dispatch
+   `rust-core.yml` on the ref to record with `record_golden=true`
+   (`gh workflow run rust-core.yml --ref <ref> -f record_golden=true`).
+   The job writes `tests/parity/golden/<sha7>/{cli,http,mcp,schema}.json` and
+   their audits under the pinned `UV_PYTHON`, then opens a `golden/<sha7>`
+   pull request. Land that pull request before relying on the golden
+   (WI-2661: workers never commit a golden re-record).
+   The job names the directory for the dispatched commit. When that is not the
+   merge base, the selector falls back to the newest ancestor recording and
+   announces it (see `.github/workflows/rust-core.yml`).
+3. Do not delete another recording by hand. The selector keeps the one named
+   for the merge base, or the newest ancestor when none matches;
    `mcp-tools.json`, `openapi.json` and `registry.json` beside it are separate,
    generated fixtures and stay.
 4. Check both implementations against the new golden:
