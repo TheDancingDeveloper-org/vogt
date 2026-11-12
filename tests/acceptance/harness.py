@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import atexit
 import contextlib
+import functools
 import json
 import re
 import secrets
@@ -310,7 +311,18 @@ class Context:
         self.cleanup.append((label, action))
 
     def track_session(self, session_id: str) -> None:
+        """Track a session for the whole run, not only for this case.
+
+        The sessions group starts one pod in S1 and asserts against it in S2
+        onwards, so a per-case stop would kill the subject before the next
+        case ran. The run's shared cleanup stops it once the group is done,
+        and the atexit sweep retries if the process dies first.
+        """
         self.started_sessions.append(session_id)
+        on_run_cleanup(
+            f"stop session {session_id}",
+            functools.partial(self.stop_session, session_id),
+        )
 
     def stop_session(self, session_id: str) -> None:
         if session_id in self._stopped:
@@ -330,11 +342,6 @@ class Context:
             except Exception as exc:
                 problems.append(redact(f"{label}: {type(exc).__name__}: {exc}"))
         self.cleanup.clear()
-        for session_id in list(self.started_sessions):
-            try:
-                self.stop_session(session_id)
-            except Exception as exc:
-                problems.append(redact(f"stop {session_id}: {exc}"))
         return problems
 
 

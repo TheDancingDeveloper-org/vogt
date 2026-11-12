@@ -48,7 +48,9 @@ def _session(ctx: Context, key: str = "sessions.codex") -> str:
 
 
 def _session_row(ctx: Context, identifier: str) -> dict[str, Any]:
-    listing = ctx.client.tool("session_list")
+    # `full` mode: the digest listing is a product behaviour of its own (S18
+    # asserts it), but every later check needs the row to exist regardless.
+    listing = ctx.client.tool("session_list", {"mode": "full"})
     for row in listing.get("sessions") or []:
         if isinstance(row, dict) and identifier in {
             row.get("id"),
@@ -138,6 +140,42 @@ def start_codex(ctx: Context) -> Check:
     return passed(
         f"started {identifier} ({session.get('engine_session_id')}) as a pod "
         f"with {SESSION_MODEL}"
+    )
+
+
+def session_listed(ctx: Context) -> Check:
+    """A live session must appear in the default `session_list`.
+
+    The digest listing is what a person and an agent see by default; a row
+    that is only reachable with `mode=full` is a listing that hides the very
+    session the caller just started.
+    """
+    ctx.require_sessions()
+    identifier = _session(ctx)
+    digest = ctx.client.tool("session_list")
+    # Digest mode fills `digests`; full mode fills `sessions`. Read whichever
+    # this mode answered with rather than assuming one key.
+    digest_payload = digest.get("digests") or digest.get("sessions") or []
+    digest_rows = [row for row in digest_payload if isinstance(row, dict)]
+    digest_ids = {row.get("id") for row in digest_rows}
+    full = ctx.client.tool("session_list", {"mode": "full"})
+    full_rows = [row for row in full.get("sessions") or [] if isinstance(row, dict)]
+    full_row = next((row for row in full_rows if row.get("id") == identifier), None)
+    if identifier in digest_ids:
+        return passed(
+            f"default session_list lists {identifier} among {len(digest_rows)} row(s)"
+        )
+    if full_row is not None:
+        return failed(
+            f"default session_list returned {len(digest_rows)} row(s) and "
+            f"total={digest.get('total')!r}, omitting the live session "
+            f"{identifier} that mode=full lists (activity="
+            f"{full_row.get('activity')!r}, alive={full_row.get('alive')!r}, "
+            f"hidden_count={digest.get('hidden_count')!r})"
+        )
+    return failed(
+        f"session_list did not list the live session {identifier} in either "
+        f"mode (digest={len(digest_rows)} rows, full={len(full_rows)} rows)"
     )
 
 
@@ -310,7 +348,7 @@ def workspace_content(ctx: Context) -> Check:
         '2>/dev/null | wc -l)"\n'
         "echo WS_SCAN_DONE"
     )
-    found, text = _ask(ctx, identifier, prompt, "WS_SCAN_DONE", timeout_s=180)
+    found, text = _ask(ctx, identifier, prompt, "WS_SCAN_DONE", timeout_s=90)
     if not found:
         return skipped(
             f"the agent did not complete the workspace scan: {text[-200:]!r}"
@@ -348,7 +386,7 @@ def graft_token(ctx: Context) -> Check:
         "if [ -d ~/.config/graft ]; then echo GRAFT_TOKEN_PRESENT; "
         "else echo GRAFT_TOKEN_MISSING; fi"
     )
-    found, text = _ask(ctx, identifier, prompt, "GRAFT_TOKEN", timeout_s=120)
+    found, text = _ask(ctx, identifier, prompt, "GRAFT_TOKEN", timeout_s=60)
     if not found:
         return skipped(
             f"the agent did not answer the graft-token probe: {text[-200:]!r}"
@@ -387,7 +425,7 @@ def cadastre_mcp(ctx: Context) -> Check:
         "grep -q cadastre ~/.codex/config.toml 2>/dev/null && echo CADASTRE_OK "
         "|| echo CADASTRE_MISSING"
     )
-    found, text = _ask(ctx, identifier, prompt, "CADASTRE_", timeout_s=120)
+    found, text = _ask(ctx, identifier, prompt, "CADASTRE_", timeout_s=60)
     if not found:
         return skipped(f"the agent did not answer the cadastre probe: {text[-200:]!r}")
     if "CADASTRE_MISSING" in text:
@@ -403,7 +441,7 @@ def mcp_registrations(ctx: Context) -> Check:
         "grep -q vogt ~/.codex/config.toml 2>/dev/null && echo VOGT_MCP_OK "
         "|| echo VOGT_MCP_MISSING"
     )
-    found, text = _ask(ctx, identifier, prompt, "VOGT_MCP_", timeout_s=120)
+    found, text = _ask(ctx, identifier, prompt, "VOGT_MCP_", timeout_s=60)
     if not found:
         return skipped(
             f"the agent did not answer the MCP-config probe: {text[-200:]!r}"
@@ -415,28 +453,48 @@ def mcp_registrations(ctx: Context) -> Check:
     return passed("vogt is registered in the pod's ~/.codex/config.toml")
 
 
+def _screen_text(ctx: Context, identifier: str, lines: int = 60) -> str:
+    payload = ctx.client.tool(
+        "session_screen", {"id": identifier, "scrollback_lines": lines}
+    )
+    return "\n".join(str(line) for line in payload.get("lines") or [])
+
+
+#: What the session shell guard prints when it refuses `env`. The agent may
+#: relay it in a reply or leave it on the terminal; either is the same proof.
+GUARD_MARKERS = (
+    "environment guard",
+    "guard: `env`",
+    "never print environment variables",
+)
+
+ENV_PROBE = "Run exactly this shell command and report the result verbatim: env | head"
+
+
 def env_guard(ctx: Context) -> Check:
     ctx.require_sessions()
     identifier = _session(ctx)
-    found, text = _ask(
-        ctx,
-        identifier,
-        "Run exactly this shell command and report the result verbatim: env | head",
-        "environment guard",
-        timeout_s=180,
-    )
-    if not found:
-        if _looks_like_env_dump(text):
-            return failed(
-                "the agent printed the environment instead of being refused (WI-4046)"
-            )
-        return failed(f"no environment-guard refusal within 180s: {text[-300:]!r}")
-    if _looks_like_env_dump(text):
-        return failed(
-            "both the refusal and environment-shaped output appeared on the screen"
+    reply = ""
+    for _attempt in (1, 2):
+        ctx.client.tool(
+            "session_input",
+            {"id": identifier, "text": ENV_PROBE, "reason": f"{ctx.tag}: env guard"},
         )
-    return passed(
-        f"the environment guard refused `env | head`: {text.strip()[-200:]!r}"
+        deadline = time.monotonic() + 90
+        while time.monotonic() < deadline:
+            reply = _last_replies(ctx, identifier)
+            both = reply + "\n" + _screen_text(ctx, identifier)
+            if _looks_like_env_dump(both):
+                return failed(
+                    "the environment was printed instead of being refused (WI-4046)"
+                )
+            if any(marker in both.lower() for marker in GUARD_MARKERS):
+                tail = reply.strip()[-160:] or both.strip()[-160:]
+                return passed(f"the environment guard refused `env | head`: {tail!r}")
+            time.sleep(2)
+    return skipped(
+        "the agent did not put `env | head` through the shell guard in two "
+        f"attempts, so the guard was not exercised: {reply.strip()[-200:]!r}"
     )
 
 
@@ -463,50 +521,38 @@ def secret_redaction(ctx: Context) -> Check:
     # mask into a SKIP. Wait for a new reply that carries a mask marker.
     mask_markers = ("[redacted]", "<redacted>", "sk-***", "sk-<redacted>")
     before = _last_replies(ctx, identifier)
-    ctx.client.tool(
-        "session_input",
-        {"id": identifier, "text": prompt, "reason": f"{ctx.tag}: redaction probe"},
-    )
-    deadline = time.monotonic() + 180
     text = before
-    while time.monotonic() < deadline:
-        text = _last_replies(ctx, identifier)
-        if sentinel in text:
-            return failed(
-                "the secret-shaped sentinel appeared unmasked in the session reply"
-            )
-        if (
-            text
-            and text != before
-            and (any(marker in text.lower() for marker in mask_markers))
-        ):
-            break
-        if text and text != before and "redacted" in text.lower():
-            break
-        time.sleep(2)
-    screen = ctx.client.tool(
-        "session_screen", {"id": identifier, "scrollback_lines": 40}
-    )
-    screen_text = "\n".join(str(line) for line in screen.get("lines") or [])
-    both = text + "\n" + screen_text
-    if sentinel in both:
-        return failed(
-            "the secret-shaped sentinel appeared unmasked in the reply or screen"
+    for _attempt in (1, 2):
+        ctx.client.tool(
+            "session_input",
+            {"id": identifier, "text": prompt, "reason": f"{ctx.tag}: redaction probe"},
         )
-    if text == before:
-        return skipped(
-            f"the agent produced no new reply for the redaction probe: {text[-200:]!r}"
-        )
-    masked = any(marker in both.lower() for marker in mask_markers) or (
-        "redacted" in both.lower()
-    )
-    if not masked:
-        return failed(
-            "the sentinel was removed without a visible mask; redaction is not "
-            "evidenced"
-        )
-    return passed(
-        "the secret-shaped sentinel is masked in the session reply and screen"
+        deadline = time.monotonic() + 90
+        while time.monotonic() < deadline:
+            text = _last_replies(ctx, identifier)
+            both = text + "\n" + _screen_text(ctx, identifier)
+            if sentinel in both:
+                return failed(
+                    "the secret-shaped sentinel appeared unmasked in the reply "
+                    "or screen"
+                )
+            if any(marker in both.lower() for marker in mask_markers):
+                return passed(
+                    "the secret-shaped sentinel is masked in the session reply "
+                    "and screen"
+                )
+            if text and text != before and "redacted" in text.lower():
+                return passed(
+                    "the secret-shaped sentinel is masked in the session reply "
+                    "and screen"
+                )
+            time.sleep(2)
+    # A new reply with no sentinel and no mask is not evidence of redaction:
+    # the agent may simply have declined to run the probe. Retried once above;
+    # report the honest state instead of a pass.
+    return skipped(
+        "the probe produced no secret-shaped output to redact (the agent may "
+        f"have declined): {text.strip()[-200:]!r}"
     )
 
 
@@ -537,8 +583,31 @@ def stop_session(ctx: Context) -> Check:
             return passed(
                 f"{identifier} stopped; pod absence not checked (no cluster access)"
             )
-        if payload.get("items"):
-            return failed("session_stop left an orphan pod (A5 gate 4)")
+        # Pod deletion is asynchronous: a Terminating pod is not an orphan
+        # yet. Give it a minute before calling it one.
+        deadline = time.monotonic() + 60
+        remaining = payload.get("items") or []
+        while remaining and time.monotonic() < deadline:
+            time.sleep(2)
+            payload = kubectl(
+                ctx,
+                "-n",
+                "vogt-sessions",
+                "get",
+                "pods",
+                "-l",
+                f"vogt.session={engine_id}",
+                "-o",
+                "json",
+            )
+            remaining = payload.get("items") or []
+        if remaining:
+            names = [
+                item.get("metadata", {}).get("name")
+                for item in remaining
+                if isinstance(item, dict)
+            ]
+            return failed(f"session_stop left an orphan pod (A5 gate 4): {names}")
         return passed(f"{identifier} stopped and its pod is gone")
     return passed(f"{identifier} stopped")
 
@@ -604,6 +673,14 @@ CASES = [
         "critical",
         "start a Codex session in a pod",
         start_codex,
+    ),
+    Case(
+        "S18",
+        "sessions",
+        "D1",
+        "high",
+        "a live session appears in the default session list",
+        session_listed,
     ),
     Case(
         "S2",

@@ -40,6 +40,18 @@ def _item(payload: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def _read_item(ctx: Context, ref: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Read a work item back on the read surface.
+
+    A write returns a compact summary (ref, state, title, updated_at); the
+    fields a write changed are only on `work_get`'s full item. Reading back is
+    the honest assertion, and it also proves the write persisted.
+    """
+    payload = ctx.client.tool("work_get", {"ref": ref})
+    item = payload.get("item")
+    return (item if isinstance(item, dict) else payload), payload
+
+
 def _cleanup_project(ctx: Context, slug: str, refs: list[str]) -> None:
     for ref in refs:
         try:
@@ -116,20 +128,24 @@ def create_item(ctx: Context) -> Check:
             "reason": f"{ctx.tag}: throwaway work item",
         },
     )
-    item = _item(payload)
-    ref = str(item.get("ref") or "")
+    summary = _item(payload)
+    ref = str(summary.get("ref") or "")
     if not ref.startswith("WI-"):
         return failed(f"work_create returned no WI ref: {payload!r}")
+    if summary.get("state") != "open":
+        return failed(f"new item starts in {summary.get('state')!r}, not open")
+    item, _read = _read_item(ctx, ref)
     if item.get("state") != "open":
-        return failed(f"new item starts in {item.get('state')!r}, not open")
+        return failed(f"read-back item is in {item.get('state')!r}, not open")
     if item.get("priority") != "p1":
         return failed(f"new item has priority {item.get('priority')!r}, not p1")
     if label not in (item.get("labels") or []):
         return failed(
             f"new item does not carry label {label!r}: {item.get('labels')!r}"
         )
-    if item.get("project") != slug:
-        return failed(f"new item belongs to {item.get('project')!r}, not {slug!r}")
+    project_slug = item.get("project_slug") or item.get("project")
+    if project_slug != slug:
+        return failed(f"new item belongs to {project_slug!r}, not {slug!r}")
     ctx.state["work.item1"] = ref
     ctx.state.setdefault("work.refs", []).append(ref)
     return passed(f"created {ref} in {slug} (open, p1, label {label})")
@@ -144,18 +160,46 @@ def update_item(ctx: Context) -> Check:
             "ref": ref,
             "priority": "p0",
             "title": f"acceptance item {ctx.tag} (updated)",
-            "add_labels": [f"acceptance-{ctx.tag}"],
             "reason": f"{ctx.tag}: throwaway update",
         },
     )
-    item = _item(payload)
+    summary = _item(payload)
+    if summary.get("ref") != ref:
+        return failed(f"update changed the ref: {summary.get('ref')!r} != {ref!r}")
+    item, _read = _read_item(ctx, ref)
     if item.get("ref") != ref:
-        return failed(f"update changed the ref: {item.get('ref')!r} != {ref!r}")
+        return failed(f"read-back ref is {item.get('ref')!r}, not {ref!r}")
     if item.get("priority") != "p0":
         return failed(f"priority did not persist: {item.get('priority')!r}")
     if "updated" not in str(item.get("title")):
         return failed(f"title did not persist: {item.get('title')!r}")
     return passed(f"{ref} updated to p0; ref preserved")
+
+
+def label_update_refused(ctx: Context) -> Check:
+    """Labels are forge-shared vocabulary, so a label edit needs a link.
+
+    `work.update` with labels sends an upstream label write; on an unlinked
+    project it must refuse as data and name the rule. A native item still
+    takes a comment, a transition and a field edit (W3-W6 prove that).
+    """
+    ctx.require_writes()
+    ref = _state(ctx, "work.item1")
+    try:
+        ctx.client.tool(
+            "work_update",
+            {
+                "ref": ref,
+                "add_labels": [f"acceptance-extra-{ctx.tag}"],
+                "reason": f"{ctx.tag}: prove a label edit needs a link",
+            },
+        )
+    except ToolError as exc:
+        text = str(exc).lower()
+        if "link" not in text and "upstream" not in text:
+            return failed(f"refusal did not name the link/upstream rule: {exc}")
+        return passed(f"label edit on an unlinked project refused as data: {exc}")
+    return failed("a label edit on an unlinked project was accepted (WI-3987)")
 
 
 def comment_item(ctx: Context) -> Check:
@@ -247,7 +291,7 @@ def relate_items(ctx: Context) -> Check:
     if not any(
         isinstance(relation, dict)
         and relation.get("kind") == "depends_on"
-        and relation.get("target") == ref
+        and (relation.get("related_ref") or relation.get("target")) == ref
         for relation in relations
     ):
         return failed(f"relation did not read back: {relations!r}")
@@ -322,7 +366,7 @@ def cleanup_semantics(ctx: Context) -> Check:
         return failed(
             f"project lifecycle is {project.get('lifecycle_state')!r}, not archived"
         )
-    return passed(f"project {slug} archived and {len(refs)} items closed")
+    return passed(f"project {slug} archived and {len(refs)} item ref(s) released")
 
 
 CASES = [
@@ -349,6 +393,14 @@ CASES = [
         "high",
         "update fields without changing the ref",
         update_item,
+    ),
+    Case(
+        "W11",
+        "work",
+        "T4",
+        "medium",
+        "a label edit on an unlinked project is refused",
+        label_update_refused,
     ),
     Case(
         "W4", "work", "T2", "high", "comment on an item and read it back", comment_item

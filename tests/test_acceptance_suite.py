@@ -105,6 +105,36 @@ def test_cleanup_runs_after_a_failing_case() -> None:
     assert client.stopped == ["ses_fake_cleanup"]
 
 
+def test_a_tracked_session_survives_the_case_that_started_it() -> None:
+    """S1 starts the pod the later session cases assert against.
+
+    A per-case Context used to stop every session it had tracked, so S1 killed
+    the pod before S2 waited for it and the whole group failed against the
+    live instance. The stop belongs to the run, after the last case.
+    """
+    client = _StoppingClient()
+    seen: list[list[str]] = []
+
+    def start_case(ctx: harness.Context) -> harness.Check:
+        ctx.track_session("ses_shared")
+        return harness.passed("started")
+
+    def use_case(ctx: harness.Context) -> harness.Check:
+        seen.append(list(client.stopped))
+        return harness.passed("still there")
+
+    cases = [
+        harness.Case("T-start", "local", "WI-4135", "critical", "start", start_case),
+        harness.Case("T-use", "local", "WI-4135", "critical", "use", use_case),
+    ]
+    summary = harness.run_cases(
+        cases, client=client, options=harness.Options(fake=True), tag="acceptance-share"
+    )
+    assert [result.verdict for result in summary.results] == ["PASS", "PASS"]
+    assert seen == [[]], "the session was stopped before the next case ran"
+    assert client.stopped == ["ses_shared"]
+
+
 def test_atexit_sweep_reads_the_live_nested_sweep_row() -> None:
     """`session_sweep` answers `{attention, session: {reason, id}}` live.
 
@@ -287,6 +317,107 @@ def test_full_fake_run_is_green_and_redacts_a_leaked_token(
             result["id"] == "S14" and result["verdict"] == "PASS"
             for result in document["results"]
         )
+
+
+def test_fake_work_writes_answer_with_the_live_compact_summary() -> None:
+    """The live write surface answers with four fields, not the whole item.
+
+    A check that asserted priority on the write result would fail against the
+    live instance even though the write persisted; the fake must keep the same
+    shape so the offline run catches that class of mistake.
+    """
+    from tests.acceptance.client import HttpClient, McpClient
+
+    with FakeServer() as fake:
+        mcp = McpClient(HttpClient(fake.base_url, token=fake.token))
+        mcp.initialize()
+        project = mcp.tool(
+            "project_create",
+            {
+                "name": "acceptance-shape",
+                "root_path": "/tmp/acceptance-shape",
+                "lifecycle_state": "incubating",
+                "reason": "offline shape test",
+            },
+        )
+        slug = str((project.get("project") or project)["slug"])
+        created = mcp.tool(
+            "work_create",
+            {
+                "kind": "bug",
+                "title": "shape",
+                "priority": "p1",
+                "project": slug,
+                "local_only": True,
+                "labels": ["shape"],
+                "reason": "offline shape test",
+            },
+        )
+        assert set(created) == {"ref", "state", "title", "updated_at"}
+        read = mcp.tool("work_get", {"ref": created["ref"]})
+        assert read["item"]["priority"] == "p1"
+        assert read["item"]["project_slug"] == slug
+        assert read["item"]["labels"] == ["shape"]
+        assert read["comments"] == []
+        target = mcp.tool(
+            "work_create",
+            {
+                "kind": "chore",
+                "title": "shape target",
+                "project": slug,
+                "local_only": True,
+                "reason": "offline shape test",
+            },
+        )
+        related = mcp.tool(
+            "work_relate",
+            {
+                "ref": target["ref"],
+                "kind": "depends_on",
+                "target": created["ref"],
+                "reason": "offline shape test",
+            },
+        )
+        relation = related["item"]["relations"][0]
+        assert relation["related_ref"] == created["ref"]
+        updated = mcp.tool(
+            "work_update",
+            {"ref": created["ref"], "priority": "p0", "reason": "offline shape test"},
+        )
+        assert set(updated) == {"ref", "state", "title", "updated_at"}
+        assert mcp.tool("work_get", {"ref": created["ref"]})["item"]["priority"] == "p0"
+
+
+def test_fake_session_list_splits_digest_and_full_rows() -> None:
+    """`session_list` answers digest rows under `digests`, full under `sessions`.
+
+    The live surface does this, so a check that reads only `sessions` sees an
+    empty list in the default mode. The fake has to keep the split or the
+    offline run cannot catch that mistake.
+    """
+    from tests.acceptance.client import HttpClient, McpClient
+
+    with FakeServer() as fake:
+        mcp = McpClient(HttpClient(fake.base_url, token=fake.token))
+        mcp.initialize()
+        started = mcp.tool(
+            "session_start",
+            {
+                "project": "vogt",
+                "placement": "pod",
+                "worktree": False,
+                "model": "deepseek/deepseek-v4-flash",
+                "task": "Reply with READY.",
+                "reason": "offline shape test",
+            },
+        )
+        session_id = str((started.get("session") or started)["id"])
+        digest = mcp.tool("session_list")
+        assert digest["sessions"] == []
+        assert [row["id"] for row in digest["digests"]] == [session_id]
+        full = mcp.tool("session_list", {"mode": "full"})
+        assert full["digests"] == []
+        assert [row["id"] for row in full["sessions"]] == [session_id]
 
 
 def test_suite_docs_the_fake_verification() -> None:
