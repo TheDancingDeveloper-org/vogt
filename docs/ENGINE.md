@@ -5280,8 +5280,14 @@ names another policy file and `off` turns the policy off, like
 starts without `--settings`. The MCP file comes from the bootstrap response
 (`mcp_config`): the Vogt MCP endpoint (`<ENGINE_POD_ENGINE_ENDPOINT>/mcp`) and,
 when `ENGINE_CADASTRE_MCP_URL` is set, Cadastre, as streamable-HTTP servers. The
-Vogt entry's `Authorization` header is `Bearer ${VOGT_HTTP_TOKEN}`, so the file
-holds no credential. The engine mints the session's own core credential
+Vogt entry's `Authorization` header is `Bearer ${VOGT_HTTP_TOKEN}` and
+Cadastre's is `Bearer ${CADASTRE_HTTP_TOKEN}`, so the file holds no credential.
+Cadastre is registered only when the agent-auth manifest declares
+`CADASTRE_HTTP_TOKEN` (any policy, `ondemand` included) or the session holds an
+approved grant for it; with no bearer it is left out rather than registered to
+answer 401. Because a pod does not run the CLI under `vogt-agent-auth run`, a
+Codex session gets that bearer fetched through the broker around the Codex
+child, beside its provider keys (WI-4121). The engine mints the session's own core credential
 (`agent:engine:<id>`, as for a host agent session, revoked when the session
 ends) and returns it as `VOGT_HTTP_TOKEN` in the bootstrap `env`, with
 `VOGT_ENGINE_SESSION_ID`. When the core is absent or refuses, the file is empty

@@ -40,23 +40,40 @@ pub fn for_backend(
     }
 }
 
+/// The variable the pod's Cadastre MCP entry names for its bearer (WI-4121).
+/// The host's mcp-bootstrap registers the same name, so a pod and a host
+/// session authenticate the same way; the value is brokered through the
+/// agent-auth manifest and fetched around the agent, never written here.
+pub const CADASTRE_TOKEN_ENV: &str = "CADASTRE_HTTP_TOKEN";
+
 /// The header the pod's Vogt MCP entry sends. Claude Code expands
 /// `${VOGT_HTTP_TOKEN}` from the session's environment when it reads the
 /// file, so the credential is never written to disk.
 const VOGT_AUTHORIZATION: &str = "Bearer ${VOGT_HTTP_TOKEN}";
+
+/// Cadastre's Claude Code counterpart (WI-4121).
+const CADASTRE_AUTHORIZATION: &str = "Bearer ${CADASTRE_HTTP_TOKEN}";
 
 /// The `--mcp-config` file a pod-backed Claude Code session is started with
 /// (WI-3243): `endpoints.mcp` as streamable-HTTP servers, the Vogt one
 /// carrying the session's bearer by environment reference. With
 /// `has_credential` false the Vogt entry is left out: without a token it could
 /// only answer 401, and the file is still passed with `--strict-mcp-config`
-/// so the account's own MCP set does not apply in its place.
-pub fn claude_mcp_config(endpoints: &SessionEndpoints, has_credential: bool) -> Value {
+/// so the account's own MCP set does not apply in its place. Cadastre follows
+/// the same rule on `has_cadastre_credential` (WI-4121): a deployment that
+/// declares no token for it gets no entry rather than one that always 401s.
+pub fn claude_mcp_config(
+    endpoints: &SessionEndpoints,
+    has_credential: bool,
+    has_cadastre_credential: bool,
+) -> Value {
     let mut servers = serde_json::Map::new();
     if let Some(entries) = endpoints.mcp.as_object() {
         for (name, entry) in entries {
-            if name == "vogt" && !has_credential {
-                continue;
+            match name.as_str() {
+                "vogt" if !has_credential => continue,
+                "cadastre" if !has_cadastre_credential => continue,
+                _ => {}
             }
             let Some(url) = entry.get("url").and_then(Value::as_str) else {
                 continue;
@@ -64,6 +81,8 @@ pub fn claude_mcp_config(endpoints: &SessionEndpoints, has_credential: bool) -> 
             let mut server = json!({"type": "http", "url": url});
             if name == "vogt" {
                 server["headers"] = json!({"Authorization": VOGT_AUTHORIZATION});
+            } else if name == "cadastre" {
+                server["headers"] = json!({"Authorization": CADASTRE_AUTHORIZATION});
             }
             servers.insert(name.clone(), server);
         }
@@ -72,23 +91,35 @@ pub fn claude_mcp_config(endpoints: &SessionEndpoints, has_credential: bool) -> 
 }
 
 /// The `config.toml` a pod-backed Codex session runs with (WI-3161): the same
-/// servers as `claude_mcp_config`, the Vogt one naming its bearer by the
-/// environment variable Codex reads at spawn (`bearer_token_env_var`), so the
-/// file holds no credential. The entrypoint merges it into `$CODEX_HOME`.
-pub fn codex_mcp_config(endpoints: &SessionEndpoints, has_credential: bool) -> String {
+/// servers as `claude_mcp_config`, each authenticated one naming its bearer by
+/// the environment variable Codex reads at spawn (`bearer_token_env_var`), so
+/// the file holds no credential. The session agent fetches those names from
+/// the broker around the Codex child (WI-3886). The entrypoint merges the
+/// fragment into `$CODEX_HOME`.
+pub fn codex_mcp_config(
+    endpoints: &SessionEndpoints,
+    has_credential: bool,
+    has_cadastre_credential: bool,
+) -> String {
     let mut out = String::new();
     if let Some(entries) = endpoints.mcp.as_object() {
         for (name, entry) in entries {
-            if name == "vogt" && !has_credential {
-                continue;
+            match name.as_str() {
+                "vogt" if !has_credential => continue,
+                "cadastre" if !has_cadastre_credential => continue,
+                _ => {}
             }
             let Some(url) = entry.get("url").and_then(Value::as_str) else {
                 continue;
             };
             // A JSON string is a valid TOML basic string.
             out.push_str(&format!("[mcp_servers.{name}]\nurl = {}\n", json!(url)));
-            if name == "vogt" {
-                out.push_str("bearer_token_env_var = \"VOGT_HTTP_TOKEN\"\n");
+            match name.as_str() {
+                "vogt" => out.push_str("bearer_token_env_var = \"VOGT_HTTP_TOKEN\"\n"),
+                "cadastre" => out.push_str(&format!(
+                    "bearer_token_env_var = \"{CADASTRE_TOKEN_ENV}\"\n"
+                )),
+                _ => {}
             }
             out.push('\n');
         }
@@ -97,14 +128,20 @@ pub fn codex_mcp_config(endpoints: &SessionEndpoints, has_credential: bool) -> S
 }
 
 /// The `opencode.json` a pod-backed opencode session runs with (WI-3161):
-/// remote servers, the Vogt one sending `{env:VOGT_HTTP_TOKEN}` that opencode
+/// remote servers, an authenticated one sending `{env:NAME}` that opencode
 /// expands itself, so no credential is in the file.
-pub fn opencode_mcp_config(endpoints: &SessionEndpoints, has_credential: bool) -> Value {
+pub fn opencode_mcp_config(
+    endpoints: &SessionEndpoints,
+    has_credential: bool,
+    has_cadastre_credential: bool,
+) -> Value {
     let mut servers = serde_json::Map::new();
     if let Some(entries) = endpoints.mcp.as_object() {
         for (name, entry) in entries {
-            if name == "vogt" && !has_credential {
-                continue;
+            match name.as_str() {
+                "vogt" if !has_credential => continue,
+                "cadastre" if !has_cadastre_credential => continue,
+                _ => {}
             }
             let Some(url) = entry.get("url").and_then(Value::as_str) else {
                 continue;
@@ -112,6 +149,8 @@ pub fn opencode_mcp_config(endpoints: &SessionEndpoints, has_credential: bool) -
             let mut server = json!({"type": "remote", "url": url});
             if name == "vogt" {
                 server["headers"] = json!({"Authorization": "Bearer {env:VOGT_HTTP_TOKEN}"});
+            } else if name == "cadastre" {
+                server["headers"] = json!({"Authorization": "Bearer {env:CADASTRE_HTTP_TOKEN}"});
             }
             servers.insert(name.clone(), server);
         }
@@ -182,7 +221,7 @@ mod tests {
             Some("https://192.168.1.75:18197"),
             Some("https://cadastre.example.test"),
         );
-        let config = claude_mcp_config(&endpoints, true);
+        let config = claude_mcp_config(&endpoints, true, true);
         assert_eq!(
             config,
             json!({"mcpServers": {
@@ -209,8 +248,39 @@ mod tests {
             None,
         );
         assert_eq!(
-            claude_mcp_config(&endpoints, false),
+            claude_mcp_config(&endpoints, false, false),
             json!({"mcpServers": {}})
+        );
+    }
+
+    /// WI-4121: a cadastre URL with no token the deployment declares or the
+    /// session holds is omitted, not registered to answer 401 forever.
+    #[test]
+    fn cadastre_without_a_declared_token_is_left_out() {
+        let endpoints = for_backend(
+            "pod",
+            "127.0.0.1:8910".parse().unwrap(),
+            Some("https://192.168.1.75:18197"),
+            Some("https://cadastre.example.test"),
+        );
+        assert_eq!(
+            claude_mcp_config(&endpoints, true, false),
+            json!({"mcpServers": {
+                "vogt": {
+                    "type": "http",
+                    "url": "https://192.168.1.75:18197/mcp",
+                    "headers": {"Authorization": "Bearer ${VOGT_HTTP_TOKEN}"}
+                }
+            }})
+        );
+        assert!(!codex_mcp_config(&endpoints, true, false).contains("mcp_servers.cadastre"));
+        assert_eq!(
+            opencode_mcp_config(&endpoints, true, false)["mcp"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .collect::<Vec<_>>(),
+            ["vogt"]
         );
     }
 
@@ -222,7 +292,7 @@ mod tests {
             Some("https://192.168.1.75:18197"),
             Some("https://cadastre.example.test"),
         );
-        let codex = codex_mcp_config(&endpoints, true);
+        let codex = codex_mcp_config(&endpoints, true, true);
         assert!(codex.contains(
             "[mcp_servers.vogt]\nurl = \"https://192.168.1.75:18197/mcp\"\nbearer_token_env_var = \"VOGT_HTTP_TOKEN\"\n"
         ));
@@ -234,7 +304,7 @@ mod tests {
         );
         assert!(!codex.contains("value-of"));
         assert_eq!(
-            opencode_mcp_config(&endpoints, true),
+            opencode_mcp_config(&endpoints, true, true),
             json!({"mcp": {
                 "vogt": {"type": "remote", "url": "https://192.168.1.75:18197/mcp",
                          "headers": {"Authorization": "Bearer {env:VOGT_HTTP_TOKEN}"}},
@@ -242,9 +312,9 @@ mod tests {
                              "headers": {"Authorization": "Bearer {env:CADASTRE_HTTP_TOKEN}"}}
             }})
         );
-        assert!(!codex_mcp_config(&endpoints, false).contains("mcp_servers.vogt"));
+        assert!(!codex_mcp_config(&endpoints, false, true).contains("mcp_servers.vogt"));
         assert_eq!(
-            opencode_mcp_config(&endpoints, false)["mcp"]
+            opencode_mcp_config(&endpoints, false, true)["mcp"]
                 .as_object()
                 .unwrap()
                 .keys()

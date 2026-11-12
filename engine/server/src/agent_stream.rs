@@ -971,6 +971,30 @@ pub async fn bootstrap(
             breadcrumbs.ondemand.push(entry.var);
         }
     }
+    // WI-4121: a pod's cadastre entry authenticates with the same bearer the
+    // host registration names, and only when this deployment declares that
+    // variable (any policy, `ondemand` included) or this session holds a
+    // grant for it. Without one the entry is left out rather than registered
+    // to answer 401. A Codex session fetches the value like a provider key:
+    // its name joins the ondemand breadcrumbs and the session agent resolves
+    // it into the child, never into the pod's environment or the config.
+    let cadastre_bearer = broker
+        .manifest()
+        .iter()
+        .any(|entry| entry.var == crate::session_endpoints::CADASTRE_TOKEN_ENV)
+        || breadcrumbs
+            .granted
+            .iter()
+            .any(|var| var == crate::session_endpoints::CADASTRE_TOKEN_ENV);
+    let cadastre_named = breadcrumbs
+        .ondemand
+        .iter()
+        .any(|var| var == crate::session_endpoints::CADASTRE_TOKEN_ENV);
+    if cadastre_bearer && req.cli == "codex" && !cadastre_named {
+        breadcrumbs
+            .ondemand
+            .push(crate::session_endpoints::CADASTRE_TOKEN_ENV.to_string());
+    }
     let mut env = bootstrap_env(
         cfg.engine_endpoint,
         id,
@@ -1010,14 +1034,24 @@ pub async fn bootstrap(
         let has = token.is_some();
         match req.cli.as_str() {
             "claude" => {
-                mcp_config = Some(crate::session_endpoints::claude_mcp_config(&endpoints, has))
+                mcp_config = Some(crate::session_endpoints::claude_mcp_config(
+                    &endpoints,
+                    has,
+                    cadastre_bearer,
+                ))
             }
             "codex" => {
-                codex_config = Some(crate::session_endpoints::codex_mcp_config(&endpoints, has))
+                codex_config = Some(crate::session_endpoints::codex_mcp_config(
+                    &endpoints,
+                    has,
+                    cadastre_bearer,
+                ))
             }
             _ => {
                 opencode_config = Some(crate::session_endpoints::opencode_mcp_config(
-                    &endpoints, has,
+                    &endpoints,
+                    has,
+                    cadastre_bearer,
                 ))
             }
         }

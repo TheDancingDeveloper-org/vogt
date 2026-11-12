@@ -517,17 +517,21 @@ fn is_env_name(name: &str) -> bool {
         && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
 }
 
-/// The shell prefix that hands the Codex child the provider keys it needs
-/// (WI-3886). The bootstrap response carries only the key names; each value is
-/// fetched through the pod's agent-auth broker immediately before Codex starts
-/// and exported in the launch shell, so it exists in the CLI's environment and
-/// nowhere in the pod's long-lived process tree. A key that cannot be fetched
-/// is reported by name and left unset: a provider key is optional, and one
-/// broker failure must not stop a session that may not use that provider.
-fn codex_provider_key_prefix(providers: &[CodexProvider]) -> String {
+/// The shell prefix that hands the Codex child the brokered values it needs
+/// (WI-3886, WI-4121). The bootstrap response and the Codex fragment carry
+/// only names: provider `env_key`s and the `bearer_token_env_var` each MCP
+/// server names. Each value is fetched through the pod's agent-auth broker
+/// immediately before Codex starts and exported in the launch shell, so it
+/// exists in the CLI's environment and nowhere in the pod's long-lived
+/// process tree or its config. A name already set (the Vogt session token,
+/// for instance) is left alone. A key that cannot be fetched is reported by
+/// name and left unset: it is optional, and one broker failure must not stop
+/// a session that may not use it.
+fn codex_broker_fetch_prefix(providers: &[CodexProvider], mcp_bearer_envs: &[String]) -> String {
     let mut keys: Vec<&str> = providers
         .iter()
         .map(|provider| provider.env_key.as_str())
+        .chain(mcp_bearer_envs.iter().map(String::as_str))
         .filter(|name| is_env_name(name))
         .collect();
     keys.sort_unstable();
@@ -541,9 +545,10 @@ fn codex_provider_key_prefix(providers: &[CodexProvider]) -> String {
         line.push_str(key);
     }
     line.push_str(
-        "; do if __vogt_value=\"$(vogt-agent-auth fetch \"$__vogt_key\")\"; then \
+        "; do if eval \"[ -n \\\"\\${$__vogt_key:-}\\\" ]\"; then continue; fi; \
+         if __vogt_value=\"$(vogt-agent-auth fetch \"$__vogt_key\")\"; then \
          export \"$__vogt_key=$__vogt_value\"; else \
-         printf 'session-agent: provider key %s was not delivered\\n' \"$__vogt_key\" >&2; \
+         printf 'session-agent: brokered key %s was not delivered\\n' \"$__vogt_key\" >&2; \
          fi; done; unset __vogt_key __vogt_value; ",
     );
     line
@@ -1444,6 +1449,9 @@ struct CodexConfigFile {
     model: Option<String>,
     providers: Vec<CodexProvider>,
     mcp_servers: Vec<String>,
+    /// The `bearer_token_env_var` each MCP server names (WI-4121), so the
+    /// launch line resolves those through the broker too.
+    mcp_bearer_envs: Vec<String>,
 }
 
 fn codex_file_config(
@@ -1524,6 +1532,15 @@ fn codex_file_config(
     }
     if let Some(servers) = table.get("mcp_servers").and_then(toml::Value::as_table) {
         file.mcp_servers = servers.keys().cloned().collect();
+        for value in servers.values() {
+            if let Some(name) = value
+                .as_table()
+                .and_then(|server| server.get("bearer_token_env_var"))
+                .and_then(toml::Value::as_str)
+            {
+                file.mcp_bearer_envs.push(name.to_string());
+            }
+        }
     }
     Ok(file)
 }
@@ -1630,7 +1647,7 @@ pub fn command_line(config: &Config) -> Result<String, AgentError> {
                 prompt: prompt.as_deref(),
             })
             .map_err(AgentError::Pty)?;
-            let mut line = codex_provider_key_prefix(&file.providers);
+            let mut line = codex_broker_fetch_prefix(&file.providers, &file.mcp_bearer_envs);
             line.push_str("codex");
             for arg in args {
                 line.push(' ');
@@ -2502,14 +2519,21 @@ mod tests {
             context_window: None,
             auto_compact_token_limit: None,
         };
-        let prefix = codex_provider_key_prefix(&[
-            provider("DS_KEY"),
-            provider("BAD-KEY"),
-            provider("DS_KEY"),
-        ]);
-        assert!(prefix.starts_with("for __vogt_key in DS_KEY;"), "{prefix}");
+        let prefix = codex_broker_fetch_prefix(
+            &[provider("DS_KEY"), provider("BAD-KEY"), provider("DS_KEY")],
+            &[
+                "CADASTRE_HTTP_TOKEN".into(),
+                "BAD NAME".into(),
+                String::new(),
+            ],
+        );
+        assert!(
+            prefix.starts_with("for __vogt_key in CADASTRE_HTTP_TOKEN DS_KEY;"),
+            "{prefix}"
+        );
         assert!(!prefix.contains("BAD-KEY"), "{prefix}");
-        assert_eq!(codex_provider_key_prefix(&[]), "");
+        assert!(!prefix.contains("BAD NAME"), "{prefix}");
+        assert_eq!(codex_broker_fetch_prefix(&[], &[]), "");
     }
 
     /// WI-3886: the key is fetched through the pod broker immediately before
@@ -2574,6 +2598,68 @@ mod tests {
         assert!(
             String::from_utf8_lossy(&failed.stderr).contains("was not delivered"),
             "{failed:?}"
+        );
+    }
+
+    /// WI-4121: an MCP server whose Codex table names a bearer by environment
+    /// variable gets that value from the broker immediately before Codex
+    /// starts, beside the provider keys. A value already in the environment is
+    /// left as it is, so the Vogt session token is never fetched again.
+    #[test]
+    fn a_codex_child_receives_an_mcp_bearer_from_the_broker() {
+        let dir = tempfile::tempdir().unwrap();
+        let fragment = dir.path().join("vogt-codex.toml");
+        std::fs::write(
+            &fragment,
+            "[mcp_servers.cadastre]\nurl = \"https://cadastre.example.test/mcp\"\n\
+             bearer_token_env_var = \"CADASTRE_HTTP_TOKEN\"\n",
+        )
+        .unwrap();
+        let mut config = claude_config(ClaudeLaunch::default(), false);
+        config.cli = "codex".into();
+        config.codex.config_file = Some(fragment);
+        let line = command_line(&config).unwrap();
+        assert!(line.contains("CADASTRE_HTTP_TOKEN"), "{line}");
+        assert!(line.contains("vogt-agent-auth fetch"), "{line}");
+        assert!(!line.contains("fetched-secret"), "{line}");
+
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let helper = bin.join("vogt-agent-auth");
+        std::fs::write(
+            &helper,
+            "#!/bin/sh\ncase \"$1\" in\nfetch)\n  printf fetched-secret ;;\n*) exit 1 ;;\nesac\n",
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let path = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let run = |existing: Option<&str>| {
+            let mut command = std::process::Command::new("/bin/sh");
+            command.arg("-c").arg(format!(
+                "codex() {{ printf 'cad=%s\\n' \"${{CADASTRE_HTTP_TOKEN:-unset}}\"; }}; {line}"
+            ));
+            command.env("PATH", &path).env_remove("CADASTRE_HTTP_TOKEN");
+            if let Some(value) = existing {
+                command.env("CADASTRE_HTTP_TOKEN", value);
+            }
+            command.output().unwrap()
+        };
+        let fetched = run(None);
+        assert_eq!(
+            String::from_utf8_lossy(&fetched.stdout).trim(),
+            "cad=fetched-secret"
+        );
+        let kept = run(Some("already-there"));
+        assert_eq!(
+            String::from_utf8_lossy(&kept.stdout).trim(),
+            "cad=already-there"
         );
     }
 
