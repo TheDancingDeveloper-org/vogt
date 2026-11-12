@@ -25,7 +25,8 @@ on:
     # (fmt, clippy, test; cargo deny and cargo audit; parity) must report on
     # every pull request, or a batch with no Rust change waits forever on
     # contexts that never register. The `changes` job skips them only when
-    # every changed path is on a docs/acceptance allowlist (fail closed);
+    # every changed path is on the acceptance/forge-template allowlist in
+    # scripts/rust_core_changes.sh (fail closed; docs always run);
     # a skipped required job counts as passing.
     branches: [rust-core, rust-2, wi-1443-main-sync]
   # The live suite and coverage run here, not on every push (WI-2677).
@@ -84,7 +85,10 @@ jobs:
           if [ "$EVENT_NAME" != "pull_request" ]; then
             echo "rust=true" >> "$GITHUB_OUTPUT"; exit 0
           fi
-          if ! files=$(git diff --name-only "origin/${BASE_REF}...HEAD"); then
+          # --no-renames: a rename is a delete plus an add, so the old path
+          # is classified too (a Rust file moved into docs/ still runs).
+          # The diff is local, so no API page limit can truncate it.
+          if ! files=$(git -c core.quotePath=false diff --no-renames --name-status "origin/${BASE_REF}...HEAD"); then
             echo "could not diff against origin/${BASE_REF}; running everything"
             echo "rust=true" >> "$GITHUB_OUTPUT"; exit 0
           fi
