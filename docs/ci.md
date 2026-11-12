@@ -150,6 +150,58 @@ three languages within a release run.
 The `ci` gate takes seconds; the queue run is the expensive part and is
 deliberately not duplicated on every push to a pull request.
 
+## Pre-land check on `rust-2`
+
+Workers land on the `rust-2` graft line with `g land`, and graft runs no CI
+gate of its own. Batches 131-134 each landed and then turned the line red on
+a gate the worker's local loop did not run. `scripts/pre-land-check.sh` is
+the local form of those gates:
+
+```sh
+scripts/pre-land-check.sh          # the default quick set
+scripts/pre-land-check.sh --rust   # also fmt, clippy and nextest
+scripts/pre-land-check.sh --self-test
+```
+
+It runs, in workflow order, the commands from `rust-core.yml` and `ci.yml`
+and stops at the first failure with one line and a log path:
+
+1. `cargo deny --all-features check` in `engine/` (the wildcard-dependency
+   gate).
+2. `cargo test -p vogt-core --bin vogt-core
+   every_python_test_has_one_disposition` (the ledger test).
+3. `pytest tests/test_engine_parity.py` (every engine route has an MCP
+   counterpart or a reason).
+4. `ruff check .`.
+5. `ruff format --check .`.
+6. `mypy`.
+7. The parity checks against the committed `tests/parity/golden` directory:
+   the Python CLI, HTTP and MCP recordings; the Rust CLI, HTTP and MCP
+   recordings; the actor and schema probes; `crossopen`, `selftest`,
+   `errors`, and both `contract` checks. The record-twice-and-diff
+   determinism probe is skipped: it proves the recorder, not the change, and
+   costs minutes.
+
+`--rust` adds `cargo fmt --all -- --check`, then clippy and nextest scoped
+to the crates the diff touches; `engine/Cargo.toml`, a new crate or an
+unattributable engine path falls back to `--workspace`. Run it before
+`g commit`: the working-copy diff is what scopes it. Once the change is a
+committed draft, reading that diff needs graft auth; set
+`PRE_LAND_RUST_PACKAGES` to a space-separated crate list instead.
+`CARGO_BUILD_JOBS` defaults to 4, and every gate runs under `nice`.
+
+A graft working copy has no `.git`, so `scripts/select_parity_golden.sh`
+cannot read its history. The script detects that, chooses the newest
+committed golden by `meta.json`'s `recorded_at`, prints the choice, and does
+not run any git-dependent test. A normal checkout uses the selector
+unchanged. `PRE_LAND_PARITY_GOLDEN=<dir>` overrides either choice, and
+`PRE_LAND_BASE=<ref>` overrides the git base `--rust` diffs against.
+
+The `--self-test` mode forces the first gate to fail through
+`PRE_LAND_FORCE_FAIL` and asserts that the script reports `FAIL cargo-deny`
+and exits non-zero. The quick set is a few minutes on a warm checkout; the
+first run also syncs the Python environment and builds `vogt-core`.
+
 ## Landing
 
 `land-pr` (workspace `.agent-tools/bin/land-pr`) detects a merge queue from

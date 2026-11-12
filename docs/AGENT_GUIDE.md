@@ -13,6 +13,10 @@ Land uncommitted work before teardown. Account/transcript write-back is not
 a workspace backup; hibernate wakes into a fresh clone. An engine restart
 re-adopts a running pod when its record and stream credential survived, and
 never deletes it (WI-3205, WI-4126).
+Before `g land`, run `scripts/pre-land-check.sh`; add `--rust` when the change
+touches `engine/`. It is the local form of the rust-2 CI gates that used to
+fail only after a land (`cargo deny`, the disposition ledger, engine/MCP
+parity, ruff, mypy and the committed parity goldens).
 
 You are an agent, and this guide is for you. It is not about developing Vogt —
 [`../AGENTS.md`](../AGENTS.md), [`../engine/AGENTS.md`](../engine/AGENTS.md) and
