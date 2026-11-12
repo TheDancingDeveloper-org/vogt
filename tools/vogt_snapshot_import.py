@@ -730,6 +730,11 @@ def read_target(
         match = IMPORT_MARKER.match(first_line)
         if match is None:
             continue
+        # A marker is only evidence of an earlier import when the importing
+        # run also attached its label. An unrelated dev item may quote the
+        # first line without being ours; never adopt or rewrite it.
+        if PROD_IMPORT_LABEL not in _texts(row.get("labels"), "work_item.labels"):
+            continue
         source_ref = match.group(1)
         if source_ref in state.markers:
             raise Refused(
