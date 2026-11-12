@@ -2058,7 +2058,9 @@ teardown. An attached agent's unconfirmed flush refuses hibernation; an
 unattached agent retains only its last successful write-back. The engine
 keeps the record and screen; wake creates a new pod seeded with the saved
 conversation. This does not checkpoint `/work`: land code before hibernating.
-Engine restart does not re-adopt the running pod (WI-3205).
+An explicit hibernate is one of the two lifecycle actions allowed to delete a
+pod; an engine restart never does, and re-adopts the running pod instead
+(WI-3205).
 
 An idle agent session holds a few hundred MiB in its CLI and its MCP
 servers. Its conversation is already on disk in the agent CLI's own
@@ -2165,19 +2167,24 @@ engine id (WI-912; the design is `docs/design/session-hibernation.md`).
   - **Unlanded workspace changes are lost by design.** The pod's workspace is
     deleted with it; only graft-landed work, the transcript and the account
     config survive a hibernation.
-  - *Engine restart.* On SIGTERM pod sessions are not hibernated: their pods
-    keep running. The stream credential each pod holds is kept in
+  - *Engine restart.* On SIGTERM pod sessions are not hibernated: their
+    records (without a hibernation marker) and screens are written, and their
+    pods keep running. The stream credential each pod holds is kept in
     `state_dir/pod-tokens/<id>` (mode 0600; the hibernation record never holds
     a secret). At boot the engine lists the session pods, and for each one
     whose record was left running it rebuilds the session over a stream link
     whose cursor is the length of the session's output log, so the agent's
     resume replays exactly the output the engine missed. An agent that is
     ahead of the log (output acknowledged but not yet logged when the engine
-    died) is skipped forward rather than refused. If no agent dials in within
-    `ENGINE_POD_RECONNECT_TIMEOUT` (120 s) the pod is marked lost: it is deleted and the
-    session stays hibernated as `recovered`, wakeable from the engine-held
-    transcript. A pod with no kept credential is not adopted; the reconciler
-    deletes it as an orphan.
+    died) is skipped forward rather than refused. An agent that has not
+    dialled back after `ENGINE_POD_RECONNECT_TIMEOUT` (120 s) is reported by
+    the reconciler, not given up: the session stays live and the pod stays
+    running, so a late agent can still take the link over. A pod with no kept
+    credential, or with no session record at all, is likewise reported and
+    left running; nothing in startup, shutdown or reconcile deletes a session
+    pod. Deletion belongs to the session's own teardown — an explicit stop or
+    hibernate, or an agent that has already exited — because a running pod is
+    the only copy of its workspace (WI-3405, WI-4126).
 - **`keep_awake`** pins a session. The pin is kept in its record and shown
   on its summary. A pinned session is never hibernated by policy, and if the
   engine finds it hibernated at boot (after a shutdown or a crash), it wakes
@@ -3653,14 +3660,15 @@ rollout), so ownership is explicit:
 - the sweep lists only `vogt.session,vogt.engine=<id>`, and ignores any pod
   without its own label (pods made before the label existed are not deleted;
   remove them by hand);
-- an orphan is deleted by name with a `preconditions.uid` taken from the listed
-  pod, so a decision about one pod cannot delete its replacement (the API
-  server answers 409).
+- a pod with no live session is reported, never deleted: its workspace exists
+  only inside it, and only an explicit stop or hibernate may delete a pod. A
+  delete that does run names the pod's uid, so a decision about one pod cannot
+  delete its replacement (the API server answers 409).
 
-**An engine restart currently marks pod sessions lost.** The session token and
-the stream cursor live in memory, so an agent in a surviving pod cannot
-reconnect: the sweep deletes the pod as an orphan, and the session returns from
-its record as hibernated. WI-3205 re-adopts running pods instead.
+**An engine restart re-adopts the running pods.** Boot restores the session
+records from `state_dir`, rebuilds each surviving pod's stream link over the
+kept credential (WI-3205), and leaves the pods that cannot be adopted running
+for the operator to recover. Reporting is rate-limited to one warning per pod.
 
 ### Session history APIs
 

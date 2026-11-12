@@ -115,8 +115,9 @@ On the dev deployment, 2026-11-06 (WI-3169, WI-3163):
   (WI-3389).
 - **A woken Claude pod resuming its conversation** has not been shown
   (WI-3158).
-- **An engine restart loses pod sessions.** The pods are deleted and the
-  sessions come back hibernated (WI-3205).
+- **Engine restart survival is implemented but unverified live.** rust-2
+  re-adopts surviving pods and never deletes them on restart; the vogt-dev
+  rollout check is WI-4126.
 - **Spill-over to a second node** is configured but not observed (WI-3343).
 - **Every pod clones the same repository**, whatever project the session is
   for (WI-3369).
@@ -332,7 +333,8 @@ shells and task runs.
    trust prompt and a git view of the clone are done (WI-3355, WI-3356).
 2. **Lifecycle** — WI-3158 (hibernate and wake with a resumed conversation),
    WI-3160 (credential and transcript write-back), WI-3205 (re-adopt pods
-   after an engine restart), WI-3245 (teardown race).
+   after an engine restart), WI-3245 (teardown race), WI-4126 (restart never
+   deletes a pod; cols/rows survive wake).
 3. **Security** — WI-3242 (no shared writable cache), WI-3243 (the permission
    posture inside pods), WI-3248 and WI-3249 (cluster role and egress
    narrowing).

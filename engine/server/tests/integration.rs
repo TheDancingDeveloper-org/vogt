@@ -21102,7 +21102,7 @@ sleep 2
     }
 
     #[tokio::test]
-    async fn reconcile_ends_a_session_whose_pod_died_and_deletes_orphans() {
+    async fn reconcile_ends_a_session_whose_pod_died_and_reports_orphans() {
         use k8s_openapi::api::core::v1::{
             ContainerState, ContainerStateTerminated, ContainerStatus, Pod, PodStatus,
         };
@@ -21170,7 +21170,14 @@ sleep 2
         .await
         .unwrap();
         assert_eq!(report.ended, vec![id]);
-        assert_eq!(report.deleted, vec![orphan]);
+        assert_eq!(
+            report
+                .reported
+                .iter()
+                .map(|(id, _)| *id)
+                .collect::<Vec<_>>(),
+            vec![orphan]
+        );
 
         tokio::time::timeout(Duration::from_secs(10), async {
             while h.detail(id).await.summary.exit_code != Some(137) {
@@ -21196,7 +21203,10 @@ sleep 2
         })
         .await
         .expect("the ended session's pod is deleted");
-        assert!(h.launcher.deleted.lock().unwrap().contains(&orphan));
+        assert!(
+            !h.launcher.deleted.lock().unwrap().contains(&orphan),
+            "an orphan pod is reported, never deleted: its workspace is the only copy"
+        );
     }
 
     /// WI-3878: a Running pod whose attached agent stops sending heartbeats
@@ -21623,11 +21633,33 @@ sleep 2
             .conversation
             .is_none());
         h.state.sessions.hibernate_for_shutdown().await;
+        assert!(
+            h.state.sessions.get(id).is_ok_and(|s| s.is_alive()),
+            "shutdown keeps a pod session live"
+        );
+        assert!(
+            h.launcher.deleted.lock().unwrap().is_empty(),
+            "shutdown never deletes a session pod"
+        );
+        // The record is persisted without a hibernation marker, so boot sees
+        // a session that was running and can re-adopt its pod.
+        let record_path = h
+            .state
+            .config
+            .state_dir
+            .join("sessions")
+            .join(format!("{id}.json"));
+        let record: Value =
+            serde_json::from_str(&std::fs::read_to_string(&record_path).unwrap()).unwrap();
+        assert!(
+            record["hibernation"].is_null(),
+            "a pod session's shutdown record must stay live: {record}"
+        );
         let old_link = h.state.agent_auth.pod(id).unwrap();
         h.state.agent_auth.forget_pod(id);
         let launcher = fake_launcher(vec![running_pod(id)]);
         let registry = restarted(&h, launcher.clone());
-        let adopted = registry.readopt_pods(Duration::from_secs(60)).await;
+        let adopted = registry.readopt_pods().await;
         old_link.finish(137);
         assert_eq!(adopted, vec![id]);
         let sweep = vogt_engine_server::pod_reconcile::sweep(
@@ -21637,7 +21669,7 @@ sleep 2
         )
         .await
         .unwrap();
-        assert!(sweep.deleted.is_empty());
+        assert!(sweep.reported.is_empty());
         assert!(launcher.deleted.lock().unwrap().is_empty());
         assert!(registry.get(id).unwrap().is_alive());
         let mut agent = h.dial(id, &token, 0).await;
@@ -21671,7 +21703,7 @@ sleep 2
         drop(agent);
         let launcher = fake_launcher(vec![running_pod(id)]);
         let registry = restarted(&h, launcher.clone());
-        let adopted = registry.readopt_pods(Duration::from_secs(60)).await;
+        let adopted = registry.readopt_pods().await;
         // The dead process's session ends with it.
         old_link.finish(137);
         assert_eq!(adopted, vec![id]);
@@ -21718,46 +21750,71 @@ sleep 2
     }
 
     #[tokio::test]
-    async fn an_adopted_pod_whose_agent_never_returns_is_marked_lost() {
+    async fn an_adopted_pod_whose_agent_never_returns_is_reported_and_left_running() {
         let (mut h, _accounts) = claude_harness().await;
         let id = h.start().await;
         let token = h.session_token(id).await;
         let mut agent = h.dial(id, &token, 0).await;
-        assert_eq!(take(&mut agent).await, Frame::Ack { offset: 0 });
+        // Only the adopted link matters here; the first ack's offset is not
+        // the subject of this test.
+        let _ = take(&mut agent).await;
         let old_link = h.state.agent_auth.pod(id).unwrap();
         h.state.agent_auth.forget_pod(id);
         drop(agent);
         let launcher = fake_launcher(vec![running_pod(id)]);
         let registry = restarted(&h, launcher.clone());
-        let adopted = registry.readopt_pods(Duration::from_millis(300)).await;
+        let adopted = registry.readopt_pods().await;
         old_link.finish(137);
         assert_eq!(adopted, vec![id]);
-        tokio::time::timeout(Duration::from_secs(15), async {
-            while !(registry.is_hibernated(id) && launcher.deleted.lock().unwrap().contains(&id)) {
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-        })
-        .await
-        .expect("a pod that never reconnects is deleted and its session left hibernated");
-        assert_eq!(
-            *launcher.delete_uids.lock().unwrap(),
-            vec![(id, Some(format!("uid-adopted-{id}")))],
-            "an adopted pod is deleted by the uid its listing gave"
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !registry.is_hibernated(id),
+            "a restart never hibernates (and so never deletes) a surviving pod"
         );
-        let summary = registry.summary_of(id).unwrap();
-        assert_eq!(summary.activity, ActivityState::Hibernated);
+        assert!(
+            launcher.deleted.lock().unwrap().is_empty(),
+            "a pod whose agent has not dialled back is left running"
+        );
+
+        // The agent stream registry is process-wide; a long connect grace
+        // keeps this sweep from judging other tests' sessions as disappeared.
+        let cfg = vogt_engine_server::pod_backend::PodConfig {
+            reconnect_timeout: Duration::from_millis(50),
+            connect_timeout: Duration::from_secs(3600),
+            ..Default::default()
+        };
+        let sweep =
+            vogt_engine_server::pod_reconcile::sweep(launcher.as_ref(), &h.state.agent_auth, &cfg)
+                .await
+                .unwrap();
+        assert_eq!(
+            sweep.reported.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            vec![id]
+        );
+        assert!(launcher.deleted.lock().unwrap().is_empty());
+        assert!(
+            registry.get(id).is_ok_and(|s| s.is_alive()),
+            "the adopted session stays live so a late agent can still take it over"
+        );
+
+        if let Some(link) = h.state.agent_auth.pod(id) {
+            link.finish(0);
+        }
+        ended(&registry, id).await;
     }
 
     /// WI-3878: `ENGINE_POD_RECONNECT_TIMEOUT` (read through the same lookup
     /// `PodConfig::from_env` uses) is what decides how long an adopted pod's
-    /// agent may take to redial before the pod is marked lost.
+    /// agent may take to redial before the reconciler reports it.
     #[tokio::test]
-    async fn an_env_overridden_reconnect_timeout_marks_an_unreturning_pod_lost() {
+    async fn an_env_overridden_reconnect_timeout_reports_an_unreturning_pod() {
         let (mut h, _accounts) = claude_harness().await;
         let id = h.start().await;
         let token = h.session_token(id).await;
         let mut agent = h.dial(id, &token, 0).await;
-        assert_eq!(take(&mut agent).await, Frame::Ack { offset: 0 });
+        // Only the adopted link matters here; the first ack's offset is not
+        // the subject of this test.
+        let _ = take(&mut agent).await;
         let old_link = h.state.agent_auth.pod(id).unwrap();
         h.state.agent_auth.forget_pod(id);
         drop(agent);
@@ -21774,17 +21831,63 @@ sleep 2
         )
         .unwrap();
         assert_eq!(cfg.reconnect_timeout, Duration::from_secs(1));
+        // The agent stream registry is process-wide; a long connect grace
+        // keeps this sweep from judging other tests' sessions as disappeared.
+        let cfg = vogt_engine_server::pod_backend::PodConfig {
+            connect_timeout: Duration::from_secs(3600),
+            ..cfg
+        };
 
-        let adopted = registry.readopt_pods(cfg.reconnect_timeout).await;
+        let adopted = registry.readopt_pods().await;
         old_link.finish(137);
         assert_eq!(adopted, vec![id]);
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while !(registry.is_hibernated(id) && launcher.deleted.lock().unwrap().contains(&id)) {
-                tokio::time::sleep(Duration::from_millis(25)).await;
-            }
-        })
-        .await
-        .expect("the one-second reconnect timeout, not the 120 s default, marks the pod lost");
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        let sweep =
+            vogt_engine_server::pod_reconcile::sweep(launcher.as_ref(), &h.state.agent_auth, &cfg)
+                .await
+                .unwrap();
+        assert_eq!(
+            sweep.reported.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            vec![id],
+            "the one-second reconnect timeout, not the 120 s default, reports the pod"
+        );
+        assert!(launcher.deleted.lock().unwrap().is_empty());
+        assert!(!registry.is_hibernated(id));
+
+        if let Some(link) = h.state.agent_auth.pod(id) {
+            link.finish(0);
+        }
+        ended(&registry, id).await;
+    }
+
+    #[tokio::test]
+    async fn a_restart_reports_a_pod_whose_session_record_is_missing() {
+        let (h, _accounts) = claude_harness().await;
+        let orphan = Uuid::new_v4();
+        let launcher = fake_launcher(vec![running_pod(orphan)]);
+        let registry = restarted(&h, launcher.clone());
+        assert!(
+            registry.readopt_pods().await.is_empty(),
+            "a pod with no session record cannot be adopted"
+        );
+        // The agent stream registry is process-wide; a long connect grace
+        // keeps this sweep from judging other tests' sessions as disappeared.
+        let cfg = vogt_engine_server::pod_backend::PodConfig {
+            connect_timeout: Duration::from_secs(3600),
+            ..Default::default()
+        };
+        let sweep =
+            vogt_engine_server::pod_reconcile::sweep(launcher.as_ref(), &h.state.agent_auth, &cfg)
+                .await
+                .unwrap();
+        assert_eq!(
+            sweep.reported.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            vec![orphan]
+        );
+        assert!(
+            launcher.deleted.lock().unwrap().is_empty(),
+            "a pod with no session record is reported, not deleted"
+        );
     }
 
     #[tokio::test]
@@ -21796,10 +21899,7 @@ sleep 2
         h.state.agent_auth.forget_pod(id);
         let registry = restarted(&h, fake_launcher(vec![running_pod_of(id, "someone-else")]));
         old_link.finish(137);
-        assert!(registry
-            .readopt_pods(Duration::from_secs(60))
-            .await
-            .is_empty());
+        assert!(registry.readopt_pods().await.is_empty());
         assert!(registry.is_hibernated(id));
     }
 
@@ -21819,10 +21919,7 @@ sleep 2
         );
         let registry = restarted(&h, fake_launcher(vec![running_pod(id)]));
         old_link.finish(137);
-        assert!(registry
-            .readopt_pods(Duration::from_secs(60))
-            .await
-            .is_empty());
+        assert!(registry.readopt_pods().await.is_empty());
         assert!(registry.is_hibernated(id));
     }
 }
