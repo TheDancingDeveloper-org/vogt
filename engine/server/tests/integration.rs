@@ -19569,6 +19569,7 @@ mod pod_stream {
             buffer_bytes: 64 * 1024,
             claude_config_dir: None,
             codex_home: Some(pod_home.clone()),
+            workspace_root: None,
             model: None,
             effort: None,
             permission_mode: None,
