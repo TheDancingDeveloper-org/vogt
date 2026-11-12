@@ -1111,6 +1111,16 @@ in `ps` for every process in the pod to read. vogt-core folds a `session.start`
 the engine does not recognise, gets no first prompt and keeps only the
 variable.
 
+The engine also confirms that the first turn actually began (WI-4068). After a
+fresh agent session with a brief is spawned, `first_turn.rs` waits for the TUI
+to reach a prompt — the same readiness check `/wait` uses, not a fixed sleep —
+then looks for a running turn. A prompt still queued at the composer is pressed
+with one Enter; a session that still has no turn is reported blocked with "the
+first prompt never started a turn", so it appears in the session list as
+needing a person instead of idling at zero turns. It never presses Enter into a
+dialog, and it logs `event=first_turn.started`, `first_turn.retry` and
+`first_turn.failed` with the elapsed time.
+
 **The companion guide.** When the start request carries a non-empty
 `companion`, the engine writes it beside the brief as
 `state_dir/agent-task-prompts/sessions/<session-id>.guide.md`
