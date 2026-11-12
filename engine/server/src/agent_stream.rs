@@ -87,6 +87,17 @@ pub struct AgentAuth {
     pods: std::sync::Mutex<HashMap<Uuid, Arc<PodLink>>>,
 }
 
+/// How a requested salvage ended (WI-4132).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SalvageOutcome {
+    /// The agent stored the archive (or found nothing to save).
+    Done,
+    /// No agent is attached, so the working tree cannot be read.
+    NotAttached,
+    /// The agent could not build or upload the salvage; the string is why.
+    Failed(String),
+}
+
 /// How a requested write-back ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FlushOutcome {
@@ -117,6 +128,10 @@ pub struct PodLink {
     /// Write-backs the agent reported it could not complete.
     flush_failures: AtomicU64,
     flush_notify: Notify,
+    /// Salvage requests the agent answered, and the last failure reason.
+    salvages: AtomicU64,
+    salvage_notify: Notify,
+    salvage_failure: std::sync::Mutex<Option<String>>,
     /// The pod is gone and the stream forgotten; hibernation waits for it so
     /// a wake never races the old pod's teardown.
     torn_down: AtomicBool,
@@ -154,6 +169,9 @@ impl PodLink {
             flushes: AtomicU64::new(0),
             flush_failures: AtomicU64::new(0),
             flush_notify: Notify::new(),
+            salvages: AtomicU64::new(0),
+            salvage_notify: Notify::new(),
+            salvage_failure: std::sync::Mutex::new(None),
             torn_down: AtomicBool::new(false),
             torn_notify: Notify::new(),
             connected: AtomicBool::new(false),
@@ -772,6 +790,43 @@ impl AgentAuth {
             .unwrap_or(FlushOutcome::Failed)
     }
 
+    /// Ask the agent to salvage its checkout and wait for the answer. The
+    /// archive itself arrives on the upload route, which records it; this is
+    /// only the ordering a stop needs (WI-4132).
+    pub async fn request_salvage(&self, id: Uuid, limit: Duration) -> SalvageOutcome {
+        let Some(link) = self.pod(id) else {
+            return SalvageOutcome::NotAttached;
+        };
+        let before = link.salvages.load(Ordering::Acquire);
+        // Clear a stale failure so this request cannot return the last one.
+        *link.salvage_failure.lock().expect("salvage lock poisoned") = None;
+        if self.send(id, Frame::Salvage).is_err() {
+            return SalvageOutcome::NotAttached;
+        }
+        let wait = async {
+            loop {
+                let notified = link.salvage_notify.notified();
+                if link.salvages.load(Ordering::Acquire) > before {
+                    return match link
+                        .salvage_failure
+                        .lock()
+                        .expect("salvage lock poisoned")
+                        .clone()
+                    {
+                        Some(reason) => SalvageOutcome::Failed(reason),
+                        None => SalvageOutcome::Done,
+                    };
+                }
+                notified.await;
+            }
+        };
+        tokio::time::timeout(limit, wait).await.unwrap_or_else(|_| {
+            SalvageOutcome::Failed(
+                "the pod agent did not answer the salvage request in time".into(),
+            )
+        })
+    }
+
     /// Forget the stream, unless a newer registration has replaced `link`.
     pub fn forget_pod_if(&self, id: Uuid, link: &Arc<PodLink>) {
         let current = self.pod(id);
@@ -1148,6 +1203,24 @@ pub async fn bootstrap(
             );
         }
     }
+    // Project memory is keyed by the project, not the pod's path or the
+    // leased account, and restored only at launch (WI-3371). Off unless the
+    // deployment turned it on.
+    if crate::pod_salvage::persist_memory_enabled() {
+        for (path, bytes) in crate::pod_salvage::memory_bundle(
+            state.sessions.state_dir(),
+            source.location.repo(),
+            &pod_work_dir,
+        ) {
+            bundle.insert(
+                path,
+                serde_json::Value::String(base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    bytes,
+                )),
+            );
+        }
+    }
     if let Some(account) = account {
         env.insert(
             "VOGT_SESSION_ACCOUNT".into(),
@@ -1360,6 +1433,14 @@ where
                             let counter = if ok { &link.flushes } else { &link.flush_failures };
                             counter.fetch_add(1, Ordering::AcqRel);
                             link.flush_notify.notify_waiters();
+                        }
+                        Frame::Salvaged { ok, reason, .. } => {
+                            *link.salvage_failure.lock().expect("salvage lock poisoned") =
+                                (!ok).then(|| {
+                                    reason.unwrap_or_else(|| "the pod agent could not save the working tree".into())
+                                });
+                            link.salvages.fetch_add(1, Ordering::AcqRel);
+                            link.salvage_notify.notify_waiters();
                         }
                         Frame::Heartbeat { .. } => {
                             link.note_heartbeat();
@@ -1593,6 +1674,59 @@ mod tests {
         assert!(!closed);
         assert_eq!(resyncs(&frames), 1, "{frames:?}");
         assert!(frames.contains(&Frame::Resync { offset: capacity }));
+    }
+
+    #[tokio::test]
+    async fn a_salvage_request_reaches_the_agent_and_ok_is_done() {
+        let auth = Arc::new(AgentAuth::default());
+        let id = Uuid::new_v4();
+        let (_link, _reader) = auth.register_pod(id);
+        let mut agent = connect(&auth, id).await;
+        let requester = {
+            let auth = Arc::clone(&auth);
+            tokio::spawn(async move { auth.request_salvage(id, Duration::from_secs(2)).await })
+        };
+        let (frames, _) = agent.drain().await;
+        assert_eq!(frames, vec![Frame::Salvage]);
+        agent.send(Frame::Salvaged {
+            ok: true,
+            files: 2,
+            reason: None,
+        });
+        assert_eq!(requester.await.unwrap(), SalvageOutcome::Done);
+    }
+
+    #[tokio::test]
+    async fn a_salvage_failure_carries_its_reason() {
+        let auth = Arc::new(AgentAuth::default());
+        let id = Uuid::new_v4();
+        let (_link, _reader) = auth.register_pod(id);
+        let mut agent = connect(&auth, id).await;
+        let requester = {
+            let auth = Arc::clone(&auth);
+            tokio::spawn(async move { auth.request_salvage(id, Duration::from_secs(2)).await })
+        };
+        let (frames, _) = agent.drain().await;
+        assert_eq!(frames, vec![Frame::Salvage]);
+        agent.send(Frame::Salvaged {
+            ok: false,
+            files: 0,
+            reason: Some("the checkout could not be read".into()),
+        });
+        assert_eq!(
+            requester.await.unwrap(),
+            SalvageOutcome::Failed("the checkout could not be read".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_salvage_without_an_attached_pod_is_not_attached() {
+        let auth = AgentAuth::default();
+        assert_eq!(
+            auth.request_salvage(Uuid::new_v4(), Duration::from_millis(10))
+                .await,
+            SalvageOutcome::NotAttached
+        );
     }
 
     #[tokio::test]

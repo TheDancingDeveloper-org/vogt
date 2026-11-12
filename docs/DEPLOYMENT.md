@@ -83,6 +83,10 @@ the example does: compiled defaults are not portable operator choices.
 | `ENGINE_POD_WORKSPACE_DIR` | Mount path of the tree, default `/home/vogt/Working`; must be under `/home/vogt`. The clone goes in `session/` beneath it. |
 | `ENGINE_POD_WORKSPACE_SOURCE` | Required when the workspace is on: absolute path on the engine's filesystem to the installed tree it snapshots (the engine's `agent-workspace-config` `emptyDir`, e.g. `/home/sprooty/Working`). |
 | `ENGINE_POD_WORKSPACE_MAX_BYTES` | Cap on the uncompressed snapshot, default 64 MiB (hard maximum 512 MiB). |
+| `ENGINE_POD_SALVAGE` | On unless `0`/`false`: before an explicit stop or hibernation deletes a pod, archive its uncommitted work under `state_dir/pod-salvage/`. Never lands or pushes. |
+| `ENGINE_POD_SALVAGE_KEEP` | Archives kept per session, default 5; older ones are pruned. |
+| `ENGINE_POD_SALVAGE_MAX_BYTES` | Cap across one session's archives, default 128 MiB; the oldest go first. |
+| `ENGINE_POD_PERSIST_MEMORY` | Off by default: Claude project memory is written back and restored at launch, keyed by project, under `state_dir/pod-memory/`. |
 
 The `ENGINE_SOURCE_GRAFT_*` names are the graft source provider's; the older
 `ENGINE_POD_GRAFT_*` and `ENGINE_GRAFT_MINT_TOKEN_FILE` names are read as
@@ -107,7 +111,10 @@ reported and left running. Deletion belongs to the session's own teardown —
 an explicit stop or hibernate, or an agent that has already exited.
 Keep `state_dir` on a persistent volume, or re-adoption has no records to
 restore. Hibernation flushes account/transcript state before teardown; wake
-starts a fresh clone. Land code first: account write-back is not a backup of
+starts a fresh clone. An explicit stop and a hibernation also salvage the
+checkout's uncommitted work into `state_dir/pod-salvage/`; that archive is
+the safety net, not a substitute for landing: `g land`/commit as you go, and
+treat the salvage as recovery material. Account write-back is not a backup of
 unlanded files.
 
 **Reported pods are never auto-removed.** This includes a pod whose session
@@ -390,6 +397,33 @@ servers run in their read-only modes as well, but the token is the control
 that holds if a mode has a gap. `git-forgejo` (git with a forge token header
 that cannot be word-split) uses `FORGEJO_TOKEN` and `FORGEJO_URL` instead,
 because it pushes as well as reads.
+
+**Linking a forge account on a dev instance.** A dev instance has no
+production tracker data, so link *your own* forge account before using
+`forge.repos`, `forge.import` or `forge.writeback`. The link is the acting
+person's, encrypted at rest with `forge_account_key_file`, and it is what
+`forge.repos`/`forge.import` clone with — not the instance file token:
+
+```console
+docker compose -f deploy/stack.compose.yml exec vogt \
+  vogt forge account link --host github.com --token-stdin \
+  --reason "link my GitHub account on dev"
+```
+
+`--token-file PATH` and `--token-stdin` are the non-interactive forms; on a
+terminal it prompts with hidden input. The token is never an argument and is
+never returned by `forge account status`. Configure the host on the dev
+instance first (a configured `forge_token_files` entry, or the
+`github_token_file` default for `github.com`), or the link is refused as an
+unconfigured host.
+
+**Linking arms the actor, never a project.** `forge.account_link` stores a
+credential; it does not change any project's write-back policy. Every project
+stays `write_back = none` — observe only — until `vogt forge writeback
+--project <slug> --policy comment_only|full` arms it deliberately. This holds
+for `forge.import`, `forge.link`, a restored backup and an instance import:
+adoption makes the project upstream-truth, not upstream-writable. A merge or
+clone disarms every project to `none` for the same reason.
 
 ## 4. Reverse proxy and TLS
 

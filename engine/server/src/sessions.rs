@@ -427,6 +427,30 @@ enum Scratch {
 /// How long hibernating a pod session waits for its agent to write the
 /// transcript back.
 const POD_FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// How long a stop waits for the pod agent's salvage before going on.
+const POD_SALVAGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// `ENGINE_POD_SALVAGE` (on unless explicitly off), and the retention
+/// bounds. Read per call so an operator can change them without a restart,
+/// as the other pod settings are.
+pub(crate) fn salvage_settings() -> (bool, usize, u64) {
+    use vogt_engine_contract::salvage::{DEFAULT_KEEP_PER_SESSION, DEFAULT_MAX_SESSION_BYTES};
+    let enabled = std::env::var("ENGINE_POD_SALVAGE")
+        .map(|v| !matches!(v.trim(), "0" | "false" | "no" | "off"))
+        .unwrap_or(true);
+    let keep = std::env::var("ENGINE_POD_SALVAGE_KEEP")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(DEFAULT_KEEP_PER_SESSION);
+    let max = std::env::var("ENGINE_POD_SALVAGE_MAX_BYTES")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(DEFAULT_MAX_SESSION_BYTES);
+    (enabled, keep, max)
+}
 /// A pod an engine restart is taking back: its rebuilt stream halves and the
 /// uid its listing gave, which its teardown names.
 type AdoptedPod = (
@@ -790,6 +814,78 @@ impl SessionRegistry {
             }
         });
         Ok(spawned)
+    }
+
+    /// Ask the pod's agent to save the checkout's uncommitted work before the
+    /// pod is deleted, and record where it went (WI-4132, WI-3370). Never
+    /// fails the stop: an agent that is not attached, does not answer, or
+    /// cannot upload leaves a `salvage_failed` report with the reason.
+    ///
+    /// A host session has no pod and nothing to do here.
+    pub async fn salvage_pod(
+        &self,
+        id: Uuid,
+    ) -> Option<vogt_engine_contract::salvage::SalvageReport> {
+        let (enabled, _, _) = salvage_settings();
+        if !enabled || crate::agent_stream::global().pod(id).is_none() {
+            return None;
+        }
+        let session = self.sessions.get(&id).map(|s| Arc::clone(s.value()))?;
+        use crate::agent_stream::SalvageOutcome;
+        let report = match crate::agent_stream::global()
+            .request_salvage(id, POD_SALVAGE_TIMEOUT)
+            .await
+        {
+            SalvageOutcome::Done => session.salvage(),
+            SalvageOutcome::NotAttached => {
+                Some(vogt_engine_contract::salvage::SalvageReport::failed(
+                    "no pod agent is attached, so the working tree could not be read",
+                    now_rfc3339(),
+                ))
+            }
+            SalvageOutcome::Failed(reason) => Some(
+                vogt_engine_contract::salvage::SalvageReport::failed(reason, now_rfc3339()),
+            ),
+        };
+        if let Some(report) = &report {
+            if report.is_failed() {
+                tracing::warn!(target: "vogt::audit", session = %id,
+                    reason = report.reason.as_deref().unwrap_or("unknown"),
+                    "could not salvage the session pod's uncommitted work");
+            } else {
+                tracing::info!(target: "vogt::audit", session = %id,
+                    path = report.path.as_deref().unwrap_or(""),
+                    files = report.files,
+                    "salvaged the session pod's uncommitted work");
+            }
+            session.set_salvage(report.clone());
+            if let Some(mut record) = self.records.get_mut(&id) {
+                record.salvage = Some(report.clone());
+                let copy = record.clone();
+                drop(record);
+                if let Err(e) = hibernation::write(&self.cfg.state_dir, &copy) {
+                    tracing::warn!(session = %id, error = %e,
+                        "could not keep the salvage report in the session record");
+                }
+            }
+        }
+        report
+    }
+
+    /// Record an archive a pod uploaded (called from the upload route).
+    pub fn set_salvage(&self, id: Uuid, report: vogt_engine_contract::salvage::SalvageReport) {
+        if let Some(session) = self.sessions.get(&id).map(|s| Arc::clone(s.value())) {
+            session.set_salvage(report.clone());
+        }
+        if let Some(mut record) = self.records.get_mut(&id) {
+            record.salvage = Some(report);
+            let copy = record.clone();
+            drop(record);
+            if let Err(e) = hibernation::write(&self.cfg.state_dir, &copy) {
+                tracing::warn!(session = %id, error = %e,
+                    "could not keep the salvage report in the session record");
+            }
+        }
     }
 
     /// Keep the stream credential a pod was given, so an engine that restarts
@@ -2530,6 +2626,13 @@ impl SessionRegistry {
             }
         }
 
+        // The pod is about to go: keep its uncommitted work before anything
+        // stops it. A failure never blocks the hibernation; it is reported in
+        // the record and the summary (WI-4132).
+        if pod_link.is_some() {
+            let _ = self.salvage_pod(id).await;
+        }
+
         // The screen and the record are written before anything is stopped:
         // a failure here leaves the session running and says so.
         let (screen, rows, cols) = session.screen_source(hibernation::SCREEN_BYTES);
@@ -2559,6 +2662,7 @@ impl SessionRegistry {
         // A handoff survives a forced wake and a later hibernation that does
         // not name one: the live session carries the mark the record had.
         record.superseded_by = superseded_by.or_else(|| session.superseded_by());
+        record.salvage = session.salvage();
         // The budget and its flags live on the session; a record rebuilt here
         // would otherwise drop them, and a wake would forget both the limit
         // and that it had already been reached.
@@ -3979,6 +4083,7 @@ fn hibernated_summary(record: &Record, screen_bytes: u64) -> Option<SessionSumma
         blocked: record.blocked.clone(),
         conversation: record.conversation.clone(),
         hibernation: Some(hibernation),
+        salvage: record.salvage.clone(),
         keep_awake: record.keep_awake,
         autopilot: record.autopilot,
         autopilot_nudges: 0,
@@ -4884,6 +4989,7 @@ mod tests {
             blocked: None,
             conversation: None,
             hibernation: None,
+            salvage: None,
             keep_awake: false,
             autopilot: false,
             autopilot_nudges: 0,

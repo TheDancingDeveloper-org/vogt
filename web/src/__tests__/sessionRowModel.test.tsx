@@ -200,3 +200,33 @@ describe("a session stopped on request (WI-913)", () => {
     expect(activityClass(session({ id: "c", activity: "errored", exit_code: 3 }))).toBe("errored");
   });
 });
+
+describe("a stopped pod session's salvage (WI-4132)", () => {
+  it("names the archive, or why there is none", async () => {
+    const { sessionSalvageHint, sessionRuntimeHint } = await import("../sessionRowModel");
+    expect(sessionSalvageHint(session({ id: "s" }))).toBeNull();
+    const saved = {
+      ...session({ id: "s" }),
+      salvage: {
+        state: "saved" as const,
+        path: "/state/pod-salvage/x/1",
+        files: 3,
+        bytes: 10,
+        at: "2026-11-12T00:00:00Z",
+      },
+    };
+    expect(sessionSalvageHint(saved)).toBe("salvage at /state/pod-salvage/x/1 (3 files)");
+    expect(sessionRuntimeHint(saved)).toContain("salvage at /state/pod-salvage/x/1 (3 files)");
+    const failed = {
+      ...session({ id: "s" }),
+      salvage: {
+        state: "salvage_failed" as const,
+        files: 0,
+        bytes: 0,
+        reason: "no pod agent is attached",
+        at: "2026-11-12T00:00:00Z",
+      },
+    };
+    expect(sessionSalvageHint(failed)).toBe("salvage failed: no pod agent is attached");
+  });
+});
