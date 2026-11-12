@@ -818,13 +818,12 @@ impl SessionRegistry {
     /// `recovered` session; for each whose pod survived, rebuild the live
     /// session over a stream link whose cursor is the output the log already
     /// holds, so the agent's resume replays exactly what the engine missed.
-    /// An agent that does not dial in within `reconnect_timeout` is given up
-    /// as lost: the pod is deleted and the session stays hibernated, to be
-    /// woken from the engine-held transcript. Returns the adopted ids.
-    pub async fn readopt_pods(
-        self: &Arc<Self>,
-        reconnect_timeout: std::time::Duration,
-    ) -> Vec<Uuid> {
+    /// A pod whose agent does not dial back is not given up: the session
+    /// stays live and the pod stays running, because its workspace is the
+    /// only copy, so a late agent can still take the link over. The
+    /// reconciler reports such a pod instead of deleting it. Returns the
+    /// adopted ids.
+    pub async fn readopt_pods(self: &Arc<Self>) -> Vec<Uuid> {
         if !self.cfg.pod_backends_enabled {
             return Vec::new();
         }
@@ -877,32 +876,9 @@ impl SessionRegistry {
                 .map_or(0, |m| m.len());
             let uid = pod.metadata.uid.clone();
             match self.adopt_one(record, cursor, token, uid).await {
-                Ok(link) => {
+                Ok(_link) => {
                     tracing::info!(session = %id, cursor, "adopted a running session pod after the restart");
                     adopted.push(id);
-                    let registry = Arc::clone(self);
-                    tokio::spawn(async move {
-                        tokio::time::sleep(reconnect_timeout).await;
-                        if link.has_connected() || link.is_finished() {
-                            return;
-                        }
-                        tracing::warn!(session = %id, "an adopted pod's agent did not reconnect; marking it lost");
-                        if let Err(e) = registry
-                            .hibernate_internal(
-                                id,
-                                Some(
-                                    "the session's pod did not reconnect after the engine restarted"
-                                        .into(),
-                                ),
-                                HibernateTrigger::Recovered,
-                                true,
-                                None,
-                            )
-                            .await
-                        {
-                            tracing::warn!(session = %id, error = %e, "could not mark an unreachable adopted pod lost");
-                        }
-                    });
                 }
                 Err(e) => {
                     tracing::warn!(session = %id, error = %e, "could not adopt a session pod");
@@ -3253,22 +3229,20 @@ impl SessionRegistry {
         self.shutting_down.store(true, Ordering::Release);
         // An oversight session is kept even as a plain shell, so it stays
         // listed — with its last screen — after the restart (WI-962).
-        let candidates: Vec<(Uuid, bool)> = self
-            .live_sessions()
-            .into_iter()
-            .filter_map(|s| {
-                // A pod session's pod outlives the engine and is adopted
-                // again at the next boot (WI-3205); hibernating it would
-                // delete the pod.
-                if crate::agent_stream::global().pod(s.id).is_some() {
-                    return None;
-                }
-                let allow_shell = s.role() == SessionRole::Oversight;
-                self.hibernate_refusal(&s, allow_shell)
-                    .is_none()
-                    .then_some((s.id, allow_shell))
-            })
-            .collect();
+        let mut candidates = Vec::new();
+        for session in self.live_sessions() {
+            // A pod session's pod outlives the engine and is adopted again at
+            // the next boot (WI-3205); hibernating it would delete the pod.
+            // Persist its record and leave the pod running.
+            if crate::agent_stream::global().pod(session.id).is_some() {
+                self.persist_live_pod_record(&session);
+                continue;
+            }
+            let allow_shell = session.role() == SessionRole::Oversight;
+            if self.hibernate_refusal(&session, allow_shell).is_none() {
+                candidates.push((session.id, allow_shell));
+            }
+        }
         if candidates.is_empty() {
             return;
         }
@@ -3296,6 +3270,34 @@ impl SessionRegistry {
             if let Err(e) = result {
                 tracing::warn!(session = %id, error = %e, "could not hibernate a session for shutdown; its record stays for recovery");
             }
+        }
+    }
+
+    /// Write a live pod session's record at shutdown without stopping it.
+    /// The pod outlives the engine; boot re-adopts it from this record and the
+    /// kept stream credential ([`Self::readopt_pods`]). A hibernation marker
+    /// is deliberately not written: it would describe the pod as stopped and
+    /// hide it from re-adoption.
+    fn persist_live_pod_record(&self, session: &Session) {
+        let Some(mut record) = self.records.get(&session.id).map(|r| r.clone()) else {
+            return;
+        };
+        record.name = session.name();
+        record.keep_awake = session.keep_awake();
+        record.blocked = session.blocked();
+        record.done_at = session.done_at();
+        record.hibernation = None;
+        let (screen, rows, cols) = session.screen_source(hibernation::SCREEN_BYTES);
+        record.rows = Some(rows);
+        record.cols = Some(cols);
+        if let Err(e) = hibernation::write_screen(&self.cfg.state_dir, session.id, &screen)
+            .and_then(|()| hibernation::write(&self.cfg.state_dir, &record))
+        {
+            tracing::warn!(
+                session = %session.id,
+                error = %e,
+                "could not persist a live pod session's record at shutdown; the pod is left running"
+            );
         }
     }
 
