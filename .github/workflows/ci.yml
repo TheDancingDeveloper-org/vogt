@@ -444,6 +444,16 @@ jobs:
         working-directory: engine
         run: cargo fmt --all -- --check
 
+      # The Rust core image is built only by rust-core.yml's compose and
+      # Playwright jobs, which a normal batch PR skips. A path dependency the
+      # Dockerfile forgets to copy therefore reaches the rust-core-to-main PR
+      # unnoticed. This reads the Dockerfile and the Cargo manifests; it needs
+      # no Docker daemon and runs on every PR that reaches this job.
+      - name: rust-core image copies its path dependencies
+        # Runs after a failed step too, so one round reports every failure.
+        if: always() && !cancelled()
+        run: python3 scripts/check_rust_core_dockerfile.py
+
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
         # `auto` caches only on GitHub-hosted runners; these are self-hosted,
         # so the cache is asked for explicitly and keyed on the lockfile.

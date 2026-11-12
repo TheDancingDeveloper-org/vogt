@@ -142,6 +142,7 @@ pinned by the `application/resolve.rs` tests in the Rust core (WI-1058).
 | test_readonly_mcp_wrappers.py | retired | `engine/deploy/readonly-mcp.sh`. An engine deploy script, not the core. |
 | test_registry.py | ported | `registry.rs` (duplicate names, routes, a required reason, scopes). |
 | test_release_workflow.py | retired | `.github/workflows/release.yml` digest promotion. CI policy, not product behaviour. |
+| test_rust_core_dockerfile.py | retired | Static checks on `deploy/rust-core.Dockerfile` and its ignore file for the local path dependencies of `vogt-core` (WI-4150). CI policy for the Rust core image, not core behaviour; `rust-core.yml` builds that image only on schedule, dispatch and the rust-core-to-main PR. |
 | test_rust_schemas.py | ported | Derived operation schemas in `application/models.rs` and `registry.rs`, compared with Python's live `registry.dump` by this file, which runs the Rust binary under pytest. |
 | test_scheduler.py | ported | In-process collector/watch schedules in `adapters/http/scheduler.rs`; posture interval and failed-read retry coverage in `adapters/forge/collectors.rs` (WI-3385). |
 | test_schema_gate.py | ported | Readiness migration gate in `adapters/http/health.rs` and the migrator. |

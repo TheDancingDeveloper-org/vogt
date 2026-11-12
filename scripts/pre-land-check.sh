@@ -132,6 +132,11 @@ disposition_gate() {
     "${NICE[@]}" cargo test -p vogt-core --bin vogt-core every_python_test_has_one_disposition
 }
 
+rust_core_image_gate() {
+    cd "$ROOT" || return 1
+    "${NICE[@]}" python3 scripts/check_rust_core_dockerfile.py
+}
+
 engine_parity_gate() {
     cd "$ROOT" || return 1
     uv sync --locked || return 1
@@ -313,6 +318,7 @@ echo "pre-land: $MODE mode, CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS, nice $NICE_LEVEL
 
 run_gate cargo-deny cargo_deny_gate
 run_gate disposition disposition_gate
+run_gate rust-core-image rust_core_image_gate
 run_gate engine-parity engine_parity_gate
 run_gate ruff-check ruff_check_gate
 run_gate ruff-format ruff_format_gate

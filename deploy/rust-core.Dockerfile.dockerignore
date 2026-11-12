@@ -4,6 +4,8 @@
 *
 !engine/core/
 !engine/core/**
+!engine/contract/
+!engine/contract/**
 !src/vogt/storage/sqlite/migrations/
 !src/vogt/storage/sqlite/migrations/**
 !vogt-lifecycle.sh

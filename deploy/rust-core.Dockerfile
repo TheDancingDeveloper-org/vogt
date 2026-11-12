@@ -24,20 +24,24 @@ WORKDIR /src
 # works from engine/. This image builds it alone: the workspace also contains
 # the engine server, which this image does not ship and should not compile.
 COPY engine/core core
+# `vogt-core` depends on the contract crate by path (`../contract`). It has to
+# sit beside the copied core, or cargo stops at
+# `failed to read /src/contract/Cargo.toml`.
+COPY engine/contract contract
 # embedded.rs includes the SQL five directories above the core crate, which
 # from engine/core is the repository's src/vogt. This image has no engine/
 # directory, so the crate sits at core/ and the SQL has to sit five up.
 COPY src/vogt/storage/sqlite/migrations /src/vogt/storage/sqlite/migrations
 # A generated workspace, not engine/Cargo.lock: that lock names the engine
-# server and the contract crate, which this image does not build, and cargo
-# refuses a lock whose members are absent. The rust-version is read from the
-# workspace file so it cannot drift from engine/Cargo.toml.
+# server, which this image does not build, and cargo refuses a lock whose
+# members are absent. The rust-version is read from the workspace file so it
+# cannot drift from engine/Cargo.toml.
 COPY engine/Cargo.toml /tmp/engine-Cargo.toml
 RUN ver=$(sed -n 's/^rust-version = "\(.*\)"/\1/p' /tmp/engine-Cargo.toml) \
     && test -n "$ver" \
     && printf '%s\n' \
       '[workspace]' \
-      'members = ["core"]' \
+      'members = ["core", "contract"]' \
       'resolver = "2"' \
       '' \
       '[workspace.package]' \
