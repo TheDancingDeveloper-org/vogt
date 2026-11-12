@@ -169,11 +169,13 @@ if [ -z "$engine_id" ]; then
   exit 1
 fi
 echo "session.list on the Rust core against the real engine"
+# The default view is digest rows keyed by Vogt's ses_ id (as in the Python
+# core); mode=full rows carry both ids, so ask for those and match the engine's.
 body="$("${COMPOSE[@]}" exec -T engine \
-  sh -c 'tok=$(cat /run/rust-tokens/vogt_core_token); curl -fsS -H "Authorization: Bearer $tok" http://vogt:8000/api/sessions')"
+  sh -c 'tok=$(cat /run/rust-tokens/vogt_core_token); curl -fsS -H "Authorization: Bearer $tok" "http://vogt:8000/api/sessions?mode=full"')"
 # An unconfigured core returns {"sessions": []} with an engine note. A core
 # that reached the real engine returns a row naming the engine's own id.
-printf '%s\n' "$body" | grep -q "\"$engine_id\"" || {
+printf '%s\n' "$body" | grep -q "\"engine_session_id\":\"$engine_id\"" || {
   echo "session.list did not name the engine session $engine_id: $body" >&2
   exit 1
 }
