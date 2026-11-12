@@ -8,13 +8,15 @@
 //! - a live session whose pod failed, completed unreported, is stuck in a
 //!   state that cannot heal, or has disappeared, is ended (the pod phase and
 //!   reason become the session's last output and its exit code);
-//! - a pod with no live session behind it is an orphan and is deleted.
+//! - a pod with no live session behind it is reported and left running: its
+//!   workspace exists only in that pod, so an orphan is not permission to
+//!   delete unlanded work. Deletion belongs to the session's own end, never
+//!   to reconciliation.
 //!
-//! After an engine restart no session holds a link or credential, so the
-//! pods the previous process left are orphans: the agent in such a pod cannot
-//! authenticate again (its session token lived in the old process), so the
-//! pod is marked lost by deleting it, and the session itself comes back from
-//! its record as hibernated (`recover_records`).
+//! After an engine restart the previous process's pods are still the only
+//! copy of their sessions' workspaces. Boot re-adopts the ones whose record
+//! and stream credential survived (`readopt_pods`); any other pod is
+//! reported, never deleted, so an operator can recover it by hand.
 use crate::{
     agent_stream::{AgentAuth, PodLink},
     chats::redact,
@@ -36,8 +38,10 @@ pub enum Verdict {
     Keep,
     /// The session's pod is gone or beyond help: end the session.
     End { code: i32, note: String },
-    /// No live session owns the pod: delete it.
-    Orphan,
+    /// No live session owns the pod, or an adopted pod's agent has not
+    /// dialled back yet. Report it and leave it running: the pod is the only
+    /// copy of its workspace, and reconciliation must not delete it.
+    Report { note: String },
 }
 
 /// Judge one pod. `link` is the engine's stream link for the pod's session,
@@ -51,13 +55,33 @@ pub fn judge(pod: &Pod, link: Option<&PodLink>, cfg: &PodConfig, age: Option<Dur
         // flight; the next sweep decides.
         return match age {
             Some(age) if age < cfg.connect_timeout => Verdict::Keep,
-            _ => Verdict::Orphan,
+            _ => Verdict::Report {
+                note: "no live session owns this pod; left running".into(),
+            },
         };
     };
     if link.is_finished() {
         // The session already ended; its start task deletes the pod. If that
-        // delete failed, the link is forgotten and the pod is an orphan next.
+        // delete failed, the link is forgotten and the pod is reported next.
         return Verdict::Keep;
+    }
+    if link.is_adopted() && !link.has_connected() && matches!(pod_phase(pod), "running" | "pending")
+    {
+        // The engine restarted and its agent has not dialled back. Never end
+        // or delete this pod: the session's workspace lives only inside it,
+        // and a late agent can still take the link over. A pod that has
+        // already terminated falls through to the phase rules, which end the
+        // session on the exit it reported.
+        return if link.age() > cfg.reconnect_timeout {
+            Verdict::Report {
+                note: format!(
+                    "restarted engine: its agent has not reconnected after {}s; left running",
+                    cfg.reconnect_timeout.as_secs()
+                ),
+            }
+        } else {
+            Verdict::Keep
+        };
     }
     if pod_phase(pod) == "running" && link.has_connected() {
         if link.is_connected() {
@@ -177,7 +201,9 @@ fn pod_age(pod: &Pod) -> Option<Duration> {
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Sweep {
     pub ended: Vec<Uuid>,
-    pub deleted: Vec<Uuid>,
+    /// Pods left running because no live session owns them, with the reason.
+    /// Reconciliation never deletes them.
+    pub reported: Vec<(Uuid, String)>,
 }
 
 pub async fn sweep(launcher: &dyn PodLauncher, auth: &AgentAuth, cfg: &PodConfig) -> Result<Sweep> {
@@ -214,22 +240,8 @@ pub async fn sweep(launcher: &dyn PodLauncher, auth: &AgentAuth, cfg: &PodConfig
                     report.ended.push(id);
                 }
             }
-            Verdict::Orphan => {
-                // Delete exactly the pod that was judged: without a UID the
-                // name could now belong to a replacement.
-                let Some(uid) = pod.metadata.uid.clone() else {
-                    tracing::warn!(session = %id, "an orphan pod without a uid is left alone");
-                    continue;
-                };
-                match launcher.delete(id, Some(uid)).await {
-                    Ok(()) => {
-                        tracing::info!(session = %id, "deleted an orphan session pod");
-                        report.deleted.push(id);
-                    }
-                    Err(e) => {
-                        tracing::warn!(session = %id, error = %e, "deleting an orphan pod failed")
-                    }
-                }
+            Verdict::Report { note } => {
+                report.reported.push((id, note));
             }
         }
     }
@@ -256,9 +268,22 @@ pub fn spawn(
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut failing = false;
+        // A pod reported once stays reported while it is still there, so a
+        // session left running after a restart does not warn every interval.
+        let mut reported: HashSet<Uuid> = HashSet::new();
         loop {
             match sweep(launcher.as_ref(), &auth, &cfg).await {
-                Ok(_) => failing = false,
+                Ok(report) => {
+                    failing = false;
+                    let current: HashSet<Uuid> =
+                        report.reported.iter().map(|(id, _)| *id).collect();
+                    for (id, note) in &report.reported {
+                        if reported.insert(*id) {
+                            tracing::warn!(session = %id, %note, "session pod left running");
+                        }
+                    }
+                    reported.retain(|id| current.contains(id));
+                }
                 Err(e) if !failing => {
                     failing = true;
                     tracing::warn!(error = %e, "session pod reconcile failed");
@@ -526,11 +551,35 @@ mod tests {
             judge(&p, None, &cfg, Some(Duration::from_secs(5))),
             Verdict::Keep
         );
-        assert_eq!(
+        assert!(matches!(
             judge(&p, None, &cfg, Some(Duration::from_secs(31))),
-            Verdict::Orphan
+            Verdict::Report { .. }
+        ));
+        assert!(matches!(
+            judge(&p, None, &cfg, None),
+            Verdict::Report { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_adopted_pod_that_already_terminated_ends_with_its_exit() {
+        let id = Uuid::new_v4();
+        let auth = AgentAuth::default();
+        let (link, _reader) = auth.adopt_pod(id, 0, "kept-token".into()).await;
+
+        // Adoption preserves a pod that is still running, not one whose
+        // process has already ended: the session ends on the exit it reported.
+        let verdict = judge(
+            &pod(id, terminated("Succeeded", 0, "")),
+            Some(&link),
+            &cfg(),
+            None,
         );
-        assert_eq!(judge(&p, None, &cfg, None), Verdict::Orphan);
+
+        assert!(
+            matches!(verdict, Verdict::End { code: 0, .. }),
+            "{verdict:?}"
+        );
     }
 
     #[tokio::test]
@@ -554,7 +603,7 @@ mod tests {
         let report = sweep(&kube, &auth, &cfg()).await.unwrap();
 
         assert_eq!(report.ended, vec![id]);
-        assert!(report.deleted.is_empty());
+        assert!(report.reported.is_empty());
         assert!(link.is_finished());
         assert_eq!(link.wait_exit(), 137);
         // The reason was appended after the bytes already received.
@@ -590,7 +639,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_pod_with_no_live_session_is_deleted() {
+    async fn a_pod_with_no_live_session_is_reported_and_left_running() {
         let id = Uuid::new_v4();
         let kube = MockKube::with(vec![
             pod(id, phase("Running")),
@@ -601,28 +650,57 @@ mod tests {
 
         let report = sweep(&kube, &auth, &cfg()).await.unwrap();
 
-        assert_eq!(report.deleted, vec![id]);
-        // The delete is bound to the listed pod's uid.
         assert_eq!(
-            *kube.deleted.lock().unwrap(),
-            vec![(id, Some(format!("uid-{id}")))]
+            report
+                .reported
+                .iter()
+                .map(|(id, _)| *id)
+                .collect::<Vec<_>>(),
+            vec![id]
+        );
+        assert!(
+            kube.deleted.lock().unwrap().is_empty(),
+            "an orphan is never deleted"
         );
     }
 
     #[tokio::test]
-    async fn after_a_restart_every_pod_of_the_old_process_is_lost() {
-        // The new process has no links: pods that were running are orphans,
-        // pods that had already finished are too.
+    async fn after_a_restart_every_pod_of_the_old_process_is_reported() {
+        // The new process has no links: pods that were running and pods that
+        // had already finished are both reported, and both are left alone.
         let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
         let kube = MockKube::with(vec![pod(a, phase("Running")), pod(b, phase("Succeeded"))]);
 
         let report = sweep(&kube, &AgentAuth::default(), &cfg()).await.unwrap();
 
-        let mut deleted = report.deleted;
-        deleted.sort();
+        let mut reported = report
+            .reported
+            .iter()
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>();
+        reported.sort();
         let mut expected = vec![a, b];
         expected.sort();
-        assert_eq!(deleted, expected);
+        assert_eq!(reported, expected);
+        assert!(kube.deleted.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_adopted_pod_whose_agent_has_not_dialled_back_is_reported_not_ended() {
+        let id = Uuid::new_v4();
+        let auth = AgentAuth::default();
+        let (link, _reader) = auth.adopt_pod(id, 0, "kept-token".into()).await;
+        assert!(link.is_adopted() && !link.has_connected());
+        std::thread::sleep(Duration::from_millis(5));
+        let cfg = PodConfig {
+            reconnect_timeout: Duration::ZERO,
+            ..Default::default()
+        };
+
+        let verdict = judge(&pod(id, phase("Running")), Some(&link), &cfg, None);
+
+        assert!(matches!(verdict, Verdict::Report { .. }), "{verdict:?}");
+        assert!(!link.is_finished(), "the session is not ended");
     }
 
     #[tokio::test]
@@ -693,12 +771,19 @@ mod tests {
 
         let report = sweep(&kube, &AgentAuth::default(), &cfg()).await.unwrap();
 
-        assert_eq!(report.deleted, vec![mine]);
-        assert_eq!(kube.deleted.lock().unwrap().len(), 1);
+        assert_eq!(
+            report
+                .reported
+                .iter()
+                .map(|(id, _)| *id)
+                .collect::<Vec<_>>(),
+            vec![mine]
+        );
+        assert!(kube.deleted.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
-    async fn an_orphan_without_a_uid_is_left_alone() {
+    async fn an_orphan_without_a_uid_is_also_reported() {
         let id = Uuid::new_v4();
         let mut p = pod(id, phase("Running"));
         p.metadata.uid = None;
@@ -706,7 +791,14 @@ mod tests {
 
         let report = sweep(&kube, &AgentAuth::default(), &cfg()).await.unwrap();
 
-        assert!(report.deleted.is_empty());
+        assert_eq!(
+            report
+                .reported
+                .iter()
+                .map(|(id, _)| *id)
+                .collect::<Vec<_>>(),
+            vec![id]
+        );
         assert!(kube.deleted.lock().unwrap().is_empty());
     }
 }

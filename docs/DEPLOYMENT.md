@@ -100,11 +100,15 @@ boot from pinned public sources; it is workspace configuration, not session
 persistence. Cache seeds (WI-3164/WI-3354) are not shared writable homes or
 workspace persistence.
 
-An engine restart currently loses pod stream credentials/cursor. The
-reconciler deletes surviving pods as orphans and restores records as
-hibernated (re-adoption: WI-3205). Hibernation flushes account/transcript
-state before teardown; wake starts a fresh clone. Land code first: account
-write-back is not a backup of unlanded files.
+An engine restart re-adopts surviving pod sessions when their record and kept
+stream credential are on the state volume (WI-3205). Startup, shutdown and the
+reconciler never delete a session pod: a pod that cannot be adopted is
+reported and left running. Deletion belongs to the session's own teardown —
+an explicit stop or hibernate, or an agent that has already exited.
+Keep `state_dir` on a persistent volume, or re-adoption has no records to
+restore. Hibernation flushes account/transcript state before teardown; wake
+starts a fresh clone. Land code first: account write-back is not a backup of
+unlanded files.
 
 Compose still supports local sessions on this line. What single-host Compose
 runs after removal of that backend remains open (roadmap §6); this chapter
