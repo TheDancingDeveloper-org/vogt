@@ -154,6 +154,17 @@ _AGENT_STREAM = (
     "person or another agent performs; the session's own view of it is "
     "`session.screen`."
 )
+_POD_FILES = (
+    "A session pod's own containers, not a person or another agent: its init "
+    "container fetches the installed guidance tree it will work from "
+    "(WI-4127), its session agent writes back project memory, and before the "
+    "pod goes — an explicit stop or a hibernation — that agent uploads its "
+    "uncommitted work as a salvage (WI-3371, WI-4132). Each presents the "
+    "per-pod bootstrap credential or the per-session stream token its pod "
+    "holds (the engine withholds its own bearer from sessions), and carries "
+    "only that pod's files. An agent's equivalent is the session it runs in: "
+    "its workspace, and `session.commit_for` for work it means to keep."
+)
 _SESSION_SELF = (
     "A session's own calls with its per-session broker token (secret "
     "fetch/store, launch report, its conversation, its project-policy "
@@ -248,4 +259,7 @@ ENGINE_ONLY: Mapping[str, str] = {
     "POST /api/agent-auth/store/{var}/bundle-file": _SESSION_SELF,
     "POST /api/agent-auth/bootstrap": _AGENT_STREAM,
     "GET /api/agent-auth/sessions/{id}/agent": _AGENT_STREAM,
+    "GET /api/agent-auth/sessions/{id}/workspace": _POD_FILES,
+    "POST /api/agent-auth/store/bundle/salvage": _POD_FILES,
+    "POST /api/agent-auth/store/bundle/memory": _POD_FILES,
 }
