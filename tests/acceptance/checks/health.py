@@ -8,6 +8,37 @@ from ..harness import Case, Check, Context, HttpStatusError, failed, passed, ski
 
 _EMPTY_IDENTITIES = {"", "local", "dev", "local/dev", "unknown", "none"}
 
+#: The shortest accepted short digest. `--expect-digest f09829df` is a
+#: deliberate convenience for a deployed prefix; a one-character "match"
+#: would prove nothing.
+_MIN_DIGEST_PREFIX = 7
+
+
+def _digest_matches(actual: str, expected: str) -> tuple[bool, str]:
+    """Compare an image digest, accepting a short deployed prefix.
+
+    The engine reports the full `sha256:…` digest. Operators routinely pass
+    the short source prefix printed by the rollout (`f09829df`), so compare
+    the hex bodies and require an exact match or a prefix of at least seven
+    characters. A bare `sha256:` or a shorter prefix is not evidence.
+    """
+    actual_hex = actual.strip().lower().removeprefix("sha256:")
+    expected_hex = expected.strip().lower().removeprefix("sha256:")
+    if not actual_hex or not expected_hex:
+        return False, "empty digest"
+    if actual_hex == expected_hex:
+        return True, "exact"
+    if len(expected_hex) < _MIN_DIGEST_PREFIX:
+        return (
+            False,
+            f"expected prefix {expected_hex!r} is shorter than {_MIN_DIGEST_PREFIX}",
+        )
+    if actual_hex.startswith(expected_hex):
+        return True, "prefix"
+    if len(actual_hex) >= _MIN_DIGEST_PREFIX and expected_hex.startswith(actual_hex):
+        return True, "prefix"
+    return False, "mismatch"
+
 
 def _get_json(ctx: Context, path: str) -> dict[str, Any]:
     response = ctx.client.http.request("GET", path)
@@ -93,13 +124,17 @@ def diagnostics_digest(ctx: Context) -> Check:
         return skipped("--expect-digest was not given")
     payload = ctx.client.tool("instance_diagnostics")
     actual = str(payload.get("image_digest") or "")
-    if actual != expected:
+    matched, how = _digest_matches(actual, expected)
+    if not matched:
         return failed(
-            f"image_digest is {actual!r}, expected {expected!r}",
+            f"image_digest is {actual!r}, expected {expected!r} ({how})",
             actual=actual,
             expected=expected,
         )
-    return passed(f"image_digest={actual} matches --expect-digest")
+    qualifier = "" if how == "exact" else " (prefix match)"
+    return passed(
+        f"image_digest={actual} matches --expect-digest {expected!r}{qualifier}"
+    )
 
 
 def config_identity(ctx: Context) -> Check:
