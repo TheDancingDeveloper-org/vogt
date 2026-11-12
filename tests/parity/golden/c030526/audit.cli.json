@@ -826,5 +826,17 @@
     "reason": "parity harness",
     "revision": 68,
     "txn_id": "txn_0078"
+  },
+  {
+    "actor_id": "act_0001",
+    "at": "2026-01-02T03:04:06+00:00",
+    "entity_id": "wrk_0003",
+    "entity_kind": "work_item",
+    "id": "aud_0070",
+    "operation": "work.create",
+    "payload_digest": "<payload-digest>",
+    "reason": "parity",
+    "revision": 69,
+    "txn_id": "txn_0080"
   }
 ]

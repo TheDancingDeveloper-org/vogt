@@ -395,6 +395,7 @@
         "kind": "chore",
         "title": "refused item",
         "project": "parity",
+        "upstream": true,
         "reason": "parity"
       },
       "expect": {
@@ -2936,6 +2937,19 @@
         "sweeps"
       ],
       "why": "declared (suppressions, contract exemptions, drift proposals) and observed (observations, promotions, sweeps) after the S5 block"
+    },
+    {
+      "operation": "work.create",
+      "params": {
+        "kind": "chore",
+        "title": "native item on an unlinked project",
+        "project": "second",
+        "reason": "parity"
+      },
+      "expect": {
+        "exit": 0
+      },
+      "why": "WI-3987: without upstream, work.create on an unlinked project is a native item; only the explicit upstream opt-in refuses"
     }
   ]
 }
