@@ -12,6 +12,7 @@ from tools.vogt_snapshot_import import (
     ImportFailure,
     McpFailure,
     Plan,
+    RefMap,
     Refused,
     State,
     build_plan,
@@ -92,6 +93,7 @@ class FakeTarget:
             {
                 "ref": ref,
                 "title": item["title"],
+                "body": item.get("body", ""),
                 "kind": item["kind"],
                 "state": item["state"],
                 "priority": item["priority"],
@@ -154,7 +156,7 @@ class FakeTarget:
         initiative = arguments.get("initiative")
         if initiative is not None and initiative not in self.initiatives:
             raise McpFailure("work_create", "not_found", f"initiative {initiative}")
-        number = len(self.items) + 1
+        number = max((ref_number(ref) or 0 for ref in self.items), default=0) + 1
         ref = f"WI-{number}"
         self.items[ref] = {
             "ref": ref,
@@ -491,14 +493,24 @@ def target_with_wi1(*, kind: str = "chore") -> FakeTarget:
 
 
 def plan_for(tmp_path: Path, target: FakeTarget, **kwargs: Any) -> Plan:
+    ref_mode = kwargs.pop("ref_mode", "preserve")
+    map_path = kwargs.pop("map_path", None)
     source = load_source(write_source(tmp_path, kwargs.pop("payload", None)))
-    state = read_target(target)  # type: ignore[arg-type]
+    state = read_target(target, ref_mode=ref_mode)  # type: ignore[arg-type]
     state.url = "http://target"
+    ref_map = None
+    if ref_mode == "remap":
+        ref_map = RefMap.open(
+            map_path or tmp_path / "map.json", source=source, target_url="http://target"
+        )
     return build_plan(
         source,
         state,
         project_root="/srv/vogt/repos",
         ref_policy=kwargs.pop("ref_policy", "sequence"),
+        ref_mode=ref_mode,
+        ref_map=ref_map,
+        map_path=map_path or (tmp_path / "map.json" if ref_mode == "remap" else None),
         **kwargs,
     )
 
@@ -506,9 +518,20 @@ def plan_for(tmp_path: Path, target: FakeTarget, **kwargs: Any) -> Plan:
 def apply_plan(
     tmp_path: Path, source_path: Path, target: FakeTarget, plan: Plan, **kwargs: Any
 ) -> Importer:
+    ref_mode = kwargs.pop("ref_mode", plan.ref_mode)
     state = State.open(
-        tmp_path / "state.json", source=plan.source, target_url="http://target"
+        tmp_path / "state.json",
+        source=plan.source,
+        target_url="http://target",
+        ref_mode=ref_mode,
     )
+    ref_map = None
+    if ref_mode == "remap":
+        ref_map = RefMap.open(
+            plan.map_path or tmp_path / "map.json",
+            source=plan.source,
+            target_url="http://target",
+        )
     importer = Importer(
         target,  # type: ignore[arg-type]
         plan,
@@ -518,6 +541,8 @@ def apply_plan(
         comment_provenance=kwargs.pop("comment_provenance", True),
         strict_comments=kwargs.pop("strict_comments", False),
         project_root="/srv/vogt/repos",
+        ref_mode=ref_mode,
+        ref_map=ref_map,
         log=lambda _: None,
     )
     importer.run()
@@ -729,3 +754,171 @@ def test_fresh_policy_never_touches_an_existing_wi1(tmp_path: Path) -> None:
     apply_plan(tmp_path, source_path, target, plan)
     assert target.items["WI-1"]["title"] == "the dev smoke item"
     assert [ref for ref in target.items if ref != "WI-1"] == ["WI-2", "WI-3", "WI-4"]
+
+
+# ---------------------------------------------------------------------------
+# Remap mode (WI-4125, operator decision 2026-11-12)
+# ---------------------------------------------------------------------------
+
+
+def dev_target(count: int = 13) -> FakeTarget:
+    items = {
+        f"WI-{number}": {
+            "ref": f"WI-{number}",
+            "title": f"dev item {number}",
+            "body": "",
+            "kind": "chore",
+            "state": "open",
+            "priority": "p2",
+            "project_slug": "vogt",
+            "labels": [],
+        }
+        for number in range(1, count + 1)
+    }
+    return FakeTarget(
+        items=items,
+        projects={
+            "vogt": {
+                "slug": "vogt",
+                "name": "vogt",
+                "root_path": "/srv/vogt/repos/vogt",
+                "write_back": "none",
+                "link_state": "unlinked",
+            }
+        },
+    )
+
+
+def test_remap_assigns_new_numbers_after_the_target_max(tmp_path: Path) -> None:
+    source_path = write_source(tmp_path)
+    target = dev_target()
+    plan = plan_for(tmp_path, target, ref_mode="remap")
+
+    assert plan.ref_mode == "remap"
+    assert plan.ref_aligned is False
+    assert plan.replace_wi1 is False
+    assert [item.ref for item in plan.items_existing] == []
+    assert [item.ref for item in plan.items_new] == ["WI-1", "WI-2", "WI-3"]
+    assert plan.first_new_ref == 14
+    assert plan.predicted_refs == {
+        "WI-1": "WI-14",
+        "WI-2": "WI-15",
+        "WI-3": "WI-16",
+    }
+
+    apply_plan(tmp_path, source_path, target, plan)
+
+    assert sorted(target.items, key=lambda ref: ref_number(ref) or 0) == [
+        f"WI-{number}" for number in range(1, 17)
+    ]
+    assert target.items["WI-1"]["title"] == "dev item 1"
+    assert target.items["WI-13"]["title"] == "dev item 13"
+    assert target.items["WI-14"]["title"] == "first prod item"
+    assert target.items["WI-14"]["body"].splitlines()[0] == "Imported from prod: WI-1"
+    assert target.items["WI-15"]["body"].splitlines()[0] == "Imported from prod: WI-2"
+    assert "prod-import" in target.items["WI-14"]["labels"]
+    assert "prod-import" in target.labels
+    assert target.items["WI-1"]["state"] == "open"
+    assert target.items["WI-15"]["state"] == "review"
+    assert target.items["WI-16"]["state"] == "wont_do"
+
+
+def test_remap_relations_and_comments_follow_the_map(tmp_path: Path) -> None:
+    source_path = write_source(tmp_path)
+    target = dev_target(2)
+    plan = plan_for(tmp_path, target, ref_mode="remap")
+    apply_plan(tmp_path, source_path, target, plan)
+
+    assert target.relations == {("WI-3", "relates_to", "WI-4")}
+    assert [comment["ref"] for comment in target.comments] == ["WI-3", "WI-4"]
+
+
+def test_remap_markers_prevent_duplicates_when_resuming(tmp_path: Path) -> None:
+    source_path = write_source(tmp_path)
+    target = dev_target(3)
+    plan = plan_for(tmp_path, target, ref_mode="remap")
+    apply_plan(tmp_path, source_path, target, plan)
+    assert len(target.items) == 6
+
+    (tmp_path / "map.json").unlink()
+    resumed = plan_for(tmp_path, target, ref_mode="remap")
+    assert [item.ref for item in resumed.items_new] == []
+    assert {item.ref for item in resumed.items_existing} == {"WI-1", "WI-2", "WI-3"}
+
+    apply_plan(tmp_path, source_path, target, resumed)
+    assert len(target.items) == 6
+    assert len(target.comments) == 2
+
+
+def test_remap_suffixes_a_colliding_project_without_touching_devs(
+    tmp_path: Path,
+) -> None:
+    source_path = write_source(tmp_path)
+    target = dev_target(2)
+    target.projects["alpha"] = {
+        "slug": "alpha",
+        "name": "alpha",
+        "root_path": "/srv/vogt/repos/alpha",
+        "write_back": "none",
+        "link_state": "unlinked",
+    }
+    plan = plan_for(tmp_path, target, ref_mode="remap")
+
+    assert plan.project_slug_map == {"alpha": "alpha-prod", "beta": "beta"}
+    assert plan.project_collisions == [("alpha", "alpha-prod", "alpha prod")]
+    apply_plan(tmp_path, source_path, target, plan)
+
+    assert target.projects["alpha"]["name"] == "alpha"
+    assert target.projects["alpha"]["root_path"] == "/srv/vogt/repos/alpha"
+    assert target.projects["alpha-prod"]["name"] == "alpha prod"
+    assert target.projects["alpha-prod"]["root_path"] == "/srv/vogt/repos/alpha-prod"
+    assert target.items["WI-3"]["project_slug"] == "alpha-prod"
+    assert target.items["WI-4"]["project_slug"] == "beta"
+
+
+def test_remap_limit_items_is_a_resumable_pilot(tmp_path: Path) -> None:
+    source_path = write_source(tmp_path)
+    target = dev_target(2)
+    pilot = plan_for(tmp_path, target, ref_mode="remap", limit_items=1)
+    assert [item.ref for item in pilot.items_new] == ["WI-1"]
+    apply_plan(tmp_path, source_path, target, pilot)
+    assert [ref for ref in target.items if ref not in {"WI-1", "WI-2"}] == ["WI-3"]
+
+    rest = plan_for(tmp_path, target, ref_mode="remap")
+    assert [item.ref for item in rest.items_new] == ["WI-2", "WI-3"]
+    apply_plan(tmp_path, source_path, target, rest)
+    assert [ref for ref in target.items if ref not in {"WI-1", "WI-2"}] == [
+        "WI-3",
+        "WI-4",
+        "WI-5",
+    ]
+    assert len(target.comments) == 2
+
+
+def test_remap_still_refuses_the_source_instance_and_production_hosts(
+    tmp_path: Path,
+) -> None:
+    source = load_source(write_source(tmp_path))
+    with pytest.raises(Refused, match="instance"):
+        read_target(
+            FakeTarget(instance_id=source.instance_id),  # type: ignore[arg-type]
+            source,
+            url="http://127.0.0.1:8700",
+            ref_mode="remap",
+        )
+    with pytest.raises(Refused, match="production"):
+        read_target(
+            FakeTarget(),  # type: ignore[arg-type]
+            source,
+            url="https://vogt-prod.example.net",
+            ref_mode="remap",
+        )
+
+
+def test_strict_preserve_mode_still_refuses_a_diverged_target_item(
+    tmp_path: Path,
+) -> None:
+    target = dev_target(2)
+    target.items["WI-2"]["title"] = "something else entirely"
+    with pytest.raises(Refused, match="refusing to overwrite unrelated work"):
+        plan_for(tmp_path, target)
