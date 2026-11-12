@@ -539,6 +539,13 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
             "/api/agent-auth/sessions/{id}/agent",
             get(agent_stream::stream),
         )
+        // The session pod's read-only workspace tree (WI-4127): the same
+        // per-pod bootstrap credential, checked without consuming it because
+        // the init container fetches before the session's bootstrap does.
+        .route(
+            crate::workspace_snapshot::WORKSPACE_ROUTE,
+            get(crate::workspace_snapshot::workspace),
+        )
         .with_state(Arc::clone(&state));
 
     let broker_routes = Router::new()
