@@ -1084,12 +1084,14 @@ pub async fn get_session_screen(
     // A hibernated session shows the screen it had when it stopped, and
     // reading it does not wake it.
     if let Some((bytes, rows, cols, summary)) = state.sessions.hibernated_screen(id) {
-        return Ok(Json(
-            crate::screen::kept_screen(id, bytes, rows, cols, summary, lines).await?,
-        ));
+        let mut screen = crate::screen::kept_screen(id, bytes, rows, cols, summary, lines).await?;
+        crate::screen::redact_screen(&mut screen);
+        return Ok(Json(screen));
     }
     let s = state.sessions.get(id)?;
-    Ok(Json(crate::screen::session_screen(s, lines).await?))
+    let mut screen = crate::screen::session_screen(s, lines).await?;
+    crate::screen::redact_screen(&mut screen);
+    Ok(Json(screen))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1191,7 +1193,8 @@ pub async fn sweep_sessions(
                 }
             };
             let (screen_tail, ready) = match screen {
-                Some(screen) => {
+                Some(mut screen) => {
+                    crate::screen::redact_screen(&mut screen);
                     let mut tail: Vec<String> = screen
                         .lines
                         .into_iter()
