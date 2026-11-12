@@ -19128,6 +19128,75 @@ mod pod_stream {
             .contains("model_providers"));
     }
 
+    /// WI-4121: a pod's cadastre MCP entry authenticates with the bearer
+    /// variable the host registration names, and only when the agent-auth
+    /// manifest declares it. The bootstrap carries the name, never a value;
+    /// the session agent fetches it around the Codex child. With no entry in
+    /// the manifest the server is left out rather than registered to 401.
+    #[tokio::test]
+    async fn a_cadastre_pod_entry_names_its_bearer_only_when_the_manifest_declares_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let helper = fake_broker_helper(dir.path());
+        let mut h = harness_cfg(false, None, move |cfg| {
+            cfg.cadastre_mcp_url = Some("https://cadastre.example.test".into());
+            cfg.agent_auth_helper = helper;
+            cfg.agent_auth_secrets = vogt_engine_server::secret_broker::parse_manifest(
+                "CADASTRE_HTTP_TOKEN acct cadastre-token ondemand\n",
+            )
+            .unwrap();
+        })
+        .await;
+        let id = h.start().await;
+        let (_, token) = h.created.recv().await.unwrap();
+        let body: Value = h
+            .bootstrap_as(id, &token, "codex")
+            .await
+            .json()
+            .await
+            .unwrap();
+        let config = body["codex_config"].as_str().unwrap();
+        assert!(config.contains("[mcp_servers.cadastre]"), "{config}");
+        assert!(
+            config.contains("bearer_token_env_var = \"CADASTRE_HTTP_TOKEN\""),
+            "{config}"
+        );
+        assert!(
+            config.contains("https://cadastre.example.test/mcp"),
+            "{config}"
+        );
+        assert_eq!(
+            body["env"]["AGENT_AUTH_ONDEMAND"].as_str(),
+            Some("CADASTRE_HTTP_TOKEN"),
+            "{body}"
+        );
+        assert!(body["env"].get("CADASTRE_HTTP_TOKEN").is_none(), "{body}");
+        assert!(
+            !body.to_string().contains("value-of-CADASTRE_HTTP_TOKEN"),
+            "{body}"
+        );
+
+        // The same deployment URL, no manifest line: the entry is omitted.
+        let dir2 = tempfile::tempdir().unwrap();
+        let helper = fake_broker_helper(dir2.path());
+        let mut h = harness_cfg(false, None, move |cfg| {
+            cfg.cadastre_mcp_url = Some("https://cadastre.example.test".into());
+            cfg.agent_auth_helper = helper;
+            cfg.agent_auth_secrets = Vec::new();
+        })
+        .await;
+        let id = h.start().await;
+        let (_, token) = h.created.recv().await.unwrap();
+        let body: Value = h
+            .bootstrap_as(id, &token, "codex")
+            .await
+            .json()
+            .await
+            .unwrap();
+        let config = body["codex_config"].as_str().unwrap_or_default();
+        assert!(!config.contains("mcp_servers.cadastre"), "{config}");
+        assert!(!body.to_string().contains("CADASTRE_HTTP_TOKEN"), "{body}");
+    }
+
     /// WI-3491 review: a provider whose env_key is already a manifest VAR is
     /// dropped whole. The pod gets no table pointing that VAR at the
     /// registry's base_url, and the manifest's ondemand secret is not fetched.
