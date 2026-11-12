@@ -180,6 +180,13 @@ pub struct SessionSpec {
     /// the record, so a wake keeps it, and in history, so a resume can.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_item: Option<String>,
+    /// The core's own id for the session (e.g. `ses_01M...`), when the start
+    /// came from vogt-core. It is not the engine's session id: the core keeps
+    /// its identifier, and provider credentials that are bound to a session
+    /// use this one so the agent's brief, its commits and its token all name
+    /// the same thing. Absent for a caller that has no core id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_ref: Option<String>,
     /// Start the session in a git worktree of its own (WI-1298). When set,
     /// the engine creates the worktree under `cwd` — which must be the
     /// checkout the worktree is cut from — on branch `worktree.branch` off
