@@ -64,13 +64,17 @@ Useful switches:
 | --- | --- |
 | `--prod-host HOST` | add a hostname to the production list (repeatable); `vogt.sprooty.com` and any host containing `vogt-prod` are always on it |
 | `--i-know-this-is-not-prod` | override the production-**hostname** refusal only; a target that reports the snapshot's own instance id is still refused |
-| `--limit-items N` | resumable pilot: create only the next N work items, and only the relations/comments between them |
+| `--limit-items N` | resumable pilot: create only the next N work items, and only the relations/comments between them; projects, labels, initiatives and the actors they need are still imported in full |
 | `--skip-comments` / `--skip-relations` | leave that phase out |
 | `--no-comment-provenance` | omit the `_prod comment by … at …_` prefix |
 | `--superseded-policy wont_do` | default: keep the WI number of a retired item, as `wont_do` with a note |
 | `--ref-policy fresh` | do not require or check WI alignment; every item gets a new id and ref |
 | `--ref-mode remap` | target mints new WI numbers; each item carries `Imported from prod: WI-n`, the `prod-import` label and an entry in `--map-out` |
 | `--map-out PATH` | remap mode's persisted prod-ref -> dev-ref map (default `~/Working/notes/vogt-dev-prod-ref-map.json`) |
+
+`--limit-items` limits work items only. The first run still imports every
+project, label, initiative and needed actor (the pilot created all 81
+projects, 70 initiatives and 16 labels); later runs add the remaining items.
 
 ### Remap mode (import beside existing dev work)
 

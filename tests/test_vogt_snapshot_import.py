@@ -850,6 +850,41 @@ def test_remap_markers_prevent_duplicates_when_resuming(tmp_path: Path) -> None:
     assert len(target.comments) == 2
 
 
+def test_remap_does_not_adopt_a_marker_without_the_prod_import_label(
+    tmp_path: Path,
+) -> None:
+    source_path = write_source(tmp_path)
+    target = dev_target()
+    target.items["WI-14"] = {
+        "ref": "WI-14",
+        "title": "dev item that merely quotes the marker",
+        "body": "Imported from prod: WI-1\ncopied by hand",
+        "kind": "chore",
+        "state": "open",
+        "priority": "p2",
+        "project_slug": "vogt",
+        "labels": ["documentation"],
+    }
+    plan = plan_for(tmp_path, target, ref_mode="remap")
+
+    assert "WI-1" in [item.ref for item in plan.items_new]
+    assert "WI-1" not in [item.ref for item in plan.items_existing]
+
+    apply_plan(tmp_path, source_path, target, plan)
+
+    assert target.items["WI-14"]["title"] == "dev item that merely quotes the marker"
+    assert target.items["WI-14"]["body"] == "Imported from prod: WI-1\ncopied by hand"
+    assert target.items["WI-14"]["labels"] == ["documentation"]
+    imported = [
+        item
+        for item in target.items.values()
+        if item.get("body", "").splitlines()[:1] == ["Imported from prod: WI-1"]
+        and "prod-import" in item.get("labels", [])
+    ]
+    assert len(imported) == 1
+    assert imported[0]["ref"] != "WI-14"
+
+
 def test_remap_suffixes_a_colliding_project_without_touching_devs(
     tmp_path: Path,
 ) -> None:
