@@ -62,11 +62,28 @@ Useful switches:
 
 | flag | meaning |
 | --- | --- |
+| `--prod-host HOST` | add a hostname to the production list (repeatable); `vogt.sprooty.com` and any host containing `vogt-prod` are always on it |
+| `--i-know-this-is-not-prod` | override the production-**hostname** refusal only; a target that reports the snapshot's own instance id is still refused |
 | `--limit-items N` | resumable pilot: create only the next N work items, and only the relations/comments between them |
 | `--skip-comments` / `--skip-relations` | leave that phase out |
 | `--no-comment-provenance` | omit the `_prod comment by … at …_` prefix |
 | `--superseded-policy wont_do` | default: keep the WI number of a retired item, as `wont_do` with a note |
 | `--ref-policy fresh` | do not require or check WI alignment; every item gets a new id and ref |
+
+### The prod guard
+
+Reading the target's `status` also reads its instance id. The importer refuses
+before planning, and therefore before any write, when:
+
+- the target reports the same instance id as the snapshot's `instance_id` —
+  the run would write the snapshot back into the instance it came from. No
+  flag overrides this; and
+- the target hostname is `vogt.sprooty.com`, contains `vogt-prod`, or is
+  listed with `--prod-host`. Only `--i-know-this-is-not-prod` overrides this
+  hostname check, and it does not weaken the instance-id check.
+
+`--apply` also refuses a target whose `status` reports no instance id, because
+the importer cannot then prove the target is not the source.
 
 The state file defaults to
 `~/.local/state/vogt-snapshot-import/<source-instance>-<target-digest>.json`.

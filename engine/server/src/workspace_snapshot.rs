@@ -15,21 +15,28 @@
 //!   same per-pod bootstrap credential the session container presents. The
 //!   check is read-only, so the init container's fetch does not spend the
 //!   credential the session container still needs for `bootstrap`.
-//! - The snapshot is an allowlisted top-level set (`AGENTS.md`, `CLAUDE.md`,
-//!   `.claude`, `.codex`, `.agent-tools`, `UsefulClaudeSkills`). Everything
-//!   else in the engine's workspace — `Active/`, `.local/`, other dotfiles —
-//!   is not part of the tree a session gets.
+//! - The snapshot is an allowlisted set of paths — the two workspace guidance
+//!   files, the installed rule/skill/agent directories, and the shared tool
+//!   trees. Whole dot-directories are not allowed: `.claude` holds
+//!   `settings.local.json` (exact commands, sometimes inline tokens) and
+//!   `.codex` holds `auth.json`. Everything else in the engine's workspace --
+//!   `Active/`, `.local/`, checkouts, caches -- is not part of the tree a
+//!   session gets.
 //! - `.git` directories, SSH keys, credential-helper and token files are never
 //!   emitted, symlinks are never followed, and a symlink that resolves outside
 //!   the source is an error rather than a silent omission. A size cap bounds
 //!   memory; gzip is deterministic (fixed mtime, sorted entries, normalised
-//!   modes) so an ETag is stable between identical builds.
+//!   modes) so an ETag is stable between identical builds. The built tarball
+//!   is cached against a content fingerprint and builds are serialised, so
+//!   concurrent pod starts do not rebuild the same tree in memory.
 
 use std::{
+    collections::HashSet,
     fmt, fs,
     io::Write,
     os::unix::fs::PermissionsExt,
     path::{Component, Path, PathBuf},
+    sync::{Mutex as StdMutex, OnceLock},
 };
 
 use axum::{
@@ -38,6 +45,7 @@ use axum::{
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
+use bytes::Bytes;
 use flate2::{write::GzEncoder, Compression};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -47,15 +55,24 @@ use crate::{agent_stream::AgentAuth, app::AppState};
 /// The route a session pod's init container fetches.
 pub const WORKSPACE_ROUTE: &str = "/api/agent-auth/sessions/{id}/workspace";
 
-/// The only top-level names a snapshot may carry. Everything else in the
-/// engine's workspace is engine state, a checkout, or unrelated material.
-pub const SNAPSHOT_ROOTS: &[&str] = &[
+/// The only paths a snapshot may carry, relative to the workspace root.
+///
+/// These are the paths `agent-workspace-config`'s `bootstrap/install.sh`
+/// materialises: the two guidance files it writes, the rule, skill and agent
+/// trees it copies, and the shared tools it syncs. `UsefulClaudeSkills` is a
+/// checkout of the configuration repository, not an installed asset, and is
+/// deliberately absent. `.agent-tools/{bin,lib,etc}` is the whole installed
+/// tool tree (its `tests/` and caches are not needed in a session).
+pub const SNAPSHOT_ALLOWLIST: &[&str] = &[
     "AGENTS.md",
     "CLAUDE.md",
-    ".claude",
-    ".codex",
-    ".agent-tools",
-    "UsefulClaudeSkills",
+    ".claude/rules",
+    ".claude/skills",
+    ".claude/agents",
+    ".codex/skills",
+    ".agent-tools/bin",
+    ".agent-tools/lib",
+    ".agent-tools/etc",
 ];
 
 /// The default cap on the uncompressed snapshot.
@@ -73,6 +90,10 @@ const EXCLUDED_DIRS: &[&str] = &[
     "target",
     ".venv",
     "__pycache__",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".mypy_cache",
+    ".tox",
 ];
 
 /// File or directory names never emitted, case-insensitively. The workspace
@@ -90,7 +111,12 @@ const EXCLUDED_NAMES: &[&str] = &[
     ".pgpass",
     ".my.cnf",
     ".credentials.json",
+    ".claude.json",
     ".env",
+    "auth.json",
+    "settings.json",
+    "settings.local.json",
+    "scheduled_tasks.lock",
     "credentials",
     "credentials.json",
     "id_rsa",
@@ -101,7 +127,7 @@ const EXCLUDED_NAMES: &[&str] = &[
     "authorized_keys",
 ];
 
-const EXCLUDED_SUFFIXES: &[&str] = &[".pem", ".key", ".p12", ".pfx", ".token", ".kdbx"];
+const EXCLUDED_SUFFIXES: &[&str] = &[".pem", ".key", ".p12", ".pfx", ".token", ".kdbx", ".lock"];
 
 #[derive(Debug)]
 pub enum SnapshotError {
@@ -162,10 +188,7 @@ impl From<std::io::Error> for SnapshotError {
 /// the snapshot unbounded in time or memory.
 const MAX_ENTRIES: usize = 20_000;
 
-/// Build the gzipped snapshot of `source`. Blocking; callers run it off the
-/// async runtime. Entries are emitted in sorted order with fixed metadata, so
-/// two builds of an unchanged tree are byte-identical.
-pub fn build_tarball(source: &Path, max_bytes: u64) -> Result<Vec<u8>, SnapshotError> {
+fn canonical_root(source: &Path) -> Result<PathBuf, SnapshotError> {
     let root = source
         .canonicalize()
         .map_err(|e| SnapshotError::Unavailable(format!("{}: {e}", source.display())))?;
@@ -175,29 +198,49 @@ pub fn build_tarball(source: &Path, max_bytes: u64) -> Result<Vec<u8>, SnapshotE
             root.display()
         )));
     }
+    Ok(root)
+}
+
+/// Build the gzipped snapshot of `source`. Blocking; callers run it off the
+/// async runtime. Entries are emitted in sorted order with fixed metadata, so
+/// two builds of an unchanged tree are byte-identical.
+pub fn build_tarball(source: &Path, max_bytes: u64) -> Result<Vec<u8>, SnapshotError> {
+    let root = canonical_root(source)?;
     let mut tar = Vec::new();
     let mut total = 0u64;
-    let mut count = 0usize;
-    for name in SNAPSHOT_ROOTS {
-        let path = root.join(name);
-        // An absent allowed root is not an error: the installed tree grows.
-        let Ok(meta) = fs::symlink_metadata(&path) else {
-            continue;
-        };
-        append_tree(
-            &root,
-            &path,
-            Path::new(name),
-            &meta,
-            &mut tar,
-            &mut total,
-            max_bytes,
-            &mut count,
-        )?;
+    let count;
+    {
+        let mut visit =
+            |rel: &Path, path: &Path, meta: &fs::Metadata| -> Result<(), SnapshotError> {
+                if meta.is_dir() {
+                    return append_header(&mut tar, rel, 0o755, 0, b'5');
+                }
+                if meta.len() > max_bytes.saturating_sub(total) {
+                    return Err(SnapshotError::TooLarge { limit: max_bytes });
+                }
+                let data = fs::read(path)?;
+                let len = data.len() as u64;
+                if len > max_bytes.saturating_sub(total) {
+                    return Err(SnapshotError::TooLarge { limit: max_bytes });
+                }
+                total += len;
+                let mode = if meta.permissions().mode() & 0o111 != 0 {
+                    // The owner's exec bit, carried as a normalised 0755.
+                    0o755
+                } else {
+                    0o644
+                };
+                append_header(&mut tar, rel, mode, len, b'0')?;
+                tar.extend_from_slice(&data);
+                let pad = (512 - (data.len() % 512)) % 512;
+                tar.resize(tar.len() + pad, 0);
+                Ok(())
+            };
+        count = walk_allowlisted(&root, &mut visit)?;
     }
     if count == 0 {
         return Err(SnapshotError::Unavailable(format!(
-            "{} holds none of {SNAPSHOT_ROOTS:?}",
+            "{} holds none of {SNAPSHOT_ALLOWLIST:?}",
             root.display()
         )));
     }
@@ -207,15 +250,104 @@ pub fn build_tarball(source: &Path, max_bytes: u64) -> Result<Vec<u8>, SnapshotE
     Ok(encoder.finish()?)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn append_tree(
+/// A stable fingerprint of exactly the bytes and paths a build would emit.
+///
+/// It is content-based, not mtime-based: `install.sh` copies assets with
+/// `copy2`, which preserves timestamps, so a metadata-only key could serve a
+/// stale tarball after an update.
+pub fn fingerprint(source: &Path) -> Result<[u8; 32], SnapshotError> {
+    let root = canonical_root(source)?;
+    let mut hasher = Sha256::new();
+    let count;
+    {
+        let mut visit =
+            |rel: &Path, path: &Path, meta: &fs::Metadata| -> Result<(), SnapshotError> {
+                hasher.update(rel.as_os_str().as_encoded_bytes());
+                hasher.update([if meta.is_dir() { b'd' } else { b'f' }]);
+                hasher.update((meta.permissions().mode() & 0o111).to_le_bytes());
+                if meta.is_file() {
+                    let data = fs::read(path)?;
+                    hasher.update((data.len() as u64).to_le_bytes());
+                    hasher.update(&data);
+                }
+                Ok(())
+            };
+        count = walk_allowlisted(&root, &mut visit)?;
+    }
+    if count == 0 {
+        return Err(SnapshotError::Unavailable(format!(
+            "{} holds none of {SNAPSHOT_ALLOWLIST:?}",
+            root.display()
+        )));
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&hasher.finalize());
+    Ok(out)
+}
+
+type Visit<'a> = &'a mut dyn FnMut(&Path, &Path, &fs::Metadata) -> Result<(), SnapshotError>;
+
+/// Walk only the allowlisted paths, visiting each emitted entry in sorted
+/// order. Parent directories of an allowed path are emitted first so a tar
+/// extractor does not have to invent them.
+fn walk_allowlisted(root: &Path, visit: Visit<'_>) -> Result<usize, SnapshotError> {
+    let mut count = 0usize;
+    let mut emitted_parents = HashSet::new();
+    for entry in SNAPSHOT_ALLOWLIST {
+        let rel = Path::new(entry);
+        let mut usable = true;
+        let mut ancestors = Vec::new();
+        if let Some(parent) = rel.parent() {
+            let mut ancestor = PathBuf::new();
+            for component in parent.components() {
+                ancestor.push(component.as_os_str());
+                let meta = match fs::symlink_metadata(root.join(&ancestor)) {
+                    Ok(meta) => meta,
+                    // An absent allowed root is not an error: the installed
+                    // tree grows, and an older one may lack a directory.
+                    Err(_) => {
+                        usable = false;
+                        break;
+                    }
+                };
+                // A symlinked ancestor is never followed, even when it points
+                // inside: the archive entry it would produce is not a path a
+                // pod should receive.
+                if meta.file_type().is_symlink() || !meta.is_dir() {
+                    usable = false;
+                    break;
+                }
+                ancestors.push(ancestor.clone());
+            }
+        }
+        if !usable {
+            continue;
+        }
+        let path = root.join(rel);
+        let Ok(meta) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        // Emit an allowed path's parents only when the path itself exists, so
+        // a workspace that holds neither the file nor the directory stays
+        // "unavailable" rather than serving a tarball of empty directories.
+        for ancestor in ancestors {
+            if emitted_parents.insert(ancestor.clone()) {
+                let ancestor_meta = fs::symlink_metadata(root.join(&ancestor))?;
+                bump(&mut count)?;
+                visit(&ancestor, &root.join(&ancestor), &ancestor_meta)?;
+            }
+        }
+        walk_tree(root, &path, rel, &meta, &mut *visit, &mut count)?;
+    }
+    Ok(count)
+}
+
+fn walk_tree(
     root: &Path,
     path: &Path,
     rel: &Path,
     meta: &fs::Metadata,
-    tar: &mut Vec<u8>,
-    total: &mut u64,
-    max_bytes: u64,
+    visit: Visit<'_>,
     count: &mut usize,
 ) -> Result<(), SnapshotError> {
     validate_relative(rel)?;
@@ -237,7 +369,7 @@ fn append_tree(
             return Ok(());
         }
         bump(count)?;
-        append_header(tar, rel, 0o755, 0, b'5')?;
+        visit(rel, path, meta)?;
         let mut children = fs::read_dir(path)?.collect::<std::io::Result<Vec<_>>>()?;
         children.sort_by_key(|entry| entry.file_name());
         for child in children {
@@ -252,14 +384,12 @@ fn append_tree(
             validate_relative(&child_rel)?;
             let child_path = child.path();
             let child_meta = fs::symlink_metadata(&child_path)?;
-            append_tree(
+            walk_tree(
                 root,
                 &child_path,
                 &child_rel,
                 &child_meta,
-                tar,
-                total,
-                max_bytes,
+                &mut *visit,
                 count,
             )?;
         }
@@ -269,26 +399,7 @@ fn append_tree(
         return Ok(());
     }
     bump(count)?;
-    if meta.len() > max_bytes.saturating_sub(*total) {
-        return Err(SnapshotError::TooLarge { limit: max_bytes });
-    }
-    let data = fs::read(path)?;
-    let len = data.len() as u64;
-    if len > max_bytes.saturating_sub(*total) {
-        return Err(SnapshotError::TooLarge { limit: max_bytes });
-    }
-    *total += len;
-    let mode = if meta.permissions().mode() & 0o111 != 0 {
-        // The owner's exec bit, carried as a normalised 0755.
-        0o755
-    } else {
-        0o644
-    };
-    append_header(tar, rel, mode, len, b'0')?;
-    tar.extend_from_slice(&data);
-    let pad = (512 - (data.len() % 512)) % 512;
-    tar.resize(tar.len() + pad, 0);
-    Ok(())
+    visit(rel, path, meta)
 }
 
 fn bump(count: &mut usize) -> Result<(), SnapshotError> {
@@ -425,6 +536,80 @@ pub fn validate_relative(path: &Path) -> Result<(), SnapshotError> {
     Ok(())
 }
 
+struct CachedSnapshot {
+    source: PathBuf,
+    limit: u64,
+    fingerprint: [u8; 32],
+    bytes: Bytes,
+    etag: String,
+}
+
+/// The last built snapshot, keyed by source, cap and a content fingerprint.
+///
+/// One build runs at a time: every pod start asks for the same tree, and a
+/// fetch must never multiply a 64 MiB tarball in memory. A request that loses
+/// the race waits for the build rather than starting another.
+#[derive(Default)]
+pub struct SnapshotCache {
+    gate: tokio::sync::Mutex<()>,
+    cached: StdMutex<Option<CachedSnapshot>>,
+    #[cfg(test)]
+    builds: std::sync::atomic::AtomicUsize,
+}
+
+impl SnapshotCache {
+    /// The built tarball and its ETag for `source`.
+    pub async fn get(&self, source: &Path, limit: u64) -> Result<(Bytes, String), SnapshotError> {
+        let _gate = self.gate.lock().await;
+        let source = source.to_path_buf();
+        let probe = source.clone();
+        let fingerprint = tokio::task::spawn_blocking(move || fingerprint(&probe))
+            .await
+            .map_err(|e| {
+                SnapshotError::Unavailable(format!("snapshot fingerprint task failed: {e}"))
+            })??;
+        {
+            let cached = self.cached.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(cached) = cached.as_ref() {
+                if cached.source == source
+                    && cached.limit == limit
+                    && cached.fingerprint == fingerprint
+                {
+                    return Ok((cached.bytes.clone(), cached.etag.clone()));
+                }
+            }
+        }
+        let build_source = source.clone();
+        let bytes = tokio::task::spawn_blocking(move || build_tarball(&build_source, limit))
+            .await
+            .map_err(|e| SnapshotError::Unavailable(format!("snapshot task failed: {e}")))??;
+        let bytes = Bytes::from(bytes);
+        #[cfg(test)]
+        self.builds
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let etag = format!("\"{}\"", hex(&Sha256::digest(&bytes[..])));
+        let mut cached = self.cached.lock().unwrap_or_else(|e| e.into_inner());
+        *cached = Some(CachedSnapshot {
+            source,
+            limit,
+            fingerprint,
+            bytes: bytes.clone(),
+            etag: etag.clone(),
+        });
+        Ok((bytes, etag))
+    }
+
+    #[cfg(test)]
+    fn build_count(&self) -> usize {
+        self.builds.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+fn snapshot_cache() -> &'static SnapshotCache {
+    static CACHE: OnceLock<SnapshotCache> = OnceLock::new();
+    CACHE.get_or_init(SnapshotCache::default)
+}
+
 async fn authorize(auth: &AgentAuth, id: Uuid, headers: &HeaderMap) -> Result<(), StatusCode> {
     let token = headers
         .get(header::AUTHORIZATION)
@@ -458,22 +643,13 @@ pub async fn workspace(
     };
     let source = PathBuf::from(workspace.source);
     let limit = workspace.max_bytes;
-    let built = tokio::task::spawn_blocking(move || build_tarball(&source, limit)).await;
-    let bytes = match built {
-        Ok(Ok(bytes)) => bytes,
-        Ok(Err(e)) => {
+    let (bytes, etag) = match snapshot_cache().get(&source, limit).await {
+        Ok(built) => built,
+        Err(e) => {
             tracing::warn!(session = %id, error = %e, "could not build the workspace snapshot");
             return (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response();
         }
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("snapshot task failed: {e}"),
-            )
-                .into_response()
-        }
     };
-    let etag = format!("\"{}\"", hex(&Sha256::digest(&bytes)));
     if headers
         .get(header::IF_NONE_MATCH)
         .and_then(|v| v.to_str().ok())
@@ -575,6 +751,7 @@ mod tests {
         write(root, "CLAUDE.md", "pointer");
         write(root, ".claude/rules/rule.md", "rule");
         write(root, ".claude/skills/s/SKILL.md", "skill");
+        write(root, ".claude/agents/reviewer.md", "agent");
         write(root, ".codex/skills/c/SKILL.md", "skill");
         write(root, ".agent-tools/bin/redact", "#!/bin/sh\n");
         fs::set_permissions(
@@ -582,18 +759,37 @@ mod tests {
             fs::Permissions::from_mode(0o755),
         )
         .unwrap();
-        write(root, "UsefulClaudeSkills/u/SKILL.md", "skill");
+        write(root, ".agent-tools/lib/estate_ci/mod.py", "lib");
+        write(root, ".agent-tools/etc/tracker.toml", "etc");
         // Excluded: unlisted top-level entries, other dotfiles, and secrets.
         write(root, "notes.txt", "not workspace");
         write(root, "Active/WI/x", "checkout");
         write(root, "agent-workspace-config/AGENTS.md", "unlisted");
+        write(
+            root,
+            "UsefulClaudeSkills/u/SKILL.md",
+            "a checkout, not a skill",
+        );
         write(root, ".ssh/id_ed25519", "key");
         write(root, ".env", "TOKEN=1");
+        // Claude Code's local permission list records exact commands and can
+        // carry inline tokens; the other names hold agent credentials and
+        // process state that must not reach a pod.
+        write(root, ".claude/settings.json", "{}");
+        write(root, ".claude/settings.local.json", "{\"permissions\":{}}");
+        write(root, ".claude/history/h.jsonl", "session");
         write(root, ".claude/.credentials.json", "{}");
         write(root, ".claude/.git/config", "[remote]");
         write(root, "UsefulClaudeSkills/.git/config", "[remote]");
         write(root, ".claude/id_rsa", "key");
+        write(root, ".codex/auth.json", "{\"token\":\"x\"}");
+        write(root, ".codex/config.toml", "model = \"x\"");
+        write(root, ".codex/scheduled_tasks.lock", "pid");
         write(root, ".codex/credentials.json", "{}");
+        write(root, ".claude/skills/s/.ruff_cache/v", "cache");
+        write(root, ".agent-tools/bin/__pycache__/x.pyc", "bytecode");
+        write(root, ".agent-tools/.pytest_cache/v/cache", "cache");
+        write(root, ".agent-tools/bin/tool.lock", "lock");
         write(root, ".agent-tools/release.pem", "key");
 
         let built = build_tarball(root, 16 * 1024 * 1024).unwrap();
@@ -603,9 +799,11 @@ mod tests {
             "CLAUDE.md",
             ".claude/rules/rule.md",
             ".claude/skills/s/SKILL.md",
+            ".claude/agents/reviewer.md",
             ".codex/skills/c/SKILL.md",
             ".agent-tools/bin/redact",
-            "UsefulClaudeSkills/u/SKILL.md",
+            ".agent-tools/lib/estate_ci/mod.py",
+            ".agent-tools/etc/tracker.toml",
         ] {
             assert!(names.iter().any(|n| n == want), "missing {want}: {names:?}");
         }
@@ -613,13 +811,24 @@ mod tests {
             "notes.txt",
             "Active/WI/x",
             "agent-workspace-config/AGENTS.md",
+            "UsefulClaudeSkills/u/SKILL.md",
             ".ssh/id_ed25519",
             ".env",
+            ".claude/settings.json",
+            ".claude/settings.local.json",
+            ".claude/history/h.jsonl",
             ".claude/.credentials.json",
             ".claude/.git/config",
             "UsefulClaudeSkills/.git/config",
             ".claude/id_rsa",
+            ".codex/auth.json",
+            ".codex/config.toml",
+            ".codex/scheduled_tasks.lock",
             ".codex/credentials.json",
+            ".claude/skills/s/.ruff_cache/v",
+            ".agent-tools/bin/__pycache__/x.pyc",
+            ".agent-tools/.pytest_cache/v/cache",
+            ".agent-tools/bin/tool.lock",
             ".agent-tools/release.pem",
         ] {
             assert!(
@@ -632,6 +841,26 @@ mod tests {
             .find(|(name, _, _)| name == ".agent-tools/bin/redact")
             .unwrap();
         assert_eq!(redact.2, 0o755, "the exec bit is preserved");
+    }
+
+    #[tokio::test]
+    async fn caches_the_build_until_the_source_changes() {
+        let dir = TempDir::new().unwrap();
+        write(dir.path(), ".claude/rules/r.md", "one");
+        write(dir.path(), ".agent-tools/bin/tool", "#!/bin/sh\n");
+        let cache = SnapshotCache::default();
+
+        let (first, first_etag) = cache.get(dir.path(), 1024 * 1024).await.unwrap();
+        let (again, again_etag) = cache.get(dir.path(), 1024 * 1024).await.unwrap();
+        assert_eq!(first_etag, again_etag);
+        assert_eq!(&again[..], &first[..]);
+        assert_eq!(cache.build_count(), 1, "an unchanged source is not rebuilt");
+
+        write(dir.path(), ".claude/rules/r.md", "two");
+        let (changed, changed_etag) = cache.get(dir.path(), 1024 * 1024).await.unwrap();
+        assert_ne!(first_etag, changed_etag);
+        assert_ne!(&first[..], &changed[..]);
+        assert_eq!(cache.build_count(), 2, "a changed source is rebuilt");
     }
 
     #[test]
@@ -680,6 +909,14 @@ mod tests {
         let error = build_tarball(dir.path(), 1024 * 1024).unwrap_err();
         assert!(matches!(error, SnapshotError::Unavailable(_)), "{error}");
         let error = build_tarball(&dir.path().join("missing"), 1024).unwrap_err();
+        assert!(matches!(error, SnapshotError::Unavailable(_)), "{error}");
+    }
+
+    #[test]
+    fn an_unlisted_dot_directory_is_not_a_snapshot() {
+        let dir = TempDir::new().unwrap();
+        write(dir.path(), ".claude/settings.local.json", "{}");
+        let error = build_tarball(dir.path(), 1024 * 1024).unwrap_err();
         assert!(matches!(error, SnapshotError::Unavailable(_)), "{error}");
     }
 
