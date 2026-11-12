@@ -5212,30 +5212,46 @@ pod the kubelet stops at that deadline ends its session with the distinct
 reason `hit its active deadline: …` from the reconciler, not the generic
 failure note.
 
-**Workspace tree (WI-3373, WI-3374).** Off by default. With
-`ENGINE_POD_WORKSPACE=1`, the engine adds a `workspace-config` init container
-and a pod-local `emptyDir`, and mounts that volume read-only at
+**Workspace tree (WI-3373, WI-3374; engine-served since WI-4127).** Off by
+default. With `ENGINE_POD_WORKSPACE=1`, the engine adds a `workspace-config`
+init container and a pod-local `emptyDir`, and mounts that volume read-only at
 `ENGINE_POD_WORKSPACE_DIR` (default `/home/vogt/Working`) in the session
-container. The init container clones the workspace configuration and the shared
-skills repositories at the pinned `ENGINE_POD_WORKSPACE_CONFIG_COMMIT` and
-`ENGINE_POD_WORKSPACE_SKILLS_COMMIT`, runs
-`agent-workspace-config/bootstrap/install.sh` with `WORKSPACE_ROOT` on the
-volume, and exits. Both sources are public and are read over HTTPS, so the
-step needs no deploy key, Forgeit or GitHub token, or Infisical identity: no
-credential exists that could reach the session container, and the pod spec
-gains no Secret. The tree is never writable from the session container; the
-session's clone keeps its own writable `emptyDir` at
-`<dir>/session` (a nested mount), so `AGENTS.md`, `CLAUDE.md`, `.claude/rules`,
-`.claude/skills` and `.codex/skills` are ancestors of the session's cwd as
-they are for a host session. `VOGT_CLONE_DIR` and `VOGT_WORK_DIR` move to
-`<dir>/session`, the caller's `cwd` is re-rooted under it, and the Claude
-project-trust entry follows it. The session agent sets
-`VOGT_WORKSPACE_ROOT` and, for Codex, gathers `developer_instructions` from the
-mounted tree itself (the engine cannot read a per-pod `emptyDir`): the
-checkout's own guidance is inlined and the workspace files and skill roots are
-named, as on a host. A clone or install failure logs and leaves the session
-with the pre-workspace tree rather than failing the boot. `.agent-tools` is
-not in either cloned repository, so a pod does not get `.agent-tools/bin`.
+container. The tree is the engine's own installed workspace —
+`ENGINE_POD_WORKSPACE_SOURCE`, the directory the engine's
+`agent-workspace-config` init container fills in the shared `agent-config`
+`emptyDir` — not a pod-side clone. The init container fetches
+`GET /api/agent-auth/sessions/{id}/workspace` from
+`ENGINE_POD_ENGINE_ENDPOINT` with the pod's existing one-use bootstrap
+credential, read from the same per-pod Secret into a `0600` curl config file
+rather than a command line, and unpacks the gzipped tarball into the volume.
+The route checks that credential without consuming it, so the session
+container's `bootstrap` still spends it. No new Secret, deploy key, Forgejo
+token or Infisical identity is added: the private configuration repository is
+never read by a pod, and none of its credentials exist there.
+
+The snapshot is allowlisted to `AGENTS.md`, `CLAUDE.md`, `.claude`, `.codex`,
+`.agent-tools` and `UsefulClaudeSkills`. Top-level entries outside that set
+(including other dotfiles such as `.local`, `.config` and `.ssh`) are
+excluded. At every depth `.git`, SSH keys, credential-helper and token files
+are excluded; in-tree symlinks are skipped, and a symlink that resolves outside
+the source fails the build instead of escaping. `ENGINE_POD_WORKSPACE_MAX_BYTES`
+(default 64 MiB, hard maximum 512 MiB) caps the uncompressed tree. The response
+is deterministic gzip with an `ETag`, so an unchanged tree has a stable
+identity. A missing source, a failed fetch or an unpack failure logs and
+leaves the session with the pre-workspace tree rather than failing the boot.
+
+The tree is never writable from the session container; the session's clone
+keeps its own writable `emptyDir` at `<dir>/session` (a nested mount), so
+`AGENTS.md`, `CLAUDE.md`, `.claude/rules`, `.claude/skills` and
+`.codex/skills` are ancestors of the session's cwd as they are for a host
+session. `VOGT_CLONE_DIR` and `VOGT_WORK_DIR` move to `<dir>/session`, the
+caller's `cwd` is re-rooted under it, and the Claude project-trust entry
+follows it. The session agent sets `VOGT_WORKSPACE_ROOT` and, for Codex,
+gathers `developer_instructions` from the mounted tree itself (the engine
+cannot read a per-pod `emptyDir`): the checkout's own guidance is inlined and
+the workspace files and skill roots are named, as on a host. `.agent-tools` is
+served when the engine's tree has it (an estate host does); a tree installed
+without it leaves the pod without `.agent-tools/bin`.
 
 **Engine configuration** (`pod_backend.rs`; the graft rows are the graft source provider's, `graft_provider.rs`):
 
