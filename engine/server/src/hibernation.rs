@@ -169,6 +169,10 @@ pub struct Record {
     /// Set while hibernated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hibernation: Option<Hibernation>,
+    /// The last archive of the pod's uncommitted work, so a hibernated
+    /// session still shows where it was kept (WI-4132).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub salvage: Option<vogt_engine_contract::salvage::SalvageReport>,
     /// The latest economics snapshot, as JSON (WI-1245). Kept so removing a
     /// hibernated session can record its cost once; nothing reads it back
     /// onto a summary.
@@ -256,6 +260,7 @@ impl Record {
             workspace: None,
             superseded_by: None,
             hibernation: None,
+            salvage: None,
             economics: None,
             rows: None,
             cols: None,

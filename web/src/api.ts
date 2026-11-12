@@ -44,6 +44,26 @@ export interface ApprovalPrompt {
   kind?: "approval" | "picker";
 }
 
+/** The archive the engine made of a pod's uncommitted work before deleting
+ *  the pod (engine `SalvageReport`, WI-4132). */
+export interface SalvageReport {
+  state: "saved" | "salvage_failed";
+  /** The archive directory on the engine's state volume, when saved. */
+  path?: string | null;
+  files: number;
+  bytes: number;
+  repos?: string[];
+  /** Why it failed, or what it left out. */
+  reason?: string | null;
+  at: string;
+}
+
+/** The answer to a stop: whether it happened, and what was salvaged first. */
+export interface StopResponse {
+  ok: boolean;
+  salvage?: SalvageReport | null;
+}
+
 /** What a session is for (engine `SessionRole`, WI-957). */
 export type SessionRole = "worker" | "oversight";
 
@@ -71,6 +91,9 @@ export interface SessionSummary {
   conversation?: AgentConversation | null;
   /** Set while `activity` is `hibernated`. */
   hibernation?: Hibernation | null;
+  /** What the engine kept of the pod's uncommitted work before deleting it
+   *  (WI-4132). Absent on a host session or when there was nothing to save. */
+  salvage?: SalvageReport | null;
   /** Pinned awake: never hibernated by policy. */
   keep_awake?: boolean;
   /** What the session is for (WI-957): `oversight` for one nominated to
@@ -936,7 +959,7 @@ export const api = {
   renameSession: (id: string, name: string) =>
     req<OkResponse>("PATCH", `/api/sessions/${id}`, { name }),
   killSession: (id: string) =>
-    req<OkResponse>("POST", `/api/sessions/${id}/kill`),
+    req<StopResponse>("POST", `/api/sessions/${id}/kill`),
   /** The engine's own hibernation routes; see `sessionHibernation.ts`, which
    *  prefers vogt-core's audited operations and falls back to these only
    *  when there is no core. */

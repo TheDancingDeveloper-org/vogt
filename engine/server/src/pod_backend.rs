@@ -1215,6 +1215,22 @@ fn pod_env(
         // path inside it (WI-3883). With a workspace tree (WI-3374) the clone
         // sits under it, so the workspace files are ancestors of the session.
         EnvVar {
+            name: "VOGT_PROJECT".into(),
+            value: Some(source.location.repo().to_string()),
+            ..Default::default()
+        },
+        // Project memory is only carried when the deployment asked for it
+        // (WI-3371); the value is safe to put in the spec, unlike a key.
+        EnvVar {
+            name: "ENGINE_POD_PERSIST_MEMORY".into(),
+            value: Some(if crate::pod_salvage::persist_memory_enabled() {
+                "1".into()
+            } else {
+                "0".into()
+            }),
+            ..Default::default()
+        },
+        EnvVar {
             name: "VOGT_CLONE_DIR".into(),
             value: Some(cfg.work_dir()),
             ..Default::default()

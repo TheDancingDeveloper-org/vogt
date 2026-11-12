@@ -775,7 +775,10 @@ than these routes.
   "reconnecting" is not one.
 - `PATCH /api/sessions/:id` `{"name": "..."}` -> `OkResponse` (requires the
   `sessions` capability). MCP: `session_rename`.
-- `POST /api/sessions/:id/kill` `{"reason"?, "by"?}` -> `OkResponse`
+- `POST /api/sessions/:id/kill` `{"reason"?, "by"?}` -> `StopResponse`
+  (`{"ok": true, "salvage"?}`); a pod session's uncommitted work is archived
+  first and named in `salvage` (`path`, `files`, `bytes`, `repos`, or a
+  `salvage_failed` reason). The stop happens whether or not the salvage did.
   (SIGKILL to the child; the session stays in the registry so its
   scrollback is still readable, which is what makes this different from
   `DELETE`. The optional body is recorded before the kill, and the exit then
@@ -2179,9 +2182,26 @@ engine id (WI-912; the design is `docs/design/session-hibernation.md`).
     Claude's `<conversation>.jsonl` or a Codex
     `sessions/<date>/rollout-<stamp>-<conversation>.jsonl`, so a woken Codex
     pod continues its conversation instead of starting fresh (WI-3873).
-  - **Unlanded workspace changes are lost by design.** The pod's workspace is
-    deleted with it; only graft-landed work, the transcript and the account
-    config survive a hibernation.
+  - **Uncommitted work is salvaged before the pod goes (WI-4132).** An
+    explicit stop and a hibernation both ask the pod's agent to save the
+    checkout's uncommitted changes first: a patch per repository
+    (`git diff --binary`, or `graft diff` for a graft working copy), the
+    untracked file list with each file's content, and a `manifest.json`,
+    written under `state_dir/pod-salvage/<session_id>/<timestamp>/`
+    (directories `0700`, files `0600`). It never lands, commits or pushes;
+    recovery is a person's or a worker's choice. Credential-looking paths and
+    anything the provider reports as ignored are left out, and a size cap
+    bounds each archive. The stop result carries the `salvage` report
+    (`path`, `files`, `bytes`, `repos`), the session summary keeps it, and
+    the PWA shows it on the session row. A salvage that cannot be taken —
+    no attached agent, an upload failure — records `salvage_failed` with the
+    reason and never blocks the stop. An engine restart takes no salvage and
+    deletes no pod (WI-4126). `ENGINE_POD_SALVAGE` (on by default) turns it
+    off; `ENGINE_POD_SALVAGE_KEEP` (default 5) and
+    `ENGINE_POD_SALVAGE_MAX_BYTES` (default 128 MiB) bound what one session
+    keeps. Still only in the archive: work that was neither landed nor
+    untracked at the time of the stop. Graft-landed changes are on the line,
+    and the transcript and account bundle survive as before.
   - *Engine restart.* On SIGTERM pod sessions are not hibernated: their
     records (without a hibernation marker) and screens are written, and their
     pods keep running. The stream credential each pod holds is kept in
@@ -2200,6 +2220,17 @@ engine id (WI-912; the design is `docs/design/session-hibernation.md`).
     pod. Deletion belongs to the session's own teardown — an explicit stop or
     hibernate, or an agent that has already exited — because a running pod is
     the only copy of its workspace (WI-3405, WI-4126).
+- **Project memory (WI-3371).** With `ENGINE_POD_PERSIST_MEMORY` on (off by
+  default), a Claude pod also writes `CLAUDE_CONFIG_DIR/projects/*/memory`
+  back to the engine, keyed by the project's source identity rather than by
+  the account or the pod's `/work` path, under `state_dir/pod-memory/<project>/`
+  (`0700`/`0600`). The next session on the same project, under any leased
+  account, receives those files at bootstrap as bundle entries under
+  `projects/<project-dir>/memory/`; the entrypoint writes them before the CLI
+  starts. The pod's copy is what the next flush replaces, so the engine's
+  archive is read-only in effect: a restore happens only at launch. Turning
+  the setting off leaves existing files on the volume and stops both the
+  restore and the write-back.
 - **`keep_awake`** pins a session. The pin is kept in its record and shown
   on its summary. A pinned session is never hibernated by policy, and if the
   engine finds it hibernated at boot (after a shutdown or a crash), it wakes
@@ -3906,6 +3937,9 @@ Avoid anonymous `serde_json::json!` blobs for stable routes when a named typed
 response will do. Current standard small shapes:
 
 - `OkResponse` -> `{"ok": true|false}`
+- `StopResponse` -> `{"ok": true, "salvage"?: SalvageReport}`; the salvage
+  report is `{"state": "saved"|"salvage_failed", "path"?, "files", "bytes",
+  "repos"?, "reason"?, "at"}` (WI-4132).
 - `WriteFileResponse` -> `{"ok": true, "bytes": <n>}`
 
 Several routes return `serde_json::Value` rather than a named type — the push

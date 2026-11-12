@@ -69,6 +69,19 @@ export function sessionResourceWord(s: SessionSummary): string | null {
   return r.cpu_pct >= 1 ? `${memory} · ${Math.round(r.cpu_pct)}% CPU` : memory;
 }
 
+/** Where a stopped pod session's uncommitted work was kept, or why it was
+ *  not (WI-4132). Null when the engine made no archive. */
+export function sessionSalvageHint(s: SessionSummary): string | null {
+  const salvage = s.salvage;
+  if (!salvage) return null;
+  if (salvage.state === "salvage_failed") {
+    return `salvage failed${salvage.reason ? `: ${salvage.reason}` : ""}`;
+  }
+  if (!salvage.path) return null;
+  const files = salvage.files === 1 ? "1 file" : `${salvage.files} files`;
+  return `salvage at ${salvage.path} (${files})`;
+}
+
 /** "template claude · codex · model gpt-5.6", from what the engine knows:
  *  the template it was started from and the agent and model on its command
  *  line. The model an agent actually ran is the core's to resolve from its
@@ -84,6 +97,7 @@ export function sessionRuntimeHint(s: SessionSummary): string | null {
     model ? `model ${model}` : null,
     s.permission_mode ? `permissions ${s.permission_mode}` : null,
     s.stop ? `stopped${s.stop.by ? ` by ${s.stop.by}` : ""}${s.stop.reason ? `: ${s.stop.reason}` : ""}` : null,
+    sessionSalvageHint(s),
   ].filter((part): part is string => Boolean(part));
   return parts.length ? parts.join(" · ") : null;
 }

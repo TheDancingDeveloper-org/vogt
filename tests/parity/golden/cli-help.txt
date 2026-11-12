@@ -2946,18 +2946,18 @@ options:
 
 $ vogt forge account link --help
 [exit 0]
-usage: vogt forge account link [-h] [--host HOST] --token TOKEN
-                               --reason REASON
+usage: vogt forge account link [-h] [--host HOST] [--token-file TOKEN__FILE |
+                               --token-stdin] --reason REASON
 
 options:
-  -h, --help       show this help message and exit
-  --host HOST      The configured forge host to link, for example github.com
-                   or a Forgejo host named under forge_token_files.
-  --token TOKEN    The Personal Access Token. Validated, then stored encrypted
-                   at rest under `forge_account_key_file` and never returned
-                   by any surface. To revoke it, unlink here and revoke it
-                   upstream too.
-  --reason REASON  Why this write is being made (audited).
+  -h, --help            show this help message and exit
+  --host HOST           The configured forge host to link, for example
+                        github.com or a Forgejo host named under
+                        forge_token_files.
+  --token-file TOKEN__FILE
+                        Read the token from this file (never pass it in argv).
+  --token-stdin         Read the token from standard input.
+  --reason REASON       Why this write is being made (audited).
 
 $ vogt forge account status --help
 [exit 0]

@@ -1,9 +1,12 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+
+use crate::salvage::SalvageReport;
 use uuid::Uuid;
 
 pub mod chat;
+pub mod salvage;
 pub mod source;
 pub use chat::*;
 
@@ -365,6 +368,11 @@ pub struct SessionSummary {
     /// Set while the session is hibernated: when, why, and by what.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hibernation: Option<Hibernation>,
+    /// The archive the engine made of the pod's uncommitted work before it
+    /// deleted the pod (WI-4132). Absent on a host session, when the stop
+    /// found nothing to save, and from an engine that predates the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub salvage: Option<SalvageReport>,
     /// Pinned awake: never hibernated by policy, and woken at boot.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub keep_awake: bool,
