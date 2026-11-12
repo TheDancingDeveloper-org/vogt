@@ -16,73 +16,93 @@ check() {
   fi
 }
 T=$'\t'
+Z=0000000000000000000000000000000000000000
+S=1111111111111111111111111111111111111111
+# raw STATUS PATH [OLDMODE NEWMODE]: one `git diff --raw` line.
+raw() {
+  local st=$1 p=$2 om=${3:-} nm=${4:-}
+  case "$st" in
+    A*) om=${om:-000000}; nm=${nm:-100644} ;;
+    D*) om=${om:-100644}; nm=${nm:-000000} ;;
+    *) om=${om:-100644}; nm=${nm:-100644} ;;
+  esac
+  printf ':%s %s %s %s %s\t%s' "$om" "$nm" "$S" "$Z" "$st" "$p"
+}
 
-# Skippable: allowlisted paths only.
-check false tests/acceptance/harness.py
-check false tests/acceptance/checks/x.py tests/test_acceptance_suite.py
-check false .github/ISSUE_TEMPLATE/bug_report.yml .github/PULL_REQUEST_TEMPLATE.md
-check false "M${T}tests/acceptance/harness.py" "A${T}tests/acceptance/new.py"
-check false "R100${T}tests/acceptance/a.py${T}tests/acceptance/b.py"
+# Skippable: A or M of an allowlisted regular file, mode unchanged.
+check false "$(raw M tests/acceptance/harness.py)"
+check false "$(raw A tests/acceptance/checks/new.py)" "$(raw M tests/acceptance/matrix.toml)"
+check false "$(raw M .github/ISSUE_TEMPLATE/bug_report.yml)" "$(raw M .github/PULL_REQUEST_TEMPLATE.md)"
+check false "$(raw M tests/acceptance/run.py 100755 100755)"
+check false "$(raw A tests/acceptance/run2.py 000000 100755)"
+
+# Review B3: tests/test_acceptance_suite.py is enumerated by disposition.rs,
+# so no change to it skips: modify, delete, rename.
+check true "$(raw M tests/test_acceptance_suite.py)"
+check true "$(raw D tests/test_acceptance_suite.py)"
+check true "$(raw D tests/test_acceptance_suite.py)" "$(raw A tests/acceptance/test_suite.py)"
+check true "$(raw R100 tests/test_acceptance_suite.py$'\t'tests/acceptance/suite.py)"
+check true "$(raw A tests/test_new_thing.py)"
+
+# Only A and M skip, whatever the path (review B3 principle).
+check true "$(raw D tests/acceptance/harness.py)"
+check true "$(raw R100 tests/acceptance/a.py$'\t'tests/acceptance/b.py)"
+check true "$(raw C100 tests/acceptance/a.py$'\t'tests/acceptance/b.py)"
+check true "$(raw T tests/acceptance/a.py 100644 120000)"
+check true "$(raw U tests/acceptance/a.py)"
+check true "$(raw X tests/acceptance/a.py)"
+check true "$(raw M tests/acceptance/run.py 100644 100755)"
+check true "$(raw M tests/acceptance/run.py 100755 100644)"
+check true "$(raw A tests/acceptance/link 000000 120000)"
+check true "$(raw M tests/acceptance/sub 160000 160000)"
+check true "$(raw A .github/ISSUE_TEMPLATE/x.yml 100644 100644)"
+# Not --raw output: bare paths and name-status lines run.
+check true tests/acceptance/harness.py
+check true "M${T}tests/acceptance/harness.py"
+check true ":100644 100644 $S $Z M"
+check true ":100644 100644 $S $Z M extra${T}tests/acceptance/a.py"
+check true "$(raw M tests/acceptance/a.py)" "garbage"
 
 # Docs that cargo or pytest read (review B1), and docs in general: all run.
-check true docs/ENGINE.md
-check true docs/PYTHON_TEST_DISPOSITION.md
-check true docs/CONFIG.md
-check true docs/ACCEPTANCE.md
-check true docs/design/context-management.md
-check true docs/engine-openapi.yaml
-check true README.md
-check true SECURITY.md
-check true CHANGELOG.md
-check true engine/README.md
-check true .github/PULL_REQUEST_TEMPLATE/other.md
+for p in docs/ENGINE.md docs/PYTHON_TEST_DISPOSITION.md docs/CONFIG.md \
+         docs/ACCEPTANCE.md docs/design/context-management.md \
+         docs/engine-openapi.yaml README.md SECURITY.md CHANGELOG.md \
+         engine/README.md .github/PULL_REQUEST_TEMPLATE/other.md; do
+  check true "$(raw M "$p")"
+done
 
-# Renames and copies (review B2): the old path counts as well as the new.
-check true "R100${T}engine/core/src/lib.rs${T}docs/lib.md"
-check true "R087${T}engine/foo.rs${T}tests/acceptance/foo.py"
-check true "R100${T}docs/foo.md${T}engine/foo.rs"
-check true "R100${T}tests/acceptance/x.py${T}engine/core/src/x.rs"
-check true "C100${T}engine/core/src/lib.rs${T}tests/acceptance/lib.py"
-check true "R100"
+# Renames and copies (review B2): never skippable, either direction.
+check true "$(raw R100 engine/core/src/lib.rs$'\t'docs/lib.md)"
+check true "$(raw R087 engine/foo.rs$'\t'tests/acceptance/foo.py)"
+check true "$(raw R100 tests/acceptance/x.py$'\t'engine/core/src/x.rs)"
+check true "$(raw C100 engine/core/src/lib.rs$'\t'tests/acceptance/lib.py)"
 # --no-renames output of the same rename: a delete plus an add.
-check true "D${T}engine/core/src/lib.rs" "A${T}tests/acceptance/lib.md"
-# Deleting a Rust file runs.
-check true "D${T}engine/core/src/lib.rs"
-check true engine/core/src/lib.rs
+check true "$(raw D engine/core/src/lib.rs)" "$(raw A tests/acceptance/lib.md)"
+check true "$(raw D engine/core/src/lib.rs)"
 
 # Paths an earlier review named: all run.
-check true engine/session-agent/src/main.rs
-check true engine/contract/src/lib.rs
-check true engine/.cargo/audit.toml
-check true scripts/parity.py
-check true scripts/select_parity_golden.sh
-check true pyproject.toml
-check true uv.lock
-check true engine/server/tests/rust_core.rs
-check true engine/Dockerfile
-check true engine/deploy/agent-auth.sh
-check true deny.toml
-check true Cargo.lock
-check true tests/parity/golden/x.json
-check true src/vogt/cli.py
-check true .github/workflows/rust-core.yml
-check true .github/workflows/acceptance.yml
-check true scripts/rust_core_changes.sh
-check true scripts/test_rust_core_changes.sh
-check true web/src/app.ts
-check true tests/test_sessions.py
-check true tests/acceptance_other.py
+for p in engine/core/src/lib.rs engine/session-agent/src/main.rs \
+         engine/contract/src/lib.rs engine/.cargo/audit.toml scripts/parity.py \
+         scripts/select_parity_golden.sh pyproject.toml uv.lock \
+         engine/server/tests/rust_core.rs engine/Dockerfile \
+         engine/deploy/agent-auth.sh deny.toml Cargo.lock \
+         tests/parity/golden/x.json src/vogt/cli.py \
+         .github/workflows/rust-core.yml .github/workflows/acceptance.yml \
+         scripts/rust_core_changes.sh scripts/test_rust_core_changes.sh \
+         web/src/app.ts tests/test_sessions.py tests/acceptance_other.py; do
+  check true "$(raw M "$p")"
+done
 
-# Mixed sets: one relevant path runs everything.
-check true tests/acceptance/harness.py src/vogt/cli.py
-check true tests/acceptance/harness.py docs/ENGINE.md
-check true .github/PULL_REQUEST_TEMPLATE.md README.md
+# Mixed sets: one relevant line runs everything.
+check true "$(raw M tests/acceptance/harness.py)" "$(raw M src/vogt/cli.py)"
+check true "$(raw M tests/acceptance/harness.py)" "$(raw M docs/ENGINE.md)"
+check true "$(raw M .github/PULL_REQUEST_TEMPLATE.md)" "$(raw M README.md)"
 
 # Empty diff runs.
 check true ""
 
-# A list at the pull-files cap may be truncated: run. One under it skips.
-many() { local i; for ((i = 0; i < $1; i++)); do echo "tests/acceptance/f$i.py"; done; }
+# A list at the cap may be truncated: run. One under it skips.
+many() { local i; for ((i = 0; i < $1; i++)); do raw M "tests/acceptance/f$i.py"; echo; done; }
 got=$(many 3000 | bash "$classify" 2>/dev/null)
 [ "$got" = "rust=true" ] || { echo "FAIL: 3000 paths gave $got"; fail=1; }
 got=$(many 2999 | bash "$classify" 2>/dev/null)
@@ -104,10 +124,16 @@ scan() {
     --exclude=test_acceptance_suite.py 2>/dev/null || true
 }
 
+# tests/test_acceptance_suite.py imports tests.acceptance, but only pytest
+# (ci.yml, acceptance.yml) runs it; no rust-core job runs pytest, and the
+# file itself is never skippable (disposition.rs enumerates it).
+if grep -v '^[[:space:]]*#' "$root/.github/workflows/rust-core.yml" | grep -qw pytest; then
+  echo "FAIL: rust-core.yml runs pytest; test_acceptance_suite.py's import of tests.acceptance now matters"; fail=1
+fi
+
 # 1. No scanned file names an allowlisted path (it would be read by a
 #    job that the allowlist lets skip).
-for pat in 'tests[/.]acceptance' 'test_acceptance_suite' \
-           'ISSUE_TEMPLATE' 'PULL_REQUEST_TEMPLATE'; do
+for pat in 'tests[/.]acceptance[/.]' 'ISSUE_TEMPLATE' 'PULL_REQUEST_TEMPLATE'; do
   hits=$(scan "$pat")
   if [ -n "$hits" ]; then
     echo "FAIL: allowlisted '$pat' is referenced by:"; echo "$hits"; fail=1
@@ -123,7 +149,7 @@ ndocs=0
 while IFS= read -r d; do
   [ -z "$d" ] && continue
   ndocs=$((ndocs + 1))
-  got=$(printf '%s\n' "$d" | bash "$classify" 2>/dev/null)
+  got=$(raw M "$d" | bash "$classify" 2>/dev/null)
   [ "$got" = "rust=true" ] || { echo "FAIL: referenced doc $d is skippable"; fail=1; }
 done <<<"$docs"
 for must in docs/ENGINE.md docs/PYTHON_TEST_DISPOSITION.md; do

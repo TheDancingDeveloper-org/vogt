@@ -73,7 +73,8 @@ jobs:
 
       - id: classify
         # Fail closed (WI-4158): the required jobs skip only when every
-        # changed path is on the allowlist in scripts/rust_core_changes.sh.
+        # changed path is an add or modify of a file on the allowlist in
+        # scripts/rust_core_changes.sh.
         # Any other event, a failed diff, or an empty diff runs them. The
         # base ref is passed through the environment, not interpolated
         # into the script.
@@ -85,10 +86,12 @@ jobs:
           if [ "$EVENT_NAME" != "pull_request" ]; then
             echo "rust=true" >> "$GITHUB_OUTPUT"; exit 0
           fi
-          # --no-renames: a rename is a delete plus an add, so the old path
-          # is classified too (a Rust file moved into docs/ still runs).
-          # The diff is local, so no API page limit can truncate it.
-          if ! files=$(git -c core.quotePath=false diff --no-renames --name-status "origin/${BASE_REF}...HEAD"); then
+          # --raw carries status and modes: only an add or modify of a
+          # regular allowlisted file with an unchanged mode skips; any
+          # delete, rename, copy, type or mode change runs. --no-renames
+          # also turns a rename into a delete plus an add. The diff is
+          # local, so no API page limit can truncate it.
+          if ! files=$(git -c core.quotePath=false diff --no-renames --raw --no-abbrev "origin/${BASE_REF}...HEAD"); then
             echo "could not diff against origin/${BASE_REF}; running everything"
             echo "rust=true" >> "$GITHUB_OUTPUT"; exit 0
           fi
