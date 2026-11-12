@@ -566,7 +566,7 @@ mod tests {
         assert!(output.contains("session pod failed: OOMKilled"));
         assert!(output.contains("--- container log (last 50 lines) ---"));
         assert!(output.contains("session agent failed: no such file"));
-        assert!(output.contains("Authorization: [redacted] [redacted]"));
+        assert!(output.contains("Authorization: Bearer [redacted]"));
         assert!(output.contains("token=[redacted]"));
         assert!(!output.contains("bearer-secret-123456"));
         assert!(!output.contains("source-secret-123456"));
