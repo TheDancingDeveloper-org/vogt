@@ -78,6 +78,12 @@ the example does: compiled defaults are not portable operator choices.
 | `ENGINE_POD_PNPM_SEED_HOST_PATH` | Read-only pnpm host seed; same constraints. |
 | `ENGINE_POD_SEED_ALLOWED_PREFIXES` | Comma-separated allowed host-seed prefixes. |
 | `ENGINE_POD_SCCACHE_ENDPOINT` | Optional validated sccache endpoint. |
+| `ENGINE_POD_WORKSPACE` | Opt in (`true`/`1`) to the read-only workspace tree in every session pod; off by default. |
+| `ENGINE_POD_WORKSPACE_DIR` | Mount path of the tree, default `/home/vogt/Working`; must be under `/home/vogt`. The clone goes in `session/` beneath it. |
+| `ENGINE_POD_WORKSPACE_CONFIG_REPO` | Workspace-configuration repository, default the public `agent-workspace-config` HTTPS URL. |
+| `ENGINE_POD_WORKSPACE_CONFIG_COMMIT` | Required full 40-character commit id when the workspace is on. |
+| `ENGINE_POD_WORKSPACE_SKILLS_REPO` | Shared-skills repository, default the public `UsefulClaudeSkills` HTTPS URL. |
+| `ENGINE_POD_WORKSPACE_SKILLS_COMMIT` | Required full 40-character commit id when the workspace is on. |
 
 The `ENGINE_SOURCE_GRAFT_*` names are the graft source provider's; the older
 `ENGINE_POD_GRAFT_*` and `ENGINE_GRAFT_MINT_TOKEN_FILE` names are read as
@@ -85,9 +91,11 @@ aliases for one release, with a deprecation warning.
 
 `ENGINE_SOURCE_GRAFT_MINT_TOKEN_FILE` is also needed for per-session graft minting;
 mount it only in the engine. See [session pod boot](ENGINE.md#session-pod-boot)
-for bootstrap, revocation and account write-back. There is no workspace
-configuration volume setting yet (WI-3374). Cache seeds (WI-3164/WI-3354)
-are not shared writable homes or workspace persistence.
+for bootstrap, revocation and account write-back. The workspace tree
+(`ENGINE_POD_WORKSPACE`, WI-3373/WI-3374) is read-only, pod-local and built at
+boot from pinned public sources; it is workspace configuration, not session
+persistence. Cache seeds (WI-3164/WI-3354) are not shared writable homes or
+workspace persistence.
 
 An engine restart currently loses pod stream credentials/cursor. The
 reconciler deletes surviving pods as orphans and restores records as
