@@ -837,17 +837,18 @@ fn bearer(h: &HeaderMap) -> Option<&[u8]> {
         .strip_prefix("Bearer ")
         .map(str::as_bytes)
 }
-/// The directory a pod session runs in: `VOGT_WORK_DIR`'s default in
-/// `deploy/session-entrypoint.sh`.
-const POD_WORK_DIR: &str = "/work";
-
-/// Mark the bundle's `.claude.json` onboarded and `/work` trusted. Without
+/// Mark the bundle's `.claude.json` onboarded and the pod's clone root
+/// trusted (the workspace's `session/` directory when the pod has a workspace
+/// tree, WI-3374). Without
 /// `hasCompletedOnboarding` Claude Code runs its first-run flow (theme picker, then "Select login
 /// method") and never reads the login it was handed (WI-3334). The account's
 /// stored config (the engine's own trust entries, say) often lacks the flag,
 /// and a fresh account has no config at all. Only a bundle with a login is
 /// touched, and a config that is not a JSON object is passed through as is.
-fn with_onboarding_config(mut files: Vec<(String, Vec<u8>)>) -> Vec<(String, Vec<u8>)> {
+fn with_onboarding_config(
+    mut files: Vec<(String, Vec<u8>)>,
+    work_dir: &str,
+) -> Vec<(String, Vec<u8>)> {
     if !files.iter().any(|(path, _)| path == ".credentials.json") {
         return files;
     }
@@ -876,7 +877,7 @@ fn with_onboarding_config(mut files: Vec<(String, Vec<u8>)>) -> Vec<(String, Vec
     // project you trust?", and autopilot's nudge answers its default, "No,
     // exit" (WI-3355).
     let mut value = serde_json::Value::Object(map);
-    changed |= crate::claude_config::accept_in_config(&mut value, POD_WORK_DIR);
+    changed |= crate::claude_config::accept_in_config(&mut value, work_dir);
     if !changed {
         return files;
     }
@@ -929,6 +930,9 @@ pub async fn bootstrap(
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
     let engine_endpoint = cfg.engine_endpoint.clone();
+    // The pod's clone root, for the Claude project-trust entry (WI-3355): it
+    // moves under the workspace tree when that is on (WI-3374).
+    let pod_work_dir = cfg.work_dir();
     let Some(source) = state.agent_auth.take_source(id).await else {
         return (StatusCode::BAD_REQUEST, "session source is unavailable").into_response();
     };
@@ -1098,7 +1102,7 @@ pub async fn bootstrap(
             .sessions
             .secret_broker()
             .bundle_snapshot(account, conversation.as_deref().unwrap_or(""));
-        for (path, bytes) in with_onboarding_config(files) {
+        for (path, bytes) in with_onboarding_config(files, &pod_work_dir) {
             // Claude keeps `<conversation>.jsonl`; a Codex rollout is
             // `rollout-<stamp>-<conversation>.jsonl`. Both must count, or a
             // woken Codex pod starts a fresh conversation and loses its
