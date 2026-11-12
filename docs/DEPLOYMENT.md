@@ -236,7 +236,7 @@ Everything an operator chooses lives in `deploy/.env`, read by
 | `ENGINE_PORT` | no | `8910` | Host port the container's 8910 is published on. |
 | `ENGINE_PUBLIC_URL` | no | — | The URL clients reach the stack at. Set it once there is a stable one (§4). |
 | `ENGINE_AGENT_AUTH_PUBLIC_URL` | no | — | HTTPS origin used by pod sessions for the agent-auth broker and Vogt MCP, for example `https://192.168.1.75:18197`. It must have no path, query, fragment, or credentials; local sessions keep loopback. |
-| `ENGINE_CADASTRE_MCP_URL` | no | unset | HTTPS origin for the Cadastre MCP server used by pod sessions. It must have no path, query, fragment, or credentials; unset omits Cadastre rather than handing pods the tailnet-only default. (`ENGINE_AGENT_AUTH_CADASTRE_MCP_URL` remains accepted as a compatibility alias.) |
+| `ENGINE_CADASTRE_MCP_URL` | no | unset | HTTPS origin for the Cadastre MCP server used by pod sessions. It must have no path, query, fragment, or credentials; unset omits Cadastre rather than handing pods the tailnet-only default. Pods authenticate with `CADASTRE_HTTP_TOKEN`, so the agent-auth manifest must declare it (any policy, `ondemand` included) or the entry is omitted. (`ENGINE_AGENT_AUTH_CADASTRE_MCP_URL` remains accepted as a compatibility alias.) |
 | `VOGT_STACK_IMAGE` | no | `ghcr.io/thedancingdeveloper-org/vogt-stack:0.7.22` | The image to run. Pin a digest (§6). |
 | `VOGT_VOICE_IMAGE` | no | `ghcr.io/thedancingdeveloper-org/vogt-voice:0.7.22` | The sidecar. Pin the same release as the stack. |
 | `COMPOSE_PROFILES` | no | `voice` | Clear it to run without the sidecar; the voice controls stay present but inert. |
