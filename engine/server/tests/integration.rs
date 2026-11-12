@@ -8930,6 +8930,73 @@ async fn session_screen_masks_a_printed_secret() {
         .unwrap();
 }
 
+/// WI-3988 review: a narrow screen wraps a private key across lines, so a
+/// line-at-a-time pass would keep the short body pieces and the END marker.
+/// The served screen must mask the block from BEGIN to END.
+#[tokio::test]
+async fn session_screen_masks_a_key_block_wrapped_across_lines() {
+    let (base, _h) = boot().await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let id = create_session_with(
+        &client,
+        &base,
+        json!({
+            "name": "screen-wrapped-key",
+            "cols": 40,
+            "rows": 12,
+            "command": [
+                "/bin/sh",
+                "-c",
+                "printf '%s\\n' 'WIN_SSH_KEY=abcd1234' '-----BEGIN OPENSSH PRIVATE KEY-----' 'b3BlbnNzaC1rZXktdjEAAAAA' 'dGhlIHF1aWNrIGJyb3duIGZveA' '-----END OPENSSH PRIVATE KEY-----' 'key-block-done'; sleep 30",
+            ],
+        }),
+    )
+    .await;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let screen: Value = client
+            .get(format!("{base}/api/sessions/{id}/screen"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let lines = screen["lines"].to_string();
+        if lines.contains("key-block-done") {
+            for leaked in [
+                "BEGIN OPENSSH PRIVATE KEY",
+                "END OPENSSH PRIVATE KEY",
+                "b3BlbnNzaC1rZXktdjEAAAAA",
+                "dGhlIHF1aWNrIGJyb3duIGZveA",
+                "abcd1234",
+            ] {
+                assert!(
+                    !lines.contains(leaked),
+                    "a printed key block survived: {lines}"
+                );
+            }
+            assert!(lines.contains("[redacted]"), "{lines}");
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "screen never showed the end of the block: {screen:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    client
+        .delete(format!("{base}/api/sessions/{id}"))
+        .send()
+        .await
+        .unwrap();
+}
+
 /// WI-874: `/wait` answers as soon as the session is ready, on exit, and on
 /// timeout; `any-change` returns on the next state change.
 #[tokio::test]

@@ -683,9 +683,16 @@ pub async fn kept_screen(
 /// and the raw byte streams (attach, the history download) stay untouched —
 /// this masks what is served as text, not what the terminal renders.
 pub fn redact_screen(screen: &mut SessionScreen) {
-    for line in screen.lines.iter_mut().chain(screen.scrollback.iter_mut()) {
-        *line = crate::redaction::redact(line);
-    }
+    // A private key is a block that a narrow terminal wraps across lines, so
+    // redact scrollback and grid as one run: a BEGIN above the visible window
+    // still masks the body and END in it. Splitting back by count keeps the
+    // grid where the reader saw it.
+    let split = screen.scrollback.len();
+    let mut joined = std::mem::take(&mut screen.scrollback);
+    joined.append(&mut screen.lines);
+    crate::redaction::redact_lines(&mut joined);
+    screen.lines = joined.split_off(split);
+    screen.scrollback = joined;
     if let Some(title) = screen.title.as_mut() {
         *title = crate::redaction::redact(title);
     }
@@ -728,6 +735,81 @@ mod tests {
         assert!(!served.contains("BEGIN OPENSSH PRIVATE KEY"), "{served}");
         assert!(!served.contains("abcd1234"), "{served}");
         assert!(served.contains("[redacted]"), "{served}");
+    }
+
+    #[test]
+    fn a_served_screen_masks_a_key_block_split_across_lines() {
+        // A narrow PTY wraps the key body, so neither the short pieces nor
+        // the END line are long or mixed-case enough for a line-at-a-time
+        // pass. The BEGIN is in scrollback, above the visible grid.
+        let mut screen = SessionScreen {
+            id: uuid::Uuid::nil(),
+            cols: 40,
+            rows: 4,
+            lines: vec![
+                "b3BlbnNzaC1rZXktdjEAAAAA".into(),
+                "dGhlIHF1aWNrIGJyb3duIGZveA".into(),
+                "AAAA".into(),
+                "-----END OPENSSH PRIVATE KEY-----".into(),
+            ],
+            cursor: ScreenCursor { row: 3, col: 0 },
+            title: None,
+            activity: ActivityState::Idle,
+            alive: true,
+            ready: false,
+            scrollback: vec![
+                "$ cat ~/.ssh/id_ed25519".into(),
+                "-----BEGIN OPENSSH PRIVATE KEY-----".into(),
+            ],
+            turn_started_at: None,
+            last_output_at: None,
+            approval: None,
+            blocked: None,
+        };
+        redact_screen(&mut screen);
+        let served = format!("{:?}{:?}", screen.lines, screen.scrollback);
+        for leaked in [
+            "BEGIN OPENSSH PRIVATE KEY",
+            "END OPENSSH PRIVATE KEY",
+            "b3BlbnNzaC1rZXktdjEAAAAA",
+            "dGhlIHF1aWNrIGJyb3duIGZveA",
+            "AAAA",
+        ] {
+            assert!(!served.contains(leaked), "{leaked} survived: {served}");
+        }
+        assert_eq!(screen.lines.len(), 4, "line count changed: {served}");
+        assert_eq!(screen.scrollback.len(), 2, "line count changed: {served}");
+        assert!(served.contains("[redacted]"), "{served}");
+    }
+
+    #[test]
+    fn a_served_screen_masks_an_unterminated_key_to_the_end() {
+        let mut screen = SessionScreen {
+            id: uuid::Uuid::nil(),
+            cols: 40,
+            rows: 3,
+            lines: vec![
+                "-----BEGIN OPENSSH PRIVATE KEY-----".into(),
+                "b3BlbnNzaC1rZXktdjEAAAAA".into(),
+                "AAAA".into(),
+            ],
+            cursor: ScreenCursor { row: 2, col: 0 },
+            title: None,
+            activity: ActivityState::Idle,
+            alive: true,
+            ready: false,
+            scrollback: Vec::new(),
+            turn_started_at: None,
+            last_output_at: None,
+            approval: None,
+            blocked: None,
+        };
+        redact_screen(&mut screen);
+        let served = format!("{:?}", screen.lines);
+        assert!(!served.contains("BEGIN OPENSSH PRIVATE KEY"), "{served}");
+        assert!(!served.contains("b3BlbnNzaC1rZXktdjEAAAAA"), "{served}");
+        assert!(!served.contains("\"AAAA\""), "{served}");
+        assert_eq!(screen.lines.len(), 3, "{served}");
     }
 
     #[test]
