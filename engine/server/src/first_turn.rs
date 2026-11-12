@@ -22,14 +22,26 @@
 //!    reported blocked ("the first prompt never started a turn") so it shows
 //!    in the session list as needing a person instead of idling silently.
 //!
+//! A briefed agent given its pointer at launch often starts working without
+//! ever resting at the composer first. Its first turn can then finish inside
+//! the readiness window, leaving only an idle composer behind — indistinguishable
+//! from a queued prompt unless the turn start is remembered. Readiness therefore
+//! reports a turn already started (Codex's `working` title, or the turn start
+//! the activity watcher records) and the watch returns without pressing Enter
+//! or reporting blocked.
+//!
 //! It gives up quietly when the session exits, is blocked on a person, shows a
-//! dialog, or is already running a turn; the watchdog never answers a dialog.
+//! dialog, or never settles; the watchdog never answers a dialog.
 
 use std::{sync::Arc, time::Duration};
 
 use vogt_engine_contract::{ActivityState, BlockedReport};
 
-use crate::{events::EventBus, pty::Session, screen};
+use crate::{
+    events::EventBus,
+    pty::Session,
+    screen::{self, AgentTitle},
+};
 
 /// How long the watch spends on each step. A module value so tests can make it
 /// instant.
@@ -59,17 +71,36 @@ impl Default for Policy {
 /// large enough not to spin a runtime worker.
 const POLL: Duration = Duration::from_millis(100);
 
-/// Agents whose launch line submits the brief itself. `opencode` takes no
-/// first prompt, so a retry there would be guesswork.
-pub const FIRST_TURN_AGENTS: &[&str] = &["claude", "codex"];
+/// Agents the watchdog confirms. Codex is the one whose launch can leave the
+/// brief queued in the composer, and it sets a title this engine reads, so
+/// `codex: working` is proof that a turn began even if the TUI never rested at
+/// its composer first. Claude submits the launch prompt itself and announces no
+/// turn-state title, so a queued prompt and a live turn look the same on its
+/// screen; pressing Enter there could interrupt a turn already running. It is
+/// therefore left to its own submit path. `opencode` takes no first prompt, so
+/// a retry there would be guesswork.
+pub const FIRST_TURN_AGENTS: &[&str] = &["codex"];
 
 /// Watch a freshly spawned session's first turn. Spawn this once, at start,
 /// for a fresh agent session that was given a brief.
 pub fn watch(bus: EventBus, session: Arc<Session>, policy: Policy) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let started = std::time::Instant::now();
-        if !wait_until_ready(&session, policy.ready_within).await {
-            return;
+        match wait_until_ready(&session, policy.ready_within).await {
+            Readiness::Stop => return,
+            Readiness::TurnStarted => {
+                // The brief was taken at launch. There is no queued prompt to
+                // confirm, and pressing Enter could interrupt the turn.
+                tracing::info!(
+                    session = %session.id,
+                    event = "first_turn.started",
+                    first_turn_ms = started.elapsed().as_millis() as u64,
+                    retried = false,
+                    "the session's first turn started before it rested at a composer"
+                );
+                return;
+            }
+            Readiness::Ready => {}
         }
         for attempt in 0..2 {
             if wait_for_turn(&session, policy.turn_within).await {
@@ -127,26 +158,67 @@ pub fn watch(bus: EventBus, session: Arc<Session>, policy: Policy) -> tokio::tas
     })
 }
 
-/// Wait for the agent's first rest at a prompt. `false` means the session
-/// exited, asked for a person, or never became ready within the window — in
-/// every case there is nothing to confirm.
-async fn wait_until_ready(session: &Arc<Session>, within: Duration) -> bool {
+/// What a fresh session was doing when the watch last looked at it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Readiness {
+    /// At rest at its composer: a brief may be queued there and needs confirming.
+    Ready,
+    /// A turn is running, or already ran. The prompt was taken, so there is
+    /// nothing to press and nothing to report.
+    TurnStarted,
+    /// Exited, asked for a person, or never settled: nothing to confirm.
+    Stop,
+}
+
+/// Wait for the agent's first rest at a prompt. A turn already under way —
+/// running now, or started and finished between two polls — is reported as
+/// [`Readiness::TurnStarted`] rather than mistaken for a prompt still queued at
+/// the composer.
+async fn wait_until_ready(session: &Arc<Session>, within: Duration) -> Readiness {
+    let baseline = session.turn_started_at();
     let deadline = tokio::time::Instant::now() + within;
     loop {
         if !session.is_alive() || session.blocked().is_some() {
-            return false;
+            return Readiness::Stop;
+        }
+        let (rendered, _) = session.render_screen(0);
+        // Codex's own word outranks the activity poll: it sets `working` on
+        // submit, before the model answers, and it forces the activity to
+        // running even while the TUI has gone quiet.
+        if matches!(
+            screen::agent_title(rendered.title.as_deref()),
+            Some(AgentTitle::Working)
+        ) {
+            return Readiness::TurnStarted;
+        }
+        // A turn that began and ended between two polls leaves the stamp
+        // advanced (see `begins_turn`) even though the activity is back at rest.
+        if turn_started_since(session, baseline) {
+            return Readiness::TurnStarted;
         }
         match session.activity() {
-            ActivityState::AwaitingApproval => return false,
-            ActivityState::Idle | ActivityState::WaitingForInput if at_composer(session) => {
-                return true
+            ActivityState::AwaitingApproval => return Readiness::Stop,
+            ActivityState::Idle | ActivityState::WaitingForInput
+                if is_at_composer(session, &rendered) =>
+            {
+                return Readiness::Ready
             }
             _ => {}
         }
         if tokio::time::Instant::now() >= deadline {
-            return false;
+            return Readiness::Stop;
         }
         tokio::time::sleep(POLL).await;
+    }
+}
+
+/// Whether a turn began after the watch started. A fresh session carries its
+/// spawn time in `turn_started_at`, so only a later stamp is a real turn.
+fn turn_started_since(session: &Arc<Session>, baseline: Option<time::OffsetDateTime>) -> bool {
+    match (baseline, session.turn_started_at()) {
+        (Some(before), Some(now)) => now > before,
+        (None, Some(_)) => true,
+        _ => false,
     }
 }
 
@@ -174,6 +246,11 @@ async fn wait_for_turn(session: &Arc<Session>, within: Duration) -> bool {
 /// same test `wait` uses for `ready`.
 fn at_composer(session: &Arc<Session>) -> bool {
     let (rendered, _) = session.render_screen(0);
+    is_at_composer(session, &rendered)
+}
+
+/// [`at_composer`] against a screen the caller already rendered.
+fn is_at_composer(session: &Arc<Session>, rendered: &screen::Rendered) -> bool {
     screen::is_ready(
         session.activity(),
         session.is_alive(),

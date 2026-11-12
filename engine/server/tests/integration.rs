@@ -17022,6 +17022,90 @@ async fn a_first_prompt_that_never_submits_is_reported_blocked_after_one_enter()
     session.kill().unwrap();
 }
 
+/// WI-4068 review: a briefed agent given its pointer at launch starts working
+/// without ever resting at its composer. If that first turn finishes inside the
+/// readiness window, the watchdog must not read the idle composer it leaves
+/// behind as a prompt still queued: no Enter, no blocked report. Codex's own
+/// `working` title is the evidence it acts on.
+#[tokio::test]
+async fn a_first_turn_seen_working_is_not_retried_when_it_finishes_inside_the_wait_window() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bus = vogt_engine_server::events::EventBus::new(64);
+    let session = spawn_fake_codex(
+        tmp.path(),
+        "#!/bin/bash\n\
+         printf '\\033]0;codex: working\\007'\n\
+         for i in 1 2 3 4 5; do printf 'working %s\\n' \"$i\"; sleep 0.1; done\n\
+         printf '\\033]0;codex: ready\\007'\n\
+         printf '> '\n\
+         if read -t 2 -r line; then printf 'ENTER-RECEIVED:%s\\n' \"$line\"; fi\n\
+         exec sleep 30\n",
+        &bus,
+    );
+    vogt_engine_server::first_turn::watch(bus, Arc::clone(&session), first_turn_policy())
+        .await
+        .unwrap();
+    assert!(
+        session.blocked().is_none(),
+        "the first turn ran, so nothing is blocked: {:?}",
+        session.blocked()
+    );
+    let (screen, _) = session.render_screen(0);
+    assert!(
+        !screen
+            .lines
+            .iter()
+            .any(|line| line.contains("ENTER-RECEIVED")),
+        "the watchdog pressed Enter into a first turn that already ran: {:?}",
+        screen.lines
+    );
+    session.kill().unwrap();
+}
+
+/// WI-4068 review: stock Codex sets no title, so a turn that starts at launch
+/// and ends before the TUI is ever seen at its composer leaves only an advanced
+/// turn start. The idle composer behind it must not be reported as a prompt
+/// that never submitted.
+#[tokio::test]
+async fn a_first_turn_that_finishes_before_the_composer_is_seen_is_not_blocked() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bus = vogt_engine_server::events::EventBus::new(64);
+    let session = spawn_fake_codex(
+        tmp.path(),
+        "#!/bin/bash\n\
+         printf 'booting\\n'\n\
+         sleep 0.8\n\
+         printf 'working\\n'\n\
+         sleep 0.1\n\
+         printf '> '\n\
+         if read -t 2 -r line; then printf 'ENTER-RECEIVED:%s\\n' \"$line\"; fi\n\
+         exec sleep 30\n",
+        &bus,
+    );
+    vogt_engine_server::first_turn::watch(bus, Arc::clone(&session), first_turn_policy())
+        .await
+        .unwrap();
+    assert!(
+        session.turn_started_at() > Some(session.created_at),
+        "the fixture must record a real turn start, not the spawn stamp"
+    );
+    assert!(
+        session.blocked().is_none(),
+        "the first turn ran, so nothing is blocked: {:?}",
+        session.blocked()
+    );
+    let (screen, _) = session.render_screen(0);
+    assert!(
+        !screen
+            .lines
+            .iter()
+            .any(|line| line.contains("ENTER-RECEIVED")),
+        "the watchdog pressed Enter into a first turn that already ran: {:?}",
+        screen.lines
+    );
+    session.kill().unwrap();
+}
+
 /// WI-1812: a session launched through the real `agent-auth.sh` while the
 /// secrets manager is unreachable still starts, says so in its terminal, and
 /// shows in `/api/status`; once the secrets manager answers again, the next

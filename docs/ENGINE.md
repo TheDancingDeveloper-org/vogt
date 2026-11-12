@@ -1112,14 +1112,21 @@ the engine does not recognise, gets no first prompt and keeps only the
 variable.
 
 The engine also confirms that the first turn actually began (WI-4068). After a
-fresh agent session with a brief is spawned, `first_turn.rs` waits for the TUI
-to reach a prompt — the same readiness check `/wait` uses, not a fixed sleep —
-then looks for a running turn. A prompt still queued at the composer is pressed
-with one Enter; a session that still has no turn is reported blocked with "the
-first prompt never started a turn", so it appears in the session list as
-needing a person instead of idling at zero turns. It never presses Enter into a
-dialog, and it logs `event=first_turn.started`, `first_turn.retry` and
-`first_turn.failed` with the elapsed time.
+fresh **Codex** session with a brief is spawned, `first_turn.rs` waits for the
+TUI to reach a prompt — the same readiness check `/wait` uses, not a fixed sleep
+— then looks for a running turn. A turn that already started is left alone: a
+briefed agent given its pointer at launch often begins working before it ever
+rests at the composer, so `codex: working` or a turn start recorded by the
+activity watcher is reported as `event=first_turn.started` with no Enter and no
+blocked report, even if that first turn finishes inside the readiness window. A
+prompt still queued at the composer is pressed with one Enter; a session that
+still has no turn is reported blocked with "the first prompt never started a
+turn", so it appears in the session list as needing a person instead of idling
+at zero turns. It never presses Enter into a dialog, and it logs
+`event=first_turn.started`, `first_turn.retry` and `first_turn.failed` with the
+elapsed time. Claude is not watched: it submits its own launch prompt and
+announces no turn-state title, so a queued prompt and a live turn cannot be told
+apart safely.
 
 **The companion guide.** When the start request carries a non-empty
 `companion`, the engine writes it beside the brief as
