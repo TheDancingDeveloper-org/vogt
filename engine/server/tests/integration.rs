@@ -20862,7 +20862,7 @@ sleep 2
         let id = h
             .start_with(json!({
                 "work_item": "WI-3229",
-                "session_ref": "ses_01M76WJECNPXTPV2NKQQNBA8DA",
+                "session_ref": "ses_01ARZ3NDEKTSV4RRFFQ69G5FAV",
                 "source": graft_source(),
                 "budget": { "session_wall_clock_minutes": 60 },
             }))
@@ -20876,7 +20876,7 @@ sleep 2
         assert_eq!(grants.len(), 1);
         // Bound to the core's session id: that is the id the worker's brief
         // names and the id its commits carry.
-        assert_eq!(grants[0].session, "ses_01M76WJECNPXTPV2NKQQNBA8DA");
+        assert_eq!(grants[0].session, "ses_01ARZ3NDEKTSV4RRFFQ69G5FAV");
         assert_eq!(grants[0].work_item.as_deref(), Some("WI-3229"));
         assert_eq!(grants[0].ttl_s, 60 * 60 + 30 * 60);
         assert_eq!(
@@ -20898,7 +20898,7 @@ sleep 2
         assert_eq!(boot.status(), StatusCode::OK);
         let body: Value = boot.json().await.unwrap();
         assert_eq!(body["source_token"], SECRET);
-        assert_eq!(body["graft_session"], "ses_01M76WJECNPXTPV2NKQQNBA8DA");
+        assert_eq!(body["graft_session"], "ses_01ARZ3NDEKTSV4RRFFQ69G5FAV");
         assert!(!body["env"].to_string().contains(SECRET));
         assert!(!body["bundle"].to_string().contains(SECRET));
         assert_eq!(
