@@ -45,6 +45,7 @@ import re
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -55,6 +56,13 @@ JsonObject = dict[str, Any]
 
 EXPORT_FORMAT_VERSION = 2
 DEFAULT_REASON = "WI-4125: import the approved vogt-prod tracker snapshot into vogt-dev"
+#: A target whose host is one of these is production, whatever its instance
+#: id says.  `--prod-host` extends the list; only the explicit
+#: `--i-know-this-is-not-prod` flag lets a run past it.
+DEFAULT_PROD_HOSTNAMES = ("vogt.sprooty.com",)
+#: Any host containing one of these is production too, so a deployment named
+#: after its purpose is caught even on a hostname not listed above.
+PROD_HOSTNAME_MARKERS = ("vogt-prod",)
 STATE_VERSION = 1
 PAGE = 200
 WORK_REF = re.compile(r"^WI-(\d+)$")
@@ -122,6 +130,12 @@ def _text(value: object, where: str) -> str:
 def _maybe_text(value: object, where: str) -> str | None:
     if value is None:
         return None
+    return _text(value, where)
+
+
+def _optional_text(value: object, where: str) -> str:
+    if value is None:
+        return ""
     return _text(value, where)
 
 
@@ -566,6 +580,7 @@ class TargetState:
     url: str
     import_root: str
     project_root: str | None
+    instance_id: str = ""
     projects: dict[str, JsonObject] = field(default_factory=dict)
     labels: set[str] = field(default_factory=set)
     initiatives: dict[str, JsonObject] = field(default_factory=dict)
@@ -580,7 +595,63 @@ class TargetState:
         return numbers
 
 
-def read_target(client: McpClient) -> TargetState:
+def target_hostname(url: str) -> str:
+    """The lower-cased host of `url`, without userinfo, port or trailing dot."""
+    try:
+        host = urllib.parse.urlsplit(url).hostname or ""
+    except ValueError:
+        return ""
+    return host.strip().lower().rstrip(".")
+
+
+def is_production_host(host: str, prod_hosts: Sequence[str] = ()) -> bool:
+    host = host.strip().lower().rstrip(".")
+    listed = {
+        entry.strip().lower().rstrip(".")
+        for entry in (*DEFAULT_PROD_HOSTNAMES, *prod_hosts)
+    }
+    return host in listed or any(marker in host for marker in PROD_HOSTNAME_MARKERS)
+
+
+def refuse_production_target(
+    source: Source,
+    state: TargetState,
+    *,
+    prod_hosts: Sequence[str] = (),
+    allow_prod_hostname: bool = False,
+) -> None:
+    """Refuse a target the importer must never write the snapshot back to.
+
+    A matching instance id is conclusive whatever the flag says: the snapshot
+    came from that instance, so applying it there is a write back into prod
+    (or into whichever instance produced the export).  The hostname list is a
+    second, independent guard, and only the explicit override can pass it.
+    """
+    if state.instance_id and state.instance_id == source.instance_id:
+        raise Refused(
+            f"target {state.url!r} reports instance {state.instance_id!r}, "
+            "the same instance that produced the snapshot; this run would "
+            "write the snapshot back into its source"
+        )
+    host = target_hostname(state.url)
+    if is_production_host(host, prod_hosts) and not allow_prod_hostname:
+        raise Refused(
+            f"target host {host!r} is on the production list "
+            f"({', '.join(DEFAULT_PROD_HOSTNAMES)} and hosts containing "
+            f"{', '.join(PROD_HOSTNAME_MARKERS)}); pass "
+            "--i-know-this-is-not-prod only if this target is deliberately "
+            "not production"
+        )
+
+
+def read_target(
+    client: McpClient,
+    source: Source | None = None,
+    *,
+    url: str = "",
+    prod_hosts: Sequence[str] = (),
+    allow_prod_hostname: bool = False,
+) -> TargetState:
     status = client.tool("status")
     disk = status.get("disk")
     import_root = ""
@@ -597,11 +668,19 @@ def read_target(client: McpClient) -> TargetState:
     if isinstance(counts, dict) and isinstance(counts.get("work_items"), int):
         declared = counts["work_items"]
     state = TargetState(
-        url="",
+        url=url,
         import_root=import_root,
         project_root=import_root or None,
+        instance_id=_optional_text(status.get("instance_id"), "instance_id"),
         declared_work_items=declared,
     )
+    if source is not None:
+        refuse_production_target(
+            source,
+            state,
+            prod_hosts=prod_hosts,
+            allow_prod_hostname=allow_prod_hostname,
+        )
     for row in _paged(client, "project_list", "projects"):
         state.projects[_text(row.get("slug"), "project.slug")] = row
     for name in _paged_names(client, "label_list", "labels", "name"):
@@ -1475,6 +1554,25 @@ def _parser() -> argparse.ArgumentParser:
         "--target-url", help="target engine base URL, e.g. https://vogt-dev.sprooty.com"
     )
     parser.add_argument(
+        "--prod-host",
+        action="append",
+        default=[],
+        metavar="HOST",
+        help=(
+            "another target hostname that is production (repeatable); "
+            f"{', '.join(DEFAULT_PROD_HOSTNAMES)} and hosts containing "
+            f"{', '.join(PROD_HOSTNAME_MARKERS)} are always refused"
+        ),
+    )
+    parser.add_argument(
+        "--i-know-this-is-not-prod",
+        action="store_true",
+        help=(
+            "override the production-hostname refusal only; a target that "
+            "reports the snapshot's own instance id is still refused"
+        ),
+    )
+    parser.add_argument(
         "--token-file", type=Path, help="file holding the target bearer token"
     )
     parser.add_argument("--apply", action="store_true", help="write to the target")
@@ -1535,11 +1633,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.target_url:
         client = McpClient(args.target_url, token, log=_log)
         try:
-            target = read_target(client)
-            target.url = args.target_url
+            target = read_target(
+                client,
+                source,
+                url=args.target_url,
+                prod_hosts=args.prod_host,
+                allow_prod_hostname=args.i_know_this_is_not_prod,
+            )
+        except Refused as err:
+            _log(f"refusing the target: {err}")
+            return 1
         except ImportFailure as err:
             _log(f"reading the target failed: {err}")
             return 1
+    if args.apply and not target.instance_id:
+        _log(
+            "apply refused: the target did not report an instance id, so the "
+            "importer cannot prove it is not the snapshot's source"
+        )
+        return 1
     project_root = args.project_root or target.project_root
     if project_root is None and args.apply:
         _log("apply needs --project-root (the target did not report one)")

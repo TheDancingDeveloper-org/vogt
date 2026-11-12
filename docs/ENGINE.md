@@ -1583,6 +1583,11 @@ underscore words, so `WIN_SSH_KEY=…` is masked and `KEY_COUNT=…` is not) in
 (WI-3988). Masking is a guardrail over shapes, not a boundary; the raw
 byte-stream routes (`GET /api/sessions/:id`, attach
 and `/api/history/:id/download`) still carry exactly what the program wrote.
+The guardrail has two more limits worth stating: search matches the unmasked
+bytes, both in the archived index and in a live session's scrollback tail, so a
+query can confirm that a credential-shaped value is present even though the
+returned snippet is masked; and the live terminal stream and those raw routes
+are not masked at all.
 
 **Turn timing.** `SessionSummary`, the screen and the `activity` event carry
 `turn_started_at` — when the session last went `running` from `idle` or
@@ -3222,7 +3227,8 @@ contains `$HOME`, or contains `state_dir`.
 - `GET /api/search?q=&path=&max=` -> `SearchHit[]` — ripgrep, `max` defaults
   to 200 and is capped at 500. An empty `q` is `400`. `rg` must be on `$PATH`;
   its absence is `500`, deliberately loud, because a silent empty result would
-  read as "no matches".
+  read as "no matches". `rg` matches the unmasked file bytes; a hit's excerpt
+  is subject to the file-read masking above, not to a pre-search mask.
 - `GET /api/search/files?q=&path=&max=` -> `FileSearchResult[]` — substring
   match on name and relative path, case-insensitive, `max` defaults to 100 and
   is capped at 500. Ordered by name-prefix match first, then shorter paths.
@@ -5229,15 +5235,25 @@ container's `bootstrap` still spends it. No new Secret, deploy key, Forgejo
 token or Infisical identity is added: the private configuration repository is
 never read by a pod, and none of its credentials exist there.
 
-The snapshot is allowlisted to `AGENTS.md`, `CLAUDE.md`, `.claude`, `.codex`,
-`.agent-tools` and `UsefulClaudeSkills`. Top-level entries outside that set
-(including other dotfiles such as `.local`, `.config` and `.ssh`) are
-excluded. At every depth `.git`, SSH keys, credential-helper and token files
-are excluded; in-tree symlinks are skipped, and a symlink that resolves outside
-the source fails the build instead of escaping. `ENGINE_POD_WORKSPACE_MAX_BYTES`
-(default 64 MiB, hard maximum 512 MiB) caps the uncompressed tree. The response
-is deterministic gzip with an `ETag`, so an unchanged tree has a stable
-identity. A missing source, a failed fetch or an unpack failure logs and
+The snapshot is allowlisted by path, not by top-level name: `AGENTS.md`,
+`CLAUDE.md`, `.claude/{rules,skills,agents}`, `.codex/skills` and
+`.agent-tools/{bin,lib,etc}` — the paths `agent-workspace-config`'s
+`bootstrap/install.sh` actually installs. A whole dot-directory is never
+served: `.claude/settings.json` and the local permission list
+`.claude/settings.local.json` record exact commands (and can contain inline
+tokens), and `.codex/auth.json` is a credential. `UsefulClaudeSkills` is a
+checkout of the configuration repository, not an installed asset, and is
+excluded along with other checkouts and dotfiles such as `.local`, `.config`
+and `.ssh`. At every depth `.git`, SSH keys, credential-helper and token files,
+`*.lock` files, `.pytest_cache`, `.ruff_cache` and `__pycache__` are excluded
+as a second line of defence; in-tree symlinks are skipped, and a symlink that
+resolves outside the source fails the build instead of escaping.
+`ENGINE_POD_WORKSPACE_MAX_BYTES` (default 64 MiB, hard maximum 512 MiB) caps
+the uncompressed tree. The response is deterministic gzip with an `ETag`, so
+an unchanged tree has a stable identity. The built tarball is cached against a
+content fingerprint (not an mtime key, because `copy2` preserves timestamps),
+and builds are serialised one at a time, so concurrent pod starts do not each
+hold a copy. A missing source, a failed fetch or an unpack failure logs and
 leaves the session with the pre-workspace tree rather than failing the boot.
 
 The tree is never writable from the session container; the session's clone
