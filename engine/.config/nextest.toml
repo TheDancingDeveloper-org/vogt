@@ -4,3 +4,10 @@
 # a test that panics while holding a PTY session hangs forever otherwise.
 [profile.default]
 slow-timeout = { period = "60s", terminate-after = 10 }
+
+# The pod_stream tests play a fake agent against a live engine; each finishes
+# in seconds. One that panics mid-protocol hangs the same way (WI-4176), so it
+# is killed after 90 s instead of 600 s.
+[[profile.default.overrides]]
+filter = 'binary(integration) & test(/^pod_stream::/)'
+slow-timeout = { period = "30s", terminate-after = 3 }
