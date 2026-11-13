@@ -98,6 +98,8 @@ struct UpdateProjectParams {
     repo_url: Option<String>,
     #[serde(default)]
     exclusions: Option<Vec<String>>,
+    #[serde(default)]
+    agent_policy: Option<crate::application::models::AgentPolicy>,
     reason: String,
 }
 
@@ -1071,10 +1073,55 @@ fn dependency_summary<C: Clock, I: IdFactory>(
     }))
 }
 
+/// The write-time checks the Python `update_project` runs on a policy: the
+/// typed read has already refused a malformed shape (`merge_mode: merge`, a
+/// bad source); what is left is that every regex compiles and stays inside
+/// the dialect the engine matches with.
+fn checked_agent_policy(
+    policy: &crate::application::models::AgentPolicy,
+) -> Result<crate::core::AgentPolicy, VogtError> {
+    use std::sync::OnceLock;
+    static UNSUPPORTED: OnceLock<regex::Regex> = OnceLock::new();
+    let unsupported = UNSUPPORTED.get_or_init(|| {
+        regex::Regex::new(r"\(\?<=|\(\?<!|\(\?=|\(\?!|\(\?P=|\(\?\(|\\[1-9]").expect("static")
+    });
+    let invalid = |message: String| Err(VogtError::InvalidRequest(message));
+    if policy.session_wall_clock_minutes.is_some_and(|m| m <= 0) {
+        return invalid("session_wall_clock_minutes must be positive".to_string());
+    }
+    for pattern in &policy.forbidden_text {
+        if let Some(found) = unsupported.find(pattern) {
+            return invalid(format!(
+                "forbidden_text pattern {} uses {}, which the engine's regex dialect does not support (no lookaround, no backreferences)",
+                py_repr(pattern),
+                py_repr(found.as_str())
+            ));
+        }
+        if let Err(error) = regex::Regex::new(pattern) {
+            return invalid(format!(
+                "forbidden_text pattern {} does not compile: {error}",
+                py_repr(pattern)
+            ));
+        }
+    }
+    if let Some(landing) = &policy.landing {
+        if let Err(error) = regex::Regex::new(&landing.branch_pattern.replace("{n}", r"\d+")) {
+            return invalid(format!(
+                "branch_pattern {} does not compile once {{n}} is replaced with a number: {error}",
+                py_repr(&landing.branch_pattern)
+            ));
+        }
+    }
+    let value =
+        serde_json::to_value(policy).map_err(|e| VogtError::InvalidRequest(e.to_string()))?;
+    serde_json::from_value(value).map_err(|e| VogtError::InvalidRequest(e.to_string()))
+}
+
 struct ProjectChange {
     slug: String,
     repo_url: Option<String>,
     exclusions: Option<Vec<String>>,
+    agent_policy: Option<crate::core::AgentPolicy>,
     lifecycle_state: Option<String>,
     at: crate::core::Moment,
     event: &'static str,
@@ -1091,9 +1138,11 @@ fn apply_change<C: Clock + 'static, I: IdFactory + 'static>(
         if change.event == PROJECT_UPDATED_EVENT
             && change.repo_url.is_none()
             && change.exclusions.is_none()
+            && change.agent_policy.is_none()
         {
             return Err(VogtError::InvalidRequest(
-                "give --repo-url or --exclusions; there is nothing else to update".to_string(),
+                "give --repo-url, --exclusions or --agent-policy; there is nothing else to update"
+                    .to_string(),
             ));
         }
         if change.event == PROJECT_TRANSITIONED_EVENT {
@@ -1108,6 +1157,7 @@ fn apply_change<C: Clock + 'static, I: IdFactory + 'static>(
                 default_branch: None,
                 repo_url: change.repo_url.clone(),
                 exclusions: change.exclusions.clone(),
+                agent_policy: change.agent_policy.clone(),
                 lifecycle_state: change.lifecycle_state.clone(),
                 ..ProjectUpdate::default()
             },
@@ -1156,12 +1206,18 @@ fn update_project<C: Clock + 'static, I: IdFactory + 'static>(
     params: Value,
 ) -> Result<Value, VogtError> {
     let params = parse::<UpdateProjectParams>(params)?;
+    let agent_policy = params
+        .agent_policy
+        .as_ref()
+        .map(checked_agent_policy)
+        .transpose()?;
     let updated = place_change(
         ctx,
         ProjectChange {
             slug: params.slug,
             repo_url: params.repo_url,
             exclusions: params.exclusions,
+            agent_policy,
             lifecycle_state: None,
             at: now_of(&ctx.clock),
             event: PROJECT_UPDATED_EVENT,
@@ -1183,6 +1239,7 @@ fn transition_project<C: Clock + 'static, I: IdFactory + 'static>(
             slug: params.slug,
             repo_url: None,
             exclusions: None,
+            agent_policy: None,
             lifecycle_state: Some(params.to_state),
             at: now_of(&ctx.clock),
             event: PROJECT_TRANSITIONED_EVENT,
@@ -1472,5 +1529,72 @@ mod tests {
             matches!(error, VogtError::TransitionRejected { ref rule, .. } if rule == "lifecycle.not_allowed"),
             "{error}"
         );
+    }
+
+    fn policy_with_source() -> Value {
+        json!({
+            "forbidden_text": ["^wip$"],
+            "landing": {
+                "base_branch": "main",
+                "worker_lands_by": "push_branch",
+                "merge_by": "oversight",
+                "merge_mode": "rebase",
+                "source": {
+                    "location": {"kind": "graft", "endpoint": "http://graft:1", "repo": "vogt"},
+                    "ref": "rust-2",
+                    "landing": "line"
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn update_with_an_agent_policy_persists_it_including_the_landing_source() {
+        let ctx = context("local:test-user", None);
+        register_op(&ctx, registration("Widget", "/srv/widget")).unwrap();
+        let updated = update_op(
+            &ctx,
+            json!({"slug": "widget", "agent_policy": policy_with_source(), "reason": "a reason"}),
+        )
+        .unwrap();
+        assert_eq!(
+            updated["project"]["agent_policy"]["landing"]["source"]["ref"],
+            "rust-2"
+        );
+        let got = get_op(&ctx, json!({"slug": "widget"})).unwrap();
+        assert_eq!(
+            got["project"]["agent_policy"]["landing"]["source"]["location"]["repo"], "vogt",
+            "{got}"
+        );
+        assert_eq!(got["project"]["agent_policy"]["forbidden_text"][0], "^wip$");
+    }
+
+    #[test]
+    fn update_refuses_a_malformed_agent_policy_and_stores_nothing() {
+        let ctx = context("local:test-user", None);
+        register_op(&ctx, registration("Widget", "/srv/widget")).unwrap();
+        let mut merge = policy_with_source();
+        merge["landing"]["merge_mode"] = json!("merge");
+        let mut lookaround = policy_with_source();
+        lookaround["forbidden_text"] = json!(["(?=x)"]);
+        let mut uncompiled = policy_with_source();
+        uncompiled["forbidden_text"] = json!(["("]);
+        let mut pattern = policy_with_source();
+        pattern["landing"]["branch_pattern"] = json!("^wi-{n}-(");
+        let mut source = policy_with_source();
+        source["landing"]["source"] = json!({"ref": ""});
+        for bad in [merge, lookaround, uncompiled, pattern, source] {
+            let error = update_op(
+                &ctx,
+                json!({"slug": "widget", "agent_policy": bad.clone(), "reason": "a reason"}),
+            )
+            .unwrap_err();
+            assert!(
+                matches!(error, VogtError::InvalidRequest(_)),
+                "{bad}: {error}"
+            );
+        }
+        let got = get_op(&ctx, json!({"slug": "widget"})).unwrap();
+        assert!(got["project"]["agent_policy"]["landing"].is_null(), "{got}");
     }
 }

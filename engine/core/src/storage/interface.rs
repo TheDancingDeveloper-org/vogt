@@ -160,6 +160,8 @@ pub struct ProjectUpdate {
     pub write_back: Option<String>,
     pub link_state: Option<String>,
     pub exclusions: Option<Vec<String>>,
+    /// Replaces the stored policy entirely.
+    pub agent_policy: Option<crate::core::AgentPolicy>,
     pub contract_adopted_at: Option<Moment>,
     /// Adoption is reversible, and `None` already means "leave alone", so
     /// declining the contract needs a flag of its own.
