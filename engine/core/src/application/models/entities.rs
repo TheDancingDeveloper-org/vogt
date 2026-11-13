@@ -12,7 +12,9 @@ use std::collections::BTreeMap;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::{date_time, integer, number, open_object, optional_date_time, string_map};
+use super::{
+    date_time, integer, number, open_object, optional_date_time, optional_open_object, string_map,
+};
 
 fn token_kind_api() -> TokenKind {
     TokenKind::Api
@@ -456,6 +458,62 @@ pub struct LandingPolicy {
     #[serde(default)]
     #[schemars(extend("x-keep-default" = true))]
     pub long_lived_branches: Vec<String>,
+    // The project's source, when it states one. A session's pod gets a
+    // credential scoped to it and nothing else (WI-4213).
+    #[serde(default, deserialize_with = "checked_source")]
+    #[schemars(schema_with = "optional_open_object", extend("x-keep-default" = true))]
+    pub source: Option<serde_json::Value>,
+}
+
+/// A source is stored as the object it arrived as; it must read as a
+/// [`ProjectSource`], so a malformed one is refused when the policy is written.
+fn checked_source<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<serde_json::Value>, D::Error> {
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    if let Some(value) = &value {
+        ProjectSource::deserialize(value).map_err(serde::de::Error::custom)?;
+    }
+    Ok(value)
+}
+
+/// The shape a stored source must have. Mirrors the engine's
+/// `SourceDescriptor`; it carries no credential.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct ProjectSource {
+    location: SourceLocation,
+    /// A branch for git, a line for graft.
+    #[serde(rename = "ref", deserialize_with = "non_empty")]
+    reference: String,
+    #[serde(default)]
+    landing: SourceLanding,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+#[allow(dead_code)]
+enum SourceLocation {
+    Git { url: String, repo: String },
+    Graft { endpoint: String, repo: String },
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum SourceLanding {
+    #[default]
+    PushBranch,
+    OpenPr,
+    Line,
+}
+
+fn non_empty<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    let value = String::deserialize(deserializer)?;
+    if value.is_empty() {
+        return Err(serde::de::Error::custom("source ref must not be empty"));
+    }
+    Ok(value)
 }
 
 /// How a review of this project's work is run. Guidance until enforced.
@@ -518,4 +576,43 @@ pub struct Freshness {
     pub collectors: BTreeMap<String, String>,
     #[serde(default)]
     pub detail: Option<String>,
+}
+
+#[cfg(test)]
+mod landing_source_tests {
+    use super::LandingPolicy;
+    use serde_json::{json, Value};
+
+    fn landing(source: Value) -> Value {
+        json!({
+            "base_branch": "main",
+            "worker_lands_by": "push_branch",
+            "merge_by": "oversight",
+            "merge_mode": "rebase",
+            "source": source,
+        })
+    }
+
+    #[test]
+    fn a_graft_source_is_accepted_and_kept_as_stated() {
+        let source = json!({
+            "location": {"kind": "graft", "endpoint": "http://graft.test", "repo": "vogt"},
+            "ref": "rust-2",
+            "landing": "line",
+        });
+        let policy: LandingPolicy = serde_json::from_value(landing(source.clone())).unwrap();
+        assert_eq!(policy.source, Some(source));
+    }
+
+    #[test]
+    fn a_malformed_source_is_refused() {
+        for bad in [
+            json!({"location": {"kind": "svn", "repo": "r"}, "ref": "main"}),
+            json!({"location": {"kind": "git", "url": "u", "repo": "r"}, "ref": ""}),
+            json!({"location": {"kind": "git", "url": "u", "repo": "r"}, "ref": "m", "landing": "merge"}),
+            json!({"ref": "main"}),
+        ] {
+            assert!(serde_json::from_value::<LandingPolicy>(landing(bad)).is_err());
+        }
+    }
 }
