@@ -251,18 +251,31 @@ work_dir=${VOGT_WORK_DIR:-$clone_dir}
 # A bare mkdir under `set -e` would end the script with no reason in the log;
 # name the directory so a failed clone step says why (WI-3762).
 mkdir -p "$clone_dir" || fail "cannot create $clone_dir"
+# WI-4213: a clone that cannot happen or fails must never kill the session; the
+# agent still starts (with the brief and its tools) and says so. Nothing below
+# prints a token: graft's stderr names the endpoint and the refusal only.
+clone_ok=0
 if [ "$source_kind" = git ]; then
-  if ! git clone --branch "$source_ref" --single-branch "$source_repo" "$clone_dir" >/dev/null 2>"$tmp_dir/git.err"; then
-    fail "git clone $source_repo into $clone_dir failed: $(tail -n3 "$tmp_dir/git.err" | tr '\n' ' ' | cut -c1-400)"
+  if git clone --branch "$source_ref" --single-branch "$source_repo" "$clone_dir" >/dev/null 2>"$tmp_dir/git.err"; then
+    clone_ok=1
+  else
+    printf 'session-entrypoint: WARNING: git clone %s into %s failed; the session continues without the source: %s\n' \
+      "$source_repo" "$clone_dir" "$(tail -n3 "$tmp_dir/git.err" | tr '\n' ' ' | cut -c1-400)" >&2
   fi
 elif [ "$source_kind" = graft ]; then
-if ! graft --token-file "$source_token_file" clone "$source_repo" "$clone_dir" --line "$source_ref" >/dev/null 2>"$tmp_dir/graft.err"; then
-  # graft's stderr names the endpoint and the refusal, never the token file's content.
-  fail "g clone $source_repo --line $source_ref into $clone_dir failed (GRAFT_ENDPOINT=${GRAFT_ENDPOINT:-unset}): $(tail -n3 "$tmp_dir/graft.err" | tr '\n' ' ' | cut -c1-400)"
-fi
+  if [ -z "${VOGT_GRAFT_TOKEN_FILE:-}" ] || [ -n "${VOGT_GRAFT_TOKEN_UNAVAILABLE:-}" ]; then
+    printf 'session-entrypoint: WARNING: skipping clone of %s (line %s): no graft token is available (%s); the session continues without the source\n' \
+      "$source_repo" "$source_ref" "${VOGT_GRAFT_TOKEN_UNAVAILABLE:-the bootstrap response carried no source token}" >&2
+  elif graft --token-file "$source_token_file" clone "$source_repo" "$clone_dir" --line "$source_ref" >/dev/null 2>"$tmp_dir/graft.err"; then
+    clone_ok=1
+  else
+    printf 'session-entrypoint: WARNING: clone failed: g clone %s --line %s into %s failed (GRAFT_ENDPOINT=%s); the session continues without the source: %s\n' \
+      "$source_repo" "$source_ref" "$clone_dir" "${GRAFT_ENDPOINT:-unset}" "$(tail -n3 "$tmp_dir/graft.err" | tr '\n' ' ' | cut -c1-400)" >&2
+  fi
 else
   fail "unsupported source kind: $source_kind"
 fi
+[ "$clone_ok" = 1 ] || mkdir -p "$work_dir" || fail "cannot create $work_dir"
 [ -d "$work_dir" ] || fail "the session's cwd is not in the clone: $work_dir"
 # /work is a per-pod emptyDir: kubelet gives it a root-owned mount point even
 # though the pod runs as uid 1000 (fsGroup only sets the group), so git refuses
@@ -315,7 +328,7 @@ git_view() {
   printf 'session-entrypoint: git view of %s ready (read-only; land with g)\n' "$clone_dir" >&2
 }
 step=git-view; say git-view
-git_view || printf 'session-entrypoint: could not build a git view of %s; continuing\n' "$clone_dir" >&2
+if [ "$clone_ok" = 1 ]; then git_view || printf 'session-entrypoint: could not build a git view of %s; continuing\n' "$clone_dir" >&2; fi
 step=brief; say brief
 add_dir=${VOGT_ADD_DIR:-$clone_dir/.vogt}; mkdir -p "$add_dir"; chmod 700 "$add_dir"
 jq -r '.brief // ""' "$response" >"$add_dir/brief.md"; chmod 600 "$add_dir/brief.md"
