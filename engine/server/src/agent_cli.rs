@@ -1692,6 +1692,7 @@ mod permission_tests {
                 brief: Some(brief),
             },
             codex: vogt_session_agent::CodexLaunch::default(),
+            opencode_mcp_config: None,
         };
         let line = vogt_session_agent::command_line(&pod_config).unwrap();
         let out = std::process::Command::new("sh")
@@ -1824,6 +1825,7 @@ url = "http://komodo/mcp"
                 template_args: template,
                 config_file: None,
             },
+            opencode_mcp_config: None,
         };
         let line = vogt_session_agent::command_line(&pod_config).unwrap();
         let out = std::process::Command::new("sh")
@@ -1969,6 +1971,7 @@ url = "http://komodo/mcp"
                 template_args: template,
                 config_file: None,
             },
+            opencode_mcp_config: None,
         };
         let line = vogt_session_agent::command_line(&pod_config).unwrap();
         let out = std::process::Command::new("sh")

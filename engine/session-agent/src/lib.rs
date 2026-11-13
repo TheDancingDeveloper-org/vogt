@@ -418,6 +418,10 @@ pub struct Config {
     /// environment directly (WI-3882): guidance, charter, a compact limit and
     /// the template's own arguments.
     pub codex: CodexLaunch,
+    /// The engine-owned opencode MCP config written by the pod entrypoint.
+    /// It is read only to discover bearer environment references that the
+    /// broker must resolve around the final child.
+    pub opencode_mcp_config: Option<PathBuf>,
 }
 
 /// Where the image installs the default driven-session policy; the same path
@@ -657,6 +661,9 @@ impl Config {
                 .unwrap_or_else(|| CODEX_APPROVAL_DEFAULT.to_owned()),
             claude: ClaudeLaunch::from_env(),
             codex: CodexLaunch::from_env(),
+            opencode_mcp_config: std::env::var_os("VOGT_OPENCODE_MCP_CONFIG")
+                .filter(|path| !path.is_empty())
+                .map(PathBuf::from),
         })
     }
     pub fn ws_url(&self) -> Result<String, AgentError> {
@@ -1809,7 +1816,18 @@ pub fn command_line(config: &Config) -> Result<String, AgentError> {
                 prompt: prompt.as_deref(),
             })
             .map_err(AgentError::Pty)?;
-            let mut line = String::from("claude");
+            // Claude's MCP config names brokered bearers by environment
+            // reference, just like Codex's `bearer_token_env_var`.  Fetch
+            // them around the child rather than exporting them into the
+            // session-agent/entrypoint environment.
+            let mcp_bearers = config
+                .claude
+                .mcp_config
+                .as_deref()
+                .map(read_mcp_bearer_envs)
+                .unwrap_or_default();
+            let mut line = codex_broker_fetch_prefix(&[], &mcp_bearers);
+            line.push_str("claude");
             for arg in args {
                 line.push(' ');
                 line.push_str(&sh_quote(Path::new(&arg)));
@@ -1882,11 +1900,67 @@ pub fn command_line(config: &Config) -> Result<String, AgentError> {
             }
             Ok(line)
         }
-        "opencode" => Ok("opencode".into()),
+        "opencode" => {
+            // session-entrypoint writes the engine-owned config to this path
+            // and keeps the path in VOGT_OPENCODE_MCP_CONFIG.  As with Claude,
+            // only the final opencode child receives the brokered values.
+            let mcp_bearers = config
+                .opencode_mcp_config
+                .as_deref()
+                .map(read_mcp_bearer_envs)
+                .unwrap_or_default();
+            let mut line = codex_broker_fetch_prefix(&[], &mcp_bearers);
+            line.push_str("opencode");
+            Ok(line)
+        }
         _ => Err(AgentError::Pty(
             "VOGT_CLI must be claude, codex or opencode".into(),
         )),
     }
+}
+
+/// Read bearer environment references from an engine-owned JSON MCP config.
+/// Claude uses `${VAR}` while opencode uses `{env:VAR}`; both forms are
+/// deliberately accepted only in the Authorization header, so arbitrary
+/// config text cannot become a shell variable on the launch line.
+fn read_mcp_bearer_envs(path: &Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Vec::new();
+    };
+    let servers = value
+        .get("mcpServers")
+        .or_else(|| value.get("mcp"))
+        .and_then(serde_json::Value::as_object);
+    let Some(servers) = servers else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    for server in servers.values() {
+        let Some(headers) = server.get("headers").and_then(serde_json::Value::as_object) else {
+            continue;
+        };
+        let Some(authorization) = headers
+            .get("Authorization")
+            .and_then(serde_json::Value::as_str)
+        else {
+            continue;
+        };
+        let name = authorization
+            .strip_prefix("Bearer ${")
+            .and_then(|value| value.strip_suffix('}'))
+            .or_else(|| {
+                authorization
+                    .strip_prefix("Bearer {env:")
+                    .and_then(|value| value.strip_suffix('}'))
+            });
+        if let Some(name) = name {
+            names.push(name.to_string());
+        }
+    }
+    names
 }
 
 /// What the session agent adds to the CLI's environment. Claude Code's own
@@ -2308,6 +2382,7 @@ mod tests {
             codex_approval_policy: CODEX_APPROVAL_DEFAULT.into(),
             claude: ClaudeLaunch::default(),
             codex: CodexLaunch::default(),
+            opencode_mcp_config: None,
         };
         let (_reader, _writer, child, _master) = spawn_pty(&config).unwrap();
         // The reap waits for the exit, so no sleep races the kill.
@@ -2337,6 +2412,7 @@ mod tests {
             codex_approval_policy: CODEX_APPROVAL_DEFAULT.into(),
             claude: ClaudeLaunch::default(),
             codex: CodexLaunch::default(),
+            opencode_mcp_config: None,
         }
     }
 
@@ -2678,6 +2754,7 @@ mod tests {
             codex_approval_policy: CODEX_APPROVAL_DEFAULT.into(),
             claude: ClaudeLaunch::default(),
             codex: CodexLaunch::default(),
+            opencode_mcp_config: None,
         };
         let (_reader, _writer, mut child, master) = spawn_pty(&config).unwrap();
         let size = master.get_size().unwrap();
@@ -2712,6 +2789,7 @@ mod tests {
             codex_approval_policy: CODEX_APPROVAL_DEFAULT.into(),
             claude: ClaudeLaunch::default(),
             codex: CodexLaunch::default(),
+            opencode_mcp_config: None,
         };
         let argv = argv_of(&command_line(&config).unwrap());
         assert_eq!(&argv[..2], ["--session-id", "abc-123"]);
@@ -2958,6 +3036,84 @@ mod tests {
         );
     }
 
+    /// WI-4114: Claude and opencode use Authorization header references rather
+    /// than Codex's `bearer_token_env_var`, but the secret boundary is the
+    /// same: resolve the name around the final child and keep the value out of
+    /// config, argv and the long-lived pod environment.
+    #[test]
+    fn claude_and_opencode_children_receive_mcp_bearers_from_the_broker() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude_mcp = dir.path().join("claude-mcp.json");
+        let opencode_mcp = dir.path().join("opencode.json");
+        std::fs::write(
+            &claude_mcp,
+            r#"{"mcpServers":{"cadastre":{"headers":{"Authorization":"Bearer ${CADASTRE_HTTP_TOKEN}"}}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &opencode_mcp,
+            r#"{"mcp":{"cadastre":{"headers":{"Authorization":"Bearer {env:CADASTRE_HTTP_TOKEN}"}}}}"#,
+        )
+        .unwrap();
+
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let helper = bin.join("vogt-agent-auth");
+        std::fs::write(
+            &helper,
+            "#!/bin/sh\n[ \"$1\" = fetch ] || exit 1\nprintf fetched-secret\n",
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let path = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+
+        for (cli, config) in [
+            (
+                "claude",
+                claude_config(
+                    ClaudeLaunch {
+                        mcp_config: Some(claude_mcp.clone()),
+                        ..Default::default()
+                    },
+                    false,
+                ),
+            ),
+            ("opencode", {
+                let mut config = claude_config(ClaudeLaunch::default(), false);
+                config.cli = "opencode".into();
+                config.opencode_mcp_config = Some(opencode_mcp.clone());
+                config
+            }),
+        ] {
+            let line = command_line(&config).unwrap();
+            assert!(line.contains("CADASTRE_HTTP_TOKEN"), "{cli}: {line}");
+            assert!(line.contains("vogt-agent-auth fetch"), "{cli}: {line}");
+            assert!(!line.contains("fetched-secret"), "{cli}: {line}");
+            let output = std::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(format!(
+                    "{cli}() {{ printf 'cad=%s\\n' \"${{CADASTRE_HTTP_TOKEN:-unset}}\"; }}; {line}"
+                ))
+                .env("PATH", &path)
+                .env_remove("CADASTRE_HTTP_TOKEN")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{cli}: {output:?}");
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout).trim(),
+                "cad=fetched-secret",
+                "{cli}"
+            );
+        }
+    }
+
     /// WI-3873: the rollout name comes from the launch line, not from a file
     /// the test planted under a name it already believed in. The generated
     /// argv names the conversation; Codex names its rollout from that same
@@ -3072,6 +3228,7 @@ mod tests {
                 brief: None,
             },
             codex: CodexLaunch::default(),
+            opencode_mcp_config: None,
         };
         // The host launcher's flags, in its order (WI-3881).
         assert_eq!(
@@ -3165,6 +3322,7 @@ mod tests {
             codex_approval_policy: CODEX_APPROVAL_DEFAULT.into(),
             claude,
             codex: CodexLaunch::default(),
+            opencode_mcp_config: None,
         }
     }
 
@@ -3265,6 +3423,7 @@ mod tests {
             codex_approval_policy: CODEX_APPROVAL_DEFAULT.into(),
             claude: ClaudeLaunch::default(),
             codex: CodexLaunch::default(),
+            opencode_mcp_config: None,
         };
         assert_eq!(command_line(&config).unwrap(), "opencode");
         // Codex refuses extra writable roots, so it gets no `--add-dir`; the
@@ -3486,6 +3645,7 @@ mod tests {
             codex_approval_policy: CODEX_APPROVAL_DEFAULT.into(),
             claude: ClaudeLaunch::default(),
             codex: CodexLaunch::default(),
+            opencode_mcp_config: None,
         };
         // No requirements file in the pod.
         let err = codex_guard(&config, &requirements, &hook).unwrap_err();
@@ -3570,6 +3730,7 @@ mod tests {
                 brief: None,
             },
             codex: CodexLaunch::default(),
+            opencode_mcp_config: None,
         };
         assert_eq!(
             argv_of(&command_line(&config).unwrap()),
@@ -3657,6 +3818,7 @@ mod tests {
             codex_approval_policy: CODEX_APPROVAL_DEFAULT.into(),
             claude: ClaudeLaunch::default(),
             codex: CodexLaunch::default(),
+            opencode_mcp_config: None,
         };
         let (mut reader, _writer, mut child, _master) = spawn_pty(&config).unwrap();
         let mut out = String::new();

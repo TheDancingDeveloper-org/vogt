@@ -19752,9 +19752,10 @@ mod pod_stream {
 
     /// WI-4121: a pod's cadastre MCP entry authenticates with the bearer
     /// variable the host registration names, and only when the agent-auth
-    /// manifest declares it. The bootstrap carries the name, never a value;
-    /// the session agent fetches it around the Codex child. With no entry in
-    /// the manifest the server is left out rather than registered to 401.
+    /// manifest declares it. Each supported agent's bootstrap carries the
+    /// name, never a value; the session agent fetches it around the final
+    /// child. With no entry in the manifest the server is left out rather
+    /// than registered to 401.
     #[tokio::test]
     async fn a_cadastre_pod_entry_names_its_bearer_only_when_the_manifest_declares_it() {
         let dir = tempfile::tempdir().unwrap();
@@ -19796,6 +19797,37 @@ mod pod_stream {
             !body.to_string().contains("value-of-CADASTRE_HTTP_TOKEN"),
             "{body}"
         );
+
+        for cli in ["claude", "opencode"] {
+            let id = h.start().await;
+            let (_, token) = h.created.recv().await.unwrap();
+            let body: Value = h.bootstrap_as(id, &token, cli).await.json().await.unwrap();
+            let config = if cli == "claude" {
+                &body["mcp_config"]["mcpServers"]["cadastre"]
+            } else {
+                &body["opencode_config"]["mcp"]["cadastre"]
+            };
+            assert_eq!(
+                config["url"], "https://cadastre.example.test/mcp",
+                "{cli}: {body}"
+            );
+            assert!(
+                config["headers"]["Authorization"]
+                    .as_str()
+                    .is_some_and(|value| value.contains("CADASTRE_HTTP_TOKEN")),
+                "{cli}: {body}"
+            );
+            assert_eq!(
+                body["env"]["AGENT_AUTH_ONDEMAND"].as_str(),
+                Some("CADASTRE_HTTP_TOKEN"),
+                "{cli}: {body}"
+            );
+            assert!(body["env"].get("CADASTRE_HTTP_TOKEN").is_none(), "{body}");
+            assert!(
+                !body.to_string().contains("value-of-CADASTRE_HTTP_TOKEN"),
+                "{body}"
+            );
+        }
 
         // The same deployment URL, no manifest line: the entry is omitted.
         let dir2 = tempfile::tempdir().unwrap();
@@ -20221,6 +20253,7 @@ mod pod_stream {
             resume: false,
             claude: vogt_session_agent::ClaudeLaunch::default(),
             codex: vogt_session_agent::CodexLaunch::default(),
+            opencode_mcp_config: None,
         };
         let line = vogt_session_agent::command_line(&agent).expect("a Codex launch line");
         let mut argv = shell_argv(&line);
