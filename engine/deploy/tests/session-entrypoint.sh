@@ -105,7 +105,7 @@ run_case() {
     SOURCE_JSON='{"location":{"kind":"graft","endpoint":"http://graft","repo":"vogt"},"ref":"rust-2","landing":"line"}' \
     VOGT_SOURCE_JSON='{"location":{"kind":"graft","endpoint":"http://graft","repo":"vogt"},"ref":"rust-2","landing":"line"}' VOGT_CLI=claude \
     VOGT_CLONE_DIR="$dir/work" VOGT_WORK_DIR="$dir/work" VOGT_SESSION_TOKEN_FILE="$dir/run/session-token" \
-    CLAUDE_CONFIG_DIR="$dir/claude" "$@" "$entry"
+    CLAUDE_CONFIG_DIR="$dir/claude" GRAFT_TOKEN=default-graft-token-value "$@" "$entry"
 }
 
 # shellcheck disable=SC2016 # ${VOGT_HTTP_TOKEN} is Claude Code's to expand
@@ -157,7 +157,7 @@ grep -q '^EXTRA=yes$' "$tmp/happy/agent.env" || fail "caller env did not reach t
 ! grep -q '^EXTRA=' "$tmp/happy/graft.env" || fail "caller env reached the clone step"
 grep -q '^VOGT_SESSION_ID=s1$' "$tmp/happy/agent.env" || fail "engine env did not win over the caller's"
 ! grep -q '^VOGT_SESSION_ID=caller$' "$tmp/happy/agent.env" || fail "caller env overrode the engine's"
-! grep -Eq "$BOOT|$SESSION|graft-secret-value" <<<"$out" || fail "secret in output"
+! grep -Eq "$BOOT|$SESSION|graft-secret-value|default-graft-token-value" <<<"$out" || fail "secret in output"
 for step in bootstrap session-token account-bundle brokered-env claude-config source-token clone brief handoff; do
   grep -q "^session-entrypoint: step $step$" <<<"$out" || fail "step marker $step"
 done
@@ -218,9 +218,9 @@ run_case "$tmp/subdir" VOGT_WORK_DIR="$tmp/subdir/work/engine" >/dev/null 2>&1 |
 grep -q 'clone vogt '"$tmp/subdir/work"' --line rust-2' "$tmp/subdir/graft.args" || fail "subdir cwd moved the clone"
 grep -q "^VOGT_SESSION_CWD=$tmp/subdir/work/engine$" "$tmp/subdir/agent.env" || fail "agent cwd not the requested subdirectory"
 
-# Without a graft token the session token is what graft clones with. An
-# engine that sends no MCP config leaves the session agent nothing to pass.
-run_case "$tmp/no-graft-token" >/dev/null 2>&1 || fail "no-graft-token path"
+# Without a graft token the clone is skipped (WI-4213). An engine that sends
+# no MCP config leaves the session agent nothing to pass.
+run_case "$tmp/no-graft-token" GRAFT_TOKEN= >/dev/null 2>&1 || fail "no-graft-token path"
 [ ! -e "$tmp/no-graft-token/run/mcp.json" ] || fail "mcp config written without one in the response"
 ! grep -q '^VOGT_CLAUDE_MCP_CONFIG=' "$tmp/no-graft-token/agent.env" || fail "mcp config exported without one"
 posture=$(run_case "$tmp/posture" VOGT_CLAUDE_SETTINGS_FILE="$tmp/policy.json" MCP_CONFIG="$MCP" 2>&1 | grep 'claude posture') || true
@@ -314,7 +314,6 @@ OC='{"mcp":{"vogt":{"type":"remote","url":"https://e/mcp"}}}'
 out=$(run_case "$tmp/ocfg" VOGT_CLI=opencode OPENCODE_CONFIG="$OC" XDG_CONFIG_HOME="$tmp/ocfg/xdg" 2>&1) || fail "opencode path: $out"
 jq -e '.mcp.vogt.url=="https://e/mcp"' "$tmp/ocfg/xdg/opencode/opencode.json" >/dev/null || fail "opencode config content"
 [[ $(stat -c %a "$tmp/ocfg/xdg/opencode/opencode.json") == 600 ]] || fail "opencode config mode"
-[[ $(<"$tmp/no-graft-token/graft.token") == "$SESSION" ]] || fail "clone should fall back to the session token"
 
 # WI-4130: no account bundle is not a crash. The pod starts and names the
 # missing login, for each pod-capable agent, before the CLI's own screen.
@@ -355,8 +354,24 @@ if run_case "$tmp/emptyfile" >"$tmp/emptyfile.out" 2>&1; then fail "empty token 
 grep -q 'bootstrap failed.*is empty' "$tmp/emptyfile.out" || fail "empty token file error"
 if run_case "$tmp/unauthorized" BOOT_MODE=401 >"$tmp/401.out" 2>&1; then fail "401 succeeded"; fi
 grep -q 'bootstrap failed.*refused' "$tmp/401.out" || fail "401 error"
-if run_case "$tmp/clone-failure" CLONE_FAIL=1 >"$tmp/clone.out" 2>&1; then fail "clone failure succeeded"; fi
-grep -q 'clone failed' "$tmp/clone.out" || fail "clone error"
+# WI-4213: a failed clone never kills the session. With a token the entrypoint
+# warns prominently and still starts the agent; the token never reaches the log.
+run_case "$tmp/clone-failure" CLONE_FAIL=1 GRAFT_TOKEN=graft-secret-value GRAFT_SESSION=ses_TEST >"$tmp/clone.out" 2>&1 || fail "clone failure killed the session: $(cat "$tmp/clone.out")"
+grep -q 'WARNING.*clone failed' "$tmp/clone.out" || fail "clone failure not warned"
+grep -q '^agent:' "$tmp/clone.out" || fail "agent did not start after a failed clone"
+[ -e "$tmp/clone-failure/agent.env" ] || fail "agent not exec'd after a failed clone"
+! grep -q 'git view of' "$tmp/clone.out" || fail "git view built over a failed clone"
+# No token at all (the engine could not mint one): the clone is skipped with a
+# clear line, graft is never called, and the agent starts.
+run_case "$tmp/no-token-skip" GRAFT_TOKEN= >"$tmp/skip.out" 2>&1 || fail "no-token session died: $(cat "$tmp/skip.out")"
+grep -q 'skipping clone' "$tmp/skip.out" || fail "no-token skip not logged"
+[ ! -e "$tmp/no-token-skip/graft.args" ] || fail "graft clone ran without a token"
+[ -e "$tmp/no-token-skip/agent.env" ] || fail "agent not started without a token"
+# The engine's explicit unavailable marker skips even when a token is present.
+run_case "$tmp/unavailable" GRAFT_TOKEN=graft-secret-value GRAFT_SESSION=ses_TEST VOGT_GRAFT_TOKEN_UNAVAILABLE='the project names no graft source' >"$tmp/unavail.out" 2>&1 || fail "unavailable-token session died"
+grep -q 'skipping clone.*names no graft source' "$tmp/unavail.out" || fail "unavailable reason not logged"
+[ ! -e "$tmp/unavailable/graft.args" ] || fail "graft clone ran with the unavailable marker"
+[ -e "$tmp/unavailable/agent.env" ] || fail "agent not started with the unavailable marker"
 # WI-3886: a name declared ondemand must arrive as a name, never a value. A
 # response that does both is refused before the CLI starts.
 LEAK_ENV='{"VOGT_SESSION_ID":"s1","AGENT_AUTH_ONDEMAND":"DEEPSEEK_KEY","DEEPSEEK_KEY":"provider-key-value"}'
@@ -364,7 +379,7 @@ if run_case "$tmp/ondemand-leak" VOGT_CLI=codex ENV_JSON="$LEAK_ENV" >"$tmp/onde
 grep -q 'bootstrap returned a value for ondemand variable DEEPSEEK_KEY' "$tmp/ondemand-leak.out" || fail "ondemand value refusal: $(cat "$tmp/ondemand-leak.out")"
 [ ! -e "$tmp/ondemand-leak/agent.env" ] || fail "agent started with an exported ondemand value"
 ! grep -q 'provider-key-value' "$tmp/ondemand-leak.out" || fail "ondemand value appeared in output"
-for output in "$tmp/missing.out" "$tmp/401.out" "$tmp/clone.out"; do
-  ! grep -Eq "$BOOT|$SESSION" "$output" || fail "secret appeared in output"
+for output in "$tmp/missing.out" "$tmp/401.out" "$tmp/clone.out" "$tmp/skip.out" "$tmp/unavail.out"; do
+  ! grep -Eq "$BOOT|$SESSION|graft-secret-value|default-graft-token-value" "$output" || fail "secret appeared in output"
 done
 echo 'session-entrypoint: ok'
