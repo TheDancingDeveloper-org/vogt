@@ -185,6 +185,7 @@ fi
 if [ "$VOGT_CLI" = opencode ] && jq -e '.opencode_config | type == "object"' "$response" >/dev/null 2>&1; then
   oc_dir=${XDG_CONFIG_HOME:-$HOME/.config}/opencode; mkdir -p "$oc_dir"; chmod 700 "$oc_dir"
   jq '.opencode_config' "$response" >"$oc_dir/opencode.json"; chmod 600 "$oc_dir/opencode.json"
+  export VOGT_OPENCODE_MCP_CONFIG="$oc_dir/opencode.json"
   printf 'session-entrypoint: opencode posture: mcp-config\n' >&2
 fi
 # Same rule as Claude above: opencode has no credential in the image, so a

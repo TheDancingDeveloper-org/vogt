@@ -445,6 +445,19 @@ Code (`~/.claude.json`), Codex (`~/.codex/config.toml`), opencode (its user
 `opencode.json[c]`); `VOGT_MCP_URL` overrides the endpoint, and
 with neither set the bootstrap falls back to the front door on loopback.
 
+**Cadastre in pod sessions.** `ENGINE_CADASTRE_MCP_URL` is the HTTPS origin a
+session pod can reach (no `/mcp`; the engine appends it). A URL alone is not
+enough: the live agent-auth manifest, or a grant held by the session, must also
+declare `CADASTRE_HTTP_TOKEN`. The bootstrap then emits the Cadastre entry for
+Codex, Claude Code and opencode with only that environment-variable reference
+and names it in `AGENT_AUTH_ONDEMAND`. The pod-side session agent resolves the
+value through `vogt-agent-auth fetch` immediately around the final CLI child;
+the bearer value is never serialized into an MCP config, bootstrap response,
+argv, or the pod's long-lived environment. With no URL or no declared/granted
+token the Cadastre entry is omitted rather than installed as an endpoint that
+can only answer 401. `CADASTRE_MCP_URL` remains the host-side
+`mcp-bootstrap.sh` setting; it does not configure a pod endpoint by itself.
+
 **Codex's driven-session bundle** (WI-1149). The same bootstrap writes the keys
 a session the engine starts needs and an interactive CLI does not.
 `project_doc_fallback_filenames = ["CLAUDE.md"]` at the root, so a checkout
@@ -5369,6 +5382,14 @@ JSON value carrying the guidance, charter, compact limit and template argv the
 pod cannot derive, and the entrypoint exports `VOGT_CODEX_CONFIG_FILE`;
 `codex_args` combines both with the fragment, so a host and a pod launch build
 the same Codex argv (WI-3882).
+
+The same child-only rule applies to pod MCP bearers (WI-4114): Codex reads
+`bearer_token_env_var` from its engine-owned fragment, while Claude Code and
+opencode read the variable reference in their engine-owned Authorization
+header. For all three, the session agent extracts only a valid environment
+name, fetches it through the per-session broker, and exports the value only in
+the final CLI launch shell. `VOGT_OPENCODE_MCP_CONFIG` names opencode's
+engine-owned file for that purpose; it carries no bearer value.
 
 The container's root filesystem is read-only (`readOnlyRootFilesystem: true`)
 on top of the existing uid/gid 1000, no-privilege-escalation and dropped
