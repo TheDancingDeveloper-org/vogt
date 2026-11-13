@@ -17120,7 +17120,16 @@ fn spawn_fake_codex(
     body: &str,
     bus: &vogt_engine_server::events::EventBus,
 ) -> Arc<vogt_engine_server::pty::Session> {
-    let codex = dir.join("codex");
+    spawn_fake_agent(dir, "codex", body, bus)
+}
+
+fn spawn_fake_agent(
+    dir: &std::path::Path,
+    name: &str,
+    body: &str,
+    bus: &vogt_engine_server::events::EventBus,
+) -> Arc<vogt_engine_server::pty::Session> {
+    let codex = dir.join(name);
     std::fs::write(&codex, body).unwrap();
     std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
     let spec = vogt_engine_contract::SessionSpec {
@@ -17193,6 +17202,40 @@ async fn a_queued_first_prompt_is_submitted_by_the_watchdog_and_starts_a_turn() 
         "{:?}",
         screen.lines
     );
+    session.kill().unwrap();
+}
+
+/// WI-4186: a pod Claude session with autopilot off opened at an empty
+/// composer and never started a turn, because only autopilot's nudge ever typed
+/// into it. An Enter does nothing there, so the watchdog types the brief
+/// pointer. The fake starts its turn only when a line naming the brief arrives.
+#[tokio::test]
+async fn an_empty_claude_composer_is_given_the_brief_pointer_and_starts_a_turn() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bus = vogt_engine_server::events::EventBus::new(64);
+    let session = spawn_fake_agent(
+        tmp.path(),
+        "claude",
+        "#!/bin/bash\n\
+         printf '> '\n\
+         read -r line\n\
+         case \"$line\" in\n\
+           \"\") printf 'EMPTY-ENTER\\n'; read -r line;;\n\
+         esac\n\
+         printf 'GOT:%s\\n' \"$line\"\n\
+         printf 'esc to interrupt\\n'\n\
+         exec sleep 30\n",
+        &bus,
+    );
+    vogt_engine_server::first_turn::watch(bus, Arc::clone(&session), first_turn_policy())
+        .await
+        .unwrap();
+    let (screen, _) = session.render_screen(0);
+    // The 80-column screen wraps the line, so compare without the breaks.
+    let text = screen.lines.join("");
+    assert!(text.contains("GOT:Vogt started this session"), "{text}");
+    assert!(text.contains("VOGT_SESSION_BRIEF_FILE"), "{text}");
+    assert!(session.blocked().is_none(), "{:?}", session.blocked());
     session.kill().unwrap();
 }
 
