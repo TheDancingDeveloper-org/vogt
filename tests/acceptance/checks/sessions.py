@@ -340,6 +340,8 @@ def workspace_content(ctx: Context) -> Check:
     identifier = _session(ctx)
     prompt = (
         "Run these shell commands and reply with their output verbatim, nothing else:\n"
+        'if [ -n "${VOGT_WORKSPACE_ROOT:-}" ]; then '
+        "echo WS_CAPABILITY_PRESENT; else echo WS_CAPABILITY_ABSENT; fi\n"
         "test -f ~/Working/AGENTS.md && echo WS_AGENTS_OK || echo WS_AGENTS_MISSING\n"
         "test -d ~/.claude/rules && echo WS_RULES_OK || echo WS_RULES_MISSING\n"
         "for f in settings.local.json auth.json .git-credentials .netrc; do echo "
@@ -350,13 +352,21 @@ def workspace_content(ctx: Context) -> Check:
     )
     found, text = _ask(ctx, identifier, prompt, "WS_SCAN_DONE", timeout_s=90)
     if not found:
+        return failed(f"the agent did not complete the workspace scan: {text[-200:]!r}")
+    if "WS_CAPABILITY_ABSENT" in text:
         return skipped(
-            f"the agent did not complete the workspace scan: {text[-200:]!r}"
+            "live pod reported VOGT_WORKSPACE_ROOT unset; the deployment does not "
+            "provide a workspace snapshot (enable ENGINE_POD_WORKSPACE)"
+        )
+    if "WS_CAPABILITY_PRESENT" not in text:
+        return failed(
+            "the workspace probe did not report whether VOGT_WORKSPACE_ROOT is set: "
+            f"{text[-200:]!r}"
         )
     if "WS_AGENTS_MISSING" in text or "WS_RULES_MISSING" in text:
-        return skipped(
-            "the pod has no workspace volume (W3: ENGINE_POD_WORKSPACE off or "
-            "WI-4120 not deployed)"
+        return failed(
+            "live pod reported VOGT_WORKSPACE_ROOT set, but the mounted workspace "
+            "is missing AGENTS.md or .claude/rules"
         )
     leaks: list[str] = []
     for name in ("settings.local.json", "auth.json", ".git-credentials", ".netrc"):
@@ -383,16 +393,29 @@ def graft_token(ctx: Context) -> Check:
     identifier = _session(ctx)
     prompt = (
         "Run this and reply with the output verbatim:\n"
-        "if [ -d ~/.config/graft ]; then echo GRAFT_TOKEN_PRESENT; "
-        "else echo GRAFT_TOKEN_MISSING; fi"
+        'if [ -z "${VOGT_GRAFT_TOKEN_FILE:-}" ]; then '
+        "echo GRAFT_CREDENTIAL_ABSENT; "
+        'elif [ -r "$VOGT_GRAFT_TOKEN_FILE" ]; then '
+        "echo GRAFT_CREDENTIAL_PRESENT; "
+        "else echo GRAFT_CREDENTIAL_BROKEN; fi"
     )
-    found, text = _ask(ctx, identifier, prompt, "GRAFT_TOKEN", timeout_s=60)
+    found, text = _ask(ctx, identifier, prompt, "GRAFT_CREDENTIAL_", timeout_s=60)
     if not found:
-        return skipped(
-            f"the agent did not answer the graft-token probe: {text[-200:]!r}"
+        return failed(
+            f"the agent did not answer the graft-credential probe: {text[-200:]!r}"
         )
-    if "GRAFT_TOKEN_MISSING" in text:
-        return skipped("the pod has no graft credential (G2: WI-3229/WI-3986)")
+    if "GRAFT_CREDENTIAL_ABSENT" in text:
+        return skipped(
+            "live pod reported VOGT_GRAFT_TOKEN_FILE unset; enable per-session "
+            "graft credential minting for the source provider"
+        )
+    if "GRAFT_CREDENTIAL_BROKEN" in text:
+        return failed(
+            "live pod reported VOGT_GRAFT_TOKEN_FILE set, but its credential file "
+            "is not readable"
+        )
+    if "GRAFT_CREDENTIAL_PRESENT" not in text:
+        return failed(f"the graft credential probe was ambiguous: {text[-200:]!r}")
     clone = (
         f"g clone vogt /tmp/{ctx.tag} --line rust-2 >/dev/null 2>&1 "
         "&& echo GRAFT_CLONE_OK || echo GRAFT_CLONE_FAIL"
@@ -410,10 +433,9 @@ def graft_token(ctx: Context) -> Check:
         return failed(
             "a pod session with a graft credential could not clone the sandbox repo"
         )
-    return skipped(
-        "clone succeeded; landing was not exercised: no sandbox repo is configured "
-        "(tests/acceptance has no sandbox_repo, and landing in the real line is "
-        "out of scope)"
+    return passed(
+        "live pod reported a readable VOGT_GRAFT_TOKEN_FILE and used it to clone "
+        "vogt/rust-2"
     )
 
 
@@ -422,15 +444,42 @@ def cadastre_mcp(ctx: Context) -> Check:
     identifier = _session(ctx)
     prompt = (
         "Run this and reply with the output verbatim:\n"
-        "grep -q cadastre ~/.codex/config.toml 2>/dev/null && echo CADASTRE_OK "
-        "|| echo CADASTRE_MISSING"
+        "grep -q '^\\[mcp_servers\\.cadastre\\]' ~/.codex/config.toml 2>/dev/null "
+        "&& echo CADASTRE_CAPABILITY_PRESENT || echo CADASTRE_CAPABILITY_ABSENT"
     )
-    found, text = _ask(ctx, identifier, prompt, "CADASTRE_", timeout_s=60)
+    found, text = _ask(ctx, identifier, prompt, "CADASTRE_CAPABILITY_", timeout_s=60)
     if not found:
-        return skipped(f"the agent did not answer the cadastre probe: {text[-200:]!r}")
-    if "CADASTRE_MISSING" in text:
-        return skipped("cadastre is not registered in the pod (W2: WI-4121 in flight)")
-    return passed("cadastre is registered in the pod's ~/.codex/config.toml")
+        return failed(f"the agent did not answer the cadastre probe: {text[-200:]!r}")
+    if "CADASTRE_CAPABILITY_ABSENT" in text:
+        return skipped(
+            "live pod config has no [mcp_servers.cadastre] entry; configure the "
+            "cadastre MCP URL and credential for worker sessions"
+        )
+    if "CADASTRE_CAPABILITY_PRESENT" not in text:
+        return failed(f"the cadastre registration probe was ambiguous: {text[-200:]!r}")
+    found, text = _ask(
+        ctx,
+        identifier,
+        "Call the cadastre MCP version tool. If it returns a version, reply "
+        "CADASTRE_CALL_OK. If the call fails, reply CADASTRE_CALL_FAIL followed "
+        "by the error. Do not inspect or print any credential.",
+        "CADASTRE_CALL_",
+        timeout_s=90,
+    )
+    if not found:
+        return failed(
+            "cadastre is registered in the live pod, but the tool invocation did "
+            f"not answer: {text[-200:]!r}"
+        )
+    if "CADASTRE_CALL_FAIL" in text:
+        return failed(
+            f"cadastre is registered but its version call failed: {text[-200:]!r}"
+        )
+    if "CADASTRE_CALL_OK" not in text:
+        return failed(f"the cadastre invocation result was ambiguous: {text[-200:]!r}")
+    return passed(
+        "cadastre is registered in the live pod and its version tool answered"
+    )
 
 
 def mcp_registrations(ctx: Context) -> Check:
