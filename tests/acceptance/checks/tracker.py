@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from ..harness import Case, Check, Context, failed, passed, skipped
 
 
@@ -66,10 +68,54 @@ def forge_repos_refuses_cleanly(ctx: Context) -> Check:
 
 
 def import_refuses_prod(ctx: Context) -> Check:
-    return skipped(
-        "no prod-to-dev import tool exists yet (WI-3172/WI-3173); there is no target "
-        "selector to prove a prod refusal against"
-    )
+    del ctx
+    tool = Path(__file__).resolve().parents[3] / "tools" / "vogt_snapshot_import.py"
+    if not tool.is_file():
+        return skipped(
+            f"observed import tool absent at {tool}; ship the snapshot importer "
+            "to enable T4"
+        )
+
+    try:
+        from tools.vogt_snapshot_import import (
+            DEFAULT_PROD_HOSTNAMES,
+            Refused,
+            Source,
+            TargetState,
+            refuse_production_target,
+        )
+
+        source = Source(
+            path=tool,
+            instance_id="acceptance-source-instance",
+            exported_at="2026-01-01T00:00:00Z",
+            projects=(),
+            initiatives=(),
+            labels=(),
+            items=(),
+            comments=(),
+            actor_kind={},
+            ignored_keys=(),
+        )
+        target = TargetState(
+            url=f"https://{DEFAULT_PROD_HOSTNAMES[0]}",
+            import_root="",
+            project_root=None,
+        )
+        refuse_production_target(source, target)
+    except Refused as exc:
+        detail = str(exc)
+        if "production" not in detail.lower():
+            return failed(f"the import tool refused for an unrelated reason: {detail}")
+        return passed(
+            "observed tools/vogt_snapshot_import.py and invoked its guard; "
+            f"production target refused: {detail}"
+        )
+    except Exception as exc:
+        return failed(
+            f"the shipped import tool could not be invoked: {type(exc).__name__}: {exc}"
+        )
+    return failed("the shipped import tool accepted its default production host")
 
 
 CASES = [

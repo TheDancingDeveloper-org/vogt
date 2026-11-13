@@ -180,13 +180,24 @@ instance answered `source_ref=graft/batch-134`,
 `source_sha=c81eb71d…` — a real graft commit — so only the human-facing
 version string is wrong.
 
-**Skipped live, and why.** `A3` (no read-only token on this host), `S17` (no
-`--allow-restart`), `P3` (no broken provider to exercise), `P4` (WI-4131 has
-not landed), `T4` (no prod-to-dev import tool yet), `E1` (usage board not
-configured), `S8` (no workspace volume; ENGINE_POD_WORKSPACE off or WI-4120
-not deployed), `S9` (no per-session graft credential; WI-3229/WI-3986), and
-`S10` (cadastre MCP not registered; WI-4121 in flight). A session probe the
-agent refuses to run is a SKIP with the refusal quoted; it is never a pass.
+**Skip conditions are live facts.** A capability check skips only after the
+target (or, for the operator-side importer, the checkout running the suite)
+reports the capability absent. Once present, a broken probe is a failure.
+
+| Check | Exact fact that triggers `SKIP` | What enables the check |
+| --- | --- | --- |
+| `A3` | `--read-token-file` was not given | Provide a 0600 read-only token file. |
+| `S17` | `--allow-restart` was not given, or no operator redeploy occurs | Pass the flag and arrange the documented operator-driven engine restart. |
+| `P3` | No provider row reports a missing/broken secret | Configure a deliberately broken provider for the acceptance run. |
+| `P4` | Provider-failure visibility (WI-4131) is not deployed | Deploy the implementation named by WI-4131. |
+| `E1` | `usage_board` reports that B2 is not configured | Configure the usage-board source. |
+| `S8` | The live pod reports `VOGT_WORKSPACE_ROOT` unset | Enable `ENGINE_POD_WORKSPACE` and its workspace source. If the variable is set but rules are missing or credentials leak, the check fails. |
+| `S9` | The live pod reports `VOGT_GRAFT_TOKEN_FILE` unset | Enable per-session graft credential minting. An unreadable credential or failed clone is a failure. |
+| `S10` | The live pod config has no `[mcp_servers.cadastre]` entry | Configure the cadastre MCP URL and credential. A registered server whose version call fails is a failure. |
+| `T4` | `tools/vogt_snapshot_import.py` is absent from the checkout running the suite | Ship the importer. When present, the suite invokes its production-target guard and fails if production is accepted. |
+
+An agent refusal, timeout, malformed marker, or failed invocation does not
+prove a capability absent and therefore reports `FAIL`, not `SKIP`.
 
 Run the groups in this order once a token exists:
 
