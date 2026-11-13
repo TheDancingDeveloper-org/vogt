@@ -738,16 +738,12 @@ impl SessionRegistry {
             work_item: spec.work_item.clone(),
             budget: spec.budget.clone(),
         };
-        // A project that names a graft source is the only one that earns a
-        // repo-scoped token. The deployment default is a compatibility
-        // fallback for what to clone, not a mapping that grants landing
-        // rights in the deployment's repository (WI-4124). A git project has
-        // no graft credential to mint, so it gets neither a token nor a note.
-        let graft_source = spec
-            .source
-            .as_ref()
-            .is_some_and(|s| s.kind() == SourceKind::Graft);
-        let git_source = spec.source.is_some() && !graft_source;
+        // Mint against the effective source, not only an explicitly carried
+        // project descriptor. Older/core-compatible starts omit `source` and
+        // use the deployment's validated default; when that default is graft,
+        // it is still the exact repo and line the pod is about to clone. A git
+        // source has no graft credential to mint and gets no graft note.
+        let graft_source = source.kind() == SourceKind::Graft;
         tokio::spawn(async move {
             let auth = crate::agent_stream::global();
             let mut minted: Option<crate::source_provider::CredentialHandle> = None;
@@ -763,13 +759,7 @@ impl SessionRegistry {
                 // bootstrap token. The provider keeps it so the pod's teardown
                 // can revoke it, even after an engine restart adopted the pod.
                 let created = async {
-                    if provider.mints_credentials() && !git_source && !graft_source {
-                        note_graft_token_unavailable(
-                            &link,
-                            id,
-                            "the project names no graft source",
-                        );
-                    } else if provider.mints_credentials() && graft_source {
+                    if provider.mints_credentials() && graft_source {
                         // A mint failure must not take sessions down with the
                         // graft server: the pod starts, without a token, and
                         // the session says why. A missing token fails the
@@ -786,7 +776,7 @@ impl SessionRegistry {
                                 note_graft_token_unavailable(&link, id, &e.to_string());
                             }
                         }
-                    } else if !git_source && provider.shared_credential().is_some() {
+                    } else if graft_source && provider.shared_credential().is_some() {
                         tracing::warn!(
                             session = %id,
                             "the source provider mints no per-session credential: \
