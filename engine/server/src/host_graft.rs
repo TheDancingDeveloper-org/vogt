@@ -76,9 +76,14 @@ impl HostGraftCredential {
         &self.delivered
     }
 
+    /// Withdraw the local copy now, without touching graft.
+    pub fn remove_delivered(&self) {
+        let _ = std::fs::remove_file(&self.delivered);
+    }
+
     /// Withdraw the local copy first, then ask graft to revoke the token.
     pub async fn revoke(self) -> Result<(), SourceError> {
-        let _ = std::fs::remove_file(&self.delivered);
+        self.remove_delivered();
         self.provider.revoke_credential(&self.minted).await
     }
 }

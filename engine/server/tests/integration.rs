@@ -21751,6 +21751,211 @@ sleep 2
         assert_eq!(*minter.revoked.lock().unwrap(), [id]);
     }
 
+    // ---- host-backed sessions: the graft credential's lifecycle (WI-3986)
+
+    /// The config home host credentials are delivered under in these tests.
+    fn host_config_home() -> std::path::PathBuf {
+        static HOME: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+        HOME.get_or_init(|| {
+            let dir = tempfile::tempdir().unwrap().keep();
+            std::env::set_var("XDG_CONFIG_HOME", &dir);
+            dir
+        })
+        .clone()
+    }
+
+    fn host_token_path(session_ref: &str) -> std::path::PathBuf {
+        host_config_home()
+            .join("graft/sessions")
+            .join(session_ref)
+            .join("trial-1.token")
+    }
+
+    /// A harness whose `pod` template runs `script` on the host, with the
+    /// session's environment written to `out`.
+    async fn host_harness(out: &std::path::Path, command: Option<&str>) -> Harness {
+        host_config_home();
+        let script = format!("env > {}; exec cat", out.display());
+        let template = SessionTemplate {
+            name: "pod".into(),
+            description: "host-backed".into(),
+            command: Some(match command {
+                Some(c) => vec![c.into()],
+                None => vec!["/bin/sh".into(), "-c".into(), script],
+            }),
+            cwd: None,
+            env: Vec::new(),
+            account: None,
+            default_name: None,
+            match_repo_names: Vec::new(),
+            match_path_prefixes: Vec::new(),
+            tags: Vec::new(),
+            backend: "pod".into(),
+            host_capable: true,
+            pod_capable: false,
+        };
+        let mut h = harness_cfg(false, Some(vec![template]), |cfg| {
+            cfg.vogt_core_token = Some(GRAFT_CORE_TOKEN.into())
+        })
+        .await;
+        h.client = client_for(GRAFT_CORE_TOKEN);
+        h
+    }
+
+    async fn host_env(out: &std::path::Path) -> String {
+        until("the session environment", || {
+            std::fs::read_to_string(out).is_ok_and(|t| t.contains("PATH="))
+        })
+        .await;
+        std::fs::read_to_string(out).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_host_session_gets_a_graft_token_file_and_never_the_value() {
+        let out = tempfile::tempdir().unwrap();
+        let out = out.path().join("env");
+        let mut h = host_harness(&out, None).await;
+        let minter = FakeMinter::new(Ok("host-minted-SECRET"));
+        install_minter(&h, minter.clone());
+        let _id = h
+            .start_with(json!({
+                "source": graft_source(),
+                "placement": "host",
+                "session_ref": "ses_host_env",
+                "work_item": "WI-3986",
+            }))
+            .await;
+        let env = host_env(&out).await;
+        let path = host_token_path("ses_host_env");
+        assert!(env.contains(&format!("VOGT_GRAFT_TOKEN_FILE={}", path.display())));
+        assert!(env.contains("GRAFT_SESSION_ID=ses_host_env"));
+        assert!(!env.contains("host-minted-SECRET"), "token value in env");
+        assert!(!env.contains("VOGT_GRAFT_TOKEN_UNAVAILABLE"));
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "host-minted-SECRET"
+        );
+        let grants = minter.grants.lock().unwrap();
+        assert_eq!(grants.len(), 1);
+        assert_eq!(grants[0].work_item.as_deref(), Some("WI-3986"));
+        assert!(h.created.try_recv().is_err(), "a host session makes no pod");
+    }
+
+    #[tokio::test]
+    async fn a_pod_placed_session_gets_no_host_graft_file() {
+        let out = tempfile::tempdir().unwrap();
+        let mut h = host_harness(&out.path().join("env"), None).await;
+        install_minter(&h, FakeMinter::new(Ok("pod-minted")));
+        let _id = h
+            .start_with(json!({
+                "source": graft_source(),
+                "placement": "pod",
+                "session_ref": "ses_host_pod_skip",
+            }))
+            .await;
+        let _ = h.created.recv().await.expect("the pod is created");
+        assert!(!host_token_path("ses_host_pod_skip").exists());
+    }
+
+    #[tokio::test]
+    async fn a_host_mint_failure_starts_the_session_without_a_token_and_says_why() {
+        let out = tempfile::tempdir().unwrap();
+        let out = out.path().join("env");
+        let h = host_harness(&out, None).await;
+        install_minter(&h, FakeMinter::new(Err("graft is down")));
+        let _id = h
+            .start_with(json!({
+                "source": graft_source(),
+                "placement": "host",
+                "session_ref": "ses_host_mint_fail",
+            }))
+            .await;
+        let env = host_env(&out).await;
+        assert!(!env.contains("VOGT_GRAFT_TOKEN_FILE"), "{env}");
+        assert!(env.contains("VOGT_GRAFT_TOKEN_UNAVAILABLE="), "{env}");
+        assert!(env.contains("graft is down"), "{env}");
+        assert!(!host_token_path("ses_host_mint_fail").exists());
+    }
+
+    #[tokio::test]
+    async fn a_host_create_that_fails_revokes_and_removes_the_credential() {
+        let out = tempfile::tempdir().unwrap();
+        let h = host_harness(&out.path().join("env"), Some("/nonexistent/vogt-test-bin")).await;
+        let minter = FakeMinter::new(Ok("host-create-fail"));
+        install_minter(&h, minter.clone());
+        let response = h
+            .client
+            .post(format!("{}/api/sessions", h.base))
+            .json(&json!({
+                "name": "x", "template": "pod", "placement": "host",
+                "source": graft_source(), "session_ref": "ses_host_create_fail",
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert!(!response.status().is_success(), "{}", response.status());
+        assert!(!host_token_path("ses_host_create_fail").exists());
+        assert_eq!(minter.revoked.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn host_exit_revokes_and_hibernate_then_wake_mints_anew() {
+        let out = tempfile::tempdir().unwrap();
+        let out = out.path().join("env");
+        let h = host_harness(&out, None).await;
+        let minter = FakeMinter::new(Ok("host-lifecycle"));
+        install_minter(&h, minter.clone());
+        let start = |r: &'static str| {
+            h.start_with(json!({
+                "source": graft_source(), "placement": "host", "session_ref": r,
+            }))
+        };
+
+        // Hibernate revokes and removes; wake mints a fresh credential.
+        let id = start("ses_host_cycle").await;
+        host_env(&out).await;
+        let path = host_token_path("ses_host_cycle");
+        assert!(path.exists());
+        h.state
+            .sessions
+            .hibernate(
+                id,
+                Some("test".into()),
+                vogt_engine_contract::HibernateTrigger::Manual,
+                true,
+                true,
+                None,
+            )
+            .await
+            .unwrap();
+        until("hibernate revoke", || {
+            !minter.revoked.lock().unwrap().is_empty()
+        })
+        .await;
+        assert!(!path.exists(), "the file goes with the process");
+        let woke = h
+            .client
+            .post(format!("{}/api/sessions/{id}/wake", h.base))
+            .json(&json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(woke.status(), StatusCode::OK);
+        assert!(path.exists(), "wake delivers a fresh file");
+        assert_eq!(minter.grants.lock().unwrap().len(), 2);
+
+        // Exit revokes and removes.
+        let kill = h
+            .client
+            .post(format!("{}/api/sessions/{id}/kill", h.base))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(kill.status(), StatusCode::OK);
+        until("exit revoke", || minter.revoked.lock().unwrap().len() == 2).await;
+        assert!(!path.exists());
+    }
+
     #[tokio::test]
     async fn a_pod_that_cannot_be_created_ends_the_session() {
         let h = harness(true).await;
