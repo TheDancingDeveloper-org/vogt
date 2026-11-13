@@ -41,6 +41,7 @@ pub mod hibernate_policy;
 pub mod hibernation;
 pub mod history;
 pub mod history_api;
+pub mod host_graft;
 pub mod launch;
 pub mod llm_providers;
 pub mod mcp_set;

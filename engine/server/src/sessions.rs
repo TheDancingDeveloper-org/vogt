@@ -386,6 +386,9 @@ pub struct SessionRegistry {
     /// The source providers pod sessions are served from. Built from the
     /// deployment's settings on first use; tests install providers.
     source_registry: parking_lot::Mutex<Option<crate::source_provider::SourceRegistry>>,
+    /// Graft credentials delivered to host-backed sessions, revoked with the
+    /// process. Pod credentials stay in `agent_stream` and the pod lifecycle.
+    host_graft_credentials: Arc<DashMap<Uuid, crate::host_graft::HostGraftCredential>>,
     /// Stream halves rebuilt for pods an engine restart is adopting, taken by
     /// `spawn_pod_session` when the session over them is built.
     adopting: parking_lot::Mutex<std::collections::HashMap<Uuid, AdoptedPod>>,
@@ -550,6 +553,7 @@ impl SessionRegistry {
             account_leases,
             pod_launcher: parking_lot::Mutex::new(None),
             source_registry: parking_lot::Mutex::new(None),
+            host_graft_credentials: Arc::new(DashMap::new()),
             adopting: parking_lot::Mutex::new(std::collections::HashMap::new()),
         }
     }
@@ -1152,7 +1156,81 @@ impl SessionRegistry {
             spec.env = Some(merged);
         }
         self.check_provider_secret(id, &spec).await?;
-        self.create_inner(spec, Creating::Fresh(Origin::Api), Some(id))
+        self.prepare_host_graft(id, &mut spec).await?;
+        let created = self.create_inner(spec, Creating::Fresh(Origin::Api), Some(id));
+        if created.is_err() {
+            self.revoke_host_graft(id).await;
+        }
+        created
+    }
+
+    /// Mint a graft credential for a host-backed session whose project lands
+    /// on a graft line. Pods have their own bootstrap delivery path.
+    async fn prepare_host_graft(&self, id: Uuid, spec: &mut SessionSpec) -> Result<()> {
+        use vogt_engine_contract::source::{LandingMode, SourceKind};
+
+        if self.runs_in_pod(spec.template.as_deref(), spec.placement.as_deref()) {
+            return Ok(());
+        }
+        let Some(source) = spec
+            .source
+            .as_ref()
+            .filter(|source| source.kind() == SourceKind::Graft)
+            .filter(|source| source.landing == LandingMode::Line)
+        else {
+            return Ok(());
+        };
+        let registry = self.source_registry()?;
+        let provider = registry
+            .for_source(source)
+            .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+        if !provider.mints_credentials() {
+            return Ok(());
+        }
+        let request = crate::source_provider::CredentialRequest {
+            session: id,
+            session_ref: spec.session_ref.clone(),
+            work_item: spec.work_item.clone(),
+            budget: spec.budget.clone(),
+        };
+        let credential = crate::host_graft::HostGraftCredential::provision(
+            Arc::clone(&provider),
+            source,
+            &request,
+            &crate::host_graft::config_home().map_err(|e| ApiError::Config(e.to_string()))?,
+        )
+        .await
+        .map_err(|e| ApiError::BadGateway(e.to_string()))?;
+        let session_ref = request
+            .session_ref
+            .clone()
+            .unwrap_or_else(|| id.to_string());
+        let env = spec.env.get_or_insert_with(Vec::new);
+        env.retain(|(name, _)| name != "GRAFT_SESSION_ID" && name != "VOGT_GRAFT_TOKEN_FILE");
+        env.push(("GRAFT_SESSION_ID".into(), session_ref));
+        env.push((
+            "VOGT_GRAFT_TOKEN_FILE".into(),
+            credential.path().to_string_lossy().into_owned(),
+        ));
+        self.host_graft_credentials.insert(id, credential);
+        Ok(())
+    }
+
+    async fn revoke_host_graft(&self, id: Uuid) {
+        let Some((_, credential)) = self.host_graft_credentials.remove(&id) else {
+            return;
+        };
+        if let Err(error) = credential.revoke().await {
+            tracing::warn!(
+                target: "vogt::audit", session = %id, error = %error,
+                "could not revoke the host session's graft credential; it expires on its own"
+            );
+        } else {
+            tracing::info!(
+                target: "vogt::audit", session = %id,
+                "revoked the host session's graft credential"
+            );
+        }
     }
 
     /// Refuse a Codex launch whose selected provider's secret cannot be
@@ -1271,8 +1349,14 @@ impl SessionRegistry {
             &spec.command,
             spec.template.as_deref(),
         )?;
-        self.check_provider_secret(Uuid::new_v4(), &spec).await?;
-        self.create_inner(spec, Creating::Fresh(Origin::AgentTask), None)
+        let id = Uuid::new_v4();
+        self.check_provider_secret(id, &spec).await?;
+        self.prepare_host_graft(id, &mut spec).await?;
+        let created = self.create_inner(spec, Creating::Fresh(Origin::AgentTask), Some(id));
+        if created.is_err() {
+            self.revoke_host_graft(id).await;
+        }
+        created
     }
 
     fn create_inner(
@@ -2556,11 +2640,32 @@ impl SessionRegistry {
         let core = Arc::clone(&self.core);
         let broker = Arc::clone(&self.secret_broker);
         let account_leases = Arc::clone(&self.account_leases);
+        let host_graft_credentials = Arc::clone(&self.host_graft_credentials);
         Box::new(move |session: &Session| {
             // An approved grant is for a running session; whatever stopped it,
             // the grant goes with the process (WI-973).
             broker.drop_grants(session.id);
             account_leases.remove(&session.id);
+            // A host graft token belongs to the live process, including when
+            // it exits for hibernation or engine shutdown. Wake mints anew.
+            if let Some((_, credential)) = host_graft_credentials.remove(&session.id) {
+                let id = session.id;
+                if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                    runtime.spawn(async move {
+                        if let Err(error) = credential.revoke().await {
+                            tracing::warn!(
+                                target: "vogt::audit", session = %id, error = %error,
+                                "could not revoke the host session's graft credential; it expires on its own"
+                            );
+                        } else {
+                            tracing::info!(
+                                target: "vogt::audit", session = %id,
+                                "revoked the host session's graft credential"
+                            );
+                        }
+                    });
+                }
+            }
             if session.is_hibernating() || shutting_down.load(Ordering::Acquire) {
                 return;
             }
@@ -3003,7 +3108,15 @@ impl SessionRegistry {
             req.rows,
         );
         self.check_provider_secret(id, &spec).await?;
-        let session = self.create_inner(spec, Creating::Wake(Box::new(record)), None)?;
+        let mut spec = spec;
+        self.prepare_host_graft(id, &mut spec).await?;
+        let session = match self.create_inner(spec, Creating::Wake(Box::new(record)), None) {
+            Ok(session) => session,
+            Err(error) => {
+                self.revoke_host_graft(id).await;
+                return Err(error);
+            }
+        };
         self.bus.publish(ServerEvent::SessionWoken { id });
         if fresh.is_some() {
             tracing::info!(
