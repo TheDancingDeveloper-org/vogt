@@ -71,15 +71,32 @@ impl Default for Policy {
 /// large enough not to spin a runtime worker.
 const POLL: Duration = Duration::from_millis(100);
 
-/// Agents the watchdog confirms. Codex is the one whose launch can leave the
-/// brief queued in the composer, and it sets a title this engine reads, so
-/// `codex: working` is proof that a turn began even if the TUI never rested at
-/// its composer first. Claude submits the launch prompt itself and announces no
-/// turn-state title, so a queued prompt and a live turn look the same on its
-/// screen; pressing Enter there could interrupt a turn already running. It is
-/// therefore left to its own submit path. `opencode` takes no first prompt, so
-/// a retry there would be guesswork.
-pub const FIRST_TURN_AGENTS: &[&str] = &["codex"];
+/// Agents the watchdog confirms. Codex can leave the brief queued in the
+/// composer, and it sets a title this engine reads, so `codex: working` is
+/// proof that a turn began even if the TUI never rested at its composer first.
+///
+/// Claude Code announces no turn-state title, but the activity watcher still
+/// stamps every turn start, and that stamp is what the watch trusts (WI-4186):
+/// a pod Claude session with autopilot off was seen at an empty composer with
+/// no turn, and nothing but autopilot's nudge would ever have typed into it.
+/// Its recovery differs from Codex's, because an Enter into an empty composer
+/// does nothing: see [`resubmit`]. `opencode` takes no first prompt, so a retry
+/// there would be guesswork.
+pub const FIRST_TURN_AGENTS: &[&str] = &["codex", "claude"];
+
+/// What a Claude session is typed when its launch prompt never reached the
+/// composer. It names the brief by the variable the pod entrypoint exports
+/// rather than a path, because the engine does not know where the pod put the
+/// file.
+const CLAUDE_RECOVERY_PROMPT: &str = "Vogt started this session with a brief in the file \
+named by the VOGT_SESSION_BRIEF_FILE environment variable. Read that file now \
+(`echo $VOGT_SESSION_BRIEF_FILE` gives the path). If it has a \"Task\" section, \
+carry that task out; otherwise summarise the brief in one line and wait for \
+instructions.";
+
+/// The text the launch prompt starts with, so a composer holding it is a
+/// queued prompt and not an empty one.
+const LAUNCH_PROMPT_MARK: &str = "Vogt started this session with a brief";
 
 /// Watch a freshly spawned session's first turn. Spawn this once, at start,
 /// for a fresh agent session that was given a brief.
@@ -121,14 +138,9 @@ pub fn watch(bus: EventBus, session: Arc<Session>, policy: Policy) -> tokio::tas
             if !at_composer(&session) {
                 return;
             }
-            if session.write_input(b"\r").is_err() {
+            if resubmit(&session).await.is_err() {
                 return;
             }
-            tracing::info!(
-                session = %session.id,
-                event = "first_turn.retry",
-                "the brief was queued but no turn started; pressed Enter once"
-            );
         }
         if !session.is_alive() {
             return;
@@ -156,6 +168,37 @@ pub fn watch(bus: EventBus, session: Arc<Session>, policy: Policy) -> tokio::tas
             );
         }
     })
+}
+
+/// Get the first prompt submitted, once. A composer that holds the launch
+/// prompt just needs its Enter. An empty Claude composer needs the prompt
+/// typed (an Enter there does nothing); an empty Codex one keeps the old
+/// behaviour, an Enter that an empty composer ignores.
+async fn resubmit(session: &Arc<Session>) -> std::io::Result<()> {
+    let (rendered, _) = session.render_screen(0);
+    let queued = rendered
+        .lines
+        .iter()
+        .any(|l| l.contains(LAUNCH_PROMPT_MARK));
+    if !queued && session.agent().as_deref() == Some("claude") {
+        tracing::info!(
+            session = %session.id,
+            event = "first_turn.retype",
+            "the composer is empty and no turn started; typed the brief pointer"
+        );
+        // The Enter on its own, after a pause: a burst ending in a carriage
+        // return reads as a paste, and the newline stays text.
+        session.write_input(CLAUDE_RECOVERY_PROMPT.as_bytes())?;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        return session.write_input(b"\r");
+    }
+    session.write_input(b"\r")?;
+    tracing::info!(
+        session = %session.id,
+        event = "first_turn.retry",
+        "the brief was queued but no turn started; pressed Enter once"
+    );
+    Ok(())
 }
 
 /// What a fresh session was doing when the watch last looked at it.
