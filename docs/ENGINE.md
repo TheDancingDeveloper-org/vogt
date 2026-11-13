@@ -3656,7 +3656,9 @@ The built-in templates (used when the config file lists none) run on
 `ENGINE_SESSION_BACKEND` (or `VOGT_ENGINE_SESSION_BACKEND`): `local`
 (default) or `pod`, which needs `ENGINE_POD_BACKENDS_ENABLED`. Any other value
 refuses to start the engine. A template's own `backend` in the config file is
-kept as written.
+kept as written. The built-in `Claude Code (protected)` template supports
+`placement=pod` even when its default and the deployment default remain
+`host`; this moves only the requested Claude session into a pod.
 
 The built-in agent templates state both placements: `Claude Code (protected)`
 and `OpenCode (protected)` keep `local` as their default backend and are
@@ -5546,7 +5548,11 @@ bootstrap refusal quotes the engine's one-line reason only). In order:
    `VOGT_SESSION_TOKEN_FILE` (default `/run/vogt/session-token`).
 4. `account-bundle` — the assigned account bundle is written into
    `CLAUDE_CONFIG_DIR` (directories `0700`, files `0600`); unsafe paths are
-   refused.
+   refused. When it carries a Claude login, the engine also supplies
+   `.claude.json` with first-run onboarding complete and `/work` trusted,
+   including approval and warning acknowledgement for external `CLAUDE.md`
+   imports. This pod-specific seed is necessary because `/work` does not exist
+   on the engine host where ordinary quiet onboarding runs.
 5. `brokered-env` — the response's `env` map is exported to the session,
    except the bootstrap token names.
 6. `claude-config` — the agent's own config files. For `VOGT_CLI=claude`, the
