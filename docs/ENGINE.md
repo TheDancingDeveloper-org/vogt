@@ -5425,7 +5425,7 @@ without it leaves the pod without `.agent-tools/bin`.
 
 **Per-session graft token** (`graft_mint.rs`). When
 `ENGINE_SOURCE_GRAFT_MINT` is on and the session's project names a graft source,
-at pod create the engine calls graft's `AdminService.MintToken` (gRPC,
+the engine calls graft's `AdminService.MintToken` (gRPC,
 `graft-protocol` 0.1, the mint token as the bearer) for a token with subject
 `vogt-session-<session id>`, that session id and the session's work item (when
 graft accepts the label: short, no whitespace) stamped on it, and exactly four
@@ -5464,6 +5464,22 @@ the minted token in `<state_dir>/pod-graft-tokens/<session>` (`0600`, directory
 `0700`, like the pod stream tokens in `pod-tokens/`) from mint until the revoke
 attempt, so a pod an engine restart adopts is still revoked when it ends. A
 session hibernated or removed with no pod running has nothing left to revoke.
+
+For a **host-backed** session with the same graft-line source, the provider
+still keeps its private copy under `state_dir`, then atomically delivers a
+second `0600` copy at
+`$XDG_CONFIG_HOME/graft/sessions/<session_ref>/trial-1.token` (or
+`$HOME/.config/...` when `XDG_CONFIG_HOME` is unset). `session_ref` is the
+core's `ses_...` id from the worker brief, so graft's write-time binding and
+the path the worker is told to use name the same session. Only the token-file
+path and `GRAFT_SESSION_ID` enter the child's environment, never the value.
+Normal process exit or stop removes that copy and calls `RevokeToken`; TTL is
+again the backstop after an engine crash or an unavailable graft server. This
+uses the same `ENGINE_SOURCE_GRAFT_ENDPOINT`,
+`ENGINE_SOURCE_GRAFT_MINT_TOKEN_FILE` and `ENGINE_SOURCE_GRAFT_MINT=1`
+deployment settings as pods; the mint token remains an engine-only mounted
+secret and is never copied into a session. The deployment therefore needs a
+service-kind token whose scopes cover the repositories and lines it may grant.
 
 **Per-session kache key (WI-3242).** The shared Secret `ENGINE_POD_CACHE_SECRET`
 (default `kache-s3`, read through `envFrom`) must hold only a **read-only** key
