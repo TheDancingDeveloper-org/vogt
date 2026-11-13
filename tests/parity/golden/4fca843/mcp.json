@@ -5452,6 +5452,18 @@
                     "title": "Merge Mode",
                     "type": "string"
                   },
+                  "source": {
+                    "anyOf": [
+                      {
+                        "additionalProperties": true,
+                        "type": "object"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "title": "Source"
+                  },
                   "worker_lands_by": {
                     "enum": [
                       "push_branch",
@@ -5948,6 +5960,18 @@
                     ],
                     "title": "Merge Mode",
                     "type": "string"
+                  },
+                  "source": {
+                    "anyOf": [
+                      {
+                        "additionalProperties": true,
+                        "type": "object"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "title": "Source"
                   },
                   "worker_lands_by": {
                     "enum": [
@@ -6465,6 +6489,18 @@
                     ],
                     "title": "Merge Mode",
                     "type": "string"
+                  },
+                  "source": {
+                    "anyOf": [
+                      {
+                        "additionalProperties": true,
+                        "type": "object"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "title": "Source"
                   },
                   "worker_lands_by": {
                     "enum": [
@@ -7056,6 +7092,18 @@
                     "title": "Merge Mode",
                     "type": "string"
                   },
+                  "source": {
+                    "anyOf": [
+                      {
+                        "additionalProperties": true,
+                        "type": "object"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "title": "Source"
+                  },
                   "worker_lands_by": {
                     "enum": [
                       "push_branch",
@@ -7509,6 +7557,18 @@
                     ],
                     "title": "Merge Mode",
                     "type": "string"
+                  },
+                  "source": {
+                    "anyOf": [
+                      {
+                        "additionalProperties": true,
+                        "type": "object"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "title": "Source"
                   },
                   "worker_lands_by": {
                     "enum": [
@@ -8167,6 +8227,18 @@
                     ],
                     "title": "Merge Mode",
                     "type": "string"
+                  },
+                  "source": {
+                    "anyOf": [
+                      {
+                        "additionalProperties": true,
+                        "type": "object"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "title": "Source"
                   },
                   "worker_lands_by": {
                     "enum": [
@@ -9122,6 +9194,18 @@
                     "title": "Merge Mode",
                     "type": "string"
                   },
+                  "source": {
+                    "anyOf": [
+                      {
+                        "additionalProperties": true,
+                        "type": "object"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "title": "Source"
+                  },
                   "worker_lands_by": {
                     "enum": [
                       "push_branch",
@@ -9413,6 +9497,18 @@
                     ],
                     "title": "Merge Mode",
                     "type": "string"
+                  },
+                  "source": {
+                    "anyOf": [
+                      {
+                        "additionalProperties": true,
+                        "type": "object"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "title": "Source"
                   },
                   "worker_lands_by": {
                     "enum": [
@@ -9879,6 +9975,18 @@
                     ],
                     "title": "Merge Mode",
                     "type": "string"
+                  },
+                  "source": {
+                    "anyOf": [
+                      {
+                        "additionalProperties": true,
+                        "type": "object"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "title": "Source"
                   },
                   "worker_lands_by": {
                     "enum": [
@@ -62043,6 +62151,18 @@
                     "title": "Merge Mode",
                     "type": "string"
                   },
+                  "source": {
+                    "anyOf": [
+                      {
+                        "additionalProperties": true,
+                        "type": "object"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "title": "Source"
+                  },
                   "worker_lands_by": {
                     "enum": [
                       "push_branch",
@@ -62498,6 +62618,18 @@
                     ],
                     "title": "Merge Mode",
                     "type": "string"
+                  },
+                  "source": {
+                    "anyOf": [
+                      {
+                        "additionalProperties": true,
+                        "type": "object"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "title": "Source"
                   },
                   "worker_lands_by": {
                     "enum": [
@@ -63031,6 +63163,18 @@
                     ],
                     "title": "Merge Mode",
                     "type": "string"
+                  },
+                  "source": {
+                    "anyOf": [
+                      {
+                        "additionalProperties": true,
+                        "type": "object"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "title": "Source"
                   },
                   "worker_lands_by": {
                     "enum": [
@@ -63994,6 +64138,18 @@
                     ],
                     "title": "Merge Mode",
                     "type": "string"
+                  },
+                  "source": {
+                    "anyOf": [
+                      {
+                        "additionalProperties": true,
+                        "type": "object"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "title": "Source"
                   },
                   "worker_lands_by": {
                     "enum": [
