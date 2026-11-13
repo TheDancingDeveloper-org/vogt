@@ -1063,9 +1063,9 @@ pub async fn bootstrap(
     // host registration names, and only when this deployment declares that
     // variable (any policy, `ondemand` included) or this session holds a
     // grant for it. Without one the entry is left out rather than registered
-    // to answer 401. A Codex session fetches the value like a provider key:
-    // its name joins the ondemand breadcrumbs and the session agent resolves
-    // it into the child, never into the pod's environment or the config.
+    // to answer 401. Every supported agent fetches the value around its final
+    // child: the name joins the ondemand breadcrumbs and the session agent
+    // resolves it, never into the pod's environment or the config.
     let cadastre_bearer = broker
         .manifest()
         .iter()
@@ -1078,7 +1078,7 @@ pub async fn bootstrap(
         .ondemand
         .iter()
         .any(|var| var == crate::session_endpoints::CADASTRE_TOKEN_ENV);
-    if cadastre_bearer && req.cli == "codex" && !cadastre_named {
+    if cadastre_bearer && !cadastre_named {
         breadcrumbs
             .ondemand
             .push(crate::session_endpoints::CADASTRE_TOKEN_ENV.to_string());
