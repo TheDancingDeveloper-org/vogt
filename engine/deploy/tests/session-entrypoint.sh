@@ -110,13 +110,24 @@ run_case() {
 
 # shellcheck disable=SC2016 # ${VOGT_HTTP_TOKEN} is Claude Code's to expand
 MCP='{"mcpServers":{"vogt":{"type":"http","url":"https://e/mcp","headers":{"Authorization":"Bearer ${VOGT_HTTP_TOKEN}"}}}}'
-out=$(run_case "$tmp/happy" VOGT_SESSION_COMMAND='["sleep","1"]' GRAFT_TOKEN=graft-secret-value GRAFT_SESSION=ses_TEST MCP_CONFIG="$MCP" VOGT_EXTRA_CA_FILE=/etc/ca.pem VOGT_CLAUDE_SETTINGS_FILE=off 2>&1) || fail "happy path: $out"
+CLAUDE_BUNDLE=$(jq -nc \
+  --arg credentials "$(printf credentials | base64 -w0)" \
+  --arg config "$(printf '%s' '{"hasCompletedOnboarding":true,"theme":"dark","projects":{"/work":{"hasTrustDialogAccepted":true,"hasClaudeMdExternalIncludesApproved":true,"hasClaudeMdExternalIncludesWarningShown":true}}}' | base64 -w0)" \
+  --arg nested "$(printf bundle | base64 -w0)" \
+  '{".credentials.json":$credentials,".claude.json":$config,"sub/.credentials.json":$nested}')
+out=$(run_case "$tmp/happy" VOGT_SESSION_COMMAND='["sleep","1"]' GRAFT_TOKEN=graft-secret-value GRAFT_SESSION=ses_TEST BUNDLE_JSON="$CLAUDE_BUNDLE" MCP_CONFIG="$MCP" VOGT_EXTRA_CA_FILE=/etc/ca.pem VOGT_CLAUDE_SETTINGS_FILE=off 2>&1) || fail "happy path: $out"
 grep -q "agent:$tmp/happy/work:hello brief" <<<"$out" || fail "agent did not receive bootstrap state"
 jq -e '.session_id=="s1" and .source.location.kind=="graft" and .source.location.repo=="vogt" and .source.ref=="rust-2" and .cli=="claude"' \
   "$tmp/happy/request.json" >/dev/null || fail "bootstrap request body"
 [[ $(stat -c %a "$tmp/happy/run/session-token") == 600 ]] || fail "token mode"
 [[ $(<"$tmp/happy/run/session-token") == "$SESSION" ]] || fail "token content"
 [[ $(stat -c %a "$tmp/happy/claude/sub/.credentials.json") == 600 ]] || fail "bundle mode"
+[[ $(<"$tmp/happy/claude/.credentials.json") == credentials ]] || fail "account credentials not installed"
+jq -e '.hasCompletedOnboarding == true and .theme == "dark"
+  and .projects["/work"].hasTrustDialogAccepted == true
+  and .projects["/work"].hasClaudeMdExternalIncludesApproved == true
+  and .projects["/work"].hasClaudeMdExternalIncludesWarningShown == true' \
+  "$tmp/happy/claude/.claude.json" >/dev/null || fail "Claude onboarding/trust config not installed"
 grep -q "clone vogt $tmp/happy/work --line rust-2" "$tmp/happy/graft.args" || fail "clone args"
 # WI-3356: /work is a git repository whose last commit is the line's tip
 # changeset, with no remote, so git log -1 -p, git diff and git status work.
