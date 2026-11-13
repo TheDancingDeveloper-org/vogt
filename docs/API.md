@@ -816,7 +816,7 @@ fits in context.
   `landing` (`base_branch`, `branch_pattern` with `{n}` for the work item
   number, `worker_lands_by` of `push_branch` or `open_pr`, `merge_by` of
   `oversight` or `operator`, `merge_mode` of `fast_forward` or `rebase`,
-  `linear_history`, `deploy_by`, `initiative_bases`, `long_lived_branches`),
+  `linear_history`, `deploy_by`, `initiative_bases`, `long_lived_branches`, `source`: where the project lives, as a `location` of kind `git` or `graft`, a `ref` and a `landing` mode. Only a project that states one gets a graft credential in a pod session),
   `review` (`template`, `model`, `effort`,
   `never_models`, `budget_turns`) and `verification` (`required_for_done`,
   `lanes`). `branch_pattern` must compile as a regex once `{n}` is a number,

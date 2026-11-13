@@ -96,3 +96,41 @@ def test_a_known_long_lived_base_is_named_not_contradicted() -> None:
 def test_a_caller_that_merges_is_not_told_not_to_merge() -> None:
     lines = task_policy_conflicts("Then merge it.", _landing(), caller_merges=True)
     assert not any("do not merge" in line for line in lines)
+
+
+_GRAFT_SOURCE = {
+    "location": {"kind": "graft", "endpoint": "http://graft.test", "repo": "vogt"},
+    "ref": "rust-2",
+    "landing": "line",
+}
+
+
+def _policy_with(**extra: object) -> dict[str, object]:
+    return {
+        "base_branch": "main",
+        "worker_lands_by": "push_branch",
+        "merge_by": "oversight",
+        "merge_mode": "rebase",
+        **extra,
+    }
+
+
+def test_landing_policy_accepts_a_project_source() -> None:
+    policy = LandingPolicy.model_validate(_policy_with(source=_GRAFT_SOURCE))
+
+    assert policy.source == _GRAFT_SOURCE
+    assert LandingPolicy.model_validate(_policy_with()).source is None
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"location": {"kind": "svn", "repo": "r"}, "ref": "main"},
+        {"location": _GRAFT_SOURCE["location"], "ref": ""},
+        {"location": _GRAFT_SOURCE["location"], "ref": "x", "landing": "merge"},
+        {"ref": "main"},
+    ],
+)
+def test_landing_policy_refuses_a_malformed_source(bad: dict[str, object]) -> None:
+    with pytest.raises(ValueError):
+        LandingPolicy.model_validate(_policy_with(source=bad))

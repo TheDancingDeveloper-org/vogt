@@ -1900,6 +1900,19 @@
                 },
                 "title": "Long Lived Branches",
                 "type": "array"
+              },
+              "source": {
+                "anyOf": [
+                  {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Source"
               }
             },
             "required": [
@@ -2414,6 +2427,19 @@
                 },
                 "title": "Long Lived Branches",
                 "type": "array"
+              },
+              "source": {
+                "anyOf": [
+                  {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Source"
               }
             },
             "required": [
@@ -2948,6 +2974,19 @@
                 },
                 "title": "Long Lived Branches",
                 "type": "array"
+              },
+              "source": {
+                "anyOf": [
+                  {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Source"
               }
             },
             "required": [
@@ -3558,6 +3597,19 @@
                 },
                 "title": "Long Lived Branches",
                 "type": "array"
+              },
+              "source": {
+                "anyOf": [
+                  {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Source"
               }
             },
             "required": [
@@ -4027,6 +4079,19 @@
                 },
                 "title": "Long Lived Branches",
                 "type": "array"
+              },
+              "source": {
+                "anyOf": [
+                  {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Source"
               }
             },
             "required": [
@@ -4706,6 +4771,19 @@
                 },
                 "title": "Long Lived Branches",
                 "type": "array"
+              },
+              "source": {
+                "anyOf": [
+                  {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Source"
               }
             },
             "required": [
@@ -5692,6 +5770,19 @@
                 },
                 "title": "Long Lived Branches",
                 "type": "array"
+              },
+              "source": {
+                "anyOf": [
+                  {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Source"
               }
             },
             "required": [
@@ -5990,6 +6081,19 @@
                 },
                 "title": "Long Lived Branches",
                 "type": "array"
+              },
+              "source": {
+                "anyOf": [
+                  {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Source"
               }
             },
             "required": [
@@ -6471,6 +6575,19 @@
                 },
                 "title": "Long Lived Branches",
                 "type": "array"
+              },
+              "source": {
+                "anyOf": [
+                  {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Source"
               }
             },
             "required": [
@@ -61352,6 +61469,19 @@
                 },
                 "title": "Long Lived Branches",
                 "type": "array"
+              },
+              "source": {
+                "anyOf": [
+                  {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Source"
               }
             },
             "required": [
@@ -61823,6 +61953,19 @@
                 },
                 "title": "Long Lived Branches",
                 "type": "array"
+              },
+              "source": {
+                "anyOf": [
+                  {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Source"
               }
             },
             "required": [
@@ -62374,6 +62517,19 @@
                 },
                 "title": "Long Lived Branches",
                 "type": "array"
+              },
+              "source": {
+                "anyOf": [
+                  {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Source"
               }
             },
             "required": [
@@ -63370,6 +63526,19 @@
                 },
                 "title": "Long Lived Branches",
                 "type": "array"
+              },
+              "source": {
+                "anyOf": [
+                  {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Source"
               }
             },
             "required": [

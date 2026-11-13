@@ -14,6 +14,7 @@ from typing import Annotated, Any, Literal
 from pydantic import (
     BaseModel,
     ConfigDict,
+    Field,
     StringConstraints,
     field_validator,
     model_validator,
@@ -92,6 +93,38 @@ class Actor(Entity):
 _BRANCH_NUMBER = "{n}"
 
 
+class GitSourceLocation(Entity):
+    """A git source: a clone URL and the repository's stable identity."""
+
+    kind: Literal["git"]
+    url: str
+    repo: str
+
+
+class GraftSourceLocation(Entity):
+    """A graft source: a provider endpoint and the repository name on it."""
+
+    kind: Literal["graft"]
+    endpoint: str
+    repo: str
+
+
+class ProjectSource(Entity):
+    """Where a project's source lives and how work lands (WI-4213).
+
+    Mirrors the engine's `SourceDescriptor`. It carries no credential: the
+    engine mints a scoped one at session start, and only for a project that
+    states a source.
+    """
+
+    location: Annotated[
+        GitSourceLocation | GraftSourceLocation, Field(discriminator="kind")
+    ]
+    #: A branch for git, a line for graft.
+    ref: str = Field(min_length=1)
+    landing: Literal["push_branch", "open_pr", "line"] = "push_branch"
+
+
 class LandingPolicy(Entity):
     """How a worker's branch is cut and landed on this project.
 
@@ -117,6 +150,18 @@ class LandingPolicy(Entity):
     #: Other long-lived branches a task may name as its base. A task that
     #: names one is taken at its word rather than overridden (WI-1841).
     long_lived_branches: list[str] = []
+    #: The project's source, when it states one. A session's pod gets a
+    #: credential scoped to this source and nothing else (WI-4213).
+    source: dict[str, Any] | None = None
+
+    @field_validator("source")
+    @classmethod
+    def _source_is_well_formed(
+        cls, source: dict[str, Any] | None
+    ) -> dict[str, Any] | None:
+        if source is not None:
+            ProjectSource.model_validate(source)
+        return source
 
     def known_bases(self) -> frozenset[str]:
         """Every branch a worker on this project may cut from and land onto."""
