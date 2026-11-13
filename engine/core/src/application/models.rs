@@ -182,6 +182,7 @@ mod caught_up;
 pub(crate) use caught_up::UsageBoardParams;
 mod chat;
 mod entities;
+pub(crate) use entities::AgentPolicy;
 mod forge;
 mod project;
 mod records;

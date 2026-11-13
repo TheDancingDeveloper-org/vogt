@@ -1962,6 +1962,13 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
                 false,
             )));
         }
+        if let Some(policy) = &update.agent_policy {
+            set.push("agent_policy = ?".into());
+            values.push(Box::new(
+                serde_json::to_string(policy)
+                    .expect("an agent policy is plain data and serialises"),
+            ));
+        }
         if set.is_empty() {
             return Ok(());
         }
