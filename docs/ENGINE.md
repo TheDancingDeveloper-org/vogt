@@ -1155,6 +1155,22 @@ elapsed time. Claude is not watched: it submits its own launch prompt and
 announces no turn-state title, so a queued prompt and a live turn cannot be told
 apart safely.
 
+For a pod session, `first_turn_ms` is the end-to-end clock from the engine's
+`session.start`, not from the first model byte. Diagnose a slow first turn by
+pairing that event with `kubectl logs --timestamps` for the session pod: the
+entrypoint's step markers split pod readiness through `bootstrap`, source
+`clone`, `handoff`, PTY spawn and `launch.first_output`; `first_turn.started`
+then proves that Codex accepted the launch prompt, before the model answers.
+Fresh pod Codex sessions are expected to start that turn within 20 seconds of
+the pod becoming Ready. The old 65–79 second shape was not model or MCP warm-up:
+the pod launch omitted the brief pointer and autopilot's 60-second nudge was the
+first thing that submitted it. The positional prompt in
+`vogt-session-agent::command_line` removes that timer from the launch path, and
+the first-turn watchdog is a fallback for a prompt already queued at the
+composer. `a_fresh_codex_is_given_its_brief_as_the_prompt` and the
+`a_queued_first_prompt_*` integration tests assert those behaviours without a
+wall-clock timing assertion.
+
 **The companion guide.** When the start request carries a non-empty
 `companion`, the engine writes it beside the brief as
 `state_dir/agent-task-prompts/sessions/<session-id>.guide.md`
