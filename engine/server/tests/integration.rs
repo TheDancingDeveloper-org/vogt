@@ -21272,15 +21272,7 @@ sleep 2
     fn install_minter(h: &Harness, minter: Arc<dyn GraftMinter>) {
         let state_dir = h.state.sessions.state_dir().to_path_buf();
         h.state.sessions.install_source_provider(Arc::new(
-            vogt_engine_server::graft_provider::GraftProvider::with_minter(&state_dir, minter)
-                .with_settings(vogt_engine_server::graft_provider::GraftSettings {
-                    endpoint: Some("http://graft.test:17888".into()),
-                    token_file: None,
-                    mint_token_file: None,
-                    repo: "vogt".into(),
-                    line: "rust-2".into(),
-                    mint_enabled: true,
-                }),
+            vogt_engine_server::graft_provider::GraftProvider::with_minter(&state_dir, minter),
         ));
     }
 
@@ -21594,10 +21586,9 @@ sleep 2
     }
 
     #[tokio::test]
-    async fn a_legacy_start_mints_for_the_effective_graft_default() {
-        // A start from a core that omits the descriptor uses the deployment's
-        // validated default. Mint for that exact effective repo and line so
-        // the pod does not clone them with an unrelated shared credential.
+    async fn a_project_without_a_graft_source_earns_no_graft_token() {
+        // No project source: the deployment default only names what to clone,
+        // it is not a mapping that earns a repo-scoped landing token.
         let mut h = harness(false).await;
         let minter = FakeMinter::new(Ok("minted-graft-token"));
         install_minter(&h, minter.clone());
@@ -21605,14 +21596,10 @@ sleep 2
         let (created_id, token) = h.created.recv().await.expect("a pod is created");
         assert_eq!(created_id, id);
         let body: Value = h.bootstrap(id, &token).await.json().await.unwrap();
-        assert_eq!(body["source_token"], "minted-graft-token");
-        assert_eq!(body["env"]["GRAFT_ENDPOINT"], "http://graft.test:17888");
-        assert_eq!(body["source"]["location"]["repo"], "vogt");
-        assert_eq!(body["source"]["ref"], "rust-2");
-        let grants = minter.grants.lock().unwrap();
-        assert_eq!(grants.len(), 1);
-        assert_eq!(grants[0].repo, "vogt");
-        assert_eq!(grants[0].line, "rust-2");
+        assert!(body.get("source_token").is_none(), "{body}");
+        assert!(minter.grants.lock().unwrap().is_empty());
+        let out = String::from_utf8_lossy(&h.scrollback(id).await).into_owned();
+        assert!(out.contains("names no graft source"), "{out}");
     }
 
     #[tokio::test]
