@@ -19860,48 +19860,63 @@ mod pod_stream {
         assert!(!config.contains("elsewhere"), "{config}");
     }
 
-    /// WI-3334: a Claude pod on a leased account is handed its login with an
-    /// onboarded `.claude.json` (none is stored), and writes the bundle back
-    /// with the only credential it holds, its stream token.
+    /// WI-3334 / WI-2000: `placement=pod` is accepted for the stock Claude
+    /// template. Its pod runs Claude, and its leased account is handed a login
+    /// with onboarding, folder trust and external imports pre-approved before
+    /// the checkout exists. It can write the bundle back with the only
+    /// credential it holds, its stream token.
     #[tokio::test]
     async fn a_claude_pod_gets_a_signed_in_bundle_and_can_write_it_back() {
         let tmp = tempfile::tempdir().unwrap();
         let acct = tmp.path().join("acct2");
         std::fs::create_dir_all(&acct).unwrap();
         std::fs::write(acct.join(".credentials.json"), br#"{"claudeAiOauth":{}}"#).unwrap();
-        let claude = SessionTemplate {
-            name: "pod".into(),
-            description: "claude pod".into(),
-            command: Some(vec!["claude".into()]),
-            cwd: None,
-            env: Vec::new(),
-            account: None,
-            default_name: None,
-            match_repo_names: Vec::new(),
-            match_path_prefixes: Vec::new(),
-            tags: Vec::new(),
-            backend: "pod".into(),
-            host_capable: false,
-            pod_capable: false,
-        };
         let dir = acct.clone();
-        let mut h = harness_cfg(false, Some(vec![claude]), move |cfg| {
-            cfg.agent_onboarding = vogt_engine_server::claude_config::Onboarding {
-                enabled: true,
-                default_dir: None,
-                settings_file: None,
-                opencode_config: None,
-                account_concurrency_cap: 8,
-                accounts: vogt_engine_server::claude_config::parse_accounts(Some(&format!(
-                    "acct2={}",
-                    dir.display()
-                ))),
-                codex_policy: Ok(None),
-            };
-        })
+        let mut h = harness_cfg(
+            false,
+            Some(SessionTemplate::default_templates()),
+            move |cfg| {
+                cfg.agent_onboarding = vogt_engine_server::claude_config::Onboarding {
+                    enabled: true,
+                    default_dir: None,
+                    settings_file: None,
+                    opencode_config: None,
+                    account_concurrency_cap: 8,
+                    accounts: vogt_engine_server::claude_config::parse_accounts(Some(&format!(
+                        "acct2={}",
+                        dir.display()
+                    ))),
+                    codex_policy: Ok(None),
+                };
+            },
+        )
         .await;
-        let id = h.start().await;
+        let created: Value = h
+            .client
+            .post(format!("{}/api/sessions", h.base))
+            .json(&json!({
+                "name": "claude-pod",
+                "template": "Claude Code (protected)",
+                "placement": "pod",
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let id: Uuid = created["id"].as_str().unwrap().parse().unwrap();
         let (_, token) = h.created.recv().await.unwrap();
+        let pod = h.launcher.pods.lock().unwrap()[0].clone();
+        let env = pod.spec.unwrap().containers[0]
+            .env
+            .clone()
+            .unwrap()
+            .into_iter()
+            .map(|item| (item.name, item.value.unwrap_or_default()))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(env["VOGT_CLI"], "claude");
+        assert!(!env.contains_key("VOGT_SESSION_COMMAND"));
         let body: Value = h
             .bootstrap_as(id, &token, "claude")
             .await
@@ -19918,10 +19933,15 @@ mod pod_stream {
         .unwrap();
         let config: Value = serde_json::from_slice(&config).unwrap();
         assert_eq!(config["hasCompletedOnboarding"], true);
-        // WI-3355: the pod's checkout is trusted, so Claude Code does not open
-        // at "Is this a project you trust?".
+        assert_eq!(config["theme"], "dark");
+        let project = &config["projects"]["/work"];
+        assert_eq!(project["hasTrustDialogAccepted"], true, "{config}");
         assert_eq!(
-            config["projects"]["/work"]["hasTrustDialogAccepted"], true,
+            project["hasClaudeMdExternalIncludesApproved"], true,
+            "{config}"
+        );
+        assert_eq!(
+            project["hasClaudeMdExternalIncludesWarningShown"], true,
             "{config}"
         );
 
