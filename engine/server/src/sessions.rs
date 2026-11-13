@@ -1193,20 +1193,46 @@ impl SessionRegistry {
             work_item: spec.work_item.clone(),
             budget: spec.budget.clone(),
         };
-        let credential = crate::host_graft::HostGraftCredential::provision(
-            Arc::clone(&provider),
-            source,
-            &request,
-            &crate::host_graft::config_home().map_err(|e| ApiError::Config(e.to_string()))?,
-        )
-        .await
-        .map_err(|e| ApiError::BadGateway(e.to_string()))?;
+        let provisioned = match crate::host_graft::config_home() {
+            Ok(home) => {
+                crate::host_graft::HostGraftCredential::provision(
+                    Arc::clone(&provider),
+                    source,
+                    &request,
+                    &home,
+                )
+                .await
+            }
+            Err(e) => Err(e),
+        };
+        let env = spec.env.get_or_insert_with(Vec::new);
+        env.retain(|(name, _)| {
+            !matches!(
+                name.as_str(),
+                "GRAFT_SESSION_ID" | "VOGT_GRAFT_TOKEN_FILE" | "VOGT_GRAFT_TOKEN_UNAVAILABLE"
+            )
+        });
+        let credential = match provisioned {
+            Ok(credential) => credential,
+            Err(e) => {
+                // A graft outage or a scope gap must not stop host sessions
+                // (oversight's included) from starting, as for pods: the
+                // session starts without a token and is told why.
+                let why = e.to_string();
+                tracing::warn!(
+                    target: "vogt::audit",
+                    session = %id,
+                    reason = %why,
+                    "host session graft token unavailable; the session continues without one"
+                );
+                env.push(("VOGT_GRAFT_TOKEN_UNAVAILABLE".into(), why));
+                return Ok(());
+            }
+        };
         let session_ref = request
             .session_ref
             .clone()
             .unwrap_or_else(|| id.to_string());
-        let env = spec.env.get_or_insert_with(Vec::new);
-        env.retain(|(name, _)| name != "GRAFT_SESSION_ID" && name != "VOGT_GRAFT_TOKEN_FILE");
         env.push(("GRAFT_SESSION_ID".into(), session_ref));
         env.push((
             "VOGT_GRAFT_TOKEN_FILE".into(),
@@ -2650,6 +2676,9 @@ impl SessionRegistry {
             // it exits for hibernation or engine shutdown. Wake mints anew.
             if let Some((_, credential)) = host_graft_credentials.remove(&session.id) {
                 let id = session.id;
+                // The file goes now, so an engine shutdown cannot leave it and
+                // a fast wake's new file is never removed by this task.
+                credential.remove_delivered();
                 if let Ok(runtime) = tokio::runtime::Handle::try_current() {
                     runtime.spawn(async move {
                         if let Err(error) = credential.revoke().await {
