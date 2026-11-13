@@ -2205,7 +2205,14 @@ engine id (WI-912; the design is `docs/design/session-hibernation.md`).
     (directories `0700`, files `0600`). It never lands, commits or pushes;
     recovery is a person's or a worker's choice. Credential-looking paths and
     anything the provider reports as ignored are left out, and a size cap
-    bounds each archive. The stop result carries the `salvage` report
+    bounds each archive. In particular, salvage uses `lstat` plus a
+    no-following open and never follows symlinks, so a link into the Kubernetes
+    service-account mount (`/var/run/secrets/kubernetes.io/serviceaccount`) or
+    the per-session graft token path
+    (`$XDG_CONFIG_HOME/graft/sessions/<session>/trial-1.token`) is not archived.
+    Credential names and stores such as `*.token`, `.ssh/`, `.aws/`, `.kube/`,
+    `credentials`, and dotenv files are excluded even when they are ordinary
+    files in the checkout. The stop result carries the `salvage` report
     (`path`, `files`, `bytes`, `repos`), the session summary keeps it, and
     the PWA shows it on the session row. A salvage that cannot be taken —
     no attached agent, an upload failure — records `salvage_failed` with the

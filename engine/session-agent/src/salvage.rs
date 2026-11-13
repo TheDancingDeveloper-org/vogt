@@ -12,6 +12,7 @@
 //! appear, and size bounds bound what one archive may hold.
 
 use std::{
+    ffi::CString,
     fs,
     path::{Component, Path, PathBuf},
     process::Command,
@@ -305,39 +306,19 @@ fn plan_git(
     // Untracked bytes count against the pod-wide total, not only the server's.
     let mut remaining = *budget;
     for path in untracked_paths {
-        if is_secret_path(&path) {
+        if !safe_relative(&path) || is_secret_path(&path) {
             skipped.push(SalvageSkip {
                 path,
                 reason: SkipReason::Secret,
             });
             continue;
         }
-        let full = repo.join(&path);
-        // lstat, never stat: a link (to the pod's service-account or graft
-        // token, say) is not carried, and its target is never read.
-        let Ok(meta) = fs::symlink_metadata(&full) else {
-            skipped.push(SalvageSkip {
-                path,
-                reason: SkipReason::Unreadable,
-            });
-            continue;
-        };
-        if !meta.file_type().is_file() {
-            skipped.push(SalvageSkip {
-                path,
-                reason: SkipReason::Unreadable,
-            });
-            continue;
-        }
-        if meta.len() > limits.max_untracked_file_bytes || meta.len() > remaining {
-            skipped.push(SalvageSkip {
-                path,
-                reason: SkipReason::TooLarge,
-            });
-            continue;
-        }
-        match read_no_follow(&full) {
-            Ok(bytes) if bytes.len() as u64 > remaining => skipped.push(SalvageSkip {
+        let limit = limits.max_untracked_file_bytes.min(remaining);
+        // Open every component relative to the checkout, refusing links at
+        // every step. This protects parent directories too, not only the
+        // final file, and the descriptor is checked before any bytes are read.
+        match read_no_follow(repo, Path::new(&path), limit) {
+            Ok(bytes) if bytes.len() as u64 > limit => skipped.push(SalvageSkip {
                 path,
                 reason: SkipReason::TooLarge,
             }),
@@ -385,17 +366,63 @@ fn plan_git(
     ))
 }
 
-/// Read a regular file without following a final-component symlink, so a
-/// link swapped in after the lstat is refused rather than read through.
-fn read_no_follow(path: &Path) -> std::io::Result<Vec<u8>> {
+/// Read a regular file below `root` without following any path-component
+/// symlink. Parent directories and the final file are opened one component at
+/// a time with `openat(O_NOFOLLOW)`, and the descriptor is checked before a
+/// bounded read.
+#[cfg(unix)]
+fn read_no_follow(root: &Path, relative: &Path, max_bytes: u64) -> std::io::Result<Vec<u8>> {
     use std::io::Read;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::OpenOptionsExt;
-    let mut file = fs::OpenOptions::new()
+
+    let mut current = fs::OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)?;
+        .custom_flags(libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .open(root)?;
+    let components = relative.components().collect::<Vec<_>>();
+    if components.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "empty salvage path",
+        ));
+    }
+    for (index, component) in components.iter().enumerate() {
+        let Component::Normal(name) = component else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "non-relative salvage path",
+            ));
+        };
+        let name = CString::new(name.as_bytes()).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL in salvage path")
+        })?;
+        let final_component = index + 1 == components.len();
+        let mut flags = libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_RDONLY;
+        if !final_component {
+            flags |= libc::O_DIRECTORY;
+        }
+        // SAFETY: `current` is a live directory descriptor and `name` is one
+        // NUL-terminated path component. A successful descriptor is owned by
+        // this call and immediately transferred to `File`.
+        let fd = unsafe { libc::openat(current.as_raw_fd(), name.as_ptr(), flags) };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: `openat` returned a fresh descriptor owned by this call.
+        current = unsafe { fs::File::from_raw_fd(fd) };
+    }
+    if !current.metadata()?.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "salvage path is not a regular file",
+        ));
+    }
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
+    current
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)?;
     Ok(bytes)
 }
 
@@ -613,6 +640,20 @@ mod tests {
             .skipped
             .iter()
             .any(|s| s.path == "notes.txt" && s.reason == SkipReason::Unreadable));
+    }
+
+    #[test]
+    fn no_path_component_may_be_a_symlink() {
+        let dir = scratch("symlink-component");
+        let outside = scratch("symlink-component-outside");
+        fs::write(outside.join("innocent.txt"), "CREDENTIAL-BYTES\n").unwrap();
+        std::os::unix::fs::symlink(&outside, dir.join("linked")).unwrap();
+
+        let error = read_no_follow(&dir, Path::new("linked/innocent.txt"), 1024).unwrap_err();
+        assert!(
+            matches!(error.raw_os_error(), Some(code) if code == libc::ELOOP || code == libc::ENOTDIR),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]

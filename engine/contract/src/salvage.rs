@@ -208,7 +208,17 @@ pub const SECRET_NAMES: &[&str] = &[
 ];
 
 /// Directory components that mark a credential store wherever they appear.
-pub const SECRET_DIRS: &[&str] = &[".ssh", ".aws", ".gnupg", ".docker", ".kube"];
+pub const SECRET_DIRS: &[&str] = &[
+    ".ssh",
+    ".aws",
+    ".gnupg",
+    ".docker",
+    ".kube",
+    "secrets",
+    "credentials",
+    "serviceaccount",
+    "service-account",
+];
 
 /// File suffixes never written into an archive.
 pub const SECRET_SUFFIXES: &[&str] = &[
@@ -233,6 +243,9 @@ pub fn is_secret_path(path: &str) -> bool {
     while let Some(component) = components.next() {
         let lower = component.to_ascii_lowercase();
         if SECRET_DIRS.contains(&lower.as_str()) {
+            return true;
+        }
+        if lower.contains("credential") || lower.contains("service-account") {
             return true;
         }
         // A dotenv file with a suffix is still a dotenv file.
@@ -289,6 +302,9 @@ mod tests {
             "id_rsa",
             "home/.ssh/config",
             ".aws/credentials",
+            "var/run/secrets/kubernetes.io/serviceaccount/token",
+            ".config/graft/sessions/ses_TEST/trial-1.token",
+            "private/client-credential.txt",
             "auth.json",
             "deploy.p12",
             ".git-credentials",
