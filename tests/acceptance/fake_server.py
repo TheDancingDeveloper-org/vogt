@@ -777,7 +777,7 @@ class FakeHandler(BaseHTTPRequestHandler):
             return
         if "ws_scan_done" in lowered or "ws_agents" in lowered:
             session["replies"].append(
-                "WS_AGENTS_OK\nWS_RULES_OK\n"
+                "WS_CAPABILITY_PRESENT\nWS_AGENTS_OK\nWS_RULES_OK\n"
                 "settings.local.json 0\nauth.json 0\n"
                 ".git-credentials 0\n.netrc 0\nssh_keys 0\nWS_SCAN_DONE"
             )
@@ -787,11 +787,14 @@ class FakeHandler(BaseHTTPRequestHandler):
             session["replies"].append("VOGT_MCP_OK")
             session["screen"] = ["VOGT_MCP_OK"]
             return
-        if "graft_token" in lowered:
-            session["replies"].append("GRAFT_TOKEN_MISSING")
+        if "graft_credential" in lowered:
+            session["replies"].append("GRAFT_CREDENTIAL_ABSENT")
             return
-        if "cadastre" in lowered:
-            session["replies"].append("CADASTRE_MISSING")
+        if "cadastre_capability" in lowered:
+            session["replies"].append("CADASTRE_CAPABILITY_ABSENT")
+            return
+        if "cadastre_call" in lowered:
+            session["replies"].append("CADASTRE_CALL_OK")
             return
         session["replies"].append("READY")
 
