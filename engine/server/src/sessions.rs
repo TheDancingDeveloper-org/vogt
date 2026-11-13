@@ -706,6 +706,7 @@ impl SessionRegistry {
         let spawned = spawned?;
         let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple()).into_bytes();
         let state_dir = self.cfg.state_dir.clone();
+        let shutting_down = Arc::clone(&self.shutting_down);
         tracing::info!(
             session = %id,
             template = %template.name,
@@ -808,6 +809,16 @@ impl SessionRegistry {
                 }
             }
             link.exited().await;
+            // The engine is going away: whatever ended the link (the stream
+            // dropping with the engine, a late frame) says nothing about the
+            // pod. Leave the pod, its stream credential and its source
+            // credential for the next engine to adopt; only an explicit stop
+            // or hibernate, which runs before the flag is set, tears a pod
+            // down.
+            if shutting_down.load(Ordering::Acquire) {
+                tracing::info!(session = %id, "the engine is shutting down; leaving the session pod running for the next engine");
+                return;
+            }
             // Torn down only once the pod has left the cluster, so a wake
             // right after can create its replacement under the same name
             // instead of meeting the old pod still `Terminating`.
@@ -4363,6 +4374,7 @@ fn recover_records(
     account_pool: &Arc<crate::account_pool::AccountPool>,
     account_leases: &DashMap<Uuid, Arc<crate::account_pool::AccountLease>>,
 ) {
+    let mut loaded = 0usize;
     for mut record in hibernation::load_all(state_dir) {
         let id = record.id;
         if record.hibernation.is_none() {
@@ -4374,6 +4386,11 @@ fn recover_records(
                 && record.role != SessionRole::Oversight
                 && read_pod_token(state_dir, id).is_none()
             {
+                tracing::warn!(
+                    session = %id,
+                    name = %record.name,
+                    "dropping a session record with no conversation to resume and no pod credential to adopt"
+                );
                 hibernation::remove(state_dir, id);
                 continue;
             }
@@ -4398,7 +4415,13 @@ fn recover_records(
             tracing::info!(session = %id, name = %record.name, "recovered a session as hibernated");
         }
         records.insert(id, record);
+        loaded += 1;
     }
+    tracing::info!(
+        state_dir = %state_dir.display(),
+        loaded,
+        "loaded session records from the state directory"
+    );
 }
 
 /// Write the per-launch model catalog when the launch model is registered by

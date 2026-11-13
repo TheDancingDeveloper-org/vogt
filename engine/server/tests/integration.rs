@@ -22558,6 +22558,34 @@ sleep 2
         ended(&registry, id).await;
     }
 
+    /// The old engine's link can end while it is shutting down (its stream
+    /// drops with the process). That must not delete the pod or its stream
+    /// credential: the next engine adopts both (WI-4126).
+    #[tokio::test]
+    async fn a_link_that_ends_during_shutdown_leaves_the_pod_and_credential() {
+        let mut h = harness(false).await;
+        let id = h.start().await;
+        let _token = h.session_token(id).await;
+        let launcher = Arc::clone(&h.launcher);
+        let state_dir = h.state.config.state_dir.clone();
+        let credential = state_dir.join("pod-tokens").join(id.to_string());
+        assert!(credential.exists(), "bootstrap keeps the stream credential");
+        h.state.sessions.hibernate_for_shutdown().await;
+        let link = h.state.agent_auth.pod(id).unwrap();
+        link.finish(137);
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(
+            launcher.deleted.lock().unwrap().is_empty(),
+            "a link ending during shutdown must not delete the pod"
+        );
+        assert!(
+            credential.exists(),
+            "the stream credential is kept for the next engine"
+        );
+        let record = state_dir.join("sessions").join(format!("{id}.json"));
+        assert!(record.exists(), "the record is kept for the next engine");
+    }
+
     #[tokio::test]
     async fn a_restarted_engine_adopts_the_running_pod_and_replays_exactly() {
         let (mut h, _accounts) = claude_harness().await;
