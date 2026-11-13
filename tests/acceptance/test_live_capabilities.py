@@ -30,6 +30,26 @@ class FakeSessionTarget:
         raise AssertionError(f"unexpected tool call: {name} {arguments}")
 
 
+class EmptyReplyTarget:
+    """A session whose model turn failed before writing an assistant reply."""
+
+    secrets: tuple[str, ...] = ()
+
+    def tool(
+        self, name: str, arguments: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        if name == "session_screen":
+            return {"lines": ["Codex composer after the failed turn"]}
+        if name == "session_log_tail":
+            return {
+                "text": "Reconnecting... waiting for network\n"
+                "Connection failed: error sending request"
+            }
+        if name == "session_list":
+            return {"sessions": []}
+        raise AssertionError(f"unexpected tool call: {name} {arguments}")
+
+
 def _context(*replies: str) -> Context:
     options = Options(with_sessions=True, state={"sessions.codex": "ses_fake"})
     return Context(FakeSessionTarget(list(replies)), options, "acceptance-capability")
@@ -88,3 +108,39 @@ def test_import_tool_is_detected_and_its_production_guard_runs() -> None:
     check = tracker.import_refuses_prod(_context())
     assert check.verdict == "PASS"
     assert "production target refused" in check.evidence
+
+
+def test_empty_reply_names_the_provider_failure_not_transcript_writeback() -> None:
+    ctx = Context(
+        EmptyReplyTarget(),
+        Options(with_sessions=True, state={"sessions.codex": "ses_fake"}),
+        "acceptance-provider-failure",
+    )
+
+    detail = sessions._missing_reply_detail(ctx, "ses_fake")
+
+    assert "provider/network failure" in detail
+    assert "connection failed:" in detail
+
+
+def test_dependent_session_checks_skip_after_the_first_turn_failed() -> None:
+    reason = "the first turn produced no assistant reply because the provider failed"
+    ctx = Context(
+        EmptyReplyTarget(),
+        Options(
+            with_sessions=True,
+            state={
+                "sessions.codex": "ses_fake",
+                "sessions.codex.first_turn_failure": reason,
+            },
+        ),
+        "acceptance-provider-failure",
+    )
+
+    queued = sessions.input_queueing(ctx)
+    resumed = sessions.hibernate_and_wake(ctx)
+
+    assert queued.verdict == "SKIP"
+    assert resumed.verdict == "SKIP"
+    assert "S3 established" in queued.evidence
+    assert "S3 established" in resumed.evidence

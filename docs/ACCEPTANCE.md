@@ -169,6 +169,12 @@ other reds were suite defects, fixed without weakening the assertions:
   so a healthy `active` provider is no longer mistaken for a broken one.
 - Session cleanup is run-scoped: S1's pod survives S2–S13 and is stopped by
   S14 and the run-level/atexit cleanup.
+- Session failures do not cascade into false product failures: when S3 proves
+  the first model turn never completed, S5 (queued input) and S6
+  (hibernate/wake conversation survival) report `SKIP` with that prerequisite
+  failure instead of claiming that an unanswered turn tested either feature.
+  S3 reads the session screen when `last_reply` is empty so a provider/network
+  failure is distinguished from a missing transcript write-back.
 - `W2`–`W8` read a write's compact `{ref, state, title, updated_at}`
   summary back through `work_get`, and relations through `related_ref`.
 

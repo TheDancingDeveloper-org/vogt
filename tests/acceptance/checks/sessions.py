@@ -37,6 +37,22 @@ PONG_TASK = (
     "Then reply with the single word PONG and nothing else."
 )
 
+_FIRST_TURN_FAILURE = "sessions.codex.first_turn_failure"
+
+# These are terminal/provider-network facts printed by Codex itself. A
+# transient "reconnecting" line is not enough: the CLI may recover. The
+# completed failure wording is useful when last_reply is empty because no
+# assistant response was ever written to the rollout.
+_PROVIDER_FAILURE_MARKERS = (
+    "connection failed:",
+    "error sending request",
+    "insufficient balance",
+    "insufficient_quota",
+    "too many requests",
+    "service unavailable",
+    "no deployments available",
+)
+
 
 def _session(ctx: Context, key: str = "sessions.codex") -> str:
     identifier = ctx.state.get(key)
@@ -111,6 +127,62 @@ def _poll_reply(
             return True, text
         time.sleep(2)
     return False, text
+
+
+def _missing_reply_detail(ctx: Context, identifier: str) -> str:
+    """Explain an empty transcript from the live session, without guessing.
+
+    `session_last_reply` returning no message can mean that write-back failed,
+    but it can also mean that the model turn never produced an assistant
+    message. Read the terminal and session state so the acceptance report
+    keeps those two failures distinct.
+    """
+    screen = ctx.client.tool(
+        "session_screen", {"id": identifier, "scrollback_lines": 80}
+    )
+    text = "\n".join(str(line) for line in screen.get("lines") or [])
+    # A TUI repaint can erase the completed failure from the rendered grid.
+    # The engine's ANSI-stripped history is the durable copy of what was
+    # printed, and is already redacted at the product boundary.
+    try:
+        log = ctx.client.tool(
+            "session_log_tail",
+            {"id": identifier, "tail_bytes": 32 * 1024, "strip_ansi": True},
+        )
+        text += "\n" + str(log.get("text") or "")
+    except (HttpStatusError, ToolError):
+        pass
+    lowered = text.lower()
+    marker = next(
+        (value for value in _PROVIDER_FAILURE_MARKERS if value in lowered), None
+    )
+    if marker is not None:
+        return (
+            "the first turn produced no assistant reply because the Codex "
+            f"screen reports a provider/network failure ({marker!r})"
+        )
+
+    row = _session_row(ctx, identifier)
+    blocked = row.get("blocked")
+    if isinstance(blocked, dict) and blocked.get("reason"):
+        return (
+            "the first turn produced no assistant reply and the session is "
+            f"blocked: {str(blocked['reason'])[-240:]}"
+        )
+    return (
+        "the first turn produced no assistant reply; last_reply found the "
+        "conversation but it contains no assistant message"
+    )
+
+
+def _first_turn_prerequisite(ctx: Context, check: str) -> Check | None:
+    failure = ctx.state.get(_FIRST_TURN_FAILURE)
+    if not isinstance(failure, str) or not failure:
+        return None
+    return skipped(
+        f"{check} was not exercised: S3 established that the first model turn "
+        f"never completed ({failure})"
+    )
 
 
 def _ask(
@@ -198,7 +270,9 @@ def pong_reply(ctx: Context) -> Check:
     identifier = _session(ctx)
     found, text = _poll_reply(ctx, identifier, "PONG", timeout_s=180)
     if not found:
-        return failed(f"no PONG in the last replies after 180s: {text[-400:]!r}")
+        detail = _missing_reply_detail(ctx, identifier)
+        ctx.state[_FIRST_TURN_FAILURE] = detail
+        return failed(f"no PONG in the last replies after 180s: {detail}")
     return passed(f"last_reply contains PONG: {text.strip()[-160:]!r}")
 
 
@@ -231,6 +305,9 @@ def screen_readable(ctx: Context) -> Check:
 
 def input_queueing(ctx: Context) -> Check:
     ctx.require_sessions()
+    prerequisite = _first_turn_prerequisite(ctx, "queued-input delivery")
+    if prerequisite is not None:
+        return prerequisite
     identifier = _session(ctx)
     result = ctx.client.tool(
         "session_input",
@@ -256,6 +333,9 @@ def input_queueing(ctx: Context) -> Check:
 
 def hibernate_and_wake(ctx: Context) -> Check:
     ctx.require_sessions()
+    prerequisite = _first_turn_prerequisite(ctx, "hibernate/wake conversation survival")
+    if prerequisite is not None:
+        return prerequisite
     identifier = _session(ctx)
     ctx.client.tool(
         "session_hibernate", {"id": identifier, "reason": f"{ctx.tag}: hibernate"}
