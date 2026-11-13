@@ -355,6 +355,16 @@ template cannot provide is refused with `400` naming it. Codex is pod-only,
 so `placement=host` on the Codex template is refused; the built-in Claude Code
 and opencode templates are host-default and pod-capable.
 
+**A pod session's graft source comes from `session.start`, not from the
+engine's `POST /api/sessions`** (WI-4213). The core resolves the project (the
+`project` or `work_item` parameter) and sends its `landing.source` to the
+engine as the session's `source`; the engine does not look a project up. A
+session started with the engine's raw route and no `source` has no project
+source, so it gets no graft token ("the project names no graft source") and
+the pod skips the clone. Start it through the core, e.g.
+`{"project":"vogt","template":"opencode","placement":"pod"}`. Naming `source`
+on the raw route is refused (`403`) unless the caller holds the stack secret.
+
 `session.answer` (`work.write`, audited) answers the dialog a session
 shows. The session must be `awaiting-approval`, which covers permission
 dialogs and the startup gates `folder-trust`, `external-imports` and
