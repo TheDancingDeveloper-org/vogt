@@ -5456,14 +5456,11 @@ scopes: the repo's `read`, `write` and `drafts`, and `land` on the session's
 line only. The session id is the core's `ses_...` id when the start carried one
 (`session_ref`) and the engine's UUID otherwise: graft compares it with
 `agent.session` on every write, so it must be the id the worker's brief and
-commits use. The source is normally the project descriptor supplied by the
-core. A compatible start from an older core may omit it and use the
-deployment's validated default; when that effective source is graft, minting
-is scoped to exactly its configured `ENGINE_SOURCE_GRAFT_REPO` and `LINE`, the
-same repo and line the pod clones. The fallback is not a project-routing table,
-and a project that carries a git source receives no graft token. Graft refuses
-any scope the mint token does not hold, so the engine cannot hand out more than
-it has. The
+commits use. Only a project source earns a token — the deployment's
+`ENGINE_SOURCE_GRAFT_REPO`/`LINE` say what to clone, not a mapping that grants
+landing rights — so a session whose project names no source starts with no
+token and a note. Graft refuses any scope the
+mint token does not hold, so the engine cannot hand out more than it has. The
 TTL is the session's whole-session clock budget (`session_wall_clock_minutes`)
 plus 30 minutes, capped at graft's 12 h `max_token_ttl_s`; a session with no such
 budget gets the 12 h cap. A woken session gets a new pod and a new token. The
