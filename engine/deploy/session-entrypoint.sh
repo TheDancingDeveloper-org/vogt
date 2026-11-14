@@ -332,6 +332,9 @@ if [ "$clone_ok" = 1 ]; then git_view || printf 'session-entrypoint: could not b
 step=brief; say brief
 add_dir=${VOGT_ADD_DIR:-$clone_dir/.vogt}; mkdir -p "$add_dir"; chmod 700 "$add_dir"
 jq -r '.brief // ""' "$response" >"$add_dir/brief.md"; chmod 600 "$add_dir/brief.md"
+# graft reads ignore files inside the tree, not .git/info/exclude: a "*" here
+# keeps the brief (and the dir's own ignore file) out of `g status` and `g commit`.
+printf '*\n' >"$add_dir/.gitignore"; chmod 600 "$add_dir/.gitignore"
 export VOGT_ADD_DIR="$add_dir"
 export VOGT_SESSION_CWD="$work_dir"; export VOGT_SESSION_BRIEF_FILE="$add_dir/brief.md"
 # The caller's own environment (WI-3883) is applied here, after the clone and
