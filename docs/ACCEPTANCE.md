@@ -226,3 +226,17 @@ and the run-level cleanup (and the atexit sweep) stops it.
 required check, it needs a `VOGT_DEV_TOKEN` repository secret, and it defaults
 to the read-only suite. The offline fake run is what
 `python3 tests/acceptance/run.py --fake` exists for; it needs nothing.
+
+### S17 by hand (gate 0.7)
+
+`S17` is a stub: the suite cannot restart the engine. Check restart survival
+by hand when no one else is using the instance:
+
+1. Start a Codex pod session (`session_start`, placement `pod`) and wait for its
+   `PONG` reply.
+2. `kubectl -n vogt-dev rollout restart deploy/vogt-dev-engine` and wait for
+   `rollout status`.
+3. The engine log must show `adopted a running session pod after the restart`
+   for that session, and `session_list` must still show it alive. Stop it.
+
+Last done 2026-11-14 on batch 148 (WI-4214).
