@@ -10,6 +10,7 @@ pub mod salvage;
 
 use std::{
     collections::VecDeque,
+    ffi::{OsStr, OsString},
     fs::File,
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -1996,6 +1997,35 @@ pub fn session_identity_env(
     env
 }
 
+/// `PATH` with the mounted workspace's `.agent-tools/bin` in front, when this
+/// pod has one (WI-3374). `None` on a host session or a workspace without the
+/// directory, so their `PATH` is untouched.
+pub fn workspace_tools_path(config: &Config, current: Option<&OsStr>) -> Option<OsString> {
+    let bin = config.workspace_root.as_deref()?.join(".agent-tools/bin");
+    if !bin.is_dir() {
+        return None;
+    }
+    let mut dirs = vec![bin];
+    if let Some(current) = current {
+        dirs.extend(std::env::split_paths(current));
+    }
+    std::env::join_paths(dirs).ok()
+}
+
+/// The shell words that put the workspace tools back on `PATH` after `sh -l`
+/// has run. Ubuntu's `/etc/profile` resets `PATH` for a login shell, which
+/// drops anything set in the environment, so the line re-prepends it itself.
+fn login_path_prefix(config: &Config) -> String {
+    match config
+        .workspace_root
+        .as_deref()
+        .map(|r| r.join(".agent-tools/bin"))
+    {
+        Some(bin) if bin.is_dir() => format!("PATH={}:\"$PATH\"; export PATH; ", sh_quote(&bin)),
+        _ => String::new(),
+    }
+}
+
 /// Whether this launch starts Codex: the agent CLI, or an argv naming it.
 fn launches_codex(config: &Config) -> bool {
     match &config.command {
@@ -2047,7 +2077,7 @@ pub fn spawn_pty(config: &Config) -> Result<PtyIo, AgentError> {
             let command_line = command_line(config)?;
             let mut command = CommandBuilder::new("/bin/sh");
             command.arg("-lc");
-            command.arg(command_line);
+            command.arg(format!("{}{command_line}", login_path_prefix(config)));
             command
         }
     };
@@ -2057,6 +2087,9 @@ pub fn spawn_pty(config: &Config) -> Result<PtyIo, AgentError> {
     }
     for (name, value) in session_identity_env(config, |name| std::env::var(name).ok()) {
         command.env(name, value);
+    }
+    if let Some(path) = workspace_tools_path(config, std::env::var_os("PATH").as_deref()) {
+        command.env("PATH", path);
     }
     if let Some(cwd) = &config.cwd {
         command.cwd(cwd);
@@ -2445,6 +2478,36 @@ mod tests {
         // No graft session (host session, no token): nothing changes.
         assert!(env(None, None).is_empty());
         assert!(env(Some(" "), None).is_empty());
+    }
+
+    #[test]
+    fn workspace_tools_lead_the_pod_agents_path() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = kill_config("http://engine".into());
+        config.workspace_root = Some(root.path().to_owned());
+        let current = OsStr::new("/usr/bin:/bin");
+        // No `.agent-tools/bin` in the mount: PATH untouched.
+        assert!(workspace_tools_path(&config, Some(current)).is_none());
+        std::fs::create_dir_all(root.path().join(".agent-tools/bin")).unwrap();
+        let path = workspace_tools_path(&config, Some(current)).unwrap();
+        let dirs: Vec<_> = std::env::split_paths(&path).collect();
+        assert_eq!(dirs[0], root.path().join(".agent-tools/bin"));
+        assert_eq!(&dirs[1..], [Path::new("/usr/bin"), Path::new("/bin")]);
+        // Host session: no workspace root, no change.
+        config.workspace_root = None;
+        assert!(workspace_tools_path(&config, Some(current)).is_none());
+    }
+
+    #[test]
+    fn login_shell_line_restores_workspace_tools_after_profile() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = kill_config("http://engine".into());
+        config.workspace_root = Some(root.path().to_owned());
+        assert_eq!(login_path_prefix(&config), "");
+        std::fs::create_dir_all(root.path().join(".agent-tools/bin")).unwrap();
+        let prefix = login_path_prefix(&config);
+        assert!(prefix.starts_with("PATH='") && prefix.contains(".agent-tools/bin"));
+        assert!(prefix.ends_with(":\"$PATH\"; export PATH; "));
     }
 
     fn kill_config(engine_url: String) -> Config {
