@@ -143,6 +143,11 @@ pub struct PodConfig {
     /// restart before the pod is given up as lost.
     #[serde(default = "default_reconnect_timeout")]
     pub reconnect_timeout: Duration,
+    /// How long a pod with no live or hibernated session behind it may stay
+    /// before the reconciler deletes it (`ENGINE_POD_ORPHAN_TTL`, default
+    /// 1 h, WI-4233). Zero never deletes orphans.
+    #[serde(default = "default_orphan_ttl")]
+    pub orphan_ttl: Duration,
     /// The read-only workspace tree every session pod gets (WI-3373/WI-3374);
     /// unset keeps the pre-feature spec.
     #[serde(default)]
@@ -503,6 +508,9 @@ fn merged_affinity(cfg: &PodConfig, policy: Option<&PodTemplatePolicy>) -> Optio
 fn default_reconnect_timeout() -> Duration {
     Duration::from_secs(120)
 }
+fn default_orphan_ttl() -> Duration {
+    Duration::from_secs(3600)
+}
 fn default_heartbeat_timeout() -> Duration {
     Duration::from_secs(60)
 }
@@ -649,6 +657,7 @@ impl Default for PodConfig {
             pending_timeout: default_pending_timeout(),
             session_deadline: default_session_deadline(),
             reconnect_timeout: default_reconnect_timeout(),
+            orphan_ttl: default_orphan_ttl(),
             workspace: None,
             engine_id: default_engine_id(),
         }
@@ -755,6 +764,7 @@ impl PodConfig {
             ("ENGINE_POD_CONNECT_TIMEOUT", &mut cfg.connect_timeout),
             ("ENGINE_POD_PENDING_TIMEOUT", &mut cfg.pending_timeout),
             ("ENGINE_POD_RECONNECT_TIMEOUT", &mut cfg.reconnect_timeout),
+            ("ENGINE_POD_ORPHAN_TTL", &mut cfg.orphan_ttl),
             ("ENGINE_POD_RECONCILE_TIMEOUT", &mut cfg.reconcile_interval),
             ("ENGINE_POD_HEARTBEAT_TIMEOUT", &mut cfg.heartbeat_timeout),
         ] {
@@ -2291,12 +2301,30 @@ pub async fn teardown_pod(
     limit: Duration,
     poll: Duration,
 ) -> bool {
-    let Some(uid) = uid else {
-        tracing::debug!(session = %id, "no pod uid is known for the session; not deleting by name");
-        return true;
+    // No uid means the create returned none (WI-4233): look the pod up by
+    // its session label instead of leaving it running unseen.
+    let uid = match uid {
+        Some(uid) => uid,
+        None => match launcher.list().await {
+            Ok(pods) => match pods
+                .iter()
+                .find(|p| session_id_from_pod(p) == Some(id))
+                .and_then(|p| p.metadata.uid.clone())
+            {
+                Some(uid) => uid,
+                None => return true,
+            },
+            Err(e) => {
+                tracing::warn!(session = %id, error = %e,
+                    "no pod uid is known for the stopped session and the pods could not be listed; \
+                     the pod is left for the orphan reaper");
+                return false;
+            }
+        },
     };
     if let Err(e) = launcher.delete(id, Some(uid.clone())).await {
-        tracing::debug!(session = %id, error = %e, "deleting the session pod failed");
+        tracing::warn!(session = %id, error = %e,
+            "deleting the stopped session's pod failed; the orphan reaper retries after the TTL");
         return false;
     }
     let wait = async {
