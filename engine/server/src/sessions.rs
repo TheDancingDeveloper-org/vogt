@@ -604,7 +604,7 @@ impl SessionRegistry {
 
     /// Start the loop that settles the cluster's session pods against this
     /// engine's sessions (`pod_reconcile`). A no-op unless pod backends are on.
-    pub fn start_pod_reconciler(&self) -> Option<tokio::task::JoinHandle<()>> {
+    pub fn start_pod_reconciler(self: &Arc<Self>) -> Option<tokio::task::JoinHandle<()>> {
         if !self.cfg.pod_backends_enabled {
             return None;
         }
@@ -616,6 +616,17 @@ impl SessionRegistry {
                 launcher,
                 crate::agent_stream::global(),
                 cfg,
+                {
+                    let weak = Arc::downgrade(self);
+                    // A manager that is gone owns nothing; claim everything so
+                    // a shutting-down engine reaps nothing.
+                    Arc::new(move |id| {
+                        weak.upgrade().is_none_or(|m| {
+                            m.sessions.get(&id).is_some_and(|s| s.is_alive())
+                                || m.records.contains_key(&id)
+                        })
+                    })
+                },
             )),
             Err(e) => {
                 tracing::error!("pod reconciler not started: {e}");

@@ -2267,7 +2267,7 @@ engine id (WI-912; the design is `docs/design/session-hibernation.md`).
     running, so a late agent can still take the link over. A pod with no kept
     credential, or with no session record at all, is likewise reported and
     left running; nothing in startup, shutdown or reconcile deletes a session
-    pod. Deletion belongs to the session's own teardown — an explicit stop or
+    pod before its orphan TTL. Deletion belongs to the session's own teardown — an explicit stop or
     hibernate, or an agent that has already exited — because a running pod is
     the only copy of its workspace (WI-3405, WI-4126).
 - **Project memory (WI-3371).** With `ENGINE_POD_PERSIST_MEMORY` on (off by
@@ -3669,12 +3669,14 @@ its process in a Kubernetes pod (namespace `vogt-sessions`) that dials back to
 the engine. A reconciler sweeps the namespace every
 `ENGINE_POD_RECONCILE_TIMEOUT` (15 s): it ends a live session whose pod failed,
 vanished, sat Pending too long, or whose attached agent stopped sending
-heartbeats, and deletes a pod that no live session owns.
+heartbeats, and deletes a pod that no live or hibernated session owns once
+it is older than `ENGINE_POD_ORPHAN_TTL` (3600 s, 0 disables; WI-4233). A stop
+whose pod delete failed logs a warning and leaves the pod for this reaper.
 
 Pod lifecycle timing is configurable in whole seconds through
 `ENGINE_POD_CONNECT_TIMEOUT` (30), `ENGINE_POD_PENDING_TIMEOUT` (600),
 `ENGINE_POD_RECONNECT_TIMEOUT` (120), `ENGINE_POD_RECONCILE_TIMEOUT` (15), and
-`ENGINE_POD_HEARTBEAT_TIMEOUT` (60); a value that is not a whole number of
+`ENGINE_POD_HEARTBEAT_TIMEOUT` (60), and `ENGINE_POD_ORPHAN_TTL` (3600); a value that is not a whole number of
 seconds refuses engine start. `ENGINE_POD_RECONCILE_TIMEOUT` is the sweep
 interval. The heartbeat timer applies only while an agent is attached: it
 starts when the agent completes its hello and is refreshed by each heartbeat,

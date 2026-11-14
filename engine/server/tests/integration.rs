@@ -22271,6 +22271,7 @@ sleep 2
             h.launcher.as_ref(),
             &h.state.agent_auth,
             &cfg,
+            &|_| true,
         )
         .await
         .unwrap();
@@ -22343,6 +22344,7 @@ sleep 2
             h.launcher.as_ref(),
             &h.state.agent_auth,
             &cfg,
+            &|_| true,
         )
         .await
         .unwrap();
@@ -22772,6 +22774,7 @@ sleep 2
             launcher.as_ref(),
             &h.state.agent_auth,
             &registry.pod_config().unwrap(),
+            &|_| true,
         )
         .await
         .unwrap();
@@ -22917,10 +22920,14 @@ sleep 2
             connect_timeout: Duration::from_secs(3600),
             ..Default::default()
         };
-        let sweep =
-            vogt_engine_server::pod_reconcile::sweep(launcher.as_ref(), &h.state.agent_auth, &cfg)
-                .await
-                .unwrap();
+        let sweep = vogt_engine_server::pod_reconcile::sweep(
+            launcher.as_ref(),
+            &h.state.agent_auth,
+            &cfg,
+            &|_| true,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             sweep.reported.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
             vec![id]
@@ -22976,10 +22983,14 @@ sleep 2
         old_link.finish(137);
         assert_eq!(adopted, vec![id]);
         tokio::time::sleep(Duration::from_millis(1_100)).await;
-        let sweep =
-            vogt_engine_server::pod_reconcile::sweep(launcher.as_ref(), &h.state.agent_auth, &cfg)
-                .await
-                .unwrap();
+        let sweep = vogt_engine_server::pod_reconcile::sweep(
+            launcher.as_ref(),
+            &h.state.agent_auth,
+            &cfg,
+            &|_| true,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             sweep.reported.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
             vec![id],
@@ -23010,10 +23021,14 @@ sleep 2
             connect_timeout: Duration::from_secs(3600),
             ..Default::default()
         };
-        let sweep =
-            vogt_engine_server::pod_reconcile::sweep(launcher.as_ref(), &h.state.agent_auth, &cfg)
-                .await
-                .unwrap();
+        let sweep = vogt_engine_server::pod_reconcile::sweep(
+            launcher.as_ref(),
+            &h.state.agent_auth,
+            &cfg,
+            &|_| true,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             sweep.reported.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
             vec![orphan]
