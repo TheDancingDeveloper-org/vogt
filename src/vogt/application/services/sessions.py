@@ -342,6 +342,7 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
             autopilot=autopilot,
             role=params.role,
             work_item=subject.work_item_ref,
+            session_ref=session_id,
             policy=subject.policy,
             budget=budget,
             worktree=(
@@ -4892,6 +4893,7 @@ def _start_on_engine(
     autopilot: bool = False,
     role: str = "worker",
     work_item: str | None = None,
+    session_ref: str | None = None,
     policy: AgentPolicy | None = None,
     budget: SessionBudgetParams | None = None,
     worktree: dict[str, str] | None = None,
@@ -4924,6 +4926,7 @@ def _start_on_engine(
         autopilot=autopilot,
         role=role,
         work_item=work_item,
+        session_ref=session_ref,
         companion=companion or None,
         charter=charter or None,
         policy=enforced,

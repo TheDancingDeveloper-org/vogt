@@ -1007,6 +1007,21 @@ def test_the_session_is_linked_to_its_work_item(wired: AppContext) -> None:
     assert listed.sessions[0].reason == WHY
 
 
+def test_the_engine_is_told_the_core_session_id_to_bind_credentials_to(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """WI-4229: without `session_ref` the engine mints the graft token for its
+    own UUID and the pod exports that as the session, which graft refuses
+    against the commit's `agent.session`."""
+    result = start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+    created = [
+        s["body"]
+        for s in engine.sent
+        if s["method"] == "POST" and s["url"].endswith("/api/sessions")
+    ]
+    assert created[-1]["session_ref"] == result.session.id
+
+
 def test_activity_comes_from_the_engine_not_from_storage(
     wired: AppContext, engine: StandInEngine
 ) -> None:
