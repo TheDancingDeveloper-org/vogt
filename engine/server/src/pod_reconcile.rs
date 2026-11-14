@@ -12,8 +12,9 @@
 //!   workspace exists only in that pod, so an orphan is not permission to
 //!   delete unlanded work. Deletion belongs to the session's own end, except
 //!   for a pod no live or hibernated session owns that has outlived
-//!   `orphan_ttl` (WI-4233): a stop that could not delete its pod, or one
-//!   kept for salvage, is reaped then.
+//!   `orphan_ttl` (WI-4233) since the sweep first found it unowned, and whose
+//!   salvage is recorded complete: a stop that could not delete its pod is
+//!   reaped then. A pod with no salvage record is kept and warned about.
 //!
 //! After an engine restart the previous process's pods are still the only
 //! copy of their sessions' workspaces. Boot re-adopts the ones whose record
@@ -29,7 +30,11 @@ use crate::{
     },
 };
 use k8s_openapi::api::core::v1::Pod;
-use std::{collections::HashSet, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
@@ -210,13 +215,54 @@ pub struct Sweep {
     pub reaped: Vec<Uuid>,
 }
 
-/// `owned` says whether a live or hibernated session still claims an id; only
-/// pods it denies are ever reaped.
+/// What the reaper remembers between sweeps: when each unowned pod was first
+/// seen unowned, and when it last warned about keeping one. The TTL runs from
+/// the first sweep that found the pod unowned, not from its creation, so a
+/// long session whose stop failed is not reaped the moment it loses its
+/// owner. An engine restart starts the clocks again, which is conservative.
+#[derive(Debug, Default)]
+pub struct OrphanTracker {
+    first_unowned: HashMap<Uuid, Instant>,
+    last_warned: HashMap<Uuid, Instant>,
+}
+
+impl OrphanTracker {
+    /// Pods now being timed.
+    pub fn tracked(&self) -> Vec<Uuid> {
+        self.first_unowned.keys().copied().collect()
+    }
+}
+
+/// [`sweep_with`] with no memory and no salvage record: nothing is ever
+/// reaped, because no pod can be shown salvaged.
 pub async fn sweep(
     launcher: &dyn PodLauncher,
     auth: &AgentAuth,
     cfg: &PodConfig,
     owned: &(dyn Fn(Uuid) -> bool + Sync),
+) -> Result<Sweep> {
+    sweep_with(
+        launcher,
+        auth,
+        cfg,
+        owned,
+        &|_| false,
+        &mut OrphanTracker::default(),
+    )
+    .await
+}
+
+/// `owned` says whether a live or hibernated session still claims an id;
+/// `salvaged` whether its work is recorded as salvaged. Only a pod `owned`
+/// denies, that `tracker` has seen unowned for `orphan_ttl`, and whose salvage
+/// is recorded complete is ever reaped.
+pub async fn sweep_with(
+    launcher: &dyn PodLauncher,
+    auth: &AgentAuth,
+    cfg: &PodConfig,
+    owned: &(dyn Fn(Uuid) -> bool + Sync),
+    salvaged: &(dyn Fn(Uuid) -> bool + Sync),
+    tracker: &mut OrphanTracker,
 ) -> Result<Sweep> {
     let pods = launcher.list().await?;
     let mut report = Sweep::default();
@@ -252,27 +298,49 @@ pub async fn sweep(
                 }
             }
             Verdict::Report { note } => {
-                let age = pod_age(pod);
-                let expired = !cfg.orphan_ttl.is_zero()
-                    && link.is_none()
-                    && age.is_some_and(|a| a > cfg.orphan_ttl)
-                    && !owned(id);
-                if expired {
-                    match launcher.delete(id, pod.metadata.uid.clone()).await {
-                        Ok(()) => {
-                            tracing::warn!(session = %id, ttl_secs = cfg.orphan_ttl.as_secs(),
-                                "deleted an orphan session pod past its TTL");
-                            report.reaped.push(id);
-                            continue;
+                let now = Instant::now();
+                let unowned = link.is_none() && !owned(id);
+                let held = if unowned {
+                    now.duration_since(*tracker.first_unowned.entry(id).or_insert(now))
+                } else {
+                    tracker.first_unowned.remove(&id);
+                    tracker.last_warned.remove(&id);
+                    Duration::ZERO
+                };
+                if unowned && !cfg.orphan_ttl.is_zero() && held > cfg.orphan_ttl {
+                    if !salvaged(id) {
+                        let due = tracker
+                            .last_warned
+                            .get(&id)
+                            .is_none_or(|t| now.duration_since(*t) >= cfg.reconcile_interval);
+                        if due {
+                            tracker.last_warned.insert(id, now);
+                            tracing::warn!(session = %id,
+                                age_secs = pod_age(pod).map_or(0, |a| a.as_secs()),
+                                unowned_secs = held.as_secs(),
+                                "keeping an expired orphan session pod: no completed salvage is recorded, so its workspace may hold unlanded work");
                         }
-                        Err(e) => tracing::warn!(session = %id, error = %e,
-                            "could not delete an orphan session pod"),
+                    } else {
+                        match launcher.delete(id, pod.metadata.uid.clone()).await {
+                            Ok(()) => {
+                                tracing::warn!(session = %id, ttl_secs = cfg.orphan_ttl.as_secs(),
+                                    "deleted an orphan session pod past its TTL");
+                                tracker.first_unowned.remove(&id);
+                                tracker.last_warned.remove(&id);
+                                report.reaped.push(id);
+                                continue;
+                            }
+                            Err(e) => tracing::warn!(session = %id, error = %e,
+                                "could not delete an orphan session pod"),
+                        }
                     }
                 }
                 report.reported.push((id, note));
             }
         }
     }
+    tracker.first_unowned.retain(|id, _| seen.contains(id));
+    tracker.last_warned.retain(|id, _| seen.contains(id));
     // A live session whose pod is not in the cluster at all.
     for id in auth.pod_ids() {
         if seen.contains(&id) {
@@ -294,14 +362,25 @@ pub fn spawn(
     auth: Arc<AgentAuth>,
     cfg: PodConfig,
     owned: Arc<dyn Fn(Uuid) -> bool + Send + Sync>,
+    salvaged: Arc<dyn Fn(Uuid) -> bool + Send + Sync>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut failing = false;
         // A pod reported once stays reported while it is still there, so a
         // session left running after a restart does not warn every interval.
         let mut reported: HashSet<Uuid> = HashSet::new();
+        let mut tracker = OrphanTracker::default();
         loop {
-            match sweep(launcher.as_ref(), &auth, &cfg, owned.as_ref()).await {
+            match sweep_with(
+                launcher.as_ref(),
+                &auth,
+                &cfg,
+                owned.as_ref(),
+                salvaged.as_ref(),
+                &mut tracker,
+            )
+            .await
+            {
                 Ok(report) => {
                     failing = false;
                     let current: HashSet<Uuid> =
@@ -788,29 +867,81 @@ mod tests {
         p
     }
 
-    #[tokio::test]
-    async fn an_unowned_orphan_past_the_ttl_is_deleted_but_an_owned_one_never() {
-        let (stale, owned_id, young) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
-        let kube = MockKube::with(vec![
-            aged(pod(stale, phase("Running")), 7200),
-            aged(pod(owned_id, phase("Running")), 7200),
-            aged(pod(young, phase("Running")), 10),
-        ]);
-        let cfg = PodConfig {
-            orphan_ttl: Duration::from_secs(3600),
+    fn ttl_cfg() -> PodConfig {
+        PodConfig {
+            orphan_ttl: Duration::from_millis(50),
             ..cfg()
-        };
+        }
+    }
 
-        let report = sweep(&kube, &AgentAuth::default(), &cfg, &|id| id == owned_id)
-            .await
-            .unwrap();
+    async fn run(
+        kube: &MockKube,
+        cfg: &PodConfig,
+        owned: &(dyn Fn(Uuid) -> bool + Sync),
+        salvaged: bool,
+        tracker: &mut OrphanTracker,
+    ) -> Sweep {
+        sweep_with(
+            kube,
+            &AgentAuth::default(),
+            cfg,
+            owned,
+            &move |_| salvaged,
+            tracker,
+        )
+        .await
+        .unwrap()
+    }
 
-        assert_eq!(report.reaped, vec![stale]);
+    #[tokio::test]
+    async fn an_old_pod_with_a_fresh_first_seen_is_kept() {
+        let id = Uuid::new_v4();
+        let kube = MockKube::with(vec![aged(pod(id, phase("Running")), 10_000)]);
+        let mut tracker = OrphanTracker::default();
+        let report = run(&kube, &ttl_cfg(), &|_| false, true, &mut tracker).await;
+        assert!(report.reaped.is_empty());
+        assert!(kube.deleted.lock().unwrap().is_empty());
+        assert_eq!(tracker.tracked(), vec![id]);
+    }
+
+    #[tokio::test]
+    async fn reaped_after_the_ttl_since_first_seen_only_with_a_salvage_record() {
+        let id = Uuid::new_v4();
+        let kube = MockKube::with(vec![aged(pod(id, phase("Running")), 10_000)]);
+        let mut tracker = OrphanTracker::default();
+        run(&kube, &ttl_cfg(), &|_| false, true, &mut tracker).await;
+        tokio::time::sleep(Duration::from_millis(80)).await;
+
+        let report = run(&kube, &ttl_cfg(), &|_| false, false, &mut tracker).await;
+        assert!(report.reaped.is_empty());
+        assert!(kube.deleted.lock().unwrap().is_empty());
+        assert_eq!(report.reported.len(), 1);
+
+        let report = run(&kube, &ttl_cfg(), &|_| false, true, &mut tracker).await;
+        assert_eq!(report.reaped, vec![id]);
         assert_eq!(
             kube.deleted.lock().unwrap().clone(),
-            vec![(stale, Some(format!("uid-{stale}")))]
+            vec![(id, Some(format!("uid-{id}")))]
         );
-        assert_eq!(report.reported.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_pod_that_regained_an_owner_or_vanished_leaves_the_map() {
+        let (back, gone) = (Uuid::new_v4(), Uuid::new_v4());
+        let kube = MockKube::with(vec![
+            pod(back, phase("Running")),
+            pod(gone, phase("Running")),
+        ]);
+        let mut tracker = OrphanTracker::default();
+        run(&kube, &ttl_cfg(), &|_| false, true, &mut tracker).await;
+        assert_eq!(tracker.tracked().len(), 2);
+
+        kube.pods
+            .lock()
+            .unwrap()
+            .retain(|p| session_id_from_pod(p) == Some(back));
+        run(&kube, &ttl_cfg(), &|id| id == back, true, &mut tracker).await;
+        assert!(tracker.tracked().is_empty());
     }
 
     #[tokio::test]
