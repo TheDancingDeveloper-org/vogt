@@ -18983,6 +18983,9 @@ mod pod_stream {
         /// How long a deleted pod stays `Terminating`.
         terminating: Mutex<Duration>,
         fail: bool,
+        /// A cluster policy refusal (a full ResourceQuota), reported as a
+        /// `Conflict` the way the real launcher maps a 403 (WI-4232).
+        refuse: Mutex<Option<String>>,
     }
 
     impl PodLauncher for FakeLauncher {
@@ -18993,6 +18996,9 @@ mod pod_stream {
             pod: k8s_openapi::api::core::v1::Pod,
         ) -> CreateFuture<'a> {
             Box::pin(async move {
+                if let Some(message) = self.refuse.lock().unwrap().clone() {
+                    return Err(vogt_engine_server::error::ApiError::Conflict(message));
+                }
                 if self.fail {
                     return Err(vogt_engine_server::error::ApiError::Internal(
                         "no cluster".into(),
@@ -19078,6 +19084,7 @@ mod pod_stream {
                 cluster: Arc::new(Mutex::new(cluster)),
                 terminating: Mutex::new(Duration::ZERO),
                 fail,
+                refuse: Mutex::new(None),
             })
         }
     }
@@ -21873,6 +21880,44 @@ sleep 2
                 }
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_start_the_cluster_quota_refuses_is_a_conflict_and_leaves_no_session() {
+        let h = harness(false).await;
+        *h.launcher.refuse.lock().unwrap() = Some(
+            "the cluster refused the session pod: exceeded quota: vogt-sessions, \
+             requested: limits.cpu=4, used: limits.cpu=32, limited: limits.cpu=32"
+                .into(),
+        );
+        let client = reqwest::Client::builder()
+            .default_headers(auth())
+            .build()
+            .unwrap();
+        let response = client
+            .post(format!("{}/api/sessions", h.base))
+            .json(&json!({ "name": "ninth", "template": "pod" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = response.text().await.unwrap();
+        assert!(
+            body.contains("vogt-sessions") && body.contains("limited: limits.cpu=32"),
+            "{body}"
+        );
+        let listed: Value = client
+            .get(format!("{}/api/sessions", h.base))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(
+            !listed.to_string().contains("ninth"),
+            "no session row is left: {listed}"
+        );
     }
 
     #[tokio::test]
