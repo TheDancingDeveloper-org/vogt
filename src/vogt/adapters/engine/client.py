@@ -811,6 +811,7 @@ class EngineClient:
         autopilot: bool = False,
         role: str = "worker",
         work_item: str | None = None,
+        session_ref: str | None = None,
         companion: str | None = None,
         policy: dict[str, Any] | None = None,
         budget: dict[str, Any] | None = None,
@@ -877,6 +878,11 @@ class EngineClient:
             # The item the session serves (WI-998), as a label the engine
             # keeps with the record and reports back on the summary.
             spec["work_item"] = work_item
+        if session_ref:
+            # The core's own session id (WI-4124, WI-4229): the engine binds
+            # a provider credential to it, and the pod exports it as
+            # GRAFT_SESSION_ID, so commits and the token name one session.
+            spec["session_ref"] = session_ref
         if companion:
             # The standing guide written beside the brief (WI-1243). The
             # brief points at it by name; the engine writes the text.
