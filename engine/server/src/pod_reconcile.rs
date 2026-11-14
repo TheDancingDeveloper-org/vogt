@@ -13,8 +13,9 @@
 //!   delete unlanded work. Deletion belongs to the session's own end, except
 //!   for a pod no live or hibernated session owns that has outlived
 //!   `orphan_ttl` (WI-4233) since the sweep first found it unowned, and whose
-//!   salvage is recorded complete: a stop that could not delete its pod is
-//!   reaped then. A pod with no salvage record is kept and warned about.
+//!   latest salvage report did not fail, is not older than the pod and has its
+//!   manifest on disk: a stop that could not delete its pod is reaped then.
+//!   Any other pod is kept and warned about (once, then every 10 minutes).
 //!
 //! After an engine restart the previous process's pods are still the only
 //! copy of their sessions' workspaces. Boot re-adopts the ones whose record
@@ -204,6 +205,10 @@ fn pod_age(pod: &Pod) -> Option<Duration> {
     (k8s_openapi::chrono::Utc::now() - created.0).to_std().ok()
 }
 
+/// How often the reaper repeats its "keeping this pod" warning: once when it
+/// first keeps the pod, then at most this often.
+const KEEP_WARN_EVERY: Duration = Duration::from_secs(600);
+
 /// What one sweep did.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Sweep {
@@ -246,7 +251,7 @@ pub async fn sweep(
         auth,
         cfg,
         owned,
-        &|_| false,
+        &|_, _| false,
         &mut OrphanTracker::default(),
     )
     .await
@@ -261,7 +266,7 @@ pub async fn sweep_with(
     auth: &AgentAuth,
     cfg: &PodConfig,
     owned: &(dyn Fn(Uuid) -> bool + Sync),
-    salvaged: &(dyn Fn(Uuid) -> bool + Sync),
+    salvaged: &(dyn Fn(Uuid, i64) -> bool + Sync),
     tracker: &mut OrphanTracker,
 ) -> Result<Sweep> {
     let pods = launcher.list().await?;
@@ -308,11 +313,16 @@ pub async fn sweep_with(
                     Duration::ZERO
                 };
                 if unowned && !cfg.orphan_ttl.is_zero() && held > cfg.orphan_ttl {
-                    if !salvaged(id) {
+                    let created = pod
+                        .metadata
+                        .creation_timestamp
+                        .as_ref()
+                        .map_or(i64::MAX, |t| t.0.timestamp());
+                    if !salvaged(id, created) {
                         let due = tracker
                             .last_warned
                             .get(&id)
-                            .is_none_or(|t| now.duration_since(*t) >= cfg.reconcile_interval);
+                            .is_none_or(|t| now.duration_since(*t) >= KEEP_WARN_EVERY);
                         if due {
                             tracker.last_warned.insert(id, now);
                             tracing::warn!(session = %id,
@@ -362,7 +372,7 @@ pub fn spawn(
     auth: Arc<AgentAuth>,
     cfg: PodConfig,
     owned: Arc<dyn Fn(Uuid) -> bool + Send + Sync>,
-    salvaged: Arc<dyn Fn(Uuid) -> bool + Send + Sync>,
+    salvaged: Arc<dyn Fn(Uuid, i64) -> bool + Send + Sync>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut failing = false;
@@ -886,7 +896,7 @@ mod tests {
             &AgentAuth::default(),
             cfg,
             owned,
-            &move |_| salvaged,
+            &move |_, _| salvaged,
             tracker,
         )
         .await

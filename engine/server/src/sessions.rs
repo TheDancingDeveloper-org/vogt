@@ -628,17 +628,16 @@ impl SessionRegistry {
                     })
                 },
                 {
-                    // Salvage is recorded complete when an archive with its
-                    // manifest exists. A clean stop with nothing to save
-                    // leaves no record, so such a pod is kept and warned about.
+                    // A pod is salvaged when the session's latest report
+                    // covers it (`pod_salvage::covers_pod`). A clean stop with
+                    // nothing to save leaves no record, so that pod is kept.
                     let state_dir = self.cfg.state_dir.clone();
-                    Arc::new(move |id| {
-                        std::fs::read_dir(crate::pod_salvage::session_dir(&state_dir, id))
-                            .map(|d| {
-                                d.flatten()
-                                    .any(|e| e.path().join("manifest.json").is_file())
-                            })
-                            .unwrap_or(false)
+                    let weak = Arc::downgrade(self);
+                    Arc::new(move |id, created| {
+                        let recorded = weak
+                            .upgrade()
+                            .and_then(|m| m.records.get(&id).and_then(|r| r.salvage.clone()));
+                        crate::pod_salvage::covers_pod(&state_dir, id, created, recorded.as_ref())
                     })
                 },
             )),

@@ -177,13 +177,68 @@ pub fn store(
         upload,
     })
     .map_err(|e| format!("could not serialize the salvage manifest: {e}"))?;
-    write_private(&archive.join("manifest.json"), &manifest)?;
+    // Temp file and rename: a manifest is either whole or absent, so the
+    // reaper's "manifest exists" check never sees a half-written one.
+    let tmp = archive.join("manifest.json.tmp");
+    write_private(&tmp, &manifest)?;
+    fs::rename(&tmp, archive.join("manifest.json"))
+        .map_err(|e| format!("could not write the salvage manifest: {e}"))?;
     // The copy inside the manifest counts the content files it describes;
     // the report a caller reads also counts the manifest itself.
     let mut report = report;
     report.files = count_files(&archive);
     prune(&root, keep, max_session_bytes, &archive);
     Ok(report)
+}
+
+/// Whether the session's latest salvage covers a pod created at
+/// `pod_created_unix` (WI-4233). The latest report is the newest one on disk
+/// (read from each archive's own `manifest.json`), or `recorded`, the
+/// session record's report, when that is newer or equal. It covers the pod
+/// only if it did not fail, is not older than the pod, and its manifest is
+/// on disk. An archive from an earlier pod of the same session never does.
+pub fn covers_pod(
+    state_dir: &Path,
+    session: Uuid,
+    pod_created_unix: i64,
+    recorded: Option<&SalvageReport>,
+) -> bool {
+    let unix = |at: &str| {
+        OffsetDateTime::parse(at, &Rfc3339)
+            .ok()
+            .map(|t| t.unix_timestamp())
+    };
+    let mut newest: Option<(i64, bool)> = None; // (at, ok)
+    if let Ok(dir) = fs::read_dir(session_dir(state_dir, session)) {
+        for entry in dir.flatten() {
+            let Ok(bytes) = fs::read(entry.path().join("manifest.json")) else {
+                continue;
+            };
+            let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+                continue;
+            };
+            let Some(report) = value
+                .get("report")
+                .and_then(|r| serde_json::from_value::<SalvageReport>(r.clone()).ok())
+            else {
+                continue;
+            };
+            if let Some(at) = unix(&report.at) {
+                let ok = report.state == SalvageState::Saved;
+                if newest.is_none_or(|(n, _)| at > n) {
+                    newest = Some((at, ok));
+                }
+            }
+        }
+    }
+    if let Some(r) = recorded {
+        if let Some(at) = unix(&r.at) {
+            if newest.is_none_or(|(n, _)| at >= n) {
+                newest = Some((at, r.state == SalvageState::Saved));
+            }
+        }
+    }
+    matches!(newest, Some((at, true)) if at >= pod_created_unix)
 }
 
 #[derive(serde::Serialize)]
@@ -540,6 +595,81 @@ mod tests {
         let path = Path::new(report.path.as_deref().unwrap());
         assert!(!path.join("repos/root/patch.diff").exists());
         assert!(path.join("repos/root/untracked.txt").is_file());
+    }
+    fn pod_sessions_covered(
+        state: &Path,
+        id: Uuid,
+        created: i64,
+        rec: Option<&SalvageReport>,
+    ) -> bool {
+        covers_pod(state, id, created, rec)
+    }
+
+    #[test]
+    fn an_archive_older_than_the_pod_does_not_cover_it() {
+        let state = state();
+        let id = Uuid::new_v4();
+        store(
+            &state,
+            id,
+            &upload("p", "root"),
+            &SalvageLimits::default(),
+            5,
+            DEFAULT_MAX_SESSION_BYTES,
+            at(0),
+        )
+        .unwrap();
+        let pod = at(100).unix_timestamp();
+        assert!(!pod_sessions_covered(&state, id, pod, None));
+        assert!(pod_sessions_covered(
+            &state,
+            id,
+            at(-5).unix_timestamp(),
+            None
+        ));
+    }
+
+    #[test]
+    fn a_failed_latest_report_does_not_cover_the_pod() {
+        let state = state();
+        let id = Uuid::new_v4();
+        store(
+            &state,
+            id,
+            &upload("p", "root"),
+            &SalvageLimits::default(),
+            5,
+            DEFAULT_MAX_SESSION_BYTES,
+            at(0),
+        )
+        .unwrap();
+        let failed = SalvageReport::failed("upload refused", at(50).format(&Rfc3339).unwrap());
+        assert!(!pod_sessions_covered(
+            &state,
+            id,
+            at(-5).unix_timestamp(),
+            Some(&failed)
+        ));
+    }
+
+    #[test]
+    fn a_saved_newer_report_with_a_manifest_covers_the_pod_and_a_missing_one_does_not() {
+        let state = state();
+        let id = Uuid::new_v4();
+        let report = store(
+            &state,
+            id,
+            &upload("p", "root"),
+            &SalvageLimits::default(),
+            5,
+            DEFAULT_MAX_SESSION_BYTES,
+            at(10),
+        )
+        .unwrap();
+        let created = at(0).unix_timestamp();
+        assert!(pod_sessions_covered(&state, id, created, None));
+        fs::remove_file(Path::new(report.path.as_deref().unwrap()).join("manifest.json")).unwrap();
+        assert!(!pod_sessions_covered(&state, id, created, None));
     }
 }
 
