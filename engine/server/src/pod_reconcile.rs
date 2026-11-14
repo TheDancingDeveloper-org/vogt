@@ -10,8 +10,10 @@
 //!   reason become the session's last output and its exit code);
 //! - a pod with no live session behind it is reported and left running: its
 //!   workspace exists only in that pod, so an orphan is not permission to
-//!   delete unlanded work. Deletion belongs to the session's own end, never
-//!   to reconciliation.
+//!   delete unlanded work. Deletion belongs to the session's own end, except
+//!   for a pod no live or hibernated session owns that has outlived
+//!   `orphan_ttl` (WI-4233): a stop that could not delete its pod, or one
+//!   kept for salvage, is reaped then.
 //!
 //! After an engine restart the previous process's pods are still the only
 //! copy of their sessions' workspaces. Boot re-adopts the ones whose record
@@ -204,9 +206,18 @@ pub struct Sweep {
     /// Pods left running because no live session owns them, with the reason.
     /// Reconciliation never deletes them.
     pub reported: Vec<(Uuid, String)>,
+    /// Orphan pods deleted after `orphan_ttl`.
+    pub reaped: Vec<Uuid>,
 }
 
-pub async fn sweep(launcher: &dyn PodLauncher, auth: &AgentAuth, cfg: &PodConfig) -> Result<Sweep> {
+/// `owned` says whether a live or hibernated session still claims an id; only
+/// pods it denies are ever reaped.
+pub async fn sweep(
+    launcher: &dyn PodLauncher,
+    auth: &AgentAuth,
+    cfg: &PodConfig,
+    owned: &(dyn Fn(Uuid) -> bool + Sync),
+) -> Result<Sweep> {
     let pods = launcher.list().await?;
     let mut report = Sweep::default();
     let mut seen = HashSet::new();
@@ -241,6 +252,23 @@ pub async fn sweep(launcher: &dyn PodLauncher, auth: &AgentAuth, cfg: &PodConfig
                 }
             }
             Verdict::Report { note } => {
+                let age = pod_age(pod);
+                let expired = !cfg.orphan_ttl.is_zero()
+                    && link.is_none()
+                    && age.is_some_and(|a| a > cfg.orphan_ttl)
+                    && !owned(id);
+                if expired {
+                    match launcher.delete(id, pod.metadata.uid.clone()).await {
+                        Ok(()) => {
+                            tracing::warn!(session = %id, ttl_secs = cfg.orphan_ttl.as_secs(),
+                                "deleted an orphan session pod past its TTL");
+                            report.reaped.push(id);
+                            continue;
+                        }
+                        Err(e) => tracing::warn!(session = %id, error = %e,
+                            "could not delete an orphan session pod"),
+                    }
+                }
                 report.reported.push((id, note));
             }
         }
@@ -265,6 +293,7 @@ pub fn spawn(
     launcher: Arc<dyn PodLauncher>,
     auth: Arc<AgentAuth>,
     cfg: PodConfig,
+    owned: Arc<dyn Fn(Uuid) -> bool + Send + Sync>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut failing = false;
@@ -272,7 +301,7 @@ pub fn spawn(
         // session left running after a restart does not warn every interval.
         let mut reported: HashSet<Uuid> = HashSet::new();
         loop {
-            match sweep(launcher.as_ref(), &auth, &cfg).await {
+            match sweep(launcher.as_ref(), &auth, &cfg, owned.as_ref()).await {
                 Ok(report) => {
                     failing = false;
                     let current: HashSet<Uuid> =
@@ -600,7 +629,7 @@ mod tests {
                  session={session_token}\n"
         ));
 
-        let report = sweep(&kube, &auth, &cfg()).await.unwrap();
+        let report = sweep(&kube, &auth, &cfg(), &|_| false).await.unwrap();
 
         assert_eq!(report.ended, vec![id]);
         assert!(report.reported.is_empty());
@@ -629,7 +658,7 @@ mod tests {
         let (_link, mut reader) = auth.register_pod(id);
         let kube = MockKube::with(vec![pod(id, terminated("Failed", 1, "Error"))]);
 
-        let report = sweep(&kube, &auth, &cfg()).await.unwrap();
+        let report = sweep(&kube, &auth, &cfg(), &|_| false).await.unwrap();
 
         assert_eq!(report.ended, vec![id]);
         let mut output = String::new();
@@ -648,7 +677,7 @@ mod tests {
         ]);
         let auth = AgentAuth::default();
 
-        let report = sweep(&kube, &auth, &cfg()).await.unwrap();
+        let report = sweep(&kube, &auth, &cfg(), &|_| false).await.unwrap();
 
         assert_eq!(
             report
@@ -671,7 +700,9 @@ mod tests {
         let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
         let kube = MockKube::with(vec![pod(a, phase("Running")), pod(b, phase("Succeeded"))]);
 
-        let report = sweep(&kube, &AgentAuth::default(), &cfg()).await.unwrap();
+        let report = sweep(&kube, &AgentAuth::default(), &cfg(), &|_| false)
+            .await
+            .unwrap();
 
         let mut reported = report
             .reported
@@ -709,7 +740,7 @@ mod tests {
         let (auth, link) = live(id);
         let kube = MockKube::with(vec![pod(id, phase("Running"))]);
 
-        let report = sweep(&kube, &auth, &cfg()).await.unwrap();
+        let report = sweep(&kube, &auth, &cfg(), &|_| false).await.unwrap();
 
         assert_eq!(report, Sweep::default());
         assert!(!link.is_finished());
@@ -729,12 +760,12 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            sweep(&kube, &auth, &patient).await.unwrap(),
+            sweep(&kube, &auth, &patient, &|_| false).await.unwrap(),
             Sweep::default()
         );
         assert!(!link.is_finished());
 
-        let report = sweep(&kube, &auth, &cfg()).await.unwrap();
+        let report = sweep(&kube, &auth, &cfg(), &|_| false).await.unwrap();
         assert_eq!(report.ended, vec![id]);
         assert_eq!(link.wait_exit(), 1);
     }
@@ -746,8 +777,55 @@ mod tests {
         let mut kube = MockKube::with(vec![pod(id, phase("Failed"))]);
         kube.list_fails = true;
 
-        assert!(sweep(&kube, &auth, &cfg()).await.is_err());
+        assert!(sweep(&kube, &auth, &cfg(), &|_| false).await.is_err());
         assert!(!link.is_finished());
+    }
+
+    fn aged(mut p: Pod, secs: i64) -> Pod {
+        p.metadata.creation_timestamp = Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+            k8s_openapi::chrono::Utc::now() - k8s_openapi::chrono::Duration::seconds(secs),
+        ));
+        p
+    }
+
+    #[tokio::test]
+    async fn an_unowned_orphan_past_the_ttl_is_deleted_but_an_owned_one_never() {
+        let (stale, owned_id, young) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let kube = MockKube::with(vec![
+            aged(pod(stale, phase("Running")), 7200),
+            aged(pod(owned_id, phase("Running")), 7200),
+            aged(pod(young, phase("Running")), 10),
+        ]);
+        let cfg = PodConfig {
+            orphan_ttl: Duration::from_secs(3600),
+            ..cfg()
+        };
+
+        let report = sweep(&kube, &AgentAuth::default(), &cfg, &|id| id == owned_id)
+            .await
+            .unwrap();
+
+        assert_eq!(report.reaped, vec![stale]);
+        assert_eq!(
+            kube.deleted.lock().unwrap().clone(),
+            vec![(stale, Some(format!("uid-{stale}")))]
+        );
+        assert_eq!(report.reported.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_zero_ttl_never_reaps() {
+        let id = Uuid::new_v4();
+        let kube = MockKube::with(vec![aged(pod(id, phase("Running")), 99999)]);
+        let cfg = PodConfig {
+            orphan_ttl: Duration::ZERO,
+            ..cfg()
+        };
+        let report = sweep(&kube, &AgentAuth::default(), &cfg, &|_| false)
+            .await
+            .unwrap();
+        assert!(report.reaped.is_empty());
+        assert!(kube.deleted.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -769,7 +847,9 @@ mod tests {
             .remove(ENGINE_LABEL);
         let kube = MockKube::with(vec![pod(mine, phase("Running")), other, legacy]);
 
-        let report = sweep(&kube, &AgentAuth::default(), &cfg()).await.unwrap();
+        let report = sweep(&kube, &AgentAuth::default(), &cfg(), &|_| false)
+            .await
+            .unwrap();
 
         assert_eq!(
             report
@@ -789,7 +869,9 @@ mod tests {
         p.metadata.uid = None;
         let kube = MockKube::with(vec![p]);
 
-        let report = sweep(&kube, &AgentAuth::default(), &cfg()).await.unwrap();
+        let report = sweep(&kube, &AgentAuth::default(), &cfg(), &|_| false)
+            .await
+            .unwrap();
 
         assert_eq!(
             report
