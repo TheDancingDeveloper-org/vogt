@@ -423,7 +423,7 @@ def workspace_content(ctx: Context) -> Check:
         'if [ -n "${VOGT_WORKSPACE_ROOT:-}" ]; then '
         "echo WS_CAPABILITY_PRESENT; else echo WS_CAPABILITY_ABSENT; fi\n"
         "test -f ~/Working/AGENTS.md && echo WS_AGENTS_OK || echo WS_AGENTS_MISSING\n"
-        "test -d ~/.claude/rules && echo WS_RULES_OK || echo WS_RULES_MISSING\n"
+        "test -d ~/Working/.claude/rules && echo WS_RULES_OK || echo WS_RULES_MISSING\n"
         "for f in settings.local.json auth.json .git-credentials .netrc; do echo "
         '"$f $(find ~ -maxdepth 4 -name "$f" 2>/dev/null | wc -l)"; done\n'
         "echo \"ssh_keys $(find ~/.ssh -maxdepth 1 -name 'id_*' "
