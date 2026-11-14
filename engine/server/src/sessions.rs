@@ -627,6 +627,20 @@ impl SessionRegistry {
                         })
                     })
                 },
+                {
+                    // Salvage is recorded complete when an archive with its
+                    // manifest exists. A clean stop with nothing to save
+                    // leaves no record, so such a pod is kept and warned about.
+                    let state_dir = self.cfg.state_dir.clone();
+                    Arc::new(move |id| {
+                        std::fs::read_dir(crate::pod_salvage::session_dir(&state_dir, id))
+                            .map(|d| {
+                                d.flatten()
+                                    .any(|e| e.path().join("manifest.json").is_file())
+                            })
+                            .unwrap_or(false)
+                    })
+                },
             )),
             Err(e) => {
                 tracing::error!("pod reconciler not started: {e}");
@@ -769,6 +783,8 @@ impl SessionRegistry {
             .is_some_and(|s| s.kind() == SourceKind::Graft);
         let git_source = spec.source.is_some() && !graft_source;
         let (created_tx, created_rx) = tokio::sync::oneshot::channel::<Result<()>>();
+        // Only the API start (`create_pod_checked`) takes this back out; every
+        // other start drops it in `create_inner`'s callers.
         if !adopting {
             self.pod_create_waits.insert(id, created_rx);
         }
@@ -1080,6 +1096,7 @@ impl SessionRegistry {
             None,
         );
         let created = self.create_inner(spec, Creating::Wake(Box::new(record)), None);
+        self.pod_create_waits.remove(&id);
         self.adopting.lock().remove(&id);
         match created {
             Ok(_) => Ok(link),
@@ -1101,7 +1118,11 @@ impl SessionRegistry {
             &spec.command,
             spec.template.as_deref(),
         )?;
-        self.create_inner(spec, Creating::Fresh(Origin::Api), None)
+        let created = self.create_inner(spec, Creating::Fresh(Origin::Api), None);
+        if let Ok(session) = &created {
+            self.pod_create_waits.remove(&session.id);
+        }
+        created
     }
 
     /// Refuse a requested model that no known-model source lists (WI-4138).
@@ -1432,6 +1453,7 @@ impl SessionRegistry {
         self.check_provider_secret(id, &spec).await?;
         self.prepare_host_graft(id, &mut spec).await?;
         let created = self.create_inner(spec, Creating::Fresh(Origin::AgentTask), Some(id));
+        self.pod_create_waits.remove(&id);
         if created.is_err() {
             self.revoke_host_graft(id).await;
         }
@@ -3183,7 +3205,9 @@ impl SessionRegistry {
         self.check_provider_secret(id, &spec).await?;
         let mut spec = spec;
         self.prepare_host_graft(id, &mut spec).await?;
-        let session = match self.create_inner(spec, Creating::Wake(Box::new(record)), None) {
+        let created = self.create_inner(spec, Creating::Wake(Box::new(record)), None);
+        self.pod_create_waits.remove(&id);
+        let session = match created {
             Ok(session) => session,
             Err(error) => {
                 self.revoke_host_graft(id).await;

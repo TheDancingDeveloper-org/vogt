@@ -2266,10 +2266,14 @@ engine id (WI-912; the design is `docs/design/session-hibernation.md`).
     the reconciler, not given up: the session stays live and the pod stays
     running, so a late agent can still take the link over. A pod with no kept
     credential, or with no session record at all, is likewise reported and
-    left running; nothing in startup, shutdown or reconcile deletes a session
-    pod before its orphan TTL. Deletion belongs to the session's own teardown — an explicit stop or
-    hibernate, or an agent that has already exited — because a running pod is
-    the only copy of its workspace (WI-3405, WI-4126).
+    left running. Deletion belongs to the session's own teardown (an explicit
+    stop or hibernate, or an agent that has already exited), because a running
+    pod is the only copy of its workspace (WI-3405, WI-4126). The one other
+    deleter is the reconciler: it reaps a pod only after `ENGINE_POD_ORPHAN_TTL`
+    has passed since a sweep first found the pod unowned (an engine restart
+    restarts that clock), and only when a completed salvage archive is
+    recorded for it. Otherwise it keeps the pod and logs a warning each
+    sweep interval.
 - **Project memory (WI-3371).** With `ENGINE_POD_PERSIST_MEMORY` on (off by
   default), a Claude pod also writes `CLAUDE_CONFIG_DIR/projects/*/memory`
   back to the engine, keyed by the project's source identity rather than by

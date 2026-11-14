@@ -2218,15 +2218,30 @@ pub fn validate_resume_cursor(cursor: u64, next_offset: u64) -> Result<u64> {
     Ok(cursor)
 }
 
-/// Map a refused pod creation to an API error. A 403 or 422 from the
-/// Kubernetes API is a policy refusal (a ResourceQuota, an admission rule), not
-/// an engine fault: it is a `Conflict` that carries the cluster's own message,
-/// which names the quota and its limit (WI-4232).
+/// Map a refused pod creation to an API error. Only a ResourceQuota refusal
+/// (a 403 whose message says the quota was exceeded) is a `Conflict`, carrying
+/// the cluster's message, which names the quota and its limit (WI-4232). Any
+/// other refusal, an RBAC 403 or an admission 422, is the engine's own fault:
+/// it is logged in full and reaches the caller as a generic error that names
+/// neither the service account nor the namespace.
 fn creation_error(e: kube::Error) -> ApiError {
     match &e {
-        kube::Error::Api(status) if matches!(status.code, 403 | 422) => ApiError::Conflict(
-            format!("the cluster refused the session pod: {}", status.message),
-        ),
+        kube::Error::Api(status)
+            if matches!(status.code, 403 | 422) && status.message.contains("exceeded quota") =>
+        {
+            ApiError::Conflict(format!(
+                "the cluster refused the session pod: {}",
+                status.message
+            ))
+        }
+        kube::Error::Api(status) if matches!(status.code, 403 | 422) => {
+            tracing::error!(code = status.code, message = %status.message,
+                "the cluster refused to create a session pod");
+            ApiError::Internal(format!(
+                "the cluster refused to create the session pod (HTTP {})",
+                status.code
+            ))
+        }
         _ => ApiError::Internal(format!("creating session pod: {e}")),
     }
 }
@@ -5106,6 +5121,22 @@ mod creation_error_tests {
                 assert!(m.contains("vogt-sessions") && m.contains("limited: limits.cpu=32"));
             }
             other => panic!("expected Conflict, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_rbac_or_admission_refusal_is_internal_and_leaks_nothing() {
+        let msg = "pods is forbidden: User \"system:serviceaccount:vogt-dev:engine\" cannot create resource \"pods\" in namespace \"vogt-dev\"";
+        for code in [403, 422] {
+            match creation_error(api(code, msg)) {
+                ApiError::Internal(m) => {
+                    assert!(
+                        !m.contains("serviceaccount") && !m.contains("vogt-dev"),
+                        "{m}"
+                    );
+                }
+                other => panic!("expected Internal, got {other:?}"),
+            }
         }
     }
 
