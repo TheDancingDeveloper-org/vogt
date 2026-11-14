@@ -144,8 +144,10 @@ pub struct PodConfig {
     #[serde(default = "default_reconnect_timeout")]
     pub reconnect_timeout: Duration,
     /// How long a pod with no live or hibernated session behind it may stay
-    /// before the reconciler deletes it (`ENGINE_POD_ORPHAN_TTL`, default
-    /// 1 h, WI-4233). Zero never deletes orphans.
+    /// unowned, counted from the sweep that first found it so (not from its
+    /// creation), before the reconciler deletes it (`ENGINE_POD_ORPHAN_TTL`,
+    /// default 1 h, WI-4233). Only a pod covered by the session's latest
+    /// salvage report is deleted. Zero never deletes orphans.
     #[serde(default = "default_orphan_ttl")]
     pub orphan_ttl: Duration,
     /// The read-only workspace tree every session pod gets (WI-3373/WI-3374);

@@ -2272,8 +2272,9 @@ engine id (WI-912; the design is `docs/design/session-hibernation.md`).
     deleter is the reconciler: it reaps a pod only after `ENGINE_POD_ORPHAN_TTL`
     has passed since a sweep first found the pod unowned (an engine restart
     restarts that clock), and only when a completed salvage archive is
-    recorded for it. Otherwise it keeps the pod and logs a warning each
-    sweep interval.
+    covering the pod (latest report, not failed, newer than the pod) is on
+    disk. Otherwise it keeps the pod and logs a warning once, then every 10
+    minutes.
 - **Project memory (WI-3371).** With `ENGINE_POD_PERSIST_MEMORY` on (off by
   default), a Claude pod also writes `CLAUDE_CONFIG_DIR/projects/*/memory`
   back to the engine, keyed by the project's source identity rather than by
@@ -3674,8 +3675,11 @@ the engine. A reconciler sweeps the namespace every
 `ENGINE_POD_RECONCILE_TIMEOUT` (15 s): it ends a live session whose pod failed,
 vanished, sat Pending too long, or whose attached agent stopped sending
 heartbeats, and deletes a pod that no live or hibernated session owns once
-it is older than `ENGINE_POD_ORPHAN_TTL` (3600 s, 0 disables; WI-4233). A stop
-whose pod delete failed logs a warning and leaves the pod for this reaper.
+`ENGINE_POD_ORPHAN_TTL` (3600 s, 0 disables; WI-4233) has passed since a sweep
+first found it unowned, and only if the session's latest salvage report did not
+fail, is not older than the pod, and has its `manifest.json` on disk. A stop
+whose pod delete failed logs a warning and leaves the pod for this reaper; a pod
+the reaper keeps is warned about once, then every 10 minutes.
 
 Pod lifecycle timing is configurable in whole seconds through
 `ENGINE_POD_CONNECT_TIMEOUT` (30), `ENGINE_POD_PENDING_TIMEOUT` (600),
