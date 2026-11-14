@@ -1973,6 +1973,29 @@ pub fn launch_env(config: &Config) -> Vec<(&'static str, &'static str)> {
     }
 }
 
+/// The session ids the agent's children see (WI-4229). `g` writes
+/// `VOGT_SESSION_ID` as the legacy session alias on every commit, and the graft
+/// server refuses a legacy alias that disagrees with the token's session. In a
+/// pod that variable holds the engine UUID while the token is bound to the
+/// core's `ses_` id (`GRAFT_SESSION_ID`), so the agent gets the `ses_` id under
+/// both names and keeps the UUID as `VOGT_ENGINE_SESSION_ID`. The variable
+/// stays set: the MCP bridge and agent-auth take its presence to mean a
+/// session token is in use.
+pub fn session_identity_env(
+    config: &Config,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Vec<(&'static str, String)> {
+    let graft = lookup("GRAFT_SESSION_ID").filter(|id| !id.trim().is_empty());
+    let Some(graft) = graft else {
+        return Vec::new();
+    };
+    let mut env = vec![("VOGT_SESSION_ID", graft)];
+    if lookup("VOGT_ENGINE_SESSION_ID").is_none_or(|id| id.is_empty()) {
+        env.push(("VOGT_ENGINE_SESSION_ID", config.session_id.clone()));
+    }
+    env
+}
+
 /// Whether this launch starts Codex: the agent CLI, or an argv naming it.
 fn launches_codex(config: &Config) -> bool {
     match &config.command {
@@ -2030,6 +2053,9 @@ pub fn spawn_pty(config: &Config) -> Result<PtyIo, AgentError> {
     };
     let mut command = command;
     for (name, value) in launch_env(config) {
+        command.env(name, value);
+    }
+    for (name, value) in session_identity_env(config, |name| std::env::var(name).ok()) {
         command.env(name, value);
     }
     if let Some(cwd) = &config.cwd {
@@ -2387,6 +2413,38 @@ mod tests {
         let (_reader, _writer, child, _master) = spawn_pty(&config).unwrap();
         // The reap waits for the exit, so no sleep races the kill.
         assert_eq!(stop_and_reap(child, Duration::from_secs(30)), Some(137));
+    }
+
+    #[test]
+    fn pod_agent_sees_the_graft_session_as_its_session_id() {
+        let mut config = kill_config("http://engine".into());
+        config.session_id = "11111111-2222-3333-4444-555555555555".into();
+        let env = |graft: Option<&'static str>, engine: Option<&'static str>| {
+            session_identity_env(&config, move |name| match name {
+                "GRAFT_SESSION_ID" => graft.map(str::to_owned),
+                "VOGT_ENGINE_SESSION_ID" => engine.map(str::to_owned),
+                _ => None,
+            })
+        };
+        // The pod: `g` must not derive a legacy alias that is the engine UUID.
+        assert_eq!(
+            env(Some("ses_01ABC"), None),
+            vec![
+                ("VOGT_SESSION_ID", "ses_01ABC".to_owned()),
+                (
+                    "VOGT_ENGINE_SESSION_ID",
+                    "11111111-2222-3333-4444-555555555555".to_owned()
+                ),
+            ]
+        );
+        // The engine already named its UUID: left alone.
+        assert_eq!(
+            env(Some("ses_01ABC"), Some("u")),
+            vec![("VOGT_SESSION_ID", "ses_01ABC".to_owned())]
+        );
+        // No graft session (host session, no token): nothing changes.
+        assert!(env(None, None).is_empty());
+        assert!(env(Some(" "), None).is_empty());
     }
 
     fn kill_config(engine_url: String) -> Config {
