@@ -74,29 +74,19 @@ const POLL: Duration = Duration::from_millis(100);
 /// Agents the watchdog confirms. Codex can leave the brief queued in the
 /// composer, and it sets a title this engine reads, so `codex: working` is
 /// proof that a turn began even if the TUI never rested at its composer first.
-///
-/// Claude Code announces no turn-state title, but the activity watcher still
-/// stamps every turn start, and that stamp is what the watch trusts (WI-4186):
-/// a pod Claude session with autopilot off was seen at an empty composer with
-/// no turn, and nothing but autopilot's nudge would ever have typed into it.
-/// Its recovery differs from Codex's, because an Enter into an empty composer
-/// does nothing: see [`resubmit`]. `opencode` takes no first prompt, so a retry
-/// there would be guesswork.
-pub const FIRST_TURN_AGENTS: &[&str] = &["codex", "claude"];
+/// Claude Code announces no turn-state title, so a Claude turn that runs
+/// without a quiet gap and ends inside the readiness window leaves no evidence
+/// at all, and a retry there would type a second prompt into a session that
+/// already took its first (WI-4186 review). `opencode` takes no first prompt,
+/// so a retry there would be guesswork.
+pub const FIRST_TURN_AGENTS: &[&str] = &["codex"];
 
-/// What a Claude session is typed when its launch prompt never reached the
-/// composer. It names the brief by the variable the pod entrypoint exports
-/// rather than a path, because the engine does not know where the pod put the
-/// file.
-const CLAUDE_RECOVERY_PROMPT: &str = "Vogt started this session with a brief in the file \
-named by the VOGT_SESSION_BRIEF_FILE environment variable. Read that file now \
-(`echo $VOGT_SESSION_BRIEF_FILE` gives the path). If it has a \"Task\" section, \
-carry that task out; otherwise summarise the brief in one line and wait for \
-instructions.";
-
-/// The text the launch prompt starts with, so a composer holding it is a
-/// queued prompt and not an empty one.
-const LAUNCH_PROMPT_MARK: &str = "Vogt started this session with a brief";
+/// Whether the engine starts the watch for a session it just spawned: only a
+/// fresh one (a wake resumes a conversation that already took its brief),
+/// given a brief, running an agent in [`FIRST_TURN_AGENTS`].
+pub fn watches(fresh: bool, briefed: bool, agent: Option<&str>) -> bool {
+    fresh && briefed && agent.is_some_and(|agent| FIRST_TURN_AGENTS.contains(&agent))
+}
 
 /// Watch a freshly spawned session's first turn. Spawn this once, at start,
 /// for a fresh agent session that was given a brief.
@@ -170,28 +160,8 @@ pub fn watch(bus: EventBus, session: Arc<Session>, policy: Policy) -> tokio::tas
     })
 }
 
-/// Get the first prompt submitted, once. A composer that holds the launch
-/// prompt just needs its Enter. An empty Claude composer needs the prompt
-/// typed (an Enter there does nothing); an empty Codex one keeps the old
-/// behaviour, an Enter that an empty composer ignores.
+/// Press Enter once: a queued composer submits, an empty one ignores it.
 async fn resubmit(session: &Arc<Session>) -> std::io::Result<()> {
-    let (rendered, _) = session.render_screen(0);
-    let queued = rendered
-        .lines
-        .iter()
-        .any(|l| l.contains(LAUNCH_PROMPT_MARK));
-    if !queued && session.agent().as_deref() == Some("claude") {
-        tracing::info!(
-            session = %session.id,
-            event = "first_turn.retype",
-            "the composer is empty and no turn started; typed the brief pointer"
-        );
-        // The Enter on its own, after a pause: a burst ending in a carriage
-        // return reads as a paste, and the newline stays text.
-        session.write_input(CLAUDE_RECOVERY_PROMPT.as_bytes())?;
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        return session.write_input(b"\r");
-    }
     session.write_input(b"\r")?;
     tracing::info!(
         session = %session.id,
@@ -256,13 +226,30 @@ async fn wait_until_ready(session: &Arc<Session>, within: Duration) -> Readiness
 }
 
 /// Whether a turn began after the watch started. A fresh session carries its
-/// spawn time in `turn_started_at`, so only a later stamp is a real turn.
+/// spawn time in `turn_started_at`, so only a later stamp can be a real turn.
+///
+/// Nor is every later stamp one (WI-4186). A session starts `running`; one that
+/// stays silent for the quiet window goes `idle`, and its first output then
+/// moves it back to `running`, which stamps a "turn start". A pod session is
+/// exactly that: nothing reaches its terminal while the pod is scheduled and
+/// the entrypoint boots, so the CLI's first draw is stamped as a turn. Taking
+/// that for a started turn ended the watch at once, so a pod Codex whose launch
+/// prompt did not start a turn was never given its Enter, never reported
+/// blocked, and with autopilot off sat at its composer for good (with autopilot
+/// on, the 60-second nudge started it, which is the 65–79 s first turn every
+/// pod session showed). A turn starts from rest, and rest needs a quiet window
+/// after some output, so a stamp counts only when it falls at least the quiet
+/// window after the session's first output.
 fn turn_started_since(session: &Arc<Session>, baseline: Option<time::OffsetDateTime>) -> bool {
-    match (baseline, session.turn_started_at()) {
-        (Some(before), Some(now)) => now > before,
-        (None, Some(_)) => true,
-        _ => false,
+    let Some(stamp) = session.turn_started_at() else {
+        return false;
+    };
+    if baseline.is_some_and(|before| stamp <= before) {
+        return false;
     }
+    session
+        .first_output_at()
+        .is_some_and(|first| stamp >= first + session.idle_after())
 }
 
 /// Whether a turn starts within `within`. A running turn means the prompt was
@@ -301,4 +288,28 @@ fn is_at_composer(session: &Arc<Session>, rendered: &screen::Rendered) -> bool {
         session.agent().as_deref(),
         rendered.title.as_deref(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::watches;
+
+    /// WI-4186 review: the gate `sessions.rs` applies. Codex only, fresh and
+    /// briefed only; Claude Code (with or without autopilot, host or pod) is
+    /// never watched, so nothing is ever typed into it.
+    #[test]
+    fn only_a_fresh_briefed_codex_is_watched() {
+        assert!(watches(true, true, Some("codex")));
+        assert!(!watches(true, true, Some("claude")));
+        assert!(!watches(true, true, Some("opencode")));
+        assert!(!watches(true, true, None));
+        assert!(
+            !watches(false, true, Some("codex")),
+            "a wake already took its brief"
+        );
+        assert!(
+            !watches(true, false, Some("codex")),
+            "no brief, no first prompt"
+        );
+    }
 }

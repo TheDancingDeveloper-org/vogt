@@ -80,6 +80,11 @@ pub struct Session {
     turn_started_at: Mutex<Option<time::OffsetDateTime>>,
     /// Wall-clock time of the last PTY output.
     last_output_at: Mutex<Option<time::OffsetDateTime>>,
+    /// When the child first wrote anything. A pod session is silent from spawn
+    /// until its CLI draws, so its first output moves it from `idle` to
+    /// `running` and stamps `turn_started_at`; only a stamp a full quiet
+    /// window after this one can be a turn (WI-4186).
+    first_output_at: Mutex<Option<time::OffsetDateTime>>,
     /// The permission dialog on screen, while `awaiting-approval`.
     approval: Mutex<Option<crate::approval::Pending>>,
     /// The agent's own report that it is blocked on a person.
@@ -766,6 +771,11 @@ impl Session {
         *self.turn_started_at.lock()
     }
 
+    /// When the child first wrote output, if it has.
+    pub fn first_output_at(&self) -> Option<time::OffsetDateTime> {
+        *self.first_output_at.lock()
+    }
+
     /// Snapshot scrollback plus the byte position immediately after the
     /// snapshot. Attached clients use the position to drop already-replayed
     /// broadcast chunks.
@@ -1409,6 +1419,7 @@ fn assemble_session(
         // A session starts running, so its first turn starts with it.
         turn_started_at: Mutex::new(Some(created_at)),
         last_output_at: Mutex::new(None),
+        first_output_at: Mutex::new(None),
         approval: Mutex::new(None),
         blocked: Mutex::new(None),
         salvage: Mutex::new(None),
@@ -1500,7 +1511,9 @@ fn spawn_reader_thread(
                         let pos = pos_after - n as u64;
                         let now = Instant::now();
                         *session.last_output.lock() = Some(now);
-                        *session.last_output_at.lock() = Some(time::OffsetDateTime::now_utc());
+                        let wall = time::OffsetDateTime::now_utc();
+                        *session.last_output_at.lock() = Some(wall);
+                        session.first_output_at.lock().get_or_insert(wall);
                         session.note_output(now);
                         if !session.first_output_seen.swap(true, Ordering::AcqRel) {
                             crate::launch::record_first_output(

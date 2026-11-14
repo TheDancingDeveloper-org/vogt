@@ -263,6 +263,7 @@ fn test_config(stub: &str) -> Config {
             ..vogt_engine_server::call::CallPolicy::default()
         },
         autopilot: vogt_engine_server::autopilot::Policy::default(),
+        first_turn: vogt_engine_server::first_turn::Policy::default(),
         budget: vogt_engine_server::budget::Policy::default(),
         agent_onboarding: vogt_engine_server::claude_config::Onboarding::default(),
         session_rss_warn_bytes: None,

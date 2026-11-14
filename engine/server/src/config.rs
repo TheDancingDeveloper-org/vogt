@@ -618,6 +618,10 @@ pub struct Config {
     /// prompt before it is told to carry on, and the most nudges it gets
     /// (`ENGINE_AUTOPILOT_NUDGE_AFTER`, `ENGINE_AUTOPILOT_MAX_NUDGES`).
     pub autopilot: crate::autopilot::Policy,
+    /// How long a fresh briefed session gets to come to rest and to start its
+    /// first turn before the engine presses Enter or reports it blocked
+    /// (WI-4068). Fixed in production; a field so tests can shorten it.
+    pub first_turn: crate::first_turn::Policy,
     /// Enforcing session budgets (WI-1245 / C7): the percent of a turn or
     /// context limit that warns, and how often live sessions are checked
     /// (`ENGINE_BUDGET_SOFT_PCT`, `ENGINE_BUDGET_TICK_SECS`; a tick of 0
@@ -1268,6 +1272,7 @@ pub fn load(
         session_list_retain_after: session_list_retain_from_env()?,
         assistant_call: call_policy_from_env()?,
         autopilot: autopilot_policy_from_env()?,
+        first_turn: crate::first_turn::Policy::default(),
         budget: budget_policy_from_env()?,
         chat: chat_policy_from_env()?,
         agent_onboarding: crate::claude_config::Onboarding::from_env(),
