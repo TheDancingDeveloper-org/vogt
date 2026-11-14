@@ -383,6 +383,10 @@ pub struct SessionRegistry {
     /// Creates and removes pods for pod-backed templates. Unset until the
     /// first pod session (or a test) needs it.
     pod_launcher: parking_lot::Mutex<Option<Arc<dyn crate::pod_backend::PodLauncher>>>,
+    /// Where a freshly started pod session's pod creation reports its
+    /// outcome, so the launching call can refuse a start the cluster refused
+    /// (WI-4232). Taken by `create_launched`; empty for adopted pods.
+    pod_create_waits: DashMap<Uuid, tokio::sync::oneshot::Receiver<Result<()>>>,
     /// The source providers pod sessions are served from. Built from the
     /// deployment's settings on first use; tests install providers.
     source_registry: parking_lot::Mutex<Option<crate::source_provider::SourceRegistry>>,
@@ -511,6 +515,9 @@ fn normalize_requested_model(model: Option<String>) -> Option<String> {
         .filter(|model| !model.is_empty())
 }
 
+/// How long a start waits to learn whether the cluster accepted the pod.
+const POD_CREATE_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
+
 impl SessionRegistry {
     pub fn new(cfg: Arc<Config>, bus: EventBus, history: Option<Arc<SessionHistory>>) -> Self {
         let account_dirs = cfg
@@ -552,6 +559,7 @@ impl SessionRegistry {
             minted: Arc::new(DashMap::new()),
             account_leases,
             pod_launcher: parking_lot::Mutex::new(None),
+            pod_create_waits: DashMap::new(),
             source_registry: parking_lot::Mutex::new(None),
             host_graft_credentials: Arc::new(DashMap::new()),
             adopting: parking_lot::Mutex::new(std::collections::HashMap::new()),
@@ -749,6 +757,10 @@ impl SessionRegistry {
             .as_ref()
             .is_some_and(|s| s.kind() == SourceKind::Graft);
         let git_source = spec.source.is_some() && !graft_source;
+        let (created_tx, created_rx) = tokio::sync::oneshot::channel::<Result<()>>();
+        if !adopting {
+            self.pod_create_waits.insert(id, created_rx);
+        }
         tokio::spawn(async move {
             let auth = crate::agent_stream::global();
             let mut minted: Option<crate::source_provider::CredentialHandle> = None;
@@ -798,9 +810,16 @@ impl SessionRegistry {
                 }
                 .await;
                 match created {
-                    Ok(uid) => pod_uid = uid,
+                    Ok(uid) => {
+                        pod_uid = uid;
+                        let _ = created_tx.send(Ok(()));
+                    }
                     Err(e) => {
                         tracing::warn!(session = %id, error = %e, "creating the session pod failed");
+                        let _ = created_tx.send(Err(match &e {
+                            ApiError::Conflict(m) => ApiError::Conflict(m.clone()),
+                            other => ApiError::Internal(other.to_string()),
+                        }));
                         auth.withdraw(id).await;
                         let note = format!("\r\nsession pod could not be created: {e}\r\n");
                         let _ = link.ingest(link.next_offset(), note.as_bytes());
@@ -1172,7 +1191,19 @@ impl SessionRegistry {
         if created.is_err() {
             self.revoke_host_graft(id).await;
         }
-        created
+        let session = created?;
+        // A pod the cluster refuses (a full ResourceQuota) fails the start:
+        // no session row is left behind (WI-4232). Any other outcome, or no
+        // answer in time, leaves the session as the background task finds it.
+        if let Some((_, wait)) = self.pod_create_waits.remove(&id) {
+            if let Ok(Ok(Err(ApiError::Conflict(message)))) =
+                tokio::time::timeout(POD_CREATE_WAIT, wait).await
+            {
+                let _ = self.remove(id);
+                return Err(ApiError::Conflict(message));
+            }
+        }
+        Ok(session)
     }
 
     /// Mint a graft credential for a host-backed session whose project lands

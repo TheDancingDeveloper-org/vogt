@@ -2000,7 +2000,7 @@ impl PodBackendFactory {
         Api::namespaced(self.client.clone(), &self.cfg.namespace)
             .create(&PostParams::default(), &pod)
             .await
-            .map_err(|e| ApiError::Internal(format!("creating session pod: {e}")))
+            .map_err(creation_error)
     }
 
     /// Create the session's pod, then the Secret that carries its bootstrap
@@ -2206,6 +2206,19 @@ pub fn validate_resume_cursor(cursor: u64, next_offset: u64) -> Result<u64> {
         ));
     }
     Ok(cursor)
+}
+
+/// Map a refused pod creation to an API error. A 403 or 422 from the
+/// Kubernetes API is a policy refusal (a ResourceQuota, an admission rule), not
+/// an engine fault: it is a `Conflict` that carries the cluster's own message,
+/// which names the quota and its limit (WI-4232).
+fn creation_error(e: kube::Error) -> ApiError {
+    match &e {
+        kube::Error::Api(status) if matches!(status.code, 403 | 422) => ApiError::Conflict(
+            format!("the cluster refused the session pod: {}", status.message),
+        ),
+        _ => ApiError::Internal(format!("creating session pod: {e}")),
+    }
 }
 
 /// Creates and removes the pod behind a session. The Kubernetes
@@ -5041,5 +5054,38 @@ mod tests {
             None
         )
         .is_err());
+    }
+}
+
+#[cfg(test)]
+mod creation_error_tests {
+    use super::*;
+
+    fn api(code: u16, message: &str) -> kube::Error {
+        kube::Error::Api(kube::core::ErrorResponse {
+            status: "Failure".into(),
+            message: message.into(),
+            reason: "Forbidden".into(),
+            code,
+        })
+    }
+
+    #[test]
+    fn a_quota_refusal_is_a_conflict_naming_the_quota() {
+        let msg = "pods \"s\" is forbidden: exceeded quota: vogt-sessions, requested: limits.cpu=4, used: limits.cpu=32, limited: limits.cpu=32";
+        match creation_error(api(403, msg)) {
+            ApiError::Conflict(m) => {
+                assert!(m.contains("vogt-sessions") && m.contains("limited: limits.cpu=32"));
+            }
+            other => panic!("expected Conflict, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn other_api_errors_stay_internal() {
+        assert!(matches!(
+            creation_error(api(500, "boom")),
+            ApiError::Internal(_)
+        ));
     }
 }
