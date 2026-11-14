@@ -138,6 +138,7 @@ git -C "$w" log -1 -p | grep -q '^-old$' || fail "git view: tip patch removal"
 [[ $(git -C "$w" rev-list --count HEAD) == 2 ]] || fail "git view: expected baseline plus tip"
 [[ -z $(git -C "$w" status --porcelain) ]] || fail "git view: tree not clean"
 [[ -z $(git -C "$w" ls-files .graft .vogt) ]] || fail "git view: runtime state tracked"
+[[ $(<"$w/.vogt/.gitignore") == '*' ]] || fail "graft view: .vogt is not ignored"
 [[ -z $(git -C "$w" remote) ]] || fail "git view: a remote would allow a push"
 # WI-4040: /work is trusted by exactly its own path (no wildcard), so git in
 # the session does not refuse it with "dubious ownership".
