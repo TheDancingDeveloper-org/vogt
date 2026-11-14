@@ -5224,6 +5224,7 @@ mod tests {
             session_list_retain_after: None,
             assistant_call: crate::call::CallPolicy::default(),
             autopilot: crate::autopilot::Policy::default(),
+            first_turn: crate::first_turn::Policy::default(),
             budget: crate::budget::Policy::default(),
             agent_onboarding: crate::claude_config::Onboarding::default(),
             session_rss_warn_bytes: None,

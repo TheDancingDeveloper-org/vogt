@@ -2337,17 +2337,8 @@ impl SessionRegistry {
         // turn (WI-4068). Start the confirmation before the caller's request
         // returns, so a session that never submits surfaces as blocked rather
         // than idling at zero turns.
-        if fresh
-            && brief.is_some()
-            && session
-                .agent()
-                .is_some_and(|agent| crate::first_turn::FIRST_TURN_AGENTS.contains(&agent.as_str()))
-        {
-            crate::first_turn::watch(
-                self.bus.clone(),
-                Arc::clone(&session),
-                crate::first_turn::Policy::default(),
-            );
+        if crate::first_turn::watches(fresh, brief.is_some(), session.agent().as_deref()) {
+            crate::first_turn::watch(self.bus.clone(), Arc::clone(&session), self.cfg.first_turn);
         }
         if capture_opencode {
             self.capture_opencode_conversation(&session);

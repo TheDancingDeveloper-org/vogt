@@ -91,6 +91,7 @@ fn test_config() -> Config {
         session_list_retain_after: None,
         assistant_call: vogt_engine_server::call::CallPolicy::default(),
         autopilot: vogt_engine_server::autopilot::Policy::default(),
+        first_turn: vogt_engine_server::first_turn::Policy::default(),
         budget: vogt_engine_server::budget::Policy::default(),
         agent_onboarding: vogt_engine_server::claude_config::Onboarding::default(),
         session_rss_warn_bytes: None,
@@ -17205,38 +17206,175 @@ async fn a_queued_first_prompt_is_submitted_by_the_watchdog_and_starts_a_turn() 
     session.kill().unwrap();
 }
 
-/// WI-4186: a pod Claude session with autopilot off opened at an empty
-/// composer and never started a turn, because only autopilot's nudge ever typed
-/// into it. An Enter does nothing there, so the watchdog types the brief
-/// pointer. The fake starts its turn only when a line naming the brief arrives.
+/// Start a briefed agent session through `POST /api/sessions`, the path that
+/// decides in `sessions.rs` whether the first-turn watchdog runs. The stub is
+/// named `agent` in a directory of its own, which is how the engine tells an
+/// agent CLI.
+async fn start_briefed_agent(
+    client: &reqwest::Client,
+    base: &str,
+    dir: &std::path::Path,
+    agent: &str,
+    script: &str,
+    autopilot: bool,
+) -> Uuid {
+    std::fs::create_dir_all(dir).unwrap();
+    let stub = dir.join(agent);
+    std::fs::write(&stub, script).unwrap();
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let res = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({
+            "name": format!("first-turn-{agent}"),
+            "command": [stub.to_string_lossy()],
+            "prompt": "# task\n\nRun `echo hello`.\n",
+            "autopilot": autopilot,
+        }))
+        .send()
+        .await
+        .unwrap();
+    let status = res.status();
+    let created: Value = res.json().await.unwrap_or(Value::Null);
+    assert_eq!(status, StatusCode::OK, "{created}");
+    created["id"].as_str().unwrap().parse().unwrap()
+}
+
+fn first_turn_config() -> Config {
+    Config {
+        first_turn: first_turn_policy(),
+        ..test_config()
+    }
+}
+
+fn screen_text(session: &vogt_engine_server::pty::Session) -> String {
+    session.render_screen(0).0.lines.join("\n")
+}
+
+/// WI-4186: the cause. A pod session is silent while the pod is scheduled and
+/// the entrypoint boots, so it goes idle before its CLI draws anything, and
+/// that first draw was stamped as a turn start. The watchdog took the stamp
+/// for a started first turn and returned, so a pod Codex whose launch prompt
+/// sat in the composer was never given its Enter: with autopilot off it never
+/// ran (the WI-3619 bench), with autopilot on only the 60-second nudge started
+/// it. The stub stays silent past the quiet window, then waits at its composer
+/// for an Enter. (Codex is pod-only, so `POST /api/sessions` cannot start it
+/// in-process; the gate itself is `first_turn::watches`, unit-tested.)
 #[tokio::test]
-async fn an_empty_claude_composer_is_given_the_brief_pointer_and_starts_a_turn() {
+async fn a_codex_silent_until_its_first_draw_still_gets_its_first_turn() {
     let tmp = tempfile::tempdir().unwrap();
     let bus = vogt_engine_server::events::EventBus::new(64);
-    let session = spawn_fake_agent(
+    let session = spawn_fake_codex(
         tmp.path(),
-        "claude",
-        "#!/bin/bash\n\
+        "#!/bin/sh\n\
+         sleep 0.8\n\
+         printf 'OpenAI Codex\\n'\n\
+         sleep 0.1\n\
+         printf '\\033]0;codex: ready\\007'\n\
          printf '> '\n\
-         read -r line\n\
-         case \"$line\" in\n\
-           \"\") printf 'EMPTY-ENTER\\n'; read -r line;;\n\
-         esac\n\
-         printf 'GOT:%s\\n' \"$line\"\n\
-         printf 'esc to interrupt\\n'\n\
+         read _line\n\
+         printf '\\033]0;codex: working\\007'\n\
+         printf 'TURN STARTED\\n'\n\
          exec sleep 30\n",
         &bus,
     );
-    vogt_engine_server::first_turn::watch(bus, Arc::clone(&session), first_turn_policy())
-        .await
-        .unwrap();
-    let (screen, _) = session.render_screen(0);
-    // The 80-column screen wraps the line, so compare without the breaks.
-    let text = screen.lines.join("");
-    assert!(text.contains("GOT:Vogt started this session"), "{text}");
-    assert!(text.contains("VOGT_SESSION_BRIEF_FILE"), "{text}");
-    assert!(session.blocked().is_none(), "{:?}", session.blocked());
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        vogt_engine_server::first_turn::watch(bus, Arc::clone(&session), first_turn_policy()),
+    )
+    .await
+    .expect("the watch ends")
+    .unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    let mut screen = screen_text(&session);
+    while !screen.contains("TURN STARTED") && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        screen = screen_text(&session);
+    }
+    let blocked = session.blocked();
+    // Killed before any assertion, so a failure reports instead of hanging on
+    // a child still waiting for its Enter.
     session.kill().unwrap();
+    assert!(
+        screen.contains("TURN STARTED"),
+        "the first turn never started: the boot draw was taken for a turn and \
+         the watchdog never pressed Enter; screen: {screen}"
+    );
+    assert!(blocked.is_none(), "{blocked:?}");
+}
+
+/// What a stub that logs every line it reads for three seconds read: `[]` is
+/// a bare Enter, anything else was typed text.
+const LOG_READS: &str = "while read -t 3 -r line; do printf 'READ:[%s]\\n' \"$line\"; done\n\
+                         printf 'READ-WINDOW-OVER\\n'\n\
+                         exec sleep 30\n";
+
+async fn reads_of(session: &vogt_engine_server::pty::Session) -> Vec<String> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !screen_text(session).contains("READ-WINDOW-OVER") {
+        if tokio::time::Instant::now() >= deadline {
+            // Killed first, so the failure reports instead of hanging on the child.
+            let screen = screen_text(session);
+            session.kill().unwrap();
+            panic!("the stub never finished reading: {screen}");
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    screen_text(session)
+        .lines()
+        .filter(|l| l.starts_with("READ:"))
+        .map(str::to_string)
+        .collect()
+}
+
+/// WI-4186 review: a Codex that took its launch prompt but is slow to show a
+/// running turn sits at an empty composer past the turn window. The watchdog
+/// may press Enter there, which an empty composer ignores, but it never types
+/// a prompt into the session.
+#[tokio::test]
+async fn a_codex_slow_to_show_its_turn_is_never_typed_a_second_prompt() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bus = vogt_engine_server::events::EventBus::new(64);
+    let session = spawn_fake_codex(
+        tmp.path(),
+        &format!("#!/bin/bash\nprintf '\\033]0;codex: ready\\007'\nprintf '> '\n{LOG_READS}"),
+        &bus,
+    );
+    vogt_engine_server::first_turn::watch(bus, Arc::clone(&session), first_turn_policy());
+    let reads = reads_of(&session).await;
+    assert!(
+        reads.iter().all(|r| r == "READ:[]"),
+        "typed into a live session: {reads:?}"
+    );
+    assert!(reads.len() <= 1, "more than one Enter: {reads:?}");
+    session.kill().unwrap();
+}
+
+/// WI-4186 review: Claude Code shows no turn-state title, so the watchdog has
+/// no proof its first turn ran and is not started for it at all, autopilot
+/// or not: nothing is typed or pressed into a Claude session.
+#[tokio::test]
+async fn a_claude_session_is_not_watched_so_nothing_is_typed_into_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (base, state, _h) = boot_with_state(first_turn_config()).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    for autopilot in [false, true] {
+        let id = start_briefed_agent(
+            &client,
+            &base,
+            &tmp.path().join(format!("claude-{autopilot}")),
+            "claude",
+            &format!("#!/bin/bash\nprintf '> '\n{LOG_READS}"),
+            autopilot,
+        )
+        .await;
+        let session = state.sessions.get(id).unwrap();
+        let reads = reads_of(&session).await;
+        assert!(reads.is_empty(), "autopilot {autopilot}: {reads:?}");
+        session.kill().unwrap();
+    }
 }
 
 /// WI-4068: a session that never submits its first prompt must not sit in the
