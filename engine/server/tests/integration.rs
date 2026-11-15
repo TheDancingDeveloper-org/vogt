@@ -18460,6 +18460,48 @@ async fn llm_provider_handlers_write_and_remove_the_registry() {
         .contains("test-provider"));
 }
 
+/// WI-3672: a panic while the registry lock was held poisoned it, and every
+/// later `llm_provider_set` answered a bare, unlogged 500.
+#[tokio::test]
+async fn llm_provider_set_survives_a_poisoned_registry_lock() {
+    let tmp = tempfile::tempdir().unwrap();
+    let registry = tmp.path().join("llm-providers.toml");
+    let mut cfg = test_config();
+    cfg.llm_providers_file = Some(registry.clone());
+    cfg.agent_auth_secrets = vogt_engine_server::secret_broker::parse_manifest(
+        "PROVIDER_KEY approved-project PROVIDER_KEY ondemand",
+    )
+    .unwrap();
+    let (base, _state, _guard) = boot_with_state(cfg).await;
+    let _ = std::thread::spawn(|| {
+        let _held = vogt_engine_server::llm_providers::registry_lock()
+            .lock()
+            .unwrap();
+        panic!("poison the registry lock");
+    })
+    .join();
+    let client = reqwest::Client::new();
+    let ok = client
+        .post(format!("{base}/api/llm-providers"))
+        .headers(auth())
+        .json(&provider_request("first", "FIRST_KEY"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ok.status(), StatusCode::OK);
+    // A second provider sharing the env_key is a clear 4xx, never a 500.
+    let dup = client
+        .post(format!("{base}/api/llm-providers"))
+        .headers(auth())
+        .json(&provider_request("second", "FIRST_KEY"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(dup.status(), StatusCode::BAD_REQUEST);
+    let body = dup.text().await.unwrap();
+    assert!(body.contains("env_key"), "{body}");
+}
+
 #[tokio::test]
 async fn llm_provider_handler_refuses_reserved_names_and_manifest_collisions() {
     let tmp = tempfile::tempdir().unwrap();

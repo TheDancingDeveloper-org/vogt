@@ -65,7 +65,7 @@ pub async fn llm_provider_set(
     })?;
     let _guard = crate::llm_providers::registry_lock()
         .lock()
-        .map_err(|_| crate::error::ApiError::Internal("provider registry lock poisoned".into()))?;
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let manifest = live_manifest(&state).map_err(|error| {
         tracing::error!(%error, "failed to compose LLM provider manifest");
         error
@@ -120,7 +120,7 @@ pub async fn llm_provider_remove(
     })?;
     let _guard = crate::llm_providers::registry_lock()
         .lock()
-        .map_err(|_| crate::error::ApiError::Internal("provider registry lock poisoned".into()))?;
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut providers =
         crate::llm_providers::load(path).map_err(crate::error::ApiError::BadRequest)?;
     let before = providers.len();
