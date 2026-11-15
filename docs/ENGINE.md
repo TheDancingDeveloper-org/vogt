@@ -2241,10 +2241,11 @@ engine id (WI-912; the design is `docs/design/session-hibernation.md`).
     (`$XDG_CONFIG_HOME/graft/sessions/<session>/trial-1.token`) is not archived.
     An untracked file with more than one hard link is skipped as `Secret`,
     because its other name may be a token; the session agent logs each
-    skipped symlink and hardlink. In a graft working copy `graft diff` reads
-    through links and `--path` does not narrow it, so when any changed path is
-    a symlink, sits below one, or has more than one link, that path is skipped
-    and the repository keeps no patch (marked truncated). Credential names and stores such as `*.token`, `.ssh/`, `.aws/`, `.kube/`,
+    skipped symlink and hardlink. Both `git diff` and `graft diff` read the
+    work tree (and `graft diff --path` does not narrow a working-copy diff), so
+    when any tracked, staged or graft-changed path is a symlink, sits below
+    one, or has more than one link, that path is skipped and the repository
+    keeps no patch (marked truncated). Credential names and stores such as `*.token`, `.ssh/`, `.aws/`, `.kube/`,
     `credentials`, and dotenv files are excluded even when they are ordinary
     files in the checkout. The stop result carries the `salvage` report
     (`path`, `files`, `bytes`, `repos`), the session summary keeps it, and

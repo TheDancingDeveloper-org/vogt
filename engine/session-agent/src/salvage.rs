@@ -303,10 +303,19 @@ fn plan_git(
     let mut skipped = Vec::new();
     let mut secret = false;
     for path in &changed {
-        if is_secret_path(path) {
+        if !safe_relative(path) || is_secret_path(path) {
             skipped.push(SalvageSkip {
                 path: path.clone(),
                 reason: SkipReason::Secret,
+            });
+            secret = true;
+        } else if let Some(reason) = link_skip(repo, name, path) {
+            // `git diff HEAD` reads the work tree, so a tracked or staged path
+            // that is now a second name for a token's inode would land in the
+            // patch. As on the graft path, the repo then keeps no patch.
+            skipped.push(SalvageSkip {
+                path: path.clone(),
+                reason,
             });
             secret = true;
         }
@@ -753,6 +762,52 @@ mod tests {
             .skipped
             .iter()
             .any(|s| s.path == "notes.txt" && s.reason == SkipReason::Secret));
+    }
+
+    /// Assert the git salvage of `dir` carries no TOKEN bytes, keeps no patch,
+    /// and lists `path` as a Secret skip.
+    fn assert_hardlink_refused(dir: &Path, path: &str) {
+        let outcome = plan(dir, &SalvageLimits::default());
+        assert!(outcome.failed.is_empty(), "{:?}", outcome.failed);
+        let repo = &outcome.upload.repos[0];
+        assert!(!repo.patch.contains("TOKEN"), "{}", repo.patch);
+        assert!(repo.patch.is_empty(), "{}", repo.patch);
+        assert!(repo.truncated);
+        for file in &repo.untracked_files {
+            let bytes = BASE64.decode(&file.bytes).unwrap();
+            assert!(!String::from_utf8_lossy(&bytes).contains("TOKEN"));
+        }
+        assert!(
+            repo.skipped
+                .iter()
+                .any(|s| s.path == path && s.reason == SkipReason::Secret),
+            "{:?}",
+            repo.skipped
+        );
+    }
+
+    #[test]
+    fn a_tracked_file_replaced_by_a_hardlink_is_never_archived() {
+        let dir = fixture("tracked-hardlink");
+        // `git diff HEAD` reads the work tree file, so a tracked file swapped
+        // for a second name of a token would carry the token in the patch.
+        let outside = scratch("tracked-hardlink-outside");
+        fs::write(outside.join("graft.token"), "GRAFT-TOKEN-BYTES\n").unwrap();
+        fs::remove_file(dir.join("keep.txt")).unwrap();
+        fs::hard_link(outside.join("graft.token"), dir.join("keep.txt")).unwrap();
+
+        assert_hardlink_refused(&dir, "keep.txt");
+    }
+
+    #[test]
+    fn a_staged_hardlink_to_a_token_is_never_archived() {
+        let dir = fixture("staged-hardlink");
+        let outside = scratch("staged-hardlink-outside");
+        fs::write(outside.join("graft.token"), "GRAFT-TOKEN-BYTES\n").unwrap();
+        fs::hard_link(outside.join("graft.token"), dir.join("new.txt")).unwrap();
+        git(&dir, &["add", "new.txt"]);
+
+        assert_hardlink_refused(&dir, "new.txt");
     }
 
     /// A stand-in for `graft` that behaves as the real CLI does on a working
