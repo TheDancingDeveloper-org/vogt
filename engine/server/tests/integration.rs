@@ -14479,6 +14479,28 @@ fn client_for(token: &str) -> reqwest::Client {
         .unwrap()
 }
 
+/// WI-4239: `session_ref` is vogt-core's to set. A session token and a
+/// person's token are refused with a 403 on `POST /api/sessions`, as is any
+/// other non-core caller.
+#[tokio::test]
+async fn a_session_or_person_token_cannot_name_a_session_ref() {
+    let (base, _tmp, _guard) = wi983_front_door().await;
+    for (who, token) in [("session", WI983_SESSION), ("person", WI983_PERSON)] {
+        let status = client_for(token)
+            .post(format!("{base}/api/sessions"))
+            .json(&json!({
+                "name": "pod-session",
+                "template": "pod",
+                "session_ref": "ses_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            }))
+            .send()
+            .await
+            .unwrap()
+            .status();
+        assert_eq!(status, reqwest::StatusCode::FORBIDDEN, "{who} token");
+    }
+}
+
 /// WI-983: a permission prompt is answered by a person and nobody else. A
 /// session token, an engine-minted token, the pod token — even one holding
 /// `admin` — and vogt-core's own credential without a person behind it are

@@ -3156,7 +3156,7 @@
         "alive": true,
         "cwd": "<root>/proj",
         "engine_session_id": "eng-parity-1",
-        "id": "ses_0001",
+        "id": "ses_00000000000000000000000001",
         "linked": true,
         "name": "parity",
         "project": "parity"
@@ -3188,7 +3188,7 @@
       "delivery_evidence": "sent, but no turn started and no queued hint showed while Vogt watched; read session_screen",
       "digest": {
         "activity": "idle",
-        "id": "ses_0001",
+        "id": "ses_00000000000000000000000001",
         "name": "parity"
       },
       "engine_session_id": "eng-parity-1",
@@ -3221,7 +3221,7 @@
     "body": {
       "digest": {
         "activity": "idle",
-        "id": "ses_0001",
+        "id": "ses_00000000000000000000000001",
         "name": "parity"
       },
       "engine_session_id": "eng-parity-1",
@@ -3257,7 +3257,7 @@
         "alive": false,
         "cwd": "<root>/proj",
         "engine_session_id": "eng-parity-1",
-        "id": "ses_0001",
+        "id": "ses_00000000000000000000000001",
         "linked": true,
         "name": "parity",
         "project": "parity"
@@ -3270,13 +3270,13 @@
     "body": {
       "session": {
         "activity": "hibernated",
-        "actor": "agent:session:ses_0001",
+        "actor": "agent:session:ses_00000000000000000000000001",
         "alive": false,
         "autopilot": false,
         "autopilot_nudges": 0,
         "cwd": "<root>/proj",
         "engine_session_id": "eng-parity-1",
-        "id": "ses_0001",
+        "id": "ses_00000000000000000000000001",
         "keep_awake": true,
         "linked": true,
         "name": "parity",
@@ -3295,13 +3295,13 @@
     "body": {
       "session": {
         "activity": "hibernated",
-        "actor": "agent:session:ses_0001",
+        "actor": "agent:session:ses_00000000000000000000000001",
         "alive": false,
         "autopilot": false,
         "autopilot_nudges": 0,
         "cwd": "<root>/proj",
         "engine_session_id": "eng-parity-1",
-        "id": "ses_0001",
+        "id": "ses_00000000000000000000000001",
         "keep_awake": true,
         "linked": true,
         "name": "parity",
@@ -3323,7 +3323,7 @@
         "alive": true,
         "cwd": "<root>/proj",
         "engine_session_id": "eng-parity-1",
-        "id": "ses_0001",
+        "id": "ses_00000000000000000000000001",
         "linked": true,
         "name": "parity",
         "project": "parity"
@@ -3452,7 +3452,7 @@
   {
     "body": {
       "engine_session_id": "eng-parity-1",
-      "id": "ses_0001"
+      "id": "ses_00000000000000000000000001"
     },
     "is_error": false,
     "operation": "session.report_blocked"
@@ -3460,7 +3460,7 @@
   {
     "body": {
       "engine_session_id": "eng-parity-1",
-      "id": "ses_0001"
+      "id": "ses_00000000000000000000000001"
     },
     "is_error": false,
     "operation": "session.report_unblocked"
@@ -3511,11 +3511,11 @@
   {
     "body": {
       "session": {
-        "actor": "agent:session:ses_0001",
+        "actor": "agent:session:ses_00000000000000000000000001",
         "alive": false,
         "cwd": "<root>/proj",
         "engine_session_id": "eng-parity-1",
-        "id": "ses_0001",
+        "id": "ses_00000000000000000000000001",
         "linked": true,
         "posture_lost_on_resume": false,
         "project": "parity",
@@ -3532,14 +3532,14 @@
     "body": {
       "session": {
         "activity": "exited",
-        "actor": "agent:session:ses_0001",
+        "actor": "agent:session:ses_00000000000000000000000001",
         "alive": false,
         "autopilot": false,
         "autopilot_nudges": 0,
         "cwd": "<root>/proj",
         "engine_session_id": "eng-parity-1",
         "exit_code": 0,
-        "id": "ses_0001",
+        "id": "ses_00000000000000000000000001",
         "keep_awake": true,
         "linked": true,
         "name": "parity-renamed",
@@ -70009,11 +70009,11 @@
   {
     "body": {
       "session": {
-        "actor": "agent:session:ses_0001",
+        "actor": "agent:session:ses_00000000000000000000000001",
         "alive": false,
         "cwd": "<root>/proj",
         "engine_session_id": "eng-parity-1",
-        "id": "ses_0001",
+        "id": "ses_00000000000000000000000001",
         "linked": true,
         "posture_lost_on_resume": false,
         "project": "parity",
@@ -70387,11 +70387,11 @@
       "tokens": [
         {
           "actor_id": "act_0005",
-          "actor_identity_ref": "agent:session:ses_0001",
+          "actor_identity_ref": "agent:session:ses_00000000000000000000000001",
           "created_at": "2026-01-02T03:04:16Z",
           "id": "tok_0004",
           "kind": "api",
-          "name": "session ses_0001",
+          "name": "session ses_00000000000000000000000001",
           "revoked_at": "2026-01-02T03:04:05Z",
           "revoked_reason": "parity",
           "scopes": [
@@ -70442,11 +70442,11 @@
         },
         {
           "actor_id": "act_0005",
-          "actor_identity_ref": "agent:session:ses_0001",
+          "actor_identity_ref": "agent:session:ses_00000000000000000000000001",
           "created_at": "2026-01-02T03:04:05Z",
           "id": "tok_0003",
           "kind": "api",
-          "name": "session ses_0001",
+          "name": "session ses_00000000000000000000000001",
           "revoked_at": "2026-01-02T03:04:11Z",
           "revoked_reason": "hibernated: parity",
           "scopes": [

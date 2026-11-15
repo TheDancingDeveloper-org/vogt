@@ -429,7 +429,7 @@ mod tests {
                     updated_at: moment(),
                 })?;
                 txn.insert_session(&CodingSession {
-                    id: "ses_0001".into(),
+                    id: "ses_00000000000000000000000001".into(),
                     engine_session_id: "eng-1".into(),
                     project_id: "prj_1".into(),
                     work_item_id: Some("wrk_1".into()),
@@ -446,7 +446,7 @@ mod tests {
                     stopped_at: None,
                 })?;
                 txn.insert_session(&CodingSession {
-                    id: "ses_0002".into(),
+                    id: "ses_00000000000000000000000002".into(),
                     engine_session_id: "eng-2".into(),
                     project_id: "prj_1".into(),
                     work_item_id: None,
@@ -465,7 +465,7 @@ mod tests {
                 Ok(crate::application::writes::WriteOutcome::new(
                     json!({}),
                     "session",
-                    "ses_0001",
+                    "ses_00000000000000000000000001",
                     json!({}),
                     "session.started",
                     json!({}),
@@ -490,7 +490,12 @@ mod tests {
 
     #[test]
     fn a_session_reports_for_itself_onto_its_bound_item() {
-        let principal = Principal::new("agent:session:ses_0001", ActorKind::Agent, "w").unwrap();
+        let principal = Principal::new(
+            "agent:session:ses_00000000000000000000000001",
+            ActorKind::Agent,
+            "w",
+        )
+        .unwrap();
         let built = fresh("self", principal);
         seed(&built);
         let reported = super::report_op(&built, params()).unwrap();
@@ -524,7 +529,12 @@ mod tests {
 
     #[test]
     fn a_session_may_not_report_as_another() {
-        let principal = Principal::new("agent:session:ses_0001", ActorKind::Agent, "w").unwrap();
+        let principal = Principal::new(
+            "agent:session:ses_00000000000000000000000001",
+            ActorKind::Agent,
+            "w",
+        )
+        .unwrap();
         let built = fresh("other", principal);
         seed(&built);
         let mut body = params();
@@ -550,7 +560,12 @@ mod tests {
 
     #[test]
     fn credentials_in_a_report_are_redacted_and_the_sha_is_not() {
-        let principal = Principal::new("agent:session:ses_0001", ActorKind::Agent, "w").unwrap();
+        let principal = Principal::new(
+            "agent:session:ses_00000000000000000000000001",
+            ActorKind::Agent,
+            "w",
+        )
+        .unwrap();
         let built = fresh("redact", principal);
         seed(&built);
         let token = format!("ghp_{}", "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8");

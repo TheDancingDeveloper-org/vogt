@@ -1206,7 +1206,10 @@ def test_a_page_of_hibernated_links_does_not_hide_a_live_unlinked_session(
     assert len(full.sessions) == 50
 
     page = list_sessions(wired, ListSessionsParams(mode="full", limit=50, offset=50))
-    assert [row.id for row in page.sessions] == ["ses_0001", "eng-live"]
+    assert [row.id for row in page.sessions] == [
+        "ses_00000000000000000000000001",
+        "eng-live",
+    ]
     assert page.total == 52 and page.truncated is False
 
 

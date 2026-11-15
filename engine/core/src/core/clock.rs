@@ -131,7 +131,7 @@ pub trait IdFactory {
     fn next(&mut self, prefix: &str) -> String;
 }
 
-/// `{prefix}_{n:04d}`, persisted as sorted JSON. `VOGT_TEST_IDS=sequential`.
+/// `{prefix}_{n:04d}` (`ses_` + 26 digits for sessions), persisted as sorted JSON. `VOGT_TEST_IDS=sequential`.
 #[derive(Debug, Clone)]
 pub struct SequentialIds {
     path: Option<std::path::PathBuf>,
@@ -165,6 +165,11 @@ impl IdFactory for SequentialIds {
             let body = serde_json::to_string(&self.counts).expect("counts are strings and numbers");
             std::fs::write(path, body)
                 .unwrap_or_else(|err| panic!("writing {}: {err}", path.display()));
+        }
+        if prefix == "ses" {
+            // The engine refuses a session_ref that is not `ses_` + 26 ULID
+            // characters, so a sequential session id is zero-padded to that.
+            return format!("ses_{issued:026}");
         }
         format!("{prefix}_{issued:04}")
     }

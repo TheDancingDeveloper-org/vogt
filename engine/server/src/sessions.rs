@@ -12,6 +12,18 @@ use vogt_engine_contract::{
 
 use crate::secret_broker::SecretBroker;
 
+/// A stored `session_ref` a wake may reuse. A record saved before WI-4230 was
+/// never checked, so a malformed ref is dropped with a warning: the wake goes
+/// ahead without one rather than failing.
+pub(crate) fn checked_session_ref(id: Uuid, stored: Option<&str>) -> Option<String> {
+    let stored = stored?;
+    if crate::api::is_core_session_id(stored) {
+        return Some(stored.to_string());
+    }
+    tracing::warn!(session = %id, "stored session_ref is not a core session id; waking without it");
+    None
+}
+
 use crate::{
     agent_cli,
     config::Config,
@@ -3283,7 +3295,7 @@ impl SessionRegistry {
             policy: record.policy.clone(),
             role: record.role,
             work_item: record.work_item.clone(),
-            session_ref: record.session_ref.clone(),
+            session_ref: checked_session_ref(record.id, record.session_ref.as_deref()),
             // A wake returns to the worktree the first start already cut; it
             // does not cut another (WI-1298).
             worktree: None,
@@ -5549,5 +5561,27 @@ mod tests {
         rows.sort_by(super::session_list_order);
         let ids: Vec<u128> = rows.iter().map(|s| s.id.as_u128()).collect();
         assert_eq!(ids, vec![1, 3, 4, 5, 2]);
+    }
+}
+
+#[cfg(test)]
+mod session_ref_wake_tests {
+    use super::*;
+
+    #[test]
+    fn a_wake_reuses_a_well_formed_ref() {
+        let good = "ses_01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        assert_eq!(
+            checked_session_ref(Uuid::nil(), Some(good)).as_deref(),
+            Some(good)
+        );
+        assert_eq!(checked_session_ref(Uuid::nil(), None), None);
+    }
+
+    #[test]
+    fn a_wake_drops_a_malformed_stored_ref() {
+        for bad in ["ses_0001", "../x", "ses_01ARZ3NDEKTSV4RRFFQ69G5FAI", ""] {
+            assert_eq!(checked_session_ref(Uuid::nil(), Some(bad)), None, "{bad}");
+        }
     }
 }

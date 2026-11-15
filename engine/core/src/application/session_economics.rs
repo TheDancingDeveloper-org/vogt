@@ -288,7 +288,7 @@ pub(crate) mod tests {
                     Moment::from_unix(1_700_000_000, 0),
                 ))?;
                 txn.insert_session(&CodingSession {
-                    id: "ses_0001".to_string(),
+                    id: "ses_00000000000000000000000001".to_string(),
                     engine_session_id: "eng-1".to_string(),
                     project_id: "prj_1".to_string(),
                     work_item_id: None,
@@ -307,7 +307,7 @@ pub(crate) mod tests {
                 Ok(WriteOutcome {
                     result: json!({}),
                     entity_kind: "session".to_string(),
-                    entity_id: "ses_0001".to_string(),
+                    entity_id: "ses_00000000000000000000000001".to_string(),
                     payload: json!({}),
                     event_kind: "session.started".to_string(),
                     summary: json!({}),
@@ -349,7 +349,12 @@ pub(crate) mod tests {
             Some(engine),
         );
         seed(&built);
-        let result = run(&built, "session.economics", json!({"id": "ses_0001"})).unwrap();
+        let result = run(
+            &built,
+            "session.economics",
+            json!({"id": "ses_00000000000000000000000001"}),
+        )
+        .unwrap();
         assert_eq!(result["engine_session_id"], "eng-1");
         assert_eq!(result["basis"], "engine-id");
         assert_eq!(result["agent"], "claude");
@@ -378,7 +383,12 @@ pub(crate) mod tests {
             Some(engine),
         );
         seed(&built);
-        let result = run(&built, "session.economics", json!({"id": "ses_0001"})).unwrap();
+        let result = run(
+            &built,
+            "session.economics",
+            json!({"id": "ses_00000000000000000000000001"}),
+        )
+        .unwrap();
         assert_eq!(result["turns"], 0);
         assert!(result["detail"]
             .as_str()
@@ -415,7 +425,12 @@ pub(crate) mod tests {
     fn unread_sessions_say_why_with_an_empty_line() {
         let off = built("off", Vec::new(), None);
         seed(&off);
-        let result = run(&off, "session.economics", json!({"id": "ses_0001"})).unwrap();
+        let result = run(
+            &off,
+            "session.economics",
+            json!({"id": "ses_00000000000000000000000001"}),
+        )
+        .unwrap();
         assert_eq!(
             result["detail"],
             "session_transcript_roots is empty: reading is off"
@@ -426,7 +441,12 @@ pub(crate) mod tests {
             "conversation": {"agent": "opencode", "id": "oc"}}));
         let other = built("opencode", Vec::new(), Some(opencode));
         seed(&other);
-        let result = run(&other, "session.economics", json!({"id": "ses_0001"})).unwrap();
+        let result = run(
+            &other,
+            "session.economics",
+            json!({"id": "ses_00000000000000000000000001"}),
+        )
+        .unwrap();
         assert_eq!(result["agent"], "opencode");
         assert_eq!(result["detail"], "opencode transcripts are not metered");
     }

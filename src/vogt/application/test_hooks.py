@@ -63,7 +63,12 @@ class SequentialIds:
         if self._path is not None:
             self._path.parent.mkdir(parents=True, exist_ok=True)
             self._path.write_text(json.dumps(self._counts, sort_keys=True))
-        return f"{prefix}_{self._counts[prefix]:04d}"
+        count = self._counts[prefix]
+        if prefix == "ses":
+            # The engine refuses a session_ref that is not `ses_` + 26 ULID
+            # characters, so a sequential session id is zero-padded to that.
+            return f"ses_{count:026d}"
+        return f"{prefix}_{count:04d}"
 
 
 def clock_from_env(environ: os._Environ[str] | None = None) -> Clock | None:

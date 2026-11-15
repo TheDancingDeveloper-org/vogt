@@ -290,7 +290,7 @@
   {
     "actor_id": "act_0001",
     "at": "2026-01-02T03:04:06+00:00",
-    "entity_id": "ses_0001",
+    "entity_id": "ses_00000000000000000000000001",
     "entity_kind": "session",
     "id": "aud_0025",
     "operation": "session.start",
@@ -314,7 +314,7 @@
   {
     "actor_id": "act_0001",
     "at": "2026-01-02T03:04:05+00:00",
-    "entity_id": "ses_0001",
+    "entity_id": "ses_00000000000000000000000001",
     "entity_kind": "session",
     "id": "aud_0027",
     "operation": "session.input",
@@ -326,7 +326,7 @@
   {
     "actor_id": "act_0001",
     "at": "2026-01-02T03:04:05+00:00",
-    "entity_id": "ses_0001",
+    "entity_id": "ses_00000000000000000000000001",
     "entity_kind": "session",
     "id": "aud_0028",
     "operation": "session.answer",
@@ -338,7 +338,7 @@
   {
     "actor_id": "act_0001",
     "at": "2026-01-02T03:04:06+00:00",
-    "entity_id": "ses_0001",
+    "entity_id": "ses_00000000000000000000000001",
     "entity_kind": "session",
     "id": "aud_0029",
     "operation": "session.hibernate",
@@ -350,7 +350,7 @@
   {
     "actor_id": "act_0001",
     "at": "2026-01-02T03:04:05+00:00",
-    "entity_id": "ses_0001",
+    "entity_id": "ses_00000000000000000000000001",
     "entity_kind": "session",
     "id": "aud_0030",
     "operation": "session.keep_awake",
@@ -362,7 +362,7 @@
   {
     "actor_id": "act_0001",
     "at": "2026-01-02T03:04:05+00:00",
-    "entity_id": "ses_0001",
+    "entity_id": "ses_00000000000000000000000001",
     "entity_kind": "session",
     "id": "aud_0031",
     "operation": "session.set_role",
@@ -374,7 +374,7 @@
   {
     "actor_id": "act_0001",
     "at": "2026-01-02T03:04:07+00:00",
-    "entity_id": "ses_0001",
+    "entity_id": "ses_00000000000000000000000001",
     "entity_kind": "session",
     "id": "aud_0032",
     "operation": "session.wake",
@@ -422,7 +422,7 @@
   {
     "actor_id": "act_0001",
     "at": "2026-01-02T03:04:05+00:00",
-    "entity_id": "ses_0001",
+    "entity_id": "ses_00000000000000000000000001",
     "entity_kind": "session",
     "id": "aud_0036",
     "operation": "session.report_blocked",
@@ -434,7 +434,7 @@
   {
     "actor_id": "act_0001",
     "at": "2026-01-02T03:04:05+00:00",
-    "entity_id": "ses_0001",
+    "entity_id": "ses_00000000000000000000000001",
     "entity_kind": "session",
     "id": "aud_0037",
     "operation": "session.report_unblocked",
@@ -446,7 +446,7 @@
   {
     "actor_id": "act_0001",
     "at": "2026-01-02T03:04:05+00:00",
-    "entity_id": "ses_0001",
+    "entity_id": "ses_00000000000000000000000001",
     "entity_kind": "session",
     "id": "aud_0038",
     "operation": "session.commit_for",
@@ -458,7 +458,7 @@
   {
     "actor_id": "act_0001",
     "at": "2026-01-02T03:04:06+00:00",
-    "entity_id": "ses_0001",
+    "entity_id": "ses_00000000000000000000000001",
     "entity_kind": "session",
     "id": "aud_0039",
     "operation": "session.stop",
@@ -470,7 +470,7 @@
   {
     "actor_id": "act_0001",
     "at": "2026-01-02T03:04:05+00:00",
-    "entity_id": "ses_0001",
+    "entity_id": "ses_00000000000000000000000001",
     "entity_kind": "session",
     "id": "aud_0040",
     "operation": "session.rename",
@@ -482,7 +482,7 @@
   {
     "actor_id": "act_0001",
     "at": "2026-01-02T03:04:06+00:00",
-    "entity_id": "ses_0001",
+    "entity_id": "ses_00000000000000000000000001",
     "entity_kind": "session",
     "id": "aud_0041",
     "operation": "session.remove",
