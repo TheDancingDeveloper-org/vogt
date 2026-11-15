@@ -930,7 +930,7 @@ fn bearer(h: &HeaderMap) -> Option<&[u8]> {
 /// touched, and a config that is not a JSON object is passed through as is.
 fn with_onboarding_config(
     mut files: Vec<(String, Vec<u8>)>,
-    work_dir: &str,
+    work_dirs: &[&str],
 ) -> Vec<(String, Vec<u8>)> {
     if !files.iter().any(|(path, _)| path == ".credentials.json") {
         return files;
@@ -960,7 +960,11 @@ fn with_onboarding_config(
     // project you trust?", and autopilot's nudge answers its default, "No,
     // exit" (WI-3355).
     let mut value = serde_json::Value::Object(map);
-    changed |= crate::claude_config::accept_in_config(&mut value, work_dir);
+    // The workspace root too: a `CLAUDE.md` there imports from outside its
+    // own directory, so the approval must not depend on the cwd alone.
+    for dir in work_dirs {
+        changed |= crate::claude_config::accept_in_config(&mut value, dir);
+    }
     if !changed {
         return files;
     }
@@ -1016,6 +1020,7 @@ pub async fn bootstrap(
     // The pod's clone root, for the Claude project-trust entry (WI-3355): it
     // moves under the workspace tree when that is on (WI-3374).
     let pod_work_dir = cfg.work_dir();
+    let workspace_root = state.config.workspace_root.to_string_lossy().into_owned();
     let Some(source) = state.agent_auth.take_source(id).await else {
         return (StatusCode::BAD_REQUEST, "session source is unavailable").into_response();
     };
@@ -1186,7 +1191,9 @@ pub async fn bootstrap(
             .sessions
             .secret_broker()
             .bundle_snapshot(account, conversation.as_deref().unwrap_or(""));
-        for (path, bytes) in with_onboarding_config(files, &pod_work_dir) {
+        for (path, bytes) in
+            with_onboarding_config(files, &[pod_work_dir.as_str(), workspace_root.as_str()])
+        {
             // Claude keeps `<conversation>.jsonl`; a Codex rollout is
             // `rollout-<stamp>-<conversation>.jsonl`. Both must count, or a
             // woken Codex pod starts a fresh conversation and loses its
@@ -2114,5 +2121,23 @@ mod tests {
             "sessions/2026/11/09/conv.jsonl",
             "conv"
         ));
+    }
+
+    /// WI-2000: an alternate account's bundle gets trust and the external
+    /// import approval for the checkout and for the workspace root.
+    #[test]
+    fn the_bundle_config_approves_every_given_directory() {
+        let files = vec![(".credentials.json".to_string(), b"{}".to_vec())];
+        let files = with_onboarding_config(files, &["/work", "/home/a/Working"]);
+        let config = files.iter().find(|(p, _)| p == ".claude.json").unwrap();
+        let config: serde_json::Value = serde_json::from_slice(&config.1).unwrap();
+        for dir in ["/work", "/home/a/Working"] {
+            let project = &config["projects"][dir];
+            assert_eq!(project["hasTrustDialogAccepted"], true, "{dir}: {config}");
+            assert_eq!(
+                project["hasClaudeMdExternalIncludesApproved"], true,
+                "{dir}: {config}"
+            );
+        }
     }
 }
