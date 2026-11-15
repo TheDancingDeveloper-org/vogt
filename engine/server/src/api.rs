@@ -450,6 +450,55 @@ fn require_source_authority(
     }
 }
 
+/// Whether `value` is a core session id: `ses_` and 26 Crockford base32
+/// characters (a ULID). The id names a token directory and graft metadata, so
+/// nothing else may reach them.
+fn is_core_session_id(value: &str) -> bool {
+    const ALPHABET: &[u8] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+    value
+        .strip_prefix("ses_")
+        .is_some_and(|ulid| ulid.len() == 26 && ulid.bytes().all(|b| ALPHABET.contains(&b)))
+}
+
+/// `session_ref` binds the pod's graft token to a core session id (WI-4230).
+/// The engine cannot check who owns an id, so only vogt-core, which allocates
+/// the ids and starts each session for its own id, may name one; it must be a
+/// well-formed core session id. Any other caller is refused with a 403.
+fn require_session_ref_authority(
+    identity: Option<&crate::auth::AuthorizedIdentity>,
+    session_ref: Option<&str>,
+) -> crate::error::Result<()> {
+    let Some(session_ref) = session_ref else {
+        return Ok(());
+    };
+    match identity {
+        Some(identity) if identity.stack_secret => {
+            if is_core_session_id(session_ref) {
+                Ok(())
+            } else {
+                Err(crate::error::ApiError::BadRequest(
+                    "session_ref must be a core session id: ses_ and 26 ULID characters".into(),
+                ))
+            }
+        }
+        Some(identity) => {
+            tracing::warn!(
+                target: "vogt::audit",
+                event = "session.session_ref",
+                outcome = "refused",
+                caller = %identity.name,
+                "session_ref refused"
+            );
+            Err(crate::error::ApiError::Forbidden(
+                "session_ref is set by vogt-core when it starts a session; \
+                 start the session through vogt-core"
+                    .into(),
+            ))
+        }
+        None => Err(crate::error::ApiError::Unauthorized),
+    }
+}
+
 /// Nominate a session as oversight, or make it a worker again (WI-957).
 /// Becoming oversight pins it awake too. Only a person, break-glass or
 /// vogt-core (`require_role_authority`).
@@ -1019,6 +1068,7 @@ pub async fn create_session(
         require_role_authority(identity.as_deref(), "(new)", spec.role)?;
     }
     require_source_authority(identity.as_deref(), spec.source.as_ref())?;
+    require_session_ref_authority(identity.as_deref(), spec.session_ref.as_deref())?;
     let s = state.sessions.create_launched(spec).await?;
     Ok(Json(s.summary()))
 }
