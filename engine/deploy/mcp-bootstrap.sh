@@ -897,6 +897,8 @@ install_readonly_servers() {
 # session's own ~/.codex/config.toml, which the session can edit, so it is a
 # convenience for autonomous work and not a security boundary; the engine's
 # person gate (WI-1355) is the boundary.
+# Nothing is written for a server with no [mcp_servers.<name>] table: run
+# `codex mcp add` first (install_vogt_codex / install_cadastre_codex do).
 readonly CODEX_SCHEMA_MAX_BYTES="${CODEX_SCHEMA_MAX_BYTES:-200000}"
 
 codex_driven_session() {
@@ -912,7 +914,7 @@ codex_driven_session() {
     (
         flock 9
         CODEX_CONFIG="$config" CODEX_SCHEMA_MAX="$CODEX_SCHEMA_MAX_BYTES" python3 - <<'PY'
-import os, sys, tempfile
+import os, re, sys, tempfile
 
 path = os.environ["CODEX_CONFIG"]
 schema_max = int(os.environ["CODEX_SCHEMA_MAX"])
@@ -925,10 +927,11 @@ except OSError as exc:
     print(f"mcp-bootstrap: cannot read {path} ({exc}); left alone", file=sys.stderr)
     sys.exit(1)
 
+parsed_existing: dict = {}
 if text.strip():
     try:
         import tomllib
-        tomllib.loads(text)
+        parsed_existing = tomllib.loads(text)
     except tomllib.TOMLDecodeError as exc:
         print(
             f"mcp-bootstrap: {path} is not valid TOML ({exc}); left alone",
@@ -977,11 +980,19 @@ def render(rows: list[str]) -> str:
 
 def header_line(row: str) -> bool:
     # A value such as terminal_title = ["agent-state"] is not a table header.
-    text_row = row.lstrip()
-    return text_row.startswith("[") and '"' not in text_row.split("]", 1)[0]
+    # Quoted segments are allowed (a header may be [a."b"]); a bare key name
+    # or a value never starts with "[" followed by only key characters.
+    return re.match(
+        r"""\s*\[\[?\s*[\w.\-"' ]+\]\]?\s*(#.*)?$""", row.rstrip("\n")
+    ) is not None
 
 lines = text.splitlines(keepends=True)
-existing_headers = {row.strip() for row in lines}
+# Which per-tool tables exist is read from the parsed TOML, not from header
+# text: an operator may have written the table with a quoted header, dotted
+# keys or an inline table, and a second copy would stop Codex parsing the file.
+existing_vogt_tools = (
+    parsed_existing.get("mcp_servers", {}).get("vogt", {}).get("tools", {})
+)
 out: list[str] = []
 index = 0
 seen_tables: set[str] = set()
@@ -1043,6 +1054,8 @@ while index < len(lines):
                 ("startup_timeout_sec", VOGT_STARTUP_TIMEOUT),
             ):
                 row = timeout_rows[key]
+                # A string value ("900") is invalid for Codex: it counts as 0
+                # and the row is replaced with the wanted value.
                 try:
                     value = float(row.split("=", 1)[1].split("#", 1)[0]) if row else 0
                 except ValueError:
@@ -1072,7 +1085,7 @@ while index < len(lines):
             # shift on the next run.
             for tool in VOGT_SELF_TOOLS:
                 header = f"[mcp_servers.vogt.tools.{tool}]"
-                if header not in existing_headers:
+                if tool not in existing_vogt_tools:
                     out.extend(["\n", header + "\n", 'approval_mode = "approve"\n'])
         if index < len(lines) and header_line(lines[index]):
             out.append("\n")
@@ -1110,6 +1123,16 @@ else:
     new = render(out)
 
 if new == text:
+    sys.exit(0)
+# Validate what is about to be written, not only what was read: a rewrite that
+# does not parse would stop Codex starting for every session.
+try:
+    tomllib.loads(new)
+except tomllib.TOMLDecodeError as exc:
+    print(
+        f"mcp-bootstrap: rewritten {path} would not parse ({exc}); left alone",
+        file=sys.stderr,
+    )
     sys.exit(0)
 directory = os.path.dirname(path) or "."
 fd, tmp = tempfile.mkstemp(prefix=".config.toml.", dir=directory)
