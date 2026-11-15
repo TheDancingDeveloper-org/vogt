@@ -629,15 +629,11 @@ impl SessionRegistry {
                 },
                 {
                     // A pod is salvaged when the session's latest report
-                    // covers it (`pod_salvage::covers_pod`). A clean stop with
-                    // nothing to save leaves no record, so that pod is kept.
+                    // covers it (`pod_salvage::covers_pod`): an archive, or the
+                    // marker a clean stop with nothing to save leaves.
                     let state_dir = self.cfg.state_dir.clone();
-                    let weak = Arc::downgrade(self);
-                    Arc::new(move |id, created| {
-                        let recorded = weak
-                            .upgrade()
-                            .and_then(|m| m.records.get(&id).and_then(|r| r.salvage.clone()));
-                        crate::pod_salvage::covers_pod(&state_dir, id, created, recorded.as_ref())
+                    Arc::new(move |id, created, uid: Option<&str>| {
+                        crate::pod_salvage::covers_pod(&state_dir, id, created, uid)
                     })
                 },
             )),
@@ -941,6 +937,20 @@ impl SessionRegistry {
                     files = report.files,
                     "salvaged the session pod's uncommitted work");
             }
+            if !report.is_failed() && report.path.is_none() {
+                // A clean stop with nothing to save leaves no archive; the
+                // marker lets the reaper show this pod salvaged (WI-4237).
+                let uid = self.pod_uid_of(id).await;
+                if let Err(e) = crate::pod_salvage::mark_nothing_to_save(
+                    &self.cfg.state_dir,
+                    id,
+                    uid.as_deref(),
+                    time::OffsetDateTime::now_utc(),
+                ) {
+                    tracing::warn!(session = %id, error = %e,
+                        "could not write the nothing-to-save marker; the pod is kept if orphaned");
+                }
+            }
             session.set_salvage(report.clone());
             if let Some(mut record) = self.records.get_mut(&id) {
                 record.salvage = Some(report.clone());
@@ -953,6 +963,16 @@ impl SessionRegistry {
             }
         }
         report
+    }
+
+    /// The uid of the session's pod, from the cluster; `None` when it cannot
+    /// be listed (the marker then matches on time alone).
+    async fn pod_uid_of(&self, id: Uuid) -> Option<String> {
+        let launcher = self.pod_launcher().ok()?;
+        let pods = launcher.list().await.ok()?;
+        pods.iter()
+            .find(|p| crate::pod_backend::session_id_from_pod(p) == Some(id))
+            .and_then(|p| p.metadata.uid.clone())
     }
 
     /// Record an archive a pod uploaded (called from the upload route).
