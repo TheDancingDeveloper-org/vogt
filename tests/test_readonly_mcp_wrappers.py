@@ -1114,3 +1114,74 @@ def test_vogt_table_gets_timeouts_and_exactly_the_self_tool_approvals(
     vogt = tomllib.loads(config.read_text(encoding="utf-8"))["mcp_servers"]["vogt"]
     assert vogt["tool_timeout_sec"] == 900
     assert vogt["tools"]["work_comment"] == {"approval_mode": "prompt"}
+
+
+_VOGT_BASE = '[mcp_servers.vogt]\ncommand = "/bin/vogt"\n'
+
+
+@pytest.mark.skipif(
+    shutil.which("python3") is None or shutil.which("flock") is None,
+    reason="the Codex config rewrite needs python3 and flock",
+)
+@pytest.mark.parametrize(
+    "extra",
+    [
+        # Each of these made the old script emit a duplicate table, so Codex
+        # could not parse the file (WI-4262).
+        'tools.work_comment.approval_mode = "prompt"\n',
+        'tools = { work_comment = { approval_mode = "prompt" } }\n',
+    ],
+    ids=["dotted-key", "inline-table"],
+)
+def test_existing_per_tool_approval_in_any_syntax_is_not_duplicated(
+    tmp_path: Path, extra: str
+) -> None:
+    import tomllib
+
+    config = tmp_path / "codex" / "config.toml"
+    config.parent.mkdir()
+    config.write_text(_VOGT_BASE + extra, encoding="utf-8")
+    proc = _codex_bootstrap(tmp_path, {})
+    assert proc.returncode == 0, proc.stderr
+    text = config.read_text(encoding="utf-8")
+    parsed = tomllib.loads(text)  # a duplicate table would raise here
+    tools = parsed["mcp_servers"]["vogt"]["tools"]
+    assert tools["work_comment"] == {"approval_mode": "prompt"}
+
+
+@pytest.mark.skipif(
+    shutil.which("python3") is None or shutil.which("flock") is None,
+    reason="the Codex config rewrite needs python3 and flock",
+)
+def test_quoted_header_per_tool_table_is_not_duplicated(tmp_path: Path) -> None:
+    import tomllib
+
+    config = tmp_path / "codex" / "config.toml"
+    config.parent.mkdir()
+    config.write_text(
+        _VOGT_BASE
+        + '\n[mcp_servers.vogt.tools."work_comment"]\napproval_mode = "prompt"\n',
+        encoding="utf-8",
+    )
+    proc = _codex_bootstrap(tmp_path, {})
+    assert proc.returncode == 0, proc.stderr
+    parsed = tomllib.loads(config.read_text(encoding="utf-8"))
+    tools = parsed["mcp_servers"]["vogt"]["tools"]
+    assert tools["work_comment"] == {"approval_mode": "prompt"}
+
+
+@pytest.mark.skipif(
+    shutil.which("python3") is None or shutil.which("flock") is None,
+    reason="the Codex config rewrite needs python3 and flock",
+)
+def test_malformed_existing_config_is_left_alone_and_exits_zero(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "codex" / "config.toml"
+    config.parent.mkdir()
+    bad = _VOGT_BASE + "this is = = not toml\n"
+    config.write_text(bad, encoding="utf-8")
+    proc = _codex_bootstrap(tmp_path, {})
+    assert proc.returncode == 0, proc.stderr
+    assert config.read_text(encoding="utf-8") == bad
+    assert "left alone" in proc.stderr
