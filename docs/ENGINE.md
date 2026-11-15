@@ -5273,6 +5273,24 @@ A deployment that serves `session.last_reply` for a pod Codex points
 `VOGT_SESSION_TRANSCRIPT_ROOTS["codex"]` at that `$CODEX_HOME/sessions` — the
 engine's own root, where the write-back lands, not any one pod's.
 
+**Dev admin token for oversight (WI-4279).** An oversight session gets a
+vogt-dev admin token by minting it, not by `fetch`: the driven-session policy's
+*Dev Admin Token Lifecycle* exception lets it run `vogt token issue` and
+`vogt token revoke` inside the vogt-dev pod, **dev lane only**. Every Claude
+launch gets the same settings file, workers included, so the exception holds
+only once the session has proved its role with engine output run in its own
+transcript: an `auth_whoami` result naming `agent:session:<id>` (the engine
+reads it from the session token) and a `session_list` row for that same id
+with `role` `oversight`. A worker has neither, so it can't use the exception.
+An issue needs `--expires-in-days 1` (the TTL is never longer), scopes from
+`read`, `work.write`, `project.write`, `admin`, and `--actor
+agent:oversight-<name>`. Capture the token without printing it: create a 0600
+file `$f`, run `vogt --json token issue ... | jq -r .secret > "$f"`, and set
+`VOGT_TOKEN_FILE="$f"`. Revoke the token with `vogt token revoke` once
+`tests/acceptance` has run, then delete the file. Prod token issue stays
+person-only; no manifest line or prod path is added. See
+`docs/design/driven-session-permissions.md`.
+
 **Approved actions (WI-2331, design only).** A proposed extension of the
 grant pattern from credentials to engine-executed, person-approved
 infrastructure actions (`vogt-agent-auth request`). Nothing is implemented;

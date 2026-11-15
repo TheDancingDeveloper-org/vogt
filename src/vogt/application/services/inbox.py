@@ -16,7 +16,12 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, cast
 
 from vogt.adapters.engine import EngineUnavailable
-from vogt.adapters.engine.client import EngineApproval, EngineBlocked, EngineSession
+from vogt.adapters.engine.client import (
+    EngineApproval,
+    EngineBlocked,
+    EngineHibernateDeferral,
+    EngineSession,
+)
 from vogt.adapters.forge import KIND_CHECK, KIND_NOTIFICATION
 from vogt.adapters.forge.kinds import (
     COLLECTOR_CHECKS,
@@ -602,6 +607,19 @@ def _collect_live(
                             work_label=session.work_item,
                         )
                     )
+                if session.hibernate_deferred is not None and session.alive:
+                    entries.append(
+                        _hibernate_deferred_entry(
+                            ctx,
+                            session.id,
+                            session.name,
+                            session.hibernate_deferred,
+                            view.session_by_engine_id(session.id),
+                            projects,
+                            view=view,
+                            work_label=session.work_item,
+                        )
+                    )
                 if session.activity not in (
                     "waiting-for-input",
                     "awaiting-approval",
@@ -917,6 +935,59 @@ def _blocked_entry(
             f"{ref} session {name or session_id} is blocked on you"
             if ref
             else f"Session {name or session_id} is blocked on you"
+        ),
+        summary=summary,
+        project_slug=None if project is None else project.slug,
+        session_id=session_id,
+        work_item_ref=ref,
+        source_subject_key=session_id,
+        trust_state="unverified",
+        freshness="live",
+        provisional=True,
+        action=InboxAction(kind="session", session_id=session_id),
+        **_actor_fields(SYSTEM_ACTOR),
+    )
+
+
+def _hibernate_deferred_entry(
+    ctx: AppContext,
+    session_id: str,
+    name: str,
+    deferred: EngineHibernateDeferral,
+    declared: CodingSession | None,
+    projects: dict[str, Project],
+    *,
+    view: ReadView,
+    work_label: str | None = None,
+) -> InboxEntry:
+    """A live session the idle policy could not hibernate (WI-4274).
+
+    One entry per session while `hibernate_deferred` is set; it is built from
+    live engine state, so it goes when the field clears. The reason is the
+    engine's, shown verbatim.
+    """
+    project = None if declared is None else projects.get(declared.project_id)
+    ref = _bound_ref(view, declared, work_label)
+    label = name or session_id
+    retry = (
+        "Retries are paused until the session's work changes"
+        if deferred.paused
+        else "It retries with backoff"
+    )
+    summary = (
+        f"Hibernation deferred ({deferred.failures} in a row): {deferred.reason}. "
+        f"{retry}; hibernate with force=true overrides."
+    )[:1000]
+    return InboxEntry(
+        entry_key=f"agent:session:{session_id}:hibernate_deferred",
+        source=AGENT_KIND,
+        kind="session.hibernate_deferred",
+        occurred_at=_when(deferred.at) or ctx.clock(),
+        observed_at=None,
+        title=(
+            f"{ref} session {label} could not hibernate"
+            if ref
+            else f"Session {label} could not hibernate"
         ),
         summary=summary,
         project_slug=None if project is None else project.slug,
