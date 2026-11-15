@@ -2239,7 +2239,9 @@ engine id (WI-912; the design is `docs/design/session-hibernation.md`).
     service-account mount (`/var/run/secrets/kubernetes.io/serviceaccount`) or
     the per-session graft token path
     (`$XDG_CONFIG_HOME/graft/sessions/<session>/trial-1.token`) is not archived.
-    Credential names and stores such as `*.token`, `.ssh/`, `.aws/`, `.kube/`,
+    An untracked file with more than one hard link is skipped as `Secret`,
+    because its other name may be a token; the session agent logs each
+    skipped symlink and hardlink. Credential names and stores such as `*.token`, `.ssh/`, `.aws/`, `.kube/`,
     `credentials`, and dotenv files are excluded even when they are ordinary
     files in the checkout. The stop result carries the `salvage` report
     (`path`, `files`, `bytes`, `repos`), the session summary keeps it, and
