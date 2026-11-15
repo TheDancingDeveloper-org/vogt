@@ -39,6 +39,20 @@ _TOOL_CACHE: weakref.WeakKeyDictionary[OperationRegistry, list[McpTool]] = (
 )
 
 
+#: A mutating tool whose name has one of these words destroys or revokes
+#: something. Mirrored in engine/core/src/adapters/mcp/framing.rs.
+_DESTRUCTIVE_WORDS = frozenset({"remove", "stop", "kill", "delete", "revoke"})
+
+
+def _annotations(name: str, mutating: bool) -> dict[str, bool]:
+    """MCP tool annotations. A client may skip its approval prompt only for
+    `readOnlyHint`, so it is set only for operations that do not mutate."""
+    annotations = {"readOnlyHint": not mutating, "openWorldHint": False}
+    if mutating and _DESTRUCTIVE_WORDS.intersection(name.split("_")):
+        annotations["destructiveHint"] = True
+    return annotations
+
+
 @dataclass(frozen=True)
 class McpTool:
     """One entry of `tools/list`."""
@@ -55,6 +69,7 @@ class McpTool:
             "name": self.name,
             "description": self.description,
             "inputSchema": self.input_schema,
+            "annotations": _annotations(self.name, self.mutating),
         }
 
 

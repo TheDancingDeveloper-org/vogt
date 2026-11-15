@@ -357,11 +357,26 @@ impl<'a, G: ToolGrant> Dispatcher<'a, G> {
 
 /// The MCP `Tool` shape.
 fn tool_wire(operation: &Operation) -> Value {
+    let name = operation.mcp_tool_name();
+    // A client may skip its approval prompt only for `readOnlyHint`, so it is
+    // set only for operations that do not mutate. Mirrors surface.py.
+    let mut annotations = json!({
+        "readOnlyHint": !operation.mutating,
+        "openWorldHint": false,
+    });
+    if operation.mutating
+        && name
+            .split('_')
+            .any(|word| matches!(word, "remove" | "stop" | "kill" | "delete" | "revoke"))
+    {
+        annotations["destructiveHint"] = json!(true);
+    }
     json!({
-        "name": operation.mcp_tool_name(),
+        "name": name,
         "description": operation.summary,
         "inputSchema": crate::registry::params_schema_for(operation.name)
             .expect("validate_schemas guarantees a schema for every operation"),
+        "annotations": annotations,
     })
 }
 

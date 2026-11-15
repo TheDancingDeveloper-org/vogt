@@ -952,6 +952,20 @@ APPROVED_SERVERS = (
     "grafana-ro",
 )
 APPROVAL_ROW = 'default_tools_approval_mode = "approve"\n'
+# Vogt's own MCP calls: Codex cuts a tool call at 300 s unless told otherwise,
+# and the wait tools block longer. Only raised, never lowered (WI-1574).
+VOGT_TOOL_TIMEOUT = 660
+VOGT_STARTUP_TIMEOUT = 30
+# The session-self tools get an explicit per-tool approval, so they stay
+# pre-approved even if the server-wide default above is ever narrowed. Exactly
+# these five and no others: the session's token scope is the real guard.
+VOGT_SELF_TOOLS = (
+    "session_bind_work",
+    "session_report",
+    "session_report_blocked",
+    "session_report_unblocked",
+    "work_comment",
+)
 
 def key_of(row: str) -> str:
     head = row.split("#", 1)[0]
@@ -967,6 +981,7 @@ def header_line(row: str) -> bool:
     return text_row.startswith("[") and '"' not in text_row.split("]", 1)[0]
 
 lines = text.splitlines(keepends=True)
+existing_headers = {row.strip() for row in lines}
 out: list[str] = []
 index = 0
 seen_tables: set[str] = set()
@@ -1005,10 +1020,13 @@ while index < len(lines):
         index += 1
         present = None
         approval = False
+        timeout_rows = {"tool_timeout_sec": None, "startup_timeout_sec": None}
         while index < len(lines) and not header_line(lines[index]):
             row = lines[index]
             if server in SCHEMA_SERVERS and key_of(row) == "tool_input_schema_max_bytes":
                 present = row
+            elif server == "vogt" and key_of(row) in timeout_rows:
+                timeout_rows[key_of(row)] = row
             else:
                 approval = approval or key_of(row) == "default_tools_approval_mode"
                 out.append(row)
@@ -1019,6 +1037,18 @@ while index < len(lines):
         # other order would move a line on every run and rewrite the file.
         if not approval:
             out.append(APPROVAL_ROW)
+        if server == "vogt":
+            for key, wanted_value in (
+                ("tool_timeout_sec", VOGT_TOOL_TIMEOUT),
+                ("startup_timeout_sec", VOGT_STARTUP_TIMEOUT),
+            ):
+                row = timeout_rows[key]
+                try:
+                    value = float(row.split("=", 1)[1].split("#", 1)[0]) if row else 0
+                except ValueError:
+                    value = 0
+                keep_row = row if row and value >= wanted_value else None
+                out.append(keep_row or f"{key} = {wanted_value}\n")
         if server not in SCHEMA_SERVERS:
             if index < len(lines) and header_line(lines[index]):
                 out.append("\n")
@@ -1036,6 +1066,14 @@ while index < len(lines):
         while out and out[-1].strip() == "":
             out.pop()
         out.append(keep or f"tool_input_schema_max_bytes = {schema_max}\n")
+        if server == "vogt":
+            # Right after the table, not at the end of the file: the other
+            # writers move their own tables, and anything appended last would
+            # shift on the next run.
+            for tool in VOGT_SELF_TOOLS:
+                header = f"[mcp_servers.vogt.tools.{tool}]"
+                if header not in existing_headers:
+                    out.extend(["\n", header + "\n", 'approval_mode = "approve"\n'])
         if index < len(lines) and header_line(lines[index]):
             out.append("\n")
         continue
