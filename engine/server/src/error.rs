@@ -66,6 +66,9 @@ impl ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
         let status = self.status();
+        if status.is_server_error() {
+            tracing::error!(%status, error = %self, "request failed");
+        }
         let mut body = json!({ "error": self.to_string() });
         if matches!(self, ApiError::UnknownModel(_)) {
             body["code"] = json!("unknown_model");
