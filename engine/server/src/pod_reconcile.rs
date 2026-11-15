@@ -220,6 +220,9 @@ pub struct Sweep {
     pub reaped: Vec<Uuid>,
 }
 
+/// Whether a salvage covers a pod: session, pod creation (unix s), pod uid.
+pub type SalvagedFn = Arc<dyn Fn(Uuid, i64, Option<&str>) -> bool + Send + Sync>;
+
 /// What the reaper remembers between sweeps: when each unowned pod was first
 /// seen unowned, and when it last warned about keeping one. The TTL runs from
 /// the first sweep that found the pod unowned, not from its creation, so a
@@ -251,7 +254,7 @@ pub async fn sweep(
         auth,
         cfg,
         owned,
-        &|_, _| false,
+        &|_, _, _| false,
         &mut OrphanTracker::default(),
     )
     .await
@@ -266,7 +269,7 @@ pub async fn sweep_with(
     auth: &AgentAuth,
     cfg: &PodConfig,
     owned: &(dyn Fn(Uuid) -> bool + Sync),
-    salvaged: &(dyn Fn(Uuid, i64) -> bool + Sync),
+    salvaged: &(dyn Fn(Uuid, i64, Option<&str>) -> bool + Sync),
     tracker: &mut OrphanTracker,
 ) -> Result<Sweep> {
     let pods = launcher.list().await?;
@@ -318,7 +321,7 @@ pub async fn sweep_with(
                         .creation_timestamp
                         .as_ref()
                         .map_or(i64::MAX, |t| t.0.timestamp());
-                    if !salvaged(id, created) {
+                    if !salvaged(id, created, pod.metadata.uid.as_deref()) {
                         let due = tracker
                             .last_warned
                             .get(&id)
@@ -372,7 +375,7 @@ pub fn spawn(
     auth: Arc<AgentAuth>,
     cfg: PodConfig,
     owned: Arc<dyn Fn(Uuid) -> bool + Send + Sync>,
-    salvaged: Arc<dyn Fn(Uuid, i64) -> bool + Send + Sync>,
+    salvaged: SalvagedFn,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut failing = false;
@@ -896,7 +899,7 @@ mod tests {
             &AgentAuth::default(),
             cfg,
             owned,
-            &move |_, _| salvaged,
+            &move |_, _, _| salvaged,
             tracker,
         )
         .await

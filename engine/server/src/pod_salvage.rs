@@ -191,26 +191,90 @@ pub fn store(
     Ok(report)
 }
 
-/// Whether the session's latest salvage covers a pod created at
-/// `pod_created_unix` (WI-4233). The latest report is the newest one on disk
-/// (read from each archive's own `manifest.json`), or `recorded`, the
-/// session record's report, when that is newer or equal. It covers the pod
-/// only if it did not fail, is not older than the pod, and its manifest is
-/// on disk. An archive from an earlier pod of the same session never does.
+/// How much newer than the pod a salvage report or "nothing to save" marker
+/// must be to cover it (WI-4237). The engine's clock and the Kubernetes API
+/// server's `creationTimestamp` are compared at whole-second precision and may
+/// disagree, and a wake can create a pod in the same second as an old archive;
+/// a report must clear the pod's creation by this margin before it counts.
+pub const COVER_MARGIN_SECS: i64 = 60;
+
+/// File name of the "nothing to save" marker, in the session's salvage dir.
+const NOTHING_TO_SAVE: &str = "nothing-to-save.json";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct NothingToSave {
+    session: Uuid,
+    pod_uid: Option<String>,
+    at: String,
+}
+
+/// Record, durably, that a clean stop found nothing to save in the pod
+/// (WI-4237). Without it the reaper could never show such a pod salvaged and
+/// would keep it forever. Written to a temp file and renamed, so the marker is
+/// whole or absent. It replaces any earlier marker of the session.
+pub fn mark_nothing_to_save(
+    state_dir: &Path,
+    session: Uuid,
+    pod_uid: Option<&str>,
+    now: OffsetDateTime,
+) -> Result<(), String> {
+    let root = session_dir(state_dir, session);
+    create_private_dir(&root)?;
+    let bytes = serde_json::to_vec(&NothingToSave {
+        session,
+        pod_uid: pod_uid.map(str::to_owned),
+        at: now.format(&Rfc3339).unwrap_or_default(),
+    })
+    .map_err(|e| format!("could not serialize the nothing-to-save marker: {e}"))?;
+    let tmp = root.join(format!("{NOTHING_TO_SAVE}.tmp"));
+    write_private(&tmp, &bytes)?;
+    fs::rename(&tmp, root.join(NOTHING_TO_SAVE))
+        .map_err(|e| format!("could not write the nothing-to-save marker: {e}"))
+}
+
+/// Whether a salvage covers a pod created at `pod_created_unix` with uid
+/// `pod_uid` (WI-4233, WI-4237). Either the newest archive on disk (read from
+/// each archive's own `manifest.json`, so its manifest is on disk by
+/// construction) is not failed and at least [`COVER_MARGIN_SECS`] newer than
+/// the pod, or a "nothing to save" marker is that fresh and is for this pod
+/// (its uid equals `pod_uid` when both are known). An archive from an earlier
+/// pod of the same session never covers.
+///
+/// There is no branch for the session record's own report: the reaper only
+/// judges pods no session record claims (`owned`), so that branch was dead,
+/// and a report not backed by a manifest on disk must not cover anything.
+///
+/// Unsalvageable orphan rule: a pod whose salvage failed and whose session
+/// record is gone has no covering archive or marker, so this returns false and
+/// the reaper keeps the pod and warns about it. It is never deleted by the
+/// engine and gets no marker; an operator decides.
 pub fn covers_pod(
     state_dir: &Path,
     session: Uuid,
     pod_created_unix: i64,
-    recorded: Option<&SalvageReport>,
+    pod_uid: Option<&str>,
 ) -> bool {
     let unix = |at: &str| {
         OffsetDateTime::parse(at, &Rfc3339)
             .ok()
             .map(|t| t.unix_timestamp())
     };
+    let needed = pod_created_unix.saturating_add(COVER_MARGIN_SECS);
+    let dir = session_dir(state_dir, session);
+    if let Ok(bytes) = fs::read(dir.join(NOTHING_TO_SAVE)) {
+        if let Ok(m) = serde_json::from_slice::<NothingToSave>(&bytes) {
+            let same_pod = match (m.pod_uid.as_deref(), pod_uid) {
+                (Some(a), Some(b)) => a == b,
+                _ => true,
+            };
+            if m.session == session && same_pod && unix(&m.at).is_some_and(|at| at >= needed) {
+                return true;
+            }
+        }
+    }
     let mut newest: Option<(i64, bool)> = None; // (at, ok)
-    if let Ok(dir) = fs::read_dir(session_dir(state_dir, session)) {
-        for entry in dir.flatten() {
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
             let Ok(bytes) = fs::read(entry.path().join("manifest.json")) else {
                 continue;
             };
@@ -231,14 +295,7 @@ pub fn covers_pod(
             }
         }
     }
-    if let Some(r) = recorded {
-        if let Some(at) = unix(&r.at) {
-            if newest.is_none_or(|(n, _)| at >= n) {
-                newest = Some((at, r.state == SalvageState::Saved));
-            }
-        }
-    }
-    matches!(newest, Some((at, true)) if at >= pod_created_unix)
+    matches!(newest, Some((at, true)) if at >= needed)
 }
 
 #[derive(serde::Serialize)]
@@ -596,64 +653,56 @@ mod tests {
         assert!(!path.join("repos/root/patch.diff").exists());
         assert!(path.join("repos/root/untracked.txt").is_file());
     }
-    fn pod_sessions_covered(
-        state: &Path,
-        id: Uuid,
-        created: i64,
-        rec: Option<&SalvageReport>,
-    ) -> bool {
-        covers_pod(state, id, created, rec)
-    }
-
-    #[test]
-    fn an_archive_older_than_the_pod_does_not_cover_it() {
-        let state = state();
-        let id = Uuid::new_v4();
+    fn saved(state: &Path, id: Uuid, offset: i64) {
         store(
-            &state,
+            state,
             id,
             &upload("p", "root"),
             &SalvageLimits::default(),
             5,
             DEFAULT_MAX_SESSION_BYTES,
-            at(0),
+            at(offset),
         )
         .unwrap();
-        let pod = at(100).unix_timestamp();
-        assert!(!pod_sessions_covered(&state, id, pod, None));
-        assert!(pod_sessions_covered(
-            &state,
-            id,
-            at(-5).unix_timestamp(),
-            None
-        ));
     }
 
     #[test]
-    fn a_failed_latest_report_does_not_cover_the_pod() {
+    fn an_archive_covers_only_with_the_margin_at_the_boundaries() {
         let state = state();
         let id = Uuid::new_v4();
-        store(
-            &state,
-            id,
-            &upload("p", "root"),
-            &SalvageLimits::default(),
-            5,
-            DEFAULT_MAX_SESSION_BYTES,
-            at(0),
-        )
-        .unwrap();
-        let failed = SalvageReport::failed("upload refused", at(50).format(&Rfc3339).unwrap());
-        assert!(!pod_sessions_covered(
-            &state,
-            id,
-            at(-5).unix_timestamp(),
-            Some(&failed)
-        ));
+        saved(&state, id, 1000);
+        let pod = |newer_by: i64| at(1000 - newer_by).unix_timestamp();
+        // Equal to the pod, 59 s newer: not covered. Exactly 60 and 61: covered.
+        assert!(!covers_pod(&state, id, pod(0), None));
+        assert!(!covers_pod(&state, id, pod(59), None));
+        assert!(covers_pod(&state, id, pod(COVER_MARGIN_SECS), None));
+        assert!(covers_pod(&state, id, pod(61), None));
+        // Older than the pod, and the engine clock ahead of the API server's
+        // (archive stamped in the pod's future by a few seconds).
+        assert!(!covers_pod(&state, id, pod(-100), None));
+        assert!(!covers_pod(&state, id, pod(-5), None));
     }
 
     #[test]
-    fn a_saved_newer_report_with_a_manifest_covers_the_pod_and_a_missing_one_does_not() {
+    fn a_failed_latest_archive_does_not_cover_the_pod() {
+        let state = state();
+        let id = Uuid::new_v4();
+        saved(&state, id, 1000);
+        // A newer manifest whose report failed hides the older saved one.
+        let root = session_dir(&state, id);
+        let dir = root.join("99999999T999999Z");
+        fs::create_dir_all(&dir).unwrap();
+        let failed = SalvageReport::failed("upload refused", at(2000).format(&Rfc3339).unwrap());
+        fs::write(
+            dir.join("manifest.json"),
+            serde_json::to_vec(&serde_json::json!({"report": failed})).unwrap(),
+        )
+        .unwrap();
+        assert!(!covers_pod(&state, id, at(0).unix_timestamp(), None));
+    }
+
+    #[test]
+    fn an_archive_without_its_manifest_does_not_cover_the_pod() {
         let state = state();
         let id = Uuid::new_v4();
         let report = store(
@@ -663,13 +712,38 @@ mod tests {
             &SalvageLimits::default(),
             5,
             DEFAULT_MAX_SESSION_BYTES,
-            at(10),
+            at(1000),
         )
         .unwrap();
         let created = at(0).unix_timestamp();
-        assert!(pod_sessions_covered(&state, id, created, None));
+        assert!(covers_pod(&state, id, created, None));
         fs::remove_file(Path::new(report.path.as_deref().unwrap()).join("manifest.json")).unwrap();
-        assert!(!pod_sessions_covered(&state, id, created, None));
+        assert!(!covers_pod(&state, id, created, None));
+    }
+
+    #[test]
+    fn a_nothing_to_save_marker_covers_its_own_pod_only_once_fresh() {
+        let state = state();
+        let id = Uuid::new_v4();
+        let created = at(0).unix_timestamp();
+        assert!(!covers_pod(&state, id, created, Some("uid-a")));
+        mark_nothing_to_save(&state, id, Some("uid-a"), at(30)).unwrap();
+        assert!(!covers_pod(&state, id, created, Some("uid-a")), "59 s rule");
+        mark_nothing_to_save(&state, id, Some("uid-a"), at(61)).unwrap();
+        assert!(covers_pod(&state, id, created, Some("uid-a")));
+        assert!(!covers_pod(&state, id, created, Some("uid-b")), "other pod");
+        assert!(covers_pod(&state, id, created, None), "uid unknown");
+        assert!(!fs::read_dir(session_dir(&state, id))
+            .unwrap()
+            .flatten()
+            .any(|e| e.file_name().to_string_lossy().ends_with(".tmp")));
+    }
+
+    #[test]
+    fn an_unsalvageable_orphan_is_never_covered() {
+        // Failed salvage, no record: nothing on disk. Kept and warned about.
+        let state = state();
+        assert!(!covers_pod(&state, Uuid::new_v4(), 0, Some("uid")));
     }
 }
 

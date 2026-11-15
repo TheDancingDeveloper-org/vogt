@@ -2272,9 +2272,14 @@ engine id (WI-912; the design is `docs/design/session-hibernation.md`).
     deleter is the reconciler: it reaps a pod only after `ENGINE_POD_ORPHAN_TTL`
     has passed since a sweep first found the pod unowned (an engine restart
     restarts that clock), and only when a completed salvage archive is
-    covering the pod (latest report, not failed, newer than the pod) is on
-    disk. Otherwise it keeps the pod and logs a warning once, then every 10
-    minutes.
+    covering the pod (latest report, not failed, at least 60 s newer than the
+    pod) is on disk, or a fresh `nothing-to-save.json` marker for this pod
+    (WI-4237; written atomically by a clean stop that had nothing to archive,
+    holding session, pod uid and time). Otherwise it keeps the pod and logs a
+    warning once, then every 10 minutes. An unsalvageable orphan (salvage
+    failed and its session record is gone) is always in that case: it is kept
+    and warned about, never deleted by the engine and never given a marker, so
+    an operator decides.
 - **Project memory (WI-3371).** With `ENGINE_POD_PERSIST_MEMORY` on (off by
   default), a Claude pod also writes `CLAUDE_CONFIG_DIR/projects/*/memory`
   back to the engine, keyed by the project's source identity rather than by
@@ -3677,7 +3682,7 @@ vanished, sat Pending too long, or whose attached agent stopped sending
 heartbeats, and deletes a pod that no live or hibernated session owns once
 `ENGINE_POD_ORPHAN_TTL` (3600 s, 0 disables; WI-4233) has passed since a sweep
 first found it unowned, and only if the session's latest salvage report did not
-fail, is not older than the pod, and has its `manifest.json` on disk. A stop
+fail, is at least 60 s newer than the pod, and has its `manifest.json` on disk (or a fresh nothing-to-save marker for the pod exists). A stop
 whose pod delete failed logs a warning and leaves the pod for this reaper; a pod
 the reaper keeps is warned about once, then every 10 minutes.
 
