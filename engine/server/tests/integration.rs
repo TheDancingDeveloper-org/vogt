@@ -20790,7 +20790,11 @@ sleep 2
     #[tokio::test]
     async fn real_entrypoint_bootstraps_against_the_real_route() {
         use std::os::unix::fs::PermissionsExt;
-        let mut h = harness(false).await;
+        // WI-4271: the entrypoint clones only with a source token the
+        // bootstrap response carries (WI-4213), so the project's graft source
+        // is served by a minting provider, as in production.
+        let mut h = core_harness(false).await;
+        install_minter(&h, FakeMinter::new(Ok("minted-graft-token-SECRET-1234")));
         // WI-3883 review: a caller's own variable must reach the agent and
         // must not be exported into the shell that clones with the minted
         // source token.
@@ -20799,6 +20803,7 @@ sleep 2
                 "name": "pod-entrypoint-env",
                 "template": "pod",
                 "env": [["CARGO_BUILD_JOBS", "4"]],
+                "source": graft_source(),
             }))
             .await;
         let (_, token) = h.created.recv().await.unwrap();
@@ -20919,11 +20924,14 @@ sleep 2
             graft.lines().next().unwrap_or_default(),
             format!(
                 "--token-file {} clone vogt {} --line rust-2",
-                token_file.display(),
+                tmp.path()
+                    .join(format!(".config/graft/sessions/{id}/trial-1.token"))
+                    .display(),
                 work.display()
             )
         );
         assert!(!graft.contains(&token));
+        assert!(!graft.contains("minted-graft-token-SECRET-1234"));
 
         // The bootstrap was consumed: replaying it is refused.
         let tmp_b = tmp.path().join("tmp-b");
