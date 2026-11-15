@@ -22203,6 +22203,44 @@ sleep 2
         assert!(h.created.try_recv().is_err(), "a host session makes no pod");
     }
 
+    /// A project's graft source that leaves `landing` out reads as
+    /// `push_branch`, the schema default. A graft source only ever lands on
+    /// its line, and pods mint for it, so a host worker oversight starts must
+    /// get the same token: read, write and land on the line, TTL bounded.
+    #[tokio::test]
+    async fn a_host_session_on_a_graft_source_without_landing_gets_a_land_scoped_token() {
+        let out = tempfile::tempdir().unwrap();
+        let out = out.path().join("env");
+        let h = host_harness(&out, None).await;
+        let minter = FakeMinter::new(Ok("host-no-landing"));
+        install_minter(&h, minter.clone());
+        let mut source = graft_source();
+        source.as_object_mut().unwrap().remove("landing");
+        let _id = h
+            .start_with(json!({
+                "source": source,
+                "placement": "host",
+                "session_ref": "ses_0000000000000000000000000A",
+                "work_item": "WI-3986",
+            }))
+            .await;
+        let env = host_env(&out).await;
+        let path = host_token_path("ses_0000000000000000000000000A");
+        assert!(
+            env.contains(&format!("VOGT_GRAFT_TOKEN_FILE={}", path.display())),
+            "a graft source without landing got no host token file"
+        );
+        assert!(path.exists());
+        let grants = minter.grants.lock().unwrap();
+        assert_eq!(grants.len(), 1);
+        let scopes = grants[0].scopes();
+        for scope in ["repo:vogt:read", "repo:vogt:write", "repo:vogt:land:rust-2"] {
+            assert!(scopes.iter().any(|s| s == scope), "{scope} in {scopes:?}");
+        }
+        assert!(grants[0].ttl_s > 0);
+        assert!(grants[0].ttl_s <= vogt_engine_server::graft_mint::MAX_TTL_S);
+    }
+
     #[tokio::test]
     async fn a_pod_placed_session_gets_no_host_graft_file() {
         let out = tempfile::tempdir().unwrap();
