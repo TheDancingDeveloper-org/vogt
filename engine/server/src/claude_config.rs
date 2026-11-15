@@ -1070,7 +1070,7 @@ mod driven_policy_tests {
     }
 
     #[test]
-    fn the_allow_list_is_exactly_these_seven_in_order() {
+    fn the_allow_list_is_exactly_these_eight_in_order() {
         let names: Vec<String> = allow_rules()
             .iter()
             .map(|r| r.split(':').next().unwrap().to_string())
@@ -1085,6 +1085,7 @@ mod driven_policy_tests {
                 "Approved Vogt Grant",
                 "Feature Branch Lease Push",
                 "Cadastre-Named Secret Read",
+                "Dev Admin Token Lifecycle",
             ],
             "adding, removing or reordering a classifier exception is a reviewed change"
         );

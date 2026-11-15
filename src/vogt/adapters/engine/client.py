@@ -125,6 +125,29 @@ class EngineBlocked:
 
 
 @dataclass(frozen=True)
+class EngineHibernateDeferral:
+    """The idle policy held a hibernation back because the save failed or was
+    skipped (engine `HibernateDeferral`, WI-4268). The reason is untrusted."""
+
+    reason: str
+    failures: int = 0
+    at: str | None = None
+    paused: bool = False
+
+    @classmethod
+    def from_payload(cls, payload: object) -> EngineHibernateDeferral | None:
+        if not isinstance(payload, dict):
+            return None
+        failures = payload.get("failures")
+        return cls(
+            reason=str(payload.get("reason", "")),
+            failures=failures if isinstance(failures, int) else 0,
+            at=_optional_str(payload.get("at")),
+            paused=payload.get("paused") is True,
+        )
+
+
+@dataclass(frozen=True)
 class EngineSession:
     """One terminal, as the engine describes it.
 
@@ -166,6 +189,8 @@ class EngineSession:
     command: str | None = None
     #: The agent's blocked report, when it made one.
     blocked: EngineBlocked | None = None
+    #: Why the idle policy held a hibernation back, while it is deferred.
+    hibernate_deferred: EngineHibernateDeferral | None = None
     #: The agent conversation the session runs, when the engine knows its id
     #: (what a wake resumes): the agent CLI and its own id.
     conversation_agent: str | None = None
@@ -231,6 +256,9 @@ class EngineSession:
             approval=EngineApproval.from_payload(payload.get("approval")),
             command=_optional_str(payload.get("command")),
             blocked=EngineBlocked.from_payload(payload.get("blocked")),
+            hibernate_deferred=EngineHibernateDeferral.from_payload(
+                payload.get("hibernate_deferred")
+            ),
             conversation_agent=_optional_str(conversation.get("agent")),
             conversation_id=_optional_str(conversation.get("id")),
             hibernation=EngineHibernation.from_payload(payload.get("hibernation")),
