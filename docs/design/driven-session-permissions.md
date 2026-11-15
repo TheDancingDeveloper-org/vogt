@@ -218,6 +218,23 @@ Exploration). Pattern rules ending in `:*` are prefix rules, and a
 trailing `*` matches any further arguments, so a pattern can't safely allow
 `HEAD:<branch>`.
 
+**Dev Admin Token Lifecycle (WI-4279, 2026-11-15).** A third exception lets an
+oversight session mint and revoke an API token on the vogt-dev lane without a
+person: `vogt token issue` / `vogt token revoke` inside the vogt-dev pod, with
+`--expires-in-days 1` and scopes from `read`, `work.write`, `project.write`,
+`admin`, to run `tests/acceptance`; revoke it when the run ends. It was chosen
+over an `ondemand` manifest line because a stored token would be long-lived and
+shared, against the 1-day, revoke-after-use rule. The rule names the vogt-dev
+lane only, so a prod token still goes through a person. The engine gives every
+Claude launch the same settings file, so the rule requires engine proof of the
+oversight role in the session's own transcript (an `auth_whoami` naming
+`agent:session:<id>` and a `session_list` row for that id with `role`
+`oversight`), the same way *Approved Vogt Grant* requires a grants listing.
+It also restricts `--actor` to `agent:oversight-*`, and requires the token to
+be captured into a 0600 file (`vogt --json token issue ... | jq -r .secret >
+"$f"`) and never printed. Deployments that
+replace the settings file must copy the exception.
+
 Pushing the checked-out branch relies on the worktree being on the session's
 own branch. A worker in the shared checkout on `main` would push `main`, which
 the forge's branch protection refuses.
