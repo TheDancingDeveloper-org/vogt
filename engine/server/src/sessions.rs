@@ -2212,6 +2212,12 @@ impl SessionRegistry {
             let env = spec.env.as_deref().unwrap_or_default();
             if agent.as_deref() == Some("claude") {
                 self.cfg.agent_onboarding.prepare(env, &cwd);
+                // The workspace root's `CLAUDE.md` imports from outside it
+                // (WI-2000), so approve it as well as the session's cwd.
+                let root = self.cfg.workspace_root.to_string_lossy();
+                if root != cwd.as_str() {
+                    self.cfg.agent_onboarding.prepare(env, &root);
+                }
             } else {
                 self.cfg.agent_onboarding.prepare_codex(env, &cwd);
             }
