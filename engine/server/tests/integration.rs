@@ -21587,7 +21587,7 @@ sleep 2
         let mut h = core_harness(false).await;
         install_minter(&h, minter);
         let id = h
-            .start_with(json!({ "source": graft_source(), "session_ref": "ses_stop" }))
+            .start_with(json!({ "source": graft_source(), "session_ref": "ses_00000000000000000000000001" }))
             .await;
         let (_, boot) = h.created.recv().await.unwrap();
         let body: Value = h.bootstrap(id, &boot).await.json().await.unwrap();
@@ -21602,7 +21602,7 @@ sleep 2
             );
             assert_eq!(
                 g.minted[0].1.session.as_deref(),
-                Some("ses_stop"),
+                Some("ses_00000000000000000000000001"),
                 "the mint binds the core session id when the start named one"
             );
             assert!(
@@ -21756,6 +21756,49 @@ sleep 2
         }
     }
 
+    async fn post_with_session_ref(h: &Harness, session_ref: &str) -> reqwest::StatusCode {
+        h.client
+            .post(format!("{}/api/sessions", h.base))
+            .json(&json!({
+                "name": "pod-session", "template": "pod", "session_ref": session_ref,
+            }))
+            .send()
+            .await
+            .unwrap()
+            .status()
+    }
+
+    /// WI-4230: the engine cannot tell whose id a `session_ref` is, so only
+    /// vogt-core may name one.
+    #[tokio::test]
+    async fn a_caller_other_than_vogt_core_cannot_name_a_session_ref() {
+        let h = harness_cfg(false, None, |cfg| {
+            cfg.vogt_core_token = Some(GRAFT_CORE_TOKEN.into())
+        })
+        .await;
+        let status = post_with_session_ref(&h, "ses_01ARZ3NDEKTSV4RRFFQ69G5FAV").await;
+        assert_eq!(status, reqwest::StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn vogt_core_cannot_name_a_malformed_session_ref() {
+        let h = core_harness(false).await;
+        for bad in [
+            "ses_x",
+            "../../etc/x",
+            "ses_01ARZ3NDEKTSV4RRFFQ69G5FAV/../x",
+            "ses_01ARZ3NDEKTSV4RRFFQ69G5FAI",
+            "ses_01ARZ3NDEKTSV4RRFFQ69G5FAVV",
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        ] {
+            assert_eq!(
+                post_with_session_ref(&h, bad).await,
+                reqwest::StatusCode::BAD_REQUEST,
+                "{bad}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn a_pod_gets_its_own_scoped_graft_token_that_never_leaks() {
         const SECRET: &str = "minted-graft-token-SECRET-1234";
@@ -21832,7 +21875,7 @@ sleep 2
         let minter = FakeMinter::new(Err("graft could not be reached to mint a session token"));
         install_minter(&h, minter.clone());
         let id = h
-            .start_with(json!({ "source": graft_source(), "session_ref": "ses_mint_failed" }))
+            .start_with(json!({ "source": graft_source(), "session_ref": "ses_00000000000000000000000002" }))
             .await;
         // The pod starts anyway: a graft outage must not make sessions
         // unavailable. The token is absent and the session says why.
@@ -21895,11 +21938,11 @@ sleep 2
         let minter = FakeMinter::new(Ok("minted-graft-token"));
         install_minter(&h, minter.clone());
         let first = h
-            .start_with(json!({ "source": graft_source(), "session_ref": "ses_first" }))
+            .start_with(json!({ "source": graft_source(), "session_ref": "ses_00000000000000000000000003" }))
             .await;
         let (_, first_token) = h.created.recv().await.expect("first pod");
         let second = h
-            .start_with(json!({ "source": graft_source(), "session_ref": "ses_second" }))
+            .start_with(json!({ "source": graft_source(), "session_ref": "ses_00000000000000000000000004" }))
             .await;
         let (_, second_token) = h.created.recv().await.expect("second pod");
         assert_ne!(first_token, second_token);
@@ -21910,15 +21953,21 @@ sleep 2
             .iter()
             .map(|g| g.session.clone())
             .collect();
-        assert_eq!(sessions, ["ses_first", "ses_second"]);
+        assert_eq!(
+            sessions,
+            [
+                "ses_00000000000000000000000003",
+                "ses_00000000000000000000000004"
+            ]
+        );
         for (id, token) in [(first, first_token), (second, second_token)] {
             let body: Value = h.bootstrap(id, &token).await.json().await.unwrap();
             assert_eq!(
                 body["graft_session"],
                 if id == first {
-                    "ses_first"
+                    "ses_00000000000000000000000003"
                 } else {
-                    "ses_second"
+                    "ses_00000000000000000000000004"
                 }
             );
         }
@@ -21967,7 +22016,7 @@ sleep 2
         let h = core_harness(true).await;
         install_minter(&h, FakeMinter::new(Ok("minted-token")));
         let id = h
-            .start_with(json!({ "source": graft_source(), "session_ref": "ses_failed_create" }))
+            .start_with(json!({ "source": graft_source(), "session_ref": "ses_00000000000000000000000005" }))
             .await;
         tokio::time::timeout(Duration::from_secs(10), async {
             while h.detail(id).await.summary.exit_code != Some(1) {
@@ -22089,14 +22138,14 @@ sleep 2
             .start_with(json!({
                 "source": graft_source(),
                 "placement": "host",
-                "session_ref": "ses_host_env",
+                "session_ref": "ses_00000000000000000000000006",
                 "work_item": "WI-3986",
             }))
             .await;
         let env = host_env(&out).await;
-        let path = host_token_path("ses_host_env");
+        let path = host_token_path("ses_00000000000000000000000006");
         assert!(env.contains(&format!("VOGT_GRAFT_TOKEN_FILE={}", path.display())));
-        assert!(env.contains("GRAFT_SESSION_ID=ses_host_env"));
+        assert!(env.contains("GRAFT_SESSION_ID=ses_00000000000000000000000006"));
         assert!(!env.contains("host-minted-SECRET"), "token value in env");
         assert!(!env.contains("VOGT_GRAFT_TOKEN_UNAVAILABLE"));
         assert_eq!(
@@ -22118,11 +22167,11 @@ sleep 2
             .start_with(json!({
                 "source": graft_source(),
                 "placement": "pod",
-                "session_ref": "ses_host_pod_skip",
+                "session_ref": "ses_00000000000000000000000007",
             }))
             .await;
         let _ = h.created.recv().await.expect("the pod is created");
-        assert!(!host_token_path("ses_host_pod_skip").exists());
+        assert!(!host_token_path("ses_00000000000000000000000007").exists());
     }
 
     #[tokio::test]
@@ -22135,14 +22184,14 @@ sleep 2
             .start_with(json!({
                 "source": graft_source(),
                 "placement": "host",
-                "session_ref": "ses_host_mint_fail",
+                "session_ref": "ses_00000000000000000000000008",
             }))
             .await;
         let env = host_env(&out).await;
         assert!(!env.contains("VOGT_GRAFT_TOKEN_FILE"), "{env}");
         assert!(env.contains("VOGT_GRAFT_TOKEN_UNAVAILABLE="), "{env}");
         assert!(env.contains("graft is down"), "{env}");
-        assert!(!host_token_path("ses_host_mint_fail").exists());
+        assert!(!host_token_path("ses_00000000000000000000000008").exists());
     }
 
     #[tokio::test]
@@ -22156,13 +22205,13 @@ sleep 2
             .post(format!("{}/api/sessions", h.base))
             .json(&json!({
                 "name": "x", "template": "pod", "placement": "host",
-                "source": graft_source(), "session_ref": "ses_host_create_fail",
+                "source": graft_source(), "session_ref": "ses_00000000000000000000000009",
             }))
             .send()
             .await
             .unwrap();
         assert!(!response.status().is_success(), "{}", response.status());
-        assert!(!host_token_path("ses_host_create_fail").exists());
+        assert!(!host_token_path("ses_00000000000000000000000009").exists());
         assert_eq!(minter.revoked.lock().unwrap().len(), 1);
     }
 
@@ -22180,9 +22229,9 @@ sleep 2
         };
 
         // Hibernate revokes and removes; wake mints a fresh credential.
-        let id = start("ses_host_cycle").await;
+        let id = start("ses_00000000000000000000000000").await;
         host_env(&out).await;
-        let path = host_token_path("ses_host_cycle");
+        let path = host_token_path("ses_00000000000000000000000000");
         assert!(path.exists());
         h.state
             .sessions
