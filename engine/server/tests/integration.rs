@@ -11710,6 +11710,7 @@ async fn a_named_claude_account_runs_the_session_in_its_own_config_dir() {
     let acct2 = tmp.path().join("acct2");
     let default_home = tmp.path().join("default-home");
     let workspace = cfg.workspace_root.clone();
+    let cfg_root = workspace.to_string_lossy().into_owned();
     cfg.agent_onboarding = vogt_engine_server::claude_config::Onboarding {
         enabled: true,
         default_dir: Some(default_home.clone()),
@@ -11763,6 +11764,13 @@ async fn a_named_claude_account_runs_the_session_in_its_own_config_dir() {
     assert_eq!(project["hasTrustDialogAccepted"], true, "{config}");
     assert_eq!(
         project["hasClaudeMdExternalIncludesApproved"], true,
+        "{config}"
+    );
+    // So is the workspace root, whose `CLAUDE.md` imports from outside it.
+    let root = &config["projects"][cfg_root.as_str()];
+    assert_eq!(root["hasTrustDialogAccepted"], true, "{config}");
+    assert_eq!(
+        root["hasClaudeMdExternalIncludesApproved"], true,
         "{config}"
     );
     assert!(!default_home.join(".claude.json").exists());
@@ -20218,6 +20226,13 @@ mod pod_stream {
         let config: Value = serde_json::from_slice(&config).unwrap();
         assert_eq!(config["hasCompletedOnboarding"], true);
         assert_eq!(config["theme"], "dark");
+        let root = h.state.config.workspace_root.to_string_lossy().into_owned();
+        let rootp = &config["projects"][root.as_str()];
+        assert_eq!(rootp["hasTrustDialogAccepted"], true, "{config}");
+        assert_eq!(
+            rootp["hasClaudeMdExternalIncludesApproved"], true,
+            "{config}"
+        );
         let project = &config["projects"]["/work"];
         assert_eq!(project["hasTrustDialogAccepted"], true, "{config}");
         assert_eq!(
