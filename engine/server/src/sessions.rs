@@ -1271,8 +1271,12 @@ impl SessionRegistry {
 
     /// Mint a graft credential for a host-backed session whose project lands
     /// on a graft line. Pods have their own bootstrap delivery path.
+    ///
+    /// Any graft source qualifies, as for pods: graft work only ever lands on
+    /// the source's line, and a stated source that leaves `landing` out reads
+    /// as `push_branch` (WI-3986).
     async fn prepare_host_graft(&self, id: Uuid, spec: &mut SessionSpec) -> Result<()> {
-        use vogt_engine_contract::source::{LandingMode, SourceKind};
+        use vogt_engine_contract::source::SourceKind;
 
         if self.runs_in_pod(spec.template.as_deref(), spec.placement.as_deref()) {
             return Ok(());
@@ -1281,7 +1285,6 @@ impl SessionRegistry {
             .source
             .as_ref()
             .filter(|source| source.kind() == SourceKind::Graft)
-            .filter(|source| source.landing == LandingMode::Line)
         else {
             return Ok(());
         };

@@ -5547,7 +5547,7 @@ the minted token in `<state_dir>/pod-graft-tokens/<session>` (`0600`, directory
 attempt, so a pod an engine restart adopts is still revoked when it ends. A
 session hibernated or removed with no pod running has nothing left to revoke.
 
-For a **host-backed** session with the same graft-line source, the provider
+For a **host-backed** session with the same graft source, the provider
 still keeps its private copy under `state_dir`, then atomically delivers a
 second `0600` copy at
 `$XDG_CONFIG_HOME/graft/sessions/<session_ref>/trial-1.token` (or
@@ -5555,7 +5555,9 @@ second `0600` copy at
 core's `ses_...` id from the worker brief, so graft's write-time binding and
 the path the worker is told to use name the same session. Only the token-file
 path and `GRAFT_SESSION_ID` enter the child's environment, never the value.
-A failed mint (graft down, a scope gap) does not stop the session: it starts
+Any graft-kind source qualifies, as for pods: a source whose `landing` is left
+out (it reads as `push_branch`) still lands on its line, and its token carries
+`land:<line>` (WI-3986). A failed mint (graft down, a scope gap) does not stop the session: it starts
 without `VOGT_GRAFT_TOKEN_FILE`, with the reason in `VOGT_GRAFT_TOKEN_UNAVAILABLE`,
 as a pod does. Normal process exit or stop removes that copy at once and calls
 `RevokeToken` in the background; TTL is
