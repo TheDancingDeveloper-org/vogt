@@ -1912,6 +1912,14 @@ pub fn command_line(config: &Config) -> Result<String, AgentError> {
                 .unwrap_or_default();
             let mut line = codex_broker_fetch_prefix(&[], &mcp_bearers);
             line.push_str("opencode");
+            // The brief is the first prompt, as for Claude Code, Codex and a
+            // host opencode (WI-3389). opencode's positional is a project
+            // directory, so the prompt goes in `--prompt`. A resume has
+            // already read it.
+            if let Some(brief) = config.claude.brief.as_deref().filter(|_| !config.resume) {
+                line.push_str(" --prompt ");
+                line.push_str(&sh_quote(Path::new(&brief_instruction(brief))));
+            }
             Ok(line)
         }
         _ => Err(AgentError::Pty(
@@ -3547,6 +3555,16 @@ mod tests {
             opencode_mcp_config: None,
         };
         assert_eq!(command_line(&config).unwrap(), "opencode");
+        // WI-3389: a brief is opencode's first prompt, via `--prompt`; a
+        // resume has already read it.
+        config.claude.brief = Some(PathBuf::from("/briefs/it's.md"));
+        let line = command_line(&config).unwrap();
+        assert!(line.starts_with("opencode --prompt '"), "{line}");
+        assert!(line.contains("/briefs/it'\\''s.md"), "{line}");
+        config.resume = true;
+        assert_eq!(command_line(&config).unwrap(), "opencode");
+        config.resume = false;
+        config.claude.brief = None;
         // Codex refuses extra writable roots, so it gets no `--add-dir`; the
         // PTY already starts in the session cwd.
         config.cli = "codex".into();
