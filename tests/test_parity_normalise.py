@@ -133,3 +133,17 @@ def test_a_missing_golden_file_is_an_error_before_the_run(
     captured = capsys.readouterr()  # type: ignore[attr-defined]
     assert "no mcp golden" in captured.err
     assert "Traceback" not in captured.err
+
+
+def test_sequential_session_ids_are_core_session_id_shaped() -> None:
+    """The engine refuses a session_ref that is not ses_ + 26 ULID characters."""
+    import re
+
+    from vogt.application.test_hooks import SequentialIds
+
+    ids = SequentialIds()
+    first, second = ids("ses"), ids("ses")
+    for value in (first, second):
+        assert re.fullmatch(r"ses_[0-9A-HJKMNP-TV-Z]{26}", value)
+    assert first < second
+    assert ids("wrk") == "wrk_0001"

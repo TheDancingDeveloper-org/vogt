@@ -453,7 +453,7 @@ fn require_source_authority(
 /// Whether `value` is a core session id: `ses_` and 26 Crockford base32
 /// characters (a ULID). The id names a token directory and graft metadata, so
 /// nothing else may reach them.
-fn is_core_session_id(value: &str) -> bool {
+pub(crate) fn is_core_session_id(value: &str) -> bool {
     const ALPHABET: &[u8] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
     value
         .strip_prefix("ses_")

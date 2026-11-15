@@ -236,8 +236,9 @@ pub fn mark_nothing_to_save(
 /// `pod_uid` (WI-4233, WI-4237). Either the newest archive on disk (read from
 /// each archive's own `manifest.json`, so its manifest is on disk by
 /// construction) is not failed and at least [`COVER_MARGIN_SECS`] newer than
-/// the pod, or a "nothing to save" marker is that fresh and is for this pod
-/// (its uid equals `pod_uid` when both are known). An archive from an earlier
+/// the pod, or a "nothing to save" marker is for this pod: its uid equals
+/// `pod_uid` (covers at any age, WI-4239), or either uid is unknown and the
+/// marker is that fresh. Archives carry no pod uid, so they keep the margin. An archive from an earlier
 /// pod of the same session never covers.
 ///
 /// There is no branch for the session record's own report: the reaper only
@@ -263,11 +264,18 @@ pub fn covers_pod(
     let dir = session_dir(state_dir, session);
     if let Ok(bytes) = fs::read(dir.join(NOTHING_TO_SAVE)) {
         if let Ok(m) = serde_json::from_slice::<NothingToSave>(&bytes) {
-            let same_pod = match (m.pod_uid.as_deref(), pod_uid) {
-                (Some(a), Some(b)) => a == b,
-                _ => true,
+            // A marker carrying the pod's own uid is about this pod whatever
+            // the clocks say, so it covers at any age: a pod stopped within
+            // the margin of its creation is not kept forever (WI-4239). When
+            // either uid is unknown the margin still applies.
+            let (same_pod, uid_known) = match (m.pod_uid.as_deref(), pod_uid) {
+                (Some(a), Some(b)) => (a == b, true),
+                _ => (true, false),
             };
-            if m.session == session && same_pod && unix(&m.at).is_some_and(|at| at >= needed) {
+            if m.session == session
+                && same_pod
+                && (uid_known || unix(&m.at).is_some_and(|at| at >= needed))
+            {
                 return true;
             }
         }
@@ -722,13 +730,22 @@ mod tests {
     }
 
     #[test]
-    fn a_nothing_to_save_marker_covers_its_own_pod_only_once_fresh() {
+    fn a_nothing_to_save_marker_covers_its_own_pod_at_any_age() {
         let state = state();
         let id = Uuid::new_v4();
         let created = at(0).unix_timestamp();
         assert!(!covers_pod(&state, id, created, Some("uid-a")));
         mark_nothing_to_save(&state, id, Some("uid-a"), at(30)).unwrap();
-        assert!(!covers_pod(&state, id, created, Some("uid-a")), "59 s rule");
+        // WI-4239: the same uid covers a pod stopped inside the margin.
+        assert!(covers_pod(&state, id, created, Some("uid-a")), "same uid");
+        assert!(!covers_pod(&state, id, created, Some("uid-b")), "other pod");
+        // With either uid unknown the margin still applies.
+        assert!(!covers_pod(&state, id, created, None), "uid unknown, 30 s");
+        mark_nothing_to_save(&state, id, None, at(30)).unwrap();
+        assert!(
+            !covers_pod(&state, id, created, Some("uid-a")),
+            "marker uid unknown, 30 s"
+        );
         mark_nothing_to_save(&state, id, Some("uid-a"), at(61)).unwrap();
         assert!(covers_pod(&state, id, created, Some("uid-a")));
         assert!(!covers_pod(&state, id, created, Some("uid-b")), "other pod");

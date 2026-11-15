@@ -210,7 +210,10 @@ class SequentialIds:
 
     def __call__(self, prefix: str) -> str:
         self._counts[prefix] = self._counts.get(prefix, 0) + 1
-        return f"{prefix}_{self._counts[prefix]:04d}"
+        count = self._counts[prefix]
+        if prefix == "ses":
+            return f"ses_{count:026d}"
+        return f"{prefix}_{count:04d}"
 
 
 def pytest_collection_modifyitems(

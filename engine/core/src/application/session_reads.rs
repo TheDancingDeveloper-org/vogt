@@ -371,7 +371,7 @@ mod tests {
                     Moment::from_unix(1_700_000_000, 0),
                 ))?;
                 txn.insert_session(&CodingSession {
-                    id: "ses_0001".to_string(),
+                    id: "ses_00000000000000000000000001".to_string(),
                     engine_session_id: "eng-1".to_string(),
                     project_id: "prj_1".to_string(),
                     work_item_id: None,
@@ -390,7 +390,7 @@ mod tests {
                 Ok(crate::application::writes::WriteOutcome {
                     result: json!({}),
                     entity_kind: "session".to_string(),
-                    entity_id: "ses_0001".to_string(),
+                    entity_id: "ses_00000000000000000000000001".to_string(),
                     payload: json!({}),
                     event_kind: "session.started".to_string(),
                     summary: json!({}),
@@ -614,7 +614,11 @@ mod tests {
     #[test]
     fn n_outside_the_range_is_refused() {
         let built = built("range", Vec::new(), None);
-        let error = ask(&built, json!({"id": "ses_0001", "n": 0})).unwrap_err();
+        let error = ask(
+            &built,
+            json!({"id": "ses_00000000000000000000000001", "n": 0}),
+        )
+        .unwrap_err();
         assert!(matches!(error, VogtError::InvalidRequest(_)));
     }
 
@@ -688,7 +692,7 @@ mod tests {
             Some(engine),
         );
         seed(&built);
-        let result = ask(&built, json!({"id": "ses_0001"})).unwrap();
+        let result = ask(&built, json!({"id": "ses_00000000000000000000000001"})).unwrap();
         assert_eq!(result["basis"], "engine-id");
         assert_eq!(result["agent"], "claude");
         assert_eq!(result["conversation_id"], "eng-1");
@@ -704,7 +708,7 @@ mod tests {
     fn empty_roots_are_not_searched() {
         let built = built("empty", Vec::new(), None);
         seed(&built);
-        let result = ask(&built, json!({"id": "ses_0001"})).unwrap();
+        let result = ask(&built, json!({"id": "ses_00000000000000000000000001"})).unwrap();
         assert!(result["basis"].is_null());
         assert_eq!(
             result["detail"],
@@ -723,7 +727,7 @@ mod tests {
             None,
         );
         seed(&built);
-        let result = ask(&built, json!({"id": "ses_0001"})).unwrap();
+        let result = ask(&built, json!({"id": "ses_00000000000000000000000001"})).unwrap();
         assert!(result["basis"].is_null());
         assert!(result["detail"]
             .as_str()
@@ -808,7 +812,7 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .find(|row| row["id"] == "ses_0001")
+            .find(|row| row["id"] == "ses_00000000000000000000000001")
             .expect("the seeded session is listed");
         assert_eq!(row["last_reply_excerpt"], "The operator list: token, HAR.");
         let _ = fs::remove_dir_all(&dir);
@@ -837,7 +841,7 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .find(|row| row["id"] == "ses_0001")
+            .find(|row| row["id"] == "ses_00000000000000000000000001")
             .expect("the seeded session is listed");
         assert!(row["model"].is_null(), "nothing was asked for");
         assert_eq!(row["running"]["agent"], "claude");

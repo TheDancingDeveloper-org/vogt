@@ -903,8 +903,9 @@ mod tests {
     #[test]
     fn a_recorded_session_resolves_to_its_engine_id() {
         let (_, built, _) = fresh("resolve", person());
-        record_session(&built, "ses_0001", "eng-9");
-        let asked = super::grant_request_op(&built, request("ses_0001")).unwrap();
+        record_session(&built, "ses_00000000000000000000000001", "eng-9");
+        let asked =
+            super::grant_request_op(&built, request("ses_00000000000000000000000001")).unwrap();
         assert_eq!(asked["grant"]["target"], "eng-9");
     }
 

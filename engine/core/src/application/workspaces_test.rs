@@ -148,12 +148,20 @@ fn seed(built: &Built) {
                 ROOT,
                 Moment::from_unix(1_700_000_000, 0),
             ))?;
-            txn.insert_session(&session("ses_0001", "eng-1", &actor.id))?;
-            txn.insert_session(&session("ses_0002", "eng-2", &actor.id))?;
+            txn.insert_session(&session(
+                "ses_00000000000000000000000001",
+                "eng-1",
+                &actor.id,
+            ))?;
+            txn.insert_session(&session(
+                "ses_00000000000000000000000002",
+                "eng-2",
+                &actor.id,
+            ))?;
             Ok(crate::application::writes::WriteOutcome {
                 result: json!({}),
                 entity_kind: "session".to_string(),
-                entity_id: "ses_0001".to_string(),
+                entity_id: "ses_00000000000000000000000001".to_string(),
                 payload: json!({}),
                 event_kind: "session.started".to_string(),
                 summary: json!({}),
@@ -222,7 +230,10 @@ fn rows_join_project_session_and_merged() {
 
     let every = list(&built, json!({})).unwrap();
     assert_eq!(every.len(), 2);
-    let linked = every.iter().find(|r| r["session"] == "ses_0001").unwrap();
+    let linked = every
+        .iter()
+        .find(|r| r["session"] == "ses_00000000000000000000000001")
+        .unwrap();
     assert_eq!(linked["project"], "vogt");
     assert_eq!(linked["merged"], true);
     assert_eq!(linked["size_bytes"], 4096);
@@ -235,7 +246,7 @@ fn rows_join_project_session_and_merged() {
 
     let only = list(&built, json!({"project": "vogt"})).unwrap();
     let sessions: Vec<&Value> = only.iter().map(|r| &r["session"]).collect();
-    assert_eq!(sessions, vec!["ses_0001"]);
+    assert_eq!(sessions, vec!["ses_00000000000000000000000001"]);
     assert_eq!(
         list(&built, json!({"alive": false})).unwrap(),
         vec![unlinked.clone()]
@@ -389,7 +400,7 @@ fn clean_by_session_sends_its_path_and_audits() {
     let built = wired_as("clean-id", &rows, &log, "local:ada", ActorKind::Human);
     let done = clean(
         &built,
-        json!({"id": "ses_0001", "mode": "build_output", "reason": WHY}),
+        json!({"id": "ses_00000000000000000000000001", "mode": "build_output", "reason": WHY}),
     )
     .unwrap();
     assert_eq!(
@@ -481,7 +492,7 @@ fn clean_needs_exactly_one_of_id_and_path() {
     let built = wired("clean-one", &rows);
     for params in [
         json!({"mode": "remove", "reason": WHY}),
-        json!({"id": "ses_0001", "path": "/w/x", "mode": "remove", "reason": WHY}),
+        json!({"id": "ses_00000000000000000000000001", "path": "/w/x", "mode": "remove", "reason": WHY}),
     ] {
         match clean(&built, params) {
             Err(VogtError::InvalidRequest(message)) => assert_eq!(
@@ -499,10 +510,13 @@ fn a_session_without_a_workspace_is_not_found() {
     let built = wired("clean-none", &rows);
     match clean(
         &built,
-        json!({"id": "ses_0001", "mode": "build_output", "reason": WHY}),
+        json!({"id": "ses_00000000000000000000000001", "mode": "build_output", "reason": WHY}),
     ) {
         Err(VogtError::NotFound(message)) => {
-            assert_eq!(message, "session 'ses_0001' has no workspace")
+            assert_eq!(
+                message,
+                "session 'ses_00000000000000000000000001' has no workspace"
+            )
         }
         other => panic!("expected not found, got {other:?}"),
     }

@@ -269,7 +269,7 @@ mod tests {
                     Moment::from_unix(1_700_000_000, 0),
                 ))?;
                 txn.insert_session(&CodingSession {
-                    id: "ses_0001".to_string(),
+                    id: "ses_00000000000000000000000001".to_string(),
                     engine_session_id: "eng-1".to_string(),
                     project_id: "prj_1".to_string(),
                     work_item_id: None,
@@ -288,7 +288,7 @@ mod tests {
                 Ok(crate::application::writes::WriteOutcome {
                     result: json!({}),
                     entity_kind: "session".to_string(),
-                    entity_id: "ses_0001".to_string(),
+                    entity_id: "ses_00000000000000000000000001".to_string(),
                     payload: json!({}),
                     event_kind: "session.started".to_string(),
                     summary: json!({}),
@@ -299,7 +299,12 @@ mod tests {
     }
 
     fn session_principal() -> Principal {
-        Principal::new("agent:session:ses_0001", ActorKind::Agent, "Session").unwrap()
+        Principal::new(
+            "agent:session:ses_00000000000000000000000001",
+            ActorKind::Agent,
+            "Session",
+        )
+        .unwrap()
     }
 
     #[test]
@@ -316,7 +321,7 @@ mod tests {
             }),
         )
         .unwrap();
-        assert_eq!(reported["id"], json!("ses_0001"));
+        assert_eq!(reported["id"], json!("ses_00000000000000000000000001"));
         assert_eq!(reported["engine_session_id"], json!("eng-1"));
         assert_eq!(
             reported["blocked"],
@@ -351,13 +356,15 @@ mod tests {
                     offset: 0,
                     actor_id: None,
                     operation: None,
-                    entity_id: Some("ses_0001".to_string()),
+                    entity_id: Some("ses_00000000000000000000000001".to_string()),
                     project_id: None,
                     since: None,
                     until: None,
                 })
                 .unwrap();
-            let events = view.list_events(0, 20, Some("ses_0001")).unwrap();
+            let events = view
+                .list_events(0, 20, Some("ses_00000000000000000000000001"))
+                .unwrap();
             (audits, events)
         });
         let operations: Vec<&str> = audits.iter().map(|row| row.operation.as_str()).collect();
@@ -426,7 +433,7 @@ mod tests {
             json!({"id": "", "blocker": "need a decision", "reason": "because"}),
         )
         .unwrap();
-        assert_eq!(reported["id"], "ses_0001");
+        assert_eq!(reported["id"], "ses_00000000000000000000000001");
         assert_eq!(seen.0.lock().unwrap().len(), 1);
     }
 

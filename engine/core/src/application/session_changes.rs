@@ -296,7 +296,7 @@ mod tests {
                     Moment::from_unix(1_700_000_000, 0),
                 ))?;
                 txn.insert_session(&CodingSession {
-                    id: "ses_0001".to_string(),
+                    id: "ses_00000000000000000000000001".to_string(),
                     engine_session_id: "eng-1".to_string(),
                     project_id: "prj_1".to_string(),
                     work_item_id: None,
@@ -315,7 +315,7 @@ mod tests {
                 Ok(crate::application::writes::WriteOutcome {
                     result: json!({}),
                     entity_kind: "session".to_string(),
-                    entity_id: "ses_0001".to_string(),
+                    entity_id: "ses_00000000000000000000000001".to_string(),
                     payload: json!({}),
                     event_kind: "session.started".to_string(),
                     summary: json!({}),
@@ -345,7 +345,7 @@ mod tests {
         let page = run(
             &built,
             "session.changes",
-            json!({"since": 3, "ids": ["ses_0001"], "limit": 10}),
+            json!({"since": 3, "ids": ["ses_00000000000000000000000001"], "limit": 10}),
         )
         .unwrap();
         assert_eq!(
@@ -355,7 +355,7 @@ mod tests {
         assert_eq!(page["next_cursor"], 8);
         assert_eq!(page["truncated"], false);
         let changes = page["changes"].as_array().unwrap();
-        assert_eq!(changes[0]["session"], "ses_0001");
+        assert_eq!(changes[0]["session"], "ses_00000000000000000000000001");
         assert_eq!(changes[0]["kind"], "ready");
         assert_eq!(changes[0]["seq"], 7);
         assert!(changes[0]["at"].is_string());
@@ -393,7 +393,7 @@ mod tests {
         let waited = run(
             &built,
             "session.wait_any",
-            json!({"ids": ["ses_0001", UNLINKED], "until": ["blocked"], "cursor": 4, "timeout_s": 30}),
+            json!({"ids": ["ses_00000000000000000000000001", UNLINKED], "until": ["blocked"], "cursor": 4, "timeout_s": 30}),
         )
         .unwrap();
         assert_eq!(

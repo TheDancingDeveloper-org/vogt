@@ -656,7 +656,7 @@ mod tests {
                     updated_at: Moment::from_unix(1_700_000_000, 0),
                 })?;
                 txn.insert_session(&CodingSession {
-                    id: "ses_0001".to_string(),
+                    id: "ses_00000000000000000000000001".to_string(),
                     engine_session_id: "eng-1".to_string(),
                     project_id: "prj_1".to_string(),
                     work_item_id: None,
@@ -675,7 +675,7 @@ mod tests {
                 Ok(crate::application::writes::WriteOutcome {
                     result: json!({}),
                     entity_kind: "session".to_string(),
-                    entity_id: "ses_0001".to_string(),
+                    entity_id: "ses_00000000000000000000000001".to_string(),
                     payload: json!({}),
                     event_kind: "session.started".to_string(),
                     summary: json!({}),
@@ -691,13 +691,13 @@ mod tests {
         seed(&built, "prj_1");
         let bound = super::bind_work_op(
             &built,
-            json!({"id": "ses_0001", "work_item": "WI-7", "reason": "working it"}),
+            json!({"id": "ses_00000000000000000000000001", "work_item": "WI-7", "reason": "working it"}),
         )
         .unwrap();
         assert_eq!(bound["previous_work_item"], json!(null));
         assert_eq!(bound["project_mismatch"], json!(false));
         assert_eq!(bound["engine_label"], "written");
-        assert_eq!(bound["session"]["id"], "ses_0001");
+        assert_eq!(bound["session"]["id"], "ses_00000000000000000000000001");
         assert_eq!(bound["session"]["linked"], json!(true));
         assert_eq!(bound["session"]["project"], "proj");
         assert_eq!(bound["session"]["work_item"], "WI-7");
@@ -734,7 +734,7 @@ mod tests {
             "cwd": "/work",
             "effort": null,
             "engine_session_id": "eng-1",
-            "id": "ses_0001",
+            "id": "ses_00000000000000000000000001",
             "model": null,
             "previous_work_item_id": null,
             "project_id": "prj_1",
@@ -746,7 +746,7 @@ mod tests {
         assert_eq!(row.payload_digest, digest);
         let again = super::bind_work_op(
             &built,
-            json!({"id": "ses_0001", "work_item": null, "reason": "done"}),
+            json!({"id": "ses_00000000000000000000000001", "work_item": null, "reason": "done"}),
         )
         .unwrap();
         assert_eq!(again["previous_work_item"], "WI-7");
@@ -758,7 +758,7 @@ mod tests {
         seed(&built, "prj_other");
         let bound = super::bind_work_op(
             &built,
-            json!({"id": "ses_0001", "work_item": "WI-7", "reason": "across"}),
+            json!({"id": "ses_00000000000000000000000001", "work_item": "WI-7", "reason": "across"}),
         )
         .unwrap();
         assert_eq!(bound["project_mismatch"], json!(true));
@@ -896,8 +896,8 @@ mod tests {
     }
 
     /// An instance with two projects, two work items (WI-7 in `proj`, WI-8 in
-    /// `other`), a live session `ses_0001` for `eng-1`, a live child `ses_0002`
-    /// for `eng-2`, and a stopped `ses_0003` for `eng-3`.
+    /// `other`), a live session `ses_00000000000000000000000001` for `eng-1`, a live child `ses_00000000000000000000000002`
+    /// for `eng-2`, and a stopped `ses_00000000000000000000000003` for `eng-3`.
     fn estate(
         name: &str,
     ) -> (
@@ -927,9 +927,9 @@ mod tests {
                 second.title = "the ops item".to_string();
                 txn.insert_work_item(&second)?;
                 for (id, engine_id, stopped) in [
-                    ("ses_0001", "eng-1", None),
-                    ("ses_0002", "eng-2", None),
-                    ("ses_0003", "eng-3", Some(at)),
+                    ("ses_00000000000000000000000001", "eng-1", None),
+                    ("ses_00000000000000000000000002", "eng-2", None),
+                    ("ses_00000000000000000000000003", "eng-3", Some(at)),
                 ] {
                     txn.insert_session(&CodingSession {
                         id: id.to_string(),
@@ -952,7 +952,7 @@ mod tests {
                 Ok(crate::application::writes::WriteOutcome {
                     result: json!({}),
                     entity_kind: "session".to_string(),
-                    entity_id: "ses_0001".to_string(),
+                    entity_id: "ses_00000000000000000000000001".to_string(),
                     payload: json!({}),
                     event_kind: "session.started".to_string(),
                     summary: json!({}),
@@ -985,7 +985,7 @@ mod tests {
         let (_, shared, built) = estate("rebind");
         let bound = super::bind_work_op(
             &built,
-            json!({"id": "ses_0001", "work_item": "WI-7", "reason": "start"}),
+            json!({"id": "ses_00000000000000000000000001", "work_item": "WI-7", "reason": "start"}),
         )
         .unwrap();
         assert_eq!(bound["previous_work_item"], json!(null));
@@ -1006,7 +1006,7 @@ mod tests {
 
         let cleared = super::bind_work_op(
             &built,
-            json!({"id": "ses_0001", "work_item": null, "reason": "done"}),
+            json!({"id": "ses_00000000000000000000000001", "work_item": null, "reason": "done"}),
         )
         .unwrap();
         assert_eq!(cleared["session"]["work_item"], json!(null));
@@ -1034,7 +1034,9 @@ mod tests {
         })
         .unwrap();
         assert_eq!(ledger.len(), 3, "one audit row per bind");
-        assert!(ledger.iter().all(|row| row.entity_id == "ses_0001"));
+        assert!(ledger
+            .iter()
+            .all(|row| row.entity_id == "ses_00000000000000000000000001"));
     }
 
     #[test]
@@ -1042,7 +1044,7 @@ mod tests {
         let (_, _, built) = estate("branch");
         super::bind_work_op(
             &built,
-            json!({"id": "ses_0001", "work_item": "WI-7", "reason": "start"}),
+            json!({"id": "ses_00000000000000000000000001", "work_item": "WI-7", "reason": "start"}),
         )
         .unwrap();
         let detail = crate::registry::default_registry()
@@ -1050,7 +1052,10 @@ mod tests {
             .expect("work.get is registered")
             .run(Some(&built), json!({"ref": "WI-7"}))
             .unwrap();
-        assert_eq!(detail["sessions"][0]["id"], "ses_0001");
+        assert_eq!(
+            detail["sessions"][0]["id"],
+            "ses_00000000000000000000000001"
+        );
         assert!(
             detail["branches"]
                 .as_array()
@@ -1066,16 +1071,21 @@ mod tests {
         let (dir, shared, _) = estate("child");
         let overseer = as_principal(
             &dir,
-            Principal::new("agent:session:ses_0001", ActorKind::Agent, "Session").unwrap(),
+            Principal::new(
+                "agent:session:ses_00000000000000000000000001",
+                ActorKind::Agent,
+                "Session",
+            )
+            .unwrap(),
             &shared,
             true,
         );
         let result = super::bind_work_op(
             &overseer,
-            json!({"id": "ses_0002", "work_item": "WI-7", "reason": "child"}),
+            json!({"id": "ses_00000000000000000000000002", "work_item": "WI-7", "reason": "child"}),
         )
         .unwrap();
-        assert_eq!(result["session"]["id"], "ses_0002");
+        assert_eq!(result["session"]["id"], "ses_00000000000000000000000002");
         assert_eq!(result["session"]["work_item"], "WI-7");
     }
 
@@ -1084,13 +1094,18 @@ mod tests {
         let (dir, shared, _) = estate("self");
         let own = as_principal(
             &dir,
-            Principal::new("agent:session:ses_0001", ActorKind::Agent, "Session").unwrap(),
+            Principal::new(
+                "agent:session:ses_00000000000000000000000001",
+                ActorKind::Agent,
+                "Session",
+            )
+            .unwrap(),
             &shared,
             true,
         );
         let result =
             super::bind_work_op(&own, json!({"work_item": "WI-7", "reason": "mine"})).unwrap();
-        assert_eq!(result["session"]["id"], "ses_0001");
+        assert_eq!(result["session"]["id"], "ses_00000000000000000000000001");
         assert_eq!(result["session"]["work_item"], "WI-7");
     }
 
@@ -1099,13 +1114,13 @@ mod tests {
         let (_, _, built) = estate("refused");
         let unknown = super::bind_work_op(
             &built,
-            json!({"id": "ses_0001", "work_item": "WI-99", "reason": "typo"}),
+            json!({"id": "ses_00000000000000000000000001", "work_item": "WI-99", "reason": "typo"}),
         )
         .unwrap_err();
         assert!(matches!(unknown, VogtError::NotFound(_)), "{unknown:?}");
         let stopped = super::bind_work_op(
             &built,
-            json!({"id": "ses_0003", "work_item": "WI-7", "reason": "late"}),
+            json!({"id": "ses_00000000000000000000000003", "work_item": "WI-7", "reason": "late"}),
         )
         .unwrap_err();
         assert!(matches!(stopped, VogtError::Conflict(_)), "{stopped:?}");
@@ -1117,7 +1132,7 @@ mod tests {
         shared.lock().unwrap().knows_work_items = false;
         let bound = super::bind_work_op(
             &built,
-            json!({"id": "ses_0001", "work_item": "WI-7", "reason": "start"}),
+            json!({"id": "ses_00000000000000000000000001", "work_item": "WI-7", "reason": "start"}),
         )
         .unwrap();
         assert_eq!(bound["engine_label"], "not_found");
@@ -1131,7 +1146,7 @@ mod tests {
         let offline = as_principal(&dir, person(), &shared, false);
         let unbound = super::bind_work_op(
             &offline,
-            json!({"id": "ses_0001", "work_item": null, "reason": "done"}),
+            json!({"id": "ses_00000000000000000000000001", "work_item": null, "reason": "done"}),
         )
         .unwrap();
         assert_eq!(unbound["engine_label"], "unavailable");
