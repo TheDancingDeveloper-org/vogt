@@ -128,7 +128,7 @@ fn plan_repo(
     budget: &mut u64,
 ) -> Result<Option<SalvageRepoUpload>, String> {
     if repo.join(".graft").exists() {
-        plan_graft(repo, name, limits, budget)
+        plan_graft("graft", repo, name, limits, budget)
     } else {
         plan_git(repo, name, limits, budget)
     }
@@ -226,12 +226,13 @@ struct GraftChange {
 }
 
 fn plan_graft(
+    graft: &str,
     repo: &Path,
     name: &str,
     limits: &SalvageLimits,
     budget: &mut u64,
 ) -> Result<Option<SalvageRepoUpload>, String> {
-    let status_text = run("graft", repo, &["status", "--json"])?;
+    let status_text = run(graft, repo, &["status", "--json"])?;
     let status: GraftStatus = serde_json::from_str(&status_text)
         .map_err(|e| format!("graft status returned invalid JSON: {e}"))?;
     if status.clean && status.changes.is_empty() {
@@ -241,23 +242,32 @@ fn plan_graft(
     let mut untracked = Vec::new();
     let mut secret = false;
     for change in &status.changes {
-        if is_secret_path(&change.path) {
+        if !safe_relative(&change.path) || is_secret_path(&change.path) {
             skipped.push(SalvageSkip {
                 path: change.path.clone(),
                 reason: SkipReason::Secret,
+            });
+            secret = true;
+        } else if let Some(reason) = link_skip(repo, name, &change.path) {
+            // `graft diff` reads the working copy through links: a symlink's
+            // target and a hardlink's shared inode would land in the patch.
+            skipped.push(SalvageSkip {
+                path: change.path.clone(),
+                reason,
             });
             secret = true;
         } else if change.status == "added" {
             untracked.push(change.path.clone());
         }
     }
-    // A patch cannot be split per path without trusting the provider's
-    // pagination; when any changed path is a credential, the archive keeps
-    // no patch rather than risk carrying it.
+    // A patch cannot be split per path: the provider's pagination is not
+    // trusted, and `graft diff --path` does not narrow a working-copy diff.
+    // When any changed path is a credential or a link, the archive keeps no
+    // patch rather than risk carrying it.
     let patch = if secret {
         String::new()
     } else {
-        run("graft", repo, &["diff", "--limit", "10000"])?
+        run(graft, repo, &["diff", "--limit", "10000"])?
     };
     Ok(finish(
         Finished {
@@ -406,13 +416,43 @@ fn refusal(error: &std::io::Error) -> Refusal {
     Refusal::Other
 }
 
+/// The skip reason for a changed path that is, or sits below, a symlink, or
+/// that is a file with more than one link; `None` for anything else, including
+/// a deleted path. Logs each refusal.
+fn link_skip(repo: &Path, name: &str, path: &str) -> Option<SkipReason> {
+    let error = open_no_follow(repo, Path::new(path)).err()?;
+    match refusal(&error) {
+        Refusal::Symlink => {
+            tracing::warn!(repo = name, path, "salvage skipped a symlink");
+            Some(SkipReason::Unreadable)
+        }
+        Refusal::HardLink(links) => {
+            tracing::warn!(repo = name, path, links, "salvage skipped a hardlink");
+            Some(SkipReason::Secret)
+        }
+        Refusal::Other => None,
+    }
+}
+
 /// Read a regular file below `root` without following any path-component
-/// symlink. Parent directories and the final file are opened one component at
-/// a time with `openat(O_NOFOLLOW)`, and the descriptor is checked before a
-/// bounded read.
+/// symlink, bounded to `max_bytes + 1` so an oversized file is detectable.
 #[cfg(unix)]
 fn read_no_follow(root: &Path, relative: &Path, max_bytes: u64) -> std::io::Result<Vec<u8>> {
     use std::io::Read;
+
+    let mut bytes = Vec::new();
+    open_no_follow(root, relative)?
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+/// Open a regular file below `root` without following any path-component
+/// symlink. Parent directories and the final file are opened one component at
+/// a time with `openat(O_NOFOLLOW)`, and the descriptor is checked: it must be
+/// a regular file with a single link.
+#[cfg(unix)]
+fn open_no_follow(root: &Path, relative: &Path) -> std::io::Result<fs::File> {
     use std::os::fd::{AsRawFd, FromRawFd};
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
@@ -468,11 +508,7 @@ fn read_no_follow(root: &Path, relative: &Path, max_bytes: u64) -> std::io::Resu
             HardLink(metadata.nlink()),
         ));
     }
-    let mut bytes = Vec::new();
-    current
-        .take(max_bytes.saturating_add(1))
-        .read_to_end(&mut bytes)?;
-    Ok(bytes)
+    Ok(current)
 }
 
 /// Paths from `git status --porcelain=v1 -z`: (tracked changes, untracked).
@@ -717,6 +753,95 @@ mod tests {
             .skipped
             .iter()
             .any(|s| s.path == "notes.txt" && s.reason == SkipReason::Secret));
+    }
+
+    /// A stand-in for `graft` that behaves as the real CLI does on a working
+    /// copy: `status --json` lists every top-level entry as added, and `diff`
+    /// prints each one's contents through `cat`, which follows symlinks, reads
+    /// a hardlink's shared inode, and fails on a directory.
+    fn fake_graft(dir: &Path) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = scratch("fake-graft").join("graft");
+        fs::write(
+            &bin,
+            r#"#!/bin/sh
+entries() { ls -A | grep -v '^\.graft$'; }
+case "$1" in
+status)
+  printf '{"line":"rust-2","base":"b","clean":false,"changes":['
+  sep=
+  for f in $(entries); do printf '%s{"path":"%s","status":"added"}' "$sep" "$f"; sep=,; done
+  printf ']}\n' ;;
+diff)
+  for f in $(entries); do printf 'added     %s\n' "$f"; cat "$f" || exit 1; done ;;
+esac
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::create_dir_all(dir.join(".graft")).unwrap();
+        bin.to_string_lossy().into_owned()
+    }
+
+    fn plan_fake_graft(dir: &Path) -> SalvageRepoUpload {
+        let graft = fake_graft(dir);
+        let limits = SalvageLimits::default();
+        let mut budget = limits.max_total_bytes;
+        plan_graft(&graft, dir, ".", &limits, &mut budget)
+            .expect("graft salvage must not fail")
+            .expect("the working copy has changes")
+    }
+
+    #[test]
+    fn graft_salvage_never_carries_a_link_target() {
+        let dir = scratch("graft-links");
+        let outside = scratch("graft-links-outside");
+        fs::write(outside.join("token"), "SA-TOKEN-BYTES\n").unwrap();
+        fs::write(outside.join("graft.token"), "GRAFT-TOKEN-BYTES\n").unwrap();
+        std::os::unix::fs::symlink(outside.join("token"), dir.join("sym_notes.txt")).unwrap();
+        fs::hard_link(outside.join("graft.token"), dir.join("hard_notes.txt")).unwrap();
+        fs::write(dir.join("real.txt"), "real\n").unwrap();
+
+        let repo = plan_fake_graft(&dir);
+        assert!(!repo.patch.contains("TOKEN"), "patch: {}", repo.patch);
+        assert_eq!(repo.untracked, vec!["real.txt"]);
+        assert!(repo
+            .skipped
+            .iter()
+            .any(|s| s.path == "sym_notes.txt" && s.reason == SkipReason::Unreadable));
+        assert!(repo
+            .skipped
+            .iter()
+            .any(|s| s.path == "hard_notes.txt" && s.reason == SkipReason::Secret));
+        assert!(repo.truncated);
+    }
+
+    #[test]
+    fn a_symlinked_directory_does_not_sink_graft_salvage() {
+        let dir = scratch("graft-dir-link");
+        let outside = scratch("graft-dir-link-outside");
+        fs::write(outside.join("inner.txt"), "CREDENTIAL-BYTES\n").unwrap();
+        std::os::unix::fs::symlink(&outside, dir.join("linked")).unwrap();
+        fs::write(dir.join("real.txt"), "real\n").unwrap();
+
+        let repo = plan_fake_graft(&dir);
+        assert!(!repo.patch.contains("CREDENTIAL"));
+        assert_eq!(repo.untracked, vec!["real.txt"]);
+        assert!(repo
+            .skipped
+            .iter()
+            .any(|s| s.path == "linked" && s.reason == SkipReason::Unreadable));
+    }
+
+    #[test]
+    fn graft_salvage_keeps_the_patch_without_links() {
+        let dir = scratch("graft-plain");
+        fs::write(dir.join("real.txt"), "real\n").unwrap();
+
+        let repo = plan_fake_graft(&dir);
+        assert!(repo.patch.contains("added     real.txt\nreal\n"));
+        assert!(repo.skipped.is_empty());
+        assert!(!repo.truncated);
     }
 
     #[test]
