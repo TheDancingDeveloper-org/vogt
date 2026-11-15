@@ -93,6 +93,8 @@ pub struct Session {
     /// it (WI-4132). Survives the stop so the list and the stop result can
     /// show the path.
     salvage: Mutex<Option<vogt_engine_contract::salvage::SalvageReport>>,
+    /// The pod's unlanded-work saves as the summary shows them (WI-3370).
+    saved_work: Mutex<SavedWorkState>,
     /// The agent conversation this session runs, when its id is known
     /// (set by the registry right after spawn).
     conversation: Mutex<Option<vogt_engine_contract::AgentConversation>>,
@@ -528,6 +530,14 @@ impl Session {
         // of the statement, so locking `exit_code` again for `alive` there
         // would deadlock (parking_lot mutexes are not re-entrant).
         let exit_code = self.exit_code();
+        let (saved_work, save_failed, hibernate_deferred) = {
+            let state = self.saved_work.lock();
+            (
+                state.saved.clone(),
+                state.failed.clone(),
+                state.deferred.as_ref().map(|d| d.0.clone()),
+            )
+        };
         let sb = self.scrollback.lock();
         // An exited child is terminal whatever the cached state says: the
         // exit waiter stores the code a moment before it moves the activity,
@@ -571,6 +581,9 @@ impl Session {
             conversation: self.conversation(),
             hibernation: None,
             salvage: self.salvage.lock().clone(),
+            saved_work,
+            save_failed,
+            hibernate_deferred,
             keep_awake: self.keep_awake(),
             autopilot: self.autopilot(),
             autopilot_nudges: self.autopilot_nudges(),
@@ -722,6 +735,49 @@ impl Session {
 
     pub fn salvage(&self) -> Option<vogt_engine_contract::salvage::SalvageReport> {
         self.salvage.lock().clone()
+    }
+
+    /// Keep the latest save of the pod's unlanded work; a success clears an
+    /// earlier failure (WI-4268).
+    pub fn set_saved_work(&self, report: vogt_engine_contract::saved_work::SavedWorkReport) {
+        let mut state = self.saved_work.lock();
+        state.saved = Some(report);
+        state.failed = None;
+    }
+
+    pub fn saved_work(&self) -> Option<vogt_engine_contract::saved_work::SavedWorkReport> {
+        self.saved_work.lock().saved.clone()
+    }
+
+    pub fn set_save_failed(&self, failure: Option<vogt_engine_contract::saved_work::SaveFailure>) {
+        self.saved_work.lock().failed = failure;
+    }
+
+    pub fn save_failed(&self) -> Option<vogt_engine_contract::saved_work::SaveFailure> {
+        self.saved_work.lock().failed.clone()
+    }
+
+    /// Record (or clear) an idle-policy hibernation held back by a failed
+    /// save, with the instant it was decided for the policy's backoff.
+    pub fn set_hibernate_deferred(
+        &self,
+        deferral: Option<vogt_engine_contract::saved_work::HibernateDeferral>,
+    ) {
+        self.saved_work.lock().deferred = deferral.map(|d| (d, std::time::Instant::now()));
+    }
+
+    /// The current deferral and how long ago it was decided.
+    pub fn hibernate_deferred(
+        &self,
+    ) -> Option<(
+        vogt_engine_contract::saved_work::HibernateDeferral,
+        std::time::Duration,
+    )> {
+        self.saved_work
+            .lock()
+            .deferred
+            .as_ref()
+            .map(|(d, at)| (d.clone(), at.elapsed()))
     }
 
     pub fn set_blocked(
@@ -971,6 +1027,17 @@ impl Session {
 fn format_rfc3339(ts: time::OffsetDateTime) -> String {
     ts.format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_else(|_| ts.to_string())
+}
+
+/// What a session holds of its pod's unlanded-work saves (WI-4268).
+#[derive(Debug, Default)]
+struct SavedWorkState {
+    saved: Option<vogt_engine_contract::saved_work::SavedWorkReport>,
+    failed: Option<vogt_engine_contract::saved_work::SaveFailure>,
+    deferred: Option<(
+        vogt_engine_contract::saved_work::HibernateDeferral,
+        std::time::Instant,
+    )>,
 }
 
 pub struct SpawnedSession {
@@ -1423,6 +1490,7 @@ fn assemble_session(
         approval: Mutex::new(None),
         blocked: Mutex::new(None),
         salvage: Mutex::new(None),
+        saved_work: Mutex::new(SavedWorkState::default()),
         conversation: Mutex::new(None),
         keep_awake: AtomicBool::new(false),
         autopilot: AtomicBool::new(false),

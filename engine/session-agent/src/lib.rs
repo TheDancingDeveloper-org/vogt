@@ -7,6 +7,7 @@
 pub mod codex_guidance;
 pub mod codex_policy;
 pub mod salvage;
+pub mod save;
 
 use std::{
     collections::VecDeque,
@@ -29,6 +30,7 @@ use tokio_tungstenite::{
     tungstenite::{client::IntoClientRequest, http::HeaderValue, Message},
     Connector,
 };
+use vogt_engine_contract::saved_work::{SaveOutcome, SaveTrigger};
 
 pub const DEFAULT_BUFFER_BYTES: usize = 1024 * 1024;
 /// The most data one replayed `Output` frame carries.
@@ -270,6 +272,29 @@ pub enum Frame {
     /// conversation transcript could not be stored.
     Flushed {
         ok: bool,
+    },
+    /// Engine to agent: checkpoint the unlanded work as a graft draft now
+    /// (WI-4267). Not final (an idle edge): save and answer `Saved`. Final
+    /// (hibernate or stop): stop the CLI, flush, save, salvage, answer
+    /// `Checkpointed` and exit.
+    Checkpoint {
+        #[serde(rename = "final", default)]
+        is_final: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        trigger: Option<SaveTrigger>,
+    },
+    /// Agent to engine: one checkpoint's outcome, from the timer or a
+    /// non-final `Checkpoint`. The timer reports only a new save or a failure.
+    Saved {
+        outcome: SaveOutcome,
+    },
+    /// Agent to engine: the final checkpoint is done and the agent exits.
+    /// `status` is how the stopped CLI ended, as `Exited` would say.
+    Checkpointed {
+        saved: SaveOutcome,
+        salvage: vogt_engine_contract::salvage::SalvageAck,
+        #[serde(default)]
+        status: Option<i32>,
     },
 }
 
@@ -819,6 +844,171 @@ async fn salvage_and_upload(
             ok: false,
             files: 0,
             reason: Some(format!("the salvage upload failed: {e}")),
+        },
+    }
+}
+
+/// The pod's saver (WI-4267), or `None` when saves are off or the clone root
+/// is not a graft checkout (a git pod keeps salvage-only behaviour).
+fn make_saver(
+    config: &Config,
+    settings: &save::SaveSettings,
+) -> Option<Arc<std::sync::Mutex<save::Saver>>> {
+    if !settings.enabled {
+        tracing::info!("session-agent: pod saves are turned off");
+        return None;
+    }
+    let root = salvage_root();
+    if !root.join(".graft").is_dir() {
+        tracing::info!(root = %root.display(), "session-agent: not a graft checkout; no pod saves");
+        return None;
+    }
+    let lookup = |name: &str| std::env::var(name).ok().filter(|v| !v.trim().is_empty());
+    let token_file = lookup("VOGT_GRAFT_TOKEN_FILE").map(PathBuf::from);
+    // graft attributes the draft to the session its token is bound to.
+    let env = session_identity_env(config, lookup)
+        .into_iter()
+        .map(|(name, value)| (name.to_owned(), value))
+        .collect();
+    // The pod's own credentials are refused wherever they appear in a file,
+    // whatever their shape.
+    let mut known = vec![config.token.as_bytes().to_vec()];
+    let mut never_walk = vec![PathBuf::from("/run/vogt")];
+    for name in ["VOGT_GRAFT_TOKEN_FILE", "VOGT_SESSION_TOKEN_FILE"] {
+        if let Some(path) = lookup(name).map(PathBuf::from) {
+            if let Ok(bytes) = std::fs::read(&path) {
+                known.push(bytes);
+            }
+            if let Some(dir) = path.parent() {
+                never_walk.push(dir.to_path_buf());
+            }
+        }
+    }
+    let config_home = lookup("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| lookup("HOME").map(|home| PathBuf::from(home).join(".config")));
+    if let Some(home) = config_home {
+        never_walk.push(home.join("graft"));
+    }
+    let graft = save::GraftCli {
+        program: PathBuf::from("graft"),
+        token_file,
+        env,
+    };
+    match save::Saver::new(
+        root,
+        settings,
+        &config.session_id,
+        graft,
+        &known,
+        &never_walk,
+    ) {
+        Ok(saver) => Some(Arc::new(std::sync::Mutex::new(saver))),
+        Err(error) => {
+            tracing::warn!(%error, "session-agent: pod saves are unavailable");
+            None
+        }
+    }
+}
+
+/// One finished checkpoint, sent back from its thread.
+struct SaveDone {
+    result: Result<save::Checkpoint, String>,
+    trigger: SaveTrigger,
+    /// The engine asked for it, so even an unchanged tree is reported.
+    explicit: bool,
+}
+
+/// Run a checkpoint on its own thread at `nice 10`, off the PTY path, and
+/// send the result to `done`.
+fn start_checkpoint(
+    saver: &Arc<std::sync::Mutex<save::Saver>>,
+    trigger: SaveTrigger,
+    explicit: bool,
+    done: &mpsc::Sender<SaveDone>,
+) {
+    let saver = saver.clone();
+    let tx = done.clone();
+    let spawned = std::thread::Builder::new()
+        .name("vogt-save".into())
+        .spawn(move || {
+            save::lower_priority();
+            let result = match saver.lock() {
+                Ok(mut saver) => saver.checkpoint(trigger),
+                Err(_) => Err("the save state is unusable after an earlier failure".into()),
+            };
+            let _ = tx.blocking_send(SaveDone {
+                result,
+                trigger,
+                explicit,
+            });
+        });
+    if let Err(error) = spawned {
+        let _ = done.try_send(SaveDone {
+            result: Err(format!("could not start the checkpoint: {error}")),
+            trigger,
+            explicit,
+        });
+    }
+}
+
+/// What a finished checkpoint tells the engine: a new save, a failure, and
+/// for a requested one also an unchanged or unsupported answer.
+fn save_outcome(done: SaveDone) -> Option<SaveOutcome> {
+    match done.result {
+        Ok(save::Checkpoint::Saved(report)) => {
+            tracing::info!(
+                draft = report.draft.as_deref().unwrap_or("-"),
+                seq = report.seq,
+                files = report.files,
+                skipped = report.skipped.len(),
+                complete = report.complete,
+                trigger = done.trigger.as_str(),
+                "session-agent: unlanded work saved"
+            );
+            Some(SaveOutcome::Saved {
+                report: Box::new(report),
+            })
+        }
+        Ok(save::Checkpoint::Unchanged(report)) => done.explicit.then_some(SaveOutcome::Saved {
+            report: Box::new(report),
+        }),
+        Ok(save::Checkpoint::Unsupported(reason)) => {
+            done.explicit.then_some(SaveOutcome::Unsupported { reason })
+        }
+        Err(reason) => {
+            tracing::warn!(%reason, trigger = done.trigger.as_str(), "session-agent: the save failed");
+            Some(SaveOutcome::SaveFailed {
+                trigger: done.trigger,
+                reason,
+            })
+        }
+    }
+}
+
+/// The final save before a hibernate or stop: wait for a checkpoint already
+/// running, then run one more and wait for it.
+async fn final_save(
+    saver: Option<&Arc<std::sync::Mutex<save::Saver>>>,
+    trigger: SaveTrigger,
+    running: bool,
+    done_tx: &mpsc::Sender<SaveDone>,
+    done_rx: &mut mpsc::Receiver<SaveDone>,
+) -> SaveOutcome {
+    let Some(saver) = saver else {
+        return SaveOutcome::Unsupported {
+            reason: "this pod does not save its work (saves off, or not a graft checkout)".into(),
+        };
+    };
+    if running {
+        let _ = done_rx.recv().await;
+    }
+    start_checkpoint(saver, trigger, true, done_tx);
+    match done_rx.recv().await.and_then(save_outcome) {
+        Some(outcome) => outcome,
+        None => SaveOutcome::SaveFailed {
+            trigger,
+            reason: "the checkpoint did not finish".into(),
         },
     }
 }
@@ -2110,6 +2300,18 @@ pub fn spawn_pty(config: &Config) -> Result<PtyIo, AgentError> {
 }
 
 pub async fn run(config: Config) -> Result<(), AgentError> {
+    let save_settings = save::SaveSettings::from_lookup(|name| std::env::var(name).ok());
+    let saver = make_saver(&config, &save_settings);
+    run_with_saves(config, save_settings, saver).await
+}
+
+/// [`run`] with the pod-save settings and saver given, not read from the
+/// environment.
+async fn run_with_saves(
+    config: Config,
+    save_settings: save::SaveSettings,
+    saver: Option<Arc<std::sync::Mutex<save::Saver>>>,
+) -> Result<(), AgentError> {
     let tls = tls_config()?;
     let mut bundle_seen = std::collections::HashMap::new();
     let mut transcript_offsets = std::collections::HashMap::new();
@@ -2145,6 +2347,21 @@ pub async fn run(config: Config) -> Result<(), AgentError> {
     let mut backoff = Duration::from_millis(100);
     let mut first_output_logged = false;
     let mut stopped = false;
+    // Pod saves (WI-4267): a timer plus the engine's `Checkpoint` requests.
+    // One checkpoint runs at a time; a request that arrives meanwhile runs
+    // next. A report the stream could not take is sent after a reconnect.
+    let (save_tx, mut save_rx) = mpsc::channel::<SaveDone>(4);
+    let mut save_running = false;
+    let mut save_pending: Option<(SaveTrigger, bool)> = None;
+    let mut save_unsent: Option<Frame> = None;
+    let save_period = save_settings
+        .interval
+        .filter(|_| saver.is_some())
+        .unwrap_or(Duration::from_secs(3600));
+    let save_timer_on = saver.is_some() && save_settings.interval.is_some();
+    let mut save_tick =
+        tokio::time::interval_at(tokio::time::Instant::now() + save_period, save_period);
+    save_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         // Request construction is a configuration error, not a transient socket
         // failure.  Return through the cleanup below rather than orphaning PTY.
@@ -2177,8 +2394,35 @@ pub async fn run(config: Config) -> Result<(), AgentError> {
             for frame in replay.resend_frames(acked) {
                 send_frame(&mut sink, &frame).await?;
             }
+            if let Some(frame) = save_unsent.as_ref() {
+                send_frame(&mut sink, frame).await?;
+                save_unsent = None;
+            }
             loop {
                 tokio::select! {
+                    _ = save_tick.tick(), if save_timer_on => {
+                        if let Some(saver) = saver.as_ref() {
+                            if save_running {
+                                save_pending.get_or_insert((SaveTrigger::Periodic, false));
+                            } else {
+                                start_checkpoint(saver, SaveTrigger::Periodic, false, &save_tx);
+                                save_running = true;
+                            }
+                        }
+                    }
+                    Some(done) = save_rx.recv() => {
+                        save_running = false;
+                        if let (Some(saver), Some((trigger, explicit))) = (saver.as_ref(), save_pending.take()) {
+                            start_checkpoint(saver, trigger, explicit, &save_tx);
+                            save_running = true;
+                        }
+                        if let Some(outcome) = save_outcome(done) {
+                            let frame = Frame::Saved { outcome };
+                            save_unsent = Some(frame.clone());
+                            send_frame(&mut sink, &frame).await?;
+                            save_unsent = None;
+                        }
+                    }
                     Some(data) = output_rx.recv() => {
                         if !first_output_logged {
                             first_output_logged = true;
@@ -2234,6 +2478,40 @@ pub async fn run(config: Config) -> Result<(), AgentError> {
                                     Frame::Flush => {
                                         let ok = flush_bundle(&config, &tls, &mut bundle_seen, &mut transcript_offsets).await;
                                         send_frame(&mut sink, &Frame::Flushed { ok }).await?;
+                                    },
+                                    Frame::Checkpoint { is_final: false, trigger } => {
+                                        let trigger = trigger.unwrap_or(SaveTrigger::Idle);
+                                        match saver.as_ref() {
+                                            None => {
+                                                send_frame(&mut sink, &Frame::Saved {
+                                                    outcome: SaveOutcome::Unsupported {
+                                                        reason: "this pod does not save its work (saves off, or not a graft checkout)".into(),
+                                                    },
+                                                }).await?;
+                                            }
+                                            Some(_) if save_running => save_pending = Some((trigger, true)),
+                                            Some(saver) => {
+                                                start_checkpoint(saver, trigger, true, &save_tx);
+                                                save_running = true;
+                                            }
+                                        }
+                                    },
+                                    // The final save: nothing writes once the CLI
+                                    // is stopped, so the draft is not torn, and an
+                                    // edit cannot slip in between save and kill.
+                                    // Like a kill, it ends this agent either way.
+                                    Frame::Checkpoint { is_final: true, trigger } => {
+                                        let trigger = trigger.unwrap_or(SaveTrigger::Hibernate);
+                                        let status = match stop_child(&mut child).await {
+                                            Frame::Exited { status } => status,
+                                            _ => None,
+                                        };
+                                        stopped = true;
+                                        let _ = flush_bundle(&config, &tls, &mut bundle_seen, &mut transcript_offsets).await;
+                                        let saved = final_save(saver.as_ref(), trigger, save_running, &save_tx, &mut save_rx).await;
+                                        let salvage = salvage_and_upload(&config, &tls).await;
+                                        let _ = send_frame(&mut sink, &Frame::Checkpointed { saved, salvage, status }).await;
+                                        return Ok(());
                                     },
                                     Frame::Salvage => {
                                         let ack = salvage_and_upload(&config, &tls).await;
@@ -2582,6 +2860,188 @@ mod tests {
             "run() did not end: {result:?}"
         );
         assert_eq!(accepts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// A clean graft checkout and a saver whose `graft` is a stub that reports
+    /// it clean, so a checkpoint reports `{draft: null, complete: true}`.
+    fn clean_saver(
+        dir: &Path,
+        interval: Option<Duration>,
+    ) -> (save::SaveSettings, Arc<std::sync::Mutex<save::Saver>>) {
+        use std::os::unix::fs::PermissionsExt;
+        let root = dir.join("work");
+        std::fs::create_dir_all(root.join(".graft")).unwrap();
+        std::fs::write(root.join(".graft/config"), "repo = \"vogt\"\n").unwrap();
+        let program = dir.join("graft");
+        std::fs::write(
+            &program,
+            "#!/bin/sh\necho '{\"line\":\"rust-2\",\"base\":\"B1\",\"head\":null,\"changes\":[]}'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let settings = save::SaveSettings {
+            interval,
+            save_dir: dir.join("save"),
+            ..save::SaveSettings::default()
+        };
+        let saver = save::Saver::new(
+            root,
+            &settings,
+            "s",
+            save::GraftCli {
+                program,
+                token_file: None,
+                env: Vec::new(),
+            },
+            &[],
+            &[],
+        )
+        .unwrap();
+        (settings, Arc::new(std::sync::Mutex::new(saver)))
+    }
+
+    /// A fake engine that sends `frames` after Hello and Resume, one each time
+    /// the previous answer (any non-heartbeat, non-output frame) arrives, and
+    /// records every frame the agent sends.
+    async fn checkpoint_engine(frames: Vec<Frame>) -> (String, Arc<std::sync::Mutex<Vec<Frame>>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let record = seen.clone();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            for _ in 0..2 {
+                socket.next().await.unwrap().unwrap();
+            }
+            let mut queue = frames.into_iter();
+            if let Some(frame) = queue.next() {
+                let text = serde_json::to_string(&frame).unwrap();
+                socket.send(Message::Text(text.into())).await.unwrap();
+            }
+            while let Some(Ok(message)) = socket.next().await {
+                let Message::Text(text) = message else {
+                    continue;
+                };
+                let frame: Frame = serde_json::from_str(&text).unwrap();
+                if matches!(frame, Frame::Heartbeat { .. } | Frame::Output { .. }) {
+                    continue;
+                }
+                record.lock().unwrap().push(frame);
+                if let Some(next) = queue.next() {
+                    let text = serde_json::to_string(&next).unwrap();
+                    socket.send(Message::Text(text.into())).await.unwrap();
+                }
+            }
+        });
+        (format!("http://{address}"), seen)
+    }
+
+    // WI-4267: an idle-edge Checkpoint is answered with Saved; a final one
+    // stops the CLI, saves, salvages, answers Checkpointed and ends run().
+    #[tokio::test]
+    async fn checkpoint_frames_save_and_the_final_one_ends_the_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        let (settings, saver) = clean_saver(dir.path(), None);
+        let (url, seen) = checkpoint_engine(vec![
+            Frame::Checkpoint {
+                is_final: false,
+                trigger: Some(SaveTrigger::Idle),
+            },
+            Frame::Checkpoint {
+                is_final: true,
+                trigger: Some(SaveTrigger::Stop),
+            },
+        ])
+        .await;
+        let result = tokio::time::timeout(
+            Duration::from_secs(20),
+            run_with_saves(kill_config(url), settings, Some(saver)),
+        )
+        .await;
+        assert!(
+            matches!(result, Ok(Ok(()))),
+            "run() did not end: {result:?}"
+        );
+        // The engine task records the last frame after run() has returned.
+        for _ in 0..100 {
+            if seen.lock().unwrap().len() >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let seen = seen.lock().unwrap().clone();
+        let [Frame::Saved {
+            outcome: SaveOutcome::Saved { report },
+        }, Frame::Checkpointed {
+            saved: SaveOutcome::Saved { report: last },
+            salvage,
+            status,
+        }] = seen.as_slice()
+        else {
+            panic!("unexpected frames: {seen:?}");
+        };
+        assert_eq!((report.draft.as_deref(), report.complete), (None, true));
+        assert_eq!((report.seq, report.trigger), (1, SaveTrigger::Idle));
+        // Nothing changed since: the final save repeats the last report.
+        assert_eq!(last, report);
+        assert!(salvage.ok, "{salvage:?}");
+        assert_eq!(*status, Some(137), "the CLI was not stopped by the agent");
+    }
+
+    // WI-4267: the timer saves without being asked, and an unchanged tree
+    // sends nothing more.
+    #[tokio::test]
+    async fn the_save_timer_reports_a_new_save_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let (settings, saver) = clean_saver(dir.path(), Some(Duration::from_millis(200)));
+        let (url, seen) = checkpoint_engine(Vec::new()).await;
+        // run() is not Send; race it against the wait instead of spawning it.
+        tokio::select! {
+            result = run_with_saves(kill_config(url), settings, Some(saver)) => panic!("run() ended: {result:?}"),
+            () = tokio::time::sleep(Duration::from_millis(1500)) => {},
+        }
+        let seen = seen.lock().unwrap().clone();
+        assert!(
+            matches!(
+                seen.as_slice(),
+                [Frame::Saved {
+                    outcome: SaveOutcome::Saved { report }
+                }] if report.trigger == SaveTrigger::Periodic && report.seq == 1
+            ),
+            "{seen:?}"
+        );
+    }
+
+    #[test]
+    fn checkpoint_frames_use_the_wire_names() {
+        let frame: Frame =
+            serde_json::from_str(r#"{"type":"checkpoint","final":true,"trigger":"hibernate"}"#)
+                .unwrap();
+        assert_eq!(
+            frame,
+            Frame::Checkpoint {
+                is_final: true,
+                trigger: Some(SaveTrigger::Hibernate)
+            }
+        );
+        let idle: Frame = serde_json::from_str(r#"{"type":"checkpoint"}"#).unwrap();
+        assert_eq!(
+            idle,
+            Frame::Checkpoint {
+                is_final: false,
+                trigger: None
+            }
+        );
+        let saved = serde_json::to_value(Frame::Saved {
+            outcome: SaveOutcome::SaveFailed {
+                trigger: SaveTrigger::Periodic,
+                reason: "graft down".into(),
+            },
+        })
+        .unwrap();
+        assert_eq!(saved["type"], "saved");
+        assert_eq!(saved["outcome"]["state"], "save_failed");
     }
 
     /// A fake engine on one port: bundle-file POSTs are answered 200 and their

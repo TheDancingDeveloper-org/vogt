@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 pub mod chat;
 pub mod salvage;
+pub mod saved_work;
 pub mod source;
 pub use chat::*;
 
@@ -373,6 +374,16 @@ pub struct SessionSummary {
     /// found nothing to save, and from an engine that predates the field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub salvage: Option<SalvageReport>,
+    /// The latest checkpoint of the pod's unlanded work as a graft draft
+    /// (WI-3370). Absent on a host session and before the first save.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved_work: Option<crate::saved_work::SavedWorkReport>,
+    /// The last checkpoint that failed, while no later one succeeded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub save_failed: Option<crate::saved_work::SaveFailure>,
+    /// The idle policy held a hibernation back because the save failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hibernate_deferred: Option<crate::saved_work::HibernateDeferral>,
     /// Pinned awake: never hibernated by policy, and woken at boot.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub keep_awake: bool,
@@ -618,6 +629,10 @@ pub enum HibernateTrigger {
     Recovered,
     /// A budget reached its hard limit (WI-1245 / C7).
     Budget,
+    /// The session's pod vanished or failed while it had a conversation to
+    /// resume (WI-3370): a wake restores the last periodic save.
+    #[serde(rename = "pod_lost")]
+    PodLost,
 }
 
 /// What an agent's done declaration came from (WI-1518).

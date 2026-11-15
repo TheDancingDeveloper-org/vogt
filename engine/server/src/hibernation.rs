@@ -173,6 +173,18 @@ pub struct Record {
     /// session still shows where it was kept (WI-4132).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub salvage: Option<vogt_engine_contract::salvage::SalvageReport>,
+    /// The latest checkpoint of the pod's unlanded work as a graft draft
+    /// (WI-3370), with the draft before it. A wake restores from it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved_work: Option<vogt_engine_contract::saved_work::SavedWorkReport>,
+    /// The last checkpoint that failed, while no later one succeeded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub save_failed: Option<vogt_engine_contract::saved_work::SaveFailure>,
+    /// The pod incarnation counter (WI-3370): bumped on each wake, so a late
+    /// report from an older pod cannot overwrite a newer save. It names the
+    /// pod's save workspace (`VOGT_POD_GEN`).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub pod_gen: u64,
     /// The latest economics snapshot, as JSON (WI-1245). Kept so removing a
     /// hibernated session can record its cost once; nothing reads it back
     /// onto a summary.
@@ -261,6 +273,9 @@ impl Record {
             superseded_by: None,
             hibernation: None,
             salvage: None,
+            saved_work: None,
+            save_failed: None,
+            pod_gen: 0,
             economics: None,
             rows: None,
             cols: None,

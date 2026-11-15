@@ -175,6 +175,13 @@ pub struct StopResponse {
     pub ok: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub salvage: Option<SalvageReport>,
+    /// The final checkpoint of the pod's unlanded work (WI-3370): where it
+    /// is kept as a graft draft. Absent on a host session or an older agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved_work: Option<crate::saved_work::SavedWorkReport>,
+    /// Why the final checkpoint failed; the stop went on regardless.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub save_failed: Option<crate::saved_work::SaveFailure>,
 }
 
 /// What the agent reports on the stream once the upload is done (`Salvaged`).

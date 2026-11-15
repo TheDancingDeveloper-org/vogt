@@ -470,6 +470,136 @@ pub(crate) fn salvage_settings() -> (bool, usize, u64) {
         .unwrap_or(DEFAULT_MAX_SESSION_BYTES);
     (enabled, keep, max)
 }
+/// `ENGINE_POD_SAVE` (on unless explicitly off): whether pods checkpoint
+/// their unlanded work as a graft draft (WI-3370). Off, a hibernate and a
+/// stop salvage and kill as before.
+pub(crate) fn pod_saves_enabled() -> bool {
+    env_flag(vogt_engine_contract::saved_work::ENV_SAVE, true)
+}
+
+/// `ENGINE_POD_REAP_COVERED` (off unless explicitly on, decision D6).
+pub(crate) fn reap_covered_enabled() -> bool {
+    env_flag(vogt_engine_contract::saved_work::ENV_REAP_COVERED, false)
+}
+
+fn env_flag(name: &str, default: bool) -> bool {
+    match std::env::var(name) {
+        Ok(v) => match v.trim() {
+            "0" | "false" | "no" | "off" => false,
+            "1" | "true" | "yes" | "on" => true,
+            _ => default,
+        },
+        Err(_) => default,
+    }
+}
+
+/// How long the engine waits for a pod's checkpoint answer
+/// (`ENGINE_POD_FINAL_SAVE_TIMEOUT`, seconds, default 60).
+pub(crate) fn final_save_timeout() -> std::time::Duration {
+    use vogt_engine_contract::saved_work::{
+        DEFAULT_FINAL_SAVE_TIMEOUT_SECS, ENV_FINAL_SAVE_TIMEOUT,
+    };
+    std::time::Duration::from_secs(
+        std::env::var(ENV_FINAL_SAVE_TIMEOUT)
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(DEFAULT_FINAL_SAVE_TIMEOUT_SECS),
+    )
+}
+
+/// The report to keep as a session's saved work, or `None` when `report` is
+/// stale (design §2.9): made by another pod incarnation than `pod_gen`, or
+/// not newer than the one kept for this incarnation. A kept report names
+/// the draft before it as `previous`, so a lost newer draft has a fallback.
+pub(crate) fn accept_saved(
+    current: Option<&vogt_engine_contract::saved_work::SavedWorkReport>,
+    pod_gen: u64,
+    mut report: vogt_engine_contract::saved_work::SavedWorkReport,
+) -> Option<vogt_engine_contract::saved_work::SavedWorkReport> {
+    if report.gen != pod_gen {
+        return None;
+    }
+    if let Some(current) = current {
+        if current.gen == report.gen && report.seq <= current.seq {
+            return None;
+        }
+        report.previous = match &current.draft {
+            Some(draft) if current.draft != report.draft => {
+                Some(vogt_engine_contract::saved_work::SavedDraftRef {
+                    draft: draft.clone(),
+                    base: current.base.clone(),
+                })
+            }
+            _ => current.previous.clone(),
+        };
+    }
+    Some(report)
+}
+
+/// The pure half of [`SessionRegistry::save_covers_pod`].
+pub(crate) fn save_covers(record: &Record, pod_gen: Option<u64>) -> bool {
+    use vogt_engine_contract::saved_work::SaveTrigger;
+    let (Some(saved), Some(hibernation)) = (&record.saved_work, &record.hibernation) else {
+        return false;
+    };
+    // A failure after the kept save (a final save that failed) means the pod
+    // may hold work the draft lacks.
+    if !saved.complete
+        || record.save_failed.is_some()
+        || pod_gen != Some(saved.gen)
+        || saved.gen != record.pod_gen
+    {
+        return false;
+    }
+    if matches!(saved.trigger, SaveTrigger::Hibernate | SaveTrigger::Stop) {
+        return true;
+    }
+    let parse = |at: &str| {
+        time::OffsetDateTime::parse(at, &time::format_description::well_known::Rfc3339).ok()
+    };
+    matches!((parse(&saved.at), parse(&hibernation.at)), (Some(s), Some(h)) if s >= h)
+}
+
+/// Ask an attached pod agent for a non-final checkpoint at its session's
+/// idle edge. Fire and forget: the answer reaches the record through the
+/// save sink, and an unchanged tree costs the agent one status walk.
+fn request_idle_checkpoint(id: Uuid) {
+    if !pod_saves_enabled() {
+        return;
+    }
+    let auth = crate::agent_stream::global();
+    if !auth.pod(id).is_some_and(|link| link.is_connected()) {
+        return;
+    }
+    let _ = auth.send(
+        id,
+        vogt_session_agent::Frame::Checkpoint {
+            is_final: false,
+            trigger: Some(vogt_engine_contract::saved_work::SaveTrigger::Idle),
+        },
+    );
+}
+
+/// What a hibernation does when the pod's unlanded work cannot be saved
+/// (design §2.8, operator decision D1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SavePolicy {
+    /// An explicit hibernate: refuse with 409; the pod and its CLI go on.
+    Refuse,
+    /// The idle policy: hold back this round, say so on the session, retry
+    /// later with backoff.
+    Defer,
+    /// `force=true`, a budget, a lost pod: hibernate anyway; the salvage
+    /// archive is the copy and the record says the save failed.
+    Proceed,
+}
+
+/// The 409 an explicit hibernate gets when the save failed (D1).
+fn save_refusal_text(why: &str) -> String {
+    format!("unlanded work could not be saved: {why}; land it, retry, or hibernate with force=true")
+}
+
 /// A pod an engine restart is taking back: its rebuilt stream halves and the
 /// uid its listing gave, which its teardown names.
 type AdoptedPod = (
@@ -480,6 +610,12 @@ type AdoptedPod = (
 
 /// How long it waits for the pod to be deleted after the agent exits.
 const POD_TEARDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// What a pod's final checkpoint answered.
+struct FinalCheckpoint {
+    saved: vogt_engine_contract::saved_work::SaveOutcome,
+    salvage: Option<vogt_engine_contract::salvage::SalvageReport>,
+}
 
 enum Creating {
     Fresh(Origin),
@@ -648,12 +784,85 @@ impl SessionRegistry {
                         crate::pod_salvage::covers_pod(&state_dir, id, created, uid)
                     })
                 },
+                {
+                    let weak = Arc::downgrade(self);
+                    Arc::new(move |id, note: &str| {
+                        weak.upgrade()
+                            .is_some_and(|m| m.hibernate_lost_pod(id, note))
+                    })
+                },
+                {
+                    let weak = Arc::downgrade(self);
+                    Arc::new(move |id, gen| {
+                        reap_covered_enabled()
+                            && weak.upgrade().is_some_and(|m| m.save_covers_pod(id, gen))
+                    })
+                },
             )),
             Err(e) => {
                 tracing::error!("pod reconciler not started: {e}");
                 None
             }
         }
+    }
+
+    /// Take a live session whose pod was lost (WI-3370, D5): one with a
+    /// conversation to resume is hibernated as `pod_lost`, keeping its screen,
+    /// bundle and last save, so a wake restores the last periodic save.
+    /// `false` leaves the reaper to end it as before (no conversation, an
+    /// agent-task run, or no live session).
+    pub fn hibernate_lost_pod(self: &Arc<Self>, id: Uuid, note: &str) -> bool {
+        let Some(session) = self.sessions.get(&id).map(|s| Arc::clone(s.value())) else {
+            return false;
+        };
+        if session.is_hibernating() {
+            return true;
+        }
+        if !session.is_alive()
+            || !self
+                .records
+                .get(&id)
+                .is_some_and(|r| r.conversation.is_some())
+        {
+            return false;
+        }
+        let registry = Arc::clone(self);
+        let reason = format!("the session pod {note}");
+        tokio::spawn(async move {
+            let result = registry
+                .hibernate_internal(
+                    id,
+                    Some(reason.clone()),
+                    HibernateTrigger::PodLost,
+                    false,
+                    None,
+                )
+                .await;
+            if let Err(e) = result {
+                tracing::warn!(session = %id, error = %e,
+                    "could not hibernate a session whose pod was lost; ending it");
+                if let Some(link) = crate::agent_stream::global().pod(id) {
+                    if !link.is_finished() {
+                        crate::pod_reconcile::end_session(&link, 1, &reason);
+                    }
+                }
+            }
+        });
+        true
+    }
+
+    /// Whether a hibernated session's latest save covers its pod (design
+    /// §2.11): no live session, the save is complete, it was made by this
+    /// pod's incarnation, and nothing ran in the pod after it — a final save
+    /// (the CLI was stopped first), or one no older than the hibernation.
+    pub(crate) fn save_covers_pod(&self, id: Uuid, pod_gen: Option<u64>) -> bool {
+        if self.sessions.get(&id).is_some_and(|s| s.is_alive()) {
+            return false;
+        }
+        let Some(record) = self.records.get(&id) else {
+            return false;
+        };
+        save_covers(&record, pod_gen)
     }
 
     fn pod_launcher(&self) -> Result<Arc<dyn crate::pod_backend::PodLauncher>> {
@@ -697,6 +906,7 @@ impl SessionRegistry {
         spec: &SessionSpec,
         template: &crate::config::SessionTemplate,
         launch: crate::agent_stream::PodLaunch,
+        pod_gen: u64,
     ) -> Result<crate::pty::SpawnedSession> {
         let auth = crate::agent_stream::global();
         let pod_config = self.pod_config()?;
@@ -772,6 +982,10 @@ impl SessionRegistry {
                 self.cfg.codex_approval_policy.as_str(),
                 spec.command.as_deref().unwrap_or_default(),
             )
+        });
+        let pod = pod.map(|mut pod| {
+            crate::pod_backend::set_pod_gen(&mut pod, pod_gen);
+            pod
         });
         let request = crate::source_provider::CredentialRequest {
             session: id,
@@ -938,6 +1152,17 @@ impl SessionRegistry {
                 vogt_engine_contract::salvage::SalvageReport::failed(reason, now_rfc3339()),
             ),
         };
+        self.keep_salvage_report(id, &session, report).await
+    }
+
+    /// Log, mark and keep a salvage report, from a `Salvage` request or a
+    /// final checkpoint.
+    async fn keep_salvage_report(
+        &self,
+        id: Uuid,
+        session: &Session,
+        report: Option<vogt_engine_contract::salvage::SalvageReport>,
+    ) -> Option<vogt_engine_contract::salvage::SalvageReport> {
         if let Some(report) = &report {
             if report.is_failed() {
                 tracing::warn!(target: "vogt::audit", session = %id,
@@ -975,6 +1200,221 @@ impl SessionRegistry {
             }
         }
         report
+    }
+
+    /// Route the pod agents' checkpoint outcomes to this registry, and ask a
+    /// pod for a checkpoint each time its session comes to rest at a prompt
+    /// (the idle edge, design §2.6): the last turn is then usually saved
+    /// within seconds, not at the next timer tick.
+    pub fn install_save_sink(self: &Arc<Self>) {
+        let weak = Arc::downgrade(self);
+        crate::agent_stream::global().add_save_sink(Arc::new(move |id, outcome| {
+            if let Some(registry) = weak.upgrade() {
+                registry.keep_save_outcome(id, outcome);
+            }
+        }));
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let mut events = self.bus.subscribe();
+        runtime.spawn(async move {
+            use tokio::sync::broadcast::error::RecvError;
+            loop {
+                match events.recv().await {
+                    Ok(ServerEvent::SessionReady { id }) => request_idle_checkpoint(id),
+                    Ok(_) | Err(RecvError::Lagged(_)) => {}
+                    Err(RecvError::Closed) => return,
+                }
+            }
+        });
+    }
+
+    /// Keep one checkpoint outcome a pod agent reported (WI-4268): a save
+    /// newer than the kept one, for the current pod incarnation, goes into
+    /// the session and its record; a failure is recorded until a later save
+    /// succeeds. Both are audited.
+    pub fn keep_save_outcome(
+        &self,
+        id: Uuid,
+        outcome: vogt_engine_contract::saved_work::SaveOutcome,
+    ) {
+        use vogt_engine_contract::saved_work::{SaveFailure, SaveOutcome};
+        let session = self.sessions.get(&id).map(|s| Arc::clone(s.value()));
+        if session.is_none() && !self.records.contains_key(&id) {
+            return;
+        }
+        match outcome {
+            SaveOutcome::Saved { report } => {
+                let record = self.records.get_mut(&id);
+                let (current, pod_gen) = match record.as_deref() {
+                    Some(r) => (r.saved_work.clone(), r.pod_gen),
+                    None => (session.as_ref().and_then(|s| s.saved_work()), report.gen),
+                };
+                let Some(kept) = accept_saved(current.as_ref(), pod_gen, *report) else {
+                    if let Some(r) = record.as_deref() {
+                        tracing::debug!(session = %id, pod_gen = r.pod_gen, "ignoring a stale save report");
+                    }
+                    return;
+                };
+                tracing::info!(
+                    target: "vogt::audit",
+                    event = "session.work.saved",
+                    session = %id,
+                    draft = kept.draft.as_deref().unwrap_or("-"),
+                    base = %kept.base,
+                    seq = kept.seq,
+                    trigger = kept.trigger.as_str(),
+                    files = kept.files,
+                    bytes = kept.bytes,
+                    skipped_count = kept.skipped.len(),
+                    complete = kept.complete,
+                    "saved the session pod's unlanded work"
+                );
+                if let Some(session) = &session {
+                    session.set_saved_work(kept.clone());
+                }
+                if let Some(mut record) = record {
+                    record.saved_work = Some(kept);
+                    record.save_failed = None;
+                    let copy = record.clone();
+                    drop(record);
+                    self.write_record(&copy);
+                }
+            }
+            SaveOutcome::SaveFailed { trigger, reason } => {
+                tracing::warn!(
+                    target: "vogt::audit",
+                    event = "session.work.save_failed",
+                    session = %id,
+                    trigger = trigger.as_str(),
+                    %reason,
+                    "could not save the session pod's unlanded work"
+                );
+                let failure = SaveFailure {
+                    trigger,
+                    reason,
+                    at: now_rfc3339(),
+                };
+                if let Some(session) = &session {
+                    session.set_save_failed(Some(failure.clone()));
+                }
+                if let Some(mut record) = self.records.get_mut(&id) {
+                    record.save_failed = Some(failure);
+                    let copy = record.clone();
+                    drop(record);
+                    self.write_record(&copy);
+                }
+            }
+            SaveOutcome::Unsupported { reason } => {
+                tracing::debug!(session = %id, %reason, "the session pod does not save its work");
+            }
+        }
+    }
+
+    fn write_record(&self, record: &Record) {
+        if let Err(e) = hibernation::write(&self.cfg.state_dir, record) {
+            tracing::warn!(session = %record.id, error = %e,
+                "could not keep the saved-work report in the session record");
+        }
+    }
+
+    /// The final checkpoint before a pod's hibernate or stop (WI-4268): the
+    /// agent stops the CLI, writes the bundle back, saves, salvages, answers
+    /// and exits. `None` when the agent is not attached or did not answer
+    /// (an agent older than the frame); the caller then salvages and kills
+    /// as before. The salvage it made is kept like a requested one.
+    async fn final_checkpoint(
+        &self,
+        id: Uuid,
+        session: &Session,
+        trigger: vogt_engine_contract::saved_work::SaveTrigger,
+    ) -> Option<FinalCheckpoint> {
+        use crate::agent_stream::CheckpointReply;
+        let reply = crate::agent_stream::global()
+            .request_checkpoint(id, true, trigger, final_save_timeout())
+            .await;
+        let CheckpointReply::Checkpointed { saved, salvage } = reply else {
+            tracing::warn!(session = %id, ?reply, "the pod agent did not answer the final checkpoint; falling back to salvage and kill");
+            return None;
+        };
+        // As for a requested salvage: the upload route already recorded the
+        // archive on the session.
+        let salvage_report = if salvage.ok {
+            session.salvage()
+        } else {
+            Some(vogt_engine_contract::salvage::SalvageReport::failed(
+                salvage
+                    .reason
+                    .unwrap_or_else(|| "the pod agent could not save the working tree".into()),
+                now_rfc3339(),
+            ))
+        };
+        let salvage = if salvage_settings().0 {
+            self.keep_salvage_report(id, session, salvage_report).await
+        } else {
+            None
+        };
+        Some(FinalCheckpoint { saved, salvage })
+    }
+
+    /// Stop a session on request, saving a pod's unlanded work first
+    /// (WI-4268). A stop is never refused over a save: a failure is reported
+    /// in the result, and the salvage archive is still taken.
+    pub async fn stop_saving(
+        &self,
+        id: Uuid,
+        request: vogt_engine_contract::StopRequest,
+    ) -> Result<vogt_engine_contract::salvage::StopResponse> {
+        use vogt_engine_contract::saved_work::{SaveFailure, SaveOutcome, SaveTrigger};
+        let live = self
+            .sessions
+            .get(&id)
+            .map(|s| Arc::clone(s.value()))
+            .filter(|s| s.is_alive());
+        let pod = crate::agent_stream::global().pod(id).is_some();
+        let mut response = vogt_engine_contract::salvage::StopResponse {
+            ok: true,
+            salvage: None,
+            saved_work: None,
+            save_failed: None,
+        };
+        let checkpoint = match &live {
+            Some(session) if pod && pod_saves_enabled() => {
+                // Recorded first, so the exit the checkpoint ends with reads
+                // `stopped` (WI-913).
+                session.request_stop(request.clone());
+                self.final_checkpoint(id, session, SaveTrigger::Stop).await
+            }
+            _ => None,
+        };
+        match checkpoint {
+            Some(done) => {
+                response.salvage = done.salvage;
+                match done.saved {
+                    SaveOutcome::Saved { report } => {
+                        // The kept report carries `previous`; a stale one
+                        // (impossible for a final save) falls back to as sent.
+                        response.saved_work = live
+                            .as_ref()
+                            .and_then(|s| s.saved_work())
+                            .filter(|kept| kept.seq == report.seq && kept.gen == report.gen)
+                            .or(Some(*report));
+                    }
+                    SaveOutcome::SaveFailed { trigger, reason } => {
+                        response.save_failed = Some(SaveFailure {
+                            trigger,
+                            reason,
+                            at: now_rfc3339(),
+                        });
+                        response.saved_work = live.as_ref().and_then(|s| s.saved_work());
+                    }
+                    SaveOutcome::Unsupported { .. } => {}
+                }
+            }
+            None => response.salvage = self.salvage_pod(id).await,
+        }
+        self.stop(id, request)?;
+        Ok(response)
     }
 
     /// The uid of the session's pod, from the cluster; `None` when it cannot
@@ -2245,8 +2685,12 @@ impl SessionRegistry {
                     })
             })
             .flatten();
+        let pod_gen = match &creating {
+            Creating::Wake(record) => record.pod_gen,
+            Creating::Fresh(_) => 0,
+        };
         let spawned = if let Some(template) = pod_template {
-            self.spawn_pod_session(id, &spec, template, pod_launch.unwrap_or_default())
+            self.spawn_pod_session(id, &spec, template, pod_launch.unwrap_or_default(), pod_gen)
         } else {
             pty::spawn(
                 id,
@@ -2417,6 +2861,12 @@ impl SessionRegistry {
                 // The declaration a wake keeps: the live session carries it
                 // again, and the next hibernation copies it back (WI-1518).
                 session.restore_done_at(record.done_at.clone());
+                // The last save stays visible on the woken session until the
+                // new pod makes its own (WI-4268).
+                if let Some(saved) = record.saved_work.clone() {
+                    session.set_saved_work(saved);
+                }
+                session.set_save_failed(record.save_failed.clone());
                 hibernation::remove_screen(&self.cfg.state_dir, id);
                 Some(record)
             }
@@ -2875,16 +3325,33 @@ impl SessionRegistry {
         force: bool,
         superseded_by: Option<String>,
     ) -> Result<SessionSummary> {
-        // A person's `force` opens only the not-attached-agent gate; the
-        // no-pinned-conversation (shell) refusal keeps its own `allow_shell`.
-        self.hibernate_with(id, reason, trigger, allow_shell, force, superseded_by)
-            .await
+        // A person's `force` opens the not-attached-agent gate and lets a
+        // failed save through (D1); the no-pinned-conversation (shell)
+        // refusal keeps its own `allow_shell`.
+        let save_policy = if force {
+            SavePolicy::Proceed
+        } else {
+            SavePolicy::Refuse
+        };
+        self.hibernate_with(
+            id,
+            reason,
+            trigger,
+            allow_shell,
+            force,
+            save_policy,
+            superseded_by,
+        )
+        .await
     }
 
     /// Hibernate from an internal lifecycle decision (readoption, shutdown,
     /// policy, budget). Those paths have no person to pass `force`, and a pod
     /// whose agent is mid-reconnect must still be ended or marked lost; only
     /// the API path is refused with a 409 for that state.
+    ///
+    /// The idle and memory policy defer when the pod's unlanded work cannot
+    /// be saved (D1); a budget, a shutdown or a lost pod hibernate anyway.
     pub(crate) async fn hibernate_internal(
         &self,
         id: Uuid,
@@ -2893,10 +3360,23 @@ impl SessionRegistry {
         allow_shell: bool,
         superseded_by: Option<String>,
     ) -> Result<SessionSummary> {
-        self.hibernate_with(id, reason, trigger, allow_shell, true, superseded_by)
-            .await
+        let save_policy = match trigger {
+            HibernateTrigger::Idle | HibernateTrigger::Memory => SavePolicy::Defer,
+            _ => SavePolicy::Proceed,
+        };
+        self.hibernate_with(
+            id,
+            reason,
+            trigger,
+            allow_shell,
+            true,
+            save_policy,
+            superseded_by,
+        )
+        .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn hibernate_with(
         &self,
         id: Uuid,
@@ -2904,6 +3384,7 @@ impl SessionRegistry {
         trigger: HibernateTrigger,
         allow_shell: bool,
         allow_detached: bool,
+        save_policy: SavePolicy,
         superseded_by: Option<String>,
     ) -> Result<SessionSummary> {
         let superseded_by = self.checked_successor(id, superseded_by)?;
@@ -2924,12 +3405,64 @@ impl SessionRegistry {
             .map(|r| r.clone())
             .ok_or(ApiError::NotFound)?;
 
+        // A pod's unlanded work is saved before anything stops it (WI-4268,
+        // design §2.8). The final checkpoint always ends the agent, so the
+        // refuse-and-keep-running rule (D1) is decided on a non-final one
+        // first: its answer says whether a save can be made, while the CLI
+        // still runs. An agent that does not answer predates the frame and
+        // gets the old salvage and kill. A lost pod has no agent to ask.
+        let pod_link = crate::agent_stream::global().pod(id);
+        let mut checkpoint = false;
+        if pod_link.is_some() && pod_saves_enabled() && trigger != HibernateTrigger::PodLost {
+            use crate::agent_stream::CheckpointReply;
+            match crate::agent_stream::global()
+                .request_checkpoint(
+                    id,
+                    false,
+                    vogt_engine_contract::saved_work::SaveTrigger::Hibernate,
+                    final_save_timeout(),
+                )
+                .await
+            {
+                CheckpointReply::Saved(outcome) => {
+                    checkpoint = true;
+                    if let Some(why) = outcome.refusal() {
+                        match save_policy {
+                            SavePolicy::Refuse => {
+                                tracing::warn!(target: "vogt::audit", event = "session.work.hibernate_refused",
+                                    session = %id, reason = %why,
+                                    "refused a hibernate: the unlanded work could not be saved");
+                                return Err(ApiError::Conflict(save_refusal_text(&why)));
+                            }
+                            SavePolicy::Defer => {
+                                let deferral = self.defer_hibernate(&session, &why);
+                                return Err(ApiError::Conflict(format!(
+                                    "hibernate deferred ({} in a row): unlanded work could not be saved: {why}",
+                                    deferral.failures
+                                )));
+                            }
+                            SavePolicy::Proceed => {
+                                tracing::warn!(target: "vogt::audit", event = "session.work.hibernate_forced",
+                                    session = %id, reason = %why,
+                                    "hibernating although the unlanded work could not be saved; the salvage archive is the copy");
+                            }
+                        }
+                    }
+                    session.set_hibernate_deferred(None);
+                }
+                CheckpointReply::NoReply => {
+                    tracing::info!(session = %id, "the pod agent does not answer checkpoints; hibernating with salvage and kill");
+                }
+                CheckpointReply::NotAttached | CheckpointReply::Checkpointed { .. } => {}
+            }
+        }
+
         // A pod session's transcript and config live in the pod, which is about
         // to be deleted. Pull them into the engine-held account bundle first;
         // an agent that is attached but cannot confirm is a refusal, because
-        // a wake would resume a conversation missing its newest turns.
-        let pod_link = crate::agent_stream::global().pod(id);
-        if pod_link.is_some() {
+        // a wake would resume a conversation missing its newest turns. A lost
+        // pod has nothing left to write back: its bundle is as last flushed.
+        if pod_link.is_some() && trigger != HibernateTrigger::PodLost {
             use crate::agent_stream::FlushOutcome;
             match crate::agent_stream::global()
                 .request_flush(id, POD_FLUSH_TIMEOUT)
@@ -2956,8 +3489,10 @@ impl SessionRegistry {
 
         // The pod is about to go: keep its uncommitted work before anything
         // stops it. A failure never blocks the hibernation; it is reported in
-        // the record and the summary (WI-4132).
-        if pod_link.is_some() {
+        // the record and the summary (WI-4132). An agent that speaks the
+        // checkpoint frames salvages inside its final checkpoint instead,
+        // after the CLI has stopped, so nothing is torn.
+        if pod_link.is_some() && !checkpoint && trigger != HibernateTrigger::PodLost {
             let _ = self.salvage_pod(id).await;
         }
 
@@ -2991,6 +3526,12 @@ impl SessionRegistry {
         // not name one: the live session carries the mark the record had.
         record.superseded_by = superseded_by.or_else(|| session.superseded_by());
         record.salvage = session.salvage();
+        // The saves reached the live record while this ran
+        // (`keep_save_outcome`); the copy taken above may predate them.
+        if let Some(current) = self.records.get(&id) {
+            record.saved_work = current.saved_work.clone();
+            record.save_failed = current.save_failed.clone();
+        }
         // The budget and its flags live on the session; a record rebuilt here
         // would otherwise drop them, and a wake would forget both the limit
         // and that it had already been reached.
@@ -3019,6 +3560,18 @@ impl SessionRegistry {
         session.mark_hibernating();
         self.records.insert(id, record);
 
+        // The final checkpoint stops the CLI, writes the bundle back, saves,
+        // salvages and ends the agent. The kill below then finds nothing
+        // left; it still runs, so an agent that fell silent is stopped.
+        if checkpoint {
+            let _ = self
+                .final_checkpoint(
+                    id,
+                    &session,
+                    vogt_engine_contract::saved_work::SaveTrigger::Hibernate,
+                )
+                .await;
+        }
         let tree = session
             .pid()
             .map(hibernation::descendants)
@@ -3031,6 +3584,13 @@ impl SessionRegistry {
             }
             None => {
                 let _ = session.kill();
+            }
+        }
+        // A lost pod's agent cannot answer the kill: end the stream here, so
+        // the task that owns the pod deletes what is left of it.
+        if trigger == HibernateTrigger::PodLost {
+            if let Some(link) = &pod_link {
+                link.finish(1);
             }
         }
         // The exit waiter records the exit; give it a moment so the history
@@ -3059,6 +3619,32 @@ impl SessionRegistry {
             .publish(ServerEvent::SessionHibernated { id, trigger });
         tracing::info!(session = %id, ?trigger, "session hibernated");
         self.hibernated_summary(id).ok_or(ApiError::NotFound)
+    }
+
+    /// Hold an idle-policy hibernation back because the save failed (D1):
+    /// the pod keeps running, the session says so (the Inbox reads it), and
+    /// the policy retries with backoff, pausing after
+    /// [`crate::hibernate_policy::DEFER_MAX_FAILURES`] until the work changes.
+    fn defer_hibernate(
+        &self,
+        session: &Session,
+        why: &str,
+    ) -> vogt_engine_contract::saved_work::HibernateDeferral {
+        let failures = session
+            .hibernate_deferred()
+            .map_or(0, |(d, _)| d.failures)
+            .saturating_add(1);
+        let deferral = vogt_engine_contract::saved_work::HibernateDeferral {
+            reason: why.chars().take(500).collect(),
+            failures,
+            at: now_rfc3339(),
+            paused: failures >= crate::hibernate_policy::DEFER_MAX_FAILURES,
+        };
+        tracing::warn!(target: "vogt::audit", event = "session.work.hibernate_deferred",
+            session = %session.id, failures, paused = deferral.paused, reason = %why,
+            "held an idle hibernate back: the unlanded work could not be saved");
+        session.set_hibernate_deferred(Some(deferral.clone()));
+        deferral
     }
 
     /// `superseded_by` as the engine stores it: a known session other than
@@ -3198,6 +3784,9 @@ impl SessionRegistry {
         env.extend(req.env.unwrap_or_default());
         let (command, template) = self.wake_launch(&record);
         let mut record = record;
+        // A new pod incarnation: it saves into its own workspace, and a late
+        // report from the old pod no longer counts (design §2.9).
+        record.pod_gen = record.pod_gen.saturating_add(1);
         let fresh = req
             .fresh_prompt
             .as_deref()
@@ -4422,6 +5011,9 @@ fn hibernated_summary(record: &Record, screen_bytes: u64) -> Option<SessionSumma
         conversation: record.conversation.clone(),
         hibernation: Some(hibernation),
         salvage: record.salvage.clone(),
+        saved_work: record.saved_work.clone(),
+        save_failed: record.save_failed.clone(),
+        hibernate_deferred: None,
         keep_awake: record.keep_awake,
         autopilot: record.autopilot,
         autopilot_nudges: 0,
@@ -5377,6 +5969,9 @@ mod tests {
             conversation: None,
             hibernation: None,
             salvage: None,
+            saved_work: None,
+            save_failed: None,
+            hibernate_deferred: None,
             keep_awake: false,
             autopilot: false,
             autopilot_nudges: 0,
@@ -5583,5 +6178,189 @@ mod session_ref_wake_tests {
         for bad in ["ses_0001", "../x", "ses_01ARZ3NDEKTSV4RRFFQ69G5FAI", ""] {
             assert_eq!(checked_session_ref(Uuid::nil(), Some(bad)), None, "{bad}");
         }
+    }
+}
+
+#[cfg(test)]
+mod saved_work_tests {
+    use super::*;
+    use vogt_engine_contract::saved_work::{SaveFailure, SaveTrigger, SavedWorkReport};
+
+    fn report(gen: u64, seq: u64, draft: Option<&str>, trigger: SaveTrigger) -> SavedWorkReport {
+        SavedWorkReport {
+            provider: "graft".into(),
+            repo: "vogt".into(),
+            line: "rust-2".into(),
+            workspace: format!("vogt-save-s-{gen}"),
+            draft: draft.map(str::to_string),
+            base: format!("base{seq}"),
+            seq,
+            gen,
+            at: "2026-11-15T10:00:00Z".into(),
+            files: 1,
+            bytes: 10,
+            skipped: Vec::new(),
+            complete: true,
+            trigger,
+            previous: None,
+        }
+    }
+
+    // Design §2.9: a late report from an older pod, or one not newer than the
+    // kept one, never overwrites a newer save.
+    #[test]
+    fn a_stale_seq_or_another_incarnation_is_ignored() {
+        let kept = report(2, 5, Some("d5"), SaveTrigger::Periodic);
+        assert_eq!(
+            accept_saved(Some(&kept), 2, report(2, 5, Some("d5"), SaveTrigger::Idle)),
+            None
+        );
+        assert_eq!(
+            accept_saved(Some(&kept), 2, report(2, 4, Some("d4"), SaveTrigger::Idle)),
+            None
+        );
+        assert_eq!(
+            accept_saved(Some(&kept), 2, report(1, 9, Some("old"), SaveTrigger::Idle)),
+            None,
+            "a report from the previous pod after a wake"
+        );
+        let newer = accept_saved(Some(&kept), 2, report(2, 6, Some("d6"), SaveTrigger::Idle))
+            .expect("newer seq is kept");
+        assert_eq!(
+            newer.previous.as_ref().map(|p| p.draft.as_str()),
+            Some("d5")
+        );
+        assert_eq!(
+            newer.previous.as_ref().map(|p| p.base.as_str()),
+            Some("base5")
+        );
+    }
+
+    #[test]
+    fn a_new_incarnation_starts_its_own_seq_and_keeps_the_old_draft_as_previous() {
+        let kept = report(1, 7, Some("d7"), SaveTrigger::Hibernate);
+        let first = accept_saved(
+            Some(&kept),
+            2,
+            report(2, 1, Some("e1"), SaveTrigger::Periodic),
+        )
+        .expect("seq restarts with the incarnation");
+        assert_eq!(first.previous.unwrap().draft, "d7");
+        // A clean save keeps the previous draft as the fallback.
+        let clean = report(2, 2, None, SaveTrigger::Periodic);
+        let kept = report(2, 1, None, SaveTrigger::Periodic);
+        let mut with_prev = kept.clone();
+        with_prev.previous = Some(vogt_engine_contract::saved_work::SavedDraftRef {
+            draft: "d7".into(),
+            base: "b".into(),
+        });
+        assert_eq!(
+            accept_saved(Some(&with_prev), 2, clean)
+                .unwrap()
+                .previous
+                .unwrap()
+                .draft,
+            "d7"
+        );
+        assert!(accept_saved(None, 0, report(0, 1, Some("x"), SaveTrigger::Idle)).is_some());
+    }
+
+    fn hibernated(saved: SavedWorkReport, pod_gen: u64, at: &str) -> Record {
+        let mut record = Record::new(Uuid::new_v4(), "s".into(), now_rfc3339());
+        record.pod_gen = pod_gen;
+        record.saved_work = Some(saved);
+        record.hibernation = Some(Hibernation {
+            at: at.into(),
+            trigger: HibernateTrigger::Manual,
+            reason: None,
+            resumable: true,
+            superseded_by: None,
+        });
+        record
+    }
+
+    // Design §2.11: covered only by a complete save of this pod's own
+    // incarnation, taken when nothing could run after it.
+    #[test]
+    fn a_save_covers_a_pod_only_when_complete_current_and_final_or_after_the_stop() {
+        let at = "2026-11-15T10:00:00Z";
+        let finale = hibernated(report(3, 4, Some("d"), SaveTrigger::Hibernate), 3, at);
+        assert!(save_covers(&finale, Some(3)));
+        assert!(!save_covers(&finale, Some(2)), "another incarnation's pod");
+        assert!(!save_covers(&finale, None), "a pod with no stamp");
+
+        let mut partial = finale.clone();
+        partial.saved_work.as_mut().unwrap().complete = false;
+        assert!(!save_covers(&partial, Some(3)));
+
+        let mut failed_after = finale.clone();
+        failed_after.save_failed = Some(SaveFailure {
+            trigger: SaveTrigger::Hibernate,
+            reason: "graft down".into(),
+            at: at.into(),
+        });
+        assert!(!save_covers(&failed_after, Some(3)));
+
+        let early = hibernated(
+            report(3, 4, Some("d"), SaveTrigger::Periodic),
+            3,
+            "2026-11-15T10:00:01Z",
+        );
+        assert!(
+            !save_covers(&early, Some(3)),
+            "a periodic save before the stop"
+        );
+        let late = hibernated(report(3, 4, Some("d"), SaveTrigger::Periodic), 3, at);
+        assert!(save_covers(&late, Some(3)));
+
+        let mut live = finale;
+        live.hibernation = None;
+        assert!(!save_covers(&live, Some(3)));
+    }
+
+    // The record keeps the save across an engine restart, and a record from
+    // before the fields decodes with none.
+    #[test]
+    fn saved_work_survives_a_record_round_trip_and_an_old_record_decodes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut record = Record::new(Uuid::new_v4(), "s".into(), now_rfc3339());
+        record.pod_gen = 4;
+        record.saved_work = Some(report(4, 2, Some("d2"), SaveTrigger::Idle));
+        record.save_failed = Some(SaveFailure {
+            trigger: SaveTrigger::Periodic,
+            reason: "graft down".into(),
+            at: "2026-11-15T10:00:00Z".into(),
+        });
+        hibernation::write(dir.path(), &record).unwrap();
+        let loaded = hibernation::load_all(dir.path());
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].pod_gen, 4);
+        assert_eq!(loaded[0].saved_work, record.saved_work);
+        assert_eq!(loaded[0].save_failed, record.save_failed);
+
+        let mut old =
+            serde_json::to_value(Record::new(Uuid::new_v4(), "o".into(), now_rfc3339())).unwrap();
+        let map = old.as_object_mut().unwrap();
+        map.remove("saved_work");
+        map.remove("save_failed");
+        map.remove("pod_gen");
+        let decoded: Record = serde_json::from_value(old).unwrap();
+        assert_eq!(decoded.saved_work, None);
+        assert_eq!(decoded.pod_gen, 0);
+    }
+
+    #[test]
+    fn the_refusal_tells_the_person_what_to_do() {
+        let text = save_refusal_text("graft is unreachable");
+        assert!(text.starts_with("unlanded work could not be saved: graft is unreachable"));
+        assert!(text.contains("force=true"));
+    }
+
+    #[test]
+    fn pod_lost_is_its_own_trigger_on_the_wire() {
+        assert_eq!(
+            serde_json::to_value(HibernateTrigger::PodLost).unwrap(),
+            serde_json::json!("pod_lost")
+        );
     }
 }

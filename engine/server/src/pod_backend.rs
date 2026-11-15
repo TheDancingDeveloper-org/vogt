@@ -1051,6 +1051,8 @@ const PRIVATE_CACHE_DIR: &str = "/cache";
 const HOME_MOUNT: &str = "/home/vogt";
 const TMP_MOUNT: &str = "/tmp";
 const RUNTIME_MOUNT: &str = "/run/vogt";
+/// The volume behind the agent's save scratch (`/save`).
+const SAVE_VOLUME: &str = "session-save";
 /// The pod-local emptyDir that carries a pod's read-only workspace tree
 /// (WI-3373) and the init container that builds it.
 const WORKSPACE_VOLUME: &str = "session-workspace";
@@ -1247,6 +1249,13 @@ fn pod_env(
             value: Some(cfg.work_dir()),
             ..Default::default()
         },
+        // The incarnation the save workspace is named by; `set_pod_gen`
+        // replaces it for a woken session's pod.
+        EnvVar {
+            name: vogt_engine_contract::saved_work::ENV_POD_GEN.into(),
+            value: Some("0".into()),
+            ..Default::default()
+        },
         // The session's working directory. The bootstrap response replaces it
         // with the caller's cwd inside the clone; with no cwd it stays the
         // clone root.
@@ -1414,6 +1423,90 @@ pub fn session_id_from_pod(pod: &Pod) -> Option<Uuid> {
         .ok()
 }
 
+/// The annotation that names a pod's incarnation (WI-3370): the record's
+/// `pod_gen` when the pod was made.
+pub const POD_GEN_ANNOTATION: &str = "vogt.pod-gen";
+
+/// Stamp a session pod with its incarnation: `VOGT_POD_GEN` names the
+/// agent's save workspace (`vogt-save-<session>-<gen>`), and the annotation
+/// lets the reaper match a pod to the save that covers it.
+pub fn set_pod_gen(pod: &mut Pod, gen: u64) {
+    pod.metadata
+        .annotations
+        .get_or_insert_with(BTreeMap::new)
+        .insert(POD_GEN_ANNOTATION.into(), gen.to_string());
+    if let Some(container) = pod
+        .spec
+        .as_mut()
+        .and_then(|spec| spec.containers.first_mut())
+    {
+        let env = container.env.get_or_insert_with(Vec::new);
+        env.retain(|e| e.name != vogt_engine_contract::saved_work::ENV_POD_GEN);
+        env.push(EnvVar {
+            name: vogt_engine_contract::saved_work::ENV_POD_GEN.into(),
+            value: Some(gen.to_string()),
+            ..Default::default()
+        });
+    }
+}
+
+/// The incarnation a pod was stamped with; `None` for a pod made before
+/// the stamp existed.
+pub fn pod_gen_of(pod: &Pod) -> Option<u64> {
+    pod.metadata
+        .annotations
+        .as_ref()?
+        .get(POD_GEN_ANNOTATION)?
+        .parse()
+        .ok()
+}
+
+/// The save settings a pod's agent reads (WI-3370), passed through from the
+/// engine's own environment. `ENGINE_POD_SAVE` is always explicit, so a pod
+/// and the engine agree on whether saves are on; the numbers are passed only
+/// when the engine sets them to a number, and the agent's defaults apply
+/// otherwise.
+fn pod_save_env() -> Vec<EnvVar> {
+    use vogt_engine_contract::saved_work::{
+        DEFAULT_SAVE_DIR, ENV_SAVE, ENV_SAVE_DIR, ENV_SAVE_INTERVAL, ENV_SAVE_MAX_BYTES,
+        ENV_SAVE_MAX_FILE_BYTES,
+    };
+    let mut env = vec![
+        EnvVar {
+            name: ENV_SAVE.into(),
+            value: Some(if crate::sessions::pod_saves_enabled() {
+                "1".into()
+            } else {
+                "0".into()
+            }),
+            ..Default::default()
+        },
+        EnvVar {
+            name: ENV_SAVE_DIR.into(),
+            value: Some(DEFAULT_SAVE_DIR.into()),
+            ..Default::default()
+        },
+    ];
+    for name in [
+        ENV_SAVE_INTERVAL,
+        ENV_SAVE_MAX_FILE_BYTES,
+        ENV_SAVE_MAX_BYTES,
+    ] {
+        if let Some(value) = std::env::var(name)
+            .ok()
+            .map(|v| v.trim().to_owned())
+            .filter(|v| v.parse::<u64>().is_ok())
+        {
+            env.push(EnvVar {
+                name: name.into(),
+                value: Some(value),
+                ..Default::default()
+            });
+        }
+    }
+    env
+}
+
 type ResourceMap = BTreeMap<String, k8s_openapi::apimachinery::pkg::api::resource::Quantity>;
 
 /// The deployment defaults with a template policy's entries laid over them.
@@ -1508,6 +1601,7 @@ pub fn pod_template(
             ..Default::default()
         });
     }
+    env.extend(pod_save_env());
     env.extend(PRIVATE_CACHE_ENV.iter().map(|(name, value)| EnvVar {
         name: (*name).into(),
         value: Some((*value).into()),
@@ -1676,6 +1770,13 @@ pub fn pod_template(
         ("session-tmp", TMP_MOUNT.to_string()),
         ("session-work", cfg.work_dir()),
         ("session-run", RUNTIME_MOUNT.to_string()),
+        // The agent's save scratch (WI-3370): a second copy of the checkout
+        // that holds only what the save filter let through. Like `/work`,
+        // it has no size limit of its own.
+        (
+            SAVE_VOLUME,
+            vogt_engine_contract::saved_work::DEFAULT_SAVE_DIR.to_string(),
+        ),
     ] {
         mounts.push(VolumeMount {
             name: name.into(),
@@ -2892,6 +2993,8 @@ mod tests {
             ("session-tmp", "/tmp"),
             ("session-work", "/work"),
             ("session-run", "/run/vogt"),
+            // The agent's save scratch (WI-3370): without it every save fails.
+            ("session-save", "/save"),
         ] {
             let mount = mounts.iter().find(|mount| mount.name == name).unwrap();
             assert_eq!(mount.mount_path, path);
@@ -2899,6 +3002,72 @@ mod tests {
             let volume = volumes.iter().find(|volume| volume.name == name).unwrap();
             assert!(volume.empty_dir.is_some(), "{name} must be an emptyDir");
         }
+    }
+
+    // WI-4268 (review note N7): the pod carries its incarnation and the save
+    // settings, and a woken session's pod is stamped with its new one.
+    #[test]
+    fn a_pod_carries_its_incarnation_and_the_save_settings() {
+        let template = SessionTemplate {
+            name: "pod".into(),
+            description: "pod".into(),
+            command: None,
+            cwd: None,
+            env: vec![],
+            default_name: None,
+            match_repo_names: vec![],
+            match_path_prefixes: vec![],
+            tags: vec![],
+            backend: "pod".into(),
+            host_capable: false,
+            pod_capable: false,
+            account: None,
+        };
+        let mut pod = pod_template(
+            &PodConfig::default(),
+            &template,
+            Uuid::nil(),
+            &project_source("demo", "rust-2"),
+            &[],
+            "session",
+            None,
+            None,
+            None,
+            None,
+            vogt_session_agent::CODEX_APPROVAL_DEFAULT,
+            &["bash".into()],
+        );
+        let env_of = |pod: &Pod, name: &str| -> Vec<String> {
+            pod.spec.as_ref().unwrap().containers[0]
+                .env
+                .as_ref()
+                .unwrap()
+                .iter()
+                .filter(|e| e.name == name)
+                .filter_map(|e| e.value.clone())
+                .collect()
+        };
+        assert_eq!(env_of(&pod, "VOGT_POD_GEN"), vec!["0".to_string()]);
+        assert_eq!(env_of(&pod, "VOGT_SAVE_DIR"), vec!["/save".to_string()]);
+        assert_eq!(env_of(&pod, "ENGINE_POD_SAVE").len(), 1);
+        set_pod_gen(&mut pod, 7);
+        assert_eq!(env_of(&pod, "VOGT_POD_GEN"), vec!["7".to_string()]);
+        assert_eq!(pod_gen_of(&pod), Some(7));
+        assert_eq!(pod_gen_of(&Pod::default()), None);
+        let spec = pod.spec.as_ref().unwrap();
+        let mount = spec.containers[0]
+            .volume_mounts
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|m| m.mount_path == "/save")
+            .expect("a /save mount");
+        assert!(spec
+            .volumes
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|v| v.name == mount.name && v.empty_dir.is_some()));
     }
 
     #[test]
@@ -4761,6 +4930,7 @@ mod tests {
                 "session-tmp",
                 "session-work",
                 "session-run",
+                "session-save",
                 "bootstrap"
             ]
         );
@@ -4772,7 +4942,7 @@ mod tests {
         assert!(spec.node_name.is_none());
         let c = &spec.containers[0];
         assert!(c.env_from.as_ref().unwrap().is_empty());
-        assert_eq!(c.volume_mounts.as_ref().unwrap().len(), 6);
+        assert_eq!(c.volume_mounts.as_ref().unwrap().len(), 7);
         assert_eq!(spec.image_pull_secrets.unwrap()[0].name, "pull");
     }
 

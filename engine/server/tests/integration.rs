@@ -19025,6 +19025,8 @@ mod pod_stream {
     use tokio_tungstenite::{
         tungstenite::client::IntoClientRequest, MaybeTlsStream, WebSocketStream,
     };
+    use vogt_engine_contract::salvage::SalvageAck;
+    use vogt_engine_contract::saved_work::{SaveOutcome, SaveTrigger, SavedWorkReport};
     use vogt_engine_contract::ActivityState;
     use vogt_engine_server::pod_backend::{CreateFuture, GoneFuture, LaunchFuture, PodLauncher};
     use vogt_session_agent::Frame;
@@ -19338,6 +19340,35 @@ mod pod_stream {
             },
         )
         .await;
+    }
+
+    /// A save report as the agent sends it (WI-4268), for incarnation 0.
+    fn saved_report(draft: Option<&str>) -> SavedWorkReport {
+        SavedWorkReport {
+            provider: "graft".into(),
+            repo: "vogt".into(),
+            line: "rust-2".into(),
+            workspace: "vogt-save-s-0".into(),
+            draft: draft.map(str::to_string),
+            base: "cbase".into(),
+            seq: 1,
+            gen: 0,
+            at: "2026-11-15T10:00:00Z".into(),
+            files: 1,
+            bytes: 5,
+            skipped: Vec::new(),
+            complete: true,
+            trigger: SaveTrigger::Stop,
+            previous: None,
+        }
+    }
+
+    /// Plays an agent that saves nothing (a git checkout, saves off): every
+    /// checkpoint is `Unsupported`.
+    fn unsupported() -> SaveOutcome {
+        SaveOutcome::Unsupported {
+            reason: "not a graft checkout".into(),
+        }
     }
 
     async fn take(ws: &mut Agent) -> Frame {
@@ -21181,26 +21212,46 @@ sleep 2
             }
         );
 
-        // The kill salvages the checkout before it signals the child, and
+        // The kill asks for the final checkpoint (WI-4268): the agent stops
+        // the child, saves, salvages and answers with the child's exit. It
         // waits for the agent's answer, so it is sent alongside.
         let kill = tokio::spawn({
             let client = h.client.clone();
             let url = format!("{}/api/sessions/{id}/kill", h.base);
             async move { client.post(url).send().await.unwrap() }
         });
-        assert_eq!(take(&mut agent).await, Frame::Salvage);
-        answer_salvage(&mut agent).await;
         assert_eq!(
             take(&mut agent).await,
-            Frame::Signal {
-                signal: "kill".into()
+            Frame::Checkpoint {
+                is_final: true,
+                trigger: Some(SaveTrigger::Stop)
             }
         );
-        assert_eq!(kill.await.unwrap().status(), StatusCode::OK);
+        let report = saved_report(Some("cdraft1"));
+        put(
+            &mut agent,
+            Frame::Checkpointed {
+                saved: SaveOutcome::Saved {
+                    report: Box::new(report.clone()),
+                },
+                salvage: SalvageAck {
+                    ok: true,
+                    files: 0,
+                    reason: None,
+                },
+                status: Some(7),
+            },
+        )
+        .await;
+        let kill = kill.await.unwrap();
+        assert_eq!(kill.status(), StatusCode::OK);
+        // The stop result carries where the work was saved.
+        let stopped: Value = kill.json().await.unwrap();
+        assert_eq!(stopped["saved_work"]["draft"], "cdraft1");
+        assert_eq!(stopped["saved_work"]["trigger"], "stop");
 
-        // The agent reports the child's exit; the session ends with it and
+        // The child's exit came with the answer; the session ends with it and
         // the pod is removed.
-        put(&mut agent, Frame::Exited { status: Some(7) }).await;
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 if h.detail(id).await.summary.exit_code == Some(7) {
@@ -22586,6 +22637,34 @@ sleep 2
                     put(agent, Frame::Flushed { ok: true }).await;
                 }
                 Frame::Salvage => answer_salvage(agent).await,
+                Frame::Checkpoint {
+                    is_final: false, ..
+                } => {
+                    put(
+                        agent,
+                        Frame::Saved {
+                            outcome: unsupported(),
+                        },
+                    )
+                    .await;
+                }
+                // The final checkpoint stops the child and ends the agent.
+                Frame::Checkpoint { is_final: true, .. } => {
+                    put(
+                        agent,
+                        Frame::Checkpointed {
+                            saved: unsupported(),
+                            salvage: SalvageAck {
+                                ok: true,
+                                files: 0,
+                                reason: None,
+                            },
+                            status: Some(0),
+                        },
+                    )
+                    .await;
+                    return;
+                }
                 Frame::Signal { signal } if signal == "kill" => {
                     put(agent, Frame::Exited { status: Some(0) }).await;
                     return;
@@ -22774,6 +22853,21 @@ sleep 2
             let url = format!("{}/api/sessions/{id}/hibernate", h.base);
             async move { client.post(url).json(&json!({})).send().await.unwrap() }
         });
+        // The non-final checkpoint first (WI-4268); this agent saves nothing.
+        assert_eq!(
+            take(&mut agent).await,
+            Frame::Checkpoint {
+                is_final: false,
+                trigger: Some(SaveTrigger::Hibernate)
+            }
+        );
+        put(
+            &mut agent,
+            Frame::Saved {
+                outcome: unsupported(),
+            },
+        )
+        .await;
         // The agent hears the flush and cannot store the transcript: the engine
         // refuses rather than delete a pod holding unsaved turns.
         assert_eq!(take(&mut agent).await, Frame::Flush);
@@ -22786,6 +22880,418 @@ sleep 2
         h.state.sessions.get(id).unwrap().kill().unwrap();
         put(&mut agent, Frame::Exited { status: Some(0) }).await;
         ended(&h.state.sessions, id).await;
+    }
+
+    // ---- Unlanded work saves (WI-4268, design §2.8-2.10) ------------------
+
+    async fn hibernate_req(
+        h: &Harness,
+        id: Uuid,
+        body: Value,
+    ) -> tokio::task::JoinHandle<reqwest::Response> {
+        let client = h.client.clone();
+        let url = format!("{}/api/sessions/{id}/hibernate", h.base);
+        tokio::spawn(async move { client.post(url).json(&body).send().await.unwrap() })
+    }
+
+    fn save_failed(trigger: SaveTrigger) -> SaveOutcome {
+        SaveOutcome::SaveFailed {
+            trigger,
+            reason: "graft is unreachable".into(),
+        }
+    }
+
+    /// Nothing more reaches the agent for a moment.
+    async fn quiet(agent: &mut Agent) {
+        let next = tokio::time::timeout(Duration::from_millis(300), agent.next()).await;
+        assert!(next.is_err(), "the agent was sent more: {next:?}");
+    }
+
+    // D1: an explicit hibernate whose save fails is refused with 409 before
+    // anything is stopped, so the CLI goes on in the same pod; force=true
+    // then hibernates anyway, the record saying the save failed.
+    #[tokio::test]
+    async fn a_failed_save_refuses_an_explicit_hibernate_and_force_overrides() {
+        let (mut h, _accounts) = claude_harness().await;
+        let id = h.start().await;
+        let token = h.session_token(id).await;
+        let mut agent = h.dial(id, &token, 0).await;
+        assert_eq!(take(&mut agent).await, Frame::Ack { offset: 0 });
+
+        let hibernate = hibernate_req(&h, id, json!({})).await;
+        assert_eq!(
+            take(&mut agent).await,
+            Frame::Checkpoint {
+                is_final: false,
+                trigger: Some(SaveTrigger::Hibernate)
+            }
+        );
+        put(
+            &mut agent,
+            Frame::Saved {
+                outcome: save_failed(SaveTrigger::Hibernate),
+            },
+        )
+        .await;
+        let res = hibernate.await.unwrap();
+        assert_eq!(res.status(), StatusCode::CONFLICT);
+        let text = res.text().await.unwrap();
+        assert!(
+            text.contains("unlanded work could not be saved: graft is unreachable"),
+            "{text}"
+        );
+        assert!(text.contains("force=true"), "{text}");
+        // No flush, no final checkpoint, no kill: the CLI runs on.
+        quiet(&mut agent).await;
+        assert!(h.launcher.deleted.lock().unwrap().is_empty());
+        assert!(!h.state.sessions.is_hibernated(id));
+        assert!(h.state.sessions.get(id).unwrap().is_alive());
+        let summary = h.detail(id).await.summary;
+        assert_eq!(
+            summary.save_failed.as_ref().map(|f| f.reason.as_str()),
+            Some("graft is unreachable")
+        );
+
+        let hibernate = hibernate_req(&h, id, json!({ "force": true })).await;
+        let mut finals = 0;
+        loop {
+            match take(&mut agent).await {
+                Frame::Checkpoint {
+                    is_final: false, ..
+                } => {
+                    put(
+                        &mut agent,
+                        Frame::Saved {
+                            outcome: save_failed(SaveTrigger::Hibernate),
+                        },
+                    )
+                    .await;
+                }
+                Frame::Flush => put(&mut agent, Frame::Flushed { ok: true }).await,
+                Frame::Checkpoint {
+                    is_final: true,
+                    trigger,
+                } => {
+                    assert_eq!(trigger, Some(SaveTrigger::Hibernate));
+                    finals += 1;
+                    put(
+                        &mut agent,
+                        Frame::Checkpointed {
+                            saved: save_failed(SaveTrigger::Hibernate),
+                            salvage: SalvageAck {
+                                ok: true,
+                                files: 0,
+                                reason: None,
+                            },
+                            status: Some(0),
+                        },
+                    )
+                    .await;
+                    break;
+                }
+                other => panic!("unexpected frame {other:?}"),
+            }
+        }
+        assert_eq!(finals, 1);
+        let res = hibernate.await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "{:?}", res.text().await);
+        assert!(h.state.sessions.is_hibernated(id));
+        let summary = h.state.sessions.hibernated_summary(id).unwrap();
+        assert!(
+            summary.save_failed.is_some(),
+            "the record says the save failed"
+        );
+    }
+
+    // A good save goes through: the probe, the flush, then the final
+    // checkpoint instead of Salvage and a kill; the record keeps the draft.
+    #[tokio::test]
+    async fn a_saved_hibernate_uses_the_final_checkpoint_and_keeps_the_draft() {
+        let (mut h, _accounts) = claude_harness().await;
+        let id = h.start().await;
+        let token = h.session_token(id).await;
+        let mut agent = h.dial(id, &token, 0).await;
+        assert_eq!(take(&mut agent).await, Frame::Ack { offset: 0 });
+        let hibernate = hibernate_req(&h, id, json!({})).await;
+        let mut seen = Vec::new();
+        loop {
+            let frame = take(&mut agent).await;
+            seen.push(frame.clone());
+            match frame {
+                Frame::Checkpoint {
+                    is_final: false, ..
+                } => {
+                    let mut report = saved_report(Some("cprobe"));
+                    report.trigger = SaveTrigger::Hibernate;
+                    put(
+                        &mut agent,
+                        Frame::Saved {
+                            outcome: SaveOutcome::Saved {
+                                report: Box::new(report),
+                            },
+                        },
+                    )
+                    .await;
+                }
+                Frame::Flush => put(&mut agent, Frame::Flushed { ok: true }).await,
+                Frame::Checkpoint { is_final: true, .. } => {
+                    let mut report = saved_report(Some("cfinal"));
+                    report.seq = 2;
+                    report.trigger = SaveTrigger::Hibernate;
+                    put(
+                        &mut agent,
+                        Frame::Checkpointed {
+                            saved: SaveOutcome::Saved {
+                                report: Box::new(report),
+                            },
+                            salvage: SalvageAck {
+                                ok: true,
+                                files: 0,
+                                reason: None,
+                            },
+                            status: Some(0),
+                        },
+                    )
+                    .await;
+                    break;
+                }
+                other => panic!("unexpected frame {other:?}"),
+            }
+        }
+        assert!(
+            !seen.contains(&Frame::Salvage),
+            "the agent salvages inside the checkpoint"
+        );
+        let res = hibernate.await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "{:?}", res.text().await);
+        let summary = h.state.sessions.hibernated_summary(id).unwrap();
+        let saved = summary.saved_work.expect("the record keeps the save");
+        assert_eq!(saved.draft.as_deref(), Some("cfinal"));
+        assert_eq!(saved.previous.map(|p| p.draft), Some("cprobe".into()));
+        assert!(summary.save_failed.is_none());
+        assert!(h.launcher.deleted.lock().unwrap().contains(&id));
+
+        // The wake is a new incarnation: its pod saves into its own workspace.
+        let woken = h
+            .client
+            .post(format!("{}/api/sessions/{id}/wake", h.base))
+            .json(&json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(woken.status(), StatusCode::OK);
+        let (created_id, _) = h.created.recv().await.expect("a new pod");
+        assert_eq!(created_id, id);
+        let pod = h.launcher.pods.lock().unwrap().pop().expect("pod");
+        assert_eq!(
+            pod.metadata
+                .annotations
+                .as_ref()
+                .unwrap()
+                .get("vogt.pod-gen"),
+            Some(&"1".to_string())
+        );
+        // The last save stays on the woken session until the new pod saves.
+        let summary = h.detail(id).await.summary;
+        assert_eq!(
+            summary.saved_work.and_then(|s| s.draft),
+            Some("cfinal".into())
+        );
+        h.state.sessions.get(id).unwrap().kill().unwrap();
+    }
+
+    // D1: a stop is never refused over a save; the result says it failed.
+    #[tokio::test]
+    async fn a_stop_is_never_refused_when_the_final_save_fails() {
+        let (mut h, _accounts) = claude_harness().await;
+        let id = h.start().await;
+        let token = h.session_token(id).await;
+        let mut agent = h.dial(id, &token, 0).await;
+        assert_eq!(take(&mut agent).await, Frame::Ack { offset: 0 });
+        let kill = tokio::spawn({
+            let client = h.client.clone();
+            let url = format!("{}/api/sessions/{id}/kill", h.base);
+            async move {
+                client
+                    .post(url)
+                    .json(&json!({"reason": "done"}))
+                    .send()
+                    .await
+                    .unwrap()
+            }
+        });
+        assert_eq!(
+            take(&mut agent).await,
+            Frame::Checkpoint {
+                is_final: true,
+                trigger: Some(SaveTrigger::Stop)
+            }
+        );
+        put(
+            &mut agent,
+            Frame::Checkpointed {
+                saved: save_failed(SaveTrigger::Stop),
+                salvage: SalvageAck {
+                    ok: true,
+                    files: 0,
+                    reason: None,
+                },
+                status: Some(0),
+            },
+        )
+        .await;
+        let res = kill.await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body: Value = res.json().await.unwrap();
+        assert_eq!(body["ok"], true);
+        assert_eq!(body["save_failed"]["reason"], "graft is unreachable");
+        assert_eq!(body["save_failed"]["trigger"], "stop");
+        ended(&h.state.sessions, id).await;
+        assert_eq!(h.detail(id).await.summary.activity, ActivityState::Stopped);
+    }
+
+    // Design §2.9: a periodic report is kept only when newer, and only from
+    // the current pod incarnation.
+    #[tokio::test]
+    async fn a_stale_seq_or_an_old_incarnations_save_is_ignored() {
+        let (mut h, _accounts) = claude_harness().await;
+        let id = h.start().await;
+        let token = h.session_token(id).await;
+        let mut agent = h.dial(id, &token, 0).await;
+        assert_eq!(take(&mut agent).await, Frame::Ack { offset: 0 });
+        let send = |seq: u64, gen: u64, draft: &str| {
+            let mut report = saved_report(Some(draft));
+            report.seq = seq;
+            report.gen = gen;
+            report.trigger = SaveTrigger::Periodic;
+            Frame::Saved {
+                outcome: SaveOutcome::Saved {
+                    report: Box::new(report),
+                },
+            }
+        };
+        put(&mut agent, send(2, 0, "c2")).await;
+        put(&mut agent, send(1, 0, "c1")).await;
+        put(&mut agent, send(9, 1, "cfuture")).await;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while h.detail(id).await.summary.saved_work.is_none() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the first save is kept");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let saved = h.detail(id).await.summary.saved_work.unwrap();
+        assert_eq!((saved.seq, saved.draft.as_deref()), (2, Some("c2")));
+        put(&mut agent, send(3, 0, "c3")).await;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while h.detail(id).await.summary.saved_work.and_then(|s| s.draft) != Some("c3".into()) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("a newer save replaces it");
+        h.state.sessions.get(id).unwrap().kill().unwrap();
+        put(&mut agent, Frame::Exited { status: Some(0) }).await;
+        ended(&h.state.sessions, id).await;
+    }
+
+    // D1: the idle policy holds a hibernate back when the save fails, says
+    // so on the session, and backs off before it tries again.
+    #[tokio::test]
+    async fn the_idle_policy_defers_a_hibernate_whose_save_failed() {
+        use vogt_engine_server::hibernate_policy::{exemption, run_once, Policy};
+        let (mut h, _accounts) = claude_harness().await;
+        let id = h.start().await;
+        let token = h.session_token(id).await;
+        let mut agent = h.dial(id, &token, 0).await;
+        assert_eq!(take(&mut agent).await, Frame::Ack { offset: 0 });
+        let session = h.state.sessions.get(id).unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while exemption(&h.state.sessions, &session).is_some() {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("the quiet pod session becomes eligible");
+        let policy = Policy {
+            idle_after: Some(Duration::from_millis(1)),
+            ..Policy::default()
+        };
+        let tick = tokio::spawn({
+            let state = Arc::clone(&h.state);
+            async move { run_once(&state.sessions, &policy).await }
+        });
+        assert_eq!(
+            take(&mut agent).await,
+            Frame::Checkpoint {
+                is_final: false,
+                trigger: Some(SaveTrigger::Hibernate)
+            }
+        );
+        put(
+            &mut agent,
+            Frame::Saved {
+                outcome: save_failed(SaveTrigger::Hibernate),
+            },
+        )
+        .await;
+        tick.await.unwrap();
+        quiet(&mut agent).await;
+        assert!(!h.state.sessions.is_hibernated(id));
+        let deferred = h
+            .detail(id)
+            .await
+            .summary
+            .hibernate_deferred
+            .expect("the session says the hibernate was held back");
+        assert_eq!(deferred.failures, 1);
+        assert_eq!(deferred.reason, "graft is unreachable");
+        let why = exemption(&h.state.sessions, &session).expect("backing off");
+        assert!(why.contains("hibernation deferred"), "{why}");
+        session.kill().unwrap();
+        put(&mut agent, Frame::Exited { status: Some(0) }).await;
+        ended(&h.state.sessions, id).await;
+    }
+
+    // D5: a lost pod's session with a conversation is hibernated as
+    // `pod_lost`; one without a conversation is left to the reaper to end.
+    #[tokio::test]
+    async fn a_lost_pod_with_a_conversation_hibernates_as_pod_lost() {
+        let (mut h, _accounts) = claude_harness().await;
+        let id = h.start().await;
+        let token = h.session_token(id).await;
+        let mut agent = h.dial(id, &token, 0).await;
+        assert_eq!(take(&mut agent).await, Frame::Ack { offset: 0 });
+        assert!(h
+            .state
+            .sessions
+            .hibernate_lost_pod(id, "disappeared from the cluster"));
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while !h.state.sessions.is_hibernated(id) {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("the session is hibernated");
+        let summary = h.state.sessions.hibernated_summary(id).unwrap();
+        let hibernation = summary.hibernation.unwrap();
+        assert_eq!(
+            hibernation.trigger,
+            vogt_engine_contract::HibernateTrigger::PodLost
+        );
+        assert!(hibernation.resumable);
+        assert!(hibernation
+            .reason
+            .unwrap()
+            .contains("disappeared from the cluster"));
+        drop(agent);
+
+        let mut plain = harness(false).await;
+        let shell = plain.start().await;
+        let _ = plain.session_token(shell).await;
+        assert!(!plain.state.sessions.hibernate_lost_pod(shell, "failed"));
+        plain.state.sessions.get(shell).unwrap().kill().unwrap();
     }
 
     /// An engine that restarted: a registry over the same state directory

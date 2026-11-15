@@ -7,7 +7,11 @@
 //!
 //! - a live session whose pod failed, completed unreported, is stuck in a
 //!   state that cannot heal, or has disappeared, is ended (the pod phase and
-//!   reason become the session's last output and its exit code);
+//!   reason become the session's last output and its exit code) — except
+//!   that a pod lost without warning (vanished, failed, or its agent gone
+//!   silent) whose session has a conversation to resume is hibernated with
+//!   trigger `pod_lost` instead (WI-3370, decision D5), so a wake restores
+//!   its last periodic save;
 //! - a pod with no live session behind it is reported and left running: its
 //!   workspace exists only in that pod, so an orphan is not permission to
 //!   delete unlanded work. Deletion belongs to the session's own end, except
@@ -15,7 +19,10 @@
 //!   `orphan_ttl` (WI-4233) since the sweep first found it unowned, and whose
 //!   latest salvage report did not fail, is not older than the pod and has its
 //!   manifest on disk: a stop that could not delete its pod is reaped then.
-//!   Any other pod is kept and warned about (once, then every 10 minutes).
+//!   With `ENGINE_POD_REAP_COVERED=1` (off by default, decision D6), a pod
+//!   whose hibernated session's latest save is complete and covers that pod
+//!   is reaped after the same TTL. Any other pod is kept and warned about
+//!   (once, then every 10 minutes).
 //!
 //! After an engine restart the previous process's pods are still the only
 //! copy of their sessions' workspaces. Boot re-adopts the ones whose record
@@ -26,8 +33,8 @@ use crate::{
     chats::redact,
     error::Result,
     pod_backend::{
-        pod_exit_code, pod_fatal_waiting_reason, pod_hit_active_deadline, pod_is_ours, pod_phase,
-        pod_reason, session_id_from_pod, PodConfig, PodLauncher, LOG_TAIL_LINES,
+        pod_exit_code, pod_fatal_waiting_reason, pod_gen_of, pod_hit_active_deadline, pod_is_ours,
+        pod_phase, pod_reason, session_id_from_pod, PodConfig, PodLauncher, LOG_TAIL_LINES,
     },
 };
 use k8s_openapi::api::core::v1::Pod;
@@ -154,9 +161,21 @@ pub fn judge(pod: &Pod, link: Option<&PodLink>, cfg: &PodConfig, age: Option<Dur
     }
 }
 
+/// Whether an `End` verdict means the pod was lost without warning (it
+/// failed, or its agent went silent while it ran), rather than finished,
+/// timed out by policy or never started. Only a lost pod's session may be
+/// hibernated as `pod_lost`.
+fn pod_was_lost(pod: &Pod) -> bool {
+    match pod_phase(pod) {
+        "running" => true,
+        "errored" => !pod_hit_active_deadline(pod),
+        _ => false,
+    }
+}
+
 /// End a live session from outside its agent: the note becomes its last
 /// output and the code its exit status, as if the agent had reported it.
-fn end_session(link: &PodLink, code: i32, note: &str) {
+pub(crate) fn end_session(link: &PodLink, code: i32, note: &str) {
     let text = format!("\r\nsession pod {note}\r\n");
     let _ = link.ingest(link.next_offset(), text.as_bytes());
     link.finish(code);
@@ -218,10 +237,32 @@ pub struct Sweep {
     pub reported: Vec<(Uuid, String)>,
     /// Orphan pods deleted after `orphan_ttl`.
     pub reaped: Vec<Uuid>,
+    /// Live sessions whose pod was lost, handed to `lost` to hibernate as
+    /// `pod_lost` rather than ended.
+    pub lost: Vec<Uuid>,
 }
 
 /// Whether a salvage covers a pod: session, pod creation (unix s), pod uid.
 pub type SalvagedFn = Arc<dyn Fn(Uuid, i64, Option<&str>) -> bool + Send + Sync>;
+
+/// Take a live session whose pod was lost (WI-3370): `true` when the
+/// session has a conversation and its `pod_lost` hibernation was started,
+/// `false` to have the sweep end it as before. The note says what happened.
+pub type LostFn = Arc<dyn Fn(Uuid, &str) -> bool + Send + Sync>;
+
+/// Whether a session's latest save covers a pod with no live session behind
+/// it: session, the pod's incarnation (`vogt.pod-gen`). Answers `false`
+/// unless `ENGINE_POD_REAP_COVERED` is on.
+pub type CoveredFn = Arc<dyn Fn(Uuid, Option<u64>) -> bool + Send + Sync>;
+
+/// The callbacks a sweep asks about sessions it cannot see itself.
+#[derive(Clone, Copy)]
+pub struct Hooks<'a> {
+    pub owned: &'a (dyn Fn(Uuid) -> bool + Sync),
+    pub salvaged: &'a (dyn Fn(Uuid, i64, Option<&str>) -> bool + Sync),
+    pub lost: &'a (dyn Fn(Uuid, &str) -> bool + Sync),
+    pub covered: &'a (dyn Fn(Uuid, Option<u64>) -> bool + Sync),
+}
 
 /// What the reaper remembers between sweeps: when each unowned pod was first
 /// seen unowned, and when it last warned about keeping one. The TTL runs from
@@ -253,8 +294,12 @@ pub async fn sweep(
         launcher,
         auth,
         cfg,
-        owned,
-        &|_, _, _| false,
+        &Hooks {
+            owned,
+            salvaged: &|_, _, _| false,
+            lost: &|_, _| false,
+            covered: &|_, _| false,
+        },
         &mut OrphanTracker::default(),
     )
     .await
@@ -263,15 +308,22 @@ pub async fn sweep(
 /// `owned` says whether a live or hibernated session still claims an id;
 /// `salvaged` whether its work is recorded as salvaged. Only a pod `owned`
 /// denies, that `tracker` has seen unowned for `orphan_ttl`, and whose salvage
-/// is recorded complete is ever reaped.
+/// is recorded complete is ever reaped — or, past the same TTL, a pod with no
+/// live session that `covered` says its session's save covers. A lost pod's
+/// session goes to `lost` before it is ended.
 pub async fn sweep_with(
     launcher: &dyn PodLauncher,
     auth: &AgentAuth,
     cfg: &PodConfig,
-    owned: &(dyn Fn(Uuid) -> bool + Sync),
-    salvaged: &(dyn Fn(Uuid, i64, Option<&str>) -> bool + Sync),
+    hooks: &Hooks<'_>,
     tracker: &mut OrphanTracker,
 ) -> Result<Sweep> {
+    let Hooks {
+        owned,
+        salvaged,
+        lost,
+        covered,
+    } = *hooks;
     let pods = launcher.list().await?;
     let mut report = Sweep::default();
     let mut seen = HashSet::new();
@@ -290,6 +342,11 @@ pub async fn sweep_with(
             Verdict::Keep => {}
             Verdict::End { code, note } => {
                 if let Some(link) = link.as_deref() {
+                    if pod_was_lost(pod) && lost(id, &note) {
+                        tracing::warn!(session = %id, %note, "hibernating a session whose pod was lost");
+                        report.lost.push(id);
+                        continue;
+                    }
                     tracing::warn!(session = %id, code, %note, "ending a session whose pod died");
                     let note = if code != 0 {
                         match failed_log_tail(launcher, auth, id).await {
@@ -308,20 +365,24 @@ pub async fn sweep_with(
             Verdict::Report { note } => {
                 let now = Instant::now();
                 let unowned = link.is_none() && !owned(id);
-                let held = if unowned {
+                // A hibernated session's pod that its complete save covers
+                // (D6): no live session, and its work is in the draft.
+                let covered_now = link.is_none() && !unowned && covered(id, pod_gen_of(pod));
+                let timed = unowned || covered_now;
+                let held = if timed {
                     now.duration_since(*tracker.first_unowned.entry(id).or_insert(now))
                 } else {
                     tracker.first_unowned.remove(&id);
                     tracker.last_warned.remove(&id);
                     Duration::ZERO
                 };
-                if unowned && !cfg.orphan_ttl.is_zero() && held > cfg.orphan_ttl {
+                if timed && !cfg.orphan_ttl.is_zero() && held > cfg.orphan_ttl {
                     let created = pod
                         .metadata
                         .creation_timestamp
                         .as_ref()
                         .map_or(i64::MAX, |t| t.0.timestamp());
-                    if !salvaged(id, created, pod.metadata.uid.as_deref()) {
+                    if !covered_now && !salvaged(id, created, pod.metadata.uid.as_deref()) {
                         let due = tracker
                             .last_warned
                             .get(&id)
@@ -337,6 +398,7 @@ pub async fn sweep_with(
                         match launcher.delete(id, pod.metadata.uid.clone()).await {
                             Ok(()) => {
                                 tracing::warn!(session = %id, ttl_secs = cfg.orphan_ttl.as_secs(),
+                                    covered = covered_now,
                                     "deleted an orphan session pod past its TTL");
                                 tracker.first_unowned.remove(&id);
                                 tracker.last_warned.remove(&id);
@@ -361,8 +423,14 @@ pub async fn sweep_with(
         }
         let Some(link) = auth.pod(id) else { continue };
         if !link.is_finished() && link.age() > cfg.connect_timeout {
+            let note = "disappeared from the cluster";
+            if lost(id, note) {
+                tracing::warn!(session = %id, "hibernating a session whose pod disappeared");
+                report.lost.push(id);
+                continue;
+            }
             tracing::warn!(session = %id, "ending a session whose pod disappeared");
-            end_session(&link, 1, "disappeared from the cluster");
+            end_session(&link, 1, note);
             report.ended.push(id);
         }
     }
@@ -376,6 +444,8 @@ pub fn spawn(
     cfg: PodConfig,
     owned: Arc<dyn Fn(Uuid) -> bool + Send + Sync>,
     salvaged: SalvagedFn,
+    lost: LostFn,
+    covered: CoveredFn,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut failing = false;
@@ -384,16 +454,13 @@ pub fn spawn(
         let mut reported: HashSet<Uuid> = HashSet::new();
         let mut tracker = OrphanTracker::default();
         loop {
-            match sweep_with(
-                launcher.as_ref(),
-                &auth,
-                &cfg,
-                owned.as_ref(),
-                salvaged.as_ref(),
-                &mut tracker,
-            )
-            .await
-            {
+            let hooks = Hooks {
+                owned: owned.as_ref(),
+                salvaged: salvaged.as_ref(),
+                lost: lost.as_ref(),
+                covered: covered.as_ref(),
+            };
+            match sweep_with(launcher.as_ref(), &auth, &cfg, &hooks, &mut tracker).await {
                 Ok(report) => {
                     failing = false;
                     let current: HashSet<Uuid> =
@@ -898,12 +965,182 @@ mod tests {
             kube,
             &AgentAuth::default(),
             cfg,
-            owned,
-            &move |_, _, _| salvaged,
+            &Hooks {
+                owned,
+                salvaged: &move |_, _, _| salvaged,
+                lost: &|_, _| false,
+                covered: &|_, _| false,
+            },
             tracker,
         )
         .await
         .unwrap()
+    }
+
+    /// A sweep with every hook given, for the WI-3370 rules.
+    async fn run_hooks(
+        kube: &MockKube,
+        auth: &AgentAuth,
+        cfg: &PodConfig,
+        hooks: &Hooks<'_>,
+        tracker: &mut OrphanTracker,
+    ) -> Sweep {
+        sweep_with(kube, auth, cfg, hooks, tracker).await.unwrap()
+    }
+
+    // WI-3370 (D5): a vanished pod whose session has a conversation is handed
+    // to the registry to hibernate as `pod_lost`, not ended; without one it
+    // ends as before.
+    #[tokio::test]
+    async fn a_vanished_pod_with_a_conversation_is_handed_over_not_ended() {
+        let id = Uuid::new_v4();
+        let (auth, link) = live(id);
+        let kube = MockKube::with(vec![]);
+        let asked = Mutex::new(Vec::new());
+        let lost = |sid: Uuid, note: &str| {
+            asked.lock().unwrap().push((sid, note.to_string()));
+            true
+        };
+        let hooks = Hooks {
+            owned: &|_| true,
+            salvaged: &|_, _, _| false,
+            lost: &lost,
+            covered: &|_, _| false,
+        };
+        let report = run_hooks(&kube, &auth, &cfg(), &hooks, &mut OrphanTracker::default()).await;
+        assert_eq!(report.lost, vec![id]);
+        assert!(report.ended.is_empty());
+        assert!(
+            !link.is_finished(),
+            "the registry's hibernation ends the link, not the sweep"
+        );
+        assert_eq!(
+            asked.lock().unwrap().clone(),
+            vec![(id, "disappeared from the cluster".to_string())]
+        );
+
+        // No conversation: the registry declines and the session ends.
+        let hooks = Hooks {
+            lost: &|_, _| false,
+            ..hooks
+        };
+        let report = run_hooks(&kube, &auth, &cfg(), &hooks, &mut OrphanTracker::default()).await;
+        assert_eq!(report.ended, vec![id]);
+        assert_eq!(link.wait_exit(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_failed_pod_is_lost_but_a_completed_or_deadline_one_still_ends() {
+        let take_all = |_: Uuid, _: &str| true;
+        let hooks = Hooks {
+            owned: &|_| true,
+            salvaged: &|_, _, _| false,
+            lost: &take_all,
+            covered: &|_, _| false,
+        };
+        let failed = Uuid::new_v4();
+        let (auth, _link) = live(failed);
+        let kube = MockKube::with(vec![pod(failed, terminated("Failed", 137, "OOMKilled"))]);
+        let report = run_hooks(&kube, &auth, &cfg(), &hooks, &mut OrphanTracker::default()).await;
+        assert_eq!(report.lost, vec![failed]);
+        assert!(report.ended.is_empty());
+
+        let done = Uuid::new_v4();
+        let (auth, link) = live(done);
+        let kube = MockKube::with(vec![pod(done, terminated("Succeeded", 0, "Completed"))]);
+        let report = run_hooks(&kube, &auth, &cfg(), &hooks, &mut OrphanTracker::default()).await;
+        assert_eq!(report.ended, vec![done]);
+        assert!(report.lost.is_empty());
+        assert!(link.is_finished());
+
+        let deadline = Uuid::new_v4();
+        let (auth, _link) = live(deadline);
+        let mut status = terminated("Failed", 137, "");
+        status.reason = Some("DeadlineExceeded".into());
+        status.container_statuses.as_mut().unwrap()[0]
+            .state
+            .as_mut()
+            .unwrap()
+            .terminated
+            .as_mut()
+            .unwrap()
+            .reason = Some("DeadlineExceeded".into());
+        let kube = MockKube::with(vec![pod(deadline, status)]);
+        let report = run_hooks(&kube, &auth, &cfg(), &hooks, &mut OrphanTracker::default()).await;
+        assert_eq!(report.ended, vec![deadline]);
+        assert!(report.lost.is_empty());
+    }
+
+    // D6: a pod with no live session but an owner (a hibernated record) is
+    // kept unless its save covers it; covered, it is reaped after the TTL.
+    #[tokio::test]
+    async fn a_covered_pod_of_a_hibernated_session_is_reaped_after_the_ttl() {
+        let id = Uuid::new_v4();
+        let mut stamped = aged(pod(id, phase("Running")), 10_000);
+        crate::pod_backend::set_pod_gen(&mut stamped, 2);
+        let kube = MockKube::with(vec![stamped]);
+        let gens = Mutex::new(Vec::new());
+        let covered = |_: Uuid, gen: Option<u64>| {
+            gens.lock().unwrap().push(gen);
+            true
+        };
+        let not_covered = Hooks {
+            owned: &|_| true,
+            salvaged: &|_, _, _| true,
+            lost: &|_, _| false,
+            covered: &|_, _| false,
+        };
+        let mut tracker = OrphanTracker::default();
+        run_hooks(
+            &kube,
+            &AgentAuth::default(),
+            &ttl_cfg(),
+            &not_covered,
+            &mut tracker,
+        )
+        .await;
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        let report = run_hooks(
+            &kube,
+            &AgentAuth::default(),
+            &ttl_cfg(),
+            &not_covered,
+            &mut tracker,
+        )
+        .await;
+        assert!(
+            report.reaped.is_empty(),
+            "an owned pod is never reaped on a salvage alone"
+        );
+        assert!(tracker.tracked().is_empty());
+
+        let hooks = Hooks {
+            covered: &covered,
+            ..not_covered
+        };
+        run_hooks(
+            &kube,
+            &AgentAuth::default(),
+            &ttl_cfg(),
+            &hooks,
+            &mut tracker,
+        )
+        .await;
+        assert!(
+            kube.deleted.lock().unwrap().is_empty(),
+            "the TTL runs first"
+        );
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        let report = run_hooks(
+            &kube,
+            &AgentAuth::default(),
+            &ttl_cfg(),
+            &hooks,
+            &mut tracker,
+        )
+        .await;
+        assert_eq!(report.reaped, vec![id]);
+        assert!(gens.lock().unwrap().iter().all(|g| *g == Some(2)));
     }
 
     #[tokio::test]

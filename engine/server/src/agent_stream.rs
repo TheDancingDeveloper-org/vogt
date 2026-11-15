@@ -20,6 +20,7 @@ use std::{
 use subtle::ConstantTimeEq;
 use tokio::sync::{mpsc, Mutex, Notify};
 use uuid::Uuid;
+use vogt_engine_contract::saved_work::{SaveOutcome, SaveTrigger};
 use vogt_engine_contract::source::SourceDescriptor;
 use vogt_session_agent::Frame;
 const BOOTSTRAP_TTL: Duration = Duration::from_secs(300);
@@ -65,6 +66,25 @@ struct PendingCredential {
 
 type AgentLinks = HashMap<Uuid, (mpsc::UnboundedSender<Frame>, Arc<PodLink>)>;
 
+/// Where the relay hands every checkpoint outcome a pod agent reports
+/// (`Saved`, and the save inside `Checkpointed`), so the session registry can
+/// keep it in the record whoever asked for it (WI-4268). Every installed
+/// sink hears every outcome and ignores sessions it does not hold; an engine
+/// has one registry, a test process many.
+pub type SaveSink = Arc<dyn Fn(Uuid, SaveOutcome) + Send + Sync>;
+
+#[derive(Default)]
+struct SaveSinkSlot(std::sync::Mutex<Vec<SaveSink>>);
+
+impl std::fmt::Debug for SaveSinkSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SaveSinkSlot")
+    }
+}
+
+/// How many recent `Saved` outcomes a link keeps for a waiting request.
+const SAVED_KEEP: usize = 8;
+
 #[derive(Debug, Default)]
 pub struct AgentAuth {
     pending: Mutex<HashMap<Uuid, Pending>>,
@@ -85,6 +105,26 @@ pub struct AgentAuth {
     /// attach/detach can update the connection state under one lock.
     links: std::sync::Mutex<AgentLinks>,
     pods: std::sync::Mutex<HashMap<Uuid, Arc<PodLink>>>,
+    save_sink: SaveSinkSlot,
+}
+
+/// How a requested checkpoint ended (WI-4268).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CheckpointReply {
+    /// No agent is attached, so nothing could be asked.
+    NotAttached,
+    /// The agent did not answer in time: an agent older than the
+    /// `Checkpoint` frame ignores it, so the caller falls back to `Salvage`
+    /// and a kill.
+    NoReply,
+    /// The answer to a non-final checkpoint.
+    Saved(SaveOutcome),
+    /// The answer to a final checkpoint: the agent stopped the CLI, saved,
+    /// salvaged and exited.
+    Checkpointed {
+        saved: SaveOutcome,
+        salvage: vogt_engine_contract::salvage::SalvageAck,
+    },
 }
 
 /// How a requested salvage ended (WI-4132).
@@ -132,6 +172,13 @@ pub struct PodLink {
     salvages: AtomicU64,
     salvage_notify: Notify,
     salvage_failure: std::sync::Mutex<Option<String>>,
+    /// `Saved` frames received, and the latest few with their number.
+    saves: AtomicU64,
+    saved: std::sync::Mutex<std::collections::VecDeque<(u64, SaveOutcome)>>,
+    save_notify: Notify,
+    /// The final checkpoint's answer, once it came.
+    checkpointed:
+        std::sync::Mutex<Option<(SaveOutcome, vogt_engine_contract::salvage::SalvageAck)>>,
     /// The pod is gone and the stream forgotten; hibernation waits for it so
     /// a wake never races the old pod's teardown.
     torn_down: AtomicBool,
@@ -172,6 +219,10 @@ impl PodLink {
             salvages: AtomicU64::new(0),
             salvage_notify: Notify::new(),
             salvage_failure: std::sync::Mutex::new(None),
+            saves: AtomicU64::new(0),
+            saved: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            save_notify: Notify::new(),
+            checkpointed: std::sync::Mutex::new(None),
             torn_down: AtomicBool::new(false),
             torn_notify: Notify::new(),
             connected: AtomicBool::new(false),
@@ -395,6 +446,37 @@ impl PodLink {
 
     pub fn request_stop(&self) {
         self.stop_requested.store(true, Ordering::Release);
+    }
+
+    fn note_saved(&self, outcome: SaveOutcome) {
+        let n = self.saves.fetch_add(1, Ordering::AcqRel) + 1;
+        let mut saved = self.saved.lock().expect("pod link lock poisoned");
+        saved.push_back((n, outcome));
+        while saved.len() > SAVED_KEEP {
+            saved.pop_front();
+        }
+        drop(saved);
+        self.save_notify.notify_waiters();
+    }
+
+    fn note_checkpointed(
+        &self,
+        saved: SaveOutcome,
+        salvage: vogt_engine_contract::salvage::SalvageAck,
+    ) {
+        *self.checkpointed.lock().expect("pod link lock poisoned") = Some((saved, salvage));
+        self.save_notify.notify_waiters();
+    }
+
+    /// The `Saved` outcomes numbered after `after`, oldest first.
+    fn saved_after(&self, after: u64) -> Vec<SaveOutcome> {
+        self.saved
+            .lock()
+            .expect("pod link lock poisoned")
+            .iter()
+            .filter(|(n, _)| *n > after)
+            .map(|(_, o)| o.clone())
+            .collect()
     }
 
     fn stop_requested(&self) -> bool {
@@ -825,6 +907,101 @@ impl AgentAuth {
                 "the pod agent did not answer the salvage request in time".into(),
             )
         })
+    }
+
+    /// Add where checkpoint outcomes go (a session registry).
+    pub fn add_save_sink(&self, sink: SaveSink) {
+        self.save_sink
+            .0
+            .lock()
+            .expect("save sink lock poisoned")
+            .push(sink);
+    }
+
+    fn report_saved(&self, id: Uuid, outcome: SaveOutcome) {
+        let sinks = self
+            .save_sink
+            .0
+            .lock()
+            .expect("save sink lock poisoned")
+            .clone();
+        for sink in sinks {
+            sink(id, outcome.clone());
+        }
+    }
+
+    /// Ask the agent for a checkpoint and wait for its answer (WI-4268).
+    ///
+    /// Non-final: the first `Saved` after the request answers it. The timer
+    /// may report between the request and the answer, but the agent runs a
+    /// requested checkpoint right after one in flight, so a periodic result
+    /// that arrives first is as recent as the tree it will save; only a
+    /// periodic *failure* is passed over for the requested one, so a
+    /// transient failure does not refuse a hibernate the next save allows.
+    ///
+    /// Final: waits for `Checkpointed`, after which the agent has exited.
+    pub async fn request_checkpoint(
+        &self,
+        id: Uuid,
+        is_final: bool,
+        trigger: SaveTrigger,
+        limit: Duration,
+    ) -> CheckpointReply {
+        let Some(link) = self.pod(id) else {
+            return CheckpointReply::NotAttached;
+        };
+        let before = link.saves.load(Ordering::Acquire);
+        if is_final {
+            link.checkpointed
+                .lock()
+                .expect("pod link lock poisoned")
+                .take();
+        }
+        let frame = Frame::Checkpoint {
+            is_final,
+            trigger: Some(trigger),
+        };
+        if self.send(id, frame).is_err() {
+            return CheckpointReply::NotAttached;
+        }
+        let mut passed_over: Option<SaveOutcome> = None;
+        let wait = async {
+            loop {
+                let notified = link.save_notify.notified();
+                if is_final {
+                    if let Some((saved, salvage)) = link
+                        .checkpointed
+                        .lock()
+                        .expect("pod link lock poisoned")
+                        .clone()
+                    {
+                        return CheckpointReply::Checkpointed { saved, salvage };
+                    }
+                } else {
+                    for outcome in link.saved_after(before) {
+                        let periodic_failure = matches!(
+                            outcome,
+                            SaveOutcome::SaveFailed {
+                                trigger: SaveTrigger::Periodic,
+                                ..
+                            }
+                        );
+                        if !periodic_failure {
+                            return CheckpointReply::Saved(outcome);
+                        }
+                        passed_over = Some(outcome);
+                    }
+                }
+                notified.await;
+            }
+        };
+        match tokio::time::timeout(limit, wait).await {
+            Ok(reply) => reply,
+            Err(_) => match passed_over {
+                Some(outcome) => CheckpointReply::Saved(outcome),
+                None => CheckpointReply::NoReply,
+            },
+        }
     }
 
     /// Forget the stream, unless a newer registration has replaced `link`.
@@ -1442,6 +1619,19 @@ where
                             link.salvages.fetch_add(1, Ordering::AcqRel);
                             link.salvage_notify.notify_waiters();
                         }
+                        Frame::Saved { outcome } => {
+                            agent_auth.report_saved(id, outcome.clone());
+                            link.note_saved(outcome);
+                        }
+                        // The final checkpoint: the agent stopped the CLI,
+                        // saved, salvaged and exits now, so the stream ends
+                        // here as it would on `Exited`.
+                        Frame::Checkpointed { saved, salvage, status } => {
+                            agent_auth.report_saved(id, saved.clone());
+                            link.note_checkpointed(saved, salvage);
+                            link.finish(status.unwrap_or(0));
+                            break;
+                        }
                         Frame::Heartbeat { .. } => {
                             link.note_heartbeat();
                             let next = link.next_offset();
@@ -1694,6 +1884,149 @@ mod tests {
             reason: None,
         });
         assert_eq!(requester.await.unwrap(), SalvageOutcome::Done);
+    }
+
+    fn saved(trigger: SaveTrigger, seq: u64) -> SaveOutcome {
+        SaveOutcome::Saved {
+            report: Box::new(vogt_engine_contract::saved_work::SavedWorkReport {
+                provider: "graft".into(),
+                repo: "vogt".into(),
+                line: "rust-2".into(),
+                workspace: "vogt-save-s-0".into(),
+                draft: Some(format!("c{seq}")),
+                base: "b".into(),
+                seq,
+                gen: 0,
+                at: "2026-11-15T00:00:00Z".into(),
+                files: 1,
+                bytes: 1,
+                skipped: Vec::new(),
+                complete: true,
+                trigger,
+                previous: None,
+            }),
+        }
+    }
+
+    // WI-4268: a non-final checkpoint is sent as such and answered by the
+    // next Saved; a periodic failure in between is passed over; every
+    // outcome reaches the save sink.
+    #[tokio::test]
+    async fn a_checkpoint_request_is_answered_by_saved_and_every_save_reaches_the_sink() {
+        let auth = Arc::new(AgentAuth::default());
+        let id = Uuid::new_v4();
+        let (_link, _reader) = auth.register_pod(id);
+        let sunk = Arc::new(std::sync::Mutex::new(Vec::new()));
+        auth.add_save_sink({
+            let sunk = Arc::clone(&sunk);
+            Arc::new(move |sid, outcome| sunk.lock().unwrap().push((sid, outcome)))
+        });
+        let mut agent = connect(&auth, id).await;
+        let requester = {
+            let auth = Arc::clone(&auth);
+            tokio::spawn(async move {
+                auth.request_checkpoint(id, false, SaveTrigger::Hibernate, Duration::from_secs(2))
+                    .await
+            })
+        };
+        let (frames, _) = agent.drain().await;
+        assert_eq!(
+            frames,
+            vec![Frame::Checkpoint {
+                is_final: false,
+                trigger: Some(SaveTrigger::Hibernate)
+            }]
+        );
+        let periodic_failure = SaveOutcome::SaveFailed {
+            trigger: SaveTrigger::Periodic,
+            reason: "graft down".into(),
+        };
+        agent.send(Frame::Saved {
+            outcome: periodic_failure.clone(),
+        });
+        agent.send(Frame::Saved {
+            outcome: saved(SaveTrigger::Hibernate, 3),
+        });
+        assert_eq!(
+            requester.await.unwrap(),
+            CheckpointReply::Saved(saved(SaveTrigger::Hibernate, 3))
+        );
+        assert_eq!(
+            sunk.lock().unwrap().clone(),
+            vec![
+                (id, periodic_failure),
+                (id, saved(SaveTrigger::Hibernate, 3))
+            ]
+        );
+    }
+
+    // An agent older than the frame ignores it: the request times out as
+    // NoReply, which sends the caller down the salvage-and-kill path.
+    #[tokio::test]
+    async fn an_old_agent_that_ignores_checkpoint_gives_no_reply() {
+        let auth = Arc::new(AgentAuth::default());
+        let id = Uuid::new_v4();
+        let (_link, _reader) = auth.register_pod(id);
+        let _agent = connect(&auth, id).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            auth.request_checkpoint(id, true, SaveTrigger::Stop, Duration::from_millis(200))
+                .await,
+            CheckpointReply::NoReply
+        );
+        assert_eq!(
+            auth.request_checkpoint(
+                Uuid::new_v4(),
+                true,
+                SaveTrigger::Stop,
+                Duration::from_millis(10)
+            )
+            .await,
+            CheckpointReply::NotAttached
+        );
+    }
+
+    // The final checkpoint's answer ends the stream with the CLI's status.
+    #[tokio::test]
+    async fn checkpointed_answers_the_final_request_and_finishes_the_link() {
+        let auth = Arc::new(AgentAuth::default());
+        let id = Uuid::new_v4();
+        let (link, _reader) = auth.register_pod(id);
+        let mut agent = connect(&auth, id).await;
+        let requester = {
+            let auth = Arc::clone(&auth);
+            tokio::spawn(async move {
+                auth.request_checkpoint(id, true, SaveTrigger::Stop, Duration::from_secs(2))
+                    .await
+            })
+        };
+        let (frames, _) = agent.drain().await;
+        assert_eq!(
+            frames,
+            vec![Frame::Checkpoint {
+                is_final: true,
+                trigger: Some(SaveTrigger::Stop)
+            }]
+        );
+        let salvage = vogt_engine_contract::salvage::SalvageAck {
+            ok: true,
+            files: 0,
+            reason: None,
+        };
+        agent.send(Frame::Checkpointed {
+            saved: saved(SaveTrigger::Stop, 4),
+            salvage: salvage.clone(),
+            status: Some(143),
+        });
+        assert_eq!(
+            requester.await.unwrap(),
+            CheckpointReply::Checkpointed {
+                saved: saved(SaveTrigger::Stop, 4),
+                salvage
+            }
+        );
+        assert!(link.is_finished());
+        assert_eq!(link.wait_exit(), 143);
     }
 
     #[tokio::test]

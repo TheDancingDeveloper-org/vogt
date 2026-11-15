@@ -157,6 +157,9 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         bus.clone(),
         history.clone(),
     ));
+    // Before any pod is adopted or started: its agent may report a save at
+    // once (WI-4268).
+    sessions.install_save_sink();
     let gui = Arc::new(GuiRegistry::new());
     let push = Arc::new(
         PushManager::with_subject(

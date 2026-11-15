@@ -92,6 +92,7 @@ pub fn change_of(sequenced: &Sequenced) -> Option<SessionChange> {
                 vogt_engine_contract::HibernateTrigger::Shutdown => "shutdown",
                 vogt_engine_contract::HibernateTrigger::Recovered => "recovered",
                 vogt_engine_contract::HibernateTrigger::Budget => "budget",
+                vogt_engine_contract::HibernateTrigger::PodLost => "pod_lost",
             };
             (*id, "hibernated", format!("hibernated ({why})"))
         }

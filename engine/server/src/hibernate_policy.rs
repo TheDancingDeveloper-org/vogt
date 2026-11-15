@@ -75,6 +75,45 @@ impl Policy {
 /// How often the watcher looks.
 const TICK: Duration = Duration::from_secs(60);
 
+/// Idle hibernations held back in a row (the save failed) before the policy
+/// stops retrying until the session's work changes (WI-4268, design §2.8).
+pub const DEFER_MAX_FAILURES: u32 = 3;
+
+/// How long the policy waits before retrying a deferred hibernation: two
+/// ticks after the first failure, doubling, at most 30 minutes.
+pub fn defer_backoff(failures: u32) -> Duration {
+    let shift = failures.saturating_sub(1).min(4);
+    (TICK * 2 * (1u32 << shift)).min(Duration::from_secs(1800))
+}
+
+/// Why a deferred hibernation is not retried yet, or `None` when it may be.
+/// `since` is how long ago it was deferred, `quiet` how long the session has
+/// drawn nothing: output after the deferral is the sign its work changed,
+/// which lifts a pause.
+pub fn deferral_exemption(
+    deferral: &vogt_engine_contract::saved_work::HibernateDeferral,
+    since: Duration,
+    quiet: Duration,
+) -> Option<String> {
+    if deferral.paused {
+        if quiet >= since {
+            return Some(format!(
+                "hibernation deferred {} times (the save failed: {}); waiting for its work to change",
+                deferral.failures, deferral.reason
+            ));
+        }
+        return None;
+    }
+    let wait = defer_backoff(deferral.failures);
+    (since < wait).then(|| {
+        format!(
+            "hibernation deferred (the save failed: {}); retrying in {} s",
+            deferral.reason,
+            (wait - since).as_secs()
+        )
+    })
+}
+
 /// Agent CLIs, as `/proc/<pid>/comm` names them.
 const AGENTS: &[&str] = &["claude", "codex", "opencode"];
 
@@ -148,6 +187,11 @@ pub fn exemption(registry: &SessionRegistry, session: &Session) -> Option<String
     }
     if session.blocked().is_some() {
         return Some("blocked on a person".into());
+    }
+    if let Some((deferral, since)) = session.hibernate_deferred() {
+        if let Some(why) = deferral_exemption(&deferral, since, session.output_quiet_for()) {
+            return Some(why);
+        }
     }
     if let Some(pid) = session.pid() {
         if !agent_running(pid) {
@@ -461,6 +505,35 @@ async fn wake_through_core(core: &crate::vogt_core::VogtCore, id: Uuid) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn deferral(failures: u32) -> vogt_engine_contract::saved_work::HibernateDeferral {
+        vogt_engine_contract::saved_work::HibernateDeferral {
+            reason: "graft down".into(),
+            failures,
+            at: "2026-11-15T10:00:00Z".into(),
+            paused: failures >= DEFER_MAX_FAILURES,
+        }
+    }
+
+    // WI-4268 (D1): a deferred idle hibernation is retried with backoff, and
+    // after three failures only once the session's work has changed.
+    #[test]
+    fn a_deferred_hibernation_backs_off_then_waits_for_new_work() {
+        let min = |m: u64| Duration::from_secs(m * 60);
+        assert_eq!(defer_backoff(1), min(2));
+        assert_eq!(defer_backoff(2), min(4));
+        assert_eq!(defer_backoff(10), min(30));
+        let quiet = min(60);
+        assert!(deferral_exemption(&deferral(1), min(1), quiet).is_some());
+        assert!(deferral_exemption(&deferral(1), min(2), quiet).is_none());
+        assert!(deferral_exemption(&deferral(2), min(3), quiet).is_some());
+        assert!(deferral_exemption(&deferral(2), min(4), quiet).is_none());
+        // Paused: however long ago, not until output came after the deferral.
+        let paused = deferral(3);
+        assert!(paused.paused);
+        assert!(deferral_exemption(&paused, min(600), quiet.max(min(600))).is_some());
+        assert!(deferral_exemption(&paused, min(10), min(5)).is_none());
+    }
 
     #[test]
     fn durations_and_sizes_parse_the_way_an_operator_writes_them() {
