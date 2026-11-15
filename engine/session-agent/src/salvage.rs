@@ -330,10 +330,20 @@ fn plan_git(
                     bytes: BASE64.encode(bytes),
                 });
             }
-            Err(_) => skipped.push(SalvageSkip {
-                path,
-                reason: SkipReason::Unreadable,
-            }),
+            Err(error) => {
+                let reason = match refusal(&error) {
+                    Refusal::Symlink => {
+                        tracing::warn!(repo = name, path, "salvage skipped a symlink");
+                        SkipReason::Unreadable
+                    }
+                    Refusal::HardLink(links) => {
+                        tracing::warn!(repo = name, path, links, "salvage skipped a hardlink");
+                        SkipReason::Secret
+                    }
+                    Refusal::Other => SkipReason::Unreadable,
+                };
+                skipped.push(SalvageSkip { path, reason });
+            }
         }
     }
     let patch = if secret {
@@ -366,6 +376,36 @@ fn plan_git(
     ))
 }
 
+/// A file [`read_no_follow`] refused because the inode has more than one name.
+#[derive(Debug)]
+struct HardLink(u64);
+
+impl std::fmt::Display for HardLink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "salvage path has {} hard links", self.0)
+    }
+}
+
+impl std::error::Error for HardLink {}
+
+/// Why [`read_no_follow`] refused a path, for the skip reason and the log.
+enum Refusal {
+    Symlink,
+    HardLink(u64),
+    Other,
+}
+
+fn refusal(error: &std::io::Error) -> Refusal {
+    if let Some(HardLink(links)) = error.get_ref().and_then(|e| e.downcast_ref::<HardLink>()) {
+        return Refusal::HardLink(*links);
+    }
+    // O_NOFOLLOW on a symlink component fails with ELOOP.
+    if error.raw_os_error() == Some(libc::ELOOP) {
+        return Refusal::Symlink;
+    }
+    Refusal::Other
+}
+
 /// Read a regular file below `root` without following any path-component
 /// symlink. Parent directories and the final file are opened one component at
 /// a time with `openat(O_NOFOLLOW)`, and the descriptor is checked before a
@@ -375,7 +415,7 @@ fn read_no_follow(root: &Path, relative: &Path, max_bytes: u64) -> std::io::Resu
     use std::io::Read;
     use std::os::fd::{AsRawFd, FromRawFd};
     use std::os::unix::ffi::OsStrExt;
-    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
     let mut current = fs::OpenOptions::new()
         .read(true)
@@ -413,10 +453,19 @@ fn read_no_follow(root: &Path, relative: &Path, max_bytes: u64) -> std::io::Resu
         // SAFETY: `openat` returned a fresh descriptor owned by this call.
         current = unsafe { fs::File::from_raw_fd(fd) };
     }
-    if !current.metadata()?.is_file() {
+    let metadata = current.metadata()?;
+    if !metadata.is_file() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "salvage path is not a regular file",
+        ));
+    }
+    // A second name for the same inode may be a token outside the checkout
+    // (or a credential path inside it), and nothing here can see that name.
+    if metadata.nlink() > 1 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            HardLink(metadata.nlink()),
         ));
     }
     let mut bytes = Vec::new();
@@ -640,6 +689,34 @@ mod tests {
             .skipped
             .iter()
             .any(|s| s.path == "notes.txt" && s.reason == SkipReason::Unreadable));
+    }
+
+    #[test]
+    fn a_hardlink_to_a_token_is_never_archived() {
+        let dir = fixture("hardlink");
+        // A hardlink is a plain file under an innocent name, so neither the
+        // name check nor O_NOFOLLOW sees it; its other name may be a token.
+        let outside = scratch("hardlink-outside");
+        fs::write(outside.join("graft.token"), "GRAFT-TOKEN-BYTES\n").unwrap();
+        fs::hard_link(outside.join("graft.token"), dir.join("notes.txt")).unwrap();
+        fs::write(dir.join("real.txt"), "real\n").unwrap();
+
+        let outcome = plan(&dir, &SalvageLimits::default());
+        let repo = &outcome.upload.repos[0];
+        let names: Vec<&str> = repo
+            .untracked_files
+            .iter()
+            .map(|f| f.path.as_str())
+            .collect();
+        assert_eq!(names, vec!["real.txt"]);
+        for file in &repo.untracked_files {
+            let bytes = BASE64.decode(&file.bytes).unwrap();
+            assert!(!String::from_utf8_lossy(&bytes).contains("TOKEN"));
+        }
+        assert!(repo
+            .skipped
+            .iter()
+            .any(|s| s.path == "notes.txt" && s.reason == SkipReason::Secret));
     }
 
     #[test]
