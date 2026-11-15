@@ -48,7 +48,7 @@ def test_no_tool_lets_a_caller_choose_who_it_is(surface: McpSurface) -> None:
 
 def test_the_wire_shape_is_an_mcp_tool(surface: McpSurface) -> None:
     wire = surface.list_tools()[0].to_wire()
-    assert set(wire) == {"name", "description", "inputSchema"}
+    assert set(wire) == {"name", "description", "inputSchema", "annotations"}
 
 
 def test_calling_a_tool_returns_plain_data(surface: McpSurface) -> None:

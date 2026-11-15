@@ -870,7 +870,10 @@ def test_driven_session_bundle_merges_and_raises_the_schema_cap(
     assert parsed["mcp_servers"]["vogt"]["tool_input_schema_max_bytes"] == 900_000
     # A kept cap is re-appended; it still has to stand off from the next header.
     rewritten = config.read_text(encoding="utf-8")
-    assert "tool_input_schema_max_bytes = 900000\n\n[mcp_servers.cadastre]" in rewritten
+    assert (
+        "tool_input_schema_max_bytes = 900000\n\n[mcp_servers.vogt.tools." in rewritten
+    )
+    assert 'approval_mode = "approve"\n\n[mcp_servers.cadastre]' in rewritten
     assert link.is_dir() and not link.is_symlink()
     # No workspace skills here, so the link would have been the home one.
     assert not (tmp_path / ".agents" / "skills-unused").exists()
@@ -1054,3 +1057,60 @@ def test_auto_compact_limit_written_when_unset_and_never_overridden(
     parsed = tomllib.loads(config.read_text(encoding="utf-8"))
     assert parsed["model_auto_compact_token_limit"] == 150000
     assert parsed["model_auto_compact_token_limit_scope"] == "total"
+
+
+@pytest.mark.skipif(
+    shutil.which("python3") is None or shutil.which("flock") is None,
+    reason="the Codex config rewrite needs python3 and flock",
+)
+def test_vogt_table_gets_timeouts_and_exactly_the_self_tool_approvals(
+    tmp_path: Path,
+) -> None:
+    """WI-1574: Codex cuts a tool call at 300 s, so the vogt table carries a
+    660 s call timeout; the five session-self tools carry an explicit approval
+    and nothing else does. A second run changes nothing."""
+    import tomllib
+
+    config = tmp_path / "codex" / "config.toml"
+    config.parent.mkdir()
+    config.write_text(
+        '[mcp_servers.vogt]\ncommand = "/bin/vogt"\n\n'
+        '[mcp_servers.cadastre]\ncommand = "/bin/cadastre"\n',
+        encoding="utf-8",
+    )
+    proc = _codex_bootstrap(tmp_path, {})
+    assert proc.returncode == 0, proc.stderr
+    first = config.read_text(encoding="utf-8")
+    servers = tomllib.loads(first)["mcp_servers"]
+    vogt = servers["vogt"]
+    assert vogt["tool_timeout_sec"] == 660
+    assert vogt["startup_timeout_sec"] == 30
+    assert vogt["tools"] == {
+        name: {"approval_mode": "approve"}
+        for name in (
+            "session_bind_work",
+            "session_report",
+            "session_report_blocked",
+            "session_report_unblocked",
+            "work_comment",
+        )
+    }
+    assert "tools" not in servers["cadastre"]
+
+    again = _codex_bootstrap(tmp_path, {})
+    assert again.returncode == 0, again.stderr
+    assert config.read_text(encoding="utf-8") == first
+
+    # A larger operator timeout and an explicit per-tool mode are kept.
+    config.write_text(
+        first.replace("tool_timeout_sec = 660", "tool_timeout_sec = 900").replace(
+            '[mcp_servers.vogt.tools.work_comment]\napproval_mode = "approve"',
+            '[mcp_servers.vogt.tools.work_comment]\napproval_mode = "prompt"',
+        ),
+        encoding="utf-8",
+    )
+    kept = _codex_bootstrap(tmp_path, {})
+    assert kept.returncode == 0, kept.stderr
+    vogt = tomllib.loads(config.read_text(encoding="utf-8"))["mcp_servers"]["vogt"]
+    assert vogt["tool_timeout_sec"] == 900
+    assert vogt["tools"]["work_comment"] == {"approval_mode": "prompt"}
