@@ -20,6 +20,8 @@ from vogt.registry import ENGINE_COUNTERPARTS, ENGINE_ONLY, default_registry
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ENGINE_SRC = REPO_ROOT / "engine" / "server" / "src"
 ENGINE_APP = ENGINE_SRC / "app.rs"
+# Route constants shared with the session agent (the pod side) live there.
+AGENT_SRC = REPO_ROOT / "engine" / "session-agent" / "src"
 WEB_SRC = REPO_ROOT / "web" / "src"
 
 pytestmark = pytest.mark.skipif(
@@ -33,7 +35,7 @@ _METHOD = re.compile(r"\b(get|post|put|patch|delete|any)\(")
 def _route_constants() -> dict[str, str]:
     """`pub const NAME: &str = "/api/..."` across the engine, by name."""
     found: dict[str, str] = {}
-    for path in ENGINE_SRC.glob("*.rs"):
+    for path in [*ENGINE_SRC.glob("*.rs"), *AGENT_SRC.glob("*.rs")]:
         for name, value in re.findall(
             r'pub const ([A-Z_]+): &str = "(/[^"]*)"', path.read_text("utf-8")
         ):
