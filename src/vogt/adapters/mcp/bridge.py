@@ -257,6 +257,10 @@ class Bridge:
             and self._initialize is not None
             and _session_refused(status, body)
             and self._reinitialize(self._initialize)
+            # A tool call is never replayed: the refusal is the server's
+            # word, not proof the call did not run. The next request uses
+            # the fresh session.
+            and message.get("method") != "tools/call"
         ):
             status, body, headers = self._post(f"{self._url}/mcp", message)
         return status, body, headers
@@ -384,15 +388,32 @@ def _with_headers(
     return status, body, {}
 
 
-def _session_refused(status: int, body: bytes) -> bool:
-    """The server no longer knows the session this request presented.
+#: The JSON-RPC error Cadastre answers a request with no live session.
+SESSION_REFUSED_CODE = -32602
+SESSION_REFUSED_PREFIX = "mcp request needs a valid mcp-session-id"
 
-    The spec answers 404. Cadastre answers 400 "MCP request needs a valid
-    Mcp-Session-Id"; the header's name in a 400 body is that refusal.
+
+def _session_refused(status: int, body: bytes) -> bool:
+    """The server clearly says it no longer knows the session presented.
+
+    The spec answers 404 for an expired session. Cadastre answers 400 with the
+    JSON-RPC error -32602 "MCP request needs a valid Mcp-Session-Id". A 400
+    whose body only mentions the header in free text is not that signal.
     """
     if status == 404:
         return True
-    return status == 400 and b"mcp-session-id" in body.lower()
+    if status != 400:
+        return False
+    try:
+        error = json.loads(body).get("error")
+    except (ValueError, AttributeError):
+        return False
+    if not isinstance(error, dict) or error.get("code") != SESSION_REFUSED_CODE:
+        return False
+    message = error.get("message")
+    return isinstance(message, str) and message.lower().startswith(
+        SESSION_REFUSED_PREFIX
+    )
 
 
 def call_timeout(message: Mapping[str, Any]) -> float:
