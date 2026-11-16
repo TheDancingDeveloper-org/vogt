@@ -1,0 +1,10 @@
+{
+ "agent": "codex-upstream",
+ "version": "0.164.0",
+ "scenario": "startup-no-auth-answered",
+ "note": "OSC/BEL only; harness not engine",
+ "sequences": [
+  "\u001b]10;?\u001b\\",
+  "\u001b]11;?\u001b\\"
+ ]
+}
