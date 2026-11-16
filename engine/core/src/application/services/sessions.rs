@@ -170,7 +170,41 @@ where
                 .filter(|field| matches!(params.get(*field), Some(Value::Null)))
                 .collect(),
         };
-    Ok(serde_json::to_value(start_session(ctx, &parsed)?).expect("a session result serialises"))
+    let warning = unserved_model_warning(ctx, parsed.model.as_deref());
+    let mut result =
+        serde_json::to_value(start_session(ctx, &parsed)?).expect("a session result serialises");
+    if let (Some(warning), Value::Object(map)) = (warning, &mut result) {
+        map.insert("warning".to_string(), Value::String(warning));
+    }
+    Ok(result)
+}
+
+/// A warning when `model` is not one a registered LLM provider serves (WI-4317).
+/// The start still proceeds: the engine decides whether it can run the model.
+/// Claude models and an unreachable registry give no warning.
+fn unserved_model_warning<C, I>(ctx: &AppContext<C, I>, model: Option<&str>) -> Option<String>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let model = model.filter(|model| !model.is_empty() && !is_claude_model(model))?;
+    let listed = ctx.engine.as_ref()?.llm_providers().ok()?;
+    let served = listed
+        .get("providers")
+        .and_then(Value::as_array)
+        .is_some_and(|providers| {
+            providers.iter().any(|provider| {
+                provider
+                    .get("models")
+                    .and_then(Value::as_array)
+                    .is_some_and(|models| models.iter().any(|one| one.as_str() == Some(model)))
+            })
+        });
+    (!served).then(|| {
+        format!(
+            "model {model:?} is not served by any registered LLM provider on this instance; the session may fail to run it. Register one with llm_provider.set, or pick a registered model (llm_provider.list)"
+        )
+    })
 }
 
 fn list_session_templates_json<C, I>(
@@ -3008,6 +3042,7 @@ where
             )));
         }
     }
+    let mut is_scratch = false;
     let project = match named {
         Some(project) => project,
         None => match work_item
@@ -3031,9 +3066,13 @@ where
                     })?
             }
             None => {
-                return Err(VogtError::InvalidRequest(
-                    "a session needs a project or a work item to open in".to_string(),
-                ));
+                let Some(slug) = ctx.config.session_scratch_project.as_deref() else {
+                    return Err(VogtError::InvalidRequest(
+                        "a session needs a project or a work item to open in, and no scratch project is configured: set `session_scratch_project` to a registered project slug, or name a project or work_item".to_string(),
+                    ));
+                };
+                is_scratch = true;
+                resolve::project(&ctx.declared.read()?, slug)?
             }
         },
     };
@@ -3111,7 +3150,7 @@ where
         cwd,
         name,
         brief,
-        is_scratch: false,
+        is_scratch,
         source,
     })
 }
@@ -6054,6 +6093,40 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(error, VogtError::InvalidRequest(_)), "{error:?}");
+    }
+
+    #[test]
+    fn a_start_with_no_subject_and_no_scratch_project_names_the_setting() {
+        let (_dir, built, _) = context("no-scratch", person(), None, |_| {}, vec![]);
+        let error = super::start_session_op(&built, json!({"reason": "no subject"})).unwrap_err();
+        let VogtError::InvalidRequest(message) = &error else {
+            panic!("expected invalid_request, got {error:?}");
+        };
+        assert!(
+            message.contains("session_scratch_project") && message.contains("scratch project"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn a_model_no_registered_provider_serves_draws_a_warning() {
+        let providers = br#"{"providers":[{"name":"p","models":["served-model"]}]}"#.to_vec();
+        let (_dir, built, _) = context(
+            "warn-model",
+            person(),
+            None,
+            |_| {},
+            vec![providers.clone(), providers.clone(), providers],
+        );
+        with_ctx!(&built, |ctx| {
+            let warning = super::unserved_model_warning(ctx, Some("ghost-model"))
+                .expect("an unserved model warns");
+            assert!(warning.contains("ghost-model"), "{warning}");
+            assert!(super::unserved_model_warning(ctx, Some("served-model")).is_none());
+            assert!(super::unserved_model_warning(ctx, Some("opus")).is_none());
+            Ok::<(), VogtError>(())
+        })
+        .unwrap();
     }
 
     /// Sweep payload from the engine: two terminals, one of them a person's

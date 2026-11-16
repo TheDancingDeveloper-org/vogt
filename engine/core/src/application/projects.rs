@@ -124,6 +124,8 @@ struct ListProjectsParams {
     limit: i64,
     #[serde(default)]
     offset: i64,
+    #[serde(default)]
+    mode: String,
 }
 
 fn default_limit() -> i64 {
@@ -849,6 +851,16 @@ fn list_projects<C: Clock + 'static, I: IdFactory + 'static>(
     params: Value,
 ) -> Result<Value, VogtError> {
     let params = list_params(params)?;
+    let summary = match params.mode.as_str() {
+        "" | "summary" => true,
+        "full" => false,
+        other => {
+            return Err(VogtError::InvalidRequest(format!(
+                "mode must be 'summary' or 'full', not {}",
+                py_repr(other)
+            )))
+        }
+    };
     let (projects, total, actor) = {
         let view = ctx.declared.read()?;
         (
@@ -857,6 +869,20 @@ fn list_projects<C: Clock + 'static, I: IdFactory + 'static>(
             view.actor_by_identity(&ctx.principal.identity_ref)?,
         )
     };
+    if summary {
+        let rows: Vec<Value> = projects
+            .iter()
+            .map(|project| {
+                json!({
+                    "slug": project.slug,
+                    "name": project.name,
+                    "lifecycle_state": project.lifecycle_state,
+                    "link_state": project.link_state,
+                })
+            })
+            .collect();
+        return Ok(json!({"projects": rows, "total": total}));
+    }
     // The same gates `work.create` applies, evaluated without writing.
     let mut listings: Vec<Value> = Vec::with_capacity(projects.len());
     for project in &projects {
@@ -1305,6 +1331,27 @@ mod tests {
             "root_path": root,
             "reason": "a reason",
         })
+    }
+
+    #[test]
+    fn list_defaults_to_compact_rows_and_full_mode_keeps_today_s_shape() {
+        let ctx = context("local:test-user", None);
+        register_op(&ctx, registration("Widget", "/srv/widget")).unwrap();
+        let summary = list_op(&ctx, json!({})).unwrap();
+        let row = &summary["projects"][0];
+        assert_eq!(row["slug"], "widget");
+        assert_eq!(row["name"], "Widget");
+        assert!(row.get("lifecycle_state").is_some() && row.get("link_state").is_some());
+        assert!(row.get("agent_policy").is_none(), "{row}");
+        assert!(row.get("writable").is_none(), "{row}");
+        let full = list_op(&ctx, json!({"mode": "full"})).unwrap();
+        let row = &full["projects"][0];
+        assert!(
+            row.get("agent_policy").is_some() && row.get("writable").is_some(),
+            "{row}"
+        );
+        let bad = list_op(&ctx, json!({"mode": "wide"})).unwrap_err();
+        assert!(matches!(bad, VogtError::InvalidRequest(_)), "{bad}");
     }
 
     #[test]

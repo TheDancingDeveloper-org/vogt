@@ -176,6 +176,9 @@ pub struct SessionResult {
     /// On `session.start` for a project with a landing rule: the rule the worker runs under and any task lines it overrode.
     #[serde(default)]
     pub effective_policy: Option<EffectivePolicy>,
+    /// On `session.start`: the requested model is served by no registered LLM provider on this instance. The start proceeded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
 }
 
 /// The landing rule a started session runs under (WI-1832).
