@@ -852,8 +852,8 @@ fn list_projects<C: Clock + 'static, I: IdFactory + 'static>(
 ) -> Result<Value, VogtError> {
     let params = list_params(params)?;
     let summary = match params.mode.as_str() {
-        "" | "summary" => true,
-        "full" => false,
+        "summary" => true,
+        "" | "full" => false,
         other => {
             return Err(VogtError::InvalidRequest(format!(
                 "mode must be 'summary' or 'full', not {}",
@@ -1334,10 +1334,10 @@ mod tests {
     }
 
     #[test]
-    fn list_defaults_to_compact_rows_and_full_mode_keeps_today_s_shape() {
+    fn summary_mode_gives_compact_rows_and_the_default_is_full() {
         let ctx = context("local:test-user", None);
         register_op(&ctx, registration("Widget", "/srv/widget")).unwrap();
-        let summary = list_op(&ctx, json!({})).unwrap();
+        let summary = list_op(&ctx, json!({"mode": "summary"})).unwrap();
         let row = &summary["projects"][0];
         assert_eq!(row["slug"], "widget");
         assert_eq!(row["name"], "Widget");
@@ -1350,6 +1350,8 @@ mod tests {
             row.get("agent_policy").is_some() && row.get("writable").is_some(),
             "{row}"
         );
+        let default = list_op(&ctx, json!({})).unwrap();
+        assert_eq!(default["projects"][0], full["projects"][0]);
         let bad = list_op(&ctx, json!({"mode": "wide"})).unwrap_err();
         assert!(matches!(bad, VogtError::InvalidRequest(_)), "{bad}");
     }

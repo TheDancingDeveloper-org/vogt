@@ -336,6 +336,7 @@ impl<'a, G: ToolGrant> Dispatcher<'a, G> {
             .filter(|value| !json_falsy(value))
             .cloned()
             .unwrap_or(serde_json::Value::Null);
+        let arguments = default_mcp_arguments(operation.name, arguments);
         // Writes answer in a few fields over MCP, where a tool result stays in
         // the caller's context (WI-1525). REST keeps the full record the GUI
         // renders; `mode: "full"` asks for it here too.
@@ -353,6 +354,23 @@ impl<'a, G: ToolGrant> Dispatcher<'a, G> {
         };
         result(Some(message_id), body)
     }
+}
+
+/// Defaults that differ over MCP, where a result stays in the caller's context.
+/// `project.list` answers compact rows here (the full listing is ~100k
+/// characters) while REST and core callers keep the full rows (WI-4317).
+fn default_mcp_arguments(operation: &str, arguments: Value) -> Value {
+    if operation != "project.list" {
+        return arguments;
+    }
+    let mut arguments = match arguments {
+        Value::Object(map) => map,
+        _ => Map::new(),
+    };
+    arguments
+        .entry("mode")
+        .or_insert_with(|| Value::String("summary".to_string()));
+    Value::Object(arguments)
 }
 
 /// The MCP `Tool` shape.
@@ -678,6 +696,16 @@ mod tests {
         );
         assert!(output.is_empty(), "{output}");
         assert_eq!(report.messages_handled, 1);
+    }
+
+    #[test]
+    fn project_list_defaults_to_summary_over_mcp_only() {
+        let given = default_mcp_arguments("project.list", Value::Null);
+        assert_eq!(given, json!({"mode": "summary"}));
+        let asked = default_mcp_arguments("project.list", json!({"mode": "full", "limit": 5}));
+        assert_eq!(asked, json!({"mode": "full", "limit": 5}));
+        let other = default_mcp_arguments("work.list", Value::Null);
+        assert_eq!(other, Value::Null);
     }
 
     #[test]
