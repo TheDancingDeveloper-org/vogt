@@ -48,6 +48,7 @@ pinned by the `application/resolve.rs` tests in the Rust core (WI-1058).
 | test_bootstrap_core_token.py | ported | Core-token adoption in `application/services/install.rs`. |
 | test_branch_binding.py | ported | `branches.rs` and the work-item branch binding service. |
 | test_bridge.py | ported | `adapters/mcp/bridge.rs`. |
+| test_bridge_mcp_session.py | ported | `adapters/mcp/bridge.rs`: the `Mcp-Session-Id` capture, re-initialize and the clear-signal retry rule (WI-4288). |
 | test_budget_handoff.py | unported | Budget-stop hand-off and resume is not yet in the Rust core. Deferred to WI-2588.
 | test_bundle_budget.py | retired | PWA first-screen bundle budget. `web/`, not the core. |
 | test_cargo_cache.py | retired | `engine/deploy/cargo-cache.sh` (WI-1256, done): Cargo cache survival on redeploy. Shell in the engine image, not the core crate; the Python test keeps driving the script. |

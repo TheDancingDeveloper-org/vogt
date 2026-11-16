@@ -31,6 +31,8 @@ class SessionServer(ThreadingHTTPServer):
         self.issued: list[str] = []
         self.live: set[str] = set()
         self.seen: list[tuple[str, str | None]] = []
+        #: Answer a `tools/call` with a 400 that only mentions the header.
+        self.free_text_400 = False
 
     def forget_sessions(self) -> None:
         """What a server restart does to every session it held."""
@@ -90,6 +92,19 @@ class _Handler(BaseHTTPRequestHandler):
                     "error": {
                         "code": -32602,
                         "message": "MCP request needs a valid Mcp-Session-Id",
+                    },
+                },
+            )
+            return
+        if message.get("method") == "tools/call" and self.server.free_text_400:
+            self._reply(
+                400,
+                {
+                    "jsonrpc": "2.0",
+                    "id": message.get("id"),
+                    "error": {
+                        "code": -32602,
+                        "message": "tool ran, rejected its Mcp-Session-Id arg",
                     },
                 },
             )
@@ -238,3 +253,38 @@ def test_a_server_that_issues_no_session_gets_no_header(
         transport=transport,
     ).serve()
     assert all("Mcp-Session-Id" not in h for h in seen)
+
+
+def _call(id_: int) -> dict[str, Any]:
+    return {
+        "jsonrpc": "2.0",
+        "id": id_,
+        "method": "tools/call",
+        "params": {"name": "x"},
+    }
+
+
+def test_a_400_that_only_mentions_the_header_is_not_resent(
+    server: SessionServer,
+) -> None:
+    server.free_text_400 = True
+    responses = _serve(server, _initialize(1), INITIALIZED, _call(2))
+    assert responses[-1]["error"]["code"] == -32602
+    assert [m for m, _ in server.seen].count("tools/call") == 1, server.seen
+    assert [m for m, _ in server.seen].count("initialize") == 1, server.seen
+
+
+def test_a_tool_call_is_never_replayed_after_the_session_is_refused(
+    server: SessionServer,
+) -> None:
+    responses = _serve(
+        server,
+        _initialize(1),
+        INITIALIZED,
+        server.forget_sessions,
+        _call(2),
+        _tools(3),
+    )
+    assert "error" in responses[1], responses[1]
+    assert [m for m, _ in server.seen].count("tools/call") == 1, server.seen
+    assert "error" not in responses[-1], responses[-1]

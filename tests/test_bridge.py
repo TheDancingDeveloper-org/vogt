@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import io
 import json
+from collections.abc import Mapping
 from typing import Any
 
 import pytest
@@ -34,7 +35,7 @@ class RecordingTransport:
 
     def __call__(
         self, url: str, headers: dict[str, str], body: bytes
-    ) -> tuple[int, bytes]:
+    ) -> tuple[int, bytes] | tuple[int, bytes, Mapping[str, str]]:
         self.calls.append({"url": url, "headers": headers, "body": body})
         return self._handler(url, headers, body)
 
@@ -187,10 +188,12 @@ def test_a_waiting_tool_call_extends_the_post_timeout() -> None:
     seen: list[float] = []
     bridge = Bridge(REMOTE, transport=_remote())
 
-    def opened(request: Any, *, timeout: float = 0) -> tuple[int, bytes]:
+    def opened(
+        request: Any, *, timeout: float = 0
+    ) -> tuple[int, bytes, Mapping[str, str]]:
         del request
         seen.append(timeout)
-        return 200, b'{"jsonrpc":"2.0","id":1,"result":{}}'
+        return 200, b'{"jsonrpc":"2.0","id":1,"result":{}}', {}
 
     bridge._transport = None  # the live branch, with urlopen replaced
     bridge._open = opened  # type: ignore[method-assign]

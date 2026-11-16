@@ -266,7 +266,11 @@ impl<'a, T: BridgeTransport> Bridge<'a, T> {
         }
         if sent_session && session_refused(&reply) {
             if let Some(initialize) = self.initialize.clone() {
-                if self.reinitialize(&url, &initialize)? {
+                // A tool call is never replayed: the refusal is the server's
+                // word, not proof the call did not run. The next request
+                // uses the fresh session.
+                let replay = message.get("method").and_then(Value::as_str) != Some("tools/call");
+                if self.reinitialize(&url, &initialize)? && replay {
                     return self.post(&url, message);
                 }
             }
@@ -373,17 +377,28 @@ impl<'a, T: BridgeTransport> Bridge<'a, T> {
     }
 }
 
-/// The server no longer knows the session this request presented. The spec
-/// answers 404; Cadastre answers 400 "MCP request needs a valid
-/// Mcp-Session-Id", and the header's name in a 400 body is that refusal.
+/// The server clearly says it no longer knows the session this request
+/// presented. The spec answers 404 for an expired session; Cadastre answers
+/// 400 with the JSON-RPC error -32602 "MCP request needs a valid
+/// Mcp-Session-Id". A 400 whose body only mentions the header in free text is
+/// not that signal.
 fn session_refused(reply: &Reply) -> bool {
-    reply.status == 404
-        || (reply.status == 400
-            && reply
-                .body
+    if reply.status == 404 {
+        return true;
+    }
+    if reply.status != 400 {
+        return false;
+    }
+    let Ok(body) = serde_json::from_slice::<Value>(&reply.body) else {
+        return false;
+    };
+    let error = &body["error"];
+    error["code"] == -32602
+        && error["message"].as_str().is_some_and(|message| {
+            message
                 .to_ascii_lowercase()
-                .windows(MCP_SESSION_HEADER.len())
-                .any(|window| window == MCP_SESSION_HEADER.to_ascii_lowercase().as_bytes()))
+                .starts_with("mcp request needs a valid mcp-session-id")
+        })
 }
 
 /// Read a token from a file. Never from argv or a URL.
@@ -732,6 +747,8 @@ mod tests {
         url: String,
         seen: Seen,
         live: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        /// Answer every `tools/call` with a 400 that merely mentions the header.
+        free_text: std::sync::Arc<std::sync::atomic::AtomicBool>,
     }
 
     impl SessionServer {
@@ -743,6 +760,8 @@ mod tests {
             let seen = Arc::new(Mutex::new(Vec::new()));
             let live = Arc::new(Mutex::new(Vec::<String>::new()));
             let (seen_in, live_in) = (Arc::clone(&seen), Arc::clone(&live));
+            let free_text = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let free_in = Arc::clone(&free_text);
             std::thread::spawn(move || {
                 let mut issued = 0;
                 for stream in listener.incoming() {
@@ -803,6 +822,16 @@ mod tests {
                                     "message": "MCP request needs a valid Mcp-Session-Id"}})
                                 .to_string(),
                             )
+                        } else if method == "tools/call"
+                            && free_in.load(std::sync::atomic::Ordering::SeqCst)
+                        {
+                            reply(
+                                "400 Bad Request",
+                                "",
+                                &json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32602,
+                                    "message": "tool ran, then rejected its Mcp-Session-Id argument"}})
+                                .to_string(),
+                            )
                         } else if id.is_null() {
                             reply("202 Accepted", "", "")
                         } else {
@@ -818,7 +847,12 @@ mod tests {
                     stream.write_all(answer.as_bytes()).unwrap();
                 }
             });
-            Self { url, seen, live }
+            Self {
+                url,
+                seen,
+                live,
+                free_text,
+            }
         }
 
         fn seen(&self) -> Vec<(String, Option<String>)> {
@@ -903,5 +937,47 @@ mod tests {
                 pair("tools/list", Some("sess-2")),
             ]
         );
+    }
+
+    #[test]
+    fn a_400_that_only_mentions_the_header_is_not_resent() {
+        let server = SessionServer::start();
+        server
+            .free_text
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let transport = UreqTransport;
+        let mut bridge = Bridge::new(&server.url, Some("t".into()), &transport, "0.1.0");
+        let mut output = String::new();
+        let call = "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"x\"}}\n";
+        bridge.serve(&format!("{INITIALIZE}{INITIALIZED}{call}"), &mut output);
+        let calls = server
+            .seen()
+            .iter()
+            .filter(|(m, _)| m == "tools/call")
+            .count();
+        assert_eq!(calls, 1, "{:?}", server.seen());
+        assert_eq!(server.seen().len(), 3, "no re-initialize either");
+    }
+
+    #[test]
+    fn a_tool_call_is_never_replayed_after_the_session_is_refused() {
+        let server = SessionServer::start();
+        let transport = UreqTransport;
+        let mut bridge = Bridge::new(&server.url, Some("t".into()), &transport, "0.1.0");
+        let mut output = String::new();
+        bridge.serve(&format!("{INITIALIZE}{INITIALIZED}"), &mut output);
+        server.live.lock().unwrap().clear();
+        let call = "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"x\"}}\n";
+        let mut after = String::new();
+        bridge.serve(call, &mut after);
+        let calls = server
+            .seen()
+            .iter()
+            .filter(|(m, _)| m == "tools/call")
+            .count();
+        assert_eq!(calls, 1, "{:?}", server.seen());
+        let mut next = String::new();
+        bridge.serve(&tools(3), &mut next);
+        assert!(next.contains("lookup"), "{next}");
     }
 }
