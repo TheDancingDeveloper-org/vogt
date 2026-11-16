@@ -130,3 +130,17 @@ def test_identity_still_falls_back_to_agent_auth_run(tmp_path: Path) -> None:
     assert proc.returncode == 0, proc.stderr
     assert seen and seen[0][:2] == ["run", "--"]
     assert bridge is not None
+
+
+def test_never_falls_through_to_prod_when_the_dev_token_is_missing(
+    tmp_path: Path,
+) -> None:
+    proc, bridge, seen = run(
+        tmp_path,
+        {**BROKER, "VOGT_PROD_TOKEN": "prod-secret", "VOGT_URL": "http://dev:8910"},
+    )
+    assert proc.returncode == 64
+    assert bridge is None  # the bridge was never launched, for any endpoint
+    assert seen == [["fetch", "VOGT_HTTP_TOKEN"]]  # only the broker was asked
+    assert "VOGT_TOKEN_FILE" in proc.stderr and "session's own shell" in proc.stderr
+    assert "prod-secret" not in proc.stderr
