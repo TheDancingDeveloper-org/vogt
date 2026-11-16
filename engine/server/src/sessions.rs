@@ -2316,6 +2316,20 @@ impl SessionRegistry {
                     })
             })
             .flatten();
+        // Whoever put the session's own core credential in its environment
+        // (the core for a session it started, `mint_agent_token` for one the
+        // engine did), the broker serves that same value back to the session
+        // for `fetch VOGT_HTTP_TOKEN` (WI-4310). A failed spawn revokes it.
+        if let Some(token) = spec
+            .env
+            .iter()
+            .flatten()
+            .rev()
+            .find(|(k, _)| k == "VOGT_HTTP_TOKEN")
+            .map(|(_, v)| v)
+        {
+            self.secret_broker.remember_vogt_token(id, token);
+        }
         let spawned = if let Some(template) = pod_template {
             self.spawn_pod_session(id, &spec, template, pod_launch.unwrap_or_default())
         } else {
