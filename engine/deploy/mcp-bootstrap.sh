@@ -212,14 +212,16 @@ readonly_wanted() {
 # this script already wrote (one whose command is the wrapper) is replaced, so
 # a second start changes nothing; a table an operator wrote under the same
 # name, running something else, is left where it is.
+# The wrapper (fifth argument) defaults to the read-only one; an empty
+# argument writes `args = []`.
 readonly_codex_write() {
-    local config="$1" name="$2" arg="$3" vars="$4" lockdir
+    local config="$1" name="$2" arg="$3" vars="$4" wrapper="${5:-$READONLY_WRAPPER}" lockdir
     lockdir="$(dirname "$config")"
     optional_dir "$lockdir" "Codex config directory" || return 0
     (
         flock 9
         CODEX_CONFIG="$config" CODEX_SERVER="$name" CODEX_ARG="$arg" \
-            CODEX_VARS="$vars" CODEX_WRAPPER="$READONLY_WRAPPER" \
+            CODEX_VARS="$vars" CODEX_WRAPPER="$wrapper" \
             python3 - <<'PY'
 import os, sys, tempfile
 
@@ -276,10 +278,12 @@ while index < len(lines):
 # as by the driven-session bundle, or each start would drop it. The key lives
 # in the session's own config.toml, which the session can edit, so it is a
 # convenience for autonomous work and not a security boundary.
+arg = os.environ["CODEX_ARG"]
+args_row = f'args = ["{arg}"]\n' if arg else "args = []\n"
 block = (
     f"{header}\n"
     f'command = "{os.environ["CODEX_WRAPPER"]}"\n'
-    f'args = ["{os.environ["CODEX_ARG"]}"]\n'
+    f"{args_row}"
     f'env_vars = [{os.environ["CODEX_VARS"]}]\n'
     f"{approval_row(existing)}"
 )
@@ -1206,6 +1210,67 @@ install_cadastre_codex() {
         --bearer-token-env-var CADASTRE_HTTP_TOKEN >/dev/null
 }
 
+# A second, remote Vogt (WI-4289): a dev session reaches prod as `vogt-prod`,
+# with a token scoped for that. Registered only while VOGT_PROD_MCP_URL is set
+# and the session can get the token — VOGT_PROD_TOKEN or VOGT_PROD_TOKEN_FILE
+# in its environment, or VOGT_PROD_TOKEN declared `ondemand` in the agent-auth
+# manifest (AGENT_AUTH_ONDEMAND), which is the shipped shape — and removed when
+# it cannot. Every client runs `vogt-prod-mcp`, which resolves the token at
+# spawn, so no registration stores a token or the URL; an `ondemand` token is
+# never in the environment at launch, so a header naming a variable (as for
+# cadastre) would never connect.
+# Overridable only so the registration logic can be exercised outside the image.
+readonly VOGT_PROD_WRAPPER="${VOGT_PROD_MCP_WRAPPER:-/usr/local/bin/vogt-prod-mcp}"
+# What Codex must forward to the wrapper: its own inputs, and the broker's.
+readonly VOGT_PROD_CODEX_VARS='"VOGT_PROD_MCP_URL", "VOGT_PROD_TOKEN", "VOGT_PROD_TOKEN_FILE", "VOGT_ENGINE_BROKER_URL", "VOGT_ENGINE_URL", "VOGT_ENGINE_BROKER_TOKEN_FILE", "VOGT_SESSION_TOKEN_FILE", "VOGT_ENGINE_EXTRA_CA_FILE", "ENGINE_AGENT_AUTH_EXTRA_CA_FILE"'
+
+vogt_prod_wanted() {
+    [[ -n "${VOGT_PROD_MCP_URL:-}" ]] || return 1
+    [[ -n "${VOGT_PROD_TOKEN:-}" || -n "${VOGT_PROD_TOKEN_FILE:-}" ]] && return 0
+    [[ " ${AGENT_AUTH_ONDEMAND:-} " == *" VOGT_PROD_TOKEN "* ]]
+}
+
+install_vogt_prod() {
+    local wanted=no config_dir
+    vogt_prod_wanted && wanted=yes
+    if command -v codex >/dev/null 2>&1; then
+        if [[ "$wanted" == yes ]]; then
+            readonly_codex_write "${CODEX_HOME:-$HOME/.codex}/config.toml" vogt-prod "" \
+                "$VOGT_PROD_CODEX_VARS" "$VOGT_PROD_WRAPPER" \
+                || printf 'mcp-bootstrap: codex registration of vogt-prod failed\n' >&2
+        elif codex mcp get vogt-prod 2>/dev/null | grep -qF "$VOGT_PROD_WRAPPER"; then
+            codex mcp remove vogt-prod >/dev/null 2>&1 || true
+        fi
+    fi
+    if command -v claude >/dev/null 2>&1; then
+        if [[ "$wanted" == yes ]]; then
+            if ! claude_runs vogt-prod "$VOGT_PROD_WRAPPER"; then
+                claude mcp remove --scope user vogt-prod >/dev/null 2>&1 || true
+                claude mcp add --scope user vogt-prod -- "$VOGT_PROD_WRAPPER" >/dev/null \
+                    || printf 'mcp-bootstrap: claude registration of vogt-prod failed\n' >&2
+            fi
+        elif ! claude_lacks vogt-prod \
+            && claude mcp get vogt-prod 2>/dev/null | grep -qF "$VOGT_PROD_WRAPPER"; then
+            claude mcp remove --scope user vogt-prod >/dev/null 2>&1 || true
+        fi
+    fi
+    # opencode has no `mcp remove` (see readonly_opencode): an unwanted entry
+    # stays, and without a URL or token the wrapper refuses to start.
+    if command -v opencode >/dev/null 2>&1 && [[ "$wanted" == yes ]]; then
+        config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
+        optional_dir "$config_dir" "opencode config directory" || return 0
+        optional_dir "${XDG_DATA_HOME:-$HOME/.local/share}/opencode" \
+            "opencode data directory" || return 0
+        if grep -qsF "\"vogt-prod\"" "$config_dir/opencode.json" "$config_dir/opencode.jsonc" \
+            && grep -qsF "$VOGT_PROD_WRAPPER" "$config_dir/opencode.json" "$config_dir/opencode.jsonc"; then
+            return 0
+        fi
+        opencode mcp add vogt-prod -- "$VOGT_PROD_WRAPPER" >/dev/null \
+            || printf 'mcp-bootstrap: opencode registration of vogt-prod failed\n' >&2
+    fi
+    return 0
+}
+
 # Vogt registrations are best-effort: a failure here must not cost an agent its
 # git/gh credentials.
 optional_step "Vogt bridge" install_vogt_bridge
@@ -1214,6 +1279,7 @@ optional_step "Claude Vogt registration" install_vogt_claude
 optional_step "opencode Vogt registration" install_vogt_opencode
 install_cadastre_claude || printf 'mcp-bootstrap: claude registration of cadastre failed\n' >&2
 install_cadastre_codex || printf 'mcp-bootstrap: codex registration of cadastre failed\n' >&2
+optional_step "vogt-prod registration" install_vogt_prod
 if command -v codex >/dev/null 2>&1; then
     codex_disable_daemon "${CODEX_HOME:-$HOME/.codex}/config.toml" \
         || printf 'mcp-bootstrap: could not disable the Codex app-server daemon\n' >&2

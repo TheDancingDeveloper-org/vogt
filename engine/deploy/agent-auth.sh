@@ -904,7 +904,10 @@ load_agent_environment() {
 
     # Register Vogt with the agent clients present in the image.
     started="$(now_us)"
-    "${VOGT_MCP_BOOTSTRAP:-/usr/local/bin/vogt-mcp-bootstrap}"
+    # The ondemand breadcrumb is exported further down; the bootstrap needs it
+    # now to register a server whose token is fetched at spawn (vogt-prod).
+    AGENT_AUTH_ONDEMAND="$AGENT_AUTH_ONDEMAND_VARS" \
+        "${VOGT_MCP_BOOTSTRAP:-/usr/local/bin/vogt-mcp-bootstrap}"
     launch_stage bootstrap "$(ms_since "$started")" ok
 
     export GIT_ASKPASS=/usr/local/bin/vogt-git-askpass
