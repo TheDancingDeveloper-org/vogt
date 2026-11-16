@@ -1,0 +1,17 @@
+{
+ "agent": "claude-code",
+ "version": "2.1.322",
+ "scenario": "permission-answered",
+ "term": "xterm-256color unless named",
+ "note": "OSC and BEL sequences only, in order; screen frames omitted; cwd redacted",
+ "sequences": [
+  "\u001b]0;✳ Claude Code\u0007",
+  "\u001b]7501;?\u0007",
+  "\u001b]7501;state=idle:app=claude-code\u0007",
+  "\u001b]0;Claude Code\u0007",
+  "\u001b]7501;state=working:app=claude-code\u0007",
+  "\u001b]0;Empty zz.txt file in /tmp\u0007",
+  "\u001b]7501;state=blocked:app=claude-code:kind=permission:msg=YXBwcm92ZSBXcml0ZTogL3RtcC9jbGF1ZGUtMTAwMC9zL3p6LnR4dA==\u0007",
+  "\u001b]7501;state=idle:app=claude-code\u0007"
+ ]
+}
