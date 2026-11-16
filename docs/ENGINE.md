@@ -399,6 +399,8 @@ environment (normally a launch-time line in `ENGINE_AGENT_AUTH_SECRETS`, §9 —
 an `ondemand` line is not in the environment when the bootstrap runs, so it
 does not register anything) and off by removing it.
 
+A host opencode session or plain shell whose `HOME` is not writable by the engine user (vogt-dev) is launched with per-session `XDG_DATA_HOME`, `XDG_STATE_HOME` and `XDG_CACHE_HOME` under `<state_dir>/opencode-xdg/<id>/` (mode 0700; WI-4284, WI-4298), so the bootstrap registers opencode and a hand-started `opencode` works. If a data directory still cannot be created, the bootstrap warns once per directory and skips opencode.
+
 | Registered as | Turned on by | Read-only because |
 |---|---|---|
 | `github-ro` | `GITHUB_MCP_TOKEN` — a fine-grained, read-only PAT; `VOGT_GITHUB_MCP_TOOLSETS` overrides the toolsets (default `actions,pull_requests,repos,code_security,dependabot`) | `--read-only` and `GITHUB_READ_ONLY=1` (write tools are not offered), plus the token's scope |
