@@ -302,10 +302,16 @@ block = (
 if name == "cadastre":
     # Per-tool tables stay where they are (an operator's setting survives a
     # re-run); only the pinned read tools that have none yet are added.
-    present_tools = {row.strip() for row in kept}
+    # Read from the parsed TOML, not header text: a quoted header such as
+    # [mcp_servers.cadastre.tools."lookup"] is the same table (WI-4294).
+    present_tools = (
+        tomllib.loads(text).get("mcp_servers", {}).get("cadastre", {}).get("tools", {})
+        if text.strip()
+        else {}
+    )
     for tool in os.environ.get("CADASTRE_READ_TOOLS", "").split():
         tool_header = f"[mcp_servers.cadastre.tools.{tool}]"
-        if tool_header not in present_tools:
+        if tool not in present_tools:
             block += f'\n{tool_header}\napproval_mode = "approve"\n'
 body = "".join(kept).rstrip("\n")
 new = f"{body}\n\n{block}" if body else block
