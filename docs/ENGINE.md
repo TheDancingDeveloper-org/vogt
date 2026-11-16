@@ -5333,9 +5333,19 @@ vogt-dev admin token by minting it, not by `fetch`: the driven-session policy's
 `vogt token revoke` inside the vogt-dev pod, **dev lane only**. Every Claude
 launch gets the same settings file, workers included, so the exception holds
 only once the session has proved its role with engine output run in its own
-transcript: an `auth_whoami` result naming `agent:session:<id>` (the engine
-reads it from the session token) and a `session_list` row for that same id
-with `role` `oversight`. A worker has neither, so it can't use the exception.
+transcript: an `auth_whoami` result naming `agent:session:<id>` or
+`agent:engine:<id>` (the engine reads it from the per-session credential it
+issued) and a `session_list` row for that same id with `role` `oversight` (ask `session_list` for `mode: full`: the default digest
+rows leave `role` out). A
+worker has neither, so it can't use the exception. The `agent:engine:<id>` form
+(WI-4282) is how an operator-started oversight proves its role: an agent
+session a person opens from the GUI gets an engine-minted credential
+(`session.token`), no Vogt record, and an unlinked `session_list` row whose
+`id` is the engine UUID; once the person makes it oversight, that row carries
+`role` `oversight`. A `claude` typed into a plain shell runs with the pod's
+shared token (`agent:pod:…`) and can't prove a role; open oversight as an
+agent session instead. A session's credential is fixed when its agent starts,
+so making a shell oversight later can't hand it one.
 An issue needs `--expires-in-days 1` (the TTL is never longer), scopes from
 `read`, `work.write`, `project.write`, `admin`, and `--actor
 agent:oversight-<name>`. Capture the token without printing it: create a 0600
