@@ -1175,10 +1175,13 @@ pub async fn get_session_replies(
     let home = std::env::var_os("HOME")
         .map(std::path::PathBuf::from)
         .unwrap_or_default();
-    let replies =
-        crate::opencode::last_replies(&crate::opencode::db_path(&home), &conversation.id, n)
-            .await
-            .unwrap_or_default();
+    let replies = crate::opencode::last_replies(
+        &crate::opencode::db_path_for(state.sessions.state_dir(), id, &home),
+        &conversation.id,
+        n,
+    )
+    .await
+    .unwrap_or_default();
     Ok(Json(serde_json::json!({
         "agent": "opencode",
         "conversation_id": conversation.id,
