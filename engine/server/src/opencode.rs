@@ -60,6 +60,64 @@ pub fn db_path(home: &Path) -> PathBuf {
         .join("opencode.db")
 }
 
+/// The XDG root the engine gives one host opencode session when its own data
+/// home is not writable (WI-4284): `data`, `state` and `cache` live under it.
+fn session_xdg_root(state_dir: &Path, id: Uuid) -> PathBuf {
+    state_dir.join("opencode-xdg").join(id.to_string())
+}
+
+/// Whether opencode could create its data directory under `home` (or
+/// `$XDG_DATA_HOME`) as this process.
+fn data_home_writable(home: &Path) -> bool {
+    let dir = db_path(home)
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_default();
+    if std::fs::create_dir_all(&dir).is_err() {
+        return false;
+    }
+    let probe = dir.join(format!(".vogt-write-probe-{}", std::process::id()));
+    let ok = std::fs::File::create(&probe).is_ok();
+    let _ = std::fs::remove_file(&probe);
+    ok
+}
+
+/// The environment that points a host opencode session at its own data,
+/// state and cache directories, or nothing when the engine's own are
+/// writable. A session that already has its directory (a wake) keeps it, so
+/// the conversation it resumes is found where it was written. The engine
+/// container's `HOME` is not writable on the estate, so without this opencode
+/// died at launch with `EACCES: mkdir ~/.local/share/opencode`.
+pub fn session_xdg_env(state_dir: &Path, id: Uuid, home: &Path) -> Vec<(String, String)> {
+    let root = session_xdg_root(state_dir, id);
+    if !root.join("data").is_dir() && data_home_writable(home) {
+        return Vec::new();
+    }
+    let mut env = Vec::new();
+    for (var, sub) in [
+        ("XDG_DATA_HOME", "data"),
+        ("XDG_STATE_HOME", "state"),
+        ("XDG_CACHE_HOME", "cache"),
+    ] {
+        let dir = root.join(sub);
+        if std::fs::create_dir_all(&dir).is_err() {
+            return Vec::new();
+        }
+        env.push((var.to_string(), dir.display().to_string()));
+    }
+    env
+}
+
+/// Where the store of engine session `id` is: its own directory when the
+/// engine gave it one, else the engine's [`db_path`].
+pub fn db_path_for(state_dir: &Path, id: Uuid, home: &Path) -> PathBuf {
+    let own = session_xdg_root(state_dir, id).join("data");
+    if own.is_dir() {
+        return own.join("opencode").join("opencode.db");
+    }
+    db_path(home)
+}
+
 async fn open(db: &Path) -> Option<SqliteConnection> {
     if !db.is_file() {
         return None;
@@ -294,6 +352,47 @@ pub fn check_model(model: &str, known: &[String]) -> std::result::Result<(), Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unwritable_home_gives_the_session_its_own_xdg_dirs() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let id = Uuid::new_v4();
+        // (Skipped as root, which a read-only directory does not stop, and
+        // when the environment already names a data home.)
+        if std::env::var_os("XDG_DATA_HOME").is_some()
+            || std::fs::create_dir(home.join("probe")).is_ok()
+        {
+            return;
+        }
+        let env = session_xdg_env(&state, id, &home);
+        let data = env.iter().find(|(k, _)| k == "XDG_DATA_HOME").unwrap();
+        assert!(Path::new(&data.1).is_dir());
+        assert!(data.1.starts_with(state.to_str().unwrap()));
+        assert!(env.iter().any(|(k, _)| k == "XDG_STATE_HOME"));
+        assert!(env.iter().any(|(k, _)| k == "XDG_CACHE_HOME"));
+        // The reader looks where the session wrote, and a wake keeps it.
+        assert_eq!(
+            db_path_for(&state, id, &home),
+            Path::new(&data.1).join("opencode").join("opencode.db")
+        );
+        assert_eq!(session_xdg_env(&state, id, &home), env);
+    }
+
+    #[test]
+    fn a_writable_home_is_left_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let id = Uuid::new_v4();
+        assert!(session_xdg_env(&tmp.path().join("state"), id, tmp.path()).is_empty());
+        assert_eq!(
+            db_path_for(&tmp.path().join("state"), id, tmp.path()),
+            db_path(tmp.path())
+        );
+    }
 
     /// A store shaped like opencode 1.18's, with only the columns read here.
     async fn store(dir: &Path) -> PathBuf {
