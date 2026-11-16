@@ -6,6 +6,7 @@
 
 pub mod codex_guidance;
 pub mod codex_policy;
+pub mod opencode_store;
 pub mod salvage;
 
 use std::{
@@ -684,6 +685,98 @@ impl Config {
     }
 }
 
+/// What opencode's store looks like on disk: the size and modification time
+/// of the database and its write-ahead log. A store that has not changed has
+/// no new reply, so it is not read again.
+fn opencode_store_marker(db: &Path) -> Option<[u8; 32]> {
+    let mut hasher = Sha256::new();
+    let mut any = false;
+    for path in [db.to_path_buf(), PathBuf::from(format!("{}-wal", db.display()))] {
+        if let Ok(meta) = std::fs::metadata(&path) {
+            any = true;
+            hasher.update(meta.len().to_le_bytes());
+            let modified = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_nanos())
+                .unwrap_or_default();
+            hasher.update(modified.to_le_bytes());
+        }
+    }
+    any.then(|| hasher.finalize().into())
+}
+
+/// Ship an opencode pod's last assistant replies to the engine (WI-4291).
+/// opencode's store also holds its credentials, so it never leaves the pod:
+/// only the [`opencode_store::RepliesUpload`] read out of it does, which is
+/// the conversation id and the assistant text. Claude and Codex pods ship
+/// their transcripts instead and never come here.
+async fn flush_opencode_replies(
+    config: &Config,
+    tls: &Arc<rustls::ClientConfig>,
+    seen: &mut std::collections::HashMap<PathBuf, [u8; 32]>,
+) -> bool {
+    if config.cli != "opencode" {
+        return true;
+    }
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return true;
+    };
+    send_opencode_replies(config, tls, &opencode_store::db_path(&home), seen).await
+}
+
+/// [`flush_opencode_replies`] for the store at `db`, once, for a caller
+/// outside the agent's own loop (a test standing in for the pod). True when
+/// the engine took the replies or there were none to send.
+pub async fn ship_opencode_replies(config: &Config, db: &Path) -> Result<bool, AgentError> {
+    let tls = tls_config()?;
+    let mut seen = std::collections::HashMap::new();
+    Ok(send_opencode_replies(config, &tls, db, &mut seen).await)
+}
+
+async fn send_opencode_replies(
+    config: &Config,
+    tls: &Arc<rustls::ClientConfig>,
+    db: &Path,
+    seen: &mut std::collections::HashMap<PathBuf, [u8; 32]>,
+) -> bool {
+    let Some(marker) = opencode_store_marker(db) else {
+        return true;
+    };
+    if seen.get(db).copied() == Some(marker) {
+        return true;
+    }
+    let Some(upload) = opencode_store::replies_upload(db, &config.session_id).await else {
+        return true;
+    };
+    if upload.replies.is_empty() {
+        return true;
+    }
+    // The stream credential must only ever go to the engine: no proxy.
+    let Ok(client) = http_client(tls.clone()) else {
+        return false;
+    };
+    let mut url = config.engine_url.clone();
+    url.push_str(opencode_store::REPLIES_ROUTE);
+    let Ok(reply) = client
+        .post(&url)
+        .bearer_auth(&config.token)
+        .json(&upload)
+        .send()
+        .await
+    else {
+        return false;
+    };
+    let status = reply.status();
+    // A refusal the engine would give again for the same store is final until
+    // the store changes; a rate limit or a server fault is tried again.
+    if !(status.as_u16() == 429 || status.is_server_error()) {
+        seen.insert(db.to_path_buf(), marker);
+    }
+    status.is_success()
+}
+
 fn tls_config() -> Result<Arc<rustls::ClientConfig>, AgentError> {
     let native = rustls_native_certs::load_native_certs();
     let mut roots = rustls::RootCertStore::empty();
@@ -949,6 +1042,7 @@ async fn flush_bundle(
     if persist_memory() {
         let _ = flush_memory(config, tls, seen).await;
     }
+    let _ = flush_opencode_replies(config, tls, seen).await;
     if claude.is_none() && (conversation.is_empty() || config.codex_home.is_none()) {
         return true;
     }
