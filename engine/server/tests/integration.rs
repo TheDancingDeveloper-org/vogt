@@ -24117,3 +24117,142 @@ async fn the_workspaces_route_lists_each_session_tree_with_its_size() {
             .await;
     }
 }
+
+/// WI-4290: stopped sessions used to keep their whole output ring and live
+/// vt100 grid in the registry forever, so the engine grew by about 1.5 MiB
+/// per stopped session on vogt-dev. Run start/stop cycles and drive the
+/// reaper with an injected clock (no sleeps decide anything): past the shed
+/// age every stopped session holds at most a bounded tail and no grid, and
+/// still shows its last screen; past the retention the registry is empty
+/// again, and so is its transition-lock map.
+#[tokio::test]
+async fn stopped_sessions_shed_their_buffers_and_are_forgotten_after_retention() {
+    const CYCLES: usize = 3;
+    const PER_CYCLE: usize = 4;
+    const OUTPUT_BYTES: u64 = 400 * 1024;
+    let stopped = vogt_engine_server::config::StoppedRetention {
+        shed_after: Duration::from_secs(60),
+        keep_bytes: 16 * 1024,
+        evict_after: Some(Duration::from_secs(3600)),
+    };
+    let (base, state, _h) = boot_with_state(Config {
+        scrollback_bytes: 1024 * 1024,
+        stopped_sessions: stopped,
+        ..test_config()
+    })
+    .await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    for cycle in 0..CYCLES {
+        let mut ids = Vec::new();
+        for n in 0..PER_CYCLE {
+            let marker = format!("STOPPED-MARKER-{cycle}-{n}");
+            let script = format!(
+                "head -c {OUTPUT_BYTES} /dev/zero | tr '\\0' x | fold -w 100; echo {marker}; exec cat"
+            );
+            let id = create_command_session(
+                &client,
+                &base,
+                &format!("reap-{cycle}-{n}"),
+                vec!["/bin/bash".into(), "-c".into(), script],
+            )
+            .await;
+            ids.push((id.parse::<Uuid>().unwrap(), marker));
+        }
+        // Wait for each session's whole output, then stop it.
+        for (id, marker) in &ids {
+            let session = state.sessions.get(*id).unwrap();
+            let deadline = tokio::time::Instant::now() + LOAD_DEADLINE;
+            while !String::from_utf8_lossy(&session.snapshot_tail(256).0).contains(marker.as_str())
+            {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "{marker} never printed"
+                );
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            state.sessions.stop(*id, Default::default()).unwrap();
+        }
+        for (id, _) in &ids {
+            let session = state.sessions.get(*id).unwrap();
+            let deadline = tokio::time::Instant::now() + LOAD_DEADLINE;
+            while session.is_alive() || session.ended_at().is_none() {
+                assert!(tokio::time::Instant::now() < deadline, "{id} never exited");
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            // Before the shed: the full ring and the grid are still held.
+            assert!(session.has_live_grid());
+            assert!(session.retained_bytes() > stopped.keep_bytes);
+        }
+        // A refused hibernation of a stopped session takes and releases the
+        // transition lock; its map entry must not outlive it.
+        for (id, _) in &ids {
+            let refused = state
+                .sessions
+                .hibernate(
+                    *id,
+                    None,
+                    vogt_engine_contract::HibernateTrigger::Manual,
+                    true,
+                    true,
+                    None,
+                )
+                .await;
+            assert!(refused.is_err());
+        }
+        assert_eq!(state.sessions.transition_entries(), 0);
+
+        let latest_end = ids
+            .iter()
+            .filter_map(|(id, _)| state.sessions.get(*id).unwrap().ended_at())
+            .max()
+            .unwrap();
+        // Inside the shed age nothing is touched.
+        let early = state.sessions.reap_stopped(latest_end);
+        assert_eq!(early.evicted, 0);
+        // Past it, every stopped session is shed, still listed and readable.
+        let reaped = state.sessions.reap_stopped(latest_end + stopped.shed_after);
+        assert_eq!(reaped.shed, PER_CYCLE, "cycle {cycle}");
+        assert_eq!(reaped.evicted, 0);
+        assert_eq!(state.sessions.len(), PER_CYCLE);
+        let mut retained = 0;
+        for (id, marker) in &ids {
+            let session = state.sessions.get(*id).unwrap();
+            assert!(!session.has_live_grid(), "{id} kept its grid");
+            // The ring's tail plus the kept screen text, each bounded.
+            assert!(
+                session.retained_bytes() <= 2 * stopped.keep_bytes,
+                "{id} retains {} bytes",
+                session.retained_bytes()
+            );
+            retained += session.retained_bytes();
+            let (screen, history) = session.render_screen(50);
+            let shown = screen.lines.iter().chain(history.iter());
+            assert!(
+                shown.into_iter().any(|l| l.contains(marker.as_str())),
+                "{id}'s kept screen lost its last output"
+            );
+            assert!(
+                String::from_utf8_lossy(&session.snapshot().0).contains(marker.as_str()),
+                "{id}'s kept tail lost its last output"
+            );
+        }
+        assert!(retained <= PER_CYCLE * 2 * stopped.keep_bytes);
+        // A second pass sheds nothing again.
+        let again = state.sessions.reap_stopped(latest_end + stopped.shed_after);
+        assert_eq!(again, Default::default());
+
+        // Past the retention every stopped session is forgotten.
+        let ttl = stopped.evict_after.unwrap();
+        let forgotten = state.sessions.reap_stopped(latest_end + ttl);
+        assert_eq!(forgotten.evicted, PER_CYCLE, "cycle {cycle}");
+        assert!(state.sessions.is_empty(), "cycle {cycle} left sessions");
+        assert_eq!(state.sessions.transition_entries(), 0);
+        for (id, _) in &ids {
+            assert!(state.sessions.get(*id).is_err());
+        }
+    }
+}

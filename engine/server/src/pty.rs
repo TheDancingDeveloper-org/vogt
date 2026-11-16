@@ -204,9 +204,10 @@ struct SettledScreen {
 }
 
 impl SettledScreen {
-    /// Keep the newest history lines whose text fits in `keep_bytes`.
+    /// Keep the newest history lines whose text, with the screen's, fits in
+    /// `keep_bytes`. The screen itself is always kept.
     fn new(rendered: crate::screen::Rendered, mut history: Vec<String>, keep_bytes: usize) -> Self {
-        let mut total = 0usize;
+        let mut total: usize = rendered.lines.iter().map(|l| l.len() + 1).sum();
         let keep_from = history
             .iter()
             .rposition(|line| {
