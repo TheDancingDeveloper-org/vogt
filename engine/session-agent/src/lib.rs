@@ -8,6 +8,8 @@ pub mod codex_guidance;
 pub mod codex_policy;
 pub mod opencode_store;
 pub mod salvage;
+#[cfg(test)]
+mod test_exec;
 
 use std::{
     collections::VecDeque,
@@ -3225,15 +3227,7 @@ mod tests {
         let bin = dir.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         let helper = bin.join("vogt-agent-auth");
-        std::fs::write(
-            &helper,
-            "#!/bin/sh\ncase \"$1\" in\nfetch)\n  [ -z \"${HELPER_FAIL:-}\" ] || { printf 'broker down\\n' >&2; exit 1; }\n  printf fetched-secret ;;\n*) exit 1 ;;\nesac\n",
-        )
-        .unwrap();
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        crate::test_exec::write_executable(&helper, "#!/bin/sh\ncase \"$1\" in\nfetch)\n  [ -z \"${HELPER_FAIL:-}\" ] || { printf 'broker down\\n' >&2; exit 1; }\n  printf fetched-secret ;;\n*) exit 1 ;;\nesac\n");
         let path = format!(
             "{}:{}",
             bin.display(),
@@ -3292,15 +3286,10 @@ mod tests {
         let bin = dir.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         let helper = bin.join("vogt-agent-auth");
-        std::fs::write(
+        crate::test_exec::write_executable(
             &helper,
             "#!/bin/sh\ncase \"$1\" in\nfetch)\n  printf fetched-secret ;;\n*) exit 1 ;;\nesac\n",
-        )
-        .unwrap();
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        );
         let path = format!(
             "{}:{}",
             bin.display(),
@@ -3352,15 +3341,10 @@ mod tests {
         let bin = dir.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         let helper = bin.join("vogt-agent-auth");
-        std::fs::write(
+        crate::test_exec::write_executable(
             &helper,
             "#!/bin/sh\n[ \"$1\" = fetch ] || exit 1\nprintf fetched-secret\n",
-        )
-        .unwrap();
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        );
         let path = format!(
             "{}:{}",
             bin.display(),

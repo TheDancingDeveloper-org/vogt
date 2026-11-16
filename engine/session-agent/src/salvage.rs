@@ -815,11 +815,9 @@ mod tests {
     /// prints each one's contents through `cat`, which follows symlinks, reads
     /// a hardlink's shared inode, and fails on a directory.
     fn fake_graft(dir: &Path) -> String {
-        use std::os::unix::fs::PermissionsExt;
-        let bin = scratch("fake-graft").join("graft");
-        fs::write(
-            &bin,
-            r#"#!/bin/sh
+        let root = scratch("fake-graft");
+        let bin = root.join("graft");
+        let script = r#"#!/bin/sh
 entries() { ls -A | grep -v '^\.graft$'; }
 case "$1" in
 status)
@@ -830,10 +828,8 @@ status)
 diff)
   for f in $(entries); do printf 'added     %s\n' "$f"; cat "$f" || exit 1; done ;;
 esac
-"#,
-        )
-        .unwrap();
-        fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+"#;
+        crate::test_exec::write_executable(&bin, script);
         fs::create_dir_all(dir.join(".graft")).unwrap();
         bin.to_string_lossy().into_owned()
     }
