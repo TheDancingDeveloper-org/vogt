@@ -113,6 +113,9 @@ pub struct LaunchRequest<'a> {
     /// The deployment's opencode driven-session policy (an opencode config
     /// with a `permission` block), for the default posture (WI-932).
     pub opencode_config: Option<&'a str>,
+    /// The XDG directories a host opencode is given when the engine's own
+    /// data home is not writable (WI-4284); empty otherwise.
+    pub opencode_xdg: &'a [(String, String)],
     /// Codex's `approval_policy` for the `default` and `accept-edits`
     /// postures: `-a <this>` (WI-2028). `"never"` by default, so a driven
     /// worker does not stop on every command, matching Claude Code's bypassed
@@ -143,6 +146,7 @@ impl<'a> LaunchRequest<'a> {
             settings_file: None,
             add_dirs: &[],
             opencode_config: None,
+            opencode_xdg: &[],
             codex_approval_policy: CODEX_APPROVAL_DEFAULT,
             mcp: None,
             codex_compact_limit: None,
@@ -462,6 +466,7 @@ pub fn launch_with_codex(
             if let Some(config) = opencode_posture(req.permission_mode, req.opencode_config) {
                 env.push(("OPENCODE_CONFIG_CONTENT".to_string(), config));
             }
+            env.extend(req.opencode_xdg.iter().cloned());
         }
         _ => unreachable!("checked against KNOWN above"),
     }
@@ -1039,6 +1044,19 @@ mod tests {
             .unwrap(),
             [protected("opencode"), cmd(&["--session", "ses_abc123"])].concat()
         );
+    }
+
+    #[test]
+    fn opencode_gets_the_session_xdg_dirs_and_no_other_agent_does() {
+        let xdg = vec![("XDG_DATA_HOME".to_string(), "/state/oc/data".to_string())];
+        let req = LaunchRequest {
+            opencode_xdg: &xdg,
+            ..LaunchRequest::bare()
+        };
+        let opencode = launch(Some(&protected("opencode")), &req).unwrap();
+        assert!(opencode.env.contains(&xdg[0]));
+        let claude = launch(Some(&protected("claude")), &req).unwrap();
+        assert!(!claude.env.iter().any(|(k, _)| k == "XDG_DATA_HOME"));
     }
 
     #[test]
@@ -1656,6 +1674,7 @@ mod permission_tests {
                 settings_file: Some(&settings),
                 add_dirs: &[PathBuf::from(cwd)],
                 opencode_config: None,
+                opencode_xdg: &[],
                 codex_approval_policy: "never",
                 mcp: None,
                 codex_compact_limit: None,
@@ -1777,6 +1796,7 @@ url = "http://komodo/mcp"
                 settings_file: None,
                 add_dirs: &[],
                 opencode_config: None,
+                opencode_xdg: &[],
                 codex_approval_policy: "never",
                 mcp: None,
                 codex_compact_limit: None,
@@ -1919,6 +1939,7 @@ url = "http://komodo/mcp"
             settings_file: None,
             add_dirs: &[],
             opencode_config: None,
+            opencode_xdg: &[],
             codex_approval_policy: "never",
             mcp: None,
             codex_compact_limit: compact_limit,
