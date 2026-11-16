@@ -98,6 +98,10 @@ use crate::pty;
 pub const BROKER_TOKEN_ENV: &str = "VOGT_ENGINE_BROKER_TOKEN";
 /// Where a session finds the broker: the engine on loopback.
 pub const BROKER_URL_ENV: &str = "VOGT_ENGINE_BROKER_URL";
+/// The variable naming a session's own Vogt credential on the read route.
+const OWN_VOGT_TOKEN_VAR: &str = "VOGT_HTTP_TOKEN";
+/// What a caller the broker cannot identify is told (WI-4310).
+const BROKER_AUTH_FIX: &str = "the secret broker does not know this caller: start the shell as a Vogt session (so it holds a broker token), or set VOGT_TOKEN_FILE to a Vogt token file";
 /// The read route. `POST` only, outside the engine bearer gate (see `app.rs`),
 /// authenticated with the session's own broker token.
 pub const FETCH_ROUTE: &str = "/api/agent-auth/fetch/{var}";
@@ -447,6 +451,10 @@ pub struct SecretBroker {
     /// Session id → SHA-256 of that session's broker token. The plaintext is
     /// handed to the child once and never stored.
     grants: DashMap<Uuid, [u8; 32]>,
+    /// Session id → the core credential minted for that session (WI-4310), so
+    /// a hand-typed agent that lost the env can ask for its own. Only ever
+    /// served back to the session that owns it.
+    vogt_tokens: DashMap<Uuid, String>,
     /// Projects beyond the manifest's that an approved grant may fetch from
     /// (`ENGINE_AGENT_GRANT_PROJECTS`).
     grant_projects: Vec<String>,
@@ -564,6 +572,7 @@ impl SecretBroker {
             manifest_file: None,
             providers_file: None,
             grants: DashMap::new(),
+            vogt_tokens: DashMap::new(),
             grant_projects: Vec::new(),
             session_grants: DashMap::new(),
             bundle: DashMap::new(),
@@ -867,6 +876,16 @@ impl SecretBroker {
         token
     }
 
+    /// Remember the core credential minted for `session` (WI-4310).
+    pub fn remember_vogt_token(&self, session: Uuid, token: &str) {
+        self.vogt_tokens.insert(session, token.to_string());
+    }
+
+    /// `session`'s own core credential, if the engine minted one.
+    pub fn vogt_token(&self, session: Uuid) -> Option<String> {
+        self.vogt_tokens.get(&session).map(|t| t.clone())
+    }
+
     /// The grant for a session about to be spawned, or `None` when there is
     /// nothing to broker — in which case the session's environment says
     /// nothing about a broker, rather than pointing at one that refuses.
@@ -885,6 +904,7 @@ impl SecretBroker {
     /// revoke it (WI-4046).
     pub fn revoke(&self, session: Uuid) {
         self.grants.remove(&session);
+        self.vogt_tokens.remove(&session);
         self.session_grants.remove(&session);
         self.credential_writes.remove(&session);
     }
@@ -2085,7 +2105,7 @@ pub async fn fetch(
         .filter(|v| !v.is_empty());
     let Some(presented) = presented else {
         auth::record_auth_failure(&Method::POST, &path, &request_id, "missing broker token").await;
-        return ApiError::Unauthorized.into_response();
+        return refusal(StatusCode::UNAUTHORIZED, BROKER_AUTH_FIX);
     };
     // A host session presents its broker grant; a pod presents the stream
     // credential its bootstrap handed it (WI-3884). Either is valid only for
@@ -2094,7 +2114,7 @@ pub async fn fetch(
     // somehow missed.
     let Some(session) = presenting_session(&state, presented).await else {
         auth::record_auth_failure(&Method::POST, &path, &request_id, "unknown broker token").await;
-        return ApiError::Unauthorized.into_response();
+        return refusal(StatusCode::UNAUTHORIZED, BROKER_AUTH_FIX);
     };
 
     if let Some(retry_after) = state
@@ -2116,6 +2136,34 @@ pub async fn fetch(
                 retry_after.as_secs().max(1).to_string(),
             )],
             Json(json!({ "error": "too many secret fetches from this session" })),
+        )
+            .into_response();
+    }
+
+    // A session's own Vogt credential is not a manifest secret: it is the one
+    // the engine minted for this session (WI-4310), served to that session
+    // alone, whatever the manifest says about the name.
+    if var == OWN_VOGT_TOKEN_VAR {
+        let Some(token) = broker.vogt_token(session) else {
+            return refusal(
+                StatusCode::NOT_FOUND,
+                "the engine minted no Vogt credential for this session; set VOGT_TOKEN_FILE to a token file, or start the agent from a session Vogt started",
+            );
+        };
+        tracing::info!(
+            target: "vogt::audit",
+            request_id = %request_id,
+            session_id = %session,
+            var = %var,
+            "session's own Vogt credential brokered to session"
+        );
+        return (
+            StatusCode::OK,
+            [
+                (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
+                (header::CACHE_CONTROL, "no-store"),
+            ],
+            token,
         )
             .into_response();
     }
