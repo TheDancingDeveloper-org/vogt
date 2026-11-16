@@ -55,8 +55,16 @@ MAX_CALL_TIMEOUT_SECONDS = 660
 #: pre-flight that turns a slow core into "server failed to connect".
 DISCOVERY_TIMEOUT_SECONDS = 3
 
-#: (url, headers, body) -> (status, body). Injected in tests; urllib live.
-Transport = Callable[[str, dict[str, str], bytes], "tuple[int, bytes]"]
+#: The streamable-HTTP session header. A server that issues one on
+#: `initialize` refuses every later request that does not send it back.
+MCP_SESSION_HEADER = "Mcp-Session-Id"
+
+#: (url, headers, body) -> (status, body) or (status, body, response headers).
+#: Injected in tests; urllib live.
+Transport = Callable[
+    [str, dict[str, str], bytes],
+    "tuple[int, bytes] | tuple[int, bytes, Mapping[str, str]]",
+]
 
 
 @dataclass
@@ -92,6 +100,11 @@ class Bridge:
         self._transport = transport
         self._discovered = False
         self._announced = False
+        #: The session the server issued on `initialize`, if it issues one,
+        #: and the client's `initialize` that got it, for re-establishing a
+        #: session the server has forgotten.
+        self._mcp_session: str | None = None
+        self._initialize: dict[str, Any] | None = None
         self.report = BridgeReport(warned=[])
 
     # -- diagnostics -------------------------------------------------------
@@ -217,9 +230,63 @@ class Bridge:
                 self.discover()
         return self.report
 
+    def _exchange(
+        self, message: dict[str, Any]
+    ) -> tuple[int, bytes, Mapping[str, str]]:
+        """POST one message, keeping the server's MCP session (WI-4288).
+
+        A streamable-HTTP server may issue an `Mcp-Session-Id` on
+        `initialize` and refuse every later request without it (Cadastre
+        does, with 400). Vogt's own `/mcp` issues none, and then nothing is
+        sent. A client `initialize` starts over: the old session is not
+        presented. A session the server no longer knows (404, or 400 naming
+        the header — a restart) is re-established once by replaying the
+        client's `initialize` and `notifications/initialized`; their answers
+        are the bridge's and never reach stdout.
+        """
+        is_initialize = message.get("method") == "initialize"
+        if is_initialize:
+            self._mcp_session = None
+            self._initialize = message
+        sent_session = self._mcp_session
+        status, body, headers = self._post(f"{self._url}/mcp", message)
+        if is_initialize:
+            self._capture_session(status, headers)
+        elif (
+            sent_session is not None
+            and self._initialize is not None
+            and _session_refused(status, body)
+            and self._reinitialize(self._initialize)
+        ):
+            status, body, headers = self._post(f"{self._url}/mcp", message)
+        return status, body, headers
+
+    def _capture_session(self, status: int, headers: Mapping[str, str]) -> str | None:
+        """Keep the session an `initialize` answer issued, if it issued one."""
+        if status != 200:
+            return None
+        for name, value in headers.items():
+            if name.lower() == MCP_SESSION_HEADER.lower() and value.strip():
+                self._mcp_session = value.strip()
+                return self._mcp_session
+        return None
+
+    def _reinitialize(self, initialize: dict[str, Any]) -> bool:
+        """Open a fresh server session for a client that already has one."""
+        self._mcp_session = None
+        status, _, headers = self._post(f"{self._url}/mcp", initialize)
+        if self._capture_session(status, headers) is None:
+            return False
+        self.warn("the server forgot this MCP session; started a new one")
+        self._post(
+            f"{self._url}/mcp",
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        )
+        return True
+
     def _forward(self, message: dict[str, Any]) -> dict[str, Any] | None:
         try:
-            status, body = self._post(f"{self._url}/mcp", message)
+            status, body, _ = self._exchange(message)
         except OSError as exc:
             if message.get("id") is None:
                 return None
@@ -262,39 +329,70 @@ class Bridge:
             # the core uses it only to attribute a pod-token caller's
             # session.start, after the engine vouches for the session.
             headers[ENGINE_SESSION_HEADER] = self._engine_session
+        if self._mcp_session:
+            headers[MCP_SESSION_HEADER] = self._mcp_session
         return headers
 
     def _get(
         self, url: str, *, timeout: float = DEFAULT_TIMEOUT_SECONDS
     ) -> tuple[int, bytes]:
         if self._transport is not None:
-            return self._transport(url, self._headers(), b"")
+            status, body, _ = _with_headers(self._transport(url, self._headers(), b""))
+            return status, body
         request = urllib.request.Request(url, headers=self._headers())
-        return self._open(request, timeout=timeout)
+        status, body, _ = _with_headers(self._open(request, timeout=timeout))
+        return status, body
 
-    def _post(self, url: str, message: dict[str, Any]) -> tuple[int, bytes]:
+    def _post(
+        self, url: str, message: dict[str, Any]
+    ) -> tuple[int, bytes, Mapping[str, str]]:
         body = json.dumps(message).encode("utf-8")
         timeout = call_timeout(message)
         if self._transport is not None:
-            return self._transport(url, self._headers(), body)
+            return _with_headers(self._transport(url, self._headers(), body))
         request = urllib.request.Request(
             url, data=body, headers=self._headers(), method="POST"
         )
-        return self._open(request, timeout=timeout)
+        return _with_headers(self._open(request, timeout=timeout))
 
     def _open(  # pragma: no cover - the live path; tests inject a transport
         self,
         request: urllib.request.Request,
         *,
         timeout: float = DEFAULT_TIMEOUT_SECONDS,
-    ) -> tuple[int, bytes]:
+    ) -> tuple[int, bytes, Mapping[str, str]]:
         try:
             with urllib.request.urlopen(  # the URL comes from configuration
                 request, timeout=timeout
             ) as response:
-                return int(response.status), bytes(response.read())
+                return (
+                    int(response.status),
+                    bytes(response.read()),
+                    dict(response.headers.items()),
+                )
         except urllib.error.HTTPError as exc:
-            return int(exc.code), bytes(exc.read())
+            return int(exc.code), bytes(exc.read()), dict(exc.headers.items())
+
+
+def _with_headers(
+    result: tuple[int, bytes] | tuple[int, bytes, Mapping[str, str]],
+) -> tuple[int, bytes, Mapping[str, str]]:
+    """A transport may answer without headers; that is no session."""
+    if len(result) == 3:
+        return result
+    status, body = result[0], result[1]
+    return status, body, {}
+
+
+def _session_refused(status: int, body: bytes) -> bool:
+    """The server no longer knows the session this request presented.
+
+    The spec answers 404. Cadastre answers 400 "MCP request needs a valid
+    Mcp-Session-Id"; the header's name in a 400 body is that refusal.
+    """
+    if status == 404:
+        return True
+    return status == 400 and b"mcp-session-id" in body.lower()
 
 
 def call_timeout(message: Mapping[str, Any]) -> float:
