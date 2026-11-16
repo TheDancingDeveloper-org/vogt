@@ -148,17 +148,119 @@ impl Terminal {
     pub fn title(&self) -> Option<String> {
         self.parser.callbacks().title.clone()
     }
+
+    /// The program's last OSC 7501 report, unless it cleared it.
+    pub fn reported(&self) -> Option<Reported> {
+        self.parser.callbacks().reported.clone()
+    }
+
+    /// The latest bell or OSC 9 / 99 / 777 notification.
+    pub fn attention_hint(&self) -> Option<Hint> {
+        self.parser.callbacks().hint
+    }
+
+    /// Forget the report and the hint (the process exited).
+    pub fn clear_reported(&mut self) {
+        let cb = self.parser.callbacks_mut();
+        cb.reported = None;
+        cb.hint = None;
+    }
+
+    /// Forget the attention hint (a person has looked).
+    pub fn clear_attention_hint(&mut self) {
+        self.parser.callbacks_mut().hint = None;
+    }
+
+    /// Whether an OSC 7501 capability query arrived since the last call. The
+    /// caller owes the program [`crate::osc7501::QUERY_REPLY`].
+    pub fn take_query(&mut self) -> bool {
+        std::mem::take(&mut self.parser.callbacks_mut().query_pending)
+    }
 }
 
-/// Captures the window title a program sets (OSC 0 / OSC 2).
+/// A program's last OSC 7501 report, stamped when the engine received it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reported {
+    pub state: vogt_engine_contract::ReportedState,
+    pub kind: Option<String>,
+    pub progress: Option<u8>,
+    pub msg: Option<String>,
+    pub title: Option<String>,
+    pub app: Option<String>,
+    pub id: Option<String>,
+    pub set_at: time::OffsetDateTime,
+}
+
+/// A bell or desktop-notification sequence: a "needs you" hint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Hint {
+    pub source: &'static str,
+    pub at: time::OffsetDateTime,
+}
+
+/// Captures what a program tells its terminal about itself: the window title
+/// (OSC 0 / OSC 2), its OSC 7501 status and capability query, and the bell
+/// and OSC 9 / 99 / 777 notifications. Bell and notification bodies are not
+/// kept (they may carry anything); only that one happened.
 #[derive(Default)]
 struct TitleCapture {
     title: Option<String>,
+    reported: Option<Reported>,
+    hint: Option<Hint>,
+    /// A capability query arrived and has not been answered yet.
+    query_pending: bool,
+}
+
+impl TitleCapture {
+    fn note_hint(&mut self, source: &'static str) {
+        self.hint = Some(Hint {
+            source,
+            at: time::OffsetDateTime::now_utc(),
+        });
+    }
 }
 
 impl vt100::Callbacks for TitleCapture {
     fn set_window_title(&mut self, _: &mut vt100::Screen, title: &[u8]) {
         self.title = Some(String::from_utf8_lossy(title).into_owned());
+    }
+
+    fn audible_bell(&mut self, _: &mut vt100::Screen) {
+        self.note_hint("bell");
+    }
+
+    fn unhandled_osc(&mut self, _: &mut vt100::Screen, params: &[&[u8]]) {
+        use crate::osc7501::{parse, Osc7501};
+        match params {
+            [b"7501", payload] => match parse(payload) {
+                Some(Osc7501::Query) => self.query_pending = true,
+                Some(Osc7501::Clear) => self.reported = None,
+                Some(Osc7501::Report(r)) => {
+                    // The program is going again: an earlier bell is stale.
+                    if r.state == vogt_engine_contract::ReportedState::Working {
+                        self.hint = None;
+                    }
+                    self.reported = Some(Reported {
+                        state: r.state,
+                        kind: r.kind,
+                        progress: r.progress,
+                        msg: r.msg,
+                        title: r.title,
+                        app: r.app,
+                        id: r.id,
+                        set_at: time::OffsetDateTime::now_utc(),
+                    });
+                }
+                None => tracing::debug!(len = payload.len(), "ignored malformed OSC 7501"),
+            },
+            // OSC 9;4 is a progress indicator, not a notification.
+            [b"9", rest @ ..] if rest.first().is_none_or(|p| *p != b"4".as_slice()) => {
+                self.note_hint("osc9")
+            }
+            [b"99", ..] => self.note_hint("osc99"),
+            [b"777", b"notify", ..] => self.note_hint("osc777"),
+            _ => {}
+        }
     }
 }
 
@@ -1539,5 +1641,42 @@ mod title_tests {
         titled.process(b"\x1b]0;codex: working\x07");
         assert_ne!(titled.fingerprint(), at_rest);
         assert_eq!(titled.title().as_deref(), Some("codex: working"));
+    }
+
+    #[test]
+    fn terminal_records_reports_hints_and_queries() {
+        use vogt_engine_contract::ReportedState;
+        let mut t = Terminal::new(3, 20);
+        assert!(!t.take_query());
+        t.process(b"\x1b]7501;?\x07");
+        assert!(t.take_query());
+        assert!(!t.take_query(), "one query is answered once");
+        t.process(b"\x1b]7501;state=idle:app=x\x1b\\");
+        assert_eq!(t.reported().unwrap().state, ReportedState::Idle);
+        // The bell and OSC 9 / 99 / 777 notify are hints; OSC 9;4 is not.
+        t.process(b"\x1b]9;4;1;50\x07");
+        assert!(t.attention_hint().is_none());
+        for (seq, source) in [
+            (&b"\x07"[..], "bell"),
+            (b"\x1b]9;hello\x07", "osc9"),
+            (b"\x1b]99;i=1;body\x1b\\", "osc99"),
+            (b"\x1b]777;notify;t;b\x07", "osc777"),
+        ] {
+            t.clear_attention_hint();
+            t.process(seq);
+            assert_eq!(t.attention_hint().unwrap().source, source);
+        }
+        t.process(b"\x1b]777;other;x\x07");
+        assert_eq!(t.attention_hint().unwrap().source, "osc777");
+        // `working` makes an earlier hint stale; `clear` removes the report.
+        t.process(b"\x1b]7501;state=working\x07");
+        assert!(t.attention_hint().is_none());
+        t.process(b"\x1b]7501;state=clear\x07");
+        assert!(t.reported().is_none());
+        // Malformed sequences change nothing and do not panic.
+        t.process(b"\x1b]7501;state=idle\x07\x1b]7501;state=bogus\x07\x1b]7501\x07");
+        assert_eq!(t.reported().unwrap().state, ReportedState::Idle);
+        t.clear_reported();
+        assert!(t.reported().is_none());
     }
 }

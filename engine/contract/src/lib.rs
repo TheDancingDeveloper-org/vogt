@@ -360,6 +360,17 @@ pub struct SessionSummary {
     /// when it is not blocked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocked: Option<BlockedReport>,
+    /// What the program says its own state is, from its last OSC 7501 report
+    /// (WI-4321). Untrusted: anything in the PTY can emit it. Absent until a
+    /// report arrives, after `state=clear`, and once the process has exited.
+    /// Nothing reads it for activity yet (WI-4322).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reported_status: Option<ReportedStatus>,
+    /// The latest bell or desktop-notification sequence (OSC 9 / 99 / 777)
+    /// the program emitted: a "needs you" hint. Cleared when a person types
+    /// or the program reports `working`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attention_hint: Option<AttentionHint>,
     /// The agent conversation this session runs, when the engine knows its
     /// id: the one it was resumed from, or the engine's own id pinned on a
     /// fresh Claude Code launch. What a wake resumes.
@@ -815,6 +826,48 @@ pub struct SessionGrant {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeepAwakeRequest {
     pub keep_awake: bool,
+}
+
+/// The state a program reports with OSC 7501 `state=`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReportedState {
+    Idle,
+    Working,
+    Done,
+    Blocked,
+    Error,
+}
+
+/// A program's own report of its state (OSC 7501). Text is untrusted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReportedStatus {
+    pub state: ReportedState,
+    /// With `blocked`: `permission`, `question` or `auth`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<u8>,
+    /// The program's message, decoded (at most 2048 bytes).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub msg: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// When the engine received it (RFC 3339).
+    pub set_at: String,
+}
+
+/// A "needs you" hint from the bell or a desktop-notification sequence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttentionHint {
+    /// `bell`, `osc9`, `osc99` or `osc777`.
+    pub source: String,
+    /// When the engine saw it (RFC 3339).
+    pub at: String,
 }
 
 /// An agent's own report that it cannot go on without a person.
