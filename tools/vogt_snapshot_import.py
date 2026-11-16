@@ -1590,6 +1590,11 @@ class State:
     def record_relation(self, key: str) -> None:
         self.data["relations"][key] = True
 
+    def forget_relation(self, key: str) -> None:
+        relations = self.data.get("relations")
+        if isinstance(relations, dict):
+            relations.pop(key, None)
+
     def has_comment(self, comment_id: str) -> bool:
         comments = self.data.get("comments")
         return isinstance(comments, dict) and comment_id in comments
@@ -1976,6 +1981,9 @@ class Importer:
                 if err.code != "invalid_request":
                     raise
                 self._log(f"{mapped_source} {kind} {mapped_target} already gone")
+            # The edge is off dev: forget it so a later re-add is not skipped.
+            self._state.forget_relation(f"{source_ref}|{kind}|{target_ref}")
+            self._state.save()
 
     def _write_relations(self) -> None:
         for source_ref, kind, target_ref in self._plan.relations:
