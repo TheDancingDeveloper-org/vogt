@@ -1190,3 +1190,64 @@ def test_malformed_existing_config_is_left_alone_and_exits_zero(
     assert proc.returncode == 0, proc.stderr
     assert config.read_text(encoding="utf-8") == bad
     assert "left alone" in proc.stderr
+
+
+K8S_SHIM = """#!/usr/bin/env python3
+import json, os, stat, sys
+path = sys.argv[sys.argv.index("--kubeconfig") + 1]
+with open(os.environ["SHIM_OUT"], "w") as fh:
+    json.dump({
+        "argv": sys.argv,
+        "env": dict(os.environ),
+        "mode": stat.S_IMODE(os.stat(path).st_mode),
+        "dirmode": stat.S_IMODE(os.stat(os.path.dirname(path)).st_mode),
+        "content": open(path).read(),
+        "path": path,
+    }, fh)
+"""
+
+
+@pytest.mark.parametrize("encoded", (False, True))
+def test_k8s_is_read_only_and_keeps_the_kubeconfig_out_of_argv(
+    tmp_path: Path, encoded: bool
+) -> None:
+    import base64
+
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    shim = bindir / "kubernetes-mcp-server"
+    shim.write_text(K8S_SHIM, encoding="utf-8")
+    shim.chmod(0o755)
+    kubeconfig = "apiVersion: v1\nclusters: []\nkind: Config\n"
+    value = base64.b64encode(kubeconfig.encode()).decode() if encoded else kubeconfig
+    proc, rec = run(
+        READONLY,
+        ["k8s"],
+        {
+            "K8S_AGENT_READONLY_KUBECONFIG": value,
+            "KUBECONFIG": "/home/admin/.kube/config",
+            "TMPDIR": str(tmp_path),
+        },
+        tmp_path,
+        bindir,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert rec is not None
+    argv = rec["argv"]
+    assert argv[1] == "--read-only"
+    assert argv[2] == "--kubeconfig"
+    assert kubeconfig.strip() not in " ".join(argv)
+    assert rec["mode"] == 0o600
+    assert rec["dirmode"] == 0o700
+    assert rec["content"].strip() == kubeconfig.strip()
+    assert "K8S_AGENT_READONLY_KUBECONFIG" not in rec["env"]
+    assert "KUBECONFIG" not in rec["env"]
+    assert not Path(rec["path"]).exists()
+    assert proc.stdout == ""
+
+
+def test_k8s_missing_kubeconfig_refuses(tmp_path: Path) -> None:
+    bindir = shim_dir(tmp_path, "kubernetes-mcp-server")
+    proc, rec = run(READONLY, ["k8s"], {}, tmp_path, bindir)
+    assert proc.returncode == 64
+    assert rec is None

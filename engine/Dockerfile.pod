@@ -85,10 +85,33 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # retained in the layer, and no credentials or runtime configuration is copied.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-       ca-certificates curl git git-lfs jq ripgrep fd-find build-essential \
+       ca-certificates coreutils curl git git-lfs jq ripgrep fd-find build-essential \
        pkg-config libssl-dev python3 python3-pip python3-venv python3-dev \
        openssh-client sudo unzip zip xz-utils zstd \
-    && find /var/lib/apt/lists -type f -delete
+    && find /var/lib/apt/lists -type f -delete \
+    && command -v timeout >/dev/null \
+    && test "$(command -v timeout)" = /usr/bin/timeout
+
+# Kubernetes MCP server (containers/kubernetes-mcp-server), read-only cluster
+# access for agents (docs/ENGINE.md §4). Pinned to one release and verified
+# against a sha256 recorded here, one per architecture; bump all three together.
+# Nothing is registered with a client here: `vogt-mcp-bootstrap` does that per
+# session, and only when the session holds K8S_AGENT_READONLY_KUBECONFIG.
+ARG K8S_MCP_VERSION=v0.0.67
+ARG K8S_MCP_SHA256_AMD64=d791c22b5367813cc9e7c66e405d8ff7f7d51189b5bd619fdd84a99cf7a1c116
+ARG K8S_MCP_SHA256_ARM64=d9378039b68b5247796655ba8bbb210d5e94287e56bd532112d81950a19f0e50
+RUN set -eu; \
+    case "$(dpkg --print-architecture)" in \
+        amd64) arch=amd64; sum="$K8S_MCP_SHA256_AMD64" ;; \
+        arm64) arch=arm64; sum="$K8S_MCP_SHA256_ARM64" ;; \
+        *) echo "no pinned kubernetes-mcp-server for $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://github.com/containers/kubernetes-mcp-server/releases/download/${K8S_MCP_VERSION}/kubernetes-mcp-server-linux-${arch}" \
+        -o /tmp/kubernetes-mcp-server; \
+    echo "${sum}  /tmp/kubernetes-mcp-server" | sha256sum -c -; \
+    install -m 755 /tmp/kubernetes-mcp-server /usr/local/bin/kubernetes-mcp-server; \
+    rm -f /tmp/kubernetes-mcp-server; \
+    kubernetes-mcp-server --version
 
 # Infisical CLI. The agent-auth helper (`engine/deploy/agent-auth.sh`) runs
 # `infisical` by name, and the engine calls that helper for on-demand provider

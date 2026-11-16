@@ -197,6 +197,7 @@ readonly READONLY_SERVERS=(
     "github-ro|github|github-mcp-server|GITHUB_MCP_TOKEN|VOGT_GITHUB_MCP_TOOLSETS"
     "grafana-ro|grafana|mcp-grafana|GRAFANA_URL GRAFANA_SERVICE_ACCOUNT_TOKEN|"
     "forgejo-ro|gitea|gitea-mcp|GITEA_HOST GITEA_MCP_TOKEN|"
+    "k8s-ro|k8s|kubernetes-mcp-server|K8S_AGENT_READONLY_KUBECONFIG|"
 )
 
 readonly_wanted() {
@@ -993,6 +994,7 @@ APPROVED_SERVERS = (
     "github-ro",
     "forgejo-ro",
     "grafana-ro",
+    "k8s-ro",
 )
 APPROVAL_ROW = 'default_tools_approval_mode = "approve"\n'
 # Vogt's own MCP calls: Codex cuts a tool call at 300 s unless told otherwise,
