@@ -614,7 +614,7 @@ fn refuse_gaps(
         .collect::<Vec<_>>()
         .join("; ");
     let tail = if offer_local_only {
-        " Or drop `upstream` to create the item locally, without upstreaming it now."
+        " Or pass `local_only=true` (or drop `upstream`) to create the item locally, without upstreaming it now."
     } else {
         ""
     };
@@ -3450,7 +3450,8 @@ mod tests {
         };
         assert!(
             message.contains("write-back policy is 'none'")
-                && message.contains("(2) no forge credential"),
+                && message.contains("(2) no forge credential")
+                && message.contains("local_only=true"),
             "{message}"
         );
         let after = create_work(
