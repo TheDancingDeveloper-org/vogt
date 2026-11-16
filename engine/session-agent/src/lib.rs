@@ -1912,6 +1912,17 @@ pub fn command_line(config: &Config) -> Result<String, AgentError> {
                 .unwrap_or_default();
             let mut line = codex_broker_fetch_prefix(&[], &mcp_bearers);
             line.push_str("opencode");
+            // The session's model (WI-4284): without `--model` opencode runs
+            // its built-in default, whatever the template or caller asked.
+            if let Some(model) = config
+                .model
+                .as_deref()
+                .map(str::trim)
+                .filter(|m| !m.is_empty())
+            {
+                line.push_str(" --model ");
+                line.push_str(&sh_quote(Path::new(model)));
+            }
             // The brief is the first prompt, as for Claude Code, Codex and a
             // host opencode (WI-3389). opencode's positional is a project
             // directory, so the prompt goes in `--prompt`. A resume has
@@ -3564,7 +3575,20 @@ mod tests {
         config.resume = true;
         assert_eq!(command_line(&config).unwrap(), "opencode");
         config.resume = false;
+        // WI-4284: the session's model is opencode's `--model`, before the
+        // prompt; without it opencode runs its built-in default.
+        config.model = Some("deepseek/deepseek-chat".into());
+        let line = command_line(&config).unwrap();
+        assert!(
+            line.starts_with("opencode --model 'deepseek/deepseek-chat' --prompt '"),
+            "{line}"
+        );
         config.claude.brief = None;
+        assert_eq!(
+            command_line(&config).unwrap(),
+            "opencode --model 'deepseek/deepseek-chat'"
+        );
+        config.model = None;
         // Codex refuses extra writable roots, so it gets no `--add-dir`; the
         // PTY already starts in the session cwd.
         config.cli = "codex".into();
