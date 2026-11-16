@@ -418,3 +418,32 @@ def test_a_blanket_cadastre_approval_is_narrowed(tmp_path: Path) -> None:
     assert cadastre.get("default_tools_approval_mode") != "approve"
     assert "add" not in cadastre.get("tools", {})
     assert cadastre["tools"]["lookup"]["approval_mode"] == "approve"
+
+
+def test_cadastre_leaves_earlier_servers_and_their_tool_settings_alone(
+    tmp_path: Path,
+) -> None:
+    codex = tmp_path / ".codex"
+    codex.mkdir()
+    (codex / "config.toml").write_text(
+        '[mcp_servers.vogt]\ncommand = "vogt-mcp"\n'
+        'default_tools_approval_mode = "approve"\n\n'
+        '[mcp_servers.vogt.tools.work_get]\napproval_mode = "prompt"\n\n'
+        '[mcp_servers.github-ro]\ncommand = "gh-ro"\nargs = []\n'
+        'env_vars = []\ndefault_tools_approval_mode = "approve"\n\n'
+        "[mcp_servers.github-ro.tools.get_file_contents]\n"
+        'approval_mode = "prompt"\n',
+        encoding="utf-8",
+    )
+    env = {"CADASTRE_MCP_URL": URL, "CADASTRE_HTTP_TOKEN": TOKEN}
+    bootstrap(tmp_path, env)
+    bootstrap(tmp_path, env)  # a re-run keeps them too
+    servers = codex_servers(tmp_path)
+    assert servers["vogt"]["default_tools_approval_mode"] == "approve"
+    assert servers["vogt"]["tools"]["work_get"]["approval_mode"] == "prompt"
+    assert servers["github-ro"]["default_tools_approval_mode"] == "approve"
+    assert (
+        servers["github-ro"]["tools"]["get_file_contents"]["approval_mode"] == "prompt"
+    )
+    assert servers["cadastre"].get("default_tools_approval_mode") != "approve"
+    assert servers["cadastre"]["tools"]["lookup"]["approval_mode"] == "approve"
