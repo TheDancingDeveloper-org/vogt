@@ -556,6 +556,12 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
             "/api/agent-auth/store/bundle/memory",
             post(crate::pod_salvage::memory_upload),
         )
+        // A pod opencode's assistant replies (WI-4291): the same per-pod
+        // credential; the store they come from stays in the pod.
+        .route(
+            crate::opencode::REPLIES_ROUTE,
+            post(crate::opencode::upload_pod_replies),
+        )
         .with_state(Arc::clone(&state));
 
     let broker_routes = Router::new()
