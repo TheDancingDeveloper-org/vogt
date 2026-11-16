@@ -34,13 +34,23 @@ readonly VOGT_SRC="${VOGT_SRC:-$HOME/Working/Active/apps/vogt}"
 # the kubelet made for the state mount, so opencode's own
 # `mkdir ~/.local/share/opencode` returns EACCES. That costs that client's
 # registration, never the launch.
+# Several clients check the same directory (Vogt, each read-only server,
+# Cadastre), so the warning is printed once per directory (WI-4298); the later
+# callers still get the failing status.
+OPTIONAL_DIR_WARNED=""
 optional_dir() {
     local dir="$1" what="$2"
     [[ -d "$dir" ]] && return 0
     if mkdir -p "$dir" 2>/dev/null; then
         return 0
     fi
-    printf 'mcp-bootstrap: %s is not writable (%s); skipping\n' "$what" "$dir" >&2
+    case "$OPTIONAL_DIR_WARNED" in
+        *"|$dir|"*) ;;
+        *)
+            OPTIONAL_DIR_WARNED="$OPTIONAL_DIR_WARNED|$dir|"
+            printf 'mcp-bootstrap: %s is not writable (%s); skipping\n' "$what" "$dir" >&2
+            ;;
+    esac
     return 1
 }
 

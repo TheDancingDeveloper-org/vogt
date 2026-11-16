@@ -125,6 +125,28 @@ pub fn session_xdg_env(state_dir: &Path, id: Uuid, home: &Path) -> Vec<(String, 
     env
 }
 
+/// The per-session XDG environment a host launch of `command` carries: an
+/// opencode session (WI-4284) and a plain shell (WI-4298), whose
+/// `mcp-bootstrap` would otherwise skip opencode and whose hand-started
+/// opencode would hit the same unwritable data directory. Other agent CLIs
+/// and pod-backed sessions get none.
+pub fn launch_xdg_env(
+    command: Option<&[String]>,
+    pod_backed: bool,
+    state_dir: &Path,
+    id: Uuid,
+    home: &Path,
+) -> Vec<(String, String)> {
+    let wanted = match command.and_then(crate::agent_cli::agent_name).as_deref() {
+        Some("opencode") | None => true,
+        Some(_) => false,
+    };
+    if pod_backed || !wanted {
+        return Vec::new();
+    }
+    session_xdg_env(state_dir, id, home)
+}
+
 /// Where the store of engine session `id` is: its own directory when the
 /// engine gave it one, else the engine's [`db_path`].
 pub fn db_path_for(state_dir: &Path, id: Uuid, home: &Path) -> PathBuf {
@@ -462,6 +484,35 @@ mod tests {
         ] {
             assert_eq!(mode(&dir), 0o700, "{}", dir.display());
         }
+    }
+
+    #[test]
+    fn a_shell_session_gets_the_private_xdg_dirs_when_its_home_is_unwritable() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let id = Uuid::new_v4();
+        // The probe home is a file, so no uid can create a data dir under it.
+        let home = tmp.path().join("home");
+        std::fs::write(&home, "not a directory").unwrap();
+        if std::env::var_os("XDG_DATA_HOME").is_some() {
+            return;
+        }
+        let shell: Vec<String> = vec!["vogt-agent-auth".into(), "shell".into()];
+        for command in [None, Some(shell.as_slice())] {
+            let env = launch_xdg_env(command, false, &state, id, &home);
+            for var in ["XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"] {
+                let (_, dir) = env.iter().find(|(k, _)| k == var).expect(var);
+                let mode = std::fs::metadata(dir).unwrap().permissions().mode() & 0o777;
+                assert_eq!(mode, 0o700, "{dir}");
+            }
+        }
+        // A Claude launch, and a pod-backed shell, get none.
+        let claude: Vec<String> = ["vogt-agent-auth", "run", "--", "claude"]
+            .map(String::from)
+            .to_vec();
+        assert!(launch_xdg_env(Some(&claude), false, &state, id, &home).is_empty());
+        assert!(launch_xdg_env(None, true, &state, id, &home).is_empty());
     }
 
     #[test]

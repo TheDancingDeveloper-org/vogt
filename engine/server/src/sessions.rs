@@ -1927,22 +1927,18 @@ impl SessionRegistry {
             &self.cfg.state_dir,
             id,
         );
-        // A host opencode whose engine home is not writable gets its own
-        // data, state and cache directories (WI-4284).
-        let opencode_xdg = if base_command
-            .as_deref()
-            .and_then(agent_cli::agent_name)
-            .as_deref()
-            == Some("opencode")
-            && !pod_backed
-        {
-            let home = std::env::var_os("HOME")
-                .map(std::path::PathBuf::from)
-                .unwrap_or_default();
-            crate::opencode::session_xdg_env(&self.cfg.state_dir, id, &home)
-        } else {
-            Vec::new()
-        };
+        // A host opencode or shell whose engine home is not writable gets its
+        // own data, state and cache directories (WI-4284, WI-4298).
+        let engine_home = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_default();
+        let opencode_xdg = crate::opencode::launch_xdg_env(
+            base_command.as_deref(),
+            pod_backed,
+            &self.cfg.state_dir,
+            id,
+            &engine_home,
+        );
         let launch_request = agent_cli::LaunchRequest {
             model: spec.model.as_deref(),
             effort: spec.effort.as_deref(),
@@ -1975,10 +1971,16 @@ impl SessionRegistry {
                 spec.command.iter().flatten().any(|arg| *arg == flag)
             })
             .map(std::path::Path::to_path_buf);
-        if !launch.env.is_empty() {
+        // A shell launches no agent CLI, so the request's XDG pair is applied
+        // here (an opencode launch already carries it).
+        let mut launch_env = launch.env;
+        if launch_env.is_empty() {
+            launch_env = opencode_xdg.clone();
+        }
+        if !launch_env.is_empty() {
             // Defaults: first, so a template or caller that sets the same
             // variable still has the last word.
-            let mut env = launch.env;
+            let mut env = launch_env;
             env.extend(spec.env.take().unwrap_or_default());
             spec.env = Some(env);
         }

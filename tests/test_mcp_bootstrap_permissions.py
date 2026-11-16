@@ -36,7 +36,9 @@ def _shim(bindir: Path, name: str, body: str) -> None:
     path.chmod(0o755)
 
 
-def _run(tmp_path: Path) -> subprocess.CompletedProcess[str]:
+def _run(
+    tmp_path: Path, extra_env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
     home = tmp_path / "home"
     home.mkdir(exist_ok=True)
     env = {
@@ -44,6 +46,7 @@ def _run(tmp_path: Path) -> subprocess.CompletedProcess[str]:
         "HOME": str(home),
         "VOGT_SRC": str(tmp_path / "absent"),
         "CALLS": str(tmp_path / "calls"),
+        **(extra_env or {}),
     }
     return subprocess.run(
         ["bash", str(BOOTSTRAP)],
@@ -73,13 +76,50 @@ def test_an_unwritable_opencode_data_dir_does_not_abort_the_launch(
         'mkdir -p "$HOME/.local/share/opencode" || exit 1\nexit 0\n',
     )
 
-    proc = _run(tmp_path)
+    # Every opencode registration (Vogt, three read-only servers, Cadastre)
+    # checks the same data directory; each used to print its own warning.
+    for tool in ("vogt-readonly-mcp", "github-mcp-server", "mcp-grafana", "gitea-mcp"):
+        _shim(bindir, tool, "exit 0\n")
+    proc = _run(
+        tmp_path,
+        {
+            "VOGT_READONLY_MCP_WRAPPER": str(bindir / "vogt-readonly-mcp"),
+            "CADASTRE_MCP_URL": "http://c",
+            "CADASTRE_HTTP_TOKEN": "x",
+            "GITHUB_MCP_TOKEN": "x",
+            "GRAFANA_URL": "http://g",
+            "GRAFANA_SERVICE_ACCOUNT_TOKEN": "x",
+            "GITEA_HOST": "http://f",
+            "GITEA_MCP_TOKEN": "x",
+        },
+    )
 
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout == "", "stdout is the MCP transport"
     assert "opencode data directory" in proc.stderr
     assert "skipping" in proc.stderr
+    assert proc.stderr.count("opencode data directory") == 1, proc.stderr
     assert not (tmp_path / "calls").exists(), "opencode was started anyway"
+
+
+def test_a_writable_xdg_data_home_registers_opencode_despite_an_unwritable_home(
+    tmp_path: Path,
+) -> None:
+    """The per-session XDG dirs the engine gives a shell (WI-4298)."""
+    home = tmp_path / "home"
+    (home / ".local").mkdir(parents=True)
+    (home / ".local" / "share").write_text("not a directory", encoding="utf-8")
+    xdg = tmp_path / "xdg"
+    (xdg / "data").mkdir(parents=True)
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    _shim(bindir, "opencode", 'printf "%s\\n" "$*" >> "$CALLS"\nexit 0\n')
+
+    proc = _run(tmp_path, {"XDG_DATA_HOME": str(xdg / "data")})
+
+    assert proc.returncode == 0, proc.stderr
+    assert "opencode data directory" not in proc.stderr, proc.stderr
+    assert "mcp add vogt" in (tmp_path / "calls").read_text(encoding="utf-8")
 
 
 def test_an_unwritable_codex_config_dir_is_skipped(tmp_path: Path) -> None:
