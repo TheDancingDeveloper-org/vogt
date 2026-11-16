@@ -187,7 +187,7 @@ pub struct ListProjectsParams {
     #[serde(default)]
     #[schemars(range(min = 0))]
     pub offset: i64,
-    /// `summary` (default): compact rows with slug, name, lifecycle_state and link_state. `full`: every project field plus `writable`.
+    /// `full` (default over REST): every project field plus `writable`. `summary`: compact rows with slug, name, lifecycle_state and link_state; the MCP `project_list` tool defaults to `summary`.
     #[serde(default)]
     pub mode: ListMode,
 }
@@ -195,8 +195,8 @@ pub struct ListProjectsParams {
 #[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ListMode {
-    #[default]
     Summary,
+    #[default]
     Full,
 }
 

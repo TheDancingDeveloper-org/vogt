@@ -6129,6 +6129,27 @@ mod tests {
         .unwrap();
     }
 
+    /// The warning rides the whole `session.start` result, not just the helper.
+    #[test]
+    fn a_start_with_an_unserved_model_carries_the_warning_in_its_result() {
+        let providers = br#"{"providers":[{"name":"p","models":["served-model"]}]}"#.to_vec();
+        let (dir, built, _) = context("warn-start", person(), None, |_| {}, vec![providers]);
+        let root = dir.join("widget");
+        std::fs::create_dir_all(&root).unwrap();
+        crate::application::projects::register_op(
+            &built,
+            json!({"name": "Widget", "root_path": root.to_string_lossy(), "reason": "test"}),
+        )
+        .unwrap();
+        let started = super::start_session_op(
+            &built,
+            json!({"project": "widget", "reason": "probe", "model": "ghost-model"}),
+        );
+        let result = started.expect("the start proceeds despite the warning");
+        let warning = result["warning"].as_str().expect("a warning field");
+        assert!(warning.contains("ghost-model"), "{warning}");
+    }
+
     /// Sweep payload from the engine: two terminals, one of them a person's
     /// own.
     fn sweep_payload() -> Vec<u8> {
