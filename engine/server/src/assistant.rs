@@ -3118,6 +3118,7 @@ mod tests {
             gui_stream_verified: false,
             agent_auth_public_url: None,
             cadastre_mcp_url: None,
+            vogt_prod_mcp_url: None,
             ws_query_token_allowed: false,
             push_allow_insecure_endpoints: false,
             state_dir: tempfile::tempdir().unwrap().keep(),

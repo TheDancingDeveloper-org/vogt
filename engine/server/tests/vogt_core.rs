@@ -221,6 +221,7 @@ fn base_config() -> Config {
         public_url: None,
         agent_auth_public_url: None,
         cadastre_mcp_url: None,
+        vogt_prod_mcp_url: None,
         vogt_core_url: None,
         vogt_import_root: None,
         vogt_engine_state_dir: None,
