@@ -236,6 +236,11 @@ class Relation:
     target_ref: str
 
 
+DECLARED_RELATION_KINDS = frozenset(
+    {"depends_on", "relates_to", "duplicate_of", "parent_of"}
+)
+
+
 @dataclass(frozen=True)
 class WorkItem:
     id: str
@@ -716,7 +721,9 @@ def read_target(
         "items",
         {
             "include_finished": True,
-            "mode": "full" if ref_mode == "remap" else "summary",
+            # Full rows carry each item's relations, which re-import
+            # reconciles against the export, so both modes read them.
+            "mode": "full",
         },
     )
     for row in rows:
@@ -882,6 +889,9 @@ class Plan:
     items_existing: list[WorkItem] = field(default_factory=list)
     superseded: list[WorkItem] = field(default_factory=list)
     relations: list[tuple[str, str, str]] = field(default_factory=list)
+    #: (source ref, kind, source ref) edges the target holds between two
+    #: imported items that the export no longer has.
+    relations_remove: list[tuple[str, str, str]] = field(default_factory=list)
     comments: list[Comment] = field(default_factory=list)
     replace_wi1: bool = False
     first_new_ref: int = 1
@@ -916,6 +926,7 @@ class Plan:
             + len(self.items_new)
             + transitions
             + len(self.relations)
+            + len(self.relations_remove)
             + comment_calls
         )
 
@@ -951,8 +962,13 @@ class Plan:
                 ),
                 "superseded": len(self.superseded),
                 "relations": len(self.relations),
+                "relations_removed": len(self.relations_remove),
                 "comments": len(self.comments),
             },
+            "relations_to_remove": [
+                {"ref": ref, "kind": kind, "target": target}
+                for ref, kind, target in self.relations_remove
+            ],
             "forge_safety": {
                 "source_write_back_non_none": list(self.write_back_forced),
                 "source_link_state_linked": list(self.link_state_forced),
@@ -1039,6 +1055,7 @@ def build_plan(
             "relations and comments beyond them were left for the next run"
         )
     _plan_relations(plan)
+    _plan_relation_removals(plan)
     _plan_comments(plan)
     return plan
 
@@ -1426,12 +1443,7 @@ def _plan_relations(plan: Plan) -> None:
     known = plan.kept_refs
     for item in plan.source.items:
         for relation in item.relations:
-            if relation.kind not in {
-                "depends_on",
-                "relates_to",
-                "duplicate_of",
-                "parent_of",
-            }:
+            if relation.kind not in DECLARED_RELATION_KINDS:
                 plan.warnings.append(
                     f"skipped {item.ref} {relation.kind} {relation.target_ref}: "
                     "the MCP surface cannot declare that relation kind"
@@ -1444,6 +1456,47 @@ def _plan_relations(plan: Plan) -> None:
                 )
                 continue
             plan.relations.append((item.ref, relation.kind, relation.target_ref))
+
+
+def _plan_relation_removals(plan: Plan) -> None:
+    """Plan removal of declared edges between imported items the export lacks.
+
+    Only an edge whose both ends are imported items is reconciled.  An edge
+    to a dev-native item (no map entry, no marker) is never read as drift.
+    """
+
+    if plan.ref_mode == "remap":
+        to_target = dict(plan.existing_refs)
+    else:
+        to_target = {item.ref: item.ref for item in plan.items_existing}
+    to_source = {target: source for source, target in to_target.items()}
+    wanted = {
+        (item.ref, relation.kind, relation.target_ref)
+        for item in plan.source.items
+        for relation in item.relations
+    }
+    for source_ref in sorted(to_target, key=lambda ref: ref_number(ref) or 0):
+        row = plan.target.items.get(to_target[source_ref])
+        if row is None:
+            continue
+        for relation in _relation_rows(row):
+            kind = relation.get("kind")
+            related = relation.get("related_ref")
+            if kind not in DECLARED_RELATION_KINDS or not isinstance(related, str):
+                continue
+            source_related = to_source.get(related)
+            if source_related is None:
+                continue
+            edge = (source_ref, kind, source_related)
+            if edge not in wanted and edge not in plan.relations_remove:
+                plan.relations_remove.append(edge)
+
+
+def _relation_rows(row: Mapping[str, object]) -> list[JsonObject]:
+    rows = row.get("relations")
+    if not isinstance(rows, list):
+        return []
+    return [entry for entry in rows if isinstance(entry, dict)]
 
 
 def _plan_comments(plan: Plan) -> None:
@@ -1608,6 +1661,9 @@ class Importer:
         self._write_labels()
         self._write_initiatives()
         self._write_actors()
+        # Before the state sync: a stale depends_on on the target gates a
+        # transition the source already made.
+        self._remove_relations()
         self._write_items()
         self._write_relations()
         self._write_comments()
@@ -1898,6 +1954,29 @@ class Importer:
             ),
         )
 
+    def _remove_relations(self) -> None:
+        for source_ref, kind, target_ref in self._plan.relations_remove:
+            mapped_source = self._resolve_ref(source_ref)
+            mapped_target = self._resolve_ref(target_ref)
+            try:
+                self._record_write(
+                    f"unrelate {mapped_source} {kind} {mapped_target}",
+                    functools.partial(
+                        self._client.tool,
+                        "work_unrelate",
+                        {
+                            "ref": mapped_source,
+                            "kind": kind,
+                            "target": mapped_target,
+                            "reason": self._reason,
+                        },
+                    ),
+                )
+            except McpFailure as err:
+                if err.code != "invalid_request":
+                    raise
+                self._log(f"{mapped_source} {kind} {mapped_target} already gone")
+
     def _write_relations(self) -> None:
         for source_ref, kind, target_ref in self._plan.relations:
             key = f"{source_ref}|{kind}|{target_ref}"
@@ -2174,6 +2253,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     if args.skip_relations:
         plan.relations = []
+        plan.relations_remove = []
     if args.skip_comments:
         plan.comments = []
     summary = plan.summary(latency_ms=args.latency_ms, comments=not args.skip_comments)
@@ -2253,8 +2333,11 @@ def _print_plan(summary: JsonObject) -> None:
     )
     print(
         "  work items: {work_items} ({work_items_new} to create, {superseded} "
-        "superseded); relations: {relations}; comments: {comments}".format(**counts)
+        "superseded); relations: {relations} ({relations_removed} to remove); "
+        "comments: {comments}".format(**counts)
     )
+    for edge in summary.get("relations_to_remove") or []:
+        print("    remove: {ref} {kind} {target}".format(**edge))
     print(
         "  refs: {policy}, first new WI-{first_new_ref}, WI-1 replaced: {replace_wi1}, "
         "last WI-{last_ref}".format(**refs)
