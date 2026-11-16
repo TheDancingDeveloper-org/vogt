@@ -1526,20 +1526,20 @@ mod tests {
         );
     }
 
-    /// A resolved value matches pydantic's dump when every field Rust kept has
-    /// the same value there. A field whose default is null is left absent here
-    /// and present as null in the dump, and that difference is not a mismatch:
-    /// the services read either as "not given".
     /// `project.list` gained `mode` (WI-4317, parity_divergence.rs); the Python
     /// corpus predates it, so the defaulted field is not compared.
     fn without_recorded_divergence(op: &str, value: &serde_json::Value) -> serde_json::Value {
         let mut value = value.clone();
-        if op == "project.list" && value["mode"] == "summary" {
+        if op == "project.list" && value["mode"] == "full" {
             value.as_object_mut().unwrap().remove("mode");
         }
         value
     }
 
+    /// A resolved value matches pydantic's dump when every field Rust kept has
+    /// the same value there. A field whose default is null is left absent here
+    /// and present as null in the dump, and that difference is not a mismatch:
+    /// the services read either as "not given".
     fn resolved_matches(resolved: &serde_json::Value, dump: &serde_json::Value) -> bool {
         match (resolved, dump) {
             (serde_json::Value::Object(resolved), serde_json::Value::Object(dump)) => resolved
