@@ -1032,6 +1032,30 @@ def test_preserve_reimport_removes_a_relation_the_source_dropped(
     assert target.items["WI-1"]["state"] == "done"
 
 
+def test_remap_reimport_re_adds_a_relation_the_source_removed_then_restored(
+    tmp_path: Path,
+) -> None:
+    with_edge = _relation_payloads(relations=_depends_on_wi2(), wi1_state="open")
+    without_edge = _relation_payloads(relations=[], wi1_state="open")
+    target = dev_target(2)
+    edge = ("WI-3", "depends_on", "WI-4")
+
+    # Day 1: the edge exists and is recorded in the resume state.
+    plan = plan_for(tmp_path, target, ref_mode="remap", payload=with_edge)
+    apply_plan(tmp_path, write_source(tmp_path, with_edge), target, plan)
+    assert edge in target.relations
+
+    # Day 2: prod dropped it; dev removes it (same state file).
+    plan = plan_for(tmp_path, target, ref_mode="remap", payload=without_edge)
+    apply_plan(tmp_path, write_source(tmp_path, without_edge), target, plan)
+    assert edge not in target.relations
+
+    # Day 3: prod relates the items again; dev must get the edge back.
+    plan = plan_for(tmp_path, target, ref_mode="remap", payload=with_edge)
+    apply_plan(tmp_path, write_source(tmp_path, with_edge), target, plan)
+    assert edge in target.relations
+
+
 def test_reimport_leaves_relations_to_dev_native_items_alone(tmp_path: Path) -> None:
     first = _relation_payloads(relations=[], wi1_state="open")
     target = dev_target(2)
