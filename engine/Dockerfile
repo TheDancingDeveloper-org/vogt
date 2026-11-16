@@ -643,6 +643,7 @@ COPY engine/deploy/agent-auth.sh /usr/local/bin/vogt-agent-auth
 COPY engine/deploy/vogt-mcp-auth.sh /usr/local/bin/vogt-mcp
 COPY engine/deploy/mcp-bootstrap.sh /usr/local/bin/vogt-mcp-bootstrap
 COPY engine/deploy/vogt-prod-mcp.sh /usr/local/bin/vogt-prod-mcp
+COPY engine/deploy/cadastre-mcp.sh /usr/local/bin/cadastre-mcp
 COPY engine/deploy/git-askpass.sh /usr/local/bin/vogt-git-askpass
 COPY engine/deploy/rust-analyzer-mcp.sh /usr/local/bin/vogt-rust-analyzer-mcp
 COPY engine/deploy/readonly-mcp.sh /usr/local/bin/vogt-readonly-mcp
@@ -660,6 +661,7 @@ RUN chmod +x \
     /usr/local/bin/vogt-mcp \
     /usr/local/bin/vogt-mcp-bootstrap \
     /usr/local/bin/vogt-prod-mcp \
+    /usr/local/bin/cadastre-mcp \
     /usr/local/bin/vogt-git-askpass \
     /usr/local/bin/vogt-rust-analyzer-mcp \
     /usr/local/bin/vogt-readonly-mcp \
