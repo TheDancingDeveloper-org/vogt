@@ -165,6 +165,12 @@ _POD_FILES = (
     "only that pod's files. An agent's equivalent is the session it runs in: "
     "its workspace, and `session.commit_for` for work it means to keep."
 )
+_POD_OPENCODE_REPLIES = (
+    "A pod opencode session's own agent uploads the redacted assistant text "
+    "of its replies (WI-4291) with the per-pod credential, so the engine can "
+    "answer `session.last_reply` for a pod whose store stays in the pod. "
+    "Pod-internal; an agent reads the result through `session.last_reply`."
+)
 _SESSION_SELF = (
     "A session's own calls with its per-session broker token (secret "
     "fetch/store, launch report, its conversation, its project-policy "
@@ -262,4 +268,5 @@ ENGINE_ONLY: Mapping[str, str] = {
     "GET /api/agent-auth/sessions/{id}/workspace": _POD_FILES,
     "POST /api/agent-auth/store/bundle/salvage": _POD_FILES,
     "POST /api/agent-auth/store/bundle/memory": _POD_FILES,
+    "POST /api/agent-auth/store/bundle/opencode-replies": _POD_OPENCODE_REPLIES,
 }
