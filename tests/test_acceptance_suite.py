@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import stat
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -542,7 +543,7 @@ def _run_s15(client: _TemplateClient, monkeypatch: pytest.MonkeyPatch) -> harnes
     from tests.acceptance.checks import sessions
 
     monkeypatch.setattr(sessions, "AGENT_REPLY_TIMEOUT_S", 0.05)
-    monkeypatch.setattr(sessions.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
     options = harness.Options(fake=True, with_sessions=True)
     ctx = harness.Context(client, options, "acceptance-s15")
     return sessions.claude_template(ctx)
