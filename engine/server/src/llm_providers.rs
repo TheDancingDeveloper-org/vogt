@@ -9,13 +9,22 @@
 //! name = "deepseek"                    # the Codex model_providers key
 //! base_url = "http://litellm:4000/v1"
 //! wire_api = "chat"                    # or "responses"
-//! env_key = "HOMELAB_LITELLM_DEEPSEEK_KEY"
+//! env_key = "LITELLM_DEEPSEEK_PROVIDER_KEY" # never a manifest VAR's name
 //! secret_project = "<secrets-manager project id>"
 //! secret_name = "HOMELAB_LITELLM_DEEPSEEK_KEY"
-//! models = ["deepseek-chat"]           # informational, shown in status
+//! models = ["deepseek-chat"]           # selects this entry; see below
 //! ```
 //!
-//! At each launch the registry does two things, and nothing else:
+//! `models` is not informational. A Codex launch's requested model picks the
+//! entry that lists it ([`codex_selection`]; two entries listing it: the one
+//! named `litellm`), and a model no entry lists is refused with
+//! `unknown_model` unless `ENGINE_LLM_MODEL_ALLOWLIST` admits it. An entry's
+//! first model is its fallback when the launch names none. An entry whose
+//! `env_key` equals a manifest VAR is dropped whole (logged only), so the
+//! example above names a distinct variable. docs/ENGINE.md, "Choosing an
+//! entry", has the full rule.
+//!
+//! Beyond selection, at each launch the registry does two things:
 //!
 //! - every provider's `env_key` joins the agent-auth manifest as an
 //!   `optional` line (`env_key secret_project secret_name`), so the helper
