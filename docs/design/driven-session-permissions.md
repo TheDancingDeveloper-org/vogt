@@ -228,8 +228,16 @@ shared, against the 1-day, revoke-after-use rule. The rule names the vogt-dev
 lane only, so a prod token still goes through a person. The engine gives every
 Claude launch the same settings file, so the rule requires engine proof of the
 oversight role in the session's own transcript (an `auth_whoami` naming
-`agent:session:<id>` and a `session_list` row for that id with `role`
-`oversight`), the same way *Approved Vogt Grant* requires a grants listing.
+`agent:session:<id>` or `agent:engine:<id>` and a `session_list` row for that
+id with `role` `oversight`), the same way *Approved Vogt Grant* requires a
+grants listing. WI-4282 added the `agent:engine:<id>` form: an agent session a
+person opens from the GUI and makes oversight has an engine-minted credential
+and an unlinked row keyed by its engine UUID, and no Vogt record. Accepting it
+was chosen over giving such sessions a Vogt record and an `agent:session`
+token when the role is set, because a running agent's credential is fixed at
+launch and could not be swapped in; the engine credential is already
+per-session and bound to that UUID, so a worker still cannot borrow it. A
+`claude` typed into a plain shell keeps the pod's shared token and stays out.
 It also restricts `--actor` to `agent:oversight-*`, and requires the token to
 be captured into a 0600 file (`vogt --json token issue ... | jq -r .secret >
 "$f"`) and never printed. Deployments that
