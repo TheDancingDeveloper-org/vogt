@@ -184,6 +184,28 @@ impl Scrollback {
         self.total_written
     }
 
+    /// Cut the ring to its last `limit` bytes, aligned like
+    /// [`Self::snapshot_tail`], and give the rest of its allocation back.
+    /// The ring's capacity becomes `limit` too, so a late push cannot grow it
+    /// again. `total_written` is unchanged, so cursors stay valid
+    /// (WI-4290: a stopped session's ring).
+    pub fn shed(&mut self, limit: usize) {
+        let start = if self.buf.len() > limit {
+            ground_state_start(&self.buf, self.buf.len() - limit)
+        } else {
+            0
+        };
+        // A fresh exact-size Vec, not `drain` + `shrink_to_fit`: the old
+        // allocation is freed whole rather than left to a realloc.
+        self.buf = self.buf[start..].to_vec();
+        self.capacity = self.capacity.min(limit.max(1));
+    }
+
+    /// Bytes the ring has allocated, which is what it costs in memory.
+    pub fn allocated(&self) -> usize {
+        self.buf.capacity()
+    }
+
     /// Last `n` bytes (or fewer if buffer smaller). Used by activity heuristics.
     pub fn tail(&self, n: usize) -> &[u8] {
         let start = self.buf.len().saturating_sub(n);
