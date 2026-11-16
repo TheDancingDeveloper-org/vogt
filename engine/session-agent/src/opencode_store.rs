@@ -370,10 +370,12 @@ pub(crate) mod tests {
             ["PONG from the pod opencode"]
         );
         let wire = serde_json::to_value(&upload).unwrap();
-        let keys: Vec<&String> = wire.as_object().unwrap().keys().collect();
+        let mut keys: Vec<&String> = wire.as_object().unwrap().keys().collect();
+        keys.sort();
         assert_eq!(keys, ["conversation_id", "replies"]);
         for reply in wire["replies"].as_array().unwrap() {
-            let keys: Vec<&String> = reply.as_object().unwrap().keys().collect();
+            let mut keys: Vec<&String> = reply.as_object().unwrap().keys().collect();
+            keys.sort();
             assert_eq!(keys, ["at", "text"]);
         }
         let text = wire.to_string();
