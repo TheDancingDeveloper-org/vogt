@@ -421,3 +421,14 @@ def test_a_trailing_slash_does_not_double_up(url: str) -> None:
         transport=transport,
     ).serve()
     assert all("//mcp" not in call["url"] for call in transport.calls)
+    _run(transport, {"jsonrpc": "2.0", "id": 1, "method": "ping"})
+    assert "X-Vogt-Tool-Profile" not in transport.calls[0]["headers"]
+
+
+def test_startup_refuses_with_a_reason_when_there_is_no_token() -> None:
+    from vogt.adapters.mcp.bridge import startup_problem
+
+    reason = startup_problem({"VOGT_URL": "http://x"})
+    assert reason is not None and "VOGT_TOKEN_FILE" in reason
+    assert startup_problem({"VOGT_URL": "http://x", "VOGT_HTTP_TOKEN": "t"}) is None
+    assert startup_problem({}) is not None
