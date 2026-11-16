@@ -207,8 +207,13 @@ Run 2026-11-16 under a python `pty` harness (120x40, no engine), trivial
 prompts, `--permission-mode default`. Raw sequences are the fixtures in
 `engine/server/tests/fixtures/osc7501/`. Claude Code 2.1.295 and 2.1.322 were
 installed from npm into scratch (lockfile sha512 matches the registry); the
-box's own 2.1.289 was also run. The Codex fork was 0.162.0 (installed), not the
-0.160.0 pin or the 0.163/0.164 targets.
+box's own 2.1.289 (a local install, not the engine pin, which is already
+2.1.322 on `rust-2`) was also run. The Codex fork was 0.162.0 (installed), not
+the 0.160.0 pin. Upstream `@openai/codex` 0.164.0 was also run at startup
+(npm integrity verified); it is upstream, not the fork.
+
+All captures came from a python `pty` harness, not from the engine. Nothing
+here exercises the engine's PTY, `session-agent` or hibernate/wake.
 
 ### Observed sequences (Claude Code 2.1.322, query answered)
 
@@ -225,8 +230,9 @@ box's own 2.1.289 was also run. The Codex fork was 0.162.0 (installed), not the
 No `id`, `progress` or `title` keys were seen. No `auth` prompt was captured
 (would need a logged-out run). The title sequence (OSC 0) keeps coming
 alongside. No bell, OSC 9, OSC 99 or OSC 777 was emitted by Claude Code in any
-run (default notification setting). 2.1.295 matches 2.1.322 for a turn. 2.1.289
-has no OSC 7501 code and never sends the query.
+run (default notification setting). 2.1.295 matches 2.1.322 for a turn. The local 2.1.289
+has no OSC 7501 code and never sends the query (below the first emitting
+version, 2.1.295).
 
 ### Answers
 
@@ -241,16 +247,22 @@ has no OSC 7501 code and never sends the query.
    (see WI-991). A reply is accepted with `ESC \` termination.
    Codex fork 0.162.0: sends no OSC 7501 query and emits none (no `]7501` in
    the binary). It still uses only the `codex: ready|working` title contract
-   (plus OSC 10/11 colour queries at start). Consistent with 0.163.0 being
-   the first emitter. Not verified at 0.163/0.164.
+   (plus OSC 10/11 colour queries at start). Upstream Codex 0.164.0 does
+   contain emitter code (`ESC]7501;state=<s>:app=codex:kind=<k>`,
+   `state=clear`, and a separate OSC 21337 `status=;indicator=;status-color=;detail=`
+   sequence). At startup, with no auth and no model turn, it sent no query and
+   no 7501, only OSC 10/11 colour queries. So whether 0.164.0 emits
+   unconditionally or after a reply is **not answered**: it needs a
+   authenticated turn. That is deferred to WI-4331 with the rebased fork
+   (0.169, WI-4323). Claude Code's gating is the only answered case.
 2. **Suppressed by TERM or multiplexer?** No. Identical sequences under
    `TERM=xterm-256color`, `TERM=dumb`, and `TERM=tmux-256color` with `TMUX`
    set. `CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1` is the opt-out: with it the
    agent sends neither the query nor any state. The engine does not set it
    (grep of engine env found no use; verify when implementing).
 3. **Pod sessions through `session-agent`, hibernate and wake?** Not
-   verified: the harness has no engine or pod. Needs an engine-level test in
-   item 2.
+   verified, and split to WI-4331: the harness is not the engine and has no
+   pod. WI-4331 also captures the rebased Codex fork.
 4. **Nested emitters?** Not leaked. A Bash tool printed
    `ESC]7501;state=blocked:...:id=tool1` and `ESC]9;...` plus a BEL via
    `python3 -c`; none reached the PTY (Claude Code captures tool output). The
@@ -259,22 +271,22 @@ has no OSC 7501 code and never sends the query.
 
 ### Codex limits
 
-The Codex backend returned "high demand / Reconnecting" for every turn
-(model gpt-5.6-sol), so no completed turn, approval dialog or question was
-captured for the fork. Only startup, working/ready titles and the
-interrupted-turn error path were recorded. Re-run when the backend is
-healthy, and against 0.163/0.164.
+The Codex backend returned "high demand / Reconnecting" for every 0.162.0
+turn, so no completed turn, approval dialog or question was captured for the
+fork. Only startup, working/ready titles and the interrupted-turn error path
+were recorded. 0.164.0 was captured at startup only (no credentials here).
+Fork 0.169 (WI-4323) is captured in WI-4331.
 
 ### Consequences for the design
 
 - Item 2 must include the query reply, written once per session start,
-  before any other output handling. Item 3 treats Claude Code as the emitter
-  now (2.1.295+; the pinned 2.1.289 does not, so the pin must move to
-  2.1.295 or later first).
-- The engine pin `VOGT_CLAUDE_CODE_VERSION=2.1.289` emits nothing, so the
-  "None expected" work for Claude Code is wrong: a pin bump is required.
+  before any other output handling, for Claude Code.
+- The engine's Claude Code pin on `rust-2` is already 2.1.322, which emits, so
+  no pin bump is needed. The "None expected" work for Claude Code stands, with
+  the reply added.
 - `blocked` carries a `msg`, so the message text is available without the
   screen parser.
+- Codex gating, auth prompt and the pod/hibernate path are open (WI-4331).
 
 ## Work breakdown
 
