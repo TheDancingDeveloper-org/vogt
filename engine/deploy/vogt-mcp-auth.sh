@@ -46,6 +46,42 @@ if [[ -n "${VOGT_HTTP_TOKEN:-}" || -s "${VOGT_TOKEN_FILE:-}" ]]; then
         vogt-mcp-remote "$@"
 fi
 
-exec /usr/local/bin/vogt-agent-auth run -- env \
+readonly AGENT_AUTH="${VOGT_AGENT_AUTH:-/usr/local/bin/vogt-agent-auth}"
+
+die() {
+    printf 'vogt-mcp: %s\n' "$*" >&2
+    exit 64
+}
+
+# No token in hand. An engine session can still ask the engine's secret broker
+# on loopback (WI-4310): a `claude` started by hand in a shell that lost the
+# session's token — a sub-shell under `env -i`, a sudo, a tmux server started
+# elsewhere — still carries the broker's address and grant, and the broker
+# needs no secrets manager. This is how `vogt-prod-mcp` gets its token. The
+# value goes into this process's environment, never argv or a file.
+if [[ -n "${VOGT_ENGINE_BROKER_URL:-${VOGT_ENGINE_URL:-}}" \
+    && -n "${VOGT_ENGINE_BROKER_TOKEN:-}${VOGT_ENGINE_BROKER_TOKEN_FILE:-}${VOGT_SESSION_TOKEN_FILE:-}" ]]; then
+    if token="$("$AGENT_AUTH" fetch VOGT_HTTP_TOKEN)"; then
+        token="${token//[$'\r\n\t ']/}"
+        if [[ -n "$token" ]]; then
+            export VOGT_HTTP_TOKEN="$token"
+            unset token
+            exec env \
+                VOGT_URL="${VOGT_URL:-$VOGT_URL_DEFAULT}" \
+                vogt-mcp-remote "$@"
+        fi
+    fi
+    printf 'vogt-mcp: the engine broker has no VOGT_HTTP_TOKEN for this session\n' >&2
+fi
+
+# Last resort: a container that holds the secrets-manager identity mints the
+# token itself. A brokered deployment strips that identity by design, so
+# without it there is nothing left to try; say what is missing rather than
+# letting the broker fail on an unset INFISICAL_API_URL.
+if [[ -z "${INFISICAL_API_URL:-}" || -z "${INFISICAL_CLIENT_ID:-}" || -z "${INFISICAL_CLIENT_SECRET:-}" ]]; then
+    die "no Vogt token: VOGT_HTTP_TOKEN and VOGT_TOKEN_FILE are unset, the engine broker gave none, and there is no secrets-manager identity. Start the agent from the session's own shell, which exports its token."
+fi
+
+exec "$AGENT_AUTH" run -- env \
     VOGT_URL="${VOGT_URL:-$VOGT_URL_DEFAULT}" \
     vogt-mcp-remote "$@"
