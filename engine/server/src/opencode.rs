@@ -24,18 +24,25 @@
 //! into the core the way transcript directories are. The engine opens it
 //! read-only, reads one session's assistant text and nothing else, and the
 //! core redacts it before it is shown.
+//!
+//! **Pods.** A pod's opencode keeps its store inside the pod. Its session
+//! agent reads the assistant text out of it with the same reader
+//! (`vogt_session_agent::opencode_store`) and posts only that to
+//! [`REPLIES_ROUTE`]; the engine redacts it and keeps it beside the session's
+//! hibernation record, where `/replies` reads it (WI-4291).
 
 use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
 
-use serde::Serialize;
-use sqlx::{
-    sqlite::{SqliteConnectOptions, SqliteJournalMode},
-    ConnectOptions, Connection, Row, SqliteConnection,
-};
+use sqlx::{Connection, Row};
 use uuid::Uuid;
+
+use vogt_session_agent::opencode_store::{cut, open};
+pub use vogt_session_agent::opencode_store::{
+    db_path, last_replies, RepliesUpload, Reply, MAX_REPLIES, REPLIES_ROUTE,
+};
 
 /// How long a fresh opencode session's id is looked for after spawn. The
 /// first prompt is written within seconds; a TUI that never got that far has
@@ -43,22 +50,6 @@ use uuid::Uuid;
 pub const CAPTURE_FOR: Duration = Duration::from_secs(120);
 /// How often the store is asked while looking.
 pub const CAPTURE_EVERY: Duration = Duration::from_secs(1);
-/// Most replies one read returns.
-pub const MAX_REPLIES: usize = 20;
-/// How many recent messages are scanned for assistant text.
-const SCAN_MESSAGES: i64 = 200;
-/// One reply is cut here, as the core cuts a transcript reply.
-const MAX_REPLY_CHARS: usize = 20_000;
-
-/// Where opencode keeps its database for a user whose home is `home`.
-pub fn db_path(home: &Path) -> PathBuf {
-    std::env::var_os("XDG_DATA_HOME")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(".local").join("share"))
-        .join("opencode")
-        .join("opencode.db")
-}
 
 /// The XDG root the engine gives one host opencode session when its own data
 /// home is not writable (WI-4284): `data`, `state` and `cache` live under it.
@@ -116,22 +107,6 @@ pub fn db_path_for(state_dir: &Path, id: Uuid, home: &Path) -> PathBuf {
         return own.join("opencode").join("opencode.db");
     }
     db_path(home)
-}
-
-async fn open(db: &Path) -> Option<SqliteConnection> {
-    if !db.is_file() {
-        return None;
-    }
-    SqliteConnectOptions::new()
-        .filename(db)
-        .read_only(true)
-        // Never change the journal mode of somebody else's database.
-        .journal_mode(SqliteJournalMode::Wal)
-        .busy_timeout(Duration::from_secs(2))
-        .disable_statement_logging()
-        .connect()
-        .await
-        .ok()
 }
 
 /// How the id was found, for the log.
@@ -198,75 +173,123 @@ pub async fn find_session(
         .map(|id| (id, Basis::Directory))
 }
 
-/// One assistant message's text.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct Reply {
-    pub text: String,
-    /// When opencode recorded the message (RFC 3339).
-    pub at: Option<String>,
+/// The most a pod's reply upload may be: [`MAX_REPLIES`] replies of
+/// [`vogt_session_agent::opencode_store::MAX_REPLY_CHARS`] characters, with
+/// room for JSON escaping.
+const MAX_UPLOAD_BYTES: usize = 2 * 1024 * 1024;
+/// Uploads one pod may make a minute. Its agent posts when the store changes,
+/// at most about once a second.
+const UPLOADS_PER_MINUTE: u32 = 120;
+
+/// The replies a pod's agent sent, made fit to keep: the last
+/// [`MAX_REPLIES`], each cut and redacted. `None` when the conversation id
+/// is not one.
+pub fn sanitize_upload(upload: RepliesUpload) -> Option<RepliesUpload> {
+    if !crate::agent_cli::is_conversation_id(&upload.conversation_id) {
+        return None;
+    }
+    let skip = upload.replies.len().saturating_sub(MAX_REPLIES);
+    let replies = upload
+        .replies
+        .into_iter()
+        .skip(skip)
+        .map(|reply| Reply {
+            text: crate::redaction::redact(&cut(reply.text)),
+            at: reply.at.filter(|at| at.len() <= 64),
+        })
+        .collect();
+    Some(RepliesUpload {
+        conversation_id: upload.conversation_id,
+        replies,
+    })
 }
 
-/// The last `n` assistant replies of opencode session `id`, oldest first.
-pub async fn last_replies(db: &Path, id: &str, n: usize) -> Option<Vec<Reply>> {
-    let mut conn = open(db).await?;
-    let messages = sqlx::query(
-        "SELECT id, time_created, data FROM message WHERE session_id = ?1 \
-         ORDER BY time_created DESC LIMIT ?2",
-    )
-    .bind(id)
-    .bind(SCAN_MESSAGES)
-    .fetch_all(&mut conn)
-    .await
-    .ok()?;
-    let mut replies = Vec::new();
-    for row in messages {
-        if replies.len() >= n.min(MAX_REPLIES) {
-            break;
-        }
-        let data: String = row.try_get(2).unwrap_or_default();
-        let role = serde_json::from_str::<serde_json::Value>(&data)
-            .ok()
-            .and_then(|v| v.get("role").and_then(|r| r.as_str()).map(str::to_string));
-        if role.as_deref() != Some("assistant") {
-            continue;
-        }
-        let message_id: String = row.try_get(0).unwrap_or_default();
-        let created: i64 = row.try_get(1).unwrap_or_default();
-        let parts =
-            sqlx::query("SELECT data FROM part WHERE message_id = ?1 ORDER BY time_created")
-                .bind(&message_id)
-                .fetch_all(&mut conn)
-                .await
-                .unwrap_or_default();
-        let text: String = parts
-            .iter()
-            .filter_map(|p| p.try_get::<String, _>(0).ok())
-            .filter_map(|d| serde_json::from_str::<serde_json::Value>(&d).ok())
-            .filter(|v| v.get("type").and_then(|t| t.as_str()) == Some("text"))
-            .filter_map(|v| v.get("text").and_then(|t| t.as_str()).map(str::to_string))
-            .collect::<Vec<_>>()
-            .join("\n")
-            .trim()
-            .to_string();
-        if text.is_empty() {
-            continue;
-        }
-        let text = if text.chars().count() > MAX_REPLY_CHARS {
-            text.chars().take(MAX_REPLY_CHARS).collect::<String>() + "…"
-        } else {
-            text
-        };
-        let at = time::OffsetDateTime::from_unix_timestamp_nanos(created as i128 * 1_000_000)
-            .ok()
-            .and_then(|t| {
-                t.format(&time::format_description::well_known::Rfc3339)
-                    .ok()
-            });
-        replies.push(Reply { text, at });
+/// Keep a pod session's replies, replacing the last ones.
+pub fn store_pod_replies(
+    state_dir: &Path,
+    id: Uuid,
+    upload: &RepliesUpload,
+) -> std::io::Result<()> {
+    let json = serde_json::to_vec(upload).map_err(std::io::Error::other)?;
+    crate::hibernation::write_replies(state_dir, id, &json)
+}
+
+/// A pod session's kept replies, when its agent has sent any.
+pub fn pod_replies(state_dir: &Path, id: Uuid) -> Option<RepliesUpload> {
+    let bytes = crate::hibernation::read_replies(state_dir, id)?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// `POST /api/agent-auth/store/bundle/opencode-replies` — a pod opencode's
+/// last assistant replies, from its session agent (WI-4291). Only a pod's
+/// stream credential opens it, and it names the session. The body is a
+/// [`RepliesUpload`] and nothing else: a message with any other field is
+/// refused, so no credential, environment or tool payload can ride along.
+/// The text is redacted before it is kept, and the conversation is recorded
+/// on the session so `session.last_reply` asks for it.
+pub async fn upload_pod_replies(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<crate::app::AppState>>,
+    request: axum::extract::Request<axum::body::Body>,
+) -> axum::response::Response {
+    use axum::{http::header, response::IntoResponse};
+    let presented = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_owned);
+    // A pod's stream credential only: a host opencode's store is read in
+    // place, so a host session has nothing to send here.
+    let session = match presented {
+        Some(token) => state.agent_auth.session_for_token(token.as_bytes()).await,
+        None => None,
+    };
+    let Some(id) = session.filter(|id| state.sessions.get(*id).is_ok()) else {
+        return crate::error::ApiError::Unauthorized.into_response();
+    };
+    if let Some(retry_after) = state
+        .auth
+        .check_mutation_rate_limit(&format!("opencode-replies:{id}"), UPLOADS_PER_MINUTE)
+    {
+        return (
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            [(
+                header::RETRY_AFTER,
+                retry_after.as_secs().max(1).to_string(),
+            )],
+            axum::Json(serde_json::json!({"error": "opencode replies rate limit exceeded"})),
+        )
+            .into_response();
     }
-    let _ = conn.close().await;
-    replies.reverse();
-    Some(replies)
+    let Ok(body) = axum::body::to_bytes(request.into_body(), MAX_UPLOAD_BYTES).await else {
+        return crate::error::ApiError::BadRequest("opencode replies are too large".into())
+            .into_response();
+    };
+    let Some(upload) = serde_json::from_slice::<RepliesUpload>(&body)
+        .ok()
+        .and_then(sanitize_upload)
+    else {
+        return crate::error::ApiError::BadRequest("invalid opencode replies".into())
+            .into_response();
+    };
+    if let Err(e) = store_pod_replies(state.sessions.state_dir(), id, &upload) {
+        tracing::warn!(session = %id, error = %e, "could not keep the pod's opencode replies");
+        return crate::error::ApiError::Internal("could not keep the replies".into())
+            .into_response();
+    }
+    let _ = state.sessions.report_conversation(
+        id,
+        vogt_engine_contract::ConversationReport {
+            agent: "opencode".into(),
+            id: upload.conversation_id.clone(),
+            ended: false,
+        },
+    );
+    tracing::info!(target: "vogt::audit", session_id = %id, replies = upload.replies.len(),
+        "pod opencode replies kept");
+    axum::Json(serde_json::json!({"ok": true, "replies": upload.replies.len()})).into_response()
 }
 
 /// How long the list of models opencode can run is trusted.
@@ -352,6 +375,10 @@ pub fn check_model(model: &str, known: &[String]) -> std::result::Result<(), Str
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sqlx::{
+        sqlite::{SqliteConnectOptions, SqliteJournalMode},
+        ConnectOptions,
+    };
 
     #[test]
     fn an_unwritable_home_gives_the_session_its_own_xdg_dirs() {
@@ -499,52 +526,6 @@ mod tests {
             find_session(&db, Uuid::new_v4(), "/w/none", 50000, &[]).await,
             None
         );
-    }
-
-    #[tokio::test]
-    async fn last_replies_are_the_assistant_text_oldest_first() {
-        let tmp = tempfile::tempdir().unwrap();
-        let db = store(tmp.path()).await;
-        for (mid, at, role) in [
-            ("m1", "1000", "user"),
-            ("m2", "2000", "assistant"),
-            ("m3", "3000", "assistant"),
-            ("m4", "4000", "assistant"),
-        ] {
-            exec(
-                &db,
-                "INSERT INTO message VALUES (?1, 'ses_1', CAST(?2 AS INTEGER), ?3)",
-                &[mid, at, &format!("{{\"role\":\"{role}\"}}")],
-            )
-            .await;
-        }
-        let parts: [(&str, &str, &str); 5] = [
-            ("p1", "m1", r#"{"type":"text","text":"do the thing"}"#),
-            ("p2", "m2", r#"{"type":"text","text":"first reply"}"#),
-            ("p3", "m3", r#"{"type":"tool","tool":"bash"}"#),
-            ("p4", "m4", r#"{"type":"text","text":"last reply"}"#),
-            ("p5", "m4", r#"{"type":"text","text":"second paragraph"}"#),
-        ];
-        for (pid, mid, data) in parts {
-            exec(
-                &db,
-                "INSERT INTO part VALUES (?1, ?2, 'ses_1', 1, ?3)",
-                &[pid, mid, data],
-            )
-            .await;
-        }
-        let replies = last_replies(&db, "ses_1", 5).await.unwrap();
-        let texts: Vec<&str> = replies.iter().map(|r| r.text.as_str()).collect();
-        assert_eq!(texts, ["first reply", "last reply\nsecond paragraph"]);
-        assert!(replies[1]
-            .at
-            .as_deref()
-            .unwrap()
-            .starts_with("1970-01-01T00:00:04"));
-        assert_eq!(last_replies(&db, "ses_1", 1).await.unwrap().len(), 1);
-        assert!(last_replies(&tmp.path().join("absent.db"), "x", 1)
-            .await
-            .is_none());
     }
 
     #[test]
