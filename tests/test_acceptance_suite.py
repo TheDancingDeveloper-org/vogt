@@ -503,3 +503,68 @@ def test_suite_docs_the_fake_verification() -> None:
     docs = (REPO / "docs" / "ACCEPTANCE.md").read_text("utf-8")
     for needle in ("--fake", "token", "known_issues.toml", "tests/acceptance"):
         assert needle in docs
+
+
+class _TemplateClient:
+    """A client whose Claude pod starts, and answers or stays silent."""
+
+    def __init__(self, replies: list[str]) -> None:
+        self.secrets: tuple[str, ...] = ()
+        self.replies = replies
+        self.stopped: list[str] = []
+        self.tasks: list[str] = []
+
+    def tool(
+        self, name: str, arguments: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        arguments = arguments or {}
+        if name == "session_template_list":
+            return {
+                "templates": [
+                    {"name": "Claude Code (protected)", "agent": "claude"},
+                ]
+            }
+        if name == "session_start":
+            self.tasks.append(str(arguments.get("task")))
+            return {"id": "ses_claude_probe"}
+        if name == "session_last_reply":
+            return {"messages": [{"text": text} for text in self.replies]}
+        if name == "session_screen":
+            return {"lines": ["Not logged in · Run /login"]}
+        if name == "session_log_tail":
+            return {"text": ""}
+        if name == "session_stop":
+            self.stopped.append(str(arguments.get("id")))
+        return {}
+
+
+def _run_s15(client: _TemplateClient, monkeypatch: pytest.MonkeyPatch) -> harness.Check:
+    from tests.acceptance.checks import sessions
+
+    monkeypatch.setattr(sessions, "AGENT_REPLY_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(sessions.time, "sleep", lambda _seconds: None)
+    options = harness.Options(fake=True, with_sessions=True)
+    ctx = harness.Context(client, options, "acceptance-s15")
+    return sessions.claude_template(ctx)
+
+
+def test_s15_fails_a_claude_pod_that_starts_but_never_answers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """WI-4284: S15 passed while every dev Claude pod was logged out."""
+    client = _TemplateClient(replies=[])
+    check = _run_s15(client, monkeypatch)
+    assert check.verdict == "FAIL", check
+    assert "PONG" in check.evidence
+    assert "Not logged in" in check.evidence
+    assert client.stopped == ["ses_claude_probe"]
+    assert "PONG" in client.tasks[0]
+
+
+def test_s15_passes_a_claude_pod_that_replies_pong(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _TemplateClient(replies=["PONG"])
+    check = _run_s15(client, monkeypatch)
+    assert check.verdict == "PASS", check
+    assert client.stopped == ["ses_claude_probe"]
