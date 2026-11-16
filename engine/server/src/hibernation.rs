@@ -297,6 +297,11 @@ fn screen_path(state_dir: &Path, id: Uuid) -> PathBuf {
     dir(state_dir).join(format!("{id}.screen"))
 }
 
+/// A pod opencode's last assistant replies, as its agent sent them (WI-4291).
+fn replies_path(state_dir: &Path, id: Uuid) -> PathBuf {
+    dir(state_dir).join(format!("{id}.replies"))
+}
+
 /// Replace `path` with `bytes`: written to a sibling temp file (0600) and
 /// renamed over it, so a reader sees the old or the new, never a torn one.
 fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
@@ -346,10 +351,20 @@ pub fn remove_screen(state_dir: &Path, id: Uuid) {
     let _ = std::fs::remove_file(screen_path(state_dir, id));
 }
 
-/// Forget a session: its record and its kept screen.
+pub fn write_replies(state_dir: &Path, id: Uuid, bytes: &[u8]) -> std::io::Result<()> {
+    write_atomic(&replies_path(state_dir, id), bytes)
+}
+
+/// A pod session's kept replies, when it has any.
+pub fn read_replies(state_dir: &Path, id: Uuid) -> Option<Vec<u8>> {
+    std::fs::read(replies_path(state_dir, id)).ok()
+}
+
+/// Forget a session: its record, its kept screen and its kept replies.
 pub fn remove(state_dir: &Path, id: Uuid) {
     let _ = std::fs::remove_file(record_path(state_dir, id));
     remove_screen(state_dir, id);
+    let _ = std::fs::remove_file(replies_path(state_dir, id));
 }
 
 /// Every readable record. One that cannot be parsed is logged and left in

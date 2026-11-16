@@ -691,7 +691,10 @@ impl Config {
 fn opencode_store_marker(db: &Path) -> Option<[u8; 32]> {
     let mut hasher = Sha256::new();
     let mut any = false;
-    for path in [db.to_path_buf(), PathBuf::from(format!("{}-wal", db.display()))] {
+    for path in [
+        db.to_path_buf(),
+        PathBuf::from(format!("{}-wal", db.display())),
+    ] {
         if let Ok(meta) = std::fs::metadata(&path) {
             any = true;
             hasher.update(meta.len().to_le_bytes());
@@ -747,10 +750,22 @@ async fn send_opencode_replies(
     if seen.get(db).copied() == Some(marker) {
         return true;
     }
-    let Some(upload) = opencode_store::replies_upload(db, &config.session_id).await else {
+    let upload = opencode_store::replies_upload(db, &config.session_id).await;
+    // Reading a WAL store touches its `-wal` and `-shm` files, so the store
+    // is stamped as it is after the read, and what was sent is kept by its
+    // content: an unchanged reply is not posted again.
+    if let Some(after) = opencode_store_marker(db) {
+        seen.insert(db.to_path_buf(), after);
+    }
+    let Some(upload) = upload.filter(|u| !u.replies.is_empty()) else {
         return true;
     };
-    if upload.replies.is_empty() {
+    let Ok(json) = serde_json::to_vec(&upload) else {
+        return true;
+    };
+    let content = bundle_marker(&json);
+    let sent_key = PathBuf::from(format!("{}#sent", db.display()));
+    if seen.get(&sent_key).copied() == Some(content) {
         return true;
     }
     // The stream credential must only ever go to the engine: no proxy.
@@ -762,17 +777,21 @@ async fn send_opencode_replies(
     let Ok(reply) = client
         .post(&url)
         .bearer_auth(&config.token)
-        .json(&upload)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(json)
         .send()
         .await
     else {
+        seen.remove(db);
         return false;
     };
     let status = reply.status();
-    // A refusal the engine would give again for the same store is final until
-    // the store changes; a rate limit or a server fault is tried again.
-    if !(status.as_u16() == 429 || status.is_server_error()) {
-        seen.insert(db.to_path_buf(), marker);
+    // A refusal the engine would give again for the same replies is final
+    // until they change; a rate limit or a server fault is tried again.
+    if status.as_u16() == 429 || status.is_server_error() {
+        seen.remove(db);
+    } else {
+        seen.insert(sent_key, content);
     }
     status.is_success()
 }
@@ -2648,6 +2667,46 @@ mod tests {
             codex: CodexLaunch::default(),
             opencode_mcp_config: None,
         }
+    }
+
+    /// WI-4291: only an opencode pod reads opencode's store and posts to the
+    /// reply route; a Claude or Codex pod's flush never does, even beside a
+    /// store, and an opencode pod posts once per change of the store.
+    #[tokio::test]
+    async fn only_an_opencode_pod_ships_opencode_replies() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let accepts = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let counted = accepts.clone();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let mut buf = vec![0u8; 64 * 1024];
+                let _ = tokio::io::AsyncReadExt::read(&mut socket, &mut buf).await;
+                let _ = tokio::io::AsyncWriteExt::write_all(
+                    &mut socket,
+                    b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}",
+                )
+                .await;
+            }
+        });
+        let tmp = tempfile::tempdir().unwrap();
+        let db = opencode_store::tests::pod_store(tmp.path(), "s", "PONG").await;
+        let tls = tls_config().unwrap();
+        for cli in ["claude", "codex"] {
+            let mut config = kill_config(format!("http://{address}"));
+            config.cli = cli.into();
+            let mut seen = std::collections::HashMap::new();
+            assert!(flush_opencode_replies(&config, &tls, &mut seen).await);
+            assert!(seen.is_empty(), "{cli}");
+        }
+        assert_eq!(accepts.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let mut config = kill_config(format!("http://{address}"));
+        config.cli = "opencode".into();
+        let mut seen = std::collections::HashMap::new();
+        assert!(send_opencode_replies(&config, &tls, &db, &mut seen).await);
+        assert!(send_opencode_replies(&config, &tls, &db, &mut seen).await);
+        assert_eq!(accepts.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     // WI-3319 B1: a kill ends run() itself, even when the Exited frame cannot
