@@ -914,6 +914,9 @@ def test_driven_session_pre_approves_only_the_trusted_servers(tmp_path: Path) ->
     first = config.read_text(encoding="utf-8")
     servers = tomllib.loads(first)["mcp_servers"]
     for name in trusted:
+        if name == "cadastre":  # read tools only, see WI-4288
+            assert "default_tools_approval_mode" not in servers[name]
+            continue
         assert servers[name]["default_tools_approval_mode"] == "approve", name
     assert "default_tools_approval_mode" not in servers["komodo"]
     assert "default_tools_approval_mode" not in servers["other"]
@@ -1095,7 +1098,9 @@ def test_vogt_table_gets_timeouts_and_exactly_the_self_tool_approvals(
             "work_comment",
         )
     }
-    assert "tools" not in servers["cadastre"]
+    # Cadastre has write tools: read tools only, never a blanket (WI-4288).
+    assert "add" not in servers["cadastre"]["tools"]
+    assert servers["cadastre"]["tools"]["lookup"] == {"approval_mode": "approve"}
 
     again = _codex_bootstrap(tmp_path, {})
     assert again.returncode == 0, again.stderr

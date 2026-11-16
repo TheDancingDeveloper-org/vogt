@@ -197,6 +197,14 @@ readonly_wanted() {
     return 0
 }
 
+# Cadastre tools that only read. Codex pre-approves exactly these, per tool;
+# the write tools (add, update, annotate, accept, acknowledge, leave_contested
+# and any later one) keep the normal approval prompt (WI-4288). A pinned list,
+# because the bootstrap runs before any server is connected and cannot read the
+# tool annotations; a new read tool needs a line here.
+readonly CADASTRE_READ_TOOLS="${CADASTRE_READ_TOOLS:-lookup brief check context_for credential_for dns_chain drift observations manifest_backlog manifest_brief manifest_drift manifest_next manifest_repo manifest_why question secret_describe version}"
+export CADASTRE_READ_TOOLS
+
 # Write one read-only server table into Codex's config.toml (GitHub #914).
 #
 # Several sessions start at once, and each used to check then append (`>>`)
@@ -233,11 +241,16 @@ def approval_row(source: str) -> str:
     # This writer replaces its own table whole, so an operator's explicit mode
     # has to be read first and carried into the new block (WI-1634). Without
     # that, every start would turn a "prompt" back into "approve".
+    # Cadastre has write tools, so it never gets a blanket "approve" (WI-4288):
+    # its read tools are approved one by one below.
+    blanket = name != "cadastre"
     for row in source.splitlines():
         head = row.split("#", 1)[0]
         if head.split("=", 1)[0].strip() == "default_tools_approval_mode":
+            if not blanket and head.split("=", 1)[1].strip() == '"approve"':
+                return ""
             return row if row.endswith("\n") else row + "\n"
-    return 'default_tools_approval_mode = "approve"\n'
+    return 'default_tools_approval_mode = "approve"\n' if blanket else ""
 try:
     with open(path, encoding="utf-8") as fh:
         text = fh.read()
@@ -264,7 +277,7 @@ existing = ""
 index = 0
 while index < len(lines):
     stripped = lines[index].strip()
-    if stripped == header or stripped.startswith(header + "."):
+    if stripped == header or stripped.startswith(header[:-1] + "."):
         index += 1
         while index < len(lines) and not lines[index].lstrip().startswith("["):
             if stripped == header:
@@ -287,6 +300,9 @@ block = (
     f'env_vars = [{os.environ["CODEX_VARS"]}]\n'
     f"{approval_row(existing)}"
 )
+if name == "cadastre":
+    for tool in os.environ.get("CADASTRE_READ_TOOLS", "").split():
+        block += f'\n[mcp_servers.cadastre.tools.{tool}]\napproval_mode = "approve"\n'
 body = "".join(kept).rstrip("\n")
 new = f"{body}\n\n{block}" if body else block
 if new == text:
@@ -997,6 +1013,9 @@ lines = text.splitlines(keepends=True)
 existing_vogt_tools = (
     parsed_existing.get("mcp_servers", {}).get("vogt", {}).get("tools", {})
 )
+existing_cadastre_tools = (
+    parsed_existing.get("mcp_servers", {}).get("cadastre", {}).get("tools", {})
+)
 out: list[str] = []
 index = 0
 seen_tables: set[str] = set()
@@ -1050,7 +1069,16 @@ while index < len(lines):
             out.pop()
         # Before the cap, which is always lifted and re-appended last: the
         # other order would move a line on every run and rewrite the file.
-        if not approval:
+        if server == "cadastre":
+            # No blanket approval (WI-4288): drop one an older start wrote.
+            out[:] = [
+                r for r in out
+                if not (
+                    key_of(r) == "default_tools_approval_mode"
+                    and r.split("#", 1)[0].split("=", 1)[1].strip() == '"approve"'
+                )
+            ]
+        elif not approval:
             out.append(APPROVAL_ROW)
         if server == "vogt":
             for key, wanted_value in (
@@ -1091,6 +1119,16 @@ while index < len(lines):
                 header = f"[mcp_servers.vogt.tools.{tool}]"
                 if tool not in existing_vogt_tools:
                     out.extend(["\n", header + "\n", 'approval_mode = "approve"\n'])
+        if server == "cadastre":
+            for tool in os.environ.get("CADASTRE_READ_TOOLS", "").split():
+                if tool not in existing_cadastre_tools:
+                    out.extend(
+                        [
+                            "\n",
+                            f"[mcp_servers.cadastre.tools.{tool}]\n",
+                            'approval_mode = "approve"\n',
+                        ]
+                    )
         if index < len(lines) and header_line(lines[index]):
             out.append("\n")
         continue
