@@ -337,6 +337,12 @@ pub struct VogtConfig {
     pub forge_token_files: BTreeMap<String, PathBuf>,
     pub agent_activity_roots: BTreeMap<String, PathBuf>,
     pub session_transcript_roots: BTreeMap<String, PathBuf>,
+    /// The engine's Claude account config directories
+    /// (`ENGINE_AGENT_CLAUDE_ACCOUNTS`, `name=/abs/dir,...`). A pod Claude
+    /// session's transcript is written back under `<dir>/projects`, so the
+    /// transcript lookups search there after the Claude root (WI-4286). Not a
+    /// setting: the engine's own variable, read as the engine reads it.
+    pub claude_account_dirs: Vec<PathBuf>,
     pub agent_activity_max_bytes_per_sweep: i64,
     pub agent_activity_services: BTreeMap<String, String>,
     pub engine_url: Option<String>,
@@ -492,6 +498,7 @@ impl Default for VogtConfig {
             forge_token_files: BTreeMap::new(),
             agent_activity_roots: BTreeMap::new(),
             session_transcript_roots: default_session_roots(),
+            claude_account_dirs: Vec::new(),
             agent_activity_max_bytes_per_sweep: 32 * 1024 * 1024,
             agent_activity_services: BTreeMap::new(),
             engine_url: None,
@@ -606,7 +613,29 @@ pub fn load_config(overrides: &Map<String, Value>) -> Result<VogtConfig, String>
     for warning in ignored_setting_warnings(&merged) {
         eprintln!("vogt-core config: warning: {warning}");
     }
-    config_from_map(&merged)
+    let mut config = config_from_map(&merged)?;
+    config.claude_account_dirs = claude_account_dirs(env::var(CLAUDE_ACCOUNTS_ENV).ok().as_deref());
+    Ok(config)
+}
+
+/// The engine's Claude accounts variable; see `VogtConfig::claude_account_dirs`.
+pub const CLAUDE_ACCOUNTS_ENV: &str = "ENGINE_AGENT_CLAUDE_ACCOUNTS";
+
+/// The directories of `name=/abs/dir` pairs, comma-separated. An entry the
+/// engine would skip (no `=`, a relative directory) is skipped here too.
+pub fn claude_account_dirs(value: Option<&str>) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    for entry in value.unwrap_or_default().split(',') {
+        let Some((name, dir)) = entry.split_once('=') else {
+            continue;
+        };
+        let dir = PathBuf::from(dir.trim());
+        if name.trim().is_empty() || !dir.is_absolute() || dirs.contains(&dir) {
+            continue;
+        }
+        dirs.push(dir);
+    }
+    dirs
 }
 
 /// Warnings for settings this build accepts but cannot act on yet.
@@ -2418,5 +2447,19 @@ mod tests {
             ["setting \"cold_wake_compaction\" is ignored by this build; tracked by WI-2588"]
         );
         assert!(!warnings.join("\n").contains("do-not-print-me"));
+    }
+
+    #[test]
+    fn claude_account_dirs_are_read_as_the_engine_reads_them() {
+        assert_eq!(
+            claude_account_dirs(Some(
+                " acct2=/var/lib/vogt/claude-accounts/acct2 ,bad,rel=x,b=/b,c=/b"
+            )),
+            vec![
+                PathBuf::from("/var/lib/vogt/claude-accounts/acct2"),
+                PathBuf::from("/b")
+            ]
+        );
+        assert!(claude_account_dirs(None).is_empty());
     }
 }
