@@ -957,21 +957,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         throttle_reset();
-        let dir = std::env::temp_dir().join(format!("vogt-login-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let mut clock = None;
-        let mut ids = None;
-        crate::application::instance::init(&dir, &mut clock, &mut ids).unwrap();
-        let mut config = crate::config::VogtConfig::default();
-        config = crate::config::VogtConfig {
-            data_dir: dir.clone(),
-            ..config
-        };
-        let built = crate::application::context::build_context(
-            config, None, None, None, None, None, None, None,
-        )
-        .unwrap();
+        let (dir, built) = fresh("wrong-then-right");
         let created = create_user_op(
             &built,
             serde_json::json!({
