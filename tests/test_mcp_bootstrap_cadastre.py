@@ -447,3 +447,28 @@ def test_cadastre_leaves_earlier_servers_and_their_tool_settings_alone(
     )
     assert servers["cadastre"].get("default_tools_approval_mode") != "approve"
     assert servers["cadastre"]["tools"]["lookup"]["approval_mode"] == "approve"
+
+
+@pytest.mark.parametrize("header", ['"lookup"', "lookup"])
+def test_an_existing_tool_table_stays_single_whatever_its_header(
+    tmp_path: Path, header: str
+) -> None:
+    codex = tmp_path / ".codex"
+    codex.mkdir()
+    (codex / "config.toml").write_text(
+        '[mcp_servers.cadastre]\ncommand = "/usr/local/bin/cadastre-mcp"\n'
+        "args = []\n\n"
+        f"[mcp_servers.cadastre.tools.{header}]\n"
+        'approval_mode = "prompt"\n',
+        encoding="utf-8",
+    )
+    env = {"CADASTRE_MCP_URL": URL, "CADASTRE_HTTP_TOKEN": TOKEN}
+    bootstrap(tmp_path, env)
+    bootstrap(tmp_path, env)
+    text = (codex / "config.toml").read_text(encoding="utf-8")
+    tomllib.loads(text)  # a duplicate table would not parse
+    assert text.count("tools.lookup]") + text.count('tools."lookup"]') == 1
+    assert (
+        codex_servers(tmp_path)["cadastre"]["tools"]["lookup"]["approval_mode"]
+        == "prompt"
+    )
