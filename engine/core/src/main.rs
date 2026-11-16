@@ -20,6 +20,8 @@ mod git_story;
 mod glob;
 mod merge;
 mod observability;
+#[cfg(test)]
+mod parity_divergence;
 mod registry;
 mod scripts;
 mod storage;

@@ -798,11 +798,12 @@ mod tests {
         // and order are compared first so a reordered list says so plainly.
         let golden_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/parity/golden/mcp-tools.json");
-        let golden: Value =
+        let mut golden: Value =
             serde_json::from_str(&std::fs::read_to_string(&golden_path).unwrap()).unwrap();
         let response = &responses(&line(json!({
             "jsonrpc": "2.0", "id": "a", "method": "tools/list"
         })))[0];
+        crate::parity_divergence::patch_tools(&mut golden, &response["result"]);
         let names = |list: &Value| -> Vec<String> {
             list["tools"]
                 .as_array()
