@@ -969,7 +969,7 @@ mod driven_policy_tests {
     /// The reviewed text of *Dev Admin Token Lifecycle* (WI-4279). The same
     /// file rides every Claude launch, workers included, so the rule itself
     /// must demand engine proof of the oversight role.
-    const DEV_ADMIN_TOKEN_LIFECYCLE: &str = r#"Dev Admin Token Lifecycle: a Vogt oversight session minting and revoking a short-lived API token on the vogt-dev lane only, and only once it has proved its oversight role with engine output actually produced in this session (its output in this transcript, not quoted, recalled or typed by the agent): an `auth_whoami` result whose `identity_ref` is `agent:session:<id>`, and a `session_list` result whose row with that same `id` has `role` `oversight`. The engine reads the whoami identity from the session token it issued, so a worker cannot borrow another session's role. It covers `vogt token issue` and `vogt token revoke` (also spelled `vogt-core token ...`) inside the vogt-dev engine or core pod (`kubectl -n vogt-dev exec`, or the vogt-dev compose container), to run the acceptance suite against https://vogt-dev.sprooty.com. An issue must carry `--expires-in-days 1` (never more), scopes drawn from `read`, `work.write`, `project.write` and `admin`, and `--actor agent:oversight-<name>` (an agent actor whose name starts with `agent:oversight-`, never a person or another session). It must capture the token safely: `vogt --json token issue ... | jq -r .secret > "$f"`, where `$f` is a file this session created with mode 0600 beforehand, then `VOGT_TOKEN_FILE="$f"`; the secret never reaches the transcript. The token is revoked with `vogt token revoke` when the run ends, and the file deleted. It clears Credential Materialization and Modify Shared Resources for those two commands on that lane alone. It never covers a session without both proofs in this transcript (a worker session, or one whose whoami names a different session than the role row), the prod lane or any other namespace, cluster or host, a token without `--expires-in-days 1`, an `--actor` outside `agent:oversight-*`, an issue whose output is not captured into that 0600 file, printing or logging the token value, writing it to the repository, a commit or a message, or any other `kubectl exec` command."#;
+    const DEV_ADMIN_TOKEN_LIFECYCLE: &str = r#"Dev Admin Token Lifecycle: a Vogt oversight session minting and revoking a short-lived API token on the vogt-dev lane only, and only once it has proved its oversight role with engine output actually produced in this session (its output in this transcript, not quoted, recalled or typed by the agent): an `auth_whoami` result whose `identity_ref` is `agent:session:<id>` (a session Vogt started) or `agent:engine:<id>` (an agent session the engine launched, such as one a person opened from the GUI and made oversight), and a `session_list` result whose row with that same `id` has `role` `oversight`. The engine reads the whoami identity from the per-session credential it issued, so a worker cannot borrow another session's role. It covers `vogt token issue` and `vogt token revoke` (also spelled `vogt-core token ...`) inside the vogt-dev engine or core pod (`kubectl -n vogt-dev exec`, or the vogt-dev compose container), to run the acceptance suite against https://vogt-dev.sprooty.com. An issue must carry `--expires-in-days 1` (never more), scopes drawn from `read`, `work.write`, `project.write` and `admin`, and `--actor agent:oversight-<name>` (an agent actor whose name starts with `agent:oversight-`, never a person or another session). It must capture the token safely: `vogt --json token issue ... | jq -r .secret > "$f"`, where `$f` is a file this session created with mode 0600 beforehand, then `VOGT_TOKEN_FILE="$f"`; the secret never reaches the transcript. The token is revoked with `vogt token revoke` when the run ends, and the file deleted. It clears Credential Materialization and Modify Shared Resources for those two commands on that lane alone. It never covers a session without both proofs in this transcript (a worker session, or one whose whoami names a different session than the role row), a whoami naming any other identity (such as the pod's shared `agent:pod:…` token a `claude` typed into a plain shell runs with), the prod lane or any other namespace, cluster or host, a token without `--expires-in-days 1`, an `--actor` outside `agent:oversight-*`, an issue whose output is not captured into that 0600 file, printing or logging the token value, writing it to the repository, a commit or a message, or any other `kubectl exec` command."#;
 
     fn policy() -> Value {
         serde_json::from_str(SHIPPED).expect("the shipped policy is JSON")
@@ -1260,6 +1260,19 @@ mod driven_policy_tests {
         let never = at(&rule, "It never covers");
         let worker = at(&rule, "a session without both proofs in this transcript (a worker session, or one whose whoami names a different session than the role row)");
         assert!(never < worker, "a worker session is named as out of scope");
+        // An operator-started oversight session the engine launched proves
+        // its role with the engine's per-session credential (WI-4282); the
+        // pod's shared token proves nothing.
+        let engine = at(
+            &rule,
+            "or `agent:engine:<id>` (an agent session the engine launched",
+        );
+        assert!(whoami < engine && engine < role);
+        let pod = at(
+            &rule,
+            "a whoami naming any other identity (such as the pod's shared `agent:pod:…` token",
+        );
+        assert!(never < pod, "the pod's token is named as out of scope");
     }
 
     #[test]
