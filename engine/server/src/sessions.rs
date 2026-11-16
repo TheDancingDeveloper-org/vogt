@@ -674,17 +674,31 @@ impl SessionRegistry {
     }
 
     /// The MCP endpoints a pod-backed session is given: `engine_endpoint` is
-    /// where a pod reaches this engine, which also serves `/mcp`.
+    /// where a pod reaches this engine, which also serves `/mcp`. A remote
+    /// Vogt (`vogt-prod`, WI-4289) is added only when one is configured and
+    /// `vogt_prod_bearer` says the session can get its token.
     pub fn pod_mcp_endpoints(
         &self,
         engine_endpoint: &str,
+        vogt_prod_bearer: bool,
     ) -> crate::session_endpoints::SessionEndpoints {
-        crate::session_endpoints::for_backend(
+        let endpoints = crate::session_endpoints::for_backend(
             "pod",
             self.cfg.bind,
             Some(engine_endpoint),
             self.cfg.cadastre_mcp_url.as_deref(),
-        )
+        );
+        match self.cfg.vogt_prod_mcp_url.as_deref() {
+            Some(origin) if vogt_prod_bearer => {
+                crate::session_endpoints::with_vogt_prod(endpoints, origin)
+            }
+            _ => endpoints,
+        }
+    }
+
+    /// Whether a remote Vogt is configured for pod sessions (WI-4289).
+    pub fn vogt_prod_configured(&self) -> bool {
+        self.cfg.vogt_prod_mcp_url.is_some()
     }
 
     /// Start a session whose process runs in a pod: register the engine's half
