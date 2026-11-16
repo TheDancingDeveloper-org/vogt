@@ -266,6 +266,28 @@ mod tests {
         assert_eq!(&*sb.snapshot(), b"cdefghij");
     }
 
+    /// WI-4290: shedding keeps an aligned tail, frees the rest of the
+    /// allocation, keeps cursors, and caps later growth.
+    #[test]
+    fn shed_keeps_an_aligned_tail_and_returns_the_allocation() {
+        let mut sb = Scrollback::new(1 << 20);
+        for i in 0..20_000 {
+            sb.push(format!("line {i}\n").as_bytes());
+        }
+        let written = sb.total_written();
+        assert!(sb.allocated() > 64 * 1024);
+        sb.shed(1024);
+        assert!(sb.len() <= 1024);
+        assert!(sb.allocated() <= 1024, "{} still allocated", sb.allocated());
+        assert_eq!(sb.total_written(), written);
+        let tail = sb.snapshot();
+        assert!(tail.starts_with(b"line "), "cut on a line start");
+        assert!(tail.ends_with(b"line 19999\n"));
+        assert!(sb.snapshot_since(written - 11).is_some());
+        sb.push(&[b'y'; 4096]);
+        assert!(sb.len() <= 1024 + 1024 / 16);
+    }
+
     #[test]
     fn single_chunk_bigger_than_capacity_keeps_tail() {
         let mut sb = Scrollback::new(4);
