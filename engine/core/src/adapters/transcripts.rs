@@ -142,35 +142,70 @@ pub fn find(
     started_at: Option<SystemTime>,
     allow_cwd_guess: bool,
 ) -> Option<Transcript> {
+    find_in(
+        roots,
+        &[],
+        engine_session_id,
+        command,
+        template,
+        cwd,
+        started_at,
+        allow_cwd_guess,
+    )
+}
+
+/// [`find`], also searching `<dir>/projects` for each Claude account config
+/// directory after the configured Claude root. A pod Claude session's
+/// transcript is written back into its account's directory (WI-4286), not the
+/// core's Claude root.
+#[allow(clippy::too_many_arguments)]
+pub fn find_in(
+    roots: &HashMap<&str, &Path>,
+    claude_accounts: &[PathBuf],
+    engine_session_id: &str,
+    command: Option<&str>,
+    template: Option<&str>,
+    cwd: Option<&str>,
+    started_at: Option<SystemTime>,
+    allow_cwd_guess: bool,
+) -> Option<Transcript> {
     let agents = agent_of(command, template);
     let mut candidates = named_ids(command);
     if is_id(engine_session_id) {
         candidates.push((engine_session_id.to_string(), "engine-id"));
     }
     for agent in agents {
-        let Some(root) = roots.get(agent) else {
-            continue;
-        };
         // Python expands here, so a default of `~/.claude/projects` is a real
         // directory rather than a literal name that never exists.
-        let root = expand_user(root);
-        if !root.is_dir() {
-            continue;
+        let mut searched: Vec<PathBuf> = roots
+            .get(agent)
+            .map(|root| expand_user(root))
+            .into_iter()
+            .collect();
+        if CLAUDE_FORMAT.contains(&agent) {
+            searched.extend(claude_accounts.iter().map(|dir| dir.join("projects")));
         }
-        for (conversation_id, basis) in &candidates {
-            if let Some(path) = by_id(agent, &root, conversation_id) {
-                return Some(Transcript {
-                    agent: agent.to_string(),
-                    path,
-                    conversation_id: conversation_id.clone(),
-                    basis: (*basis).to_string(),
-                });
+        searched.retain(|root| root.is_dir());
+        // Every id on every root first: an exact id in an account directory
+        // beats a guess from the session's directory under the main root.
+        for root in &searched {
+            for (conversation_id, basis) in &candidates {
+                if let Some(path) = by_id(agent, root, conversation_id) {
+                    return Some(Transcript {
+                        agent: agent.to_string(),
+                        path,
+                        conversation_id: conversation_id.clone(),
+                        basis: (*basis).to_string(),
+                    });
+                }
             }
         }
         if allow_cwd_guess {
             if let Some(cwd) = cwd.filter(|c| !c.is_empty()) {
-                if let Some(guessed) = by_cwd(agent, &root, cwd, started_at) {
-                    return Some(guessed);
+                for root in &searched {
+                    if let Some(guessed) = by_cwd(agent, root, cwd, started_at) {
+                        return Some(guessed);
+                    }
                 }
             }
         }

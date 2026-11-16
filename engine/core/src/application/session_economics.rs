@@ -112,8 +112,9 @@ fn economics_in<C: Clock, I: IdFactory>(
         .iter()
         .map(|(agent, root)| (agent.as_str(), root.as_path()))
         .collect();
-    let found = transcripts::find(
+    let found = transcripts::find_in(
         &roots,
+        &ctx.config.claude_account_dirs,
         engine_id,
         live.and_then(|session| session.command.as_deref()),
         declared.and_then(|row| row.template.as_deref()),
