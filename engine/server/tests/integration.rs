@@ -17171,6 +17171,86 @@ async fn summary_of_a_stub_that_prints(body: &str) -> vogt_engine_contract::Sess
     summary
 }
 
+/// WI-4321: the engine answers an OSC 7501 capability query on the PTY's
+/// input, keeps the query out of the replay ring, exposes the program's
+/// report and bell in the summary, and drops both when the process exits.
+#[tokio::test]
+async fn osc7501_query_is_answered_stripped_and_the_report_is_exposed_until_exit() {
+    let reply = vogt_engine_server::osc7501::QUERY_REPLY;
+    let body = format!(
+        "#!/bin/sh\nstty raw -echo\nprintf '\\033]7501;?\\007'\n\
+         reply=$(dd bs=1 count={} 2>/dev/null | od -An -tx1 | tr -d ' \\n')\n\
+         printf 'REPLY=%s\\r\\n' \"$reply\"\n\
+         printf '\\033]7501;state=blocked:kind=permission:app=stub:msg=aGk=\\007'\n\
+         printf '\\a'\nexec sleep 30\n",
+        reply.len()
+    );
+    let tmp = tempfile::tempdir().unwrap();
+    let script = tmp.path().join("agent");
+    std::fs::write(&script, body).unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let spec = vogt_engine_contract::SessionSpec {
+        name: "osc7501".into(),
+        command: Some(vec![script.to_string_lossy().into_owned()]),
+        ..Default::default()
+    };
+    let spawned = vogt_engine_server::pty::spawn(
+        Uuid::new_v4(),
+        &spec,
+        vogt_engine_server::pty::SpawnDefaults {
+            default_shell: "/bin/sh",
+            auto_agent_auth: false,
+            agent_auth_helper: std::path::Path::new("/usr/local/bin/vogt-agent-auth"),
+            default_cwd: tmp.path(),
+            scrollback_bytes: 64 * 1024,
+            activity_idle_after_ms: 200,
+            secret_broker: None,
+            agent_auth_manifest: None,
+            on_exit: None,
+        },
+        vogt_engine_server::events::EventBus::new(64),
+        None,
+    )
+    .unwrap();
+    let session = spawned.session;
+    // Outcome, not timing: wait for the report to appear, bounded.
+    let mut summary = session.summary();
+    for _ in 0..100 {
+        if summary.reported_status.is_some() && summary.attention_hint.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        summary = session.summary();
+    }
+    let status = summary
+        .reported_status
+        .clone()
+        .unwrap_or_else(|| panic!("no reported status: {summary:?}"));
+    assert_eq!(status.state, vogt_engine_contract::ReportedState::Blocked);
+    assert_eq!(status.kind.as_deref(), Some("permission"));
+    assert_eq!(status.app.as_deref(), Some("stub"));
+    assert_eq!(status.msg.as_deref(), Some("hi"));
+    assert_eq!(summary.attention_hint.as_ref().unwrap().source, "bell");
+
+    let ring = String::from_utf8_lossy(&session.tail(8192)).into_owned();
+    let hex: String = reply.iter().map(|b| format!("{b:02x}")).collect();
+    assert!(
+        ring.contains(&format!("REPLY={hex}")),
+        "the engine's reply did not reach the program's input: {ring:?}"
+    );
+    assert!(!ring.contains("7501;?"), "query left in the ring: {ring:?}");
+
+    session.kill().unwrap();
+    for _ in 0..100 {
+        if !session.is_alive() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let after = session.summary();
+    assert!(after.reported_status.is_none() && after.attention_hint.is_none());
+}
+
 #[tokio::test]
 async fn a_resting_session_whose_output_names_a_provider_failure_reads_as_blocked() {
     let summary = summary_of_a_stub_that_prints(

@@ -48,6 +48,7 @@ pub mod mcp_set;
 pub mod metrics;
 pub mod observability;
 pub mod opencode;
+pub mod osc7501;
 pub mod oversight_answer;
 pub mod person_gate;
 pub mod pod_backend;
