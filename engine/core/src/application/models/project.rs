@@ -187,6 +187,17 @@ pub struct ListProjectsParams {
     #[serde(default)]
     #[schemars(range(min = 0))]
     pub offset: i64,
+    /// `summary` (default): compact rows with slug, name, lifecycle_state and link_state. `full`: every project field plus `writable`.
+    #[serde(default)]
+    pub mode: ListMode,
+}
+
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ListMode {
+    #[default]
+    Summary,
+    Full,
 }
 
 /// A project, plus whether an explicit upstream create would land now.
@@ -201,10 +212,28 @@ pub struct ProjectListing {
     pub writable_reason: String,
 }
 
+/// A compact `project.list` row (`mode=summary`).
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectSummary {
+    pub slug: String,
+    pub name: String,
+    pub lifecycle_state: String,
+    pub link_state: String,
+}
+
+/// One `project.list` row: compact, or the full listing.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum ProjectRow {
+    Summary(ProjectSummary),
+    Full(Box<ProjectListing>),
+}
+
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectListResult {
-    pub projects: Vec<ProjectListing>,
+    pub projects: Vec<ProjectRow>,
     pub total: i64,
 }
 
