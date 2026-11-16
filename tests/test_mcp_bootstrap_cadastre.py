@@ -361,3 +361,60 @@ def test_wrapper_refuses_when_the_broker_has_nothing(tmp_path: Path) -> None:
     assert proc.returncode == 64
     assert proc.stdout == ""
     assert bridge is None
+
+
+READ_TOOLS = (
+    "lookup",
+    "brief",
+    "check",
+    "context_for",
+    "credential_for",
+    "dns_chain",
+    "drift",
+    "observations",
+    "manifest_backlog",
+    "manifest_brief",
+    "manifest_drift",
+    "manifest_next",
+    "manifest_repo",
+    "manifest_why",
+    "question",
+    "secret_describe",
+    "version",
+)
+WRITE_TOOLS = (
+    "add",
+    "update",
+    "annotate",
+    "accept",
+    "acknowledge",
+    "leave_contested",
+)
+
+
+def test_codex_pre_approves_only_cadastre_read_tools(tmp_path: Path) -> None:
+    env = {"CADASTRE_MCP_URL": URL, "CADASTRE_HTTP_TOKEN": TOKEN}
+    bootstrap(tmp_path, env)
+    bootstrap(tmp_path, env)  # a second start changes nothing
+    cadastre = codex_servers(tmp_path)["cadastre"]
+    assert cadastre.get("default_tools_approval_mode") != "approve"
+    tools = cadastre.get("tools", {})
+    for tool in READ_TOOLS:
+        assert tools[tool]["approval_mode"] == "approve", tool
+    for tool in WRITE_TOOLS:
+        assert tool not in tools, tool
+
+
+def test_a_blanket_cadastre_approval_is_narrowed(tmp_path: Path) -> None:
+    codex = tmp_path / ".codex"
+    codex.mkdir()
+    (codex / "config.toml").write_text(
+        '[mcp_servers.cadastre]\ncommand = "/usr/local/bin/cadastre-mcp"\n'
+        'args = []\ndefault_tools_approval_mode = "approve"\n',
+        encoding="utf-8",
+    )
+    bootstrap(tmp_path, {"CADASTRE_MCP_URL": URL, "CADASTRE_HTTP_TOKEN": TOKEN})
+    cadastre = codex_servers(tmp_path)["cadastre"]
+    assert cadastre.get("default_tools_approval_mode") != "approve"
+    assert "add" not in cadastre.get("tools", {})
+    assert cadastre["tools"]["lookup"]["approval_mode"] == "approve"
