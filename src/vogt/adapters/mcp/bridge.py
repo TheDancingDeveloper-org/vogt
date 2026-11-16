@@ -472,19 +472,38 @@ def resolve_token(env: Mapping[str, str]) -> str | None:
     return (env.get(HTTP_TOKEN_ENV) or "").strip() or None
 
 
+def startup_problem(env: Mapping[str, str]) -> str | None:
+    """Why this bridge cannot work, or None when it can start.
+
+    No URL or no token means every request would be refused. Serving anyway
+    makes the client see a connected server whose `initialize` fails, or a
+    silent close (gh#1426); refusing here puts the reason on stderr where
+    the client's log shows it.
+    """
+    if not env.get(URL_ENV):
+        return (
+            f"set {URL_ENV} to the server's base URL "
+            f"(and {TOKEN_FILE_ENV} to a file holding a token)"
+        )
+    if resolve_token(env) is None:
+        return (
+            f"no Vogt token: {HTTP_TOKEN_ENV} and {TOKEN_FILE_ENV} are unset or empty. "
+            "Start the shell as a Vogt session, or set VOGT_TOKEN_FILE"
+        )
+    return None
+
+
 def main() -> int:  # pragma: no cover - exercised via the console script
     """Console-script entry point (`vogt-mcp-remote`).
 
     Configured entirely by environment, because that is what an MCP client
     config can set — and because a token on a command line ends up in `ps`.
     """
-    url = os.environ.get(URL_ENV)
-    if not url:
-        sys.stderr.write(
-            f"vogt-mcp-remote: set {URL_ENV} to the server's base URL "
-            f"(and {TOKEN_FILE_ENV} to a file holding a token)\n"
-        )
+    problem = startup_problem(os.environ)
+    if problem:
+        sys.stderr.write(f"vogt-mcp-remote: {problem}\n")
         return 2
+    url = os.environ[URL_ENV]
     Bridge(
         url,
         token=resolve_token(os.environ),
