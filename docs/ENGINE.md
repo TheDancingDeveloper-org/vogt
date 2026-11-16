@@ -501,6 +501,19 @@ token the Cadastre entry is omitted rather than installed as an endpoint that
 can only answer 401. `CADASTRE_MCP_URL` remains the host-side
 `mcp-bootstrap.sh` setting; it does not configure a pod endpoint by itself.
 
+On a host, or in a shell started by `vogt-agent-auth shell` (WI-4288),
+`mcp-bootstrap.sh` registers `cadastre` with Claude Code, Codex and opencode
+while `CADASTRE_MCP_URL` is set and the token is present (`CADASTRE_HTTP_TOKEN`
+or `CADASTRE_HTTP_TOKEN_FILE` in the environment, or `CADASTRE_HTTP_TOKEN` in
+`AGENT_AUTH_ONDEMAND`), and removes its own registration, the earlier HTTP form
+included, when it is not. Every client runs `cadastre-mcp`
+(`deploy/cadastre-mcp.sh`), which resolves the token at spawn (the variable,
+then the file, then `vogt-agent-auth fetch CADASTRE_HTTP_TOKEN`) into its own
+environment, never argv or a stored config, drops the local session's Vogt
+credentials, and execs `vogt-mcp-remote` against the endpoint. A header naming
+`${CADASTRE_HTTP_TOKEN}` never connected for an `ondemand` token, which is not
+exported at launch.
+
 **Codex's driven-session bundle** (WI-1149). The same bootstrap writes the keys
 a session the engine starts needs and an interactive CLI does not.
 `project_doc_fallback_filenames = ["CLAUDE.md"]` at the root, so a checkout
