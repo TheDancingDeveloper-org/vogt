@@ -73,6 +73,32 @@ fn data_home_writable(home: &Path) -> bool {
     ok
 }
 
+/// Create `dir` and every missing or existing level between `base` (exclusive)
+/// and it as mode 0700. The data directory holds opencode's conversation store
+/// and `auth.json`, so no level may be readable by another user; a directory
+/// left by an older launch is tightened too.
+fn private_dirs(base: &Path, dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    let rel = dir.strip_prefix(base).unwrap_or(dir);
+    std::fs::create_dir_all(base)?;
+    let mut cur = base.to_path_buf();
+    for part in rel.components() {
+        cur.push(part);
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&cur)
+            .or_else(|e| {
+                if e.kind() == std::io::ErrorKind::AlreadyExists {
+                    Ok(())
+                } else {
+                    Err(e)
+                }
+            })?;
+        std::fs::set_permissions(&cur, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
 /// The environment that points a host opencode session at its own data,
 /// state and cache directories, or nothing when the engine's own are
 /// writable. A session that already has its directory (a wake) keeps it, so
@@ -91,7 +117,7 @@ pub fn session_xdg_env(state_dir: &Path, id: Uuid, home: &Path) -> Vec<(String, 
         ("XDG_CACHE_HOME", "cache"),
     ] {
         let dir = root.join(sub);
-        if std::fs::create_dir_all(&dir).is_err() {
+        if private_dirs(state_dir, &dir).is_err() {
             return Vec::new();
         }
         env.push((var.to_string(), dir.display().to_string()));
@@ -408,6 +434,34 @@ mod tests {
             Path::new(&data.1).join("opencode").join("opencode.db")
         );
         assert_eq!(session_xdg_env(&state, id, &home), env);
+    }
+
+    #[test]
+    fn the_session_xdg_dirs_are_private_and_an_old_loose_dir_is_tightened() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let id = Uuid::new_v4();
+        let root = session_xdg_root(&state, id);
+        // A directory an earlier launch left with default permissions.
+        std::fs::create_dir_all(root.join("data")).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(root.join("data"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        // A read-only home forces the per-session dirs; the data dir exists, so
+        // a wake reuses it even when the home is writable.
+        let env = session_xdg_env(&state, id, tmp.path());
+        assert_eq!(env.len(), 3);
+        for dir in [
+            root.parent().unwrap().to_path_buf(),
+            root.clone(),
+            root.join("data"),
+            root.join("state"),
+            root.join("cache"),
+        ] {
+            assert_eq!(mode(&dir), 0o700, "{}", dir.display());
+        }
     }
 
     #[test]
