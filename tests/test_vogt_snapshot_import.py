@@ -99,6 +99,11 @@ class FakeTarget:
                 "priority": item["priority"],
                 "project_slug": item.get("project_slug"),
                 "labels": item.get("labels", []),
+                "relations": [
+                    {"kind": kind, "related_ref": target}
+                    for source, kind, target in sorted(self.relations)
+                    if source == ref
+                ],
             }
             for ref, item in sorted(
                 self.items.items(), key=lambda pair: ref_number(pair[0]) or 0
@@ -191,6 +196,16 @@ class FakeTarget:
             raise McpFailure("work_transition", "not_found", arguments["ref"])
         if item["state"] == arguments["to_state"]:
             raise McpFailure("work_transition", "conflict", "already in state")
+        if arguments["to_state"] == "done":
+            for source, kind, target in self.relations:
+                if (
+                    source == arguments["ref"]
+                    and kind == "depends_on"
+                    and self.items[target]["state"] != "done"
+                ):
+                    raise McpFailure(
+                        "work_transition", "conflict", f"depends on {target}"
+                    )
         item["state"] = arguments["to_state"]
         return {"item": item}
 
@@ -199,6 +214,13 @@ class FakeTarget:
         if key in self.relations:
             raise McpFailure("work_relate", "conflict", "already related")
         self.relations.add(key)
+        return {"item": self.items[arguments["ref"]]}
+
+    def _work_unrelate(self, arguments: JSON) -> JSON:
+        key = (arguments["ref"], arguments["kind"], arguments["target"])
+        if key not in self.relations:
+            raise McpFailure("work_unrelate", "invalid_request", "not related")
+        self.relations.remove(key)
         return {"item": self.items[arguments["ref"]]}
 
     def _work_comment(self, arguments: JSON) -> JSON:
@@ -228,6 +250,7 @@ _MUTATING = frozenset(
         "work_update",
         "work_transition",
         "work_relate",
+        "work_unrelate",
         "work_comment",
     }
 )
@@ -957,3 +980,70 @@ def test_strict_preserve_mode_still_refuses_a_diverged_target_item(
     target.items["WI-2"]["title"] = "something else entirely"
     with pytest.raises(Refused, match="refusing to overwrite unrelated work"):
         plan_for(tmp_path, target)
+
+
+def _relation_payloads(*, relations: list[JSON], wi1_state: str) -> JSON:
+    payload = source_payload(superseded=False)
+    payload["work_items"][0]["relations"] = relations
+    payload["work_items"][0]["state"] = wi1_state
+    return payload
+
+
+def _depends_on_wi2() -> list[JSON]:
+    return [{"kind": "depends_on", "related_id": "wrk_2", "related_ref": "WI-2"}]
+
+
+def test_remap_reimport_removes_a_relation_the_source_dropped(tmp_path: Path) -> None:
+    first = _relation_payloads(relations=_depends_on_wi2(), wi1_state="open")
+    target = dev_target(2)
+    plan = plan_for(tmp_path, target, ref_mode="remap", payload=first)
+    apply_plan(tmp_path, write_source(tmp_path, first), target, plan)
+    assert ("WI-3", "depends_on", "WI-4") in target.relations
+
+    # Prod dropped the edge and finished WI-1; dev's gate would refuse "done".
+    second = _relation_payloads(relations=[], wi1_state="done")
+    plan = plan_for(tmp_path, target, ref_mode="remap", payload=second)
+    assert plan.relations_remove == [("WI-1", "depends_on", "WI-2")]
+    summary = plan.summary()
+    assert summary["counts"]["relations_removed"] == 1
+    assert summary["relations_to_remove"] == [
+        {"ref": "WI-1", "kind": "depends_on", "target": "WI-2"}
+    ]
+
+    apply_plan(tmp_path, write_source(tmp_path, second), target, plan)
+    assert ("WI-3", "depends_on", "WI-4") not in target.relations
+    assert target.items["WI-3"]["state"] == "done"
+
+
+def test_preserve_reimport_removes_a_relation_the_source_dropped(
+    tmp_path: Path,
+) -> None:
+    first = _relation_payloads(relations=_depends_on_wi2(), wi1_state="open")
+    target = target_with_wi1()
+    plan = plan_for(tmp_path, target, payload=first)
+    apply_plan(tmp_path, write_source(tmp_path, first), target, plan)
+    assert ("WI-1", "depends_on", "WI-2") in target.relations
+
+    second = _relation_payloads(relations=[], wi1_state="done")
+    plan = plan_for(tmp_path, target, payload=second)
+    assert plan.relations_remove == [("WI-1", "depends_on", "WI-2")]
+    apply_plan(tmp_path, write_source(tmp_path, second), target, plan)
+    assert not any(kind == "depends_on" for _, kind, _ in target.relations)
+    assert target.items["WI-1"]["state"] == "done"
+
+
+def test_reimport_leaves_relations_to_dev_native_items_alone(tmp_path: Path) -> None:
+    first = _relation_payloads(relations=[], wi1_state="open")
+    target = dev_target(2)
+    plan = plan_for(tmp_path, target, ref_mode="remap", payload=first)
+    apply_plan(tmp_path, write_source(tmp_path, first), target, plan)
+    # dev-native WI-1/WI-2; imported WI-3.. : edges either way round.
+    target.relations.add(("WI-3", "depends_on", "WI-1"))
+    target.relations.add(("WI-2", "relates_to", "WI-4"))
+
+    plan = plan_for(tmp_path, target, ref_mode="remap", payload=first)
+    assert plan.relations_remove == []
+    apply_plan(tmp_path, write_source(tmp_path, first), target, plan)
+    assert ("WI-3", "depends_on", "WI-1") in target.relations
+    assert ("WI-2", "relates_to", "WI-4") in target.relations
+    assert not any(name == "work_unrelate" for name, _ in target.calls)
