@@ -713,6 +713,7 @@ fn spawn_stopped_session_reaper(state: Arc<AppState>) {
             tick.tick().await;
             let reaped = sessions.reap_stopped(time::OffsetDateTime::now_utc());
             if reaped != crate::sessions::Reaped::default() {
+                release_freed_heap();
                 tracing::info!(
                     shed = reaped.shed,
                     evicted = reaped.evicted,
@@ -722,6 +723,21 @@ fn spawn_stopped_session_reaper(state: Arc<AppState>) {
             }
         }
     });
+}
+
+/// Hand the heap pages a reap freed back to the kernel. glibc malloc keeps
+/// freed memory in its arenas, so without this a shed or an eviction shows
+/// in RSS only as far as whole top-of-heap chunks happen to come free: in a
+/// 32-session measurement (WI-4290) shedding alone returned about 50 MiB of
+/// 437, and shedding then `malloc_trim(0)` about 250 MiB. Runs at most once
+/// a reaper tick, and only after a pass that freed something.
+fn release_freed_heap() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    // SAFETY: `malloc_trim` takes no pointers and only returns free pages
+    // the allocator owns; it is safe to call from any thread at any time.
+    unsafe {
+        libc::malloc_trim(0);
+    }
 }
 
 /// The engine's ordinary error body, at 404, for a path under `/api` that no
