@@ -585,6 +585,11 @@ pub struct Config {
     /// Optional Cadastre MCP endpoint for pod sessions. Unset means no
     /// Cadastre entry is handed to a pod (the tailnet default is unreachable).
     pub cadastre_mcp_url: Option<String>,
+    /// Optional origin of a second, remote Vogt that pod sessions reach as
+    /// the `vogt-prod` MCP server (WI-4289). Unset means no entry; set, the
+    /// entry is handed out only while the agent-auth manifest declares
+    /// `VOGT_PROD_TOKEN` or the session holds a grant for it.
+    pub vogt_prod_mcp_url: Option<String>,
     /// Base URL of vogt-core on loopback. None disables `/api/vogt` and
     /// `/mcp`: they answer 503 with a named reason rather than
     /// pretending the core is empty. The engine itself keeps
@@ -738,6 +743,7 @@ struct FileConfig {
     public_url: Option<String>,
     agent_auth_public_url: Option<String>,
     cadastre_mcp_url: Option<String>,
+    vogt_prod_mcp_url: Option<String>,
     vogt_core_url: Option<String>,
     vogt_core_token: Option<String>,
     vogt_core_token_file: Option<String>,
@@ -1258,6 +1264,19 @@ pub fn load(
                 .or_else(|| engine_env("ENGINE_CADASTRE_MCP_URL").ok())
                 .or_else(|| engine_env("VOGT_CADASTRE_MCP_URL").ok())
                 .map(|value| value.trim().trim_end_matches('/').to_string()),
+        )?,
+        // VOGT_PROD_MCP_URL is the name host sessions read (with its /mcp);
+        // the engine takes the same value so a deployment sets it once.
+        vogt_prod_mcp_url: validate_https_origin(
+            "ENGINE_VOGT_PROD_MCP_URL",
+            from_file
+                .vogt_prod_mcp_url
+                .or_else(|| engine_env("ENGINE_VOGT_PROD_MCP_URL").ok())
+                .or_else(|| engine_env("VOGT_PROD_MCP_URL").ok())
+                .map(|value| {
+                    let value = value.trim().trim_end_matches('/');
+                    value.strip_suffix("/mcp").unwrap_or(value).to_string()
+                }),
         )?,
         // Unprefixed on purpose: these are vogt's own variable names, and the
         // same values configure its CLI inside the container. One name for one
