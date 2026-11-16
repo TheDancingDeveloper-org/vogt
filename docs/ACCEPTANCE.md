@@ -178,6 +178,14 @@ other reds were suite defects, fixed without weakening the assertions:
 - `W2`–`W8` read a write's compact `{ref, state, title, updated_at}`
   summary back through `work_get`, and relations through `related_ref`.
 
+**S15 asserts a reply (WI-4284).** S15 used to check only that a Claude Code
+pod starts. On 2026-11-16 it passed while every Claude pod on dev was logged
+out ("Login expired", no model turn ever ran). It now briefs the pod to reply
+`PONG` and fails with the screen tail when no `PONG` reaches `last_reply`
+within 90 s, so an unauthenticated pod is a FAIL, not a PASS. S16 (opencode)
+still checks only that the pod starts: opencode's store lives inside the pod,
+so `session_last_reply` cannot read a pod opencode's replies yet.
+
 The unknown-model launch (`P2`) now refuses with a 4xx naming the model, so
 it is no longer an open finding.
 

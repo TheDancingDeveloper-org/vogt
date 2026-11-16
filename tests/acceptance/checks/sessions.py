@@ -37,6 +37,11 @@ PONG_TASK = (
     "Then reply with the single word PONG and nothing else."
 )
 
+# How long an agent pod gets to answer the S15 probe. Claude Code starts, loads
+# its MCP set and runs one turn: a minute is generous, and a logged-out pod
+# never answers however long it is given.
+AGENT_REPLY_TIMEOUT_S = 90
+
 _FIRST_TURN_FAILURE = "sessions.codex.first_turn_failure"
 
 # These are terminal/provider-network facts printed by Codex itself. A
@@ -756,16 +761,27 @@ def _template_named(ctx: Context, needle: str) -> dict[str, Any] | None:
     return None
 
 
-def _probe_template(ctx: Context, needle: str, label: str, key: str) -> Check:
+def _probe_template(
+    ctx: Context, needle: str, label: str, key: str, *, expect: str | None = None
+) -> Check:
+    """Start a template's pod; with `expect`, also require a reply carrying it.
+
+    Starting proves the pod was scheduled, not that the agent can reach its
+    model: a Claude pod with an expired login starts, sits at "Not logged in"
+    and never answers (WI-4284).
+    """
     ctx.require_sessions()
     template = _template_named(ctx, needle)
     if template is None:
         return skipped(f"no {label} template is configured on this instance")
     name = str(template.get("name"))
+    task = (
+        "Reply with the single word PONG and nothing else."
+        if expect
+        else "Reply with READY and do nothing else."
+    )
     try:
-        session = _start(
-            ctx, template=name, model=None, task="Reply with READY and do nothing else."
-        )
+        session = _start(ctx, template=name, model=None, task=task)
     except (ToolError, HttpStatusError) as exc:
         text = str(exc).lower()
         if "host-only" in text or "host only" in text or "placement" in text:
@@ -773,12 +789,40 @@ def _probe_template(ctx: Context, needle: str, label: str, key: str) -> Check:
         return failed(f"{label} pod start failed for another reason: {exc}")
     identifier = str(session.get("id") or session.get("session_id"))
     ctx.state[key] = identifier
-    ctx.stop_session(identifier)
+    try:
+        if expect:
+            found, text = _poll_reply(
+                ctx, identifier, expect, timeout_s=AGENT_REPLY_TIMEOUT_S
+            )
+            if not found:
+                detail = _missing_reply_detail(ctx, identifier)
+                screen = ctx.client.tool(
+                    "session_screen", {"id": identifier, "scrollback_lines": 10}
+                )
+                tail = [
+                    str(row).strip()
+                    for row in screen.get("lines") or []
+                    if str(row).strip()
+                ]
+                return failed(
+                    f"{label} started as {identifier} but gave no {expect} reply "
+                    f"in {AGENT_REPLY_TIMEOUT_S}s (an unauthenticated pod looks "
+                    f"like this): {detail}; screen tail: {tail[-3:]!r}"
+                )
+    finally:
+        ctx.stop_session(identifier)
+    if expect:
+        return passed(
+            f"{label} started in a pod as {identifier}, replied {expect} and "
+            "was stopped"
+        )
     return passed(f"{label} started in a pod as {identifier} and was stopped")
 
 
 def claude_template(ctx: Context) -> Check:
-    return _probe_template(ctx, "claude", "Claude Code", "sessions.claude")
+    return _probe_template(
+        ctx, "claude", "Claude Code", "sessions.claude", expect="PONG"
+    )
 
 
 def opencode_template(ctx: Context) -> Check:
