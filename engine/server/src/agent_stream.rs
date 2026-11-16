@@ -1060,7 +1060,8 @@ pub async fn bootstrap(
     // value: `vogt-agent-auth fetch` resolves each one into the Codex child
     // (the session agent's launch line), so a key never joins the pod's
     // long-lived environment.
-    let providers = if req.cli == "codex" {
+    // WI-4296: an opencode pod reaches the same providers by the same rule.
+    let providers = if matches!(req.cli.as_str(), "codex" | "opencode") {
         broker.providers()
     } else {
         Vec::new()
@@ -1199,6 +1200,17 @@ pub async fn bootstrap(
                 + "\n"
                 + &codex_config.unwrap_or_default(),
         );
+    }
+    // WI-4296: an opencode pod gets them as its config's `provider` block,
+    // each key named `{env:KEY}`; without one opencode starts signed out on
+    // its own free default, whatever model the session asked for.
+    if req.cli == "opencode" {
+        if let (Some(serde_json::Value::Object(config)), serde_json::Value::Object(extra)) = (
+            opencode_config.as_mut(),
+            crate::llm_providers::opencode_provider_config(&providers),
+        ) {
+            config.extend(extra);
+        }
     }
     // A pod resumes from the account bundle the engine holds: the login, the
     // global config and, for a woken session, its conversation's transcript.

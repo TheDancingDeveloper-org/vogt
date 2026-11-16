@@ -26,6 +26,9 @@
 //!   bootstrap's `codex_config`. The shared `~/.codex/config.toml` is never
 //!   rewritten, so a running session keeps the providers it launched with.
 //!
+//! An opencode pod gets the same providers as its config's `provider` block
+//! (WI-4296), each key named `{env:KEY}`, and runs only their models.
+//!
 //! The file holds names and addresses, never a key.
 
 use std::path::Path;
@@ -420,6 +423,82 @@ pub fn codex_config(requested_model: Option<&str>, providers: &[Provider]) -> St
         vogt_session_agent::codex_guidance::toml_basic_string(&model),
         codex_config_tables(providers)
     )
+}
+
+/// The `provider/model` ids an opencode pod can run (WI-4296): one per
+/// registered model, under the registry entry's name, which is the key the
+/// pod's opencode config gives that provider.
+pub fn opencode_models(providers: &[Provider]) -> Vec<String> {
+    providers
+        .iter()
+        .flat_map(|p| p.models.iter().map(move |m| format!("{}/{m}", p.name)))
+        .collect()
+}
+
+/// The opencode model id a pod launch runs for `requested` (WI-4296). A
+/// registered `provider/model` id is taken as it is; a bare registered model
+/// (`deepseek-chat`) is qualified with its provider, the `litellm` entry
+/// first when two register it. Anything else is refused with the near
+/// matches: an opencode pod whose model it cannot run falls back to
+/// opencode's own free default instead of failing, so the refusal must
+/// happen at start.
+pub fn opencode_model(requested: &str, providers: &[Provider]) -> Result<String, String> {
+    let known = opencode_models(providers);
+    if known.is_empty() {
+        return Err(format!(
+            "opencode cannot run model {requested:?} in a pod: no LLM provider with models \
+             is registered (ENGINE_LLM_PROVIDERS_FILE)"
+        ));
+    }
+    if known.iter().any(|id| id == requested) {
+        return Ok(requested.to_owned());
+    }
+    let serving: Vec<&Provider> = providers
+        .iter()
+        .filter(|p| p.models.iter().any(|m| m == requested))
+        .collect();
+    if let Some(provider) = serving
+        .iter()
+        .find(|p| p.name == "litellm")
+        .or_else(|| serving.first())
+    {
+        return Ok(format!("{}/{requested}", provider.name));
+    }
+    crate::opencode::check_model(requested, &known)
+        .map(|()| requested.to_owned())
+        .map_err(|e| format!("{e}; a pod runs only the provider registry's models"))
+}
+
+/// The opencode `provider` block for a pod (WI-4296): each registered entry as
+/// an OpenAI-compatible provider at its `base_url`, with the key named by
+/// reference (`{env:KEY}`). The session agent fetches that one name through
+/// the broker around the opencode child, so the value is never in the config
+/// or the pod's environment.
+pub fn opencode_provider_config(providers: &[Provider]) -> serde_json::Value {
+    if providers.is_empty() {
+        return serde_json::json!({});
+    }
+    let blocks: serde_json::Map<String, serde_json::Value> = providers
+        .iter()
+        .map(|p| {
+            let models: serde_json::Map<String, serde_json::Value> = p
+                .models
+                .iter()
+                .map(|m| (m.clone(), serde_json::json!({ "name": m })))
+                .collect();
+            let block = serde_json::json!({
+                "npm": "@ai-sdk/openai-compatible",
+                "name": p.name,
+                "options": {
+                    "baseURL": p.base_url,
+                    "apiKey": format!("{{env:{}}}", p.env_key),
+                },
+                "models": models,
+            });
+            (p.name.clone(), block)
+        })
+        .collect();
+    serde_json::json!({ "provider": blocks })
 }
 
 /// Catalog description prefix for entries this registry contributes. Kept
@@ -1013,5 +1092,73 @@ models = ["grok-4.7"]
                 .as_deref(),
             Some(catalog)
         );
+    }
+
+    const LITELLM: &str = r#"
+[[provider]]
+name = "litellm"
+base_url = "http://100.92.54.45:4000/v1"
+wire_api = "chat"
+env_key = "HOMELAB_LITELLM_SESSION_KEY"
+secret_project = "proj-b"
+secret_name = "HOMELAB_LITELLM_SESSION_KEY"
+models = ["deepseek-chat", "deepseek/deepseek-v4-flash"]
+"#;
+
+    #[test]
+    fn opencode_pods_get_each_provider_with_its_key_by_reference() {
+        let providers = parse(&format!("{DEEPSEEK}{LITELLM}")).unwrap();
+        let config = opencode_provider_config(&providers);
+        let litellm = &config["provider"]["litellm"];
+        assert_eq!(litellm["npm"], "@ai-sdk/openai-compatible");
+        assert_eq!(litellm["options"]["baseURL"], "http://100.92.54.45:4000/v1");
+        assert_eq!(
+            litellm["options"]["apiKey"],
+            "{env:HOMELAB_LITELLM_SESSION_KEY}"
+        );
+        assert!(litellm["models"]["deepseek-chat"].is_object());
+        assert!(litellm["models"]["deepseek/deepseek-v4-flash"].is_object());
+        assert_eq!(
+            config["provider"]["deepseek"]["options"]["apiKey"],
+            "{env:DEEPSEEK_KEY}"
+        );
+        assert!(opencode_provider_config(&[]).get("provider").is_none());
+        assert_eq!(
+            opencode_models(&providers),
+            [
+                "deepseek/deepseek-chat",
+                "litellm/deepseek-chat",
+                "litellm/deepseek/deepseek-v4-flash"
+            ]
+        );
+    }
+
+    #[test]
+    fn an_opencode_pod_model_resolves_against_the_registry_or_is_refused() {
+        let providers = parse(&format!("{DEEPSEEK}{LITELLM}")).unwrap();
+        // A full id is taken as it is.
+        assert_eq!(
+            opencode_model("deepseek/deepseek-chat", &providers).as_deref(),
+            Ok("deepseek/deepseek-chat")
+        );
+        assert_eq!(
+            opencode_model("litellm/deepseek/deepseek-v4-flash", &providers).as_deref(),
+            Ok("litellm/deepseek/deepseek-v4-flash")
+        );
+        // A bare registered model gets its provider, litellm first.
+        assert_eq!(
+            opencode_model("deepseek-chat", &providers).as_deref(),
+            Ok("litellm/deepseek-chat")
+        );
+        assert_eq!(
+            opencode_model("deepseek/deepseek-v4-flash", &providers).as_deref(),
+            Ok("litellm/deepseek/deepseek-v4-flash")
+        );
+        let err = opencode_model("nonexistent-model-probe", &providers).unwrap_err();
+        assert!(err.contains("nonexistent-model-probe"), "{err}");
+        let err = opencode_model("litellm/deepseek-chatt", &providers).unwrap_err();
+        assert!(err.contains("litellm/deepseek-chat"), "{err}");
+        let err = opencode_model("deepseek-chat", &[]).unwrap_err();
+        assert!(err.contains("ENGINE_LLM_PROVIDERS_FILE"), "{err}");
     }
 }

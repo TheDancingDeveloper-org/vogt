@@ -20011,6 +20011,114 @@ mod pod_stream {
             .contains("model_providers"));
     }
 
+    /// WI-4296: an opencode pod runs a model only through a registered
+    /// provider. Its bootstrap carries each provider as an opencode
+    /// `provider` block with the key named by reference and the key name
+    /// among the ondemand entries, never the value; a model no provider
+    /// serves is refused before the pod exists, and a bare registered model
+    /// starts qualified with its provider.
+    #[tokio::test]
+    async fn an_opencode_pod_gets_the_registered_providers_and_refuses_unknown_models() {
+        let core = mock_core().await;
+        let dir = tempfile::tempdir().unwrap();
+        let registry = dir.path().join("llm-providers.toml");
+        let helper = fake_broker_helper(dir.path());
+        let reg = registry.clone();
+        let mut h = harness_cfg(
+            false,
+            Some(vec![super::model_test_template("opencode-pod", "opencode")]),
+            move |cfg| {
+                cfg.vogt_core_url = Some(core);
+                cfg.vogt_core_token = Some("stack-secret".into());
+                cfg.agent_auth_helper = helper;
+                cfg.llm_providers_file = Some(reg);
+            },
+        )
+        .await;
+        std::fs::write(
+            &registry,
+            "[[provider]]\nname = \"litellm\"\nbase_url = \"http://100.92.54.45:4000/v1\"\nwire_api = \"chat\"\nenv_key = \"HOMELAB_LITELLM_SESSION_KEY\"\nsecret_project = \"p\"\nsecret_name = \"s\"\nmodels = [\"deepseek-chat\"]\n",
+        )
+        .unwrap();
+
+        let response = h
+            .client
+            .post(format!("{}/api/sessions", h.base))
+            .json(&json!({
+                "name": "unknown-opencode-model",
+                "template": "opencode-pod",
+                "placement": "pod",
+                "model": "nonexistent-model-probe",
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body: Value = response.json().await.unwrap();
+        assert_eq!(body["code"].as_str(), Some("unknown_model"), "{body}");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("nonexistent-model-probe"),
+            "{body}"
+        );
+        assert!(h.created.try_recv().is_err(), "a refused start made a pod");
+
+        let id = h
+            .start_body(json!({
+                "name": "known-opencode-model",
+                "template": "opencode-pod",
+                "placement": "pod",
+                "model": "deepseek-chat",
+            }))
+            .await;
+        let (created, token) = h.created.recv().await.expect("the pod is created");
+        assert_eq!(created, id);
+        let pod = h.launcher.pods.lock().unwrap().pop().expect("pod created");
+        let model = pod.spec.unwrap().containers[0]
+            .env
+            .clone()
+            .unwrap()
+            .into_iter()
+            .find(|v| v.name == "VOGT_MODEL")
+            .and_then(|v| v.value);
+        assert_eq!(model.as_deref(), Some("litellm/deepseek-chat"));
+
+        let body: Value = h
+            .bootstrap_as(id, &token, "opencode")
+            .await
+            .json()
+            .await
+            .unwrap();
+        let litellm = &body["opencode_config"]["provider"]["litellm"];
+        assert_eq!(
+            litellm["options"]["baseURL"], "http://100.92.54.45:4000/v1",
+            "{body}"
+        );
+        assert_eq!(
+            litellm["options"]["apiKey"], "{env:HOMELAB_LITELLM_SESSION_KEY}",
+            "{body}"
+        );
+        assert!(litellm["models"]["deepseek-chat"].is_object(), "{body}");
+        assert!(
+            body["opencode_config"]["mcp"].is_object(),
+            "the MCP block stays"
+        );
+        assert!(body["env"].get("HOMELAB_LITELLM_SESSION_KEY").is_none());
+        assert!(body["env"]["AGENT_AUTH_ONDEMAND"]
+            .as_str()
+            .unwrap_or_default()
+            .split(' ')
+            .any(|name| name == "HOMELAB_LITELLM_SESSION_KEY"));
+        assert!(
+            !body
+                .to_string()
+                .contains("value-of-HOMELAB_LITELLM_SESSION_KEY"),
+            "{body}"
+        );
+    }
+
     /// WI-4121: a pod's cadastre MCP entry authenticates with the bearer
     /// variable the host registration names, and only when the agent-auth
     /// manifest declares it. Each supported agent's bootstrap carries the

@@ -5064,6 +5064,16 @@ At each launch the registry does three things, and nothing else:
   project id must be the one in this instance's mounted manifest, which can
   differ from the id another deployment or secret-store listing records for
   the same secret name.
+- An opencode pod (WI-4296) gets each provider as an OpenAI-compatible
+  `provider.<name>` block in the bootstrap's `opencode_config`, with
+  `options.baseURL` the entry's `base_url` and `options.apiKey` the reference
+  `{env:<env_key>}`; the session agent fetches that name around the opencode
+  child, as it does an MCP bearer. Its models are `<name>/<model>`. A start
+  asking for a model is resolved against them: a registered `<name>/<model>`
+  runs as it is, a bare registered model is qualified with its provider (the
+  `litellm` entry first), and anything else is refused with `unknown_model`
+  before the pod exists, rather than left to fall back to opencode's own free
+  default. The entrypoint logs the providers and the model.
 - A Codex session gets one `model_providers.<name>` table per provider. A
   host launch gets them as `-c` overrides on its argv, so the shared
   `~/.codex/config.toml` is never rewritten. A pod gets them in the

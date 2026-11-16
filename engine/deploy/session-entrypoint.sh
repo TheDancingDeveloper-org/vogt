@@ -191,9 +191,15 @@ fi
 # Same rule as Claude above: opencode has no credential in the image, so a
 # pod without a brokered provider key or stored login starts signed out rather
 # than failing before its first turn.
+# WI-4296: the engine's registered LLM providers arrive in that config, keys
+# named by reference only; the log names the providers and the model so a
+# session's replies can be traced to them.
 if [ "$VOGT_CLI" = opencode ]; then
   oc_auth="${XDG_DATA_HOME:-$HOME/.local/share}/opencode/auth.json"
-  if [ ! -s "$oc_auth" ] && [ -z "${ANTHROPIC_API_KEY:-}${OPENAI_API_KEY:-}${OPENROUTER_API_KEY:-}${GEMINI_API_KEY:-}${GOOGLE_GENERATIVE_AI_API_KEY:-}${DEEPSEEK_API_KEY:-}" ]; then
+  oc_providers=$(jq -r '.opencode_config.provider // {} | keys | join(" ")' "$response" 2>/dev/null || true)
+  if [ -n "$oc_providers" ]; then
+    printf 'session-entrypoint: opencode providers: %s; model: %s\n' "$oc_providers" "${VOGT_MODEL:-opencode default}" >&2
+  elif [ ! -s "$oc_auth" ] && [ -z "${ANTHROPIC_API_KEY:-}${OPENAI_API_KEY:-}${OPENROUTER_API_KEY:-}${GEMINI_API_KEY:-}${GOOGLE_GENERATIVE_AI_API_KEY:-}${DEEPSEEK_API_KEY:-}" ]; then
     printf 'session-entrypoint: no opencode login or provider key in the session environment; opencode starts signed out\n' >&2
   fi
 fi

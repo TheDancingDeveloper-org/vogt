@@ -2020,12 +2020,21 @@ pub fn command_line(config: &Config) -> Result<String, AgentError> {
             // session-entrypoint writes the engine-owned config to this path
             // and keeps the path in VOGT_OPENCODE_MCP_CONFIG.  As with Claude,
             // only the final opencode child receives the brokered values.
-            let mcp_bearers = config
+            // Its LLM providers' keys (WI-4296) are named the same way and
+            // fetched with them.
+            let mut keys = config
                 .opencode_mcp_config
                 .as_deref()
                 .map(read_mcp_bearer_envs)
                 .unwrap_or_default();
-            let mut line = codex_broker_fetch_prefix(&[], &mcp_bearers);
+            keys.extend(
+                config
+                    .opencode_mcp_config
+                    .as_deref()
+                    .map(read_opencode_provider_envs)
+                    .unwrap_or_default(),
+            );
+            let mut line = codex_broker_fetch_prefix(&[], &keys);
             line.push_str("opencode");
             // The session's model (WI-4284): without `--model` opencode runs
             // its built-in default, whatever the template or caller asked.
@@ -2096,6 +2105,28 @@ fn read_mcp_bearer_envs(path: &Path) -> Vec<String> {
         }
     }
     names
+}
+
+/// The provider keys an engine-owned opencode config names (WI-4296): each
+/// `provider.<name>.options.apiKey` that is exactly `{env:NAME}`. Any other
+/// text is a literal opencode reads itself, never a name for the launch line.
+fn read_opencode_provider_envs(path: &Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Vec::new();
+    };
+    let Some(providers) = value.get("provider").and_then(serde_json::Value::as_object) else {
+        return Vec::new();
+    };
+    providers
+        .values()
+        .filter_map(|provider| provider.pointer("/options/apiKey")?.as_str())
+        .filter_map(|key| key.strip_prefix("{env:")?.strip_suffix('}'))
+        .filter(|name| is_env_name(name))
+        .map(str::to_string)
+        .collect()
 }
 
 /// What the session agent adds to the CLI's environment. Claude Code's own
@@ -3389,6 +3420,55 @@ mod tests {
                 "{cli}"
             );
         }
+    }
+
+    /// WI-4296: an opencode pod's LLM provider names its key as `{env:KEY}`
+    /// in `provider.<name>.options.apiKey`. The key is fetched through the
+    /// broker around the opencode child, as an MCP bearer is, and never
+    /// appears on the line. Text that is not a plain reference is not a name.
+    #[test]
+    fn an_opencode_child_receives_its_provider_key_from_the_broker() {
+        let dir = tempfile::tempdir().unwrap();
+        let opencode_json = dir.path().join("opencode.json");
+        std::fs::write(
+            &opencode_json,
+            r#"{"mcp":{},"provider":{"litellm":{"options":{"baseURL":"http://litellm/v1","apiKey":"{env:HOMELAB_LITELLM_SESSION_KEY}"}},"odd":{"options":{"apiKey":"{env:$(id)}"}}}}"#,
+        )
+        .unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        crate::test_exec::write_executable(
+            &bin.join("vogt-agent-auth"),
+            "#!/bin/sh\n[ \"$1\" = fetch ] || exit 1\nprintf fetched-key\n",
+        );
+        let path = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let mut config = claude_config(ClaudeLaunch::default(), false);
+        config.cli = "opencode".into();
+        config.opencode_mcp_config = Some(opencode_json);
+        config.model = Some("litellm/deepseek-chat".into());
+        let line = command_line(&config).unwrap();
+        assert!(line.contains("HOMELAB_LITELLM_SESSION_KEY"), "{line}");
+        assert!(!line.contains("$(id)"), "{line}");
+        assert!(!line.contains("fetched-key"), "{line}");
+        assert!(line.contains("--model 'litellm/deepseek-chat'"), "{line}");
+        let output = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(format!(
+                "opencode() {{ printf 'key=%s\\n' \"${{HOMELAB_LITELLM_SESSION_KEY:-unset}}\"; }}; {line}"
+            ))
+            .env("PATH", &path)
+            .env_remove("HOMELAB_LITELLM_SESSION_KEY")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "key=fetched-key"
+        );
     }
 
     /// WI-3873: the rollout name comes from the launch line, not from a file
