@@ -1144,9 +1144,10 @@ mod tests {
         // live Python.
         let golden_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/parity/golden/registry.json");
-        let golden: serde_json::Value =
+        let mut golden: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&golden_path).unwrap()).unwrap();
         let dump = dump();
+        crate::parity_divergence::patch_registry(&mut golden, &dump);
         assert_eq!(dump, golden, "registry dump drifted from the Python golden");
         // Value equality ignores key order, and the manifest's field order is
         // part of the contract, so compare the text too.
@@ -1196,10 +1197,11 @@ mod tests {
         // contract-level check the normaliser is written for.
         let golden_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/parity/golden/registry.json");
-        let golden: serde_json::Value =
+        let mut golden: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&golden_path).unwrap()).unwrap();
-        let golden_ops = golden["operations"].as_array().unwrap();
         let rust = dump();
+        crate::parity_divergence::patch_registry(&mut golden, &rust);
+        let golden_ops = golden["operations"].as_array().unwrap();
         let rust_ops = rust["operations"].as_array().unwrap();
         assert_eq!(rust_ops.len(), golden_ops.len(), "operation count drifted");
 
