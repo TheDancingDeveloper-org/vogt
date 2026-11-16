@@ -1161,10 +1161,12 @@ impl EngineClient {
                 || format!("the {} refused {method} {path}", self.label),
             )));
         }
-        if status == 409 {
+        // 429 is the engine's per-account cap (WI-4287): a capacity refusal
+        // like a 409, keeping the engine's "cap N; counts {…}" text.
+        if status == 409 || status == 429 {
             let said = engine_error_text(&String::from_utf8_lossy(&response));
             return Err(VogtError::Conflict(nonempty(&said).unwrap_or_else(|| {
-                format!("the {} refused {method} {path} (409)", self.label)
+                format!("the {} refused {method} {path} ({status})", self.label)
             })));
         }
         if status >= 400 {
@@ -2613,6 +2615,24 @@ mod tests {
         assert!(sent.contains(r#""cwd":"/proj""#));
         assert!(!sent.contains("permission_mode"));
         assert!(!sent.contains("role"));
+    }
+
+    #[test]
+    fn a_429_at_capacity_reaches_the_caller_as_a_conflict_with_the_cap_text() {
+        // WI-4287: the engine's per-account cap answers 429; the caller must
+        // see the cap and counts, not "the engine is unavailable".
+        let (_, transport) = scripted(
+            429,
+            r#"{"error":"account at capacity: cap 8; counts {\"acct2\": 8}"}"#,
+        );
+        let refused = client(transport).create_session(&CreateSession::new("n", "/proj"));
+        match refused {
+            Err(VogtError::Conflict(said)) => {
+                assert!(said.contains("cap 8"), "{said}");
+                assert!(said.contains("acct2"), "{said}");
+            }
+            other => panic!("expected a capacity conflict, got {other:?}"),
+        }
     }
 
     #[test]
