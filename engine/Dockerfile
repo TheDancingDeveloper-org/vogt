@@ -319,6 +319,29 @@ RUN set -eu; \
     ln -sfn /usr/local/go/bin/gofmt /usr/local/bin/gofmt; \
     go version | grep -qF "go${go_version} "
 
+# The GitHub CLI (WI-4325), pinned the same way as Go: the release asset is
+# checked against the sha256 recorded for that architecture, and the installed
+# binary proves its version. A session reaches a GitHub `origin` with `gh` as
+# well as `git`, and the agent-auth helper already exports `GH_TOKEN` into a
+# session (docs/ENGINE.md, "Session pod boot"), so gh reads the token from its
+# environment at start. Nothing here logs in or writes auth state: there is no
+# credential in this layer and no `gh auth` call.
+RUN set -eu; \
+    . /usr/local/share/vogt/agent-versions.env; \
+    gh_version="$VOGT_GH_VERSION"; \
+    case "$(dpkg --print-architecture)" in \
+        amd64) gh_arch=amd64; gh_sum="$VOGT_GH_SHA256_LINUX_AMD64" ;; \
+        arm64) gh_arch=arm64; gh_sum="$VOGT_GH_SHA256_LINUX_ARM64" ;; \
+        *) echo "no pinned GitHub CLI for $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac; \
+    gh_dir="gh_${gh_version}_linux_${gh_arch}"; \
+    curl -fsSL "https://github.com/cli/cli/releases/download/v${gh_version}/${gh_dir}.tar.gz" -o /tmp/gh.tar.gz; \
+    echo "$gh_sum  /tmp/gh.tar.gz" | sha256sum -c -; \
+    tar -xzf /tmp/gh.tar.gz -C /tmp; \
+    install -m 0755 "/tmp/${gh_dir}/bin/gh" /usr/local/bin/gh; \
+    rm -rf /tmp/gh.tar.gz "/tmp/${gh_dir}"; \
+    gh --version | grep -qF "gh version ${gh_version} "
+
 ARG INSTALL_AI_CLIENTS
 ARG CODEX_VERSION
 ARG CODEX_SHA
