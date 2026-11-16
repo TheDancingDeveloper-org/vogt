@@ -426,6 +426,49 @@ Cloudflare is not among them. Cloudflare's official MCP servers are hosted
 (`*.mcp.cloudflare.com`), so there is no version to pin, and none has a
 read-only mode — only the API token's scopes would make one read-only.
 
+**`vogt-prod` — a second Vogt, optional (WI-4289).** A deployment can let its
+sessions reach another Vogt — a dev deployment reaching prod — as an MCP
+server named `vogt-prod`, with a token scoped for that and nothing more. It
+is off unless the deployment sets both halves:
+
+- `VOGT_PROD_MCP_URL`, the remote server's MCP endpoint
+  (`https://vogt.example/mcp`). The engine reads the same value for pod
+  sessions (its `/mcp` dropped; `ENGINE_VOGT_PROD_MCP_URL` takes an origin and
+  wins), and it must be an https origin.
+- `VOGT_PROD_TOKEN`, normally an `ondemand` agent-auth manifest line (§9):
+  `VOGT_PROD_TOKEN <project> <secret name> ondemand`. A session may instead
+  hold it in its environment or in a file named by `VOGT_PROD_TOKEN_FILE`.
+
+On the host, `vogt-mcp-bootstrap` registers `vogt-prod` with Claude Code,
+Codex and opencode while both are present (the token counts as present when
+it is set, its file is named, or `AGENT_AUTH_ONDEMAND` lists it), and removes
+its own registration when they are not (opencode keeps a stale entry, which
+refuses to start). Every client runs `vogt-prod-mcp` (`deploy/vogt-prod-mcp.sh`)
+and nothing else: an `ondemand` token is not in the environment when the
+bootstrap runs, so a header naming the variable would never connect. The
+wrapper resolves the token at spawn — the variable, then the file, then
+`vogt-agent-auth fetch VOGT_PROD_TOKEN` — into its own environment (never argv
+or a file), drops the local session's `VOGT_SESSION_ID`, `VOGT_TOKEN_FILE` and
+`VOGT_ENGINE_SESSION_ID` so the bridge presents the remote token and not the
+local one, and execs `vogt-mcp-remote` against the remote origin. In a pod the
+engine adds a `vogt-prod` HTTP entry to the Claude, Codex and opencode configs
+whose bearer names `VOGT_PROD_TOKEN` by reference, only when the manifest
+declares it or the session holds a grant for it, and lists the name among the
+ondemand breadcrumbs, so the session agent fetches it around the agent like
+Cadastre's.
+
+The token is the boundary. Issue it on the remote Vogt to a dedicated actor
+(for example `agent:vogt-dev-bridge`) with `vogt token issue --scopes
+read,work.write --expires-in-days N`: `read` covers `session.list`,
+`session.screen`, `session.last_reply`, `session.log_tail`, `work.get` and
+`work.list`; `work.write` covers `session.input`, `session.answer`,
+`work.comment`, `work.create` and `work.transition`. Never `admin` (token and
+actor management), `project.write` or `writeback`. An agent's input to a
+permission prompt is refused there as it is here (`person_required`).
+Rotation is a new token for the same actor stored under the same secret name,
+then `token.revoke` of the old one; sessions pick it up at their next spawn of
+the server.
+
 **`git-forgejo`.** For git itself against a Gitea/Forgejo host, the image
 installs `git-forgejo` on PATH (so `git forgejo …` works too). It reads
 `FORGEJO_TOKEN` and `FORGEJO_URL` (falling back to `GITEA_HOST`), and hands git
@@ -5224,6 +5267,11 @@ helper's grammar; a malformed line is a startup error. Same honest caveat as
 above: at the same uid this narrows *ambient* exposure and adds an audit
 trail; it becomes an enforced boundary only once sessions run as a separate
 uid, and the design does not change when that lands.
+
+An `ondemand` token that an MCP server needs is resolved by the server's own
+launch, not by the bootstrap: `vogt-prod` (§4) runs a wrapper that fetches
+`VOGT_PROD_TOKEN` at spawn, and a pod's session agent fetches every bearer its
+MCP config names around the agent.
 
 **Storing a secret from a session: the write broker.** The mirror of the
 fetch, for a session that has just *produced* a secret — minted an API token,
