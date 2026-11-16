@@ -46,6 +46,25 @@ pub fn for_backend(
 /// agent-auth manifest and fetched around the agent, never written here.
 pub const CADASTRE_TOKEN_ENV: &str = "CADASTRE_HTTP_TOKEN";
 
+/// The MCP server name and bearer variable of a second, remote Vogt
+/// (WI-4289). The host's mcp-bootstrap registers the same name and the same
+/// variable, so the token is one agent-auth manifest line for both.
+pub const VOGT_PROD_SERVER: &str = "vogt-prod";
+pub const VOGT_PROD_TOKEN_ENV: &str = "VOGT_PROD_TOKEN";
+
+/// Add the `vogt-prod` entry to `endpoints` for a remote Vogt at `origin`.
+/// The caller decides whether the session can hold its bearer; an entry
+/// without one could only answer 401, so it is not added.
+pub fn with_vogt_prod(mut endpoints: SessionEndpoints, origin: &str) -> SessionEndpoints {
+    if let Some(servers) = endpoints.mcp.as_object_mut() {
+        servers.insert(
+            VOGT_PROD_SERVER.into(),
+            json!({"url": format!("{origin}/mcp")}),
+        );
+    }
+    endpoints
+}
+
 /// The header the pod's Vogt MCP entry sends. Claude Code expands
 /// `${VOGT_HTTP_TOKEN}` from the session's environment when it reads the
 /// file, so the credential is never written to disk.
@@ -53,6 +72,9 @@ const VOGT_AUTHORIZATION: &str = "Bearer ${VOGT_HTTP_TOKEN}";
 
 /// Cadastre's Claude Code counterpart (WI-4121).
 const CADASTRE_AUTHORIZATION: &str = "Bearer ${CADASTRE_HTTP_TOKEN}";
+
+/// The remote Vogt's (WI-4289).
+const VOGT_PROD_AUTHORIZATION: &str = "Bearer ${VOGT_PROD_TOKEN}";
 
 /// The `--mcp-config` file a pod-backed Claude Code session is started with
 /// (WI-3243): `endpoints.mcp` as streamable-HTTP servers, the Vogt one
@@ -83,6 +105,8 @@ pub fn claude_mcp_config(
                 server["headers"] = json!({"Authorization": VOGT_AUTHORIZATION});
             } else if name == "cadastre" {
                 server["headers"] = json!({"Authorization": CADASTRE_AUTHORIZATION});
+            } else if name == VOGT_PROD_SERVER {
+                server["headers"] = json!({"Authorization": VOGT_PROD_AUTHORIZATION});
             }
             servers.insert(name.clone(), server);
         }
@@ -112,12 +136,16 @@ pub fn codex_mcp_config(
             let Some(url) = entry.get("url").and_then(Value::as_str) else {
                 continue;
             };
-            // A JSON string is a valid TOML basic string.
+            // A JSON string is a valid TOML basic string. Every name here is
+            // a TOML bare key (letters, digits, `_` and `-`).
             out.push_str(&format!("[mcp_servers.{name}]\nurl = {}\n", json!(url)));
             match name.as_str() {
                 "vogt" => out.push_str("bearer_token_env_var = \"VOGT_HTTP_TOKEN\"\n"),
                 "cadastre" => out.push_str(&format!(
                     "bearer_token_env_var = \"{CADASTRE_TOKEN_ENV}\"\n"
+                )),
+                VOGT_PROD_SERVER => out.push_str(&format!(
+                    "bearer_token_env_var = \"{VOGT_PROD_TOKEN_ENV}\"\n"
                 )),
                 _ => {}
             }
@@ -151,6 +179,8 @@ pub fn opencode_mcp_config(
                 server["headers"] = json!({"Authorization": "Bearer {env:VOGT_HTTP_TOKEN}"});
             } else if name == "cadastre" {
                 server["headers"] = json!({"Authorization": "Bearer {env:CADASTRE_HTTP_TOKEN}"});
+            } else if name == VOGT_PROD_SERVER {
+                server["headers"] = json!({"Authorization": "Bearer {env:VOGT_PROD_TOKEN}"});
             }
             servers.insert(name.clone(), server);
         }
@@ -320,6 +350,50 @@ mod tests {
                 .keys()
                 .collect::<Vec<_>>(),
             ["cadastre"]
+        );
+    }
+
+    #[test]
+    fn vogt_prod_names_its_own_bearer_in_every_client_config() {
+        let endpoints = with_vogt_prod(
+            for_backend(
+                "pod",
+                "127.0.0.1:8910".parse().unwrap(),
+                Some("https://192.168.1.75:18197"),
+                None,
+            ),
+            "https://vogt-prod.example.test",
+        );
+        assert_eq!(
+            claude_mcp_config(&endpoints, true, false)["mcpServers"]["vogt-prod"],
+            json!({
+                "type": "http",
+                "url": "https://vogt-prod.example.test/mcp",
+                "headers": {"Authorization": "Bearer ${VOGT_PROD_TOKEN}"}
+            })
+        );
+        let codex = codex_mcp_config(&endpoints, true, false);
+        assert!(
+            codex.contains(
+                "[mcp_servers.vogt-prod]\nurl = \"https://vogt-prod.example.test/mcp\"\nbearer_token_env_var = \"VOGT_PROD_TOKEN\"\n"
+            ),
+            "{codex}"
+        );
+        let parsed: toml::Table = codex.parse().expect("the fragment is valid TOML");
+        assert!(parsed["mcp_servers"].get("vogt-prod").is_some());
+        assert_eq!(
+            opencode_mcp_config(&endpoints, true, false)["mcp"]["vogt-prod"],
+            json!({
+                "type": "remote",
+                "url": "https://vogt-prod.example.test/mcp",
+                "headers": {"Authorization": "Bearer {env:VOGT_PROD_TOKEN}"}
+            })
+        );
+        // The local Vogt's own entry still sends the local session token.
+        assert_eq!(
+            claude_mcp_config(&endpoints, true, false)["mcpServers"]["vogt"]["headers"]
+                ["Authorization"],
+            "Bearer ${VOGT_HTTP_TOKEN}"
         );
     }
 }
