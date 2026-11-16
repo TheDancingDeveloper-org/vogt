@@ -203,6 +203,11 @@ modification time). No transcript is `detail`, not an error. An opencode
 session keeps no transcript file: its replies are read by the engine from
 opencode's own store (`GET /api/sessions/{id}/replies`, which the store's
 credentials never leave) and redacted the same way, with `agent: "opencode"`.
+A pod's opencode store stays in the pod: its session agent reads the
+assistant text out of it and posts only `{conversation_id, replies: [{text,
+at}]}` to `POST /api/agent-auth/store/bundle/opencode-replies` with the pod's
+stream credential. The engine refuses any other field, redacts the text, and
+keeps it beside the session's hibernation record, where `/replies` reads it.
 
 `workspace.list` (`read` scope; filters `project` slug and `alive`) lists
 every live or hibernated session's working tree from the engine's
