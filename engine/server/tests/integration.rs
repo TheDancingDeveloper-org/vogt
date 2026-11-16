@@ -20699,12 +20699,21 @@ sleep 2
     /// A pod's opencode store, as opencode lays it out, with an account row
     /// holding a provider key and a tool call carrying a secret: what must
     /// never leave the pod (WI-4291).
-    async fn opencode_pod_store(dir: &std::path::Path, engine_id: Uuid, reply: &str) -> std::path::PathBuf {
-        use sqlx::{sqlite::SqliteConnectOptions, ConnectOptions};
+    async fn opencode_pod_store(
+        dir: &std::path::Path,
+        engine_id: Uuid,
+        reply: &str,
+    ) -> std::path::PathBuf {
+        use sqlx::{
+            sqlite::{SqliteConnectOptions, SqliteJournalMode},
+            ConnectOptions,
+        };
         let db = dir.join("opencode.db");
+        // opencode runs its store in WAL mode.
         let mut conn = SqliteConnectOptions::new()
             .filename(&db)
             .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
             .connect()
             .await
             .unwrap();
@@ -20890,7 +20899,11 @@ sleep 2
             .await
             .unwrap();
         let session_token = body["session_token"].as_str().unwrap().to_string();
-        let url = format!("{}{}", h.base, vogt_session_agent::opencode_store::REPLIES_ROUTE);
+        let url = format!(
+            "{}{}",
+            h.base,
+            vogt_session_agent::opencode_store::REPLIES_ROUTE
+        );
         let post = |bearer: Option<String>, body: Value| {
             let request = reqwest::Client::new().post(&url).json(&body);
             let request = match bearer {
@@ -20906,7 +20919,9 @@ sleep 2
             json!({"conversation_id": "ses_podoc", "replies": [{"text": "hi", "key": OPENCODE_PROVIDER_KEY}]}),
             json!({"conversation_id": "../escape", "replies": [{"text": "hi"}]}),
         ] {
-            let response = post(Some(session_token.clone()), hostile.clone()).await.unwrap();
+            let response = post(Some(session_token.clone()), hostile.clone())
+                .await
+                .unwrap();
             assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{hostile}");
         }
         let fine = json!({"conversation_id": "ses_podoc", "replies": [{"text": "hi"}]});

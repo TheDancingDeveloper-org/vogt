@@ -1156,7 +1156,9 @@ pub struct RepliesQuery {
 /// also holds its credentials, so the engine reads the session's assistant
 /// text out of it and nothing else. `replies` is empty for a session that is
 /// not opencode, or whose conversation is not known yet. Unredacted: the
-/// core redacts before showing it, as it does a transcript.
+/// core redacts before showing it, as it does a transcript. A pod's opencode
+/// store stays in the pod: its replies are the ones its agent sent
+/// (WI-4291), already redacted.
 pub async fn get_session_replies(
     Path(id): Path<Uuid>,
     Query(q): Query<RepliesQuery>,
@@ -1167,6 +1169,14 @@ pub async fn get_session_replies(
         None => state.sessions.get(id)?.conversation(),
     };
     let n = q.n.unwrap_or(1).clamp(1, crate::opencode::MAX_REPLIES);
+    if let Some(kept) = crate::opencode::pod_replies(state.sessions.state_dir(), id) {
+        let skip = kept.replies.len().saturating_sub(n);
+        return Ok(Json(serde_json::json!({
+            "agent": "opencode",
+            "conversation_id": kept.conversation_id,
+            "replies": kept.replies.into_iter().skip(skip).collect::<Vec<_>>(),
+        })));
+    }
     let Some(conversation) = conversation.filter(|c| c.agent == "opencode") else {
         return Ok(Json(
             serde_json::json!({ "agent": null, "conversation_id": null, "replies": [] }),
