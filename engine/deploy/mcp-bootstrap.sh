@@ -902,7 +902,7 @@ install_readonly_servers() {
 # convenience for autonomous work and not a security boundary; the engine's
 # person gate (WI-1355) is the boundary.
 # Nothing is written for a server with no [mcp_servers.<name>] table: run
-# `codex mcp add` first (install_vogt_codex / install_cadastre_codex do).
+# `codex mcp add` first (install_vogt_codex does).
 readonly CODEX_SCHEMA_MAX_BYTES="${CODEX_SCHEMA_MAX_BYTES:-200000}"
 
 codex_driven_session() {
@@ -1162,52 +1162,84 @@ _codex_link_skills() {
     ln -s "$target" "$link" 2>/dev/null || true
 }
 
-# Cadastre (the estate inventory) is a remote HTTP MCP server, so it needs no
-# local client: the registration is its URL plus an Authorization header that
-# names CADASTRE_HTTP_TOKEN. Claude Code expands `${CADASTRE_HTTP_TOKEN}` from
-# the session environment when it connects, and Codex reads the variable named
-# by --bearer-token-env-var, so no value is ever written. There is no built-in
-# endpoint: a deployment opts in by setting CADASTRE_MCP_URL, and without it
-# nothing is registered or removed.
-readonly CADASTRE_URL="${CADASTRE_MCP_URL:-}"
-# Single quotes on purpose: the literal reference is what gets stored.
+# Cadastre (the estate inventory) is a remote HTTP MCP server, reached through
+# `cadastre-mcp` (WI-4288). It used to be registered as HTTP with a header
+# naming `${CADASTRE_HTTP_TOKEN}`, which connects only while that variable is
+# exported, and a brokered session declares it `ondemand`, so a hand-started
+# agent had no working cadastre. Now every client runs the wrapper, which
+# resolves the token at spawn, so no registration stores a token or the URL.
+# There is no built-in endpoint: a deployment opts in by setting
+# CADASTRE_MCP_URL. The server is registered only while the session can also
+# get the token (CADASTRE_HTTP_TOKEN or CADASTRE_HTTP_TOKEN_FILE in its
+# environment, or CADASTRE_HTTP_TOKEN declared `ondemand` in the agent-auth
+# manifest) and removed when it cannot.
+# Overridable only so the registration logic can be exercised outside the image.
+readonly CADASTRE_WRAPPER="${CADASTRE_MCP_WRAPPER:-/usr/local/bin/cadastre-mcp}"
+# What Codex must forward to the wrapper: its own inputs, and the broker's.
+readonly CADASTRE_CODEX_VARS='"CADASTRE_MCP_URL", "CADASTRE_HTTP_TOKEN", "CADASTRE_HTTP_TOKEN_FILE", "VOGT_ENGINE_BROKER_URL", "VOGT_ENGINE_URL", "VOGT_ENGINE_BROKER_TOKEN_FILE", "VOGT_SESSION_TOKEN_FILE", "VOGT_ENGINE_EXTRA_CA_FILE", "ENGINE_AGENT_AUTH_EXTRA_CA_FILE"'
+# The reference the earlier HTTP registration stored; an entry carrying it is
+# ours and is replaced or removed, one an operator wrote differently is not.
+# Single quotes on purpose: the literal reference is what was stored.
 # shellcheck disable=SC2016
-readonly CADASTRE_AUTH_HEADER='Authorization: Bearer ${CADASTRE_HTTP_TOKEN}'
+readonly CADASTRE_OLD_HEADER='Bearer ${CADASTRE_HTTP_TOKEN}'
 
-# Whether ~/.claude.json already holds exactly this HTTP registration. Like
-# claude_runs, only a "yes" is trusted; anything else goes through the CLI.
-cadastre_claude_current() {
+cadastre_wanted() {
+    [[ -n "${CADASTRE_MCP_URL:-}" ]] || return 1
+    [[ -n "${CADASTRE_HTTP_TOKEN:-}" || -n "${CADASTRE_HTTP_TOKEN_FILE:-}" ]] && return 0
+    [[ " ${AGENT_AUTH_ONDEMAND:-} " == *" CADASTRE_HTTP_TOKEN "* ]]
+}
+
+# Whether ~/.claude.json holds an entry this script wrote: the wrapper, or the
+# earlier HTTP registration (its token reference as the header).
+cadastre_claude_ours() {
     local config="${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json"
     command -v jq >/dev/null 2>&1 && [[ -f "$config" ]] || return 1
-    jq -e --arg u "$CADASTRE_URL" --arg h "${CADASTRE_AUTH_HEADER#Authorization: }" '
+    jq -e --arg w "$CADASTRE_WRAPPER" --arg h "$CADASTRE_OLD_HEADER" '
         .mcpServers.cadastre? as $s
-        | $s != null and $s.type == "http" and $s.url == $u
-            and ($s.headers.Authorization? == $h)' \
+        | $s != null and ($s.command? == $w or $s.headers.Authorization? == $h)' \
         "$config" >/dev/null 2>&1
 }
 
-install_cadastre_claude() {
-    [[ -n "$CADASTRE_URL" ]] || return 0
-    command -v claude >/dev/null 2>&1 || return 0
-    cadastre_claude_current && return 0
-    # A stale entry (an older stdio wrapper, another URL) is replaced.
-    claude mcp remove cadastre >/dev/null 2>&1 || true
-    claude mcp add --scope user --transport http cadastre "$CADASTRE_URL" \
-        --header "$CADASTRE_AUTH_HEADER" >/dev/null
-}
-
-install_cadastre_codex() {
-    [[ -n "$CADASTRE_URL" ]] || return 0
-    command -v codex >/dev/null 2>&1 || return 0
-    local registered
-    if registered="$(codex mcp get cadastre 2>/dev/null)"; then
-        if grep -qF "$CADASTRE_URL" <<<"$registered"; then
+install_cadastre() {
+    local wanted=no config_dir
+    cadastre_wanted && wanted=yes
+    if command -v codex >/dev/null 2>&1; then
+        if [[ "$wanted" == yes ]]; then
+            readonly_codex_write "${CODEX_HOME:-$HOME/.codex}/config.toml" cadastre "" \
+                "$CADASTRE_CODEX_VARS" "$CADASTRE_WRAPPER" \
+                || printf 'mcp-bootstrap: codex registration of cadastre failed\n' >&2
+        elif codex mcp get cadastre 2>/dev/null \
+            | grep -qE "$CADASTRE_WRAPPER|CADASTRE_HTTP_TOKEN"; then
+            codex mcp remove cadastre >/dev/null 2>&1 || true
+        fi
+    fi
+    if command -v claude >/dev/null 2>&1; then
+        if [[ "$wanted" == yes ]]; then
+            if ! claude_runs cadastre "$CADASTRE_WRAPPER"; then
+                # A stale entry (the HTTP form, another URL) is replaced.
+                claude mcp remove --scope user cadastre >/dev/null 2>&1 || true
+                claude mcp add --scope user cadastre -- "$CADASTRE_WRAPPER" >/dev/null \
+                    || printf 'mcp-bootstrap: claude registration of cadastre failed\n' >&2
+            fi
+        elif ! claude_lacks cadastre && cadastre_claude_ours; then
+            claude mcp remove --scope user cadastre >/dev/null 2>&1 || true
+        fi
+    fi
+    # opencode has no `mcp remove` (see readonly_opencode): an unwanted entry
+    # stays, and without a URL or token the wrapper refuses to start.
+    if command -v opencode >/dev/null 2>&1 && [[ "$wanted" == yes ]]; then
+        config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
+        optional_dir "$config_dir" "opencode config directory" || return 0
+        optional_dir "${XDG_DATA_HOME:-$HOME/.local/share}/opencode" \
+            "opencode data directory" || return 0
+        if grep -qsF "\"cadastre\"" "$config_dir/opencode.json" "$config_dir/opencode.jsonc" \
+            && grep -qsF "$CADASTRE_WRAPPER" "$config_dir/opencode.json" "$config_dir/opencode.jsonc"; then
             return 0
         fi
-        codex mcp remove cadastre >/dev/null 2>&1 || return 0
+        opencode mcp add cadastre -- "$CADASTRE_WRAPPER" >/dev/null \
+            || printf 'mcp-bootstrap: opencode registration of cadastre failed\n' >&2
     fi
-    codex mcp add cadastre --url "$CADASTRE_URL" \
-        --bearer-token-env-var CADASTRE_HTTP_TOKEN >/dev/null
+    return 0
 }
 
 # A second, remote Vogt (WI-4289): a dev session reaches prod as `vogt-prod`,
@@ -1277,8 +1309,7 @@ optional_step "Vogt bridge" install_vogt_bridge
 optional_step "Codex Vogt registration" install_vogt_codex
 optional_step "Claude Vogt registration" install_vogt_claude
 optional_step "opencode Vogt registration" install_vogt_opencode
-install_cadastre_claude || printf 'mcp-bootstrap: claude registration of cadastre failed\n' >&2
-install_cadastre_codex || printf 'mcp-bootstrap: codex registration of cadastre failed\n' >&2
+optional_step "cadastre registration" install_cadastre
 optional_step "vogt-prod registration" install_vogt_prod
 if command -v codex >/dev/null 2>&1; then
     codex_disable_daemon "${CODEX_HOME:-$HOME/.codex}/config.toml" \
