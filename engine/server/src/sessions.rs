@@ -1777,6 +1777,31 @@ impl SessionRegistry {
         if pod_backed {
             validate_pod_placement_fields(worktree.is_some())?;
         }
+        // An opencode pod runs a model only through a registered provider, as
+        // `provider/model`; one it cannot run would fall back to opencode's
+        // own free default after launch, so it is refused here (WI-4296). A
+        // bare registered model is qualified with its provider. A wake keeps
+        // the model it started with, as the pod fields above do.
+        let opencode_pod = pod_backed
+            && base_command
+                .as_deref()
+                .and_then(agent_cli::agent_name)
+                .as_deref()
+                == Some("opencode");
+        if opencode_pod {
+            if let Some(model) = spec
+                .model
+                .as_deref()
+                .map(str::trim)
+                .filter(|m| !m.is_empty())
+            {
+                match crate::llm_providers::opencode_model(model, &self.secret_broker.providers()) {
+                    Ok(resolved) => spec.model = Some(resolved),
+                    Err(e) if recorded.is_none() => return Err(ApiError::UnknownModel(e)),
+                    Err(_) => {}
+                }
+            }
+        }
         // The Codex launch data the pod cannot derive itself (WI-3882). The
         // guidance and trust path are built after a worktree is cut, so they
         // name the directory the agent actually runs in.
@@ -1961,7 +1986,10 @@ impl SessionRegistry {
         // An opencode model the CLI cannot run fails inside its TUI, after
         // launch; refuse it here with the models it can (WI-935). Skipped
         // when the list cannot be had: a lister fault must not stop a launch.
-        if let (Some("opencode"), Some(model)) = (
+        // A pod's model was checked against its providers above (WI-4296):
+        // the engine's own `opencode models` says nothing about the pod.
+        if let (false, Some("opencode"), Some(model)) = (
+            opencode_pod,
             base_command
                 .as_deref()
                 .and_then(agent_cli::agent_name)
