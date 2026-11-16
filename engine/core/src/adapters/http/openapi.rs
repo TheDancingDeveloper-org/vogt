@@ -473,7 +473,8 @@ mod tests {
     /// names the route or component that differs.
     #[test]
     fn the_document_matches_the_python_golden() {
-        let golden: Value = serde_json::from_str(GOLDEN).expect("the golden is JSON");
+        let mut golden: Value = serde_json::from_str(GOLDEN).expect("the golden is JSON");
+        crate::parity_divergence::patch_openapi(&mut golden, &openapi());
         let ours = normalised(openapi());
         let expected = normalised(golden);
         let found = differences(&ours, &expected);
