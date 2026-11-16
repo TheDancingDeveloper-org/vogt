@@ -3803,8 +3803,9 @@ where
         .map(|(agent, path)| (agent.as_str(), path.as_path()))
         .collect();
     let started = UNIX_EPOCH + Duration::from_secs(session.started_at.unix_seconds().max(0) as u64);
-    transcripts::find(
+    transcripts::find_in(
         &roots,
+        &ctx.config.claude_account_dirs,
         &session.engine_session_id,
         live.and_then(|session| session.command.as_deref()),
         session.template.as_deref(),
@@ -3835,8 +3836,9 @@ where
         .iter()
         .map(|(agent, path)| (agent.as_str(), path.as_path()))
         .collect();
-    transcripts::find(
+    transcripts::find_in(
         &roots,
+        &ctx.config.claude_account_dirs,
         &live.id,
         live.command.as_deref(),
         template,

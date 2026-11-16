@@ -137,11 +137,12 @@ fn file_replies<C: Clock, I: IdFactory>(
     let started = declared
         .map(|row| row.started_at)
         .or_else(|| parse_created(live.and_then(|session| session.created_at.as_deref())));
-    let found = transcripts::find(
+    let found = transcripts::find_in(
         &roots
             .iter()
             .map(|(agent, root)| (agent.as_str(), root.as_path()))
             .collect(),
+        &ctx.config.claude_account_dirs,
         engine_id,
         live.and_then(|session| session.command.as_deref()),
         declared.and_then(|row| row.template.as_deref()),
@@ -323,6 +324,15 @@ mod tests {
         roots: Vec<(String, std::path::PathBuf)>,
         engine: Option<EngineClient>,
     ) -> crate::application::context::Built {
+        built_with(name, roots, Vec::new(), engine)
+    }
+
+    fn built_with(
+        name: &str,
+        roots: Vec<(String, std::path::PathBuf)>,
+        claude_account_dirs: Vec<std::path::PathBuf>,
+        engine: Option<EngineClient>,
+    ) -> crate::application::context::Built {
         let dir = std::env::temp_dir().join(format!("vogt-reply-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
@@ -334,6 +344,7 @@ mod tests {
             ..crate::config::VogtConfig::default()
         };
         config.session_transcript_roots = roots.into_iter().collect();
+        config.claude_account_dirs = claude_account_dirs;
         build_context(
             config,
             Some(Principal::new("local:ada", ActorKind::Human, "Ada").unwrap()),
@@ -701,6 +712,53 @@ mod tests {
         assert_eq!(result["transcript"], path.display().to_string());
         assert!(result["detail"].is_null());
         assert_eq!(result["messages"].as_array().unwrap().len(), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// WI-4286: a pod Claude session's transcript is written back into its
+    /// account's config directory, not the core's Claude root. Codex pods
+    /// already land in the core's Codex root.
+    #[test]
+    fn a_claude_pod_transcript_is_read_from_the_account_directory() {
+        let dir = std::env::temp_dir().join(format!("vogt-reply-pod-files-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let account = dir.join("claude-accounts").join("acct2");
+        let project = account.join("projects").join("-workspace");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(dir.join("claude")).unwrap();
+        let path = project.join("eng-1.jsonl");
+        fs::write(
+            &path,
+            "{\"type\":\"assistant\",\"timestamp\":\"2026-11-16T02:22:00Z\",\"message\":{\"id\":\"m1\",\"content\":[{\"type\":\"text\",\"text\":\"PONG\"}]}}\n",
+        )
+        .unwrap();
+        let engine = engine(|_path, _method, _| {
+            (
+                200,
+                serde_json::to_vec(&json!({
+                    "id": "eng-1",
+                    "alive": true,
+                    "conversation_agent": "claude",
+                    "cwd": "/workspace",
+                    "command": "claude",
+                    "account": "acct2"
+                }))
+                .unwrap(),
+            )
+        });
+        let built = built_with(
+            "pod",
+            vec![("claude".to_string(), dir.join("claude"))],
+            crate::config::claude_account_dirs(Some(&format!("acct2={}", account.display()))),
+            Some(engine),
+        );
+        seed(&built);
+        let result = ask(&built, json!({"id": "ses_00000000000000000000000001"})).unwrap();
+        assert_eq!(result["agent"], "claude", "{result}");
+        assert_eq!(result["basis"], "engine-id");
+        assert_eq!(result["messages"][0]["text"], "PONG");
+        assert_eq!(result["transcript"], path.display().to_string());
+        assert!(result["detail"].is_null(), "{result}");
         let _ = fs::remove_dir_all(&dir);
     }
 

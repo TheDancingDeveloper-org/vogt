@@ -113,8 +113,9 @@ fn excerpt_of<C: Clock, I: IdFactory>(
         .iter()
         .map(|(agent, root)| (agent.as_str(), root.as_path()))
         .collect();
-    let found = transcripts::find(
+    let found = transcripts::find_in(
         &roots,
+        &ctx.config.claude_account_dirs,
         &live.id,
         live.command.as_deref(),
         template,
