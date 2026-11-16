@@ -1464,6 +1464,7 @@ impl SessionRegistry {
         {
             Some(token) => {
                 self.minted.insert(id, ());
+                self.secret_broker.remember_vogt_token(id, token);
                 tracing::info!(
                     target: "vogt::audit",
                     event = "session.identity",
