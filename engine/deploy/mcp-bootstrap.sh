@@ -277,11 +277,10 @@ existing = ""
 index = 0
 while index < len(lines):
     stripped = lines[index].strip()
-    if stripped == header or stripped.startswith(header[:-1] + "."):
+    if stripped == header:
         index += 1
         while index < len(lines) and not lines[index].lstrip().startswith("["):
-            if stripped == header:
-                existing += lines[index]
+            existing += lines[index]
             index += 1
         continue
     kept.append(lines[index])
@@ -301,8 +300,13 @@ block = (
     f"{approval_row(existing)}"
 )
 if name == "cadastre":
+    # Per-tool tables stay where they are (an operator's setting survives a
+    # re-run); only the pinned read tools that have none yet are added.
+    present_tools = {row.strip() for row in kept}
     for tool in os.environ.get("CADASTRE_READ_TOOLS", "").split():
-        block += f'\n[mcp_servers.cadastre.tools.{tool}]\napproval_mode = "approve"\n'
+        tool_header = f"[mcp_servers.cadastre.tools.{tool}]"
+        if tool_header not in present_tools:
+            block += f'\n{tool_header}\napproval_mode = "approve"\n'
 body = "".join(kept).rstrip("\n")
 new = f"{body}\n\n{block}" if body else block
 if new == text:
@@ -1051,6 +1055,7 @@ while index < len(lines):
     )
     if server is not None:
         out.append(lines[index])
+        table_start = len(out)
         index += 1
         present = None
         approval = False
@@ -1071,8 +1076,9 @@ while index < len(lines):
         # other order would move a line on every run and rewrite the file.
         if server == "cadastre":
             # No blanket approval (WI-4288): drop one an older start wrote.
-            out[:] = [
-                r for r in out
+            # Only this table's rows: earlier servers keep their own mode.
+            out[table_start:] = [
+                r for r in out[table_start:]
                 if not (
                     key_of(r) == "default_tools_approval_mode"
                     and r.split("#", 1)[0].split("=", 1)[1].strip() == '"approve"'
