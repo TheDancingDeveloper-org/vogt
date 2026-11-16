@@ -13,9 +13,16 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WRAPPER = REPO_ROOT / "engine" / "deploy" / "vogt-mcp-auth.sh"
 TOKEN = "fetched-token-value"
+
+pytestmark = pytest.mark.skipif(
+    not WRAPPER.is_file(),
+    reason="needs engine/deploy (absent in the core-alone job)",
+)
 
 RECORD_SHIM = """#!/usr/bin/env python3
 import json, os, sys
