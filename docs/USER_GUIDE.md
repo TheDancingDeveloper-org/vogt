@@ -1188,6 +1188,16 @@ $ uv run vogt contract check --project vogt --reason "before release"
 $ uv run vogt project scaffold --project vogt --reason "close what the check found"
 ```
 
+**A refusal is not an outage.** Some commands read the local store but also
+call the session engine — `llm-provider list` above all — using the credential
+named by `engine_token_file` (`VOGT_ENGINE_TOKEN_FILE`). When the engine
+rejects that credential the command exits non-zero with `unauthenticated` or
+`forbidden` and the engine's reason, instead of printing an empty list. Mint
+one with the scopes the operation needs in the container that holds the store
+— `vogt token issue --actor local:sprooty --name <name> --scopes admin
+--reason "<why>"` (`admin` covers `llm-provider`; most reads need `read`) —
+keep the secret in a 0600 file, and point `VOGT_ENGINE_TOKEN_FILE` at it.
+
 **The contract is something a project opts into.** A project you register is
 not measured against it and is never called non-compliant: it reports
 `not_applicable` until somebody runs `contract adopt`, and it is refused
