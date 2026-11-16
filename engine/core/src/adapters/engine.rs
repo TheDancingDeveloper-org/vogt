@@ -1146,12 +1146,32 @@ impl EngineClient {
                 ));
             }
             if let Some(reason) = said.strip_prefix("forbidden: ") {
+                // A capability refusal is an authentication answer, not a
+                // grant decision: the engine understood the credential and
+                // says which scope it lacks (WI-4315). `GrantRefused` would
+                // send the reader looking for a grant that was never the
+                // problem.
+                if reason.contains("; it lacks the ") && reason.contains(" capability") {
+                    return Err(VogtError::Forbidden(reason.to_string()));
+                }
                 return Err(VogtError::GrantRefused(reason.to_string()));
             }
         }
-        if status == 401 || status == 403 {
-            return Err(VogtError::EngineUnavailable(format!(
-                "the {} refused this request ({status}): the token is missing, wrong, or lacks the `sessions` capability",
+        // A refusal is not an outage (WI-4315). The caller degrades on
+        // `EngineUnavailable` — a list operation renders "(none)", a status
+        // read renders "not answering" — which is the right answer to a dead
+        // engine and the wrong answer to a credential the engine rejected.
+        // Keep the two apart so the refusal reaches the command and exits
+        // non-zero with the reason.
+        if status == 401 {
+            return Err(VogtError::Unauthenticated(format!(
+                "the {} refused this request (401): the token is missing, wrong, or has expired; mint a scoped token with `vogt token issue` and name its file in `engine_token_file` (`VOGT_ENGINE_TOKEN_FILE`)",
+                self.label
+            )));
+        }
+        if status == 403 {
+            return Err(VogtError::Forbidden(format!(
+                "the {} refused this request (403): the token lacks the capability this route needs; mint a scoped token with `vogt token issue` and name its file in `engine_token_file` (`VOGT_ENGINE_TOKEN_FILE`)",
                 self.label
             )));
         }
