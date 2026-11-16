@@ -246,7 +246,12 @@ pub(crate) mod tests {
     /// row holding a provider key.
     pub(crate) async fn pod_store(dir: &Path, engine_id: &str, reply: &str) -> PathBuf {
         let db = store(dir).await;
-        exec(&db, "INSERT INTO session VALUES ('ses_pod', '/work', NULL, 1000)", &[]).await;
+        exec(
+            &db,
+            "INSERT INTO session VALUES ('ses_pod', '/work', NULL, 1000)",
+            &[],
+        )
+        .await;
         exec(
             &db,
             "INSERT INTO session VALUES ('ses_child', '/work', 'ses_pod', 5000)",
@@ -357,7 +362,11 @@ pub(crate) mod tests {
         let upload = replies_upload(&db, engine_id).await.expect("an upload");
         assert_eq!(upload.conversation_id, "ses_pod");
         assert_eq!(
-            upload.replies.iter().map(|r| r.text.as_str()).collect::<Vec<_>>(),
+            upload
+                .replies
+                .iter()
+                .map(|r| r.text.as_str())
+                .collect::<Vec<_>>(),
             ["PONG from the pod opencode"]
         );
         let wire = serde_json::to_value(&upload).unwrap();
@@ -389,13 +398,31 @@ pub(crate) mod tests {
     async fn with_no_brief_the_pod_conversation_is_the_newest_top_level_session() {
         let tmp = tempfile::tempdir().unwrap();
         let db = store(tmp.path()).await;
-        exec(&db, "INSERT INTO session VALUES ('ses_old', '/w', NULL, 1)", &[]).await;
-        exec(&db, "INSERT INTO session VALUES ('ses_new', '/w', NULL, 2)", &[]).await;
-        exec(&db, "INSERT INTO session VALUES ('ses_kid', '/w', 'ses_new', 3)", &[]).await;
+        exec(
+            &db,
+            "INSERT INTO session VALUES ('ses_old', '/w', NULL, 1)",
+            &[],
+        )
+        .await;
+        exec(
+            &db,
+            "INSERT INTO session VALUES ('ses_new', '/w', NULL, 2)",
+            &[],
+        )
+        .await;
+        exec(
+            &db,
+            "INSERT INTO session VALUES ('ses_kid', '/w', 'ses_new', 3)",
+            &[],
+        )
+        .await;
         assert_eq!(
             pod_conversation(&db, "no-such-engine").await.as_deref(),
             Some("ses_new")
         );
-        assert_eq!(pod_conversation(&tmp.path().join("none.db"), "x").await, None);
+        assert_eq!(
+            pod_conversation(&tmp.path().join("none.db"), "x").await,
+            None
+        );
     }
 }
