@@ -1,0 +1,16 @@
+{
+ "agent": "claude-code",
+ "version": "2.1.322",
+ "scenario": "turn-tmux-answered",
+ "term": "xterm-256color unless named",
+ "note": "OSC and BEL sequences only, in order; screen frames omitted; cwd redacted",
+ "sequences": [
+  "\u001b]0;✳ Claude Code\u0007",
+  "\u001b]7501;?\u0007",
+  "\u001b]7501;state=idle:app=claude-code\u0007",
+  "\u001b]0;Claude Code\u0007",
+  "\u001b]7501;state=working:app=claude-code\u0007",
+  "\u001b]0;Greeting in three words\u0007",
+  "\u001b]7501;state=done:app=claude-code\u0007"
+ ]
+}
