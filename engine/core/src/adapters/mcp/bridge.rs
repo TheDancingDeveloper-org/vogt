@@ -37,14 +37,33 @@ pub const DISCOVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_sec
 /// Everything else. A call that has not answered in 30 s is not going to.
 pub const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// The streamable-HTTP session header. A server that issues one on
+/// `initialize` refuses every later request that does not send it back.
+const MCP_SESSION_HEADER: &str = "Mcp-Session-Id";
+
+/// What one HTTP exchange answered.
+#[derive(Debug, Default)]
+pub struct Reply {
+    pub status: u16,
+    pub body: Vec<u8>,
+    /// The `Mcp-Session-Id` response header, when the server sent one.
+    pub mcp_session: Option<String>,
+}
+
+impl From<(u16, Vec<u8>)> for Reply {
+    fn from((status, body): (u16, Vec<u8>)) -> Self {
+        Self {
+            status,
+            body,
+            mcp_session: None,
+        }
+    }
+}
+
 /// One HTTP exchange. Injected in tests; [`UreqTransport`] is the live one.
 pub trait BridgeTransport {
-    fn exchange(
-        &self,
-        url: &str,
-        headers: &[(&str, String)],
-        body: &[u8],
-    ) -> Result<(u16, Vec<u8>), String>;
+    fn exchange(&self, url: &str, headers: &[(&str, String)], body: &[u8])
+        -> Result<Reply, String>;
 }
 
 /// What one bridge session did.
@@ -64,6 +83,11 @@ pub struct Bridge<'a, T: BridgeTransport> {
     version: &'a str,
     discovered: bool,
     announced: bool,
+    /// The session the server issued on `initialize`, if it issues one, and
+    /// the client's `initialize` that got it, for re-establishing a session
+    /// the server has forgotten.
+    mcp_session: Option<String>,
+    initialize: Option<Value>,
     pub report: BridgeReport,
 }
 
@@ -76,6 +100,8 @@ impl<'a, T: BridgeTransport> Bridge<'a, T> {
             version,
             discovered: false,
             announced: false,
+            mcp_session: None,
+            initialize: None,
             report: BridgeReport::default(),
         }
     }
@@ -90,7 +116,7 @@ impl<'a, T: BridgeTransport> Bridge<'a, T> {
     /// real call rather than die at launch.
     pub fn discover(&mut self) {
         let (status, body) = match self.get(&format!("{}/connection-info", self.url)) {
-            Ok(response) => response,
+            Ok(reply) => (reply.status, reply.body),
             Err(error) => {
                 self.warn(format!("could not reach {}: {error}", self.url));
                 return;
@@ -215,9 +241,70 @@ impl<'a, T: BridgeTransport> Bridge<'a, T> {
         }
     }
 
-    fn forward(&self, message: &Value) -> Option<Value> {
-        let (status, body) = match self.post(&format!("{}/mcp", self.url), message) {
-            Ok(response) => response,
+    /// POST one message, keeping the server's MCP session (WI-4288).
+    ///
+    /// A streamable-HTTP server may issue an `Mcp-Session-Id` on `initialize`
+    /// and refuse every later request without it (Cadastre does, with 400).
+    /// Vogt's own `/mcp` issues none, and then nothing is sent. A client
+    /// `initialize` starts over: the old session is not presented. A session
+    /// the server no longer knows (404, or 400 naming the header — a restart)
+    /// is re-established once by replaying the client's `initialize` and
+    /// `notifications/initialized`; their answers are the bridge's and never
+    /// reach stdout.
+    fn exchange(&mut self, message: &Value) -> Result<Reply, String> {
+        let url = format!("{}/mcp", self.url);
+        let is_initialize = message.get("method").and_then(Value::as_str) == Some("initialize");
+        if is_initialize {
+            self.mcp_session = None;
+            self.initialize = Some(message.clone());
+        }
+        let sent_session = self.mcp_session.is_some();
+        let reply = self.post(&url, message)?;
+        if is_initialize {
+            self.capture_session(&reply);
+            return Ok(reply);
+        }
+        if sent_session && session_refused(&reply) {
+            if let Some(initialize) = self.initialize.clone() {
+                if self.reinitialize(&url, &initialize)? {
+                    return self.post(&url, message);
+                }
+            }
+        }
+        Ok(reply)
+    }
+
+    fn capture_session(&mut self, reply: &Reply) -> bool {
+        if reply.status != 200 {
+            return false;
+        }
+        let session = reply
+            .mcp_session
+            .as_deref()
+            .map(str::trim)
+            .filter(|session| !session.is_empty());
+        self.mcp_session = session.map(str::to_owned);
+        self.mcp_session.is_some()
+    }
+
+    /// Open a fresh server session for a client that already has one.
+    fn reinitialize(&mut self, url: &str, initialize: &Value) -> Result<bool, String> {
+        self.mcp_session = None;
+        let reply = self.post(url, initialize)?;
+        if !self.capture_session(&reply) {
+            return Ok(false);
+        }
+        self.warn("the server forgot this MCP session; started a new one");
+        self.post(
+            url,
+            &json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+        )?;
+        Ok(true)
+    }
+
+    fn forward(&mut self, message: &Value) -> Option<Value> {
+        let (status, body) = match self.exchange(message) {
+            Ok(reply) => (reply.status, reply.body),
             Err(error) => {
                 // A notification expects no answer, so an unreachable server
                 // stays silent for one. A null id is a notification too:
@@ -267,20 +354,36 @@ impl<'a, T: BridgeTransport> Bridge<'a, T> {
         if let Some(token) = &self.token {
             headers.push(("Authorization", format!("Bearer {token}")));
         }
+        if let Some(session) = &self.mcp_session {
+            headers.push((MCP_SESSION_HEADER, session.clone()));
+        }
         headers
     }
 
-    fn get(&self, url: &str) -> Result<(u16, Vec<u8>), String> {
+    fn get(&self, url: &str) -> Result<Reply, String> {
         self.transport.exchange(url, &self.headers(), b"")
     }
 
-    fn post(&self, url: &str, message: &Value) -> Result<(u16, Vec<u8>), String> {
+    fn post(&self, url: &str, message: &Value) -> Result<Reply, String> {
         self.transport.exchange(
             url,
             &self.headers(),
             crate::decisions::python_json_dumps(message, false).as_bytes(),
         )
     }
+}
+
+/// The server no longer knows the session this request presented. The spec
+/// answers 404; Cadastre answers 400 "MCP request needs a valid
+/// Mcp-Session-Id", and the header's name in a 400 body is that refusal.
+fn session_refused(reply: &Reply) -> bool {
+    reply.status == 404
+        || (reply.status == 400
+            && reply
+                .body
+                .to_ascii_lowercase()
+                .windows(MCP_SESSION_HEADER.len())
+                .any(|window| window == MCP_SESSION_HEADER.to_ascii_lowercase().as_bytes()))
 }
 
 /// Read a token from a file. Never from argv or a URL.
@@ -358,7 +461,7 @@ impl BridgeTransport for UreqTransport {
         url: &str,
         headers: &[(&str, String)],
         body: &[u8],
-    ) -> Result<(u16, Vec<u8>), String> {
+    ) -> Result<Reply, String> {
         let timeout = if body.is_empty() {
             DISCOVERY_TIMEOUT
         } else {
@@ -383,8 +486,13 @@ impl BridgeTransport for UreqTransport {
     }
 }
 
-fn read_response(response: ureq::http::Response<ureq::Body>) -> Result<(u16, Vec<u8>), String> {
+fn read_response(response: ureq::http::Response<ureq::Body>) -> Result<Reply, String> {
     let status = response.status().as_u16();
+    let mcp_session = response
+        .headers()
+        .get(MCP_SESSION_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
     let mut bytes = Vec::new();
     use std::io::Read;
     response
@@ -393,7 +501,11 @@ fn read_response(response: ureq::http::Response<ureq::Body>) -> Result<(u16, Vec
         .take(8 * 1024 * 1024)
         .read_to_end(&mut bytes)
         .map_err(|error| error.to_string())?;
-    Ok((status, bytes))
+    Ok(Reply {
+        status,
+        body: bytes,
+        mcp_session,
+    })
 }
 
 #[cfg(test)]
@@ -413,7 +525,7 @@ mod tests {
             url: &str,
             headers: &[(&str, String)],
             _body: &[u8],
-        ) -> Result<(u16, Vec<u8>), String> {
+        ) -> Result<Reply, String> {
             self.seen.borrow_mut().push(format!(
                 "{url} auth={}",
                 headers.iter().any(|(name, _)| *name == "Authorization")
@@ -421,7 +533,12 @@ mod tests {
             if self.fail {
                 return Err("connection refused".to_owned());
             }
-            Ok(self.answers.borrow_mut().pop().unwrap_or((200, Vec::new())))
+            Ok(self
+                .answers
+                .borrow_mut()
+                .pop()
+                .unwrap_or((200, Vec::new()))
+                .into())
         }
     }
 
@@ -602,5 +719,189 @@ mod tests {
         env.insert(HTTP_TOKEN_ENV.into(), "  ".into());
         assert!(resolve_token(&env).is_none());
         assert!(configured_url(&HashMap::new()).is_none());
+    }
+
+    /// A streamable-HTTP server on loopback that issues an `Mcp-Session-Id`
+    /// on `initialize` and answers every later request without a live one
+    /// with Cadastre's 400 (WI-4288). Driven through the live
+    /// [`UreqTransport`], so the header really crosses the wire.
+    /// (JSON-RPC method, `Mcp-Session-Id` it carried), in arrival order.
+    type Seen = std::sync::Arc<std::sync::Mutex<Vec<(String, Option<String>)>>>;
+
+    struct SessionServer {
+        url: String,
+        seen: Seen,
+        live: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl SessionServer {
+        fn start() -> Self {
+            use std::io::{BufRead, BufReader, Read, Write};
+            use std::sync::{Arc, Mutex};
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let live = Arc::new(Mutex::new(Vec::<String>::new()));
+            let (seen_in, live_in) = (Arc::clone(&seen), Arc::clone(&live));
+            std::thread::spawn(move || {
+                let mut issued = 0;
+                for stream in listener.incoming() {
+                    let Ok(mut stream) = stream else { return };
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let mut request_line = String::new();
+                    reader.read_line(&mut request_line).unwrap();
+                    let (mut length, mut session) = (0, None);
+                    loop {
+                        let mut line = String::new();
+                        reader.read_line(&mut line).unwrap();
+                        let line = line.trim_end();
+                        if line.is_empty() {
+                            break;
+                        }
+                        let (name, value) = line.split_once(':').unwrap();
+                        match name.to_ascii_lowercase().as_str() {
+                            "content-length" => length = value.trim().parse().unwrap(),
+                            "mcp-session-id" => session = Some(value.trim().to_owned()),
+                            _ => {}
+                        }
+                    }
+                    let mut body = vec![0; length];
+                    reader.read_exact(&mut body).unwrap();
+                    let reply = |status: &str, extra: &str, body: &str| {
+                        format!(
+                            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n\
+                             Content-Length: {}\r\nConnection: close\r\n{extra}\r\n{body}",
+                            body.len()
+                        )
+                    };
+                    let answer = if request_line.starts_with("GET") {
+                        reply("404 Not Found", "", "")
+                    } else {
+                        let message: Value = serde_json::from_slice(&body).unwrap();
+                        let method = message["method"].as_str().unwrap_or("").to_owned();
+                        seen_in
+                            .lock()
+                            .unwrap()
+                            .push((method.clone(), session.clone()));
+                        let id = message.get("id").cloned().unwrap_or(Value::Null);
+                        if method == "initialize" {
+                            issued += 1;
+                            let new = format!("sess-{issued}");
+                            live_in.lock().unwrap().push(new.clone());
+                            reply(
+                                "200 OK",
+                                &format!("Mcp-Session-Id: {new}\r\n"),
+                                &json!({"jsonrpc": "2.0", "id": id,
+                                    "result": {"protocolVersion": "2025-06-18"}})
+                                .to_string(),
+                            )
+                        } else if !session.is_some_and(|s| live_in.lock().unwrap().contains(&s)) {
+                            reply(
+                                "400 Bad Request",
+                                "",
+                                &json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32602,
+                                    "message": "MCP request needs a valid Mcp-Session-Id"}})
+                                .to_string(),
+                            )
+                        } else if id.is_null() {
+                            reply("202 Accepted", "", "")
+                        } else {
+                            reply(
+                                "200 OK",
+                                "",
+                                &json!({"jsonrpc": "2.0", "id": id,
+                                    "result": {"tools": [{"name": "lookup"}]}})
+                                .to_string(),
+                            )
+                        }
+                    };
+                    stream.write_all(answer.as_bytes()).unwrap();
+                }
+            });
+            Self { url, seen, live }
+        }
+
+        fn seen(&self) -> Vec<(String, Option<String>)> {
+            self.seen.lock().unwrap().clone()
+        }
+    }
+
+    const INITIALIZE: &str =
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}\n";
+    const INITIALIZED: &str = "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n";
+
+    fn tools(id: u32) -> String {
+        format!("{{\"jsonrpc\":\"2.0\",\"id\":{id},\"method\":\"tools/list\"}}\n")
+    }
+
+    fn pair(method: &str, session: Option<&str>) -> (String, Option<String>) {
+        (method.to_owned(), session.map(str::to_owned))
+    }
+
+    #[test]
+    fn the_session_id_from_initialize_is_sent_on_every_later_request() {
+        let server = SessionServer::start();
+        let transport = UreqTransport;
+        let mut bridge = Bridge::new(&server.url, Some("t".into()), &transport, "0.1.0");
+        let mut output = String::new();
+        bridge.serve(
+            &format!("{INITIALIZE}{INITIALIZED}{}", tools(2)),
+            &mut output,
+        );
+        let last = output.lines().last().unwrap();
+        assert!(last.contains("lookup"), "{output}");
+        assert_eq!(
+            server.seen(),
+            vec![
+                pair("initialize", None),
+                pair("notifications/initialized", Some("sess-1")),
+                pair("tools/list", Some("sess-1")),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_client_reinitialize_starts_a_fresh_session() {
+        let server = SessionServer::start();
+        let transport = UreqTransport;
+        let mut bridge = Bridge::new(&server.url, Some("t".into()), &transport, "0.1.0");
+        let mut output = String::new();
+        bridge.serve(
+            &format!("{INITIALIZE}{INITIALIZED}{INITIALIZE}{}", tools(3)),
+            &mut output,
+        );
+        let seen = server.seen();
+        assert_eq!(seen[2], pair("initialize", None), "{seen:?}");
+        assert_eq!(seen[3], pair("tools/list", Some("sess-2")), "{seen:?}");
+    }
+
+    #[test]
+    fn a_session_the_server_forgot_is_reestablished_once() {
+        let server = SessionServer::start();
+        let transport = UreqTransport;
+        let mut bridge = Bridge::new(&server.url, Some("t".into()), &transport, "0.1.0");
+        let mut output = String::new();
+        bridge.serve(
+            &format!("{INITIALIZE}{INITIALIZED}{}", tools(2)),
+            &mut output,
+        );
+        server.live.lock().unwrap().clear(); // a server restart
+        let mut after = String::new();
+        bridge.serve(&tools(3), &mut after);
+        assert_eq!(
+            after.lines().count(),
+            1,
+            "only the client's answer: {after}"
+        );
+        assert!(after.contains("lookup"), "{after}");
+        assert_eq!(
+            server.seen()[3..],
+            [
+                pair("tools/list", Some("sess-1")),
+                pair("initialize", None),
+                pair("notifications/initialized", Some("sess-2")),
+                pair("tools/list", Some("sess-2")),
+            ]
+        );
     }
 }
