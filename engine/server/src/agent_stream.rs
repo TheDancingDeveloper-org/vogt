@@ -1020,7 +1020,13 @@ pub async fn bootstrap(
     // The pod's clone root, for the Claude project-trust entry (WI-3355): it
     // moves under the workspace tree when that is on (WI-3374).
     let pod_work_dir = cfg.work_dir();
-    let workspace_root = state.config.workspace_root.to_string_lossy().into_owned();
+    // The pod's own workspace mount, where its CLAUDE.md imports resolve, not
+    // the engine's workspace root, a path the pod never sees (WI-2000).
+    let workspace_root = cfg
+        .workspace
+        .as_ref()
+        .map(|workspace| workspace.dir.clone())
+        .unwrap_or_else(|| crate::pod_backend::DEFAULT_WORKSPACE_DIR.to_string());
     let Some(source) = state.agent_auth.take_source(id).await else {
         return (StatusCode::BAD_REQUEST, "session source is unavailable").into_response();
     };

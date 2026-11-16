@@ -20226,8 +20226,11 @@ mod pod_stream {
         let config: Value = serde_json::from_slice(&config).unwrap();
         assert_eq!(config["hasCompletedOnboarding"], true);
         assert_eq!(config["theme"], "dark");
-        let root = h.state.config.workspace_root.to_string_lossy().into_owned();
-        let rootp = &config["projects"][root.as_str()];
+        // The approval is for the pod's own workspace mount, not the engine's
+        // workspace root, which the pod never sees (WI-2000).
+        let engine_root = h.state.config.workspace_root.to_string_lossy().into_owned();
+        assert_ne!(engine_root, "/home/vogt/Working", "{config}");
+        let rootp = &config["projects"]["/home/vogt/Working"];
         assert_eq!(rootp["hasTrustDialogAccepted"], true, "{config}");
         assert_eq!(
             rootp["hasClaudeMdExternalIncludesApproved"], true,
