@@ -50,6 +50,11 @@ pub struct Session {
     /// ring (WI-990). `None` for a session restored from hibernation, which
     /// has only the tail it kept and renders by replaying that.
     terminal: Mutex<Option<crate::screen::Terminal>>,
+    /// The screen a stopped session showed when its grid was shed
+    /// (WI-4290): the text the screen route reads, with no grid behind it.
+    settled: Mutex<Option<SettledScreen>>,
+    /// The grid and ring of this stopped session have been shed.
+    shed: AtomicBool,
     backend: Arc<dyn SessionBackend>,
     /// Cached child PID — `child` is taken by the wait task, so SIGKILL needs
     /// its own handle on Unix.
@@ -190,6 +195,46 @@ pub struct Session {
     done_at: Mutex<Option<String>>,
 }
 
+/// What a stopped session keeps of its grid once it is shed (WI-4290): the
+/// screen and the history above it as text, a few KiB where the grid held
+/// cells for every history line.
+struct SettledScreen {
+    rendered: crate::screen::Rendered,
+    history: Vec<String>,
+}
+
+impl SettledScreen {
+    /// Keep the newest history lines whose text fits in `keep_bytes`.
+    fn new(rendered: crate::screen::Rendered, mut history: Vec<String>, keep_bytes: usize) -> Self {
+        let mut total = 0usize;
+        let keep_from = history
+            .iter()
+            .rposition(|line| {
+                total += line.len() + 1;
+                total > keep_bytes
+            })
+            .map_or(0, |i| i + 1);
+        history.drain(..keep_from);
+        history.shrink_to_fit();
+        Self { rendered, history }
+    }
+
+    fn bytes(&self) -> usize {
+        let lines = |v: &[String]| v.iter().map(|l| l.len()).sum::<usize>();
+        lines(&self.rendered.lines)
+            + lines(&self.history)
+            + self.rendered.title.as_ref().map_or(0, String::len)
+    }
+
+    /// Up to `scrollback_lines` of history, newest last, as a replay of the
+    /// same bytes with that many lines of history would give.
+    fn render(&self, scrollback_lines: usize) -> (crate::screen::Rendered, Vec<String>) {
+        let keep = scrollback_lines.min(crate::screen::MAX_SCROLLBACK_LINES);
+        let from = self.history.len().saturating_sub(keep);
+        (self.rendered.clone(), self.history[from..].to_vec())
+    }
+}
+
 impl Session {
     pub fn name(&self) -> String {
         self.name.lock().clone()
@@ -249,6 +294,51 @@ impl Session {
         }
     }
 
+    /// When the child exited, once it has.
+    pub fn ended_at(&self) -> Option<time::OffsetDateTime> {
+        *self.ended_at.lock()
+    }
+
+    /// Give back what a stopped session no longer needs (WI-4290): render
+    /// the live grid once to text and drop it, cut the output ring to its
+    /// last `keep_bytes`, and drop the economics tailer. The screen route and
+    /// the session detail still answer, from what is kept. Does nothing for a
+    /// live session, one being hibernated (its whole `Session` goes), or one
+    /// already shed. True when it shed.
+    pub fn shed_after_exit(&self, keep_bytes: usize) -> bool {
+        if self.is_alive() || self.is_hibernating() {
+            return false;
+        }
+        if self.shed.swap(true, Ordering::AcqRel) {
+            return false;
+        }
+        // Lock order is scrollback, then terminal, as in the reader thread.
+        let mut sb = self.scrollback.lock();
+        let grid = self.terminal.lock().take();
+        if let Some(mut grid) = grid {
+            let (rendered, history) = grid.render(crate::screen::MAX_SCROLLBACK_LINES);
+            *self.settled.lock() = Some(SettledScreen::new(rendered, history, keep_bytes));
+        }
+        sb.shed(keep_bytes);
+        drop(sb);
+        self.economics.lock().take();
+        true
+    }
+
+    /// Whether the session still holds its live vt100 grid.
+    pub fn has_live_grid(&self) -> bool {
+        self.terminal.lock().is_some()
+    }
+
+    /// The output bytes this session holds in memory: its ring's allocation
+    /// and the text of a shed screen. The live grid is not counted; see
+    /// [`Self::has_live_grid`].
+    pub fn retained_bytes(&self) -> usize {
+        let ring = self.scrollback.lock().allocated();
+        let screen = self.settled.lock().as_ref().map_or(0, SettledScreen::bytes);
+        ring + screen
+    }
+
     /// The current screen and the scrollback above it. From the live grid
     /// when the session has one — it has parsed every byte since spawn, so a
     /// diff-painting TUI's frame survives past the replay window (WI-990) —
@@ -257,6 +347,9 @@ impl Session {
     pub fn render_screen(&self, scrollback_lines: usize) -> (crate::screen::Rendered, Vec<String>) {
         if let Some(terminal) = self.terminal.lock().as_mut() {
             return terminal.render(scrollback_lines);
+        }
+        if let Some(settled) = self.settled.lock().as_ref() {
+            return settled.render(scrollback_lines);
         }
         let (bytes, rows, cols) = self.screen_source(crate::screen::SCREEN_REPLAY_BYTES);
         crate::screen::render_with_scrollback(&bytes, rows, cols, scrollback_lines)
@@ -470,9 +563,16 @@ impl Session {
             .settle(|| self.terminal.lock().as_ref().map(|t| t.fingerprint()))
     }
 
-    /// The window title the program last set, from the live grid.
+    /// The window title the program last set, from the live grid, or from
+    /// the screen a stopped session kept.
     pub fn title(&self) -> Option<String> {
-        self.terminal.lock().as_ref().and_then(|t| t.title())
+        if let Some(terminal) = self.terminal.lock().as_ref() {
+            return terminal.title();
+        }
+        self.settled
+            .lock()
+            .as_ref()
+            .and_then(|s| s.rendered.title.clone())
     }
 
     /// The agent CLI the session runs, from its conversation or its command.
@@ -1401,6 +1501,8 @@ fn assemble_session(
             spec.scrollback_bytes.unwrap_or(defaults.scrollback_bytes),
         )),
         terminal: Mutex::new(Some(crate::screen::Terminal::new(rows, cols))),
+        settled: Mutex::new(None),
+        shed: AtomicBool::new(false),
         backend,
         pid,
         output_tx: tx.clone(),

@@ -2897,13 +2897,26 @@ impl SessionRegistry {
         })
     }
 
-    fn transition_lock(&self, id: Uuid) -> Arc<tokio::sync::Mutex<()>> {
-        Arc::clone(
+    /// Hold `id`'s transition lock until the guard drops. The map entry goes
+    /// with the last holder, so a session hibernated and woken many times, or
+    /// removed, leaves nothing behind (WI-4290).
+    async fn transition(&self, id: Uuid) -> TransitionGuard<'_> {
+        let lock = Arc::clone(
             self.transitions
                 .entry(id)
                 .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
                 .value(),
-        )
+        );
+        TransitionGuard {
+            transitions: &self.transitions,
+            id,
+            held: Some(lock.lock_owned().await),
+        }
+    }
+
+    /// How many sessions have a transition lock entry (tests).
+    pub fn transition_entries(&self) -> usize {
+        self.transitions.len()
     }
 
     /// Why a live session cannot be hibernated, or `None` when it can.
@@ -2977,8 +2990,7 @@ impl SessionRegistry {
         superseded_by: Option<String>,
     ) -> Result<SessionSummary> {
         let superseded_by = self.checked_successor(id, superseded_by)?;
-        let lock = self.transition_lock(id);
-        let _held = lock.lock().await;
+        let _held = self.transition(id).await;
         let Some(session) = self.sessions.get(&id).map(|s| Arc::clone(s.value())) else {
             if superseded_by.is_some() {
                 self.mark_superseded(id, superseded_by)?;
@@ -3241,8 +3253,7 @@ impl SessionRegistry {
         id: Uuid,
         req: vogt_engine_contract::WakeRequest,
     ) -> Result<Arc<Session>> {
-        let lock = self.transition_lock(id);
-        let _held = lock.lock().await;
+        let _held = self.transition(id).await;
         if let Some(session) = self.sessions.get(&id).map(|s| Arc::clone(s.value())) {
             if session.is_alive() {
                 return Ok(session);
@@ -4260,8 +4271,107 @@ impl SessionRegistry {
         // (`POST /api/agent-tasks/artifacts/cleanup`), which sweeps prompt
         // files whose session the registry no longer knows.
         prompt_files::remove_session_prompt(&self.cfg.state_dir, id);
+        self.transitions
+            .remove_if(&id, |_, lock| Arc::strong_count(lock) == 1);
         Ok(())
     }
+
+    /// Bound what stopped sessions hold (WI-4290). A stop keeps the session
+    /// for its scrollback, and before this nothing ever let it go: each one
+    /// kept its whole output ring and live grid until a person deleted it.
+    /// Once `shed_after` has passed since a session exited, its grid is
+    /// rendered to text and dropped and its ring cut to `keep_bytes`; once
+    /// `evict_after` has, it is forgotten, as `remove` would, but with no
+    /// process to kill and nothing left to clean. Oversight and pinned-awake
+    /// sessions are shed but never forgotten. A session being hibernated is
+    /// left alone: its hibernation takes it out of the map itself. `now` is
+    /// passed in so a test can run the clock forward.
+    pub fn reap_stopped(&self, now: time::OffsetDateTime) -> Reaped {
+        let policy = self.cfg.stopped_sessions;
+        let mut reaped = Reaped::default();
+        let stopped: Vec<Arc<Session>> = self
+            .sessions
+            .iter()
+            .filter(|kv| !kv.value().is_alive() && !kv.value().is_hibernating())
+            .map(|kv| Arc::clone(kv.value()))
+            .collect();
+        for session in stopped {
+            let Some(ended) = session.ended_at() else {
+                continue;
+            };
+            let age = now - ended;
+            if age >= policy.shed_after && session.shed_after_exit(policy.keep_bytes) {
+                reaped.shed += 1;
+            }
+            let Some(ttl) = policy.evict_after else {
+                continue;
+            };
+            if age < ttl || session.role() == SessionRole::Oversight || session.keep_awake() {
+                continue;
+            }
+            if self.evict_stopped(session.id) {
+                reaped.evicted += 1;
+            }
+        }
+        reaped
+    }
+
+    /// Forget a stopped session: what `remove` does for one whose exit hook
+    /// has already run and whose stop already cleaned up. A session that came
+    /// back to life under its id (a wake) is kept.
+    fn evict_stopped(&self, id: Uuid) -> bool {
+        let gone = self
+            .sessions
+            .remove_if(&id, |_, s| !s.is_alive() && !s.is_hibernating())
+            .is_some();
+        if !gone {
+            return false;
+        }
+        self.secret_broker.revoke(id);
+        prompt_files::remove_session_prompt(&self.cfg.state_dir, id);
+        self.transitions
+            .remove_if(&id, |_, lock| Arc::strong_count(lock) == 1);
+        tracing::info!(session = %id, "forgot a stopped session past its retention");
+        true
+    }
+
+    /// How many sessions the registry holds in memory, live or stopped.
+    pub fn len(&self) -> usize {
+        self.sessions.len()
+    }
+
+    /// Whether the registry holds no session in memory.
+    pub fn is_empty(&self) -> bool {
+        self.sessions.is_empty()
+    }
+}
+
+/// A held transition lock; see [`SessionRegistry::transition`].
+struct TransitionGuard<'a> {
+    transitions: &'a DashMap<Uuid, Arc<tokio::sync::Mutex<()>>>,
+    id: Uuid,
+    held: Option<tokio::sync::OwnedMutexGuard<()>>,
+}
+
+impl Drop for TransitionGuard<'_> {
+    fn drop(&mut self) {
+        // Release first, so our own clone of the lock is gone. A waiter
+        // already holds a clone, which keeps the count above one; the
+        // check and the removal happen under the map's shard lock, which
+        // `transition` also takes to clone, so neither can slip between.
+        self.held.take();
+        self.transitions
+            .remove_if(&self.id, |_, lock| Arc::strong_count(lock) == 1);
+    }
+}
+
+/// What one pass of [`SessionRegistry::reap_stopped`] did.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Reaped {
+    /// Stopped sessions whose grid and ring were shed.
+    pub shed: usize,
+    /// Stopped sessions forgotten.
+    pub evicted: usize,
 }
 
 fn now_rfc3339() -> String {

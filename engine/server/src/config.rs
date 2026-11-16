@@ -615,6 +615,8 @@ pub struct Config {
     /// (WI-1289). `None` (`ENGINE_SESSION_LIST_RETAIN_AFTER=off`) never hides
     /// one. The default is six hours.
     pub session_list_retain_after: Option<std::time::Duration>,
+    /// What a stopped session keeps in memory, and for how long (WI-4290).
+    pub stopped_sessions: StoppedRetention,
     /// The live call's switch and turn-taking timings (WI-960). A call is
     /// offered only when this is enabled *and* the assistant, STT and TTS
     /// are all configured.
@@ -1289,6 +1291,7 @@ pub fn load(
         agent_clis: crate::agent_clis::AgentCliPaths::from_env(),
         hibernation: hibernation_policy_from_env()?,
         session_list_retain_after: session_list_retain_from_env()?,
+        stopped_sessions: stopped_retention_from_env()?,
         assistant_call: call_policy_from_env()?,
         autopilot: autopilot_policy_from_env()?,
         first_turn: crate::first_turn::Policy::default(),
@@ -1898,6 +1901,69 @@ fn session_list_retain_from_env() -> Result<Option<std::time::Duration>> {
             "reading ENGINE_SESSION_LIST_RETAIN_AFTER: {e}"
         ))),
     }
+}
+
+/// What a stopped session keeps in memory, and for how long (WI-4290).
+///
+/// A stop keeps the session for its scrollback, but nothing used to bound
+/// that: each stopped session held its whole output ring (up to
+/// `ENGINE_SCROLLBACK_BYTES`) and its live vt100 grid until a person deleted
+/// it, about 1.5 MiB per stopped session on vogt-dev. The reaper
+/// (`SessionRegistry::reap_stopped`) sheds the grid and cuts the ring to a
+/// tail once `shed_after` has passed, and forgets the session once
+/// `evict_after` has. Its history row and full output stay in the history
+/// store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StoppedRetention {
+    /// How long after exit the full buffers are kept, so an agent-task
+    /// runner and the history archive read the whole ring first. Fixed.
+    pub shed_after: std::time::Duration,
+    /// `ENGINE_STOPPED_SCROLLBACK_BYTES` (default 256 KiB): the output tail
+    /// a shed session keeps, and the bound on the screen it keeps.
+    pub keep_bytes: usize,
+    /// `ENGINE_STOPPED_SESSION_TTL` (`24h`, `90m`; `off` never forgets one):
+    /// how long after exit a stopped session is forgotten. Oversight and
+    /// pinned-awake sessions are kept.
+    pub evict_after: Option<std::time::Duration>,
+}
+
+impl Default for StoppedRetention {
+    fn default() -> Self {
+        Self {
+            shed_after: std::time::Duration::from_secs(60),
+            keep_bytes: 256 * 1024,
+            evict_after: Some(std::time::Duration::from_secs(24 * 3600)),
+        }
+    }
+}
+
+fn stopped_retention_from_env() -> Result<StoppedRetention> {
+    let mut retention = StoppedRetention::default();
+    if let Some(bytes) = parse_usize_env("ENGINE_STOPPED_SCROLLBACK_BYTES")? {
+        retention.keep_bytes = bytes;
+    }
+    match engine_env("ENGINE_STOPPED_SESSION_TTL") {
+        Ok(v) if v.trim().is_empty() => {}
+        Ok(v) => {
+            let v = v.trim();
+            retention.evict_after = if v.eq_ignore_ascii_case("off") || v == "0" {
+                None
+            } else {
+                Some(crate::hibernate_policy::parse_duration(v).ok_or_else(|| {
+                    ApiError::Config(format!(
+                        "ENGINE_STOPPED_SESSION_TTL={v:?} is not a duration like 24h, 90m or 86400, or off"
+                    ))
+                })?)
+            };
+        }
+        Err(std::env::VarError::NotPresent) => {}
+        Err(e) => {
+            return Err(ApiError::Config(format!(
+                "reading ENGINE_STOPPED_SESSION_TTL: {e}"
+            )))
+        }
+    }
+    Ok(retention)
 }
 
 /// `ENGINE_AUTOPILOT_NUDGE_AFTER` (`60s`, `2m`; default one minute) and

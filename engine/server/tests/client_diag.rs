@@ -72,6 +72,7 @@ fn test_config() -> Config {
         agent_clis: vogt_engine_server::agent_clis::AgentCliPaths::default(),
         hibernation: vogt_engine_server::hibernate_policy::Policy::default(),
         session_list_retain_after: None,
+        stopped_sessions: Default::default(),
         assistant_call: vogt_engine_server::call::CallPolicy::default(),
         autopilot: vogt_engine_server::autopilot::Policy::default(),
         first_turn: vogt_engine_server::first_turn::Policy::default(),

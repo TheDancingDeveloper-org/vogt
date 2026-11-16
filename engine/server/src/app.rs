@@ -293,6 +293,8 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
     // daily schedule, so `history.db` and the raw `session-logs/` cannot
     // grow without bound. A no-op when history is disabled or the horizon is 0.
     spawn_history_retention_sweeper(Arc::clone(&state));
+    // Background task: bound what stopped sessions keep in memory (WI-4290).
+    spawn_stopped_session_reaper(Arc::clone(&state));
     crate::hibernate_policy::spawn_watcher(Arc::clone(&state));
     crate::autopilot::spawn_watcher(Arc::clone(&state));
     crate::budget::spawn_watcher(Arc::clone(&state));
@@ -695,6 +697,29 @@ fn spawn_history_retention_sweeper(state: Arc<AppState>) {
                 Err(e) => tracing::warn!("session history retention sweep failed: {e}"),
             }
             tokio::time::sleep(std::time::Duration::from_secs(24 * 60 * 60)).await;
+        }
+    });
+}
+
+/// Shed and forget stopped sessions on a one-minute tick (WI-4290; see
+/// `SessionRegistry::reap_stopped`). The tick only bounds how late a shed
+/// runs; the ages are measured from each session's exit.
+fn spawn_stopped_session_reaper(state: Arc<AppState>) {
+    let sessions = Arc::clone(&state.sessions);
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            let reaped = sessions.reap_stopped(time::OffsetDateTime::now_utc());
+            if reaped != crate::sessions::Reaped::default() {
+                tracing::info!(
+                    shed = reaped.shed,
+                    evicted = reaped.evicted,
+                    remaining = sessions.len(),
+                    "stopped-session reaper"
+                );
+            }
         }
     });
 }

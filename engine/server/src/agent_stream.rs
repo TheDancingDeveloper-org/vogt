@@ -828,7 +828,7 @@ impl AgentAuth {
     }
 
     /// Forget the stream, unless a newer registration has replaced `link`.
-    pub fn forget_pod_if(&self, id: Uuid, link: &Arc<PodLink>) {
+    pub fn forget_pod_if(self: &Arc<Self>, id: Uuid, link: &Arc<PodLink>) {
         let current = self.pod(id);
         if current.is_some_and(|c| Arc::ptr_eq(&c, link)) {
             self.forget_pod(id);
@@ -853,7 +853,13 @@ impl AgentAuth {
             .collect()
     }
 
-    pub fn forget_pod(&self, id: Uuid) {
+    /// Forget a pod session's stream and the credentials held for it. The
+    /// async maps are cleared at once when uncontended; when one is busy the
+    /// removal is finished on the runtime rather than skipped, so a contended
+    /// lock no longer leaves the entry behind for good (WI-4290). A deferred
+    /// removal stands down if a newer pod has registered under the id
+    /// meanwhile (a wake), whose entries are not this pod's to drop.
+    pub fn forget_pod(self: &Arc<Self>, id: Uuid) {
         self.pods
             .lock()
             .expect("pod links lock poisoned")
@@ -862,15 +868,38 @@ impl AgentAuth {
             .lock()
             .expect("agent links lock poisoned")
             .remove(&id);
-        if let Ok(mut sessions) = self.sessions.try_lock() {
+        let mut busy = false;
+        match self.sessions.try_lock() {
+            Ok(mut sessions) => drop(sessions.remove(&id)),
+            Err(_) => busy = true,
+        }
+        match self.source_credentials.try_lock() {
+            Ok(mut held) => drop(held.remove(&id)),
+            Err(_) => busy = true,
+        }
+        match self.launches.try_lock() {
+            Ok(mut launches) => drop(launches.remove(&id)),
+            Err(_) => busy = true,
+        }
+        if !busy {
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            tracing::warn!(session = %id, "pod credentials left behind: their lock was busy and no runtime runs");
+            return;
+        };
+        let auth = Arc::clone(self);
+        runtime.spawn(async move {
+            let mut sessions = auth.sessions.lock().await;
+            let mut held = auth.source_credentials.lock().await;
+            let mut launches = auth.launches.lock().await;
+            if auth.pod(id).is_some() {
+                return;
+            }
             sessions.remove(&id);
-        }
-        if let Ok(mut held) = self.source_credentials.try_lock() {
             held.remove(&id);
-        }
-        if let Ok(mut launches) = self.launches.try_lock() {
             launches.remove(&id);
-        }
+        });
     }
     pub fn send(&self, id: Uuid, frame: Frame) -> std::io::Result<()> {
         let result = self
@@ -1999,7 +2028,7 @@ mod tests {
     async fn a_minted_credential_is_taken_once_and_withdrawn_with_the_bootstrap_token() {
         use crate::source_provider::CredentialHandle;
         let h = |n: &str| CredentialHandle { path: n.into() };
-        let auth = AgentAuth::default();
+        let auth = Arc::new(AgentAuth::default());
         let id = Uuid::new_v4();
         auth.issue(id, b"boot").await;
         auth.stash_source_credential(id, h("/c1")).await;
