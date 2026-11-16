@@ -7352,6 +7352,60 @@ async fn secret_broker_serves_a_session_its_own_vogt_token_and_names_the_fix_to_
     assert!(broker.vogt_token(a).is_none());
 }
 
+/// A session started the way vogt-core starts one (its token already in the
+/// spec's env, so the engine mints nothing) and a plain shell given a token
+/// the same way: the broker serves each its own, through the real spawn path.
+#[tokio::test]
+async fn secret_broker_serves_the_token_a_core_started_session_was_given() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = broker_config(&tmp, "LATER proj later ondemand\n");
+    let (base, state, _h) = boot_with_state(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let start = |name: &'static str, token: &'static str| {
+        let client = client.clone();
+        let base = base.clone();
+        async move {
+            let r = client
+                .post(format!("{base}/api/sessions"))
+                .json(&json!({ "name": name, "env": [["VOGT_HTTP_TOKEN", token]] }))
+                .send()
+                .await
+                .unwrap()
+                .json::<Value>()
+                .await
+                .unwrap();
+            r["id"].as_str().unwrap().parse::<uuid::Uuid>().unwrap()
+        }
+    };
+    let a = start("core-a", "core-token-of-a").await;
+    let b = start("core-b", "core-token-of-b").await;
+    let broker = state.sessions.secret_broker();
+    let plain = reqwest::Client::new();
+    let url = format!("{base}/api/agent-auth/fetch/VOGT_HTTP_TOKEN");
+
+    let r = plain
+        .post(&url)
+        .bearer_auth(broker.issue(a))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.text().await.unwrap(), "core-token-of-a");
+    let r = plain
+        .post(&url)
+        .bearer_auth(broker.issue(b))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.text().await.unwrap(), "core-token-of-b");
+
+    broker.revoke(a);
+    assert!(broker.vogt_token(a).is_none());
+}
+
 #[tokio::test]
 async fn secret_broker_hands_a_session_one_declared_secret_and_only_that() {
     let tmp = tempfile::tempdir().unwrap();

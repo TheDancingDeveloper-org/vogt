@@ -785,6 +785,17 @@ volumes are project-scoped, so a distinct `-p` already separates the data;
 [`CUSTOMISATION.md`](CUSTOMISATION.md#running-a-second-instance-on-the-same-host)
 has the details.
 
+### Post-deploy checks
+
+After every deploy of a brokered lane (vogt-dev, vogt-prod), check each of:
+
+1. `/readyz` is ready and `vogt status` shows the expected `instance_id`.
+2. **Hand-typed agent MCP (WI-4310).** Open a fresh host shell session on the
+   lane and run `claude mcp list` there. `vogt` must show as connected, using
+   that shell session's own token with no Infisical call. If it does not, the
+   launcher exits 64 naming `VOGT_TOKEN_FILE`; it never falls back to another
+   lane's token. Check that the session was not created on the other lane.
+
 ## 6. Digest pinning
 
 The stack file names a tag so the example is runnable as-is. A deployment
