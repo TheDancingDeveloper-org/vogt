@@ -1888,6 +1888,22 @@ impl SessionRegistry {
             &self.cfg.state_dir,
             id,
         );
+        // A host opencode whose engine home is not writable gets its own
+        // data, state and cache directories (WI-4284).
+        let opencode_xdg = if base_command
+            .as_deref()
+            .and_then(agent_cli::agent_name)
+            .as_deref()
+            == Some("opencode")
+            && !pod_backed
+        {
+            let home = std::env::var_os("HOME")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_default();
+            crate::opencode::session_xdg_env(&self.cfg.state_dir, id, &home)
+        } else {
+            Vec::new()
+        };
         let launch_request = agent_cli::LaunchRequest {
             model: spec.model.as_deref(),
             effort: spec.effort.as_deref(),
@@ -1901,6 +1917,7 @@ impl SessionRegistry {
             settings_file,
             add_dirs: recorded.map(|r| r.add_dirs.as_slice()).unwrap_or(&[]),
             opencode_config: self.cfg.agent_onboarding.opencode_config.as_deref(),
+            opencode_xdg: &opencode_xdg,
             codex_approval_policy: self.cfg.codex_approval_policy.as_str(),
             mcp: Some(&mcp_trim),
             codex_compact_limit,
@@ -2698,7 +2715,7 @@ impl SessionRegistry {
         let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
             return;
         };
-        let db = crate::opencode::db_path(&home);
+        let db = crate::opencode::db_path_for(&self.cfg.state_dir, session.id, &home);
         let records = Arc::clone(&self.records);
         let state_dir = self.cfg.state_dir.clone();
         let session = Arc::clone(session);
