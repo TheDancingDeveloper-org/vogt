@@ -1094,6 +1094,29 @@ pub async fn bootstrap(
             .ondemand
             .push(crate::session_endpoints::CADASTRE_TOKEN_ENV.to_string());
     }
+    // WI-4289: the remote Vogt (`vogt-prod`) follows the cadastre rule, and
+    // is offered only when this engine names one. Its token is never in the
+    // pod's environment: the name joins the ondemand breadcrumbs and the
+    // session agent fetches it around the agent.
+    let vogt_prod_bearer = state.sessions.vogt_prod_configured()
+        && (broker
+            .manifest()
+            .iter()
+            .any(|entry| entry.var == crate::session_endpoints::VOGT_PROD_TOKEN_ENV)
+            || breadcrumbs
+                .granted
+                .iter()
+                .any(|var| var == crate::session_endpoints::VOGT_PROD_TOKEN_ENV));
+    if vogt_prod_bearer
+        && !breadcrumbs
+            .ondemand
+            .iter()
+            .any(|var| var == crate::session_endpoints::VOGT_PROD_TOKEN_ENV)
+    {
+        breadcrumbs
+            .ondemand
+            .push(crate::session_endpoints::VOGT_PROD_TOKEN_ENV.to_string());
+    }
     let mut env = bootstrap_env(
         cfg.engine_endpoint,
         id,
@@ -1129,7 +1152,9 @@ pub async fn bootstrap(
     let (mut mcp_config, mut codex_config, mut opencode_config) = (None, None, None);
     if matches!(req.cli.as_str(), "claude" | "codex" | "opencode") {
         let token = state.sessions.mint_agent_token(&req.cli, id).await;
-        let endpoints = state.sessions.pod_mcp_endpoints(&engine_endpoint);
+        let endpoints = state
+            .sessions
+            .pod_mcp_endpoints(&engine_endpoint, vogt_prod_bearer);
         let has = token.is_some();
         match req.cli.as_str() {
             "claude" => {

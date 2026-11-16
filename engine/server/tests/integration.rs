@@ -82,6 +82,7 @@ fn test_config() -> Config {
         public_url: None,
         agent_auth_public_url: None,
         cadastre_mcp_url: None,
+        vogt_prod_mcp_url: None,
         vogt_core_url: None,
         vogt_import_root: None,
         vogt_engine_state_dir: None,
@@ -20109,6 +20110,94 @@ mod pod_stream {
         let config = body["codex_config"].as_str().unwrap_or_default();
         assert!(!config.contains("mcp_servers.cadastre"), "{config}");
         assert!(!body.to_string().contains("CADASTRE_HTTP_TOKEN"), "{body}");
+    }
+
+    /// WI-4289: a pod reaches a remote Vogt as `vogt-prod`, authenticated
+    /// with `VOGT_PROD_TOKEN` by reference, only when the engine names that
+    /// Vogt and the manifest declares the token. The token is never in the
+    /// bootstrap; with either half missing there is no entry.
+    #[tokio::test]
+    async fn a_vogt_prod_pod_entry_needs_a_url_and_a_manifest_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let helper = fake_broker_helper(dir.path());
+        let mut h = harness_cfg(false, None, move |cfg| {
+            cfg.vogt_prod_mcp_url = Some("https://vogt-prod.example.test".into());
+            cfg.agent_auth_helper = helper;
+            cfg.agent_auth_secrets = vogt_engine_server::secret_broker::parse_manifest(
+                "VOGT_PROD_TOKEN acct prod-bridge-token ondemand\n",
+            )
+            .unwrap();
+        })
+        .await;
+        for cli in ["claude", "codex", "opencode"] {
+            let id = h.start().await;
+            let (_, token) = h.created.recv().await.unwrap();
+            let body: Value = h.bootstrap_as(id, &token, cli).await.json().await.unwrap();
+            match cli {
+                "claude" => {
+                    let entry = &body["mcp_config"]["mcpServers"]["vogt-prod"];
+                    assert_eq!(entry["url"], "https://vogt-prod.example.test/mcp", "{body}");
+                    assert_eq!(
+                        entry["headers"]["Authorization"], "Bearer ${VOGT_PROD_TOKEN}",
+                        "{body}"
+                    );
+                }
+                "codex" => {
+                    let config = body["codex_config"].as_str().unwrap();
+                    assert!(config.contains("[mcp_servers.vogt-prod]"), "{config}");
+                    assert!(
+                        config.contains("bearer_token_env_var = \"VOGT_PROD_TOKEN\""),
+                        "{config}"
+                    );
+                }
+                _ => {
+                    let entry = &body["opencode_config"]["mcp"]["vogt-prod"];
+                    assert_eq!(entry["url"], "https://vogt-prod.example.test/mcp", "{body}");
+                    assert_eq!(
+                        entry["headers"]["Authorization"], "Bearer {env:VOGT_PROD_TOKEN}",
+                        "{body}"
+                    );
+                }
+            }
+            assert_eq!(
+                body["env"]["AGENT_AUTH_ONDEMAND"].as_str(),
+                Some("VOGT_PROD_TOKEN"),
+                "{cli}: {body}"
+            );
+            assert!(body["env"].get("VOGT_PROD_TOKEN").is_none(), "{body}");
+            assert!(
+                !body.to_string().contains("value-of-VOGT_PROD_TOKEN"),
+                "{body}"
+            );
+        }
+
+        // A URL with no manifest line, and a manifest line with no URL: no entry.
+        for (url, manifest) in [
+            (Some("https://vogt-prod.example.test"), ""),
+            (None, "VOGT_PROD_TOKEN acct prod-bridge-token ondemand\n"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let helper = fake_broker_helper(dir.path());
+            let mut h = harness_cfg(false, None, move |cfg| {
+                cfg.vogt_prod_mcp_url = url.map(str::to_owned);
+                cfg.agent_auth_helper = helper;
+                cfg.agent_auth_secrets =
+                    vogt_engine_server::secret_broker::parse_manifest(manifest).unwrap();
+            })
+            .await;
+            let id = h.start().await;
+            let (_, token) = h.created.recv().await.unwrap();
+            let body: Value = h
+                .bootstrap_as(id, &token, "claude")
+                .await
+                .json()
+                .await
+                .unwrap();
+            assert!(
+                body["mcp_config"]["mcpServers"].get("vogt-prod").is_none(),
+                "{url:?}: {body}"
+            );
+        }
     }
 
     /// WI-3491 review: a provider whose env_key is already a manifest VAR is
