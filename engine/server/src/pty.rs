@@ -288,6 +288,61 @@ impl Session {
         }
     }
 
+    /// Answer an OSC 7501 capability query the grid has just seen (WI-4321).
+    /// Claude Code asks once at startup and reports no state until it gets a
+    /// reply. Written straight to the PTY: it is the engine talking, not
+    /// input, so it must not move the input clocks. Call it outside the
+    /// scrollback lock.
+    pub fn answer_status_query(&self) {
+        let owed = self
+            .terminal
+            .lock()
+            .as_mut()
+            .is_some_and(crate::screen::Terminal::take_query);
+        if owed {
+            if let Err(e) = self.backend.write_input(crate::osc7501::QUERY_REPLY) {
+                tracing::debug!(session = %self.id, error = %e, "OSC 7501 query reply failed");
+            }
+        }
+    }
+
+    /// The program's own status report and its bell / notification hint, as
+    /// the summary shows them. Neither survives the process: an exited
+    /// session reports nothing.
+    fn reported_status(
+        &self,
+    ) -> (
+        Option<vogt_engine_contract::ReportedStatus>,
+        Option<vogt_engine_contract::AttentionHint>,
+    ) {
+        if !self.is_alive() {
+            return (None, None);
+        }
+        let guard = self.terminal.lock();
+        let Some(term) = guard.as_ref() else {
+            return (None, None);
+        };
+        let status = term
+            .reported()
+            .map(|r| vogt_engine_contract::ReportedStatus {
+                state: r.state,
+                kind: r.kind,
+                progress: r.progress,
+                msg: r.msg,
+                title: r.title,
+                app: r.app,
+                id: r.id,
+                set_at: format_rfc3339(r.set_at),
+            });
+        let hint = term
+            .attention_hint()
+            .map(|h| vogt_engine_contract::AttentionHint {
+                source: h.source.to_string(),
+                at: format_rfc3339(h.at),
+            });
+        (status, hint)
+    }
+
     /// Reflow the live grid to the PTY's new size.
     pub fn resize_terminal(&self, rows: u16, cols: u16) {
         if let Some(terminal) = self.terminal.lock().as_mut() {
@@ -639,6 +694,7 @@ impl Session {
         // report the agent wrote is absent, so the screen is the only witness
         // (WI-4119). Reported through the same field, so the screen, digest and
         // oversight table all read `blocked` instead of `idle`.
+        let (reported_status, attention_hint) = self.reported_status();
         let blocked = self.blocked().or_else(|| {
             matches!(
                 activity,
@@ -669,6 +725,8 @@ impl Session {
             last_person_input_at: self.last_person_input_at.lock().map(format_rfc3339),
             approval: self.approval_prompt(),
             blocked,
+            reported_status,
+            attention_hint,
             conversation: self.conversation(),
             hibernation: None,
             salvage: self.salvage.lock().clone(),
@@ -1032,6 +1090,9 @@ impl Session {
     /// `person_gate::is_person`). Agent writes go through `write_input`
     /// alone and leave this clock where it is.
     pub fn note_person_input(&self) {
+        if let Some(term) = self.terminal.lock().as_mut() {
+            term.clear_attention_hint();
+        }
         *self.last_person_input_at.lock() = Some(time::OffsetDateTime::now_utc());
     }
 
@@ -1601,16 +1662,27 @@ fn spawn_reader_thread(
                 match reader.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
-                        let data = Bytes::copy_from_slice(&buf[..n]);
+                        // The grid sees every byte, the OSC 7501 capability
+                        // query included, so the engine can answer it. The
+                        // ring and clients do not: a client must not answer
+                        // it too (WI-4321, WI-991).
+                        let raw = &buf[..n];
+                        let kept = crate::osc7501::strip_queries(raw);
+                        let data = Bytes::copy_from_slice(&kept);
+                        let n = data.len();
                         // Ring and grid advance together under the ring's
                         // lock, so an attach snapshot (which takes the same
                         // lock) never sees a grid ahead of `total_written`.
                         let pos_after = {
                             let mut sb = session.scrollback.lock();
                             sb.push(&data);
-                            session.feed_terminal(&data);
+                            session.feed_terminal(raw);
                             sb.total_written()
                         };
+                        session.answer_status_query();
+                        if n == 0 {
+                            continue;
+                        }
                         let pos = pos_after - n as u64;
                         let now = Instant::now();
                         *session.last_output.lock() = Some(now);
@@ -1751,6 +1823,9 @@ fn spawn_exit_waiter(
         let code = status.exit_code() as i32;
         *session.ended_at.lock() = Some(time::OffsetDateTime::now_utc());
         *session.exit_code.lock() = Some(code);
+        if let Some(term) = session.terminal.lock().as_mut() {
+            term.clear_reported();
+        }
         let new_state = compute_activity(&session);
         update_activity_if_changed(&session, new_state, &bus);
         wake_activity_watcher(&session);
