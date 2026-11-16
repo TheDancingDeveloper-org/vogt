@@ -20696,6 +20696,262 @@ sleep 2
         uploaded.expect("the session-agent ships the rollout and exits");
     }
 
+    /// A pod's opencode store, as opencode lays it out, with an account row
+    /// holding a provider key and a tool call carrying a secret: what must
+    /// never leave the pod (WI-4291).
+    async fn opencode_pod_store(dir: &std::path::Path, engine_id: Uuid, reply: &str) -> std::path::PathBuf {
+        use sqlx::{sqlite::SqliteConnectOptions, ConnectOptions};
+        let db = dir.join("opencode.db");
+        let mut conn = SqliteConnectOptions::new()
+            .filename(&db)
+            .create_if_missing(true)
+            .connect()
+            .await
+            .unwrap();
+        let brief = json!({"type": "text", "text": format!("Vogt started this session with a brief in /s/sessions/{engine_id}.md")}).to_string();
+        let tool = json!({"type": "tool", "tool": "bash", "state": {"input": {"command": format!("echo {OPENCODE_TOOL_SECRET}")}, "output": OPENCODE_TOOL_SECRET}}).to_string();
+        let text = json!({"type": "text", "text": reply}).to_string();
+        let account = json!({"provider": "anthropic", "key": OPENCODE_PROVIDER_KEY}).to_string();
+        let statements: Vec<(&str, Vec<String>)> = vec![
+            ("CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT NOT NULL, parent_id TEXT, time_created INTEGER NOT NULL)", vec![]),
+            ("CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, data TEXT NOT NULL)", vec![]),
+            ("CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT NOT NULL, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, data TEXT NOT NULL)", vec![]),
+            ("CREATE TABLE account (id TEXT PRIMARY KEY, data TEXT NOT NULL)", vec![]),
+            ("INSERT INTO account VALUES ('acc', ?1)", vec![account]),
+            ("INSERT INTO session VALUES ('ses_podoc', '/work', NULL, 1000)", vec![]),
+            ("INSERT INTO message VALUES ('m1', 'ses_podoc', 1000, '{\"role\":\"user\"}')", vec![]),
+            ("INSERT INTO message VALUES ('m2', 'ses_podoc', 2000, '{\"role\":\"assistant\"}')", vec![]),
+            ("INSERT INTO message VALUES ('m3', 'ses_podoc', 3000, '{\"role\":\"assistant\"}')", vec![]),
+            ("INSERT INTO part VALUES ('p1', 'm1', 'ses_podoc', 1, ?1)", vec![brief]),
+            ("INSERT INTO part VALUES ('p2', 'm2', 'ses_podoc', 1, ?1)", vec![tool]),
+            ("INSERT INTO part VALUES ('p3', 'm3', 'ses_podoc', 1, ?1)", vec![text]),
+        ];
+        for (sql, binds) in statements {
+            let mut q = sqlx::query(sql);
+            for b in binds {
+                q = q.bind(b);
+            }
+            q.execute(&mut conn).await.unwrap();
+        }
+        db
+    }
+
+    const OPENCODE_PROVIDER_KEY: &str = "sk-ant-oat01-PODSECRETPODSECRETPODSECRET";
+    const OPENCODE_TOOL_SECRET: &str = "GITHUB_TOKEN=ghp_TOOLPAYLOADTOOLPAYLOAD0123456789";
+
+    fn opencode_pod_template() -> SessionTemplate {
+        SessionTemplate {
+            name: "pod".into(),
+            description: "pod-backed opencode".into(),
+            command: Some(vec!["opencode".into()]),
+            cwd: None,
+            env: Vec::new(),
+            account: None,
+            default_name: None,
+            match_repo_names: Vec::new(),
+            match_path_prefixes: Vec::new(),
+            tags: Vec::new(),
+            backend: "pod".into(),
+            host_capable: false,
+            pod_capable: false,
+        }
+    }
+
+    fn opencode_agent(id: Uuid, base: &str, token: String) -> vogt_session_agent::Config {
+        vogt_session_agent::Config {
+            session_id: id.to_string(),
+            engine_url: base.to_string(),
+            token,
+            cli: "opencode".into(),
+            command: None,
+            cwd: Some("/work".into()),
+            cols: 120,
+            rows: 40,
+            buffer_bytes: 64 * 1024,
+            claude_config_dir: None,
+            codex_home: None,
+            workspace_root: None,
+            model: None,
+            effort: None,
+            permission_mode: None,
+            codex_approval_policy: "never".into(),
+            account: None,
+            conversation_id: None,
+            resume: false,
+            claude: vogt_session_agent::ClaudeLaunch::default(),
+            codex: vogt_session_agent::CodexLaunch::default(),
+            opencode_mcp_config: None,
+        }
+    }
+
+    /// WI-4291: a pod opencode keeps its store (and its credentials) in the
+    /// pod. The real session agent reads the assistant text out of it and
+    /// ships only that; the engine keeps it, and `session.last_reply` on a
+    /// real `vogt-core` returns it. The engine's copy holds no credential,
+    /// tool payload or prompt from the store.
+    #[tokio::test]
+    async fn a_pod_opencode_reply_reaches_session_last_reply() {
+        let _core_binary = vogt_core_binary();
+        let pod = tempfile::tempdir().unwrap();
+        let state_dir = tempfile::tempdir().unwrap();
+        let kept = state_dir.path().to_path_buf();
+        let mut h = harness_cfg(false, Some(vec![opencode_pod_template()]), move |cfg| {
+            cfg.state_dir = kept;
+        })
+        .await;
+        let id = h.start().await;
+        let (_, token) = h.created.recv().await.unwrap();
+        let body: Value = h
+            .bootstrap_as(id, &token, "opencode")
+            .await
+            .json()
+            .await
+            .unwrap();
+        let session_token = body["session_token"].as_str().unwrap().to_string();
+        let reply = "PONG from the pod opencode";
+        let db = opencode_pod_store(pod.path(), id, reply).await;
+
+        let shipped = vogt_session_agent::ship_opencode_replies(
+            &opencode_agent(id, &h.base, session_token),
+            &db,
+        )
+        .await
+        .expect("the agent builds its client");
+        assert!(shipped, "the engine refused the pod's replies");
+
+        // The engine's own read, as the core asks it.
+        let replies: Value = h
+            .client
+            .get(format!("{}/api/sessions/{id}/replies?n=1", h.base))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(replies["agent"], "opencode", "{replies}");
+        assert_eq!(replies["conversation_id"], "ses_podoc", "{replies}");
+        assert_eq!(replies["replies"][0]["text"], reply, "{replies}");
+
+        // Nothing from the store but that text is anywhere the engine keeps.
+        let mut dirs = vec![state_dir.path().to_path_buf()];
+        while let Some(dir) = dirs.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    dirs.push(path);
+                    continue;
+                }
+                let text = String::from_utf8_lossy(&std::fs::read(&path).unwrap()).into_owned();
+                for leaked in [OPENCODE_PROVIDER_KEY, OPENCODE_TOOL_SECRET, "ghp_TOOL"] {
+                    assert!(
+                        !text.contains(leaked),
+                        "{leaked} reached the engine in {}",
+                        path.display()
+                    );
+                }
+            }
+        }
+
+        let core = boot_codex_core(&h.base, &pod.path().join("no-transcripts")).await;
+        let response = reqwest::Client::new()
+            .get(format!("{}/api/sessions/last-reply", core.url))
+            .query(&[("id", id.to_string()), ("n", "1".to_string())])
+            .bearer_auth(CORE_TOKEN)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let answer: Value = response.json().await.unwrap();
+        assert_eq!(answer["agent"], "opencode", "{answer}");
+        assert_eq!(answer["conversation_id"], "ses_podoc", "{answer}");
+        assert_eq!(answer["messages"][0]["text"], reply, "{answer}");
+    }
+
+    /// WI-4291: the reply channel carries a conversation id and assistant
+    /// text and nothing else. A message with any other field (a credential,
+    /// the environment, a tool payload) is refused and nothing is kept; so is
+    /// one without the pod's stream credential, and credential-shaped text
+    /// inside a reply is redacted before it is kept.
+    #[tokio::test]
+    async fn the_opencode_reply_channel_carries_no_credential_field() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let kept = state_dir.path().to_path_buf();
+        let mut h = harness_cfg(false, Some(vec![opencode_pod_template()]), move |cfg| {
+            cfg.state_dir = kept;
+        })
+        .await;
+        let id = h.start().await;
+        let (_, token) = h.created.recv().await.unwrap();
+        let body: Value = h
+            .bootstrap_as(id, &token, "opencode")
+            .await
+            .json()
+            .await
+            .unwrap();
+        let session_token = body["session_token"].as_str().unwrap().to_string();
+        let url = format!("{}{}", h.base, vogt_session_agent::opencode_store::REPLIES_ROUTE);
+        let post = |bearer: Option<String>, body: Value| {
+            let request = reqwest::Client::new().post(&url).json(&body);
+            let request = match bearer {
+                Some(bearer) => request.bearer_auth(bearer),
+                None => request,
+            };
+            request.send()
+        };
+        for hostile in [
+            json!({"conversation_id": "ses_podoc", "replies": [], "credentials": OPENCODE_PROVIDER_KEY}),
+            json!({"conversation_id": "ses_podoc", "replies": [], "env": {"ANTHROPIC_API_KEY": OPENCODE_PROVIDER_KEY}}),
+            json!({"conversation_id": "ses_podoc", "replies": [{"text": "hi", "tool": {"input": OPENCODE_TOOL_SECRET}}]}),
+            json!({"conversation_id": "ses_podoc", "replies": [{"text": "hi", "key": OPENCODE_PROVIDER_KEY}]}),
+            json!({"conversation_id": "../escape", "replies": [{"text": "hi"}]}),
+        ] {
+            let response = post(Some(session_token.clone()), hostile.clone()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{hostile}");
+        }
+        let fine = json!({"conversation_id": "ses_podoc", "replies": [{"text": "hi"}]});
+        assert_eq!(
+            post(None, fine.clone()).await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            post(Some(TEST_TOKEN.into()), fine).await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let none: Value = h
+            .client
+            .get(format!("{}/api/sessions/{id}/replies", h.base))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(none["replies"], json!([]), "{none}");
+
+        let printed = format!("the key is {OPENCODE_PROVIDER_KEY} and {OPENCODE_TOOL_SECRET}");
+        let response = post(
+            Some(session_token),
+            json!({"conversation_id": "ses_podoc", "replies": [{"text": printed, "at": null}]}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let kept: Value = h
+            .client
+            .get(format!("{}/api/sessions/{id}/replies", h.base))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let text = kept["replies"][0]["text"].as_str().unwrap();
+        assert!(text.starts_with("the key is "), "{kept}");
+        assert!(!text.contains(OPENCODE_PROVIDER_KEY), "{kept}");
+        assert!(!text.contains("ghp_TOOL"), "{kept}");
+    }
+
     /// WI-3873: a Codex session has no Claude account (the engine refuses one
     /// for a non-Claude CLI), yet a wake must still seed the conversation's
     /// rollout and set `VOGT_SESSION_RESUME=1`; otherwise the woken pod starts
