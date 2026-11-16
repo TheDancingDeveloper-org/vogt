@@ -2009,10 +2009,13 @@ impl PodBackendFactory {
                 shared.join(", ")
             )));
         }
-        Api::namespaced(self.client.clone(), &self.cfg.namespace)
-            .create(&PostParams::default(), &pod)
-            .await
-            .map_err(creation_error)
+        let pods: Api<Pod> = Api::namespaced(self.client.clone(), &self.cfg.namespace);
+        let params = PostParams::default();
+        retry_quota_race(QUOTA_RACE_ATTEMPTS, quota_race_backoff, || {
+            pods.create(&params, &pod)
+        })
+        .await
+        .map_err(creation_error)
     }
 
     /// Create the session's pod, then the Secret that carries its bootstrap
@@ -2220,9 +2223,56 @@ pub fn validate_resume_cursor(cursor: u64, next_offset: u64) -> Result<u64> {
     Ok(cursor)
 }
 
+/// How many times a pod create is tried when it loses a ResourceQuota race.
+const QUOTA_RACE_ATTEMPTS: u32 = 4;
+
+/// Whether a create lost the optimistic-concurrency race on the namespace's
+/// ResourceQuota usage: a 409 Conflict ("the object has been modified"), not
+/// a 409 AlreadyExists. Retrying it is what kubectl and client-go do.
+fn is_quota_race(e: &kube::Error) -> bool {
+    matches!(e, kube::Error::Api(status)
+        if status.code == 409
+            && status.reason != "AlreadyExists"
+            && status.message.contains("the object has been modified"))
+}
+
+/// The wait before retry `attempt` (1-based): a growing base with jitter, so
+/// concurrent creates that collided do not collide again in step.
+fn quota_race_backoff(attempt: u32) -> Duration {
+    let base = 50 * u64::from(attempt);
+    let jitter = (Uuid::new_v4().as_u128() % 100) as u64;
+    Duration::from_millis(base + jitter)
+}
+
+/// Run `create` until it succeeds, fails with anything but a quota race, or
+/// has been tried `attempts` times (WI-4287).
+async fn retry_quota_race<T, F, Fut>(
+    attempts: u32,
+    backoff: impl Fn(u32) -> Duration,
+    mut create: F,
+) -> std::result::Result<T, kube::Error>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = std::result::Result<T, kube::Error>>,
+{
+    let mut attempt = 1;
+    loop {
+        match create().await {
+            Err(e) if attempt < attempts && is_quota_race(&e) => {
+                tracing::info!(attempt, error = %e,
+                    "a session pod create lost a ResourceQuota race; retrying");
+                tokio::time::sleep(backoff(attempt)).await;
+                attempt += 1;
+            }
+            done => return done,
+        }
+    }
+}
+
 /// Map a refused pod creation to an API error. Only a ResourceQuota refusal
 /// (a 403 whose message says the quota was exceeded) is a `Conflict`, carrying
-/// the cluster's message, which names the quota and its limit (WI-4232). Any
+/// the cluster's message, which names the quota and its limit (WI-4232), as is
+/// a quota-update race that outlasted its retries (WI-4287). Any
 /// other refusal, an RBAC 403 or an admission 422, is the engine's own fault:
 /// it is logged in full and reaches the caller as a generic error that names
 /// neither the service account nor the namespace.
@@ -2236,6 +2286,12 @@ fn creation_error(e: kube::Error) -> ApiError {
                 status.message
             ))
         }
+        // Still losing the quota race after every retry: a refusal the caller
+        // can retry, so it fails the start rather than leaving it podless.
+        kube::Error::Api(status) if is_quota_race(&e) => ApiError::Conflict(format!(
+            "the cluster refused the session pod: {}",
+            status.message
+        )),
         kube::Error::Api(status) if matches!(status.code, 403 | 422) => {
             tracing::error!(code = status.code, message = %status.message,
                 "the cluster refused to create a session pod");
@@ -5140,6 +5196,85 @@ mod creation_error_tests {
                 other => panic!("expected Internal, got {other:?}"),
             }
         }
+    }
+
+    fn race() -> kube::Error {
+        kube::Error::Api(kube::core::ErrorResponse {
+            status: "Failure".into(),
+            message: "Operation cannot be fulfilled on resourcequotas \"vogt-sessions\": the object has been modified; please apply your changes to the latest version and try again".into(),
+            reason: "Conflict".into(),
+            code: 409,
+        })
+    }
+
+    #[test]
+    fn a_quota_race_that_outlasts_the_retries_is_a_conflict() {
+        // A Conflict fails session_start synchronously (WI-4232), so a
+        // persistent race never leaves a podless session (WI-4287).
+        match creation_error(race()) {
+            ApiError::Conflict(m) => assert!(m.contains("resourcequotas"), "{m}"),
+            other => panic!("expected Conflict, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_quota_race_on_the_first_create_is_retried_and_yields_the_pod() {
+        let calls = std::sync::atomic::AtomicU32::new(0);
+        let got = retry_quota_race(
+            4,
+            |_| Duration::ZERO,
+            || {
+                let n = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async move {
+                    if n == 0 {
+                        Err(race())
+                    } else {
+                        Ok("pod")
+                    }
+                }
+            },
+        )
+        .await;
+        assert_eq!(got.unwrap(), "pod");
+    }
+
+    #[tokio::test]
+    async fn a_persistent_quota_race_gives_up_after_the_attempts() {
+        let calls = std::sync::atomic::AtomicU32::new(0);
+        let got: std::result::Result<(), _> = retry_quota_race(
+            4,
+            |_| Duration::ZERO,
+            || {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async { Err(race()) }
+            },
+        )
+        .await;
+        assert!(got.as_ref().is_err_and(is_quota_race));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 4);
+    }
+
+    #[tokio::test]
+    async fn already_exists_and_other_errors_are_not_retried() {
+        let calls = std::sync::atomic::AtomicU32::new(0);
+        let got: std::result::Result<(), _> = retry_quota_race(
+            4,
+            |_| Duration::ZERO,
+            || {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async {
+                    Err(kube::Error::Api(kube::core::ErrorResponse {
+                        status: "Failure".into(),
+                        message: "pods \"s\" already exists".into(),
+                        reason: "AlreadyExists".into(),
+                        code: 409,
+                    }))
+                }
+            },
+        )
+        .await;
+        assert!(got.is_err());
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[test]
