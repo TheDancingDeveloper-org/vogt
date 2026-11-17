@@ -141,15 +141,31 @@ grep -q '^/api/agent-auth/fetch/DEMO|Bearer session-token|$' "$testdir/requests.
 grep -q '^/api/agent-auth/store/WRITABLE|Bearer session-token|written-value$' \
     "$testdir/requests.log" || fail "store did not present the stream credential"
 
-# 3. Without any credential the helper still refuses, naming what is missing.
+# 3. Without any address the helper still refuses, names the missing half and
+#    the fix (WI-4310): a plain shell is not a Vogt session.
 if env -u VOGT_ENGINE_BROKER_URL -u VOGT_ENGINE_BROKER_TOKEN \
     -u VOGT_ENGINE_BROKER_TOKEN_FILE -u VOGT_ENGINE_URL \
     -u VOGT_SESSION_TOKEN_FILE bash "$script" fetch DEMO \
     >/dev/null 2>"$testdir/noauth.err"; then
     fail "fetch without any credential should fail"
 fi
-grep -q 'no secret broker in this environment' "$testdir/noauth.err" \
-    || fail "missing-broker message: $(cat "$testdir/noauth.err")"
+grep -q 'no Vogt secret broker address' "$testdir/noauth.err" \
+    || fail "missing-broker-address message: $(cat "$testdir/noauth.err")"
+grep -q 'Fix: start the shell through Vogt' "$testdir/noauth.err" \
+    || fail "missing-broker-address fix: $(cat "$testdir/noauth.err")"
+
+# 3a. With the address but no credential (a plain pod shell keeps the address
+#     and loses the token) the refusal names the credential and the same fix.
+if env -u VOGT_ENGINE_BROKER_URL -u VOGT_ENGINE_BROKER_TOKEN \
+    -u VOGT_ENGINE_BROKER_TOKEN_FILE -u VOGT_SESSION_TOKEN_FILE \
+    VOGT_ENGINE_URL="$base" bash "$script" fetch DEMO \
+    >/dev/null 2>"$testdir/nocred.err"; then
+    fail "fetch without a credential should fail"
+fi
+grep -q 'no Vogt secret broker credential' "$testdir/nocred.err" \
+    || fail "missing-broker-credential message: $(cat "$testdir/nocred.err")"
+grep -q 'Fix: start the shell through Vogt' "$testdir/nocred.err" \
+    || fail "missing-broker-credential fix: $(cat "$testdir/nocred.err")"
 
 # 3b. A broker refusal's own message reaches the caller (gh#1424): 401, 403
 #     and 502 each name the server's cause, not a fixed text.
