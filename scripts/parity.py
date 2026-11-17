@@ -138,6 +138,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     golden = json.loads((args.golden / f"{args.transport}.json").read_text())
+    if args.impl == "rust":
+        golden = _adopt_rust_divergences(golden, recorded)
     if not args.only:
         # The audit trail is the whole run's, so only a full run compares it.
         # Presence was checked before the run, so a missing file is an error
@@ -1774,6 +1776,90 @@ def _mutate(value: Any, key: str) -> bool:
     if isinstance(value, list):
         return any(_mutate(item, key) for item in value)
     return False
+
+
+# Intentional Rust-only divergences from the Python goldens (WI-4317), the CI
+# counterpart of engine/core/src/parity_divergence.rs: keep the two in step.
+# Operator decision 2026-11-16: allowed, but explicit, never silent. The golden
+# is a Python recording and is never edited; for `--impl rust` checks only, the
+# Rust value is adopted at exactly these locations and everything else is
+# compared as before. Each adoption is printed.
+#
+# (operation, path inside the step body). An empty path is the whole body.
+_RUST_DIVERGENT_BODIES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    # `mode` param; rows are ProjectSummary | ProjectListing (MCP defaults to summary).
+    ("project.list", ()),
+)
+# Registry dump: (operation name, path inside that operation).
+_RUST_DIVERGENT_REGISTRY: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("project.list", ("params_schema",)),
+    ("project.list", ("result_schema",)),
+    # Field order is compared, so `provider` cannot be spliced in alone.
+    ("session.start", ("params_schema",)),
+    *(
+        (op, ("result_schema", "properties", "warning"))
+        for op in (
+            "session.start",
+            "session.stop",
+            "session.hibernate",
+            "session.wake",
+            "session.keep_awake",
+            "session.rename",
+            "session.remove",
+            "session.set_role",
+        )
+    ),
+)
+
+
+def _adopt(golden: Any, ours: Any, path: tuple[str, ...]) -> bool:
+    """Copy `ours` at `path` into `golden`; the parents must exist in both."""
+    if not path:
+        return False
+    for key in path[:-1]:
+        if not isinstance(golden, dict) or not isinstance(ours, dict):
+            return False
+        golden, ours = golden.get(key), ours.get(key)
+    if (
+        not (isinstance(golden, dict) and isinstance(ours, dict))
+        or path[-1] not in ours
+    ):
+        return False
+    golden[path[-1]] = ours[path[-1]]
+    return True
+
+
+def _adopt_rust_divergences(golden: list[Any], recorded: list[Any]) -> list[Any]:
+    """The golden with the recorded Rust-only divergences adopted (WI-4317)."""
+    golden = json.loads(json.dumps(golden))
+    seen: dict[str, int] = {}
+    ours_by_op: dict[str, list[Any]] = {}
+    for step in recorded:
+        ours_by_op.setdefault(step["operation"], []).append(step)
+    for step in golden:
+        op = step["operation"]
+        nth = seen[op] = seen.get(op, -1) + 1
+        ours = ours_by_op.get(op, [])
+        if nth >= len(ours):
+            continue
+        body = ours[nth].get("body")
+        if any(o == op for o, _ in _RUST_DIVERGENT_BODIES) and step.get("body") != body:
+            step["body"] = body
+            print(f"parity: adopted Rust-only divergence: {op} body (WI-4317)")
+        if op == "registry.dump":
+            g_ops = {o["name"]: o for o in step["body"].get("operations", [])}
+            o_ops = {o["name"]: o for o in (body or {}).get("operations", [])}
+            for name, path in _RUST_DIVERGENT_REGISTRY:
+                if name in g_ops and name in o_ops and g_ops[name] != o_ops[name]:
+                    before = json.dumps(g_ops[name], sort_keys=True)
+                    if _adopt(g_ops[name], o_ops[name], path) and before != json.dumps(
+                        g_ops[name], sort_keys=True
+                    ):
+                        print(
+                            "parity: adopted Rust-only divergence: "
+                            f"{name}.{'.'.join(path)} (WI-4317)"
+                        )
+    return golden
 
 
 def _diff(golden: Any, recorded: Any, prefix: str) -> int:
