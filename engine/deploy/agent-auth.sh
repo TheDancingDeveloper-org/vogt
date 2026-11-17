@@ -692,11 +692,17 @@ store_one() {
         rm -f "$response"
         return 0
     fi
-    body="$(tr -d '\r\n' <"$response" | cut -c1-300)"
+    # The server's own message is the cause (its `{"error": ...}` body): pass
+    # it through, never a fixed text that hides it (gh#1424).
+    if command -v jq >/dev/null 2>&1 && body="$(jq -er '.error // empty' "$response" 2>/dev/null)" && [[ -n "$body" ]]; then
+        body="$(printf '%s' "$body" | tr -d '\r\n' | cut -c1-600)"
+    else
+        body="$(tr -d '\r\n' <"$response" | cut -c1-600)"
+    fi
     rm -f "$response"
     case "$status" in
         000) die "secret broker unreachable at $url" ;;
-        401) die "secret broker refused this session's token (HTTP 401); the engine no longer knows this session" ;;
+        401) die "secret broker refused this session's token (HTTP 401): ${body:-the engine no longer knows this session}" ;;
         403) die "secret broker refused storing $var (HTTP 403): ${body:-not writable in the manifest}" ;;
         413) die "secret broker refused storing $var (HTTP 413): value over the size cap" ;;
         *) die "secret broker failed storing $var (HTTP $status): ${body:-<empty body>}" ;;
@@ -726,11 +732,17 @@ fetch_one() {
         rm -f "$response"
         return 0
     fi
-    body="$(tr -d '\r\n' <"$response" | cut -c1-300)"
+    # The server's own message is the cause (its `{"error": ...}` body): pass
+    # it through, never a fixed text that hides it (gh#1424).
+    if command -v jq >/dev/null 2>&1 && body="$(jq -er '.error // empty' "$response" 2>/dev/null)" && [[ -n "$body" ]]; then
+        body="$(printf '%s' "$body" | tr -d '\r\n' | cut -c1-600)"
+    else
+        body="$(tr -d '\r\n' <"$response" | cut -c1-600)"
+    fi
     rm -f "$response"
     case "$status" in
         000) die "secret broker unreachable at $url" ;;
-        401) die "secret broker refused this session's token (HTTP 401); the engine no longer knows this session" ;;
+        401) die "secret broker refused this session's token (HTTP 401): ${body:-the engine no longer knows this session}" ;;
         403) die "secret broker refused $var (HTTP 403): ${body:-not in the manifest}" ;;
         *) die "secret broker failed for $var (HTTP $status): ${body:-<empty body>}" ;;
     esac

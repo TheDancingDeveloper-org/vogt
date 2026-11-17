@@ -52,6 +52,12 @@ class Handler(BaseHTTPRequestHandler):
         self.record(body)
         if self.path == "/api/agent-auth/fetch/DEMO":
             self.send(200, "demo-value")
+        elif self.path == "/api/agent-auth/fetch/E401":
+            self.send(401, '{"error":"unknown caller zeta"}')
+        elif self.path == "/api/agent-auth/fetch/E403":
+            self.send(403, '{"error":"E403 is not in the manifest, ask for a grant"}')
+        elif self.path == "/api/agent-auth/fetch/E502":
+            self.send(502, '{"error":"helper failed: HTTP 404: Secret not found"}')
         elif self.path == "/api/agent-auth/store/WRITABLE":
             self.send(200, "stored")
         elif self.path == "/api/agent-auth/grants":
@@ -144,6 +150,20 @@ if env -u VOGT_ENGINE_BROKER_URL -u VOGT_ENGINE_BROKER_TOKEN \
 fi
 grep -q 'no secret broker in this environment' "$testdir/noauth.err" \
     || fail "missing-broker message: $(cat "$testdir/noauth.err")"
+
+# 3b. A broker refusal's own message reaches the caller (gh#1424): 401, 403
+#     and 502 each name the server's cause, not a fixed text.
+for pair in "E401:unknown caller zeta" "E403:ask for a grant" "E502:HTTP 404: Secret not found"; do
+    var="${pair%%:*}"; want="${pair#*:}"
+    if env -u VOGT_ENGINE_BROKER_URL -u VOGT_ENGINE_BROKER_TOKEN \
+        -u VOGT_ENGINE_BROKER_TOKEN_FILE VOGT_ENGINE_URL="$base" \
+        VOGT_SESSION_TOKEN_FILE="$token_file" bash "$script" fetch "$var" \
+        >/dev/null 2>"$testdir/$var.err"; then
+        fail "fetch $var should fail"
+    fi
+    grep -qF "$want" "$testdir/$var.err" \
+        || fail "fetch $var lost the server message: $(cat "$testdir/$var.err")"
+done
 
 # 4. The universal-auth login carries the client secret in the body, not argv,
 #    and still yields the access token. A jq shim records jq's real argv, the
