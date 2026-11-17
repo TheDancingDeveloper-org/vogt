@@ -157,6 +157,13 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         bus.clone(),
         history.clone(),
     ));
+    {
+        // One warning naming manifest lines whose secret is missing or empty.
+        let broker = Arc::clone(sessions.secret_broker());
+        tokio::spawn(async move {
+            broker.warn_unresolvable_secrets().await;
+        });
+    }
     let gui = Arc::new(GuiRegistry::new());
     let push = Arc::new(
         PushManager::with_subject(
