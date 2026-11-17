@@ -353,6 +353,17 @@ impl Session {
         (status, hint)
     }
 
+    /// The program's own report, when it is current: the process is alive, the
+    /// report was not cleared, and it is younger than `REPORT_STALE_AFTER`.
+    fn live_report(&self) -> Option<crate::screen::Reported> {
+        if !self.is_alive() {
+            return None;
+        }
+        let report = self.terminal.lock().as_ref()?.reported()?;
+        let age = time::OffsetDateTime::now_utc() - report.set_at;
+        (age < REPORT_STALE_AFTER).then_some(report)
+    }
+
     /// Reflow the live grid to the PTY's new size.
     pub fn resize_terminal(&self, rows: u16, cols: u16) {
         if let Some(terminal) = self.terminal.lock().as_mut() {
@@ -2147,6 +2158,109 @@ fn title_approval_dialog(title: Option<&str>) -> Option<crate::approval::Detecte
     })
 }
 
+/// How long an OSC 7501 report stays authoritative. A program that reported
+/// `working` and then died silently, or an emitter that stopped, must not pin
+/// the session forever: past this the heuristics take over again.
+const REPORT_STALE_AFTER: time::Duration = time::Duration::minutes(30);
+
+/// The activity a current report maps to (WI-4322). `inferred` is what the
+/// quiet window said, used only to choose `waiting-for-input` over `idle` for
+/// a report of rest. Never called for a terminal state.
+fn mapped_activity(
+    state: vogt_engine_contract::ReportedState,
+    inferred: ActivityState,
+) -> ActivityState {
+    use vogt_engine_contract::ReportedState as R;
+    match state {
+        R::Working => ActivityState::Running,
+        R::Idle | R::Done if inferred == ActivityState::WaitingForInput => {
+            ActivityState::WaitingForInput
+        }
+        R::Idle | R::Done => ActivityState::Idle,
+        R::Blocked => ActivityState::AwaitingApproval,
+        // Decided in the design note: a live agent's own `error` is `errored`.
+        // It is not sticky: the next report, or `clear`, moves the session on.
+        R::Error => ActivityState::Errored,
+    }
+}
+
+/// The dialog to show for a reported `blocked`: the menu the screen parser
+/// found, else a dialog with no options carrying the reported message. With no
+/// options an answer fails before a key is written, so a report (which anything
+/// in the PTY can forge) never presses a choice.
+fn blocked_dialog(
+    report: &crate::screen::Reported,
+    detected: Option<crate::approval::Detected>,
+) -> crate::approval::Detected {
+    detected.unwrap_or_else(|| crate::approval::Detected {
+        question: report
+            .msg
+            .as_deref()
+            .map(|m| m.chars().take(200).collect::<String>())
+            .filter(|m| !m.trim().is_empty())
+            .unwrap_or_else(|| "awaiting approval".to_string()),
+        command_excerpt: String::new(),
+        deadline_seconds: None,
+        kind: match report.kind.as_deref() {
+            Some("question") => "question",
+            Some("auth") => "auth",
+            _ => "permission",
+        },
+        options: Vec::new(),
+        horizontal: false,
+    })
+}
+
+/// A line for the debug log when the report and the heuristic disagree. Names
+/// the two states only: the report's message and title are untrusted text and
+/// may hold a secret, so they never reach a log.
+fn disagreement(
+    reported: vogt_engine_contract::ReportedState,
+    mapped: ActivityState,
+    inferred: ActivityState,
+) -> Option<String> {
+    (mapped != inferred)
+        .then(|| format!("reported {reported:?} maps to {mapped:?}, heuristic says {inferred:?}"))
+}
+
+fn reported_activity(
+    session: &Arc<Session>,
+    report: &crate::screen::Reported,
+    inferred: ActivityState,
+) -> ActivityState {
+    let mapped = mapped_activity(report.state, inferred);
+    if let Some(line) = disagreement(report.state, mapped, inferred) {
+        tracing::debug!(
+            session = %session.id,
+            agent = session.agent().as_deref().unwrap_or("-"),
+            "OSC 7501 {line}"
+        );
+    }
+    let mut pending = session.approval.lock();
+    if mapped != ActivityState::AwaitingApproval {
+        *pending = None;
+        return mapped;
+    }
+    // Render and read the menu: the report says a dialog is up, only the
+    // screen says what it offers.
+    drop(pending);
+    let (rendered, scrollback) = session.render_screen(crate::approval::SCROLLBACK_CONTEXT_LINES);
+    let found = blocked_dialog(
+        report,
+        crate::approval::detect(&rendered.lines, &scrollback),
+    );
+    let mut pending = session.approval.lock();
+    let now = time::OffsetDateTime::now_utc();
+    match pending.as_mut() {
+        Some(p) if p.is_same(&found) => {
+            p.detected.options = found.options;
+            p.detected.kind = found.kind;
+        }
+        _ => *pending = Some(crate::approval::Pending::new(found, now)),
+    }
+    ActivityState::AwaitingApproval
+}
+
 fn compute_activity(session: &Arc<Session>) -> ActivityState {
     let tail = {
         let sb = session.scrollback.lock();
@@ -2176,6 +2290,13 @@ fn compute_activity(session: &Arc<Session>) -> ActivityState {
     // before the screen has changed enough to move the change clock, so the
     // quiet window alone reads `idle` while the title says working. Only for
     // an agent whose title this engine reads, and never over a terminal state.
+    // The agent's own OSC 7501 report is the first input (WI-4322): when one
+    // is current it decides the state and the heuristics below only read the
+    // menu of a `blocked` dialog. An agent that reports nothing, or whose
+    // report was cleared or went stale, falls through unchanged.
+    if let Some(report) = session.live_report() {
+        return reported_activity(session, &report, state);
+    }
     let titled = matches!(session.agent().as_deref(), Some("codex"));
     let screen_busy = crate::screen::screen_busy(&session.render_screen(0).0.lines);
     let state = titled_activity(state, titled, session.title().as_deref(), screen_busy);
@@ -2287,6 +2408,19 @@ fn update_activity_if_changed(session: &Arc<Session>, new: ActivityState, bus: &
 /// prompt often lands a moment after the output that began the turn.
 fn announce_ready_if_at_prompt(session: &Session, resting: ActivityState, bus: &EventBus) {
     if session.ready_announced.load(Ordering::Acquire) {
+        return;
+    }
+    // An agent that reported rest has said its turn ended: no prompt to find.
+    let reported_rest = session.live_report().is_some_and(|r| {
+        matches!(
+            r.state,
+            vogt_engine_contract::ReportedState::Idle | vogt_engine_contract::ReportedState::Done
+        )
+    });
+    if reported_rest {
+        if !session.ready_announced.swap(true, Ordering::AcqRel) {
+            bus.publish(ServerEvent::SessionReady { id: session.id });
+        }
         return;
     }
     let (rendered, _) = session.render_screen(0);
@@ -2646,5 +2780,130 @@ mod secret_env_tests {
             "/opt/other/vogt-agent-auth",
             helper
         ));
+    }
+}
+
+#[cfg(test)]
+mod reported_status_tests {
+    use super::*;
+    use vogt_engine_contract::ReportedState as R;
+
+    fn report(state: R, kind: Option<&str>, msg: Option<&str>) -> crate::screen::Reported {
+        crate::screen::Reported {
+            state,
+            kind: kind.map(str::to_string),
+            progress: None,
+            msg: msg.map(str::to_string),
+            title: None,
+            app: None,
+            id: None,
+            set_at: time::OffsetDateTime::now_utc(),
+        }
+    }
+
+    #[test]
+    fn each_reported_state_maps_per_the_table() {
+        use ActivityState::*;
+        // Whatever the quiet window said, the report decides.
+        for inferred in [Running, Idle, WaitingForInput] {
+            assert_eq!(mapped_activity(R::Working, inferred), Running);
+            assert_eq!(mapped_activity(R::Blocked, inferred), AwaitingApproval);
+            assert_eq!(mapped_activity(R::Error, inferred), Errored);
+        }
+        // Rest is `waiting-for-input` at a prompt, else `idle`.
+        for r in [R::Idle, R::Done] {
+            assert_eq!(mapped_activity(r, WaitingForInput), WaitingForInput);
+            assert_eq!(mapped_activity(r, Running), Idle);
+            assert_eq!(mapped_activity(r, Idle), Idle);
+        }
+    }
+
+    #[test]
+    fn the_change_feed_kind_follows_the_mapped_state() {
+        use crate::changes::change_of;
+        use ActivityState::*;
+        // `approval` and `errored` come from the activity event; `working`
+        // is no change. (`ready` for idle/done is the SessionReady event.)
+        let kind = |s: ActivityState| {
+            let ev = ServerEvent::Activity {
+                id: uuid::Uuid::nil(),
+                state: s,
+                activity_changed_at: String::new(),
+                approval: None,
+                turn_started_at: None,
+            };
+            change_of(&crate::events::Sequenced {
+                seq: 1,
+                at: String::new(),
+                event: ev,
+            })
+            .map(|c| c.kind)
+        };
+        assert_eq!(kind(mapped_activity(R::Working, Idle)), None);
+        assert_eq!(
+            kind(mapped_activity(R::Blocked, Idle)).as_deref(),
+            Some("approval")
+        );
+        assert_eq!(
+            kind(mapped_activity(R::Error, Idle)).as_deref(),
+            Some("errored")
+        );
+        assert_eq!(
+            kind(mapped_activity(R::Done, WaitingForInput)).as_deref(),
+            Some("ready")
+        );
+    }
+
+    /// A spoofed `blocked` with no menu on the screen yields a dialog with no
+    /// options, which cannot be answered by choice.
+    #[test]
+    fn a_blocked_report_with_no_menu_offers_no_choice() {
+        let r = report(R::Blocked, Some("permission"), Some("approve rm -rf /"));
+        let d = blocked_dialog(&r, None);
+        assert!(d.options.is_empty());
+        assert_eq!(d.question, "approve rm -rf /");
+        assert_eq!(d.kind, "permission");
+        // No kind and no message still shows a dialog.
+        let d = blocked_dialog(&report(R::Blocked, None, None), None);
+        assert!(d.options.is_empty());
+        assert_eq!(d.question, "awaiting approval");
+        // A menu the parser found wins over the report.
+        let found = crate::approval::Detected {
+            question: "Do you want to proceed?".into(),
+            command_excerpt: String::new(),
+            deadline_seconds: None,
+            kind: "permission",
+            options: vec![],
+            horizontal: false,
+        };
+        assert_eq!(
+            blocked_dialog(&r, Some(found)).question,
+            "Do you want to proceed?"
+        );
+    }
+
+    /// Without a current report the heuristics stand: no report at all, a
+    /// cleared one (`reported()` is None) and a stale one are all unauthoritative.
+    #[test]
+    fn a_stale_report_is_not_current() {
+        let mut r = report(R::Working, None, None);
+        r.set_at =
+            time::OffsetDateTime::now_utc() - REPORT_STALE_AFTER - time::Duration::seconds(1);
+        let age = time::OffsetDateTime::now_utc() - r.set_at;
+        assert!(age >= REPORT_STALE_AFTER);
+        let fresh = report(R::Working, None, None);
+        assert!(time::OffsetDateTime::now_utc() - fresh.set_at < REPORT_STALE_AFTER);
+    }
+
+    #[test]
+    fn a_disagreement_is_described_without_the_message() {
+        use ActivityState::*;
+        assert_eq!(disagreement(R::Working, Running, Running), None);
+        let line = disagreement(R::Working, Running, Idle).expect("differ");
+        assert!(line.contains("Working") && line.contains("Idle"));
+        // The text a report carries is not an input to the line at all.
+        let r = report(R::Blocked, None, Some("sk-SECRET-TOKEN"));
+        let line = disagreement(r.state, AwaitingApproval, Running).unwrap();
+        assert!(!line.contains("SECRET"));
     }
 }

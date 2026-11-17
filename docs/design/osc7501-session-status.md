@@ -139,7 +139,7 @@ ready), WI-1314 (blocked reports cleared wrongly).
   | `idle` | `idle`, or `waiting-for-input` at a prompt | `ready` |
   | `done` | as `idle` | `ready` |
   | `blocked` + `permission` / `question` / `auth` | `awaiting-approval` | `approval` |
-  | `error` | `running` or `idle`, flagged | to be decided in item 3 |
+  | `error` | `errored` | `errored` (decided in WI-4322, see below) |
 
 - On `blocked`, the engine renders the screen and runs `approval::detect` to
   fill in the options. If the parser finds no menu, the dialog is reported
@@ -192,8 +192,12 @@ of these to build is an open decision.
 2. **Pod sessions.** `engine/session-agent` streams PTY bytes to the engine,
    which parses them. Confirm that OSC 7501 arrives intact across that stream
    and across hibernate and wake.
-3. **`error` from a live agent.** Whether it is a new change kind, or folds
-   into `blocked`.
+3. **`error` from a live agent.** Decided (WI-4322): it maps to the existing
+   `errored` activity state and `errored` change kind, not `blocked`. It is
+   not sticky: the engine recomputes the state from the current report, so the
+   next report (the agent's `idle` after a failed turn) or `clear` moves the
+   session on. A report is authoritative for 30 minutes; after that, or once
+   cleared or the process exits, the heuristics apply again.
 4. **Nested emitters.** A tool the agent runs may emit its own OSC 7501 with
    an `id`. Agents usually capture tool output, so it should not reach the
    PTY. Item 1 should check.
