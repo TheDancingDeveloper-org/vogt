@@ -106,7 +106,8 @@ def test_every_schema_matches_python_live(
     for name, expected in python_ops.items():
         actual = copy.deepcopy(rust_ops[name])
         # Recorded Rust-only divergences (WI-4317): the same explicit list the
-        # CI parity check honours. Adopt Python's value only where it is not one.
+        # CI parity check honours. Take Rust's value at exactly those
+        # locations; compare the rest.
         expected = copy.deepcopy(expected)
         for op, path in parity._RUST_DIVERGENT_REGISTRY:
             if op == name:
