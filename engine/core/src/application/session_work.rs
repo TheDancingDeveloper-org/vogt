@@ -331,6 +331,7 @@ fn summarize_asked<C: Clock, I: IdFactory>(
         last_output_at: None,
         approval: None,
         blocked: None,
+        reported_status: None,
         hibernation: None,
         keep_awake: None,
         autopilot: None,
@@ -397,6 +398,7 @@ fn unlinked_summary<C: Clock, I: IdFactory>(
         last_output_at: None,
         approval: None,
         blocked: None,
+        reported_status: None,
         hibernation: None,
         keep_awake: None,
         autopilot: None,
@@ -449,6 +451,7 @@ fn apply_live(summary: &mut SessionSummary, live: &EngineSession) {
         deadline_at: approval.deadline_at.clone(),
         detected_at: (!approval.detected_at.is_empty()).then(|| approval.detected_at.clone()),
     });
+    summary.reported_status = live.reported_status.clone();
     summary.blocked = live.blocked.as_ref().map(|blocked| SessionBlocked {
         blocker: blocked.reason.clone(),
         items: blocked.items.clone(),

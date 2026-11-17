@@ -1398,6 +1398,9 @@ pub struct EngineSession {
     pub approval: Option<EngineApproval>,
     pub command: Option<String>,
     pub blocked: Option<EngineBlocked>,
+    /// The program's own OSC 7501 status as the engine serves it (WI-4321),
+    /// passed through untouched: untrusted data.
+    pub reported_status: Option<serde_json::Map<String, Value>>,
     pub conversation_agent: Option<String>,
     pub conversation_id: Option<String>,
     pub hibernation: Option<EngineHibernation>,
@@ -1456,6 +1459,7 @@ impl EngineSession {
             approval: EngineApproval::from_payload(get("approval")),
             command: optional_str(get("command")),
             blocked: EngineBlocked::from_payload(get("blocked")),
+            reported_status: get("reported_status").and_then(Value::as_object).cloned(),
             conversation_agent: optional_str(conversation.and_then(|c| c.get("agent"))),
             conversation_id: optional_str(conversation.and_then(|c| c.get("id"))),
             hibernation: EngineHibernation::from_payload(get("hibernation")),
@@ -2576,6 +2580,19 @@ mod tests {
 
     fn client(transport: Transport) -> EngineClient {
         EngineClient::new("http://engine", Some("tok".to_string()), Some(transport))
+    }
+
+    #[test]
+    fn a_sessions_osc7501_reported_status_is_kept_for_the_summary() {
+        let with = EngineSession::from_payload(&serde_json::json!({
+            "id": "s1",
+            "reported_status": {"state": "working", "msg": "building"},
+        }));
+        let status = with.reported_status.expect("reported_status dropped");
+        assert_eq!(status["state"], "working");
+        assert_eq!(status["msg"], "building");
+        let without = EngineSession::from_payload(&serde_json::json!({"id": "s2"}));
+        assert!(without.reported_status.is_none());
     }
 
     #[test]
