@@ -927,6 +927,9 @@ pub struct SessionSummary {
     pub last_output_at: Option<String>,
     pub approval: Option<SessionApproval>,
     pub blocked: Option<SessionBlocked>,
+    /// What the agent's own terminal program reports about itself over OSC 7501 (state, kind, progress, msg, title, app); null until it reports, and after it clears or exits. Untrusted: anything in the PTY can emit it, so it never replaces `activity`.
+    #[serde(default)]
+    pub reported_status: Option<serde_json::Map<String, serde_json::Value>>,
     pub last_reply_excerpt: Option<String>,
     pub hibernation: Option<SessionHibernation>,
     pub keep_awake: Option<bool>,
@@ -3825,6 +3828,7 @@ where
         last_output_at: None,
         approval: None,
         blocked: None,
+        reported_status: None,
         last_reply_excerpt: None,
         hibernation: None,
         // None until the engine was asked and answered: an engine that was
@@ -4087,6 +4091,7 @@ fn unlinked_summary(
         last_output_at: None,
         approval: None,
         blocked: None,
+        reported_status: None,
         last_reply_excerpt: None,
         hibernation: None,
         keep_awake: None,
