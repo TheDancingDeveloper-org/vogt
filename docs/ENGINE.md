@@ -407,6 +407,8 @@ A host opencode session or plain shell whose `HOME` is not writable by the engin
 | `grafana-ro` | `GRAFANA_URL` + `GRAFANA_SERVICE_ACCOUNT_TOKEN` — a Viewer-role service account | `--disable-write` (create/update tools and raw-SQL query tools are not offered), plus the Viewer role; `--usage-stats=disabled` |
 | `forgejo-ro` | `GITEA_HOST` + `GITEA_MCP_TOKEN` — a read-scoped token; works against Forgejo's Gitea-compatible API | `-r` and `GITEA_READONLY=true` (only read tools are offered), plus the token's scope |
 
+Note: `forgejo-ro` `get_file_contents` returns the file base64-encoded unless line ranges are requested; pass a line range to get plain text.
+
 The registration stores `vogt-readonly-mcp <server>` and nothing else: no
 token value (Claude Code and opencode pass a stdio server the
 session's environment; Codex is told which variables to pass with `env_vars`) and no flag a session
