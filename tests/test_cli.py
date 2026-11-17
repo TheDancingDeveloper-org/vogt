@@ -261,7 +261,12 @@ def test_engine_backed_reads_fail_loudly_on_engine_auth_refusal(
 
     from vogt.adapters.engine import EngineClient
 
-    def refuse(url, headers, body, method):  # noqa: ANN001, ANN202
+    def refuse(
+        url: str,
+        headers: dict[str, str],
+        body: bytes = b"",
+        method: str = "GET",
+    ) -> tuple[int, bytes]:
         return status, b'{"error":"refused"}'
 
     engine = EngineClient(base_url="http://engine.test", transport=refuse)
