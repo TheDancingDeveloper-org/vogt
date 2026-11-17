@@ -590,9 +590,21 @@ mod tests {
             None,
             Some(std::sync::Arc::new(|path, _, body, method| {
                 let answer = if method == "GET" {
-                    format!(r#"{{"id":"{path}","alive":true,"role":"worker"}}"#).into_bytes()
+                    format!(
+                        r#"{{"id":"{path}","alive":true,"role":"worker","reported_status":{{"state":"working","msg":"building"}}}}"#
+                    )
+                    .into_bytes()
                 } else {
-                    body.to_vec()
+                    // The engine answers a write with the session row; the echo
+                    // gains the status the stand-in's program reported.
+                    let mut row: Value = serde_json::from_slice(body).unwrap_or(json!({}));
+                    if let Some(object) = row.as_object_mut() {
+                        object.insert(
+                            "reported_status".to_string(),
+                            json!({"state": "working", "msg": "building"}),
+                        );
+                    }
+                    serde_json::to_vec(&row).unwrap()
                 };
                 (200, answer)
             })),
@@ -753,6 +765,19 @@ mod tests {
         )
         .unwrap();
         assert_eq!(again["previous_work_item"], "WI-7");
+    }
+
+    #[test]
+    fn the_session_summary_carries_the_engines_reported_status() {
+        let built = fresh("reported");
+        seed(&built, "prj_1");
+        let bound = super::bind_work_op(
+            &built,
+            json!({"id": "ses_00000000000000000000000001", "work_item": "WI-7", "reason": "status"}),
+        )
+        .unwrap();
+        assert_eq!(bound["session"]["reported_status"]["state"], "working");
+        assert_eq!(bound["session"]["reported_status"]["msg"], "building");
     }
 
     #[test]

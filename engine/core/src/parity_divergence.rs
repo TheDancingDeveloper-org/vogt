@@ -13,6 +13,8 @@
 //! - `SessionResult.warning`: set by `session.start` when no registered LLM
 //!   provider serves the requested model. Every operation returning
 //!   `SessionResult` carries the field in its result schema.
+//! - `SessionSummary.reported_status` (WI-4322): the program's OSC 7501 report,
+//!   in the schema of every operation that returns a `SessionSummary`.
 //! - The `work.create` refusal text gained a `local_only=true` hint; it is not
 //!   in any golden (messages are runtime strings).
 
@@ -54,6 +56,29 @@ const OPERATION_FIELDS: &[(&str, Path)] = &[
     ),
 ];
 
+/// Operations whose result embeds `SessionSummary`; its `reported_status`
+/// property is a recorded divergence (WI-4322).
+const SESSION_SUMMARY_OPS: &[&str] = &[
+    "work.create",
+    "work.get",
+    "work.update",
+    "work.transition",
+    "work.relate",
+    "work.unrelate",
+    "work.bind_branch",
+    "session.start",
+    "session.list",
+    "session.stop",
+    "session.sweep",
+    "session.hibernate",
+    "session.wake",
+    "session.keep_awake",
+    "session.rename",
+    "session.remove",
+    "session.set_role",
+    "session.bind_work",
+];
+
 /// OpenAPI locations that are a recorded divergence. `/api/projects` keeps
 /// every other field of the golden; the schemas are new or changed wholesale
 /// except `SessionResult`, which gained one property.
@@ -70,6 +95,13 @@ const OPENAPI_FIELDS: &[Path] = &[
         "SessionResult",
         "properties",
         "warning",
+    ],
+    &[
+        "components",
+        "schemas",
+        "SessionSummary",
+        "properties",
+        "reported_status",
     ],
     &[
         "components",
@@ -125,6 +157,19 @@ pub fn patch_registry(golden: &mut Value, ours: &Value) {
             if *operation == name {
                 adopt(g, o, path);
             }
+        }
+        if SESSION_SUMMARY_OPS.contains(&name.as_str()) {
+            adopt(
+                g,
+                o,
+                &[
+                    "result_schema",
+                    "$defs",
+                    "SessionSummary",
+                    "properties",
+                    "reported_status",
+                ],
+            );
         }
     }
 }

@@ -1861,6 +1861,39 @@ _RUST_DIVERGENT_REGISTRY: tuple[tuple[str, tuple[str, ...]], ...] = (
             "session.set_role",
         )
     ),
+    # `SessionSummary.reported_status`, the program's OSC 7501 report (WI-4322).
+    *(
+        (
+            op,
+            (
+                "result_schema",
+                "$defs",
+                "SessionSummary",
+                "properties",
+                "reported_status",
+            ),
+        )
+        for op in (
+            "work.create",
+            "work.get",
+            "work.update",
+            "work.transition",
+            "work.relate",
+            "work.unrelate",
+            "work.bind_branch",
+            "session.start",
+            "session.list",
+            "session.stop",
+            "session.sweep",
+            "session.hibernate",
+            "session.wake",
+            "session.keep_awake",
+            "session.rename",
+            "session.remove",
+            "session.set_role",
+            "session.bind_work",
+        )
+    ),
 )
 
 
