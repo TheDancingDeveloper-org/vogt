@@ -25,6 +25,7 @@ operation is unaffected — the engine-optional rule read from Vogt's side.
 from vogt.adapters.engine.client import (
     EngineAgentTask,
     EngineArchivedSession,
+    EngineAuthRefused,
     EngineClient,
     EngineHistoryMatch,
     EngineHistorySession,
@@ -39,6 +40,7 @@ from vogt.adapters.engine.client import (
 __all__ = [
     "EngineAgentTask",
     "EngineArchivedSession",
+    "EngineAuthRefused",
     "EngineClient",
     "EngineHistoryMatch",
     "EngineHistorySession",
