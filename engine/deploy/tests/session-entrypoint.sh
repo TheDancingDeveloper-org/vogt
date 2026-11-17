@@ -192,6 +192,8 @@ grep -q 'unsafe graft session id' "$tmp/graft-unsafe.out" || fail "unsafe graft 
 # token and is named to the session agent; both hooks are installed once.
 [[ $(stat -c %a "$tmp/happy/run/mcp.json") == 600 ]] || fail "mcp config mode"
 jq -e '.mcpServers.vogt.headers.Authorization=="Bearer ${VOGT_HTTP_TOKEN}"' "$tmp/happy/run/mcp.json" >/dev/null || fail "mcp config content"
+uc=$(find "$tmp/happy" -name .claude.json -type f | head -1)
+[[ -n $uc ]] && jq -e '.mcpServers.vogt.url=="https://e/mcp"' "$uc" >/dev/null || fail "vogt not registered at user scope (WI-4327)"
 grep -q "^VOGT_CLAUDE_MCP_CONFIG=$tmp/happy/run/mcp.json$" "$tmp/happy/agent.env" || fail "mcp config path not exported"
 grep -q '^NODE_EXTRA_CA_CERTS=/etc/ca.pem$' "$tmp/happy/agent.env" || fail "extra CA not given to Claude Code"
 [[ $(<"$tmp/happy/vogt-claude-session-hook.calls") == install ]] || fail "conversation hook not installed"
