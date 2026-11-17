@@ -37,6 +37,12 @@ ignore = [
     # copy; this ignore goes when sqlx moves as well. Operator acceptance is
     # pending on WI-3876.
     "RUSTSEC-2026-0459",
+    # RUSTSEC-2026-0543: chrono 0.4 is unmaintained; the advisory names every
+    # version, and the recommended alternative (jiff) is a source migration,
+    # not a lock bump. chrono reaches the core through k8s-openapi -> kube,
+    # which the engine cannot drop. Reviewed 2026-11-17 (WI-4337); WI-4338
+    # tracks moving the direct uses off chrono so this can be removed.
+    "RUSTSEC-2026-0543",
 ]
 
 [licenses]
