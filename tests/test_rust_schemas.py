@@ -14,6 +14,8 @@ with Python shows that the Rust model validates what Python's does.
 
 from __future__ import annotations
 
+import copy
+import importlib.util
 import json
 import shutil
 import subprocess
@@ -27,6 +29,13 @@ from vogt.application.services.instance import registry_dump
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ENGINE = REPO_ROOT / "engine"
+
+_spec = importlib.util.spec_from_file_location(
+    "parity_script", REPO_ROOT / "scripts" / "parity.py"
+)
+assert _spec is not None and _spec.loader is not None
+parity = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(parity)
 MODELS_RS = ENGINE / "core" / "src" / "application" / "models.rs"
 
 
@@ -95,7 +104,13 @@ def test_every_schema_matches_python_live(
 
     mismatches = []
     for name, expected in python_ops.items():
-        actual = rust_ops[name]
+        actual = copy.deepcopy(rust_ops[name])
+        # Recorded Rust-only divergences (WI-4317): the same explicit list the
+        # CI parity check honours. Adopt Python's value only where it is not one.
+        expected = copy.deepcopy(expected)
+        for op, path in parity._RUST_DIVERGENT_REGISTRY:
+            if op == name:
+                parity._adopt(expected, actual, path)
         for field in ("params_schema", "result_schema"):
             if actual[field] != expected[field]:
                 mismatches.append(f"{name}.{field}")
