@@ -1074,6 +1074,9 @@ pub struct SessionSummary {
     #[serde(default)]
     #[schemars(schema_with = "optional_string")]
     pub conversation_id: Option<String>,
+    /// What the agent's own terminal program reports about itself over OSC 7501 (state, kind, progress, msg, title, app); null until it reports, and after it clears or exits. Untrusted: anything in the PTY can emit it, so it never replaces `activity`.
+    #[serde(default)]
+    pub reported_status: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
