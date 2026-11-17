@@ -24489,3 +24489,60 @@ async fn stopped_sessions_shed_their_buffers_and_are_forgotten_after_retention()
         }
     }
 }
+
+/// Wait (bounded) until the session's activity is `want`; returns the last one seen.
+async fn activity_reaches(
+    session: &vogt_engine_server::pty::Session,
+    want: vogt_engine_contract::ActivityState,
+) -> vogt_engine_contract::ActivityState {
+    for _ in 0..60 {
+        if session.activity() == want {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    session.activity()
+}
+
+/// WI-4322: a current report decides the activity, and without one (never
+/// reported, or cleared) the quiet window decides as before. Both stubs print
+/// once and go silent; only the report differs.
+#[tokio::test]
+async fn osc7501_report_decides_activity_and_no_report_falls_through() {
+    use vogt_engine_contract::ActivityState::*;
+    // Never reports: quiet, so the heuristic says idle.
+    let (plain, _t1) = spawn_osc_stub("agent", "#!/bin/sh\nprintf 'hello\\r\\n'\nexec sleep 30\n");
+    assert_eq!(activity_reaches(&plain, Idle).await, Idle);
+
+    // Reports `working` then goes silent: the report holds it running well
+    // past the quiet window (200 ms) that made the plain stub idle.
+    let body = "#!/bin/sh\nprintf '\\033]7501;state=working:app=stub\\007'\nexec sleep 30\n";
+    let (working, _t2) = spawn_osc_stub("agent", body);
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(working.activity(), Running);
+
+    // Reports `working`, then `clear`: back to the heuristic, which is idle.
+    let body = "#!/bin/sh\nprintf '\\033]7501;state=working:app=stub\\007'\nsleep 1\n\
+                printf '\\033]7501;state=clear\\007'\nexec sleep 30\n";
+    let (cleared, _t3) = spawn_osc_stub("agent", body);
+    assert_eq!(activity_reaches(&cleared, Idle).await, Idle);
+    assert!(cleared.summary().reported_status.is_none());
+    for s in [plain, working, cleared] {
+        s.kill().unwrap();
+    }
+}
+
+/// WI-4322: a terminal state is never overridden by a report. The stub
+/// reports `blocked` and exits; the session reads `exited`, with no dialog.
+#[tokio::test]
+async fn osc7501_report_never_overrides_a_terminal_state() {
+    use vogt_engine_contract::ActivityState::*;
+    let body = "#!/bin/sh\nprintf '\\033]7501;state=blocked:kind=permission:msg=aGk=\\007'\nsleep 1\nexit 0\n";
+    let (session, _t) = spawn_osc_stub("agent", body);
+    assert_eq!(
+        activity_reaches(&session, AwaitingApproval).await,
+        AwaitingApproval
+    );
+    assert_eq!(activity_reaches(&session, Exited).await, Exited);
+    assert!(session.summary().approval.is_none());
+}

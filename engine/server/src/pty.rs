@@ -356,12 +356,8 @@ impl Session {
     /// The program's own report, when it is current: the process is alive, the
     /// report was not cleared, and it is younger than `REPORT_STALE_AFTER`.
     fn live_report(&self) -> Option<crate::screen::Reported> {
-        if !self.is_alive() {
-            return None;
-        }
-        let report = self.terminal.lock().as_ref()?.reported()?;
-        let age = time::OffsetDateTime::now_utc() - report.set_at;
-        (age < REPORT_STALE_AFTER).then_some(report)
+        let report = self.terminal.lock().as_ref().and_then(|t| t.reported());
+        current_report(self.is_alive(), report, time::OffsetDateTime::now_utc())
     }
 
     /// Reflow the live grid to the PTY's new size.
@@ -2163,6 +2159,16 @@ fn title_approval_dialog(title: Option<&str>) -> Option<crate::approval::Detecte
 /// the session forever: past this the heuristics take over again.
 const REPORT_STALE_AFTER: time::Duration = time::Duration::minutes(30);
 
+/// `report` when it is current at `now`: the process is alive, the report was
+/// not cleared, and it is younger than `REPORT_STALE_AFTER`.
+fn current_report(
+    alive: bool,
+    report: Option<crate::screen::Reported>,
+    now: time::OffsetDateTime,
+) -> Option<crate::screen::Reported> {
+    report.filter(|r| alive && now - r.set_at < REPORT_STALE_AFTER)
+}
+
 /// The activity a current report maps to (WI-4322). `inferred` is what the
 /// quiet window said, used only to choose `waiting-for-input` over `idle` for
 /// a report of rest. Never called for a terminal state.
@@ -2223,19 +2229,32 @@ fn disagreement(
         .then(|| format!("reported {reported:?} maps to {mapped:?}, heuristic says {inferred:?}"))
 }
 
+/// Log, at debug, that the report and the heuristic disagree.
+fn log_disagreement(
+    id: Uuid,
+    agent: Option<&str>,
+    reported: vogt_engine_contract::ReportedState,
+    mapped: ActivityState,
+    inferred: ActivityState,
+) {
+    if let Some(line) = disagreement(reported, mapped, inferred) {
+        tracing::debug!(session = %id, agent = agent.unwrap_or("-"), "OSC 7501 {line}");
+    }
+}
+
 fn reported_activity(
     session: &Arc<Session>,
     report: &crate::screen::Reported,
     inferred: ActivityState,
 ) -> ActivityState {
     let mapped = mapped_activity(report.state, inferred);
-    if let Some(line) = disagreement(report.state, mapped, inferred) {
-        tracing::debug!(
-            session = %session.id,
-            agent = session.agent().as_deref().unwrap_or("-"),
-            "OSC 7501 {line}"
-        );
-    }
+    log_disagreement(
+        session.id,
+        session.agent().as_deref(),
+        report.state,
+        mapped,
+        inferred,
+    );
     let mut pending = session.approval.lock();
     if mapped != ActivityState::AwaitingApproval {
         *pending = None;
@@ -2283,13 +2302,6 @@ fn compute_activity(session: &Arc<Session>) -> ActivityState {
         *session.approval.lock() = None;
         return session.terminal_state().unwrap_or(state);
     }
-    // The title outranks the quiet window in both directions (WI-1598). A
-    // `ready` title collapses a still-drawing TUI to rest, and a `working`
-    // title keeps the turn running while the TUI has gone quiet: the fork's
-    // agent-state title turns to `codex: working` at the start of a turn,
-    // before the screen has changed enough to move the change clock, so the
-    // quiet window alone reads `idle` while the title says working. Only for
-    // an agent whose title this engine reads, and never over a terminal state.
     // The agent's own OSC 7501 report is the first input (WI-4322): when one
     // is current it decides the state and the heuristics below only read the
     // menu of a `blocked` dialog. An agent that reports nothing, or whose
@@ -2297,6 +2309,13 @@ fn compute_activity(session: &Arc<Session>) -> ActivityState {
     if let Some(report) = session.live_report() {
         return reported_activity(session, &report, state);
     }
+    // The title outranks the quiet window in both directions (WI-1598). A
+    // `ready` title collapses a still-drawing TUI to rest, and a `working`
+    // title keeps the turn running while the TUI has gone quiet: the fork's
+    // agent-state title turns to `codex: working` at the start of a turn,
+    // before the screen has changed enough to move the change clock, so the
+    // quiet window alone reads `idle` while the title says working. Only for
+    // an agent whose title this engine reads, and never over a terminal state.
     let titled = matches!(session.agent().as_deref(), Some("codex"));
     let screen_busy = crate::screen::screen_busy(&session.render_screen(0).0.lines);
     let state = titled_activity(state, titled, session.title().as_deref(), screen_busy);
@@ -2882,17 +2901,79 @@ mod reported_status_tests {
         );
     }
 
-    /// Without a current report the heuristics stand: no report at all, a
-    /// cleared one (`reported()` is None) and a stale one are all unauthoritative.
+    /// A report is current only for a live process, uncleared and younger
+    /// than `REPORT_STALE_AFTER`; anything else leaves the heuristics alone.
     #[test]
-    fn a_stale_report_is_not_current() {
-        let mut r = report(R::Working, None, None);
-        r.set_at =
-            time::OffsetDateTime::now_utc() - REPORT_STALE_AFTER - time::Duration::seconds(1);
-        let age = time::OffsetDateTime::now_utc() - r.set_at;
-        assert!(age >= REPORT_STALE_AFTER);
+    fn only_a_live_fresh_report_is_current() {
+        let now = time::OffsetDateTime::now_utc();
         let fresh = report(R::Working, None, None);
-        assert!(time::OffsetDateTime::now_utc() - fresh.set_at < REPORT_STALE_AFTER);
+        assert!(current_report(true, Some(fresh.clone()), now).is_some());
+        // No report, or one the program cleared.
+        assert!(current_report(true, None, now).is_none());
+        // An exited process holds no live report.
+        assert!(current_report(false, Some(fresh.clone()), now).is_none());
+        // Older than the staleness window.
+        let mut old = fresh;
+        old.set_at = now - REPORT_STALE_AFTER - time::Duration::seconds(1);
+        assert!(current_report(true, Some(old.clone()), now).is_none());
+        old.set_at = now - REPORT_STALE_AFTER + time::Duration::seconds(1);
+        assert!(current_report(true, Some(old), now).is_some());
+    }
+
+    #[derive(Clone, Default)]
+    struct LogCapture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for LogCapture {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogCapture {
+        type Writer = LogCapture;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    fn captured(level: tracing::Level, f: impl FnOnce()) -> String {
+        let cap = LogCapture::default();
+        let sub = tracing_subscriber::fmt()
+            .with_writer(cap.clone())
+            .with_ansi(false)
+            .with_max_level(level)
+            .finish();
+        tracing::subscriber::with_default(sub, f);
+        let bytes = cap.0.lock().unwrap().clone();
+        String::from_utf8(bytes).unwrap()
+    }
+
+    /// The disagreement reaches the log at debug level, naming session and
+    /// agent, and carries none of the report's text.
+    #[test]
+    fn a_disagreement_is_logged_at_debug_with_session_and_agent() {
+        use ActivityState::*;
+        let id = Uuid::new_v4();
+        let secret = report(R::Blocked, None, Some("sk-SECRET-TOKEN"));
+        let log = |level| {
+            captured(level, || {
+                log_disagreement(id, Some("claude"), secret.state, AwaitingApproval, Running)
+            })
+        };
+        let line = log(tracing::Level::DEBUG);
+        assert!(line.contains("DEBUG"), "{line}");
+        assert!(line.contains(&id.to_string()), "{line}");
+        assert!(line.contains("claude"), "{line}");
+        assert!(!line.contains("SECRET"), "{line}");
+        // Debug only: an info-level subscriber sees nothing.
+        assert!(log(tracing::Level::INFO).is_empty());
+        // Agreement logs nothing.
+        let quiet = captured(tracing::Level::DEBUG, || {
+            log_disagreement(id, None, R::Working, Running, Running)
+        });
+        assert!(quiet.is_empty(), "{quiet}");
     }
 
     #[test]
