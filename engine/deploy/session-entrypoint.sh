@@ -99,6 +99,17 @@ if [ "$VOGT_CLI" = claude ]; then
   mcp_file="$(dirname "$token_file")/mcp.json"
   if jq -e '.mcp_config | type == "object"' "$response" >/dev/null 2>&1; then
     jq '.mcp_config' "$response" >"$mcp_file"; chmod 600 "$mcp_file"; export VOGT_CLAUDE_MCP_CONFIG="$mcp_file"
+    # --strict-mcp-config hides these servers from a hand-typed `claude` in the
+    # session's shell, which reads user scope only (WI-4327). Merge them there
+    # too; the file names the bearer by environment reference, so no credential
+    # is written. Best effort, and only the servers the engine owns are replaced.
+    user_cfg="$CLAUDE_CONFIG_DIR/.claude.json"
+    [ -s "$user_cfg" ] || printf '{}' >"$user_cfg"
+    if jq --slurpfile m "$mcp_file" '.mcpServers = ((.mcpServers // {}) + ($m[0].mcpServers // {}))' "$user_cfg" >"$user_cfg.new" 2>/dev/null; then
+      chmod 600 "$user_cfg.new"; mv "$user_cfg.new" "$user_cfg"
+    else
+      rm -f "$user_cfg.new"; printf 'session-entrypoint: could not register MCP servers at user scope; continuing\n' >&2
+    fi
   else
     printf 'session-entrypoint: the bootstrap response carries no mcp_config\n' >&2
   fi
