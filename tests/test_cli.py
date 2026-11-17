@@ -239,11 +239,24 @@ def test_the_data_dir_flag_overrides_configuration(
 
 
 @pytest.mark.parametrize("status, word", [(401, "unauthenticated"), (403, "forbidden")])
-def test_llm_provider_list_fails_loudly_on_engine_auth_refusal(
-    instance: AppContext, status: int, word: str
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["llm-provider", "list"],
+        ["session", "list"],
+        ["session", "template-list"],
+        ["agent-cli", "list"],
+        ["session", "history"],
+        ["engine", "status"],
+    ],
+    ids=lambda a: " ".join(a),
+)
+def test_engine_backed_reads_fail_loudly_on_engine_auth_refusal(
+    instance: AppContext, argv: list[str], status: int, word: str
 ) -> None:
-    """The pod's `vogt llm-provider list` (Python core) must not print "(none)"
-    when the engine refuses the token (WI-4315)."""
+    """A refused engine credential is an error on every engine-backed read, never
+    an empty list or a "not answering" note with exit 0 (WI-4315). An
+    unreachable engine still degrades; only 401/403 are loud."""
     from dataclasses import replace
 
     from vogt.adapters.engine import EngineClient
@@ -252,7 +265,7 @@ def test_llm_provider_list_fails_loudly_on_engine_auth_refusal(
         return status, b'{"error":"refused"}'
 
     engine = EngineClient(base_url="http://engine.test", transport=refuse)
-    result = run(["llm-provider", "list"], context=replace(instance, engine=engine))
-    assert result.exit_code == EXIT_ERROR
+    result = run(argv, context=replace(instance, engine=engine))
+    assert result.exit_code == EXIT_ERROR, result.stdout
     assert word in result.stderr.lower()
     assert "(none)" not in result.stdout

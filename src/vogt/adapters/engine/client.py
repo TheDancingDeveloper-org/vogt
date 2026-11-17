@@ -63,17 +63,21 @@ class EngineUnavailable(VogtError):
     http_status = 502
 
 
-class EngineAuthRefused(EngineUnavailable):
+class EngineAuthRefused(VogtError):
     """The engine answered 401/403: it is up, and refused this credential.
 
-    Still an `EngineUnavailable` so the callers that degrade a status read
-    keep doing so; a list command that must not pass a refusal off as an
-    empty result catches this one first.
+    Deliberately not an `EngineUnavailable`. The many callers that degrade an
+    unreachable engine to an empty list or a "not answering" note would
+    otherwise pass a refusal off as an empty result. Unreachable still
+    degrades; a refused credential fails loudly (code `unauthenticated` /
+    `forbidden`), the same as the core's own 401/403.
     """
 
     def __init__(self, message: str, status: int) -> None:
         super().__init__(message)
         self.status = status
+        self.code = "unauthenticated" if status == 401 else "forbidden"
+        self.http_status = 401 if status == 401 else 403
 
 
 @dataclass(frozen=True)
@@ -1714,9 +1718,10 @@ class EngineClient:
         if status in (401, 403):
             msg = (
                 f"the {self.label} refused this request ({status}): the token "
-                "lacks the `agent-clis-write` capability"
+                "is missing, unrecognised, or lacks the `agent-clis-write` "
+                "capability (core scope `admin` grants it)"
             )
-            raise EngineUnavailable(msg)
+            raise EngineAuthRefused(msg, status)
         if status >= 400:
             msg = f"the {self.label} answered {status} for POST /api/agent-clis/{tool}"
             raise EngineUnavailable(msg)
@@ -1772,7 +1777,9 @@ class EngineClient:
         if status in (401, 403):
             msg = (
                 f"the {self.label} refused this request ({status}): the token "
-                "is missing, wrong, or lacks the `sessions` capability"
+                "is missing or unrecognised (401), or lacks the capability "
+                "the route needs (403; `sessions` is granted by core scopes "
+                "`admin`, `work.write` or `project.write`, not by `read`)"
             )
             raise EngineAuthRefused(msg, status)
         if status == 400:
