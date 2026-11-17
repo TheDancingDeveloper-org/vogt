@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from vogt.adapters.engine import EngineClient, EngineUnavailable
+from vogt.adapters.engine import EngineAuthRefused, EngineClient, EngineUnavailable
 from vogt.application.context import AppContext
 from vogt.application.models import AgentCliListParams, AgentCliUpdateParams
 from vogt.application.services import agent_cli_list, agent_cli_update
@@ -279,7 +279,7 @@ def test_a_refused_token_is_named_as_the_capability_it_lacks(
         instance,
         engine=EngineClient(base_url="http://127.0.0.1:8910", transport=forbidden),
     )
-    with pytest.raises(EngineUnavailable, match="agent-clis-write"):
+    with pytest.raises(EngineAuthRefused, match="agent-clis-write"):
         agent_cli_update(
             ctx, AgentCliUpdateParams(tool="codex", version="0.150.0", reason="why")
         )

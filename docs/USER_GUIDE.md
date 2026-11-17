@@ -1188,18 +1188,24 @@ $ uv run vogt contract check --project vogt --reason "before release"
 $ uv run vogt project scaffold --project vogt --reason "close what the check found"
 ```
 
-**A refusal is not an outage.** Some commands read the local store but also
-call the session engine — `llm-provider list` above all — using the credential
-named by `engine_token_file` (`VOGT_ENGINE_TOKEN_FILE`). When the engine
-rejects that credential the command exits non-zero with `unauthenticated` or
-`forbidden` and the engine's reason, instead of printing an empty list. Mint
-one with the scopes the operation needs in the container that holds the store
-— `vogt token issue --actor local:sprooty --name <name> --scopes admin
---reason "<why>"` (`admin` covers `llm-provider`; most reads need `read`) —
-keep the secret in a 0600 file, and point `VOGT_ENGINE_TOKEN_FILE` at it.
-This holds for both cores: `vogt` in the pod is the Python console script
-unless `VOGT_CORE_IMPL=rust`, and both now refuse loudly. Check with
-`readlink -f $(command -v vogt)`.
+**A refusal is not an outage.** Commands that read the session engine —
+`llm-provider list`, `session list`, `session template-list`, `session
+history`, `agent-cli list`, `engine status` — use the credential named by
+`engine_token_file` (`VOGT_ENGINE_TOKEN_FILE`). When the engine refuses it
+(401 unrecognised or missing, 403 lacks the capability) the command exits
+non-zero with `unauthenticated` or `forbidden` and the engine's reason,
+instead of printing an empty list. An engine that cannot be reached at all
+still degrades to a note. The engine derives capabilities from the token's
+core scopes: `admin` holds every capability (including `sessions`, `history`
+and `agent-clis-write`); `work.write` or `project.write` holds `sessions` and
+`history` but not `agent-clis-write`; `read` alone holds neither, so a
+`read` token cannot list sessions or read history. To get one in a pod shell,
+mint it in the container that holds the store — `vogt token issue --actor
+local:sprooty --name <name> --scopes admin --reason "<why>"` (or `work.write`
+for session reads) — keep the secret in a 0600 file, and point
+`VOGT_ENGINE_TOKEN_FILE` at it. This holds for both cores: `vogt` in the pod
+is the Python console script unless `VOGT_CORE_IMPL=rust`
+(`readlink -f $(command -v vogt)` tells you which).
 
 **The contract is something a project opts into.** A project you register is
 not measured against it and is never called non-compliant: it reports
