@@ -396,36 +396,65 @@ impl std::fmt::Display for FetchFailure {
     }
 }
 
-/// The part of a helper's stderr a refusal repeats. The Infisical CLI opens
-/// with a long preamble (its `Instance:` line) and names the cause after it,
-/// so a plain head-truncation cut the cause off (gh#1424). Whitespace is
-/// folded to one line; when the output carries an HTTP `status-code=` and a
-/// `message=`, those lead, then the head fills the rest of the budget.
-/// Infisical's message names the failure, never a value.
+/// The part of a helper's stderr a refusal repeats. The Infisical CLI prints
+/// `Request: GET <url>?<query>`, `Instance:`, `Request ID:`, `Response Code:`
+/// and `Message:` lines (0.44.x); the long Request line pushed the cause past
+/// a head-cut (gh#1424). The Request line is dropped (it carries the project
+/// id and path, which a refusal has no need to repeat) and any URL query
+/// string is cut. When a `Response Code:` / `Message:` pair (or the older
+/// `[status-code=..] [message=..]` form) is present it leads as
+/// "HTTP <code>: <message>", then the remaining text fills the budget on one
+/// line. Infisical's message names the failure, never a value.
 fn stderr_excerpt(stderr: &str) -> String {
-    let folded = stderr.split_whitespace().collect::<Vec<_>>().join(" ");
-    let status = bracketed(&folded, "status-code=");
-    let message = bracketed(&folded, "message=");
+    let mut code = None;
+    let mut message = None;
+    let mut kept: Vec<String> = Vec::new();
+    for line in stderr.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        if line.starts_with("Request:") {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("Response Code:") {
+            code.get_or_insert_with(|| rest.trim().to_string());
+        } else if let Some(rest) = line.strip_prefix("Message:") {
+            message.get_or_insert_with(|| rest.trim().to_string());
+        }
+        kept.push(strip_query(line));
+    }
+    let folded = kept.join(" ");
+    let folded = folded.split_whitespace().collect::<Vec<_>>().join(" ");
+    if code.is_none() {
+        code = bracketed(&folded, "status-code=").map(|c| c.trim_matches('"').to_string());
+    }
+    if message.is_none() {
+        message = bracketed(&folded, "message=").map(|m| m.trim_matches('"').to_string());
+    }
     let mut cause = String::new();
-    if let Some(status) = status {
-        cause.push_str(&format!("HTTP {}", status.trim_matches('"')));
+    if let Some(code) = code {
+        cause.push_str(&format!("HTTP {code}"));
     }
     if let Some(message) = message {
         if !cause.is_empty() {
             cause.push_str(": ");
         }
-        cause.push_str(message.trim_matches('"'));
+        cause.push_str(&message);
     }
+    let head: String = folded.chars().take(STDERR_EXCERPT).collect();
     if cause.is_empty() {
-        return folded.chars().take(STDERR_EXCERPT).collect();
+        return head;
     }
     let cause: String = cause.chars().take(STDERR_EXCERPT).collect();
-    let head: String = folded.chars().take(STDERR_EXCERPT).collect();
-    if head.contains(&cause) {
-        head
-    } else {
-        format!("{cause} | {head}")
-    }
+    format!("{cause} | {head}")
+}
+
+/// `line` with the query string of every URL in it cut off.
+fn strip_query(line: &str) -> String {
+    line.split_whitespace()
+        .map(|word| match word.find("://").and_then(|_| word.find('?')) {
+            Some(q) => &word[..q],
+            None => word,
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// The text of `[key...]` in `text`: from just after `key` to the next `]`.
@@ -1155,7 +1184,7 @@ impl SecretBroker {
         let _ = writer.await;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            let stderr: String = stderr.trim().chars().take(STDERR_EXCERPT).collect();
+            let stderr = stderr_excerpt(&stderr);
             return Err(FetchFailure::Failed {
                 status: output.status.to_string(),
                 stderr,
@@ -3896,18 +3925,32 @@ mod tests {
         ));
         assert!(!outside.path().join("target").exists());
     }
+    /// Captured from infisical 0.44.11 with a bad token.
+    const REAL_CLI_STDERR: &str = "Request: GET http://100.92.54.45:8400/api/v4/secrets?environment=prod&expandSecretReferences=true&include_imports=true&projectId=11111111-2222-3333-4444-555555555555&recursive=false&secretPath=%2F\nInstance: http://100.92.54.45:8400\nRequest ID: req-0123456789abcdef\nResponse Code: 403 Forbidden\nMessage: The provided access token is malformed\nvogt-agent-auth: Infisical secret X is missing or empty\n";
+
     #[test]
-    fn the_infisical_cause_survives_the_stderr_excerpt() {
-        // The CLI's preamble is longer than the excerpt budget; the cause
-        // follows it. A head-truncation lost it (gh#1424).
-        let preamble = "Instance: https://infisical.example/api ".repeat(12);
-        let stderr = format!(
-            "{preamble}\nerror: CallGetRawSecretsV3: Unsuccessful response [GET https://x/v3/secrets/raw/FOO] [status-code=404] [message=\"Secret not found\"]\n"
+    fn the_real_cli_cause_survives_and_the_request_url_does_not() {
+        let excerpt = stderr_excerpt(REAL_CLI_STDERR);
+        assert!(
+            excerpt.starts_with("HTTP 403 Forbidden: The provided access token is malformed"),
+            "{excerpt}"
         );
-        let excerpt = stderr_excerpt(&stderr);
-        assert!(excerpt.contains("HTTP 404: Secret not found"), "{excerpt}");
+        assert!(!excerpt.contains("projectId"), "{excerpt}");
+        assert!(!excerpt.contains("secretPath"), "{excerpt}");
+        assert!(!excerpt.contains("Request: GET"), "{excerpt}");
         assert!(!excerpt.contains('\n'));
-        // Output with no recognisable cause is still bounded and one line.
+    }
+
+    #[test]
+    fn the_bracket_form_and_plain_output_still_work() {
+        let bracket = stderr_excerpt(
+            "error: Unsuccessful response [GET https://x/v3?projectId=p] [status-code=404] [message=\"Secret not found\"]",
+        );
+        assert!(
+            bracket.starts_with("HTTP 404: Secret not found"),
+            "{bracket}"
+        );
+        assert!(!bracket.contains("projectId"), "{bracket}");
         let plain = stderr_excerpt(&"x\n".repeat(500));
         assert!(plain.chars().count() <= STDERR_EXCERPT);
     }
@@ -3925,9 +3968,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let helper = helper_that(
             dir.path(),
-            "i=$(printf 'Instance: https://infisical.example %.0s' 1 2 3 4 5 6 7 8 9 10 11 12); \
-             echo \"$i\" >&2; \
-             echo 'error: Unsuccessful response [status-code=403] [message=\"Forbidden\"]' >&2; exit 1",
+            &format!("cat <<'EOF' >&2\n{REAL_CLI_STDERR}EOF\nexit 1"),
         );
         let broker = SecretBroker::with(
             "127.0.0.1:1".parse().unwrap(),
@@ -3936,7 +3977,11 @@ mod tests {
         );
         let failure = broker.fetch(&broker.manifest()[0]).await.unwrap_err();
         let text = failure.to_string();
-        assert!(text.contains("HTTP 403: Forbidden"), "{text}");
+        assert!(
+            text.contains("HTTP 403 Forbidden: The provided access token"),
+            "{text}"
+        );
+        assert!(!text.contains("projectId"), "{text}");
     }
 
     #[tokio::test]
