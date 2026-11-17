@@ -236,3 +236,23 @@ def test_the_data_dir_flag_overrides_configuration(
     assert result.exit_code == EXIT_OK
     assert json.loads(result.stdout)["data_dir"] == str(chosen)
     assert (chosen / "declared.sqlite3").exists()
+
+
+@pytest.mark.parametrize("status, word", [(401, "unauthenticated"), (403, "forbidden")])
+def test_llm_provider_list_fails_loudly_on_engine_auth_refusal(
+    instance: AppContext, status: int, word: str
+) -> None:
+    """The pod's `vogt llm-provider list` (Python core) must not print "(none)"
+    when the engine refuses the token (WI-4315)."""
+    from dataclasses import replace
+
+    from vogt.adapters.engine import EngineClient
+
+    def refuse(url, headers, body, method):  # noqa: ANN001, ANN202
+        return status, b'{"error":"refused"}'
+
+    engine = EngineClient(base_url="http://engine.test", transport=refuse)
+    result = run(["llm-provider", "list"], context=replace(instance, engine=engine))
+    assert result.exit_code == EXIT_ERROR
+    assert word in result.stderr.lower()
+    assert "(none)" not in result.stdout
