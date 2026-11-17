@@ -109,6 +109,7 @@ def test_broker_refusal_without_identity_fails_clearly(tmp_path: Path) -> None:
     assert bridge is None
     assert seen == [["fetch", "VOGT_HTTP_TOKEN"]]
     assert "no Vogt token" in proc.stderr
+    assert "engine broker has no VOGT_HTTP_TOKEN for this session" in proc.stderr
 
 
 def test_no_broker_and_no_identity_fails_clearly(tmp_path: Path) -> None:
@@ -116,6 +117,9 @@ def test_no_broker_and_no_identity_fails_clearly(tmp_path: Path) -> None:
     assert proc.returncode == 64
     assert bridge is None and seen == []
     assert "no Vogt token" in proc.stderr
+    # No broker was asked, so the refusal must not claim one answered.
+    assert "cannot act as a Vogt session" in proc.stderr
+    assert "engine broker has no" not in proc.stderr
 
 
 def test_identity_still_falls_back_to_agent_auth_run(tmp_path: Path) -> None:

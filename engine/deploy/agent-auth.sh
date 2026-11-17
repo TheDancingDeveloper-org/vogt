@@ -158,6 +158,19 @@ broker_token_available() {
     [[ -r "$file" ]]
 }
 
+# Why a broker call cannot be made, and what to do about it. A process started
+# outside a Vogt session — a plain pod shell, a sudo, a tmux server from another
+# login — can keep part of the pair (usually the address) while losing the
+# credential. Say which half is missing and how to get a shell that has both,
+# rather than listing unset variables and leaving the reader to infer the fix
+# (WI-4310).
+die_no_broker() {
+    if [[ -z "$(broker_url)" ]]; then
+        die "no Vogt secret broker address in this environment (VOGT_ENGINE_BROKER_URL and VOGT_ENGINE_URL are both unset): this is not a Vogt session shell. Fix: start the shell through Vogt (session_start), which exports the broker address and credential."
+    fi
+    die "no Vogt secret broker credential in this environment (VOGT_ENGINE_BROKER_TOKEN, VOGT_ENGINE_BROKER_TOKEN_FILE and VOGT_SESSION_TOKEN_FILE are all unset or unreadable): this is not a Vogt session shell, so a plain shell cannot authenticate to the broker. Fix: start the shell through Vogt (session_start), which exports the broker credential."
+}
+
 broker_curl() {
     local -a tls_args=()
     local file token
@@ -676,7 +689,7 @@ store_one() {
     local var="$1" value response status body url
     url="$(broker_url)"
     if [[ -z "$url" ]] || ! broker_token_available; then
-        die "no secret broker in this environment (VOGT_ENGINE_BROKER_URL or VOGT_ENGINE_URL and a token or VOGT_SESSION_TOKEN_FILE are unset): not an engine session, or the engine declares nothing in ENGINE_AGENT_AUTH_SECRETS"
+        die_no_broker
     fi
     require_command curl
     value="$(cat)"
@@ -719,7 +732,7 @@ fetch_one() {
     local var="$1" response status body url
     url="$(broker_url)"
     if [[ -z "$url" ]] || ! broker_token_available; then
-        die "no secret broker in this environment (VOGT_ENGINE_BROKER_URL or VOGT_ENGINE_URL and a token or VOGT_SESSION_TOKEN_FILE are unset): not an engine session, or the engine declares nothing in ENGINE_AGENT_AUTH_SECRETS"
+        die_no_broker
     fi
     require_command curl
     umask 077
@@ -756,7 +769,7 @@ list_grants() {
     local response status url
     url="$(broker_url)"
     if [[ -z "$url" ]] || ! broker_token_available; then
-        die "no secret broker in this environment (VOGT_ENGINE_BROKER_URL or VOGT_ENGINE_URL and a token or VOGT_SESSION_TOKEN_FILE are unset): not an engine session, or the engine declares nothing in ENGINE_AGENT_AUTH_SECRETS"
+        die_no_broker
     fi
     require_command curl
     require_command jq

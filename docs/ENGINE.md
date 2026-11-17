@@ -5288,7 +5288,14 @@ enforces that `VAR` is in `ENGINE_AGENT_AUTH_SECRETS` (any entry, not only
 rate-limits per session, then runs the configured helper's `get VAR` with the
 same re-granted environment a launch gets and returns the value. **Every fetch
 is audited** on `vogt::audit` by session id, variable and secret name —
-never value. The engine bearer does not open this route, and the broker token
+never value. **One name is not a manifest secret:** `fetch VOGT_HTTP_TOKEN`
+returns the session's own core credential — the token the engine minted when it
+launched the session, or the one the core put in the session's environment —
+to that session and no other. It needs no manifest line. That is the path a
+hand-typed `claude` or `codex` uses when it lost its environment: the
+credential it brings back still belongs to this session, so its writes are
+attributed to the session rather than to the pod.
+The engine bearer does not open this route, and the broker token
 opens nothing else. The engine reads the manifest itself at startup, with the
 helper's grammar; a malformed line is a startup error. Same honest caveat as
 above: at the same uid this narrows *ambient* exposure and adds an audit

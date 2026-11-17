@@ -59,8 +59,10 @@ die() {
 # elsewhere — still carries the broker's address and grant, and the broker
 # needs no secrets manager. This is how `vogt-prod-mcp` gets its token. The
 # value goes into this process's environment, never argv or a file.
+broker_asked=0
 if [[ -n "${VOGT_ENGINE_BROKER_URL:-${VOGT_ENGINE_URL:-}}" \
     && -n "${VOGT_ENGINE_BROKER_TOKEN:-}${VOGT_ENGINE_BROKER_TOKEN_FILE:-}${VOGT_SESSION_TOKEN_FILE:-}" ]]; then
+    broker_asked=1
     if token="$("$AGENT_AUTH" fetch VOGT_HTTP_TOKEN)"; then
         token="${token//[$'\r\n\t ']/}"
         if [[ -n "$token" ]]; then
@@ -79,7 +81,10 @@ fi
 # without it there is nothing left to try; say what is missing rather than
 # letting the broker fail on an unset INFISICAL_API_URL.
 if [[ -z "${INFISICAL_API_URL:-}" || -z "${INFISICAL_CLIENT_ID:-}" || -z "${INFISICAL_CLIENT_SECRET:-}" ]]; then
-    die "no Vogt token: VOGT_HTTP_TOKEN and VOGT_TOKEN_FILE are unset, the engine broker gave none, and there is no secrets-manager identity. Start the agent from the session's own shell, which exports its token."
+    if [[ "$broker_asked" == 1 ]]; then
+        die "no Vogt token: the engine broker has no VOGT_HTTP_TOKEN for this session, VOGT_HTTP_TOKEN and VOGT_TOKEN_FILE are unset, and there is no secrets-manager identity. Start the agent from the session's own shell, which exports its token, or set VOGT_TOKEN_FILE to a Vogt token file."
+    fi
+    die "no Vogt token: VOGT_HTTP_TOKEN and VOGT_TOKEN_FILE are unset and this shell holds no engine broker credential, so it cannot act as a Vogt session. Start the agent from the session's own shell, which exports its token, or set VOGT_TOKEN_FILE to a Vogt token file."
 fi
 
 exec "$AGENT_AUTH" run -- env \
