@@ -170,6 +170,11 @@ where
                 .filter(|field| matches!(params.get(*field), Some(Value::Null)))
                 .collect(),
         };
+    check_named_provider(
+        ctx,
+        optional_string(&params, "provider")?.as_deref(),
+        parsed.model.as_deref(),
+    )?;
     let warning = unserved_model_warning(ctx, parsed.model.as_deref());
     let mut result =
         serde_json::to_value(start_session(ctx, &parsed)?).expect("a session result serialises");
@@ -177,6 +182,52 @@ where
         map.insert("warning".to_string(), Value::String(warning));
     }
     Ok(result)
+}
+
+/// Refuse a start whose explicit `provider` is not registered or does not serve
+/// `model` (WI-4317). Absent `provider` is always fine. The engine picks the
+/// provider by model, so this only guarantees the named one is a valid server.
+fn check_named_provider<C, I>(
+    ctx: &AppContext<C, I>,
+    provider: Option<&str>,
+    model: Option<&str>,
+) -> Result<(), VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let Some(provider) = provider.filter(|name| !name.is_empty()) else {
+        return Ok(());
+    };
+    let Some(model) = model.filter(|model| !model.is_empty()) else {
+        return Err(VogtError::InvalidRequest(
+            "provider needs a model: name the model the provider must serve".to_string(),
+        ));
+    };
+    let listed = engine_of(ctx)?.llm_providers()?;
+    let entry = listed
+        .get("providers")
+        .and_then(Value::as_array)
+        .and_then(|providers| {
+            providers
+                .iter()
+                .find(|one| one.get("name").and_then(Value::as_str) == Some(provider))
+        });
+    let Some(entry) = entry else {
+        return Err(VogtError::InvalidRequest(format!(
+            "no LLM provider named {provider:?} is registered on this instance; see llm_provider.list or register it with llm_provider.set"
+        )));
+    };
+    let serves = entry
+        .get("models")
+        .and_then(Value::as_array)
+        .is_some_and(|models| models.iter().any(|one| one.as_str() == Some(model)));
+    if !serves {
+        return Err(VogtError::InvalidRequest(format!(
+            "LLM provider {provider:?} does not serve model {model:?}; pick a model it lists (llm_provider.list)"
+        )));
+    }
+    Ok(())
 }
 
 /// A warning when `model` is not one a registered LLM provider serves (WI-4317).
@@ -6127,6 +6178,70 @@ mod tests {
             Ok::<(), VogtError>(())
         })
         .unwrap();
+    }
+
+    fn provider_start(
+        name: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, VogtError> {
+        let providers = br#"{"providers":[{"name":"p","models":["served-model"]}]}"#.to_vec();
+        let (dir, built, _) = context(
+            name,
+            person(),
+            None,
+            |_| {},
+            vec![providers.clone(), providers],
+        );
+        let root = dir.join("widget");
+        std::fs::create_dir_all(&root).unwrap();
+        crate::application::projects::register_op(
+            &built,
+            json!({"name": "Widget", "root_path": root.to_string_lossy(), "reason": "test"}),
+        )
+        .unwrap();
+        let mut params = params;
+        params["project"] = json!("widget");
+        params["reason"] = json!("probe");
+        super::start_session_op(&built, params)
+    }
+
+    #[test]
+    fn an_unregistered_provider_refuses_the_start() {
+        let error = provider_start(
+            "prov-missing",
+            json!({"provider": "nope", "model": "served-model"}),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&error, VogtError::InvalidRequest(m) if m.contains("no LLM provider named")),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_provider_that_does_not_serve_the_model_refuses_the_start() {
+        let error =
+            provider_start("prov-model", json!({"provider": "p", "model": "other"})).unwrap_err();
+        assert!(
+            matches!(&error, VogtError::InvalidRequest(m) if m.contains("does not serve")),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_provider_without_a_model_refuses_the_start() {
+        let error = provider_start("prov-nomodel", json!({"provider": "p"})).unwrap_err();
+        assert!(
+            matches!(&error, VogtError::InvalidRequest(m) if m.contains("needs a model")),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_provider_that_serves_the_model_starts_without_a_warning() {
+        let result =
+            provider_start("prov-ok", json!({"provider": "p", "model": "served-model"})).unwrap();
+        assert!(result.get("warning").is_none(), "{result}");
     }
 
     /// The warning rides the whole `session.start` result, not just the helper.
