@@ -139,7 +139,7 @@ def main(argv: list[str] | None = None) -> int:
 
     golden = json.loads((args.golden / f"{args.transport}.json").read_text())
     if args.impl == "rust":
-        golden = _adopt_rust_divergences(golden, recorded)
+        golden = _adopt_rust_divergences(golden, recorded, args.transport)
     if not args.only:
         # The audit trail is the whole run's, so only a full run compares it.
         # Presence was checked before the run, so a missing file is an error
@@ -1554,6 +1554,61 @@ def _config_artifacts(binary: str, impl: str) -> dict[str, str]:
     return {path.name: content for path, content in rendered.items()}
 
 
+# Rust-only `--help` lines (WI-4317), as exact (golden text, Rust text) blocks.
+# For `contract --impl rust` only; the golden file is never edited, and any
+# other help difference still fails.
+_RUST_HELP_DIVERGENCES: tuple[tuple[str, str], ...] = (
+    (
+        "usage: vogt project list [-h] [--limit LIMIT] [--offset OFFSET]\n"
+        "\n"
+        "options:\n"
+        "  -h, --help       show this help message and exit\n"
+        "  --limit LIMIT\n"
+        "  --offset OFFSET\n",
+        "usage: vogt project list [-h] [--limit LIMIT] [--offset OFFSET] "
+        "[--mode MODE]\n"
+        "\n"
+        "options:\n"
+        "  -h, --help       show this help message and exit\n"
+        "  --limit LIMIT\n"
+        "  --offset OFFSET\n"
+        "  --mode MODE      `full` (default over REST): every project field plus\n"
+        "                   `writable`. `summary`: compact rows with slug, name,\n"
+        "                   lifecycle_state and link_state; the MCP `project_list` "
+        "tool\n"
+        "                   defaults to `summary`.\n",
+    ),
+    (
+        "                          [--model MODEL] [--effort EFFORT]\n"
+        "                          [--autopilot | --no-autopilot]\n",
+        "                          [--model MODEL] [--provider PROVIDER]\n"
+        "                          [--effort EFFORT] [--autopilot | --no-autopilot]\n",
+    ),
+    (
+        "                        model to use refuses rather than ignoring this.\n"
+        "  --effort EFFORT ",
+        "                        model to use refuses rather than ignoring this.\n"
+        "  --provider PROVIDER   Optional name of the registered LLM provider "
+        "that must\n"
+        "                        serve `model` (see `llm_provider.list`). Requires\n"
+        "                        `model`. The start is refused if no such provider is\n"
+        "                        registered or it does not serve that model; omitted\n"
+        "                        means any provider may.\n"
+        "  --effort EFFORT ",
+    ),
+)
+
+
+def _adopt_rust_help(golden: str, ours: str) -> str:
+    """The golden help tree with the recorded Rust-only help blocks applied."""
+    for before, after in _RUST_HELP_DIVERGENCES:
+        if before in golden and after in ours:
+            golden = golden.replace(before, after, 1)
+            first = after.splitlines()[0].strip()
+            print(f"parity: allowed Rust-only help divergence (WI-4317): {first}")
+    return golden
+
+
 def _contract(binary: str, impl: str, golden: Path, write: bool) -> int:
     """Record or check cli-help.txt, CONFIG.md and config.example.toml."""
     produced = {"cli-help.txt": _help_tree(binary)}
@@ -1572,6 +1627,8 @@ def _contract(binary: str, impl: str, golden: Path, write: bool) -> int:
             print(f"recorded {target}")
             continue
         want = target.read_text(encoding="utf-8")
+        if impl == "rust" and name == "cli-help.txt":
+            want = _adopt_rust_help(want, content)
         if want != content:
             failed = 1
             sys.stdout.writelines(
@@ -1785,11 +1842,6 @@ def _mutate(value: Any, key: str) -> bool:
 # Rust value is adopted at exactly these locations and everything else is
 # compared as before. Each adoption is printed.
 #
-# (operation, path inside the step body). An empty path is the whole body.
-_RUST_DIVERGENT_BODIES: tuple[tuple[str, tuple[str, ...]], ...] = (
-    # `mode` param; rows are ProjectSummary | ProjectListing (MCP defaults to summary).
-    ("project.list", ()),
-)
 # Registry dump: (operation name, path inside that operation).
 _RUST_DIVERGENT_REGISTRY: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("project.list", ("params_schema",)),
@@ -1829,7 +1881,37 @@ def _adopt(golden: Any, ours: Any, path: tuple[str, ...]) -> bool:
     return True
 
 
-def _adopt_rust_divergences(golden: list[Any], recorded: list[Any]) -> list[Any]:
+_SUMMARY_FIELDS = ("slug", "name", "lifecycle_state", "link_state")
+
+
+def _summary_matches(golden: Any, ours: Any) -> bool:
+    """True when `ours` is exactly the summary projection of the golden body.
+
+    Same `total`, same rows in order, each row only slug, name, lifecycle_state
+    and link_state, and each of those equal to the golden's. Content drift in
+    any of them is not a divergence, so the check still fails.
+    """
+    if not (isinstance(golden, dict) and isinstance(ours, dict)):
+        return False
+    if set(ours) != {"projects", "total"} or ours["total"] != golden.get("total"):
+        return False
+    g_rows, o_rows = golden.get("projects"), ours["projects"]
+    if not (isinstance(g_rows, list) and isinstance(o_rows, list)):
+        return False
+    if len(g_rows) != len(o_rows):
+        return False
+    return all(
+        isinstance(g, dict)
+        and isinstance(o, dict)
+        and set(o) == set(_SUMMARY_FIELDS)
+        and all(o[f] == g.get(f) for f in _SUMMARY_FIELDS)
+        for g, o in zip(g_rows, o_rows, strict=True)
+    )
+
+
+def _adopt_rust_divergences(
+    golden: list[Any], recorded: list[Any], transport: str
+) -> list[Any]:
     """The golden with the recorded Rust-only divergences adopted (WI-4317)."""
     golden = json.loads(json.dumps(golden))
     seen: dict[str, int] = {}
@@ -1843,9 +1925,15 @@ def _adopt_rust_divergences(golden: list[Any], recorded: list[Any]) -> list[Any]
         if nth >= len(ours):
             continue
         body = ours[nth].get("body")
-        if any(o == op for o, _ in _RUST_DIVERGENT_BODIES) and step.get("body") != body:
+        if (
+            op == "project.list"
+            and transport == "mcp"
+            and _summary_matches(step.get("body"), body)
+        ):
             step["body"] = body
-            print(f"parity: adopted Rust-only divergence: {op} body (WI-4317)")
+            print(
+                "parity: adopted Rust-only divergence: project.list summary (WI-4317)"
+            )
         if op == "registry.dump":
             g_ops = {o["name"]: o for o in step["body"].get("operations", [])}
             o_ops = {o["name"]: o for o in (body or {}).get("operations", [])}
