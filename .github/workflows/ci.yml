@@ -554,6 +554,11 @@ jobs:
           # state directory, and pod sessions mount no such path. Reviewed
           # 2026-11-10 (WI-3876); operator acceptance pending. rusqlite 0.41
           # removes the core's copy, and this ignore goes when sqlx moves.
+          # RUSTSEC-2026-0543: chrono 0.4 is unmaintained; the advisory names
+          # every version, and the recommended alternative (jiff) is a source
+          # migration, not a lock bump. chrono arrives through k8s-openapi ->
+          # kube, which the engine cannot drop. Reviewed 2026-11-17 (WI-4337);
+          # WI-4338 tracks moving the direct uses off chrono.
           # These ignores stay explicit while the audit denies future
           # vulnerabilities, unsound advisories, and yanks.
           cargo audit --no-fetch --db "$advisory_db" \
@@ -562,7 +567,8 @@ jobs:
             --ignore RUSTSEC-2024-0449 \
             --ignore RUSTSEC-2025-0134 \
             --ignore RUSTSEC-2026-0387 \
-            --ignore RUSTSEC-2026-0459
+            --ignore RUSTSEC-2026-0459 \
+            --ignore RUSTSEC-2026-0543
 
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
         # Runs after a failed step too, so one round reports every failure.
