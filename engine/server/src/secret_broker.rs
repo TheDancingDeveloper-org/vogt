@@ -396,6 +396,45 @@ impl std::fmt::Display for FetchFailure {
     }
 }
 
+/// The part of a helper's stderr a refusal repeats. The Infisical CLI opens
+/// with a long preamble (its `Instance:` line) and names the cause after it,
+/// so a plain head-truncation cut the cause off (gh#1424). Whitespace is
+/// folded to one line; when the output carries an HTTP `status-code=` and a
+/// `message=`, those lead, then the head fills the rest of the budget.
+/// Infisical's message names the failure, never a value.
+fn stderr_excerpt(stderr: &str) -> String {
+    let folded = stderr.split_whitespace().collect::<Vec<_>>().join(" ");
+    let status = bracketed(&folded, "status-code=");
+    let message = bracketed(&folded, "message=");
+    let mut cause = String::new();
+    if let Some(status) = status {
+        cause.push_str(&format!("HTTP {}", status.trim_matches('"')));
+    }
+    if let Some(message) = message {
+        if !cause.is_empty() {
+            cause.push_str(": ");
+        }
+        cause.push_str(message.trim_matches('"'));
+    }
+    if cause.is_empty() {
+        return folded.chars().take(STDERR_EXCERPT).collect();
+    }
+    let cause: String = cause.chars().take(STDERR_EXCERPT).collect();
+    let head: String = folded.chars().take(STDERR_EXCERPT).collect();
+    if head.contains(&cause) {
+        head
+    } else {
+        format!("{cause} | {head}")
+    }
+}
+
+/// The text of `[key...]` in `text`: from just after `key` to the next `]`.
+fn bracketed<'a>(text: &'a str, key: &str) -> Option<&'a str> {
+    let start = text.find(key)? + key.len();
+    let rest = &text[start..];
+    Some(&rest[..rest.find(']')?])
+}
+
 /// Why a fetch failed, without the helper's stderr (which may quote a value a
 /// broken helper printed). Safe for a launch refusal.
 fn fetch_failure_kind(failure: &FetchFailure) -> &'static str {
@@ -692,6 +731,42 @@ impl SecretBroker {
                 fetch_failure_kind(&failure)
             )
         })
+    }
+
+    /// The names (`VAR`) of manifest lines whose secret cannot be resolved or
+    /// resolves empty, each fetched once through the helper. A line flagged
+    /// `optional` is skipped: it is expected to be absent. Names only; never a
+    /// value or the helper's stderr.
+    pub async fn unresolvable_secrets(&self) -> Vec<String> {
+        let mut missing = Vec::new();
+        for entry in self.manifest() {
+            if entry.policy == ManifestPolicy::Optional {
+                continue;
+            }
+            if self.fetch(&entry).await.is_err() {
+                missing.push(entry.var);
+            }
+        }
+        missing
+    }
+
+    /// Launch-time check: one warning line naming every required manifest
+    /// secret that is missing or empty (gh#1424), so a broken line shows at
+    /// start rather than on a session's first fetch. Returns the names.
+    pub async fn warn_unresolvable_secrets(&self) -> Vec<String> {
+        if !self.enabled() {
+            return Vec::new();
+        }
+        let missing = self.unresolvable_secrets().await;
+        if !missing.is_empty() {
+            tracing::warn!(
+                target: "vogt::audit",
+                count = missing.len(),
+                vars = %missing.join(","),
+                "agent-auth manifest lines whose secret is missing or empty"
+            );
+        }
+        missing
     }
 
     /// The deploy-time entries plus the manifest file's, without the
@@ -1015,10 +1090,9 @@ impl SecretBroker {
         };
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            let stderr: String = stderr.trim().chars().take(STDERR_EXCERPT).collect();
             return Err(FetchFailure::Failed {
                 status: output.status.to_string(),
-                stderr,
+                stderr: stderr_excerpt(&stderr),
             });
         }
         let value = String::from_utf8_lossy(&output.stdout).into_owned();
@@ -3821,5 +3895,67 @@ mod tests {
             Err(BundleRefusal::Storage)
         ));
         assert!(!outside.path().join("target").exists());
+    }
+    #[test]
+    fn the_infisical_cause_survives_the_stderr_excerpt() {
+        // The CLI's preamble is longer than the excerpt budget; the cause
+        // follows it. A head-truncation lost it (gh#1424).
+        let preamble = "Instance: https://infisical.example/api ".repeat(12);
+        let stderr = format!(
+            "{preamble}\nerror: CallGetRawSecretsV3: Unsuccessful response [GET https://x/v3/secrets/raw/FOO] [status-code=404] [message=\"Secret not found\"]\n"
+        );
+        let excerpt = stderr_excerpt(&stderr);
+        assert!(excerpt.contains("HTTP 404: Secret not found"), "{excerpt}");
+        assert!(!excerpt.contains('\n'));
+        // Output with no recognisable cause is still bounded and one line.
+        let plain = stderr_excerpt(&"x\n".repeat(500));
+        assert!(plain.chars().count() <= STDERR_EXCERPT);
+    }
+
+    fn helper_that(dir: &FsPath, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("helper.sh");
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[tokio::test]
+    async fn a_failed_fetch_names_the_infisical_cause() {
+        let dir = tempfile::tempdir().unwrap();
+        let helper = helper_that(
+            dir.path(),
+            "i=$(printf 'Instance: https://infisical.example %.0s' 1 2 3 4 5 6 7 8 9 10 11 12); \
+             echo \"$i\" >&2; \
+             echo 'error: Unsuccessful response [status-code=403] [message=\"Forbidden\"]' >&2; exit 1",
+        );
+        let broker = SecretBroker::with(
+            "127.0.0.1:1".parse().unwrap(),
+            helper,
+            parse_manifest("A p s\n").unwrap(),
+        );
+        let failure = broker.fetch(&broker.manifest()[0]).await.unwrap_err();
+        let text = failure.to_string();
+        assert!(text.contains("HTTP 403: Forbidden"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn launch_check_names_required_lines_with_missing_or_empty_secrets() {
+        let dir = tempfile::tempdir().unwrap();
+        // GOOD resolves; GONE fails; BLANK prints nothing; OPT would fail but
+        // is optional and so is never asked.
+        let helper = helper_that(
+            dir.path(),
+            r#"case "$2" in GOOD) echo v;; BLANK) ;; *) echo nope >&2; exit 1;; esac"#,
+        );
+        let broker = SecretBroker::with(
+            "127.0.0.1:1".parse().unwrap(),
+            helper,
+            parse_manifest("GOOD p a\nGONE p b\nBLANK p c\nOPT p d optional\n").unwrap(),
+        );
+        assert_eq!(
+            broker.warn_unresolvable_secrets().await,
+            vec!["GONE".to_string(), "BLANK".to_string()]
+        );
     }
 }
