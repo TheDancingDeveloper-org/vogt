@@ -1197,6 +1197,9 @@ one with the scopes the operation needs in the container that holds the store
 — `vogt token issue --actor local:sprooty --name <name> --scopes admin
 --reason "<why>"` (`admin` covers `llm-provider`; most reads need `read`) —
 keep the secret in a 0600 file, and point `VOGT_ENGINE_TOKEN_FILE` at it.
+This holds for both cores: `vogt` in the pod is the Python console script
+unless `VOGT_CORE_IMPL=rust`, and both now refuse loudly. Check with
+`readlink -f $(command -v vogt)`.
 
 **The contract is something a project opts into.** A project you register is
 not measured against it and is never called non-compliant: it reports

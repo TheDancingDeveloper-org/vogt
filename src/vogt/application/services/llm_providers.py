@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from vogt.adapters.engine import EngineUnavailable
+from vogt.adapters.engine import EngineAuthRefused, EngineUnavailable
 from vogt.application.context import AppContext
 from vogt.application.models import (
     LlmProviderListResult,
@@ -15,6 +15,7 @@ from vogt.application.models import (
     LlmProviderSetParams,
     LlmProviderSetResult,
 )
+from vogt.application.services.auth import Forbidden, Unauthenticated
 from vogt.application.writes import WriteOutcome, audited_write
 from vogt.core.entities import Actor
 from vogt.errors import InvalidRequest
@@ -35,6 +36,9 @@ def llm_provider_list(
         return LlmProviderListResult(engine=_NO_ENGINE)
     try:
         payload = ctx.engine.llm_providers()
+    except EngineAuthRefused as exc:
+        # A refusal is not an empty registry: fail loudly (401/403).
+        raise (Unauthenticated if exc.status == 401 else Forbidden)(str(exc)) from exc
     except EngineUnavailable as exc:
         return LlmProviderListResult(engine=str(exc))
     return LlmProviderListResult(

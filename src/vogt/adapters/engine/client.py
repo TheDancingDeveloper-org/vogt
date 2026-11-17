@@ -63,6 +63,19 @@ class EngineUnavailable(VogtError):
     http_status = 502
 
 
+class EngineAuthRefused(EngineUnavailable):
+    """The engine answered 401/403: it is up, and refused this credential.
+
+    Still an `EngineUnavailable` so the callers that degrade a status read
+    keep doing so; a list command that must not pass a refusal off as an
+    empty result catches this one first.
+    """
+
+    def __init__(self, message: str, status: int) -> None:
+        super().__init__(message)
+        self.status = status
+
+
 @dataclass(frozen=True)
 class EngineApproval:
     """A permission dialog an agent CLI is showing (engine `ApprovalPrompt`).
@@ -1761,7 +1774,7 @@ class EngineClient:
                 f"the {self.label} refused this request ({status}): the token "
                 "is missing, wrong, or lacks the `sessions` capability"
             )
-            raise EngineUnavailable(msg)
+            raise EngineAuthRefused(msg, status)
         if status == 400:
             # The engine refused what Vogt sent it — a cwd outside the
             # workspace, an effort with no agent CLI to take it — and its
