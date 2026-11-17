@@ -6,8 +6,10 @@
 //! adopts the Rust value for exactly the fields below and compares the rest
 //! as before. Add an entry here, with a work item, only on an operator ruling.
 //!
-//! - `project.list`: `mode` parameter (`summary` default, `full`), and result
+//! - `project.list`: `mode` parameter (`full` default over REST and core, `summary` default only for the MCP tool, `full` to ask for everything), and result
 //!   rows that are `ProjectSummary` or `ProjectListing` (`ProjectRow`).
+//! - `session.start`: optional `provider` parameter (refused when unregistered
+//!   or not serving the model).
 //! - `SessionResult.warning`: set by `session.start` when no registered LLM
 //!   provider serves the requested model. Every operation returning
 //!   `SessionResult` carries the field in its result schema.
@@ -21,10 +23,12 @@ type Path = &'static [&'static str];
 
 /// Registry operation fields that are a recorded divergence: the whole
 /// `params_schema` / `result_schema` of `project.list` (its rows are a union
-/// now), and only the `warning` property of every `SessionResult` operation.
+/// now), `session.start` params_schema (field order is compared, so the new
+/// `provider` property cannot be spliced in alone), and only the `warning` property of every `SessionResult` operation.
 const OPERATION_FIELDS: &[(&str, Path)] = &[
     ("project.list", &["params_schema"]),
     ("project.list", &["result_schema"]),
+    ("session.start", &["params_schema"]),
     ("session.start", &["result_schema", "properties", "warning"]),
     ("session.stop", &["result_schema", "properties", "warning"]),
     (
@@ -66,6 +70,13 @@ const OPENAPI_FIELDS: &[Path] = &[
         "SessionResult",
         "properties",
         "warning",
+    ],
+    &[
+        "components",
+        "schemas",
+        "StartSessionParams",
+        "properties",
+        "provider",
     ],
 ];
 
@@ -136,6 +147,11 @@ pub fn patch_tools(golden: &mut Value, ours: &Value) {
         if TOOLS.contains(&name.as_str()) {
             if let Some(o) = o_tools.iter().find(|o| o["name"] == name.as_str()) {
                 g["inputSchema"] = o["inputSchema"].clone();
+            }
+        }
+        if name == "session_start" {
+            if let Some(o) = o_tools.iter().find(|o| o["name"] == "session_start") {
+                adopt(g, o, &["inputSchema", "properties", "provider"]);
             }
         }
     }

@@ -90,6 +90,10 @@ pub struct StartSessionParams {
     #[serde(default)]
     #[schemars(schema_with = "optional_string")]
     pub model: Option<String>,
+    /// Optional name of the registered LLM provider that must serve `model` (see `llm_provider.list`). Requires `model`. The start is refused if no such provider is registered or it does not serve that model; omitted means any provider may.
+    #[serde(default)]
+    #[schemars(schema_with = "optional_string")]
+    pub provider: Option<String>,
     /// Reasoning effort for the agent CLI, e.g. 'low' / 'medium' / 'high'. Omitted means the CLI's own default. Requires `template`: a plain shell has no effort to set, so do not volunteer one for a terminal that runs no agent.
     #[serde(default)]
     #[schemars(schema_with = "optional_string")]
