@@ -17225,22 +17225,17 @@ async fn summary_of_a_stub_that_prints(body: &str) -> vogt_engine_contract::Sess
     summary
 }
 
-/// WI-4321: the engine answers an OSC 7501 capability query on the PTY's
-/// input, keeps the query out of the replay ring, exposes the program's
-/// report and bell in the summary, and drops both when the process exits.
-#[tokio::test]
-async fn osc7501_query_is_answered_stripped_and_the_report_is_exposed_until_exit() {
-    let reply = vogt_engine_server::osc7501::QUERY_REPLY;
-    let body = format!(
-        "#!/bin/sh\nstty raw -echo\nprintf '\\033]7501;?\\007'\n\
-         reply=$(dd bs=1 count={} 2>/dev/null | od -An -tx1 | tr -d ' \\n')\n\
-         printf 'REPLY=%s\\r\\n' \"$reply\"\n\
-         printf '\\033]7501;state=blocked:kind=permission:app=stub:msg=aGk=\\007'\n\
-         printf '\\a'\nexec sleep 30\n",
-        reply.len()
-    );
+/// Spawn `body` as an executable named `bin` (the name decides whether the
+/// engine takes it for an agent CLI) in a PTY.
+fn spawn_osc_stub(
+    bin: &str,
+    body: &str,
+) -> (
+    std::sync::Arc<vogt_engine_server::pty::Session>,
+    tempfile::TempDir,
+) {
     let tmp = tempfile::tempdir().unwrap();
-    let script = tmp.path().join("agent");
+    let script = tmp.path().join(bin);
     std::fs::write(&script, body).unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
     let spec = vogt_engine_contract::SessionSpec {
@@ -17266,8 +17261,42 @@ async fn osc7501_query_is_answered_stripped_and_the_report_is_exposed_until_exit
         None,
     )
     .unwrap();
-    let session = spawned.session;
-    // Outcome, not timing: wait for the report to appear, bounded.
+    (spawned.session, tmp)
+}
+
+/// Wait (bounded) until the session's ring holds `needle`.
+async fn ring_has(session: &vogt_engine_server::pty::Session, needle: &str) -> String {
+    let mut ring = String::new();
+    for _ in 0..100 {
+        ring = String::from_utf8_lossy(&session.tail(8192)).into_owned();
+        if ring.contains(needle) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    ring
+}
+
+/// WI-4321: the engine answers an OSC 7501 capability query on the PTY's
+/// input, keeps the query out of the replay ring, exposes the program's
+/// report and bell in the summary, and drops both when the process exits.
+/// It answers once: a second query gets nothing.
+#[tokio::test]
+async fn osc7501_query_is_answered_once_stripped_and_the_report_is_exposed_until_exit() {
+    let reply = vogt_engine_server::osc7501::QUERY_REPLY;
+    let body = format!(
+        "#!/bin/sh\nstty raw -echo\nprintf '\\033]7501;?\\007'\n\
+         reply=$(dd bs=1 count={} 2>/dev/null | od -An -tx1 | tr -d ' \\n')\n\
+         printf 'REPLY=%s\\r\\n' \"$reply\"\n\
+         printf '\\033]7501;?\\007'\n\
+         extra=$(timeout --foreground 1 dd bs=1 count=1 2>/dev/null | od -An -tx1 | tr -d ' \\n')\n\
+         printf 'EXTRA=[%s]\\r\\n' \"$extra\"\n\
+         printf '\\033]7501;state=blocked:kind=permission:app=stub:msg=aGk=\\007'\n\
+         printf '\\a'\nexec sleep 30\n",
+        reply.len()
+    );
+    let (session, _tmp) = spawn_osc_stub("claude", &body);
+    let ring = ring_has(&session, "EXTRA=[").await;
     let mut summary = session.summary();
     for _ in 0..100 {
         if summary.reported_status.is_some() && summary.attention_hint.is_some() {
@@ -17286,11 +17315,14 @@ async fn osc7501_query_is_answered_stripped_and_the_report_is_exposed_until_exit
     assert_eq!(status.msg.as_deref(), Some("hi"));
     assert_eq!(summary.attention_hint.as_ref().unwrap().source, "bell");
 
-    let ring = String::from_utf8_lossy(&session.tail(8192)).into_owned();
     let hex: String = reply.iter().map(|b| format!("{b:02x}")).collect();
     assert!(
         ring.contains(&format!("REPLY={hex}")),
         "the engine's reply did not reach the program's input: {ring:?}"
+    );
+    assert!(
+        ring.contains("EXTRA=[]"),
+        "a second query was answered: {ring:?}"
     );
     assert!(!ring.contains("7501;?"), "query left in the ring: {ring:?}");
 
@@ -17303,6 +17335,22 @@ async fn osc7501_query_is_answered_stripped_and_the_report_is_exposed_until_exit
     }
     let after = session.summary();
     assert!(after.reported_status.is_none() && after.attention_hint.is_none());
+}
+
+/// A program that is not an agent CLI (a plain shell that cats a file holding
+/// the query) gets no engine bytes on its input.
+#[tokio::test]
+async fn osc7501_query_from_a_plain_program_gets_no_reply() {
+    let body = "#!/bin/sh\nstty raw -echo\nprintf '\\033]7501;?\\007'\n\
+         got=$(timeout --foreground 1 dd bs=1 count=1 2>/dev/null | od -An -tx1 | tr -d ' \\n')\n\
+         printf 'GOT=[%s]\\r\\n' \"$got\"\nexec sleep 30\n";
+    let (session, _tmp) = spawn_osc_stub("agent", body);
+    let ring = ring_has(&session, "GOT=[").await;
+    assert!(
+        ring.contains("GOT=[]"),
+        "a plain program got a reply: {ring:?}"
+    );
+    session.kill().unwrap();
 }
 
 #[tokio::test]

@@ -151,6 +151,9 @@ pub struct Session {
     first_output_seen: AtomicBool,
     /// The launch wrapper's report was accepted; a second is refused.
     launch_reported: AtomicBool,
+    /// The OSC 7501 capability query has been answered once (WI-4321). A
+    /// respawn builds a new `Session`, so the latch resets with it.
+    status_query_answered: AtomicBool,
     /// Set when the launch wrapper reported `degraded`: the session started
     /// without its brokered credentials (WI-1812). Lives and dies with it.
     agent_auth_degraded: parking_lot::Mutex<Option<crate::launch::DegradedLaunch>>,
@@ -299,10 +302,17 @@ impl Session {
             .lock()
             .as_mut()
             .is_some_and(crate::screen::Terminal::take_query);
-        if owed {
-            if let Err(e) = self.backend.write_input(crate::osc7501::QUERY_REPLY) {
-                tracing::debug!(session = %self.id, error = %e, "OSC 7501 query reply failed");
-            }
+        // Once per process, and only to a Claude Code or Codex session: any
+        // other program (a shell that cats a file) must not get engine bytes
+        // injected into its input.
+        if !owed
+            || !matches!(self.agent().as_deref(), Some("claude" | "codex"))
+            || self.status_query_answered.swap(true, Ordering::AcqRel)
+        {
+            return;
+        }
+        if let Err(e) = self.backend.write_input(crate::osc7501::QUERY_REPLY) {
+            tracing::debug!(session = %self.id, error = %e, "OSC 7501 query reply failed");
         }
     }
 
@@ -1608,6 +1618,7 @@ fn assemble_session(
         launcher,
         first_output_seen: AtomicBool::new(false),
         launch_reported: AtomicBool::new(false),
+        status_query_answered: AtomicBool::new(false),
         agent_auth_degraded: parking_lot::Mutex::new(None),
         economics: parking_lot::Mutex::new(None),
         economics_snapshot: parking_lot::Mutex::new(None),
