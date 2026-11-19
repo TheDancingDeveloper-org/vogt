@@ -31,7 +31,10 @@ export interface TerminalCellBox {
  * The cell under a viewport point, or null when the point is outside the grid.
  * Width prefers the screen layer (the scrollbar makes the container wider);
  * height always uses the container because the screen layer collapses to 0
- * height on some phone layouts.
+ * height on some phone layouts. `cellHeight` is the renderer's row height when
+ * known: FitAddon can leave up to one cell of remainder below the grid, so
+ * dividing the container's height by the row count would put a press near the
+ * bottom on the row below.
  */
 export function terminalCellAt(
   box: TerminalCellBox,
@@ -39,6 +42,7 @@ export function terminalCellAt(
   rows: number,
   x: number,
   y: number,
+  cellHeight = 0,
 ): { column: number; row: number } | null {
   if (cols <= 0 || rows <= 0) return null;
   const { container, screen } = box;
@@ -46,7 +50,8 @@ export function terminalCellAt(
   const left = screen && screen.width > 0 ? screen.left : container.left;
   const width = screen && screen.width > 0 ? screen.width : container.width;
   const column = Math.floor(((x - left) / width) * cols);
-  const row = Math.floor(((y - container.top) / container.height) * rows);
+  const rowHeight = cellHeight > 0 ? cellHeight : container.height / rows;
+  const row = Math.floor((y - container.top) / rowHeight);
   if (column < 0 || column >= cols || row < 0 || row >= rows) return null;
   return { column, row };
 }

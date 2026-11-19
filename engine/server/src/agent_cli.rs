@@ -512,7 +512,7 @@ pub fn launch(command: Option<&[String]>, req: &LaunchRequest<'_>) -> Result<Lau
                 // (and a long-press on a phone) never reaches Vogt's copy
                 // path. Inline mode keeps the transcript in the normal
                 // buffer: xterm.js keeps its own scrollback and selection,
-                // and Codex never captures the mouse (WI-4391).
+                // and Codex never captures the mouse (WI-4392).
                 "-c".to_string(),
                 "tui.alternate_screen=\"never\"".to_string(),
             ]);
@@ -1024,6 +1024,7 @@ mod tests {
         assert!(with_codex_providers(&bare, &providers).is_none());
         let claude: Vec<String> = ["claude", "-m", "o-model"].map(String::from).to_vec();
         assert!(with_codex_providers(&claude, &providers).is_none());
+        assert!(with_codex_providers(&wrapped, &[]).is_none());
     }
 
     #[test]
@@ -1062,7 +1063,6 @@ mod tests {
         assert!(with_codex_model_window(&claude).is_none());
         let bare: Vec<String> = vec!["codex".into()];
         assert!(with_codex_model_window(&bare).is_none());
-        assert!(with_codex_providers(&wrapped, &[]).is_none());
     }
 
     #[test]
@@ -1339,7 +1339,7 @@ mod tests {
         // The brief stays last. Ahead of it: the default posture (WI-1143),
         // the `-c` pairs that ask the fork for its `agent-state` title
         // (WI-1145), and inline mode so the browser owns selection and
-        // scrollback (WI-4391).
+        // scrollback (WI-4392).
         assert_eq!(codex.len(), 15);
         assert!(codex[14].contains(BRIEF));
         assert!(codex.windows(2).any(|w| w == ["-a", "never"]));
