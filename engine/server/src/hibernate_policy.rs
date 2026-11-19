@@ -312,6 +312,39 @@ pub async fn run_once(registry: &SessionRegistry, policy: &Policy) {
     }
 }
 
+/// How long a pinned session refused for want of an account slot waits before
+/// the boot wake asks again, and how many passes it makes (WI-4423). A full
+/// account frees a slot as a session stops, so a retry can succeed later.
+const BOOT_WAKE_RETRY: Duration = Duration::from_secs(60);
+const BOOT_WAKE_PASSES: u32 = 30;
+
+/// Why a boot wake did not happen (WI-4423). A capacity refusal is retried;
+/// a handoff refusal is final; anything else is logged and not retried.
+#[derive(Debug, PartialEq, Eq)]
+enum BootRefusal {
+    Capacity,
+    Handoff,
+    Failed,
+}
+
+fn direct_refusal(error: &crate::error::ApiError) -> BootRefusal {
+    match error {
+        crate::error::ApiError::AtCapacity(_) => BootRefusal::Capacity,
+        other if other.to_string().starts_with("conflict:") => BootRefusal::Handoff,
+        _ => BootRefusal::Failed,
+    }
+}
+
+fn core_refusal(error: &str) -> BootRefusal {
+    if error.contains("account at capacity") {
+        BootRefusal::Capacity
+    } else if error.contains("409") {
+        BootRefusal::Handoff
+    } else {
+        BootRefusal::Failed
+    }
+}
+
 /// Wake the sessions pinned awake that the engine found hibernated at boot.
 ///
 /// A linked session is woken through vogt-core's `session.wake`, with the
@@ -320,44 +353,71 @@ pub async fn run_once(registry: &SessionRegistry, policy: &Policy) {
 /// for a few minutes before giving up on a session (which then stays
 /// hibernated, listed, and wakeable by hand). With no core configured there
 /// is no token to mint and the engine wakes it directly.
+///
+/// A session refused because its account is at capacity (WI-4423) is tried
+/// again every minute for a while, so a slot that frees up still wakes it.
 pub fn spawn_boot_wake(state: Arc<AppState>) {
     let pinned = state.sessions.hibernated_keep_awake();
     if pinned.is_empty() {
         return;
     }
     tokio::spawn(async move {
-        for id in pinned {
-            let woken = match state.vogt_core.as_ref() {
-                None => state
-                    .sessions
-                    .wake(id, WakeRequest::default())
-                    .await
-                    .map(|_| ())
-                    .map_err(|e| (e.to_string().starts_with("conflict:"), e.to_string())),
-                Some(core) => wake_through_core(core, id)
-                    .await
-                    .map_err(|e| (e.contains("409"), e)),
-            };
-            match woken {
-                Ok(()) => {
-                    tracing::info!(session = %id, "woke a session pinned awake at boot");
-                    prompt_resumed_overseer(&state, id);
-                }
-                // The handoff guard refused. Said as a refusal, not a failure,
-                // and not retried: the direct wake has no retry, and the core
-                // path stops inside wake_through_core.
-                Err((true, e)) => {
-                    tracing::info!(
-                        session = %id,
-                        error = %e,
-                        "boot wake refused; the session stays hibernated"
-                    );
-                }
-                Err((false, e)) => {
-                    tracing::warn!(session = %id, error = %e, "could not wake a session pinned awake; it stays hibernated")
+        let mut waiting = pinned;
+        for pass in 1..=BOOT_WAKE_PASSES {
+            let mut full = Vec::new();
+            for id in waiting {
+                let woken = match state.vogt_core.as_ref() {
+                    None => state
+                        .sessions
+                        .wake(id, WakeRequest::default())
+                        .await
+                        .map(|_| ())
+                        .map_err(|e| (direct_refusal(&e), e.to_string())),
+                    Some(core) => wake_through_core(core, id)
+                        .await
+                        .map_err(|e| (core_refusal(&e), e)),
+                };
+                match woken {
+                    Ok(()) => {
+                        tracing::info!(session = %id, "woke a session pinned awake at boot");
+                        prompt_resumed_overseer(&state, id);
+                    }
+                    // The handoff guard refused. Said as a refusal, not a failure,
+                    // and not retried: the direct wake has no retry, and the core
+                    // path stops inside wake_through_core.
+                    Err((BootRefusal::Handoff, e)) => {
+                        tracing::info!(
+                            session = %id,
+                            error = %e,
+                            "boot wake refused; the session stays hibernated"
+                        );
+                    }
+                    Err((BootRefusal::Capacity, e)) => {
+                        tracing::warn!(
+                            session = %id,
+                            pass,
+                            error = %e,
+                            "boot wake waits for an account slot; it stays hibernated and is tried again"
+                        );
+                        full.push(id);
+                    }
+                    Err((BootRefusal::Failed, e)) => {
+                        tracing::warn!(session = %id, error = %e, "could not wake a session pinned awake; it stays hibernated")
+                    }
                 }
             }
+            if full.is_empty() {
+                return;
+            }
+            waiting = full;
+            if pass < BOOT_WAKE_PASSES {
+                tokio::time::sleep(BOOT_WAKE_RETRY).await;
+            }
         }
+        tracing::warn!(
+            sessions = ?waiting,
+            "boot wake gave up on sessions refused for an account slot; they stay hibernated"
+        );
     });
 }
 
@@ -461,6 +521,23 @@ async fn wake_through_core(core: &crate::vogt_core::VogtCore, id: Uuid) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_full_account_is_retried_and_a_handoff_refusal_is_not() {
+        let full = crate::error::ApiError::AtCapacity("cap 8; counts {}".into());
+        assert_eq!(direct_refusal(&full), BootRefusal::Capacity);
+        assert_eq!(
+            core_refusal("409 Conflict: account at capacity: cap 8; counts {\"acct2\": 8}"),
+            BootRefusal::Capacity
+        );
+        let handoff = crate::error::ApiError::Conflict("conflict: handed off".into());
+        assert_eq!(direct_refusal(&handoff), BootRefusal::Handoff);
+        assert_eq!(
+            core_refusal("409 Conflict: handed off"),
+            BootRefusal::Handoff
+        );
+        assert_eq!(core_refusal("connection refused"), BootRefusal::Failed);
+    }
 
     #[test]
     fn durations_and_sizes_parse_the_way_an_operator_writes_them() {
