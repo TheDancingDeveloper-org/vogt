@@ -356,7 +356,12 @@ const TerminalView: Component<Props> = (props) => {
   // when the finger lifts, which also hides the Copy chip; remembering the
   // range lets the selection-change handler put it back until the next gesture
   // or an explicit copy clears it.
-  let stickyTouchSelection: { column: number; row: number; length: number } | null = null;
+  let stickyTouchSelection: {
+    column: number;
+    row: number;
+    length: number;
+    text: string;
+  } | null = null;
   let restoringStickyTouchSelection = false;
   // A long-press over blank cells offers Paste; it never pastes by itself.
   const [showPasteChip, setShowPasteChip] = createSignal(false);
@@ -786,6 +791,7 @@ const TerminalView: Component<Props> = (props) => {
       term.rows,
       x,
       y,
+      estimateCellHeight(),
     );
     if (!cell) return false;
     const bufferRow = term.buffer.active.viewportY + cell.row;
@@ -793,7 +799,12 @@ const TerminalView: Component<Props> = (props) => {
     const word = terminalWordAt(line, cell.column);
     if (!word) return false;
     term.select(word[0], bufferRow, word[1] - word[0]);
-    stickyTouchSelection = { column: word[0], row: bufferRow, length: word[1] - word[0] };
+    stickyTouchSelection = {
+      column: word[0],
+      row: bufferRow,
+      length: word[1] - word[0],
+      text: line.slice(word[0], word[1]),
+    };
     return true;
   };
 
@@ -1194,6 +1205,10 @@ const TerminalView: Component<Props> = (props) => {
       if (action === "native") return;
       e.preventDefault();
       if (action === "copy") {
+        // Android Chrome fires contextmenu for the same long-press our timer
+        // already used to select a word. Copying here would write the
+        // clipboard with no explicit tap; the Copy chip is the action.
+        if (isCoarsePointer && stickyTouchSelection) return;
         copySelection().then(notifyCopy);
       } else if (action === "select") {
         // A long-press: select the word under the finger, or over blank
@@ -1242,6 +1257,15 @@ const TerminalView: Component<Props> = (props) => {
             term.select(target.column, target.row, target.length);
           } finally {
             restoringStickyTouchSelection = false;
+          }
+          // Inline output streams into scrollback, so the same absolute row
+          // can later hold different text. If the restored range no longer
+          // matches, drop it rather than copying the wrong line.
+          if (term.getSelection() !== target.text) {
+            stickyTouchSelection = null;
+            term.clearSelection();
+            setShowCopyChip(false);
+            return;
           }
           setShowCopyChip(true);
           return;

@@ -487,22 +487,6 @@ def test_autopilot_adds_the_keep_going_convention_and_is_audited(
     wired: AppContext, engine: StandInEngine
 ) -> None:
     """WI-878: autopilot tells the agent to carry on until blocked or done."""
-
-
-def test_every_guide_says_how_to_read_env_without_printing_a_secret(
-    wired: AppContext, engine: StandInEngine
-) -> None:
-    """WI-3988: a worker printed WIN_SSH_KEY into its transcript. The rule lives
-    in the companion guide every session gets, not only in the advisory
-    workspace rule, and it names the safe reads and the missing-config check."""
-    start_session(wired, StartSessionParams(project="vogt", reason=WHY))
-    guide = engine.last_spec["companion"]
-    assert "## Secrets and the environment" in guide
-    assert "`printenv`" in guide
-    assert "KEY, TOKEN, SECRET, or PASSWORD" in guide
-    assert "secret describe" in guide
-    assert "## Before you report a missing config" in guide
-    assert "## Secrets" not in engine.last_spec["prompt"]
     start_session(
         wired,
         StartSessionParams(
@@ -524,6 +508,22 @@ def test_every_guide_says_how_to_read_env_without_printing_a_secret(
     assert started[-1].summary["autopilot"] is True
     start_session(wired, StartSessionParams(project="vogt", reason=WHY))
     assert "## Autopilot" not in engine.last_spec["prompt"]
+
+
+def test_every_guide_says_how_to_read_env_without_printing_a_secret(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """WI-3988: a worker printed WIN_SSH_KEY into its transcript. The rule lives
+    in the companion guide every session gets, not only in the advisory
+    workspace rule, and it names the safe reads and the missing-config check."""
+    start_session(wired, StartSessionParams(project="vogt", reason=WHY))
+    guide = engine.last_spec["companion"]
+    assert "## Secrets and the environment" in guide
+    assert "`printenv`" in guide
+    assert "KEY, TOKEN, SECRET, or PASSWORD" in guide
+    assert "secret describe" in guide
+    assert "## Before you report a missing config" in guide
+    assert "## Secrets" not in engine.last_spec["prompt"]
 
 
 def test_autopilot_reaches_the_engine_and_is_on_by_default_for_an_agent_task(

@@ -188,6 +188,17 @@ describe("terminal cell lookup for touch long-press", () => {
     });
   });
 
+  it("uses the renderer's cell height instead of FitAddon's bottom remainder", () => {
+    // 25 rows of 20px in a 505px container: 5px of leftover below the grid.
+    const tall = { ...container, height: 505 };
+    expect(terminalCellAt({ container: tall, screen: null }, 80, 25, 10, 40 + 24 * 20 + 15, 20)).toEqual({
+      column: 0,
+      row: 24,
+    });
+    // A press in that leftover is below the last row, not on it.
+    expect(terminalCellAt({ container: tall, screen: null }, 80, 25, 10, 40 + 25 * 20 + 1, 20)).toBeNull();
+  });
+
   it("rejects points outside the grid and empty grids", () => {
     expect(terminalCellAt({ container, screen: null }, 80, 25, 9, 40)).toBeNull();
     expect(terminalCellAt({ container, screen: null }, 80, 25, 10, 39)).toBeNull();

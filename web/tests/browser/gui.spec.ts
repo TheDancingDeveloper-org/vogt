@@ -3499,6 +3499,99 @@ test("Phone terminal long-press selects a word while the program tracks the mous
     .toBe("SELECTME-ALPHA");
 });
 
+// The sticky range replays an empty selection until something clears it. If a
+// swipe did not clear it, the chip would follow the reader around and the word
+// could never be dismissed.
+test("Phone terminal long-press then a vertical swipe clears the Copy chip", async ({
+  page,
+  context,
+}) => {
+  test.skip(test.info().project.name !== "phone", "Touch gestures are the coarse-pointer path");
+  await installFixtures(page, {}, [liveSession]);
+  await page.routeWebSocket(/\/api\/sessions\/[^/]+\/attach$/, (socket) => {
+    socket.onMessage(() => undefined);
+    socket.send(JSON.stringify({ type: "snapshot-start", scrollback_bytes: 0, scrollback_pos: 0 }));
+    socket.send(Buffer.from("\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h"));
+    socket.send(Buffer.from("SWIPE-ALPHA SWIPE-BETA SWIPE-GAMMA\r\n"));
+    socket.send(JSON.stringify({ type: "snapshot-done" }));
+  });
+  await page.goto("/#/t/browser-session");
+  const host = page.locator(".terminal-host").first();
+  await expect(host).toBeVisible();
+  const box = await host.boundingBox();
+  expect(box).not.toBeNull();
+  const point = { x: Math.round(box!.x + 30), y: Math.round(box!.y + 8) };
+  const chip = page.locator(".terminal-copy-chip");
+  const cdp = await context.newCDPSession(page);
+
+  // Wait for xterm's write queue to paint the row under the finger.
+  await expect.poll(async () => {
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [point] });
+    await page.waitForTimeout(700);
+    const visible = await chip.count();
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    return visible;
+  }, { timeout: 8000 }).toBeGreaterThan(0);
+
+  // One gesture: hold until the word is selected, then swipe vertically far
+  // enough to claim the axis. The claim must clear the sticky range.
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [point] });
+  await expect(chip).toBeVisible();
+  await cdp.send("Input.dispatchTouchEvent", {
+    type: "touchMove",
+    touchPoints: [{ x: point.x, y: point.y + 80 }],
+  });
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  await expect(chip).toHaveCount(0);
+  await page.waitForTimeout(300);
+  await expect(chip).toHaveCount(0);
+});
+
+// Copy is the explicit tap. After it, an unrelated selection change (a click
+// elsewhere) must not resurrect the chip from the stale range.
+test("Phone terminal Copy tap drops the sticky range", async ({ page, context }) => {
+  test.skip(test.info().project.name !== "phone", "Touch gestures are the coarse-pointer path");
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await installFixtures(page, {}, [liveSession]);
+  await page.routeWebSocket(/\/api\/sessions\/[^/]+\/attach$/, (socket) => {
+    socket.onMessage(() => undefined);
+    socket.send(JSON.stringify({ type: "snapshot-start", scrollback_bytes: 0, scrollback_pos: 0 }));
+    socket.send(Buffer.from("\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h"));
+    socket.send(Buffer.from("COPY-ALPHA COPY-BETA COPY-GAMMA\r\n"));
+    socket.send(JSON.stringify({ type: "snapshot-done" }));
+  });
+  await page.goto("/#/t/browser-session");
+  const host = page.locator(".terminal-host").first();
+  await expect(host).toBeVisible();
+  const box = await host.boundingBox();
+  expect(box).not.toBeNull();
+  const point = { x: Math.round(box!.x + 30), y: Math.round(box!.y + 8) };
+  const chip = page.locator(".terminal-copy-chip");
+  const cdp = await context.newCDPSession(page);
+
+  await expect.poll(async () => {
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [point] });
+    await page.waitForTimeout(700);
+    const visible = await chip.count();
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    return visible;
+  }, { timeout: 8000 }).toBeGreaterThan(0);
+
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [point] });
+  await expect(chip).toBeVisible();
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  await expect(chip).toBeVisible();
+  await chip.tap();
+  await expect
+    .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+    .toBe("COPY-ALPHA");
+
+  await page.mouse.click(box!.x + 80, box!.y + 30);
+  await expect(chip).toHaveCount(0);
+  await page.waitForTimeout(300);
+  await expect(chip).toHaveCount(0);
+});
+
 test("exited session shows a banner and Remove skips the kill confirm", mockOnly(LIVE_SKIP.data), async ({ page }) => {
   const exitedSession = {
     ...liveSession,
