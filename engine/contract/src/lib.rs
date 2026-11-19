@@ -289,6 +289,26 @@ pub struct SessionPolicy {
     /// someone else's. Engine-filled.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub discard_live_changes: bool,
+    /// The regex a worker's pushed branch must match, with `{n}` already the
+    /// work item's number (WI-1327). Absent when the project states no
+    /// landing rule or the session has no work item, which leaves the
+    /// branch rules off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_pattern: Option<String>,
+    /// Whether a worker may open a pull request (`gh pr create`). Absent
+    /// leaves it unjudged; `Some(false)` refuses it (WI-1327).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_pr_allowed: Option<bool>,
+    /// What the session is for, as the wire spells it (`worker` or
+    /// `oversight`). The branch rules apply only to a `worker`. The engine
+    /// overwrites it from the live session on each check, so a `set_role`
+    /// takes effect without a fresh start (WI-1327).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_role: Option<String>,
+    /// The long-lived branches a worker may never push to: the landing base
+    /// plus the project's main branches (WI-1327).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub landing_mains: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

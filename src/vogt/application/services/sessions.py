@@ -4496,8 +4496,34 @@ def _touch_dir(root: Path, spec: str) -> Path | None:
     return resolved if resolved.is_dir() else None
 
 
+def _branch_rules(
+    policy: AgentPolicy | None, role: str, work_item: str | None
+) -> dict[str, Any] | None:
+    """The branch rules a worker's push and PR are held to (WI-1327).
+
+    Sent only when the project states a landing rule and the session serves
+    a work item, since `{n}` is the item's number. Otherwise none is sent,
+    and a start is byte-identical to one before the rules existed.
+    """
+    landing = None if policy is None else policy.landing
+    number = work_item.split("-", 1)[1] if work_item and "-" in work_item else ""
+    if landing is None or not number:
+        return None
+    mains = [landing.base_branch, *(policy.main_branches if policy else [])]
+    return {
+        "branch_pattern": landing.branch_pattern.replace("{n}", number),
+        "open_pr_allowed": landing.worker_lands_by == "open_pr",
+        "session_role": role,
+        "landing_mains": list(dict.fromkeys(mains)),
+    }
+
+
 def _enforced_policy(
-    policy: AgentPolicy | None, protected_checkouts: Sequence[str] = ()
+    policy: AgentPolicy | None,
+    protected_checkouts: Sequence[str] = (),
+    *,
+    role: str = "worker",
+    work_item: str | None = None,
 ) -> dict[str, Any] | None:
     """The slice of a project's agent policy the engine can refuse on.
 
@@ -4514,7 +4540,8 @@ def _enforced_policy(
     forbidden = [] if policy is None else [str(p) for p in policy.forbidden_text]
     merges = policy is not None and policy.merge_deploys_prod
     protected = sorted({str(path) for path in protected_checkouts if path})
-    if not forbidden and not merges and not protected:
+    rules = _branch_rules(policy, role, work_item)
+    if not forbidden and not merges and not protected and rules is None:
         return None
     enforced: dict[str, Any] = {
         "forbidden_text": forbidden,
@@ -4525,6 +4552,8 @@ def _enforced_policy(
         enforced["main_branches"] = branches
     if protected:
         enforced["protected_checkouts"] = protected
+    if rules is not None:
+        enforced.update(rules)
     return enforced
 
 
@@ -4899,7 +4928,9 @@ def _start_on_engine(
     worktree: dict[str, str] | None = None,
     protected_checkouts: Sequence[str] = (),
 ) -> EngineSession:
-    enforced = _enforced_policy(policy, protected_checkouts)
+    enforced = _enforced_policy(
+        policy, protected_checkouts, role=role, work_item=work_item
+    )
     return engine.create_session(
         prompt=brief,
         name=name,
