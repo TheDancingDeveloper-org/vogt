@@ -2253,22 +2253,11 @@ pub async fn fetch(
         // has nothing to use and its `vogt` MCP server cannot connect
         // (gh#1441). The caller here is that agent's MCP launcher, so mint the
         // session's own agent credential now, bound to `agent:engine:<id>`
-        // and revoked with the session like any other.
-        //
-        // Clients fetch in pairs (one launcher per MCP client), and a mint
-        // supersedes the last, so two racing mints would revoke the first
-        // caller's token. Serialise the on-demand mint and re-check under
-        // the lock: the second caller gets the token the first minted.
-        static ON_DEMAND_MINT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        // and revoked with the session like any other (see
+        // `SessionRegistry::mint_agent_token_on_demand`).
         let token = match broker.vogt_token(session) {
             Some(token) => Some(token),
-            None => {
-                let _guard = ON_DEMAND_MINT.lock().await;
-                match broker.vogt_token(session) {
-                    Some(token) => Some(token),
-                    None => state.sessions.mint_agent_token("shell", session).await,
-                }
-            }
+            None => state.sessions.mint_agent_token_on_demand(session).await,
         };
         let Some(token) = token else {
             return refusal(

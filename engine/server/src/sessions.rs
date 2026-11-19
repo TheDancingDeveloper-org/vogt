@@ -1431,7 +1431,16 @@ impl SessionRegistry {
         env: Option<&[(String, String)]>,
         id: Uuid,
     ) -> Option<Vec<(String, String)>> {
-        let agent = self.agent_of(command, template)?;
+        let Some(agent) = self.agent_of(command, template) else {
+            // A plain shell: no credential now. An agent started in it later
+            // gets one from the broker on its first fetch (gh#1441).
+            tracing::debug!(
+                target: "vogt::audit",
+                session_id = %id,
+                "no agent CLI in the session's command or template; no credential minted at launch"
+            );
+            return None;
+        };
         if env.is_some_and(|e| e.iter().any(|(k, _)| k == "VOGT_HTTP_TOKEN")) {
             return None;
         }
@@ -1440,6 +1449,63 @@ impl SessionRegistry {
             ("VOGT_HTTP_TOKEN".to_string(), token),
             ("VOGT_SESSION_ID".to_string(), id.to_string()),
         ])
+    }
+
+    /// The broker's on-demand mint for a live session that was started
+    /// without a credential (a plain shell, gh#1441), asked for by an agent's
+    /// MCP launcher. One mint per session: clients fetch in pairs, and a mint
+    /// supersedes the last, so concurrent callers for the same session wait
+    /// on a per-session lock and share the first caller's token. Other
+    /// sessions are never queued behind this one (gh#1444).
+    ///
+    /// A session that is gone, or that exits while the core call is in
+    /// flight, gets nothing: its exit hook has already run, so a token
+    /// minted now would never be revoked. Such a token is revoked here.
+    pub async fn mint_agent_token_on_demand(&self, id: Uuid) -> Option<String> {
+        static LOCKS: std::sync::LazyLock<dashmap::DashMap<Uuid, Arc<tokio::sync::Mutex<()>>>> =
+            std::sync::LazyLock::new(dashmap::DashMap::new);
+        let alive = |registry: &Self| registry.get(id).is_ok_and(|s| s.is_alive());
+
+        let lock = Arc::clone(LOCKS.entry(id).or_default().value());
+        let guard = lock.lock().await;
+        let token = match self.secret_broker.vogt_token(id) {
+            Some(token) => Some(token),
+            None if !alive(self) => None,
+            None => match self.mint_agent_token("shell", id).await {
+                Some(_) if !alive(self) => {
+                    self.revoke_minted(id, "the session ended while its credential was minted")
+                        .await;
+                    None
+                }
+                token => token,
+            },
+        };
+        drop(guard);
+        // The entry goes with the last holder, so nothing is left behind.
+        LOCKS.remove_if(&id, |_, l| Arc::strong_count(l) <= 2);
+        token
+    }
+
+    /// Forget and revoke at the core the credential minted for `id`.
+    async fn revoke_minted(&self, id: Uuid, reason: &str) {
+        self.minted.remove(&id);
+        self.secret_broker.revoke(id);
+        let Some(core) = self.core.get() else {
+            return;
+        };
+        if let Err(e) = core
+            .post_json(
+                "/sessions/token",
+                &serde_json::json!({
+                    "engine_session_id": id.to_string(),
+                    "revoke": true,
+                    "reason": reason,
+                }),
+            )
+            .await
+        {
+            tracing::warn!(session = %id, error = %e, "could not revoke the session's credential");
+        }
     }
 
     /// Mint (or, superseding the last, re-mint) the core credential of agent
