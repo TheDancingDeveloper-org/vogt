@@ -37,6 +37,32 @@ need() {
     done
 }
 
+# A pod whose tailscaled runs in userspace mode (vogt-dev, WI-4307) has no
+# TUN device: a direct dial to a tailnet address is refused, and only the
+# sidecar's loopback SOCKS5 reaches it (gh#1442). When the server's URL is a
+# tailnet address (100.64.0.0/10 or *.ts.net), route this one process through
+# that proxy: VOGT_TAILNET_SOCKS5 (host:port) if set, else the sidecar's
+# default 127.0.0.1:1055 when its LocalAPI socket is present. Nothing else in
+# the session is proxied.
+tailnet_proxy() {
+    local url="$1" host socks
+    host="${url#*://}"
+    host="${host%%/*}"
+    host="${host##*@}"
+    host="${host%:*}"
+    if [[ ! "$host" =~ ^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]+\.[0-9]+$ \
+        && "$host" != *.ts.net ]]; then
+        return 0
+    fi
+    socks="${VOGT_TAILNET_SOCKS5:-}"
+    if [[ -z "$socks" && -S "${TS_SOCKET:-/run/tailscale/tailscaled.sock}" ]]; then
+        socks="127.0.0.1:1055"
+    fi
+    [[ -n "$socks" ]] || return 0
+    export HTTP_PROXY="socks5://$socks" HTTPS_PROXY="socks5://$socks"
+    unset http_proxy https_proxy ALL_PROXY all_proxy
+}
+
 server="${1:-}"
 case "$server" in
     github)
@@ -54,6 +80,7 @@ case "$server" in
         # The service-account token is the only credential: drop the
         # alternatives the server would otherwise prefer or combine.
         unset GRAFANA_API_KEY GRAFANA_USERNAME GRAFANA_PASSWORD GRAFANA_EXTRA_HEADERS
+        tailnet_proxy "$GRAFANA_URL"
         exec mcp-grafana -t stdio --disable-write --usage-stats=disabled
         ;;
     gitea)

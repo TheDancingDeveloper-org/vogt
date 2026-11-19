@@ -2247,7 +2247,30 @@ pub async fn fetch(
     // the engine minted for this session (WI-4310), served to that session
     // alone, whatever the manifest says about the name.
     if var == OWN_VOGT_TOKEN_VAR {
-        let Some(token) = broker.vogt_token(session) else {
+        // A plain shell is started without a credential of its own (WI-926:
+        // the person at it keeps the pod's). In a brokered deployment the pod
+        // holds no Vogt token, so an agent later started by hand in that shell
+        // has nothing to use and its `vogt` MCP server cannot connect
+        // (gh#1441). The caller here is that agent's MCP launcher, so mint the
+        // session's own agent credential now, bound to `agent:engine:<id>`
+        // and revoked with the session like any other.
+        //
+        // Clients fetch in pairs (one launcher per MCP client), and a mint
+        // supersedes the last, so two racing mints would revoke the first
+        // caller's token. Serialise the on-demand mint and re-check under
+        // the lock: the second caller gets the token the first minted.
+        static ON_DEMAND_MINT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        let token = match broker.vogt_token(session) {
+            Some(token) => Some(token),
+            None => {
+                let _guard = ON_DEMAND_MINT.lock().await;
+                match broker.vogt_token(session) {
+                    Some(token) => Some(token),
+                    None => state.sessions.mint_agent_token("shell", session).await,
+                }
+            }
+        };
+        let Some(token) = token else {
             return refusal(
                 StatusCode::NOT_FOUND,
                 "the engine minted no Vogt credential for this session; set VOGT_TOKEN_FILE to a token file, or start the agent from a session Vogt started",
