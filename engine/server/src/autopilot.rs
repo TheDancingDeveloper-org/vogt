@@ -142,6 +142,9 @@ pub struct Seen {
     pub quiet_for: Duration,
     pub ready: bool,
     pub done: bool,
+    /// The agent is driving its own next turn (a Codex `/goal`, WI-1576), so
+    /// a nudge would only interrupt it.
+    pub own_loop: bool,
     /// The screen ends on a model API client error ([`api_client_error`]).
     pub api_error: bool,
     pub nudges: u32,
@@ -155,6 +158,7 @@ pub fn decide(policy: &Policy, seen: Seen) -> Step {
         quiet_for,
         ready,
         done,
+        own_loop,
         api_error,
         nudges,
     } = seen;
@@ -162,6 +166,7 @@ pub fn decide(policy: &Policy, seen: Seen) -> Step {
         return Step::Done;
     }
     if blocked
+        || own_loop
         || !matches!(
             activity,
             ActivityState::Idle | ActivityState::WaitingForInput
@@ -246,6 +251,12 @@ pub async fn run_once(registry: &SessionRegistry, bus: &crate::events::EventBus,
         let Ok(view) = screen::session_screen(Arc::clone(&session), 0).await else {
             continue;
         };
+        // A Codex rollout carries the turn boundaries and the goal state, so
+        // it decides both instead of the screen (WI-1576): done arrives from
+        // `task_complete`, and a running turn or an active `/goal` is left
+        // alone.
+        let rollout = agent == "codex" && session.rollout_seen();
+        let own_loop = rollout && session.rollout_own_loop();
         let api_error = api_client_error(&view.lines);
         let step = decide(
             policy,
@@ -254,7 +265,8 @@ pub async fn run_once(registry: &SessionRegistry, bus: &crate::events::EventBus,
                 blocked,
                 quiet_for,
                 ready: view.ready,
-                done: says_done(&view.lines),
+                done: !rollout && says_done(&view.lines),
+                own_loop,
                 api_error: api_error.is_some(),
                 nudges: session.autopilot_nudges(),
             },
@@ -412,6 +424,7 @@ mod tests {
                     quiet_for,
                     ready,
                     done,
+                    own_loop: false,
                     api_error: false,
                     nudges,
                 },
@@ -494,6 +507,7 @@ mod tests {
             quiet_for: policy.nudge_after + Duration::from_secs(1),
             ready: true,
             done: false,
+            own_loop: false,
             api_error,
             nudges,
         };
