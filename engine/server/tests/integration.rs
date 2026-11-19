@@ -7436,6 +7436,29 @@ async fn secret_broker_mints_a_plain_shells_vogt_token_on_demand_once() {
     assert_eq!(mints(&calls), 1, "minted once");
     assert_eq!(broker.vogt_token(shell).as_deref(), Some(a.as_str()));
 
+    // gh#1444: the on-demand credential ends with the session, like a
+    // launch-time one.
+    client
+        .post(format!("{base}/api/sessions/{shell}/kill"))
+        .send()
+        .await
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !calls
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|c| c["revoke"] == json!(true) && c["engine_session_id"] == shell.to_string())
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no revoke: {:?}",
+            calls.lock().unwrap()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(broker.vogt_token(shell).is_none());
+
     // Without a core there is nothing to mint: the refusal names the fix.
     let tmp2 = tempfile::tempdir().unwrap();
     let (base2, state2, _h2) =

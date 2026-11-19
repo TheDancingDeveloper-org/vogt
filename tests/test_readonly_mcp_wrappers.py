@@ -143,7 +143,12 @@ def test_grafana_disables_writes_and_usage_stats(tmp_path: Path) -> None:
         ),
         # A public Grafana is never proxied, whatever is configured.
         ("http://grafana.example", {"VOGT_TAILNET_SOCKS5": "127.0.0.1:2000"}, None),
-        # Not in 100.64.0.0/10.
+        # Not in 100.64.0.0/10: just below and just above it.
+        (
+            "http://100.63.255.255:3010",
+            {"VOGT_TAILNET_SOCKS5": "127.0.0.1:2000"},
+            None,
+        ),
         ("http://100.128.0.1:3010", {"VOGT_TAILNET_SOCKS5": "127.0.0.1:2000"}, None),
         # Tailnet address, but no proxy and no sidecar socket: left alone.
         (
