@@ -1623,7 +1623,11 @@ def test_k8s_is_read_only_and_keeps_the_kubeconfig_out_of_argv(
     assert rec is not None
     argv = rec["argv"]
     assert argv[1] == "--read-only"
-    assert argv[2] == "--kubeconfig"
+    # WI-4071 also narrows the server to its core toolset; keep that pinned so
+    # a session cannot widen it through the environment.
+    assert argv[2] == "--toolsets"
+    assert argv[3] == "core"
+    assert argv[4] == "--kubeconfig"
     assert kubeconfig.strip() not in " ".join(argv)
     assert rec["mode"] == 0o600
     assert rec["dirmode"] == 0o700
