@@ -32,8 +32,8 @@
 # time, so the web bundle is a build input to the Rust binary rather than a
 # runtime asset. Stage 2 cannot start before stage 1 finishes.
 #
-# The dev-pod toolchain — Node, the Rust dev toolchain, sway, selkies,
-# Java/Gradle, the Android SDK, Flutter — is no longer installed here. It
+# The dev-pod toolchain — Node, the Rust dev toolchain, the JDK, the Android
+# SDK, Flutter, Chrome — is no longer installed here. It
 # is `engine/Dockerfile.pod`, published as `vogt-pod-base:{lean,full}-*` by
 # `.github/workflows/pod-base.yml` and passed in as `POD_BASE_IMAGE`. It was 22
 # of this image's 34 build minutes and none of it depends on this repository's

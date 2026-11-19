@@ -127,6 +127,10 @@ jobs:
           # `deploy/` and `session-agent/` from this context.
           context: engine
           file: engine/Dockerfile.pod
+          # The rust stage: the lean dev toolchain that session pods run gates
+          # on (clippy, rustfmt, rust-src, a read-only `stable`). Without this,
+          # Docker builds the last stage, mobile, which is the full pod.
+          target: rust
           # No tag. `push-by-digest` is the same push shape `build.yml` uses
           # for the stack, and it is what makes the report below a digest
           # rather than a name that could later move.
@@ -154,9 +158,41 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+  pod-test:
+    # The rust target's toolchain, run the way a session pod runs it: as uid
+    # 1000 on a read-only root (engine/deploy/tests/pod-image-rust.sh). The
+    # engine image is not built until this passes.
+    name: pod image rust checks
+    needs: pod
+    runs-on: [self-hosted, docker]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
+        with:
+          registry: repo.indexarr.net
+          username: sprooty
+          password: ${{ secrets.FORGEJO_REGISTRY_TOKEN }}
+
+      - name: pull the pushed pod image and record its size
+        env:
+          IMAGE: ${{ env.POD_IMAGE }}@${{ needs.pod.outputs.digest }}
+        run: |
+          set -euo pipefail
+          docker pull "$IMAGE"
+          size="$(docker image inspect --format '{{.Size}}' "$IMAGE")"
+          echo "pod image (rust target) size: ${size} bytes ($(numfmt --to=iec "$size"))"
+          echo "pod image (rust target): ${size} bytes" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: run the rust toolchain checks
+        env:
+          IMAGE: ${{ env.POD_IMAGE }}@${{ needs.pod.outputs.digest }}
+        run: bash engine/deploy/tests/pod-image-rust.sh "$IMAGE"
+
   engine:
     name: engine image by digest
-    needs: [pod, source]
+    needs: [pod, pod-test, source]
     runs-on: [self-hosted, docker, publish]
     timeout-minutes: 90
     outputs:
