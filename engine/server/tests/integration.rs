@@ -7352,6 +7352,107 @@ async fn secret_broker_serves_a_session_its_own_vogt_token_and_names_the_fix_to_
     assert!(broker.vogt_token(a).is_none());
 }
 
+/// gh#1441: a plain shell is started with no Vogt credential, and in a
+/// brokered deployment the pod has none either. An agent started by hand in
+/// that shell asks the broker for `VOGT_HTTP_TOKEN`; the engine mints the
+/// session's own credential then, once, even when two launchers ask at once.
+/// Without a core there is nothing to mint, and the refusal stands.
+#[tokio::test]
+async fn secret_broker_mints_a_plain_shells_vogt_token_on_demand_once() {
+    use axum::{extract::State, routing::post, Router};
+    type Calls = Arc<std::sync::Mutex<Vec<Value>>>;
+    let calls: Calls = Arc::default();
+    async fn token(
+        State(calls): State<Calls>,
+        axum::Json(body): axum::Json<Value>,
+    ) -> axum::Json<Value> {
+        let n = {
+            let mut calls = calls.lock().unwrap();
+            calls.push(body.clone());
+            calls.len()
+        };
+        let id = body["engine_session_id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        // Slow enough that two unserialised fetches would both mint.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        axum::Json(json!({
+            "engine_session_id": id,
+            "actor": format!("agent:engine:{id}"),
+            "token": if body["revoke"] == json!(true) { Value::Null } else { json!(format!("minted-{n}-for-{id}")) },
+            "revoked": 0,
+        }))
+    }
+    let app = Router::new()
+        .route("/api/sessions/token", post(token))
+        .with_state(Arc::clone(&calls));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let core_addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cfg = broker_config(&tmp, "LATER proj later ondemand\n");
+    cfg.vogt_core_url = Some(format!("http://{core_addr}"));
+    cfg.vogt_core_token = Some("stack-secret".into());
+    let (base, state, _h) = boot_with_state(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let shell: uuid::Uuid = create_session_id(&client, &base, "plain-shell")
+        .await
+        .parse()
+        .unwrap();
+    let mints = |calls: &Calls| {
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c["revoke"] != json!(true))
+            .count()
+    };
+    assert_eq!(
+        mints(&calls),
+        0,
+        "a plain shell is started without a credential"
+    );
+    let broker = state.sessions.secret_broker();
+    assert!(broker.vogt_token(shell).is_none());
+
+    let grant = broker.issue(shell);
+    let plain = reqwest::Client::new();
+    let url = format!("{base}/api/agent-auth/fetch/VOGT_HTTP_TOKEN");
+    let fetch = || plain.post(&url).bearer_auth(&grant).send();
+    let (a, b) = tokio::join!(fetch(), fetch());
+    let (a, b) = (a.unwrap(), b.unwrap());
+    assert_eq!(a.status(), 200);
+    assert_eq!(b.status(), 200);
+    let (a, b) = (a.text().await.unwrap(), b.text().await.unwrap());
+    assert_eq!(a, format!("minted-1-for-{shell}"));
+    assert_eq!(a, b, "both launchers get the one token");
+    assert_eq!(mints(&calls), 1, "minted once");
+    assert_eq!(broker.vogt_token(shell).as_deref(), Some(a.as_str()));
+
+    // Without a core there is nothing to mint: the refusal names the fix.
+    let tmp2 = tempfile::tempdir().unwrap();
+    let (base2, state2, _h2) =
+        boot_with_state(broker_config(&tmp2, "LATER proj later ondemand\n")).await;
+    let other: uuid::Uuid = create_session_id(&client, &base2, "no-core-shell")
+        .await
+        .parse()
+        .unwrap();
+    let r = plain
+        .post(format!("{base2}/api/agent-auth/fetch/VOGT_HTTP_TOKEN"))
+        .bearer_auth(state2.sessions.secret_broker().issue(other))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 404);
+}
+
 /// A session started the way vogt-core starts one (its token already in the
 /// spec's env, so the engine mints nothing) and a plain shell given a token
 /// the same way: the broker serves each its own, through the real spawn path.
