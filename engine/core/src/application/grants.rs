@@ -15,6 +15,7 @@
 use serde_json::{json, Value};
 
 use crate::application::context::{write_of, AppContext, Built};
+use crate::application::services::sessions::answers_as_person;
 use crate::application::writes::{audited_write, WriteOutcome};
 use crate::core::{Clock, GrantKind, GrantState, IdFactory, Moment, SessionGrant};
 use crate::errors::VogtError;
@@ -196,7 +197,9 @@ fn decide<C: Clock + 'static, I: IdFactory + 'static>(
     decision: &str,
     reason: &str,
 ) -> Result<Value, VogtError> {
-    if ctx.principal.kind == crate::core::ActorKind::Agent {
+    // A person decides, and the engine's own credential is never a person even
+    // when the stack secret was first issued to one (WI-1000).
+    if !answers_as_person(ctx)? {
         return Err(VogtError::GrantRefused(format!(
             "only a person decides a grant, not an agent ({}); \
              approve or deny it from the Inbox",
@@ -807,6 +810,38 @@ mod tests {
             matches!(error, VogtError::GrantRefused(ref message) if message.contains("only a person")),
             "{error:?}"
         );
+    }
+
+    #[test]
+    fn the_engine_credential_cannot_decide_even_when_bound_to_a_person() {
+        // The stack secret was first issued by hand, so the engine's credential
+        // is a person's actor (WI-1000). It must not pass as that person.
+        let (dir, shared, built) = estate("engine-as-person");
+        let id = ask(&built, "eng-other", json!({}));
+        let engine = crate::application::context::build_context(
+            crate::config::VogtConfig {
+                data_dir: dir.clone(),
+                bootstrap_core_token_actor: "local:ada".to_string(),
+                ..crate::config::VogtConfig::default()
+            },
+            Some(person()),
+            Some(StepClock::new(Moment::from_unix(BASE, 0))),
+            None,
+            None,
+            Some(stand_in(&shared)),
+            None,
+            None,
+        )
+        .unwrap();
+        let refused = decide(&engine, &id, "approve").unwrap_err();
+        assert!(
+            matches!(refused, VogtError::GrantRefused(ref message) if message.contains("only a person")),
+            "{refused:?}"
+        );
+        assert!(shared.lock().unwrap().applied.is_empty());
+        assert_eq!(list(&built, None)["grants"][0]["state"], "pending");
+        // The same person's own token still approves.
+        decide(&built, &id, "approve").unwrap();
     }
 
     #[test]
