@@ -36,7 +36,11 @@ from vogt.application.models import (
     SessionGrantResult,
     SessionGrantView,
 )
-from vogt.application.services.sessions import _engine, _target
+from vogt.application.services.sessions import (
+    _answers_as_person,
+    _engine,
+    _target,
+)
 from vogt.application.writes import WriteOutcome, audited_write
 from vogt.core.entities import Actor, SessionGrant
 from vogt.errors import Conflict, GrantRefused, InvalidRequest, NotFound
@@ -125,7 +129,9 @@ def request_grant(ctx: AppContext, params: RequestGrantParams) -> SessionGrantRe
 def decide_grant(ctx: AppContext, params: DecideGrantParams) -> SessionGrantResult:
     """Approve or deny a pending grant. A person's decision, never an agent's."""
     reason = writes.validate_reason(params.reason)
-    if ctx.principal.kind == "agent":
+    # The engine's own credential is never a person, even when the stack secret
+    # was first issued to one (WI-1000).
+    if not _answers_as_person(ctx):
         msg = (
             "only a person decides a grant, not an agent "
             f"({ctx.principal.identity_ref}); approve or deny it from the Inbox"

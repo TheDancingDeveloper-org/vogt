@@ -153,6 +153,28 @@ def test_an_agent_cannot_decide_a_grant_even_the_overseer(
     assert row.state == "pending"
 
 
+def test_the_engine_credential_cannot_decide_even_when_bound_to_a_person(
+    ctx: AppContext, engine: GrantEngine
+) -> None:
+    # The stack secret was first issued by hand, so the engine's credential
+    # carries a person's actor (WI-1000). It must not pass as that person.
+    grant_id = ask(as_agent(ctx, "eng-overseer"))
+    bound = dataclasses.replace(
+        ctx,
+        config=ctx.config.model_copy(
+            update={"bootstrap_core_token_actor": "local:ada"}
+        ),
+        principal=Principal(identity_ref="local:ada", kind="human", display_name="Ada"),
+    )
+    with pytest.raises(GrantRefused, match="only a person decides"):
+        decide_grant(
+            bound, DecideGrantParams(id=grant_id, decision="approve", reason=WHY)
+        )
+    assert engine.applied == [], "nothing reached the engine"
+    (row,) = list_grants(ctx, ListGrantsParams()).grants
+    assert row.state == "pending"
+
+
 def test_a_person_approves_and_the_engine_holds_it_before_the_record_says_so(
     ctx: AppContext, engine: GrantEngine
 ) -> None:
