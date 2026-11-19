@@ -12,6 +12,45 @@
 /** Movement before the swipe's axis is fixed; below it nothing is claimed. */
 export const TERMINAL_TOUCH_INTENT_PX = 8;
 
+/** How long a finger rests on a terminal cell before it selects the word there. */
+export const TERMINAL_LONG_PRESS_MS = 500;
+
+/** The two DOM boxes a terminal cell lookup needs, in viewport coordinates. */
+export interface TerminalCellBox {
+  /** `term.element`, the container that spans the whole grid. */
+  container: { left: number; top: number; width: number; height: number };
+  /**
+   * `.xterm-screen`, which reports the width without the scrollbar. It can
+   * legitimately have height 0 on the phone layout, so vertical geometry must
+   * come from the container.
+   */
+  screen?: { left: number; width: number } | null;
+}
+
+/**
+ * The cell under a viewport point, or null when the point is outside the grid.
+ * Width prefers the screen layer (the scrollbar makes the container wider);
+ * height always uses the container because the screen layer collapses to 0
+ * height on some phone layouts.
+ */
+export function terminalCellAt(
+  box: TerminalCellBox,
+  cols: number,
+  rows: number,
+  x: number,
+  y: number,
+): { column: number; row: number } | null {
+  if (cols <= 0 || rows <= 0) return null;
+  const { container, screen } = box;
+  if (container.width <= 0 || container.height <= 0) return null;
+  const left = screen && screen.width > 0 ? screen.left : container.left;
+  const width = screen && screen.width > 0 ? screen.width : container.width;
+  const column = Math.floor(((x - left) / width) * cols);
+  const row = Math.floor(((y - container.top) / container.height) * rows);
+  if (column < 0 || column >= cols || row < 0 || row >= rows) return null;
+  return { column, row };
+}
+
 export type TerminalTouchAxis = "pending" | "vertical" | "horizontal";
 export type TerminalBufferType = "normal" | "alternate";
 

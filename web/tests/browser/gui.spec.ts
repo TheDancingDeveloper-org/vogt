@@ -3454,6 +3454,51 @@ test("Phone terminal surfaces a Copy chip over a live selection", async ({ page 
   await expect(chip).toHaveText("Copy");
 });
 
+// A TUI that enables SGR mouse tracking (Codex's fullscreen transcript did)
+// receives xterm.js's mouse reports, so xterm never forms its own selection.
+// A phone has no Shift to force one, and a long-press sends nothing at all.
+// Vogt selects the word under the finger itself and surfaces the Copy chip.
+test("Phone terminal long-press selects a word while the program tracks the mouse", async ({
+  page,
+  context,
+}) => {
+  test.skip(test.info().project.name !== "phone", "Touch long-press is the coarse-pointer path");
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await installFixtures(page, {}, [liveSession]);
+  await page.routeWebSocket(/\/api\/sessions\/[^/]+\/attach$/, (socket) => {
+    socket.onMessage(() => undefined);
+    socket.send(JSON.stringify({ type: "snapshot-start", scrollback_bytes: 0, scrollback_pos: 0 }));
+    // The modes Codex's alternate-screen TUI enables. They are what made the
+    // plain drag and the long-press fail before the fix.
+    socket.send(Buffer.from("\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h"));
+    socket.send(Buffer.from("SELECTME-ALPHA SELECTME-BETA SELECTME-GAMMA\r\n"));
+    socket.send(JSON.stringify({ type: "snapshot-done" }));
+  });
+  await page.goto("/#/t/browser-session");
+  const host = page.locator(".terminal-host").first();
+  await expect(host).toBeVisible();
+  const box = await host.boundingBox();
+  expect(box).not.toBeNull();
+
+  const cdp = await context.newCDPSession(page);
+  // xterm's write queue drains on animation frames, so retry the hold until
+  // the row is painted and the word is under the finger.
+  await expect.poll(async () => {
+    const point = { x: Math.round(box!.x + 30), y: Math.round(box!.y + 8) };
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [point] });
+    await page.waitForTimeout(700);
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    return page.locator(".terminal-copy-chip").count();
+  }, { timeout: 8000 }).toBeGreaterThan(0);
+
+  const chip = page.locator(".terminal-copy-chip");
+  await expect(chip).toBeVisible();
+  await chip.tap();
+  await expect
+    .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+    .toBe("SELECTME-ALPHA");
+});
+
 test("exited session shows a banner and Remove skips the kill confirm", mockOnly(LIVE_SKIP.data), async ({ page }) => {
   const exitedSession = {
     ...liveSession,
