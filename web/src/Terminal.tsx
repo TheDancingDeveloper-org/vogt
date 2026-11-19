@@ -649,7 +649,17 @@ const TerminalView: Component<Props> = (props) => {
     setForeignSize(size.foreign());
     const target = size.target();
     if (!term || !target) return;
-    if (term.cols === target.cols && term.rows === target.rows) return;
+    // The grid size, readable for layout and diagnostics (and by the touch
+    // long-press tests, which need the row count to press an exact row).
+    const publishGridSize = () => {
+      if (!hostRef || !term) return;
+      hostRef.dataset.terminalCols = String(term.cols);
+      hostRef.dataset.terminalRows = String(term.rows);
+    };
+    if (term.cols === target.cols && term.rows === target.rows) {
+      publishGridSize();
+      return;
+    }
     // Flush first so bytes painted for the old size are parsed before the
     // resize changes the grid they land on.
     liveWrites?.flush();
@@ -658,6 +668,7 @@ const TerminalView: Component<Props> = (props) => {
     } catch {
       /* xterm can throw while its DOM is detaching or hidden */
     }
+    publishGridSize();
   };
 
   /** The engine announced the PTY's size: draw at it from here on. */
@@ -782,16 +793,26 @@ const TerminalView: Component<Props> = (props) => {
     if (!term) return false;
     const container = term.element;
     const screen = container?.querySelector(".xterm-screen");
+    const rows = container?.querySelector(".xterm-rows");
+    // With the WebGL/canvas renderer there is no rows layer and the screen
+    // layer's computed height is 0 (the site zeroes it); the canvas is sized
+    // to the whole grid, so it is the exact cell height source.
+    const canvas = container?.querySelector("canvas");
     const outer = container?.getBoundingClientRect();
     const inner = screen?.getBoundingClientRect();
+    const gridRows = rows?.getBoundingClientRect();
+    const gridCanvas = canvas?.getBoundingClientRect();
     if (!outer) return false;
     const cell = terminalCellAt(
-      { container: outer, screen: inner },
+      {
+        container: outer,
+        screen: inner,
+        rows: gridRows && gridRows.height > 0 ? gridRows : gridCanvas,
+      },
       term.cols,
       term.rows,
       x,
       y,
-      estimateCellHeight(),
     );
     if (!cell) return false;
     const bufferRow = term.buffer.active.viewportY + cell.row;

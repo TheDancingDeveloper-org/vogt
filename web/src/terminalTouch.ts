@@ -15,7 +15,7 @@ export const TERMINAL_TOUCH_INTENT_PX = 8;
 /** How long a finger rests on a terminal cell before it selects the word there. */
 export const TERMINAL_LONG_PRESS_MS = 500;
 
-/** The two DOM boxes a terminal cell lookup needs, in viewport coordinates. */
+/** The DOM boxes a terminal cell lookup needs, in viewport coordinates. */
 export interface TerminalCellBox {
   /** `term.element`, the container that spans the whole grid. */
   container: { left: number; top: number; width: number; height: number };
@@ -24,17 +24,21 @@ export interface TerminalCellBox {
    * legitimately have height 0 on the phone layout, so vertical geometry must
    * come from the container.
    */
-  screen?: { left: number; width: number } | null;
+  screen?: { left: number; top: number; width: number; height: number } | null;
+  /**
+   * `.xterm-rows`: exactly `rows × cell height` high, with none of the
+   * remainder FitAddon can leave below the grid. Preferred for the row.
+   */
+  rows?: { top: number; height: number } | null;
 }
 
 /**
  * The cell under a viewport point, or null when the point is outside the grid.
  * Width prefers the screen layer (the scrollbar makes the container wider);
- * height always uses the container because the screen layer collapses to 0
- * height on some phone layouts. `cellHeight` is the renderer's row height when
- * known: FitAddon can leave up to one cell of remainder below the grid, so
- * dividing the container's height by the row count would put a press near the
- * bottom on the row below.
+ * the row prefers the rows layer's measured height, since a font-size estimate
+ * is short of xterm's measured cell height and the container can include up
+ * to one cell of FitAddon remainder. The screen layer, then the container, are
+ * the fallbacks (the screen collapses to 0 height on some phone layouts).
  */
 export function terminalCellAt(
   box: TerminalCellBox,
@@ -42,16 +46,20 @@ export function terminalCellAt(
   rows: number,
   x: number,
   y: number,
-  cellHeight = 0,
 ): { column: number; row: number } | null {
   if (cols <= 0 || rows <= 0) return null;
-  const { container, screen } = box;
+  const { container, screen, rows: rowsBox } = box;
   if (container.width <= 0 || container.height <= 0) return null;
   const left = screen && screen.width > 0 ? screen.left : container.left;
   const width = screen && screen.width > 0 ? screen.width : container.width;
+  const grid =
+    rowsBox && rowsBox.height > 0
+      ? rowsBox
+      : screen && screen.height > 0
+        ? screen
+        : container;
   const column = Math.floor(((x - left) / width) * cols);
-  const rowHeight = cellHeight > 0 ? cellHeight : container.height / rows;
-  const row = Math.floor((y - container.top) / rowHeight);
+  const row = Math.floor((y - grid.top) / (grid.height / rows));
   if (column < 0 || column >= cols || row < 0 || row >= rows) return null;
   return { column, row };
 }
