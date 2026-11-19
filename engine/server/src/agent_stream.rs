@@ -1454,6 +1454,9 @@ where
                             if !send_frame(&mut socket, &Frame::Ack { offset: next }).await { break; }
                         }
                         Frame::Output { offset, data } => {
+                            // Output is proof the agent is alive, not only its
+                            // Heartbeat: a busy agent may never send one.
+                            link.note_heartbeat();
                             let refused = if data.len() > AGENT_BUFFER_BYTES {
                                 // Refused but not fatal: the Resync below has
                                 // the agent resend from its replay, in chunks.
@@ -1489,6 +1492,7 @@ where
                             }
                         }
                         Frame::Gap { offset, lost } => {
+                            link.note_heartbeat();
                             if lost > AGENT_MAX_GAP_BYTES || offset.checked_add(lost).is_none() {
                                 let _ = send_frame(&mut socket, &Frame::Error {
                                     code: "invalid_gap".into(),
@@ -1509,11 +1513,13 @@ where
                             }
                         }
                         Frame::Flushed { ok } => {
+                            link.note_heartbeat();
                             let counter = if ok { &link.flushes } else { &link.flush_failures };
                             counter.fetch_add(1, Ordering::AcqRel);
                             link.flush_notify.notify_waiters();
                         }
                         Frame::Salvaged { ok, reason, .. } => {
+                            link.note_heartbeat();
                             *link.salvage_failure.lock().expect("salvage lock poisoned") =
                                 (!ok).then(|| {
                                     reason.unwrap_or_else(|| "the pod agent could not save the working tree".into())
@@ -1726,6 +1732,40 @@ mod tests {
             .iter()
             .filter(|f| matches!(f, Frame::Resync { .. }))
             .count()
+    }
+
+    /// WI-4418: a busy agent streams output and never sends a Heartbeat, and
+    /// its output alone keeps the pod alive. An agent that sends nothing still
+    /// goes stale.
+    #[tokio::test]
+    async fn output_alone_keeps_a_busy_agent_alive_and_silence_does_not() {
+        let timeout = Duration::from_millis(200);
+        let auth = Arc::new(AgentAuth::default());
+        let busy = Uuid::new_v4();
+        let (busy_link, _busy_reader) = auth.register_pod(busy);
+        let agent = connect(&auth, busy).await;
+        // Three heartbeat timeouts of output, with no Heartbeat frame.
+        let started = tokio::time::Instant::now();
+        let mut offset = 0u64;
+        while started.elapsed() < timeout * 3 {
+            agent.send(Frame::Output {
+                offset,
+                data: b"a".to_vec(),
+            });
+            offset += 1;
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            assert!(
+                busy_link.heartbeat_age() < timeout,
+                "busy agent judged silent after {:?}",
+                busy_link.heartbeat_age()
+            );
+        }
+
+        let silent = Uuid::new_v4();
+        let (silent_link, _silent_reader) = auth.register_pod(silent);
+        let _quiet = connect(&auth, silent).await;
+        tokio::time::sleep(timeout * 3).await;
+        assert!(silent_link.heartbeat_age() > timeout);
     }
 
     #[tokio::test]

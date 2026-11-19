@@ -1044,12 +1044,21 @@ async fn flush_memory(
 /// a transport failure is retried on the next flush. Claude's account files
 /// need a Claude root and account; a Codex pod has neither and still ships its
 /// rollout.
+/// Every call to [`flush_bundle`], so a test can count the flush clock's ticks.
+#[cfg(test)]
+pub(crate) static FLUSH_ATTEMPTS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 async fn flush_bundle(
     config: &Config,
     tls: &Arc<rustls::ClientConfig>,
     seen: &mut std::collections::HashMap<PathBuf, [u8; 32]>,
     offsets: &mut std::collections::HashMap<PathBuf, u64>,
 ) -> bool {
+    #[cfg(test)]
+    {
+        FLUSH_ATTEMPTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
     // The login and global config are the Claude account's and are written
     // back with or without a conversation (WI-3334).
     let claude = match (
@@ -2342,6 +2351,11 @@ pub async fn run(config: Config) -> Result<(), AgentError> {
             for frame in replay.resend_frames(acked) {
                 send_frame(&mut sink, &frame).await?;
             }
+            // One clock for the flush, exit check and heartbeat. A `sleep`
+            // rebuilt on each pass restarted on every frame, so a busy session
+            // never reached it (WI-4418).
+            let mut tick = tokio::time::interval(BUNDLE_DEBOUNCE);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 tokio::select! {
                     Some(data) = output_rx.recv() => {
@@ -2416,7 +2430,7 @@ pub async fn run(config: Config) -> Result<(), AgentError> {
                             _ => {},
                         }
                     }
-                    _ = tokio::time::sleep(BUNDLE_DEBOUNCE) => {
+                    _ = tick.tick() => {
                         let _ = flush_bundle(&config, &tls, &mut bundle_seen, &mut transcript_offsets).await;
                         if let Some(c) = child.as_mut() {
                             if let Ok(Some(status)) = c.try_wait() {
@@ -2787,6 +2801,80 @@ mod tests {
             "run() did not end: {result:?}"
         );
         assert_eq!(accepts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// WI-4418: a busy session keeps its heartbeat and bundle-flush clock. The
+    /// engine sends input every 16 ms and the child prints every 300 ms; the
+    /// old one-second `sleep`, rebuilt on each pass, never fired meanwhile.
+    /// Real time: paused time lets the clock jump past in-flight socket frames,
+    /// which hid the starvation.
+    #[tokio::test]
+    async fn a_busy_session_still_heartbeats_and_flushes() {
+        const BUSY_FOR: Duration = Duration::from_secs(6);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let heartbeats = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let counted = heartbeats.clone();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let started = tokio::time::Instant::now();
+            let mut input = tokio::time::interval(Duration::from_millis(16));
+            let mut killed = false;
+            loop {
+                tokio::select! {
+                    _ = input.tick(), if !killed => {
+                        let frame = if started.elapsed() >= BUSY_FOR {
+                            killed = true;
+                            Frame::Signal { signal: "kill".into() }
+                        } else {
+                            Frame::Input { data: b"\n".to_vec() }
+                        };
+                        let text = serde_json::to_string(&frame).unwrap();
+                        if socket.send(Message::Text(text.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    msg = socket.next() => match msg {
+                        Some(Ok(Message::Text(text))) => match serde_json::from_str::<Frame>(&text) {
+                            Ok(Frame::Heartbeat { .. }) => {
+                                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            }
+                            Ok(Frame::Output { offset, data }) => {
+                                // Every output is acked, as the engine does.
+                                let ack = Frame::Ack { offset: offset + data.len() as u64 };
+                                let text = serde_json::to_string(&ack).unwrap();
+                                if socket.send(Message::Text(text.into())).await.is_err() {
+                                    break;
+                                }
+                            }
+                            // The agent's answer to the kill: nothing more to read.
+                            Ok(Frame::Exited { .. }) => break,
+                            _ => {}
+                        },
+                        Some(Ok(_)) => {}
+                        _ => break,
+                    }
+                }
+            }
+        });
+        let mut config = kill_config(format!("http://{address}"));
+        config.command = Some(vec![
+            "sh".into(),
+            "-c".into(),
+            "while :; do echo busy; sleep 0.3; done".into(),
+        ]);
+        let flushes_before = FLUSH_ATTEMPTS.load(std::sync::atomic::Ordering::SeqCst);
+        let result = tokio::time::timeout(BUSY_FOR * 5, run(config)).await;
+        assert!(
+            matches!(result, Ok(Ok(()))),
+            "run() did not end: {result:?}"
+        );
+        // One tick a second: a 6 s run ticks about six times.
+        let beats = heartbeats.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(beats >= 4, "heartbeats: {beats}");
+        let flushes = FLUSH_ATTEMPTS.load(std::sync::atomic::Ordering::SeqCst) - flushes_before;
+        assert!(flushes >= 4, "bundle-flush attempts: {flushes}");
     }
 
     /// A fake engine on one port: bundle-file POSTs are answered 200 and their
