@@ -1395,7 +1395,18 @@ What is refused, and only for an agent session that carries a policy:
 - any `gh pr merge`;
 - a `git push` whose destination refspec, or whose current branch when it
   names none, is a protected branch (`main_branches`, or `main` when that list
-  is empty).
+  is empty);
+- for a **worker** (a session whose role is `worker`) on a work item, when the
+  project states a `landing` rule (WI-1327): a `git push` that force-pushes
+  (`--force`, `--force-with-lease`, `-f`, a `+` refspec), deletes (`--delete`,
+  `:<dst>`), mirrors or pushes in bulk (`--mirror`, `--all`, `--tags`), or
+  names a ref other than its own branch — one the `branch_pattern` does not
+  match, with `{n}` the item's number, or one of the `landing_mains` (the base
+  and the main branches); and a `gh pr create` when the project lands by push
+  (`worker_lands_by`). An oversight session, and a session with no work
+  item, is not judged by these. The role is read from the live session at
+  each check, so `session.set_role` takes effect without a restart. A
+  pattern that does not compile refuses the push.
 
 Two more rules read the session's workspace (WI-1326). The engine copies
 the session's workspace block (above) into its policy before the child runs:

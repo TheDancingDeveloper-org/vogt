@@ -701,7 +701,7 @@ pub async fn policy_check(
         )
         .await
     };
-    let policy = match settle {
+    let mut policy = match settle {
         Ok(Ok(Some(policy))) => policy,
         Ok(Ok(None)) => return Json(allow).into_response(),
         Ok(Err(_)) | Err(_) => {
@@ -713,6 +713,11 @@ pub async fn policy_check(
             .into_response();
         }
     };
+    // The role is the live session's, not the copy the policy was started
+    // with, so a `set_role` takes effect at the next check (WI-1327).
+    if policy.session_role.is_some() {
+        policy.session_role = Some(session.role().as_str().to_string());
+    }
     let cwd = if req.cwd.is_empty() {
         std::path::PathBuf::from(&session.cwd)
     } else {
