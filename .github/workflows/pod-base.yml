@@ -4,8 +4,8 @@ name: pod-base
 #
 # Why this workflow exists, in one measurement: built inline, the merged
 # image takes 34 minutes, and 22 of them are installing a toolchain that no
-# commit in this repository touches — apt, rustup, five `cargo install`s,
-# sway, GStreamer, the JDK, Gradle, the Android SDK, Flutter — rebuilt on
+# commit in this repository touches — apt, rustup, `cargo-nextest`, the JDK,
+# the Android SDK, Flutter, Chrome — rebuilt on
 # every push because it would live in the same Dockerfile as the product.
 #
 # So it is built here instead, published, and consumed by digest. An ordinary
@@ -19,7 +19,7 @@ name: pod-base
 # produces a new tag on the next build and the old one stays exactly as it
 # was. `<week>` is the ISO week, so an unchanged file is still rebuilt once a
 # week — which is load-bearing rather than tidy-minded: `rclone`, `sccache`,
-# `gh`, `step`, `github-mcp-server`, Gradle and `selkies` all resolve *latest*
+# `gh`, `step` and `github-mcp-server` all resolve *latest*
 # at build time, and a purely content-addressed tag would have frozen every
 # one of them at whatever the first build happened to see while looking like
 # reproducibility.
