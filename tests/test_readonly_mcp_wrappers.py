@@ -131,14 +131,26 @@ def test_grafana_disables_writes_and_usage_stats(tmp_path: Path) -> None:
     ("url", "extra", "proxy"),
     (
         # gh#1442: a tailnet Grafana with an explicit proxy is reached through it.
-        ("http://100.92.54.45:3010", {"VOGT_TAILNET_SOCKS5": "127.0.0.1:2000"}, "socks5://127.0.0.1:2000"),
-        ("https://grafana.tail1234.ts.net", {"VOGT_TAILNET_SOCKS5": "127.0.0.1:2000"}, "socks5://127.0.0.1:2000"),
+        (
+            "http://100.92.54.45:3010",
+            {"VOGT_TAILNET_SOCKS5": "127.0.0.1:2000"},
+            "socks5://127.0.0.1:2000",
+        ),
+        (
+            "https://grafana.tail1234.ts.net",
+            {"VOGT_TAILNET_SOCKS5": "127.0.0.1:2000"},
+            "socks5://127.0.0.1:2000",
+        ),
         # A public Grafana is never proxied, whatever is configured.
         ("http://grafana.example", {"VOGT_TAILNET_SOCKS5": "127.0.0.1:2000"}, None),
         # Not in 100.64.0.0/10.
         ("http://100.128.0.1:3010", {"VOGT_TAILNET_SOCKS5": "127.0.0.1:2000"}, None),
         # Tailnet address, but no proxy and no sidecar socket: left alone.
-        ("http://100.92.54.45:3010", {"TS_SOCKET": "/nonexistent/tailscaled.sock"}, None),
+        (
+            "http://100.92.54.45:3010",
+            {"TS_SOCKET": "/nonexistent/tailscaled.sock"},
+            None,
+        ),
     ),
 )
 def test_grafana_on_the_tailnet_goes_through_the_socks5_proxy(
@@ -158,7 +170,9 @@ def test_grafana_on_the_tailnet_goes_through_the_socks5_proxy(
     assert rec["env"].get("HTTP_PROXY") == proxy
 
 
-def test_grafana_uses_the_sidecar_default_when_its_socket_is_present(tmp_path: Path) -> None:
+def test_grafana_uses_the_sidecar_default_when_its_socket_is_present(
+    tmp_path: Path,
+) -> None:
     import socket
 
     sock_path = tmp_path / "tailscaled.sock"
