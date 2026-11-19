@@ -11826,15 +11826,30 @@ async fn a_failed_start_gives_its_slot_back() {
 }
 
 #[tokio::test]
-async fn a_recovered_session_holds_its_slot_until_it_is_removed() {
+async fn a_recovered_session_holds_no_slot_until_it_is_woken() {
     let (_tmp, cfg, stub) = one_slot_sandbox();
     let lost = leave_live_record(&cfg.state_dir, &stub);
     let (base, _h) = boot_with_config(cfg).await;
     let client = cap_client();
-    // The restart rebuilt the reservation, so the account is full.
-    let full = start_on_account(&client, &base, &stub, "blocked").await;
-    assert_eq!(full.status(), StatusCode::TOO_MANY_REQUESTS);
-    // Removing the never-woken session ends it, and returns the slot.
+    // The restart left the recovered session hibernated, so the slot is free.
+    let fits = start_on_account(&client, &base, &stub, "fits").await;
+    assert_eq!(fits.status(), StatusCode::OK);
+    // The new session now holds the only slot, so the wake is refused (WI-4423).
+    let woken = client
+        .post(format!("{base}/api/sessions/{lost}/wake"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(woken.status(), StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
+async fn removing_a_recovered_session_leaves_the_account_within_its_cap() {
+    let (_tmp, cfg, stub) = one_slot_sandbox();
+    let lost = leave_live_record(&cfg.state_dir, &stub);
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = cap_client();
     let removed = client
         .delete(format!("{base}/api/sessions/{lost}"))
         .send()
@@ -11843,30 +11858,30 @@ async fn a_recovered_session_holds_its_slot_until_it_is_removed() {
     assert_eq!(removed.status(), StatusCode::OK);
     let ok = start_on_account(&client, &base, &stub, "fits").await;
     assert_eq!(ok.status(), StatusCode::OK);
+    let full = start_on_account(&client, &base, &stub, "blocked").await;
+    assert_eq!(full.status(), StatusCode::TOO_MANY_REQUESTS);
 }
 
 #[tokio::test]
-async fn a_recovered_session_gives_its_slot_back_when_it_is_stopped() {
+async fn stopping_a_recovered_session_leaves_the_account_within_its_cap() {
     let (_tmp, cfg, stub) = one_slot_sandbox();
     let lost = leave_live_record(&cfg.state_dir, &stub);
     let (base, state, _h) = boot_with_state(cfg).await;
     let client = cap_client();
-    let full = start_on_account(&client, &base, &stub, "blocked").await;
-    assert_eq!(full.status(), StatusCode::TOO_MANY_REQUESTS);
     // Stopping through the registry, as an agent's stop request does.
     state.sessions.stop(lost, Default::default()).unwrap();
     let ok = start_on_account(&client, &base, &stub, "fits").await;
     assert_eq!(ok.status(), StatusCode::OK);
+    let full = start_on_account(&client, &base, &stub, "blocked").await;
+    assert_eq!(full.status(), StatusCode::TOO_MANY_REQUESTS);
 }
 
 #[tokio::test]
-async fn a_recovered_session_gives_its_slot_back_through_the_stop_endpoint() {
+async fn killing_a_recovered_session_through_the_endpoint_leaves_the_account_within_its_cap() {
     let (_tmp, cfg, stub) = one_slot_sandbox();
     let lost = leave_live_record(&cfg.state_dir, &stub);
     let (base, _h) = boot_with_config(cfg).await;
     let client = cap_client();
-    let full = start_on_account(&client, &base, &stub, "blocked").await;
-    assert_eq!(full.status(), StatusCode::TOO_MANY_REQUESTS);
     let stopped = client
         .post(format!("{base}/api/sessions/{lost}/kill"))
         .send()
@@ -11875,6 +11890,8 @@ async fn a_recovered_session_gives_its_slot_back_through_the_stop_endpoint() {
     assert_eq!(stopped.status(), StatusCode::OK);
     let ok = start_on_account(&client, &base, &stub, "fits").await;
     assert_eq!(ok.status(), StatusCode::OK);
+    let full = start_on_account(&client, &base, &stub, "blocked").await;
+    assert_eq!(full.status(), StatusCode::TOO_MANY_REQUESTS);
 }
 
 #[tokio::test]
