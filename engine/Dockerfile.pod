@@ -1,6 +1,9 @@
 # syntax=docker/dockerfile:1
-# Layered session images. The default target is base; rust and mobile are
-# additive targets selected by the project image mapping.
+# Layered session images. The stages are base (the session image), rust (the
+# lean dev toolchain) and mobile (rust plus Flutter, the Android SDK and Chrome).
+# Docker builds the LAST stage when no --target is given, which is mobile, so
+# every build names its target: `rust` for the lean pod and the vogt-dev pod
+# (rust2-images.yml), `mobile` for the full pod (pod-base.yml).
 
 # Both bases are pinned by the digest of the mirrored manifest list, so a
 # rebuild of this file cannot silently pick up a newer upstream image. Renovate
@@ -266,9 +269,18 @@ ARG RUSTUP_ARM64_SHA256
 ARG KACHE_VERSION
 ARG KACHE_SHA256
 LABEL org.opencontainers.image.title="vogt-session-rust"
+# RUSTUP_AUTO_INSTALL=0: the session pod's root filesystem is read-only, so a
+# rust-toolchain.toml that names another channel or version must fail with
+# rustup's own error rather than try (and fail) to install it at run time.
+# A rust-toolchain.toml with `channel = "stable"` must also resolve here, so the
+# pinned toolchain must answer to the name `stable` too. rustup refuses
+# `toolchain link stable`, so the RUN below adds a symlink of the toolchain
+# directory under that name. Both names then point at the pinned ${RUST_VERSION}
+# and nothing is downloaded at run time.
 ENV RUSTUP_HOME=/opt/rust/rustup \
     CARGO_HOME=/cache/cargo \
-    SCCACHE_DIR=/var/cache/sccache
+    SCCACHE_DIR=/var/cache/sccache \
+    RUSTUP_AUTO_INSTALL=0
 USER root
 RUN install -d -o vogt -g vogt /opt/rust /opt/rust/cargo /opt/rust/rustup /cache/cargo /var/cache/sccache \
     && case "$TARGETARCH" in amd64) rustup_arch=x86_64; rustup_sha="$RUSTUP_X64_SHA256" ;; arm64) rustup_arch=aarch64; rustup_sha="$RUSTUP_ARM64_SHA256" ;; *) echo "unsupported architecture: $TARGETARCH" >&2; exit 1 ;; esac \
@@ -276,8 +288,10 @@ RUN install -d -o vogt -g vogt /opt/rust /opt/rust/cargo /opt/rust/rustup /cache
     && echo "${rustup_sha}  /tmp/rustup-init" | sha256sum -c - \
     && chown vogt:vogt /tmp/rustup-init \
     && chmod 0755 /tmp/rustup-init \
-    && su - vogt -c "RUSTUP_HOME=/opt/rust/rustup CARGO_HOME=/opt/rust/cargo /tmp/rustup-init -y --default-toolchain ${RUST_VERSION} --profile minimal" \
+    && su - vogt -c "RUSTUP_HOME=/opt/rust/rustup CARGO_HOME=/opt/rust/cargo /tmp/rustup-init -y --default-toolchain ${RUST_VERSION} --profile default" \
     && find /tmp -maxdepth 1 -type f -name rustup-init -delete \
+    && su - vogt -c "RUSTUP_HOME=/opt/rust/rustup CARGO_HOME=/opt/rust/cargo rustup component add rust-src" \
+    && ln -s "${RUST_VERSION}-${rustup_arch}-unknown-linux-gnu" "/opt/rust/rustup/toolchains/stable-${rustup_arch}-unknown-linux-gnu" \
     && su - vogt -c "RUSTUP_HOME=/opt/rust/rustup CARGO_HOME=/opt/rust/cargo rustup target add $(printf '%s' "${RUST_TARGETS}" | tr ',' ' ')" \
     && apt-get update \
     && apt-get install -y --no-install-recommends clang lld cmake protobuf-compiler \
