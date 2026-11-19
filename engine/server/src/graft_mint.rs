@@ -9,6 +9,12 @@
 //! the minted token is a subset of the mint token on every axis, so the engine
 //! cannot hand out more than it holds.
 //!
+//! An oversight session (D41 amendment, WI-4386) is the one exception: its
+//! grant asks for `kind: "oversight"` and adds `mirror:bind`/`mirror:export`,
+//! so it can create and change a mirror through the API. The engine marks a
+//! grant from the session's recorded role only, never from the agent's own
+//! request, so a worker's token stays an agent token with no mirror rights.
+//!
 //! The token reaches the pod in the bootstrap response, like the session
 //! token: it is held in memory ([`crate::agent_stream::AgentAuth`]) from mint
 //! until the pod's single bootstrap request, then written by the entrypoint to
@@ -62,6 +68,10 @@ pub struct MintTokenRequest {
     pub session: Option<String>,
     #[prost(string, optional, tag = "5")]
     pub work_item: Option<String>,
+    /// The token kind asked for (D41 amendment, WI-4386): `oversight` only for
+    /// an oversight session. Absent mints the engine's delegation kind.
+    #[prost(string, optional, tag = "6")]
+    pub kind: Option<String>,
 }
 
 /// `graft.v1.Token`. The derived `Debug` would print the token, so this type
@@ -115,6 +125,9 @@ pub struct SessionGrant {
     pub line: String,
     pub work_item: Option<String>,
     pub ttl_s: u64,
+    /// Set only for an oversight session (D41 amendment, WI-4386). Its token
+    /// is the `oversight` kind and may hold `mirror:bind`.
+    pub oversight: bool,
 }
 
 impl SessionGrant {
@@ -154,7 +167,16 @@ impl SessionGrant {
                 })
                 .map(str::to_owned),
             ttl_s: ttl_for(budget),
+            oversight: false,
         })
+    }
+
+    /// Mark this grant as an oversight session's (D41 amendment, WI-4386):
+    /// its token is minted as the `oversight` kind and carries the mirror
+    /// grants. Worker grants never call this.
+    pub fn for_oversight(mut self) -> Self {
+        self.oversight = true;
+        self
     }
 
     pub fn subject(&self) -> String {
@@ -162,15 +184,22 @@ impl SessionGrant {
     }
 
     /// The repo's read, write and drafts scopes and `land` on this line only.
-    /// Never the base line, never another repo, never admin.
+    /// Never the base line, never another repo, never admin. An oversight
+    /// session also holds `mirror:bind` and `mirror:export` (D41 amendment,
+    /// WI-4386); its upstream stays bounded by the server's `allowed_hosts`.
     pub fn scopes(&self) -> Vec<String> {
         let repo = &self.repo;
-        vec![
+        let mut scopes = vec![
             format!("repo:{repo}:read"),
             format!("repo:{repo}:write"),
             format!("repo:{repo}:drafts"),
             format!("repo:{repo}:land:{}", self.line),
-        ]
+        ];
+        if self.oversight {
+            scopes.push("mirror:bind".to_owned());
+            scopes.push("mirror:export".to_owned());
+        }
+        scopes
     }
 
     fn request(&self) -> MintTokenRequest {
@@ -180,6 +209,7 @@ impl SessionGrant {
             ttl_s: self.ttl_s,
             session: Some(self.session.clone()),
             work_item: self.work_item.clone(),
+            kind: self.oversight.then(|| "oversight".to_owned()),
         }
     }
 }
@@ -380,6 +410,8 @@ mod tests {
             Some("ses_01ARZ3NDEKTSV4RRFFQ69G5FAV")
         );
         assert_eq!(req.work_item.as_deref(), Some("WI-3229"));
+        assert_eq!(req.kind, None);
+        assert!(!g.scopes().iter().any(|s| s.starts_with("mirror:")));
         // Another line gives another land scope and nothing broader.
         let other = SessionGrant::new(session(), "rusttorrent", "backlog-1", None, None).unwrap();
         assert!(other
@@ -387,6 +419,24 @@ mod tests {
             .contains(&"repo:rusttorrent:land:backlog-1".to_string()));
         assert!(other.scopes().iter().all(|s| !s.contains("vogt")));
         assert_eq!(other.request().work_item, None);
+    }
+
+    #[test]
+    fn an_oversight_grant_holds_mirror_bind_and_asks_for_the_oversight_kind() {
+        let g = SessionGrant::new(session(), "vogt", "rust-2", None, None)
+            .unwrap()
+            .for_oversight();
+        let scopes = g.scopes();
+        assert!(scopes.contains(&"mirror:bind".to_string()));
+        assert!(scopes.contains(&"mirror:export".to_string()));
+        assert_eq!(
+            scopes.iter().filter(|s| s.starts_with("mirror:")).count(),
+            2
+        );
+        // Still only this session's repo and line, never admin or a base line.
+        assert!(scopes.contains(&"repo:vogt:land:rust-2".to_string()));
+        assert!(!scopes.iter().any(|s| s.contains(":admin")));
+        assert_eq!(g.request().kind.as_deref(), Some("oversight"));
     }
 
     #[test]
@@ -563,6 +613,7 @@ mod tests {
         assert_eq!(req.subject, grant.subject());
         assert_eq!(req.session.as_deref(), Some(session().as_str()));
         assert_eq!(req.work_item.as_deref(), Some("WI-3229"));
+        assert_eq!(req.kind, None);
     }
 
     #[tokio::test]

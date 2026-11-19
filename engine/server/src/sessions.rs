@@ -792,6 +792,7 @@ impl SessionRegistry {
             session_ref: spec.session_ref.clone(),
             work_item: spec.work_item.clone(),
             budget: spec.budget.clone(),
+            oversight: spec.role == SessionRole::Oversight,
         };
         // A project that names a graft source is the only one that earns a
         // repo-scoped token. The deployment default is a compatibility
@@ -1314,6 +1315,7 @@ impl SessionRegistry {
             session_ref: spec.session_ref.clone(),
             work_item: spec.work_item.clone(),
             budget: spec.budget.clone(),
+            oversight: spec.role == SessionRole::Oversight,
         };
         let provisioned = match crate::host_graft::config_home() {
             Ok(home) => {

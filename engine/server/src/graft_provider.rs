@@ -396,7 +396,7 @@ impl SourceProvider for GraftProvider {
             // The token is bound to the core session id the worker's brief
             // names; the engine UUID is only the local handle its file is
             // kept under.
-            let grant = SessionGrant::new(
+            let mut grant = SessionGrant::new(
                 request
                     .session_ref
                     .clone()
@@ -407,6 +407,9 @@ impl SourceProvider for GraftProvider {
                 request.budget.as_ref(),
             )
             .map_err(|e| SourceError::InvalidSource(e.to_string()))?;
+            if request.oversight {
+                grant = grant.for_oversight();
+            }
             // The mint service's error names what failed (unreachable,
             // refused); it never carries a token.
             let token = minter
@@ -748,6 +751,13 @@ mod tests {
             .lock()
             .unwrap()
             .contains(&"repo:vogt:land:rust-2".to_string()));
+        // A worker's grant carries no mirror rights.
+        assert!(!minter
+            .scopes
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|s| s.starts_with("mirror:")));
 
         p.revoke_credential(&h).await.unwrap();
         assert!(!h.path.exists());
@@ -755,6 +765,20 @@ mod tests {
             *minter.revoked.lock().unwrap(),
             vec![(id, "minted".to_string())]
         );
+    }
+
+    #[tokio::test]
+    async fn an_oversight_request_mints_the_mirror_grants() {
+        let tmp = tempfile::tempdir().unwrap();
+        let minter = Arc::new(FakeMinter::default());
+        let p = GraftProvider::new(tmp.path().join("creds"), Some(minter.clone()));
+        let mut request = CredentialRequest::for_session(Uuid::new_v4());
+        request.oversight = true;
+        p.mint_credential(&source(), &request).await.unwrap();
+        let scopes = minter.scopes.lock().unwrap();
+        assert!(scopes.contains(&"mirror:bind".to_string()));
+        assert!(scopes.contains(&"mirror:export".to_string()));
+        assert!(scopes.contains(&"repo:vogt:land:rust-2".to_string()));
     }
 
     #[tokio::test]

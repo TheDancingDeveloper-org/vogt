@@ -52,6 +52,10 @@ pub struct CredentialRequest {
     pub session_ref: Option<String>,
     pub work_item: Option<String>,
     pub budget: Option<vogt_engine_contract::SessionBudget>,
+    /// Whether the credential is for an oversight session (D41 amendment,
+    /// WI-4386). Only those are minted the `oversight` kind, the one kind a
+    /// graft token may carry `mirror:bind` on; a worker's credential is never.
+    pub oversight: bool,
 }
 
 impl CredentialRequest {
@@ -61,6 +65,7 @@ impl CredentialRequest {
             session_ref: None,
             work_item: None,
             budget: None,
+            oversight: false,
         }
     }
 }
