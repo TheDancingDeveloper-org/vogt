@@ -781,6 +781,8 @@ pub fn with_codex_providers(
 /// rejected the request (WI-3976). Returns the two `-c` overrides to insert
 /// after the Codex binary, or `None` when this is not a Codex launch, names
 /// no model, or the model is not Haiku-class.
+/// A caller's own later `-c model_context_window=…` still wins over this
+/// override: it is inserted before the caller's arguments, not after them.
 pub fn with_codex_model_window(command: &[String]) -> Option<Vec<String>> {
     if agent_name(command).as_deref() != Some("codex") {
         return None;

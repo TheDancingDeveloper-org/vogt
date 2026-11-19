@@ -164,46 +164,58 @@ describe("terminal fling (WI-2707)", () => {
 
 describe("terminal cell lookup for touch long-press", () => {
   const container = { left: 10, top: 40, width: 400, height: 500 };
+  const screen = { left: 10, top: 40, width: 400, height: 500 };
 
   it("maps a point inside the screen layer to its cell", () => {
     expect(
-      terminalCellAt({ container, screen: { left: 10, width: 400 } }, 80, 25, 10 + 4.5 * 5, 40 + 2.5 * 20),
+      terminalCellAt({ container, screen }, 80, 25, 10 + 4.5 * 5, 40 + 2.5 * 20),
     ).toEqual({ column: 4, row: 2 });
   });
 
   it("uses the container's width when there is no screen layer", () => {
-    expect(terminalCellAt({ container, screen: null }, 40, 10, 10 + 10 * 10, 40 + 9 * 50)).toEqual({
-      column: 10,
-      row: 9,
-    });
+    expect(
+      terminalCellAt({ container, screen: null }, 40, 10, 10 + 10 * 10, 40 + 9 * 50),
+    ).toEqual({ column: 10, row: 9 });
   });
 
   it("uses the container's height when the screen layer reports zero height", () => {
     // The phone layout makes `.xterm-screen` 0 high; a screen-only measurement
     // selected nothing, so the row must come from the container.
-    const screen = { left: 10, width: 400, height: 0 };
-    expect(terminalCellAt({ container, screen }, 80, 25, 10 + 4.5 * 5, 40 + 2.5 * 20)).toEqual({
-      column: 4,
-      row: 2,
-    });
+    const collapsed = { ...screen, height: 0 };
+    expect(
+      terminalCellAt({ container, screen: collapsed }, 80, 25, 10 + 4.5 * 5, 40 + 2.5 * 20),
+    ).toEqual({ column: 4, row: 2 });
   });
 
-  it("uses the renderer's cell height instead of FitAddon's bottom remainder", () => {
-    // 25 rows of 20px in a 505px container: 5px of leftover below the grid.
+  it("uses the rows layer's exact height, not a font-size estimate", () => {
+    // 24 real rows of 18.6px (446.4) inside a 485px container: 38.6px of
+    // FitAddon remainder. A 15.6px estimate drifts a whole row by row 10.
+    const tall = { ...container, height: 485 };
+    const rowsBox = { top: 40, height: 446.4 };
+    const onRowTen = 40 + 10.5 * 18.6;
+    expect(
+      terminalCellAt({ container: tall, screen: null, rows: rowsBox }, 80, 24, 10 + 4.5 * 5, onRowTen),
+    ).toEqual({ column: 4, row: 10 });
+  });
+
+  it("keeps a press in FitAddon's bottom remainder off the last row", () => {
     const tall = { ...container, height: 505 };
-    expect(terminalCellAt({ container: tall, screen: null }, 80, 25, 10, 40 + 24 * 20 + 15, 20)).toEqual({
-      column: 0,
-      row: 24,
-    });
-    // A press in that leftover is below the last row, not on it.
-    expect(terminalCellAt({ container: tall, screen: null }, 80, 25, 10, 40 + 25 * 20 + 1, 20)).toBeNull();
+    const rowsBox = { top: 40, height: 500 };
+    expect(
+      terminalCellAt({ container: tall, screen: null, rows: rowsBox }, 80, 25, 10, 40 + 24 * 20 + 15),
+    ).toEqual({ column: 0, row: 24 });
+    expect(
+      terminalCellAt({ container: tall, screen: null, rows: rowsBox }, 80, 25, 10, 40 + 25 * 20 + 1),
+    ).toBeNull();
   });
 
   it("rejects points outside the grid and empty grids", () => {
     expect(terminalCellAt({ container, screen: null }, 80, 25, 9, 40)).toBeNull();
     expect(terminalCellAt({ container, screen: null }, 80, 25, 10, 39)).toBeNull();
     expect(terminalCellAt({ container, screen: null }, 80, 25, 10 + 420, 40)).toBeNull();
-    expect(terminalCellAt({ container: { ...container, height: 0 }, screen: null }, 80, 25, 10, 40)).toBeNull();
+    expect(
+      terminalCellAt({ container: { ...container, height: 0 }, screen: null }, 80, 25, 10, 40),
+    ).toBeNull();
     expect(terminalCellAt({ container, screen: null }, 0, 25, 10, 40)).toBeNull();
   });
 });
