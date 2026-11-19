@@ -56,7 +56,7 @@ from vogt.application.services import (
 )
 from vogt.application.services.sessions import IMPLEMENT_FOOTER
 from vogt.core.auth import hash_token
-from vogt.core.entities import AgentPolicy, ReviewPolicy
+from vogt.core.entities import AgentPolicy, LandingPolicy, ReviewPolicy
 from vogt.errors import (
     Conflict,
     InvalidRequest,
@@ -2393,8 +2393,38 @@ def test_a_landing_block_is_stored_and_rendered_with_the_item_number(
     assert "**Lands by** push_branch" in brief
     assert "**Merge by** oversight (rebase)" in brief
     assert "**Deploy by** operator" in brief
-    # The blocks are recorded, not enforced: the hook payload is unchanged.
-    assert "policy" not in engine.last_spec
+    # The landing rule is enforced on the worker's pushes and PR (WI-1327):
+    # the hook payload carries the pattern with the item number filled in.
+    enforced = engine.last_spec["policy"]
+    assert enforced["branch_pattern"] == f"^wi-{item.ref.split('-', 1)[1]}-[a-z0-9-]+$"
+    assert enforced["session_role"] == "worker"
+    assert enforced["open_pr_allowed"] is False
+    assert enforced["landing_mains"] == ["integrate/vogt-next"]
+
+
+def test_the_branch_rules_follow_the_role_and_the_work_item() -> None:
+    from vogt.application.services.sessions import _enforced_policy
+
+    agent_policy = AgentPolicy(
+        landing=LandingPolicy(
+            base_branch="main",
+            worker_lands_by="open_pr",
+            merge_by="operator",
+            merge_mode="fast_forward",
+        ),
+        main_branches=["release/1", "main"],
+    )
+    worker = _enforced_policy(agent_policy, work_item="WI-1298", role="worker")
+    assert worker is not None
+    assert worker["branch_pattern"] == "^wi-{n}-[a-z0-9-]+$".replace("{n}", "1298")
+    assert worker["open_pr_allowed"] is True
+    assert worker["landing_mains"] == ["main", "release/1"]
+    oversight = _enforced_policy(agent_policy, work_item="WI-1298", role="oversight")
+    assert oversight is not None and oversight["session_role"] == "oversight"
+    # No work item, so no `{n}` to fill: the new fields are not sent.
+    assert _enforced_policy(agent_policy, work_item=None) is None
+    # A project with no landing block states no branch rule.
+    assert _enforced_policy(AgentPolicy(), work_item="WI-1298") is None
 
 
 def test_a_project_without_a_landing_block_renders_no_landing_rule(

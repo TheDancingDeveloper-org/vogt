@@ -120,6 +120,18 @@ pub fn check(policy: &SessionPolicy, command: &str, cwd: &Path) -> Option<String
             }
         }
     }
+    // A worker on a work item pushes only its own branch and, when the
+    // project lands by push, opens no pull request (WI-1327). Anything else
+    // (an oversight session, a session with no work item) is not judged here.
+    if policy.session_role.as_deref() == Some("worker") {
+        if let Some(pattern) = policy.branch_pattern.as_deref() {
+            for simple in worker_commands(command) {
+                if let Some(reason) = worker_branch(policy, pattern, &simple, cwd) {
+                    return Some(reason);
+                }
+            }
+        }
+    }
     let worktree = policy.workspace_kind.as_deref() == Some("worktree");
     let live = policy.discard_live_changes && policy.discard_baseline.is_empty();
     if policy.discard_baseline.is_empty()
@@ -280,6 +292,143 @@ fn push_deploys(words: &[String], cwd: &Path, mains: &[&str]) -> Option<String> 
 
 fn is_main(branch: &str, mains: &[&str]) -> bool {
     mains.contains(&branch)
+}
+
+/// Each simple command on the line, and each simple command a quoted word
+/// carries (`bash -c "git push …"`), so a worker's push is judged inside a
+/// wrapper too.
+fn worker_commands(command: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for simple in split_commands(command) {
+        for word in command_words(&simple) {
+            out.extend(split_commands(&word));
+        }
+        out.push(simple);
+    }
+    out
+}
+
+/// The worker rule for one simple command (WI-1327): a `git push` must name
+/// only the worker's own branch, and a `gh pr create` is refused when the
+/// project does not let a worker open one. `None` when the command is allowed.
+fn worker_branch(
+    policy: &SessionPolicy,
+    pattern: &str,
+    simple: &str,
+    cwd: &Path,
+) -> Option<String> {
+    let words = command_words(simple);
+    match words.first().map(|w| base(w)) {
+        Some("git") if git_subcommand(&words).as_deref() == Some("push") => {
+            worker_push(&words, pattern, policy, cwd)
+        }
+        Some("gh") if gh_pr(&words) == Some("create") && policy.open_pr_allowed == Some(false) => {
+            Some(
+                "refusing: a worker does not open pull requests; it lands its branch and stops"
+                    .to_string(),
+            )
+        }
+        _ => None,
+    }
+}
+
+/// A `git push` by a worker: no force, no deletion, no mirror or bulk push,
+/// and every ref it names must be the worker's own branch.
+fn worker_push(
+    words: &[String],
+    pattern: &str,
+    policy: &SessionPolicy,
+    cwd: &Path,
+) -> Option<String> {
+    let args = git_args(words);
+    let mut refs = Vec::new();
+    let mut seen_remote = false;
+    for arg in args.iter().skip(1) {
+        if arg == "--" {
+            continue;
+        }
+        if let Some(long) = arg.strip_prefix("--") {
+            if long.starts_with("force") {
+                return Some("refusing: a worker may not force-push".to_string());
+            }
+            if long == "delete" {
+                return Some("refusing: a worker may not delete a remote branch".to_string());
+            }
+            if matches!(long, "mirror" | "all" | "branches" | "tags" | "prune") {
+                return Some(format!(
+                    "refusing: a worker pushes only its own branch (pattern {pattern})"
+                ));
+            }
+            continue;
+        }
+        if let Some(short) = arg.strip_prefix('-') {
+            if short.contains('f') {
+                return Some("refusing: a worker may not force-push".to_string());
+            }
+            if short.contains('d') {
+                return Some("refusing: a worker may not delete a remote branch".to_string());
+            }
+            continue;
+        }
+        if !seen_remote && !arg.contains(':') && !arg.starts_with('+') {
+            seen_remote = true;
+            continue;
+        }
+        if arg.starts_with('+') {
+            return Some("refusing: a worker may not force-push".to_string());
+        }
+        if arg.starts_with(':') || arg.ends_with(':') {
+            return Some("refusing: a worker may not delete a remote branch".to_string());
+        }
+        refs.push(arg.clone());
+    }
+    let dir = git_dir(words, cwd);
+    let current = current_branch(&dir);
+    if refs.is_empty() {
+        return match current {
+            Some(branch) => worker_ref(&branch, pattern, policy),
+            None => Some(format!(
+                "refusing: a worker pushes only its own branch (pattern {pattern}), and the current branch is unknown"
+            )),
+        };
+    }
+    refs.into_iter().find_map(|r| {
+        // The destination is the name the remote gets; with no `:`, the
+        // source is also the destination. `HEAD` and `@` are the current branch.
+        let named = r.split_once(':').map_or(r.as_str(), |(_, dst)| dst);
+        let named = named.strip_prefix("refs/heads/").unwrap_or(named);
+        if named == "HEAD" || named == "@" {
+            return match current.as_deref() {
+                Some(branch) => worker_ref(branch, pattern, policy),
+                None => Some(format!(
+                    "refusing: a worker pushes only its own branch (pattern {pattern}), and the current branch is unknown"
+                )),
+            };
+        }
+        worker_ref(named, pattern, policy)
+    })
+}
+
+/// Whether a worker may push to `branch`: never a landing branch, and only a
+/// name the branch pattern matches. A pattern that does not compile refuses
+/// everything rather than passing it.
+fn worker_ref(branch: &str, pattern: &str, policy: &SessionPolicy) -> Option<String> {
+    if policy.landing_mains.iter().any(|main| main == branch) {
+        return Some(format!(
+            "refusing: a worker may not push to a landing branch (pattern {pattern})"
+        ));
+    }
+    let Ok(re) = Regex::new(pattern) else {
+        return Some(format!(
+            "refusing: the branch pattern {pattern} does not compile"
+        ));
+    };
+    if re.is_match(branch) {
+        return None;
+    }
+    Some(format!(
+        "refusing: a worker pushes only its own branch (pattern {pattern})"
+    ))
 }
 
 /// The `gh pr <verb>` verb, when this is a pull-request subcommand. Global
@@ -4979,5 +5128,141 @@ mod tests {
             ],
         );
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A worker on work item 1298, whose branches match `^wi-1298-…`.
+    fn worker_on_1298() -> SessionPolicy {
+        SessionPolicy {
+            session_role: Some("worker".into()),
+            branch_pattern: Some("^wi-1298-[a-z0-9-]+$".into()),
+            landing_mains: vec!["main".into(), "integrate/vogt-next".into()],
+            open_pr_allowed: Some(false),
+            ..SessionPolicy::default()
+        }
+    }
+
+    /// Whether `command`, run by a session with `policy` in `cwd`, is refused.
+    fn refused(policy: &SessionPolicy, command: &str, cwd: &Path) -> bool {
+        check(policy, command, cwd).is_some()
+    }
+
+    #[test]
+    fn a_worker_pushes_only_its_own_branch() {
+        let cwd = cwd();
+        let worker = worker_on_1298();
+        let cases = [
+            ("git push origin wi-1298-x", false),
+            ("git push origin wi-1299-x", true),
+            ("git push --force origin wi-1298-x", true),
+            ("git push -f origin wi-1298-x", true),
+            ("git push --force-with-lease origin wi-1298-x", true),
+            ("git push -uf origin wi-1298-x", true),
+            ("git push origin +wi-1298-x", true),
+            ("git push --mirror origin", true),
+            ("git push --all origin", true),
+            ("git push --tags origin", true),
+            ("git push origin :wi-1298-x", true),
+            ("git push --delete origin wi-1298-x", true),
+            ("git push origin HEAD:integrate/vogt-next", true),
+            ("git push origin wi-1298-x:main", true),
+            ("git push origin wi-1298-x:wi-1298-y", false),
+            ("git -C ../other push origin wi-1299-x", true),
+            ("bash -c \"git push --force origin wi-1298-x\"", true),
+            ("bash -c \"git push origin wi-1298-x\"", false),
+            ("git status && git push origin wi-1298-x", false),
+            ("git status && git push origin wi-1299-x", true),
+        ];
+        for (command, want) in cases {
+            assert_eq!(
+                refused(&worker, command, &cwd),
+                want,
+                "worker on WI-1298: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_worker_pushing_the_current_branch_is_judged_by_it() {
+        let worker = worker_on_1298();
+        let own = repo("wi-1298-x");
+        let other = repo("wi-1299-x");
+        assert!(!refused(&worker, "git push origin", &own));
+        assert!(!refused(&worker, "git push origin HEAD", &own));
+        assert!(refused(&worker, "git push origin", &other));
+        assert!(refused(&worker, "git push origin HEAD", &other));
+    }
+
+    #[test]
+    fn a_worker_may_not_open_a_pull_request_when_the_project_lands_by_push() {
+        let cwd = cwd();
+        let closed = worker_on_1298();
+        assert!(refused(&closed, "gh pr create --title t", &cwd));
+        assert!(refused(&closed, "bash -c \"gh pr create --fill\"", &cwd));
+        let open = SessionPolicy {
+            open_pr_allowed: Some(true),
+            ..worker_on_1298()
+        };
+        assert!(!refused(&open, "gh pr create --title t", &cwd));
+        let unstated = SessionPolicy {
+            open_pr_allowed: None,
+            ..worker_on_1298()
+        };
+        assert!(!refused(&unstated, "gh pr create --title t", &cwd));
+    }
+
+    #[test]
+    fn an_oversight_session_and_an_unclassified_one_are_not_workers() {
+        let cwd = cwd();
+        let oversight = SessionPolicy {
+            session_role: Some("oversight".into()),
+            ..worker_on_1298()
+        };
+        assert!(!refused(
+            &oversight,
+            "git push origin integrate/vogt-next",
+            &cwd
+        ));
+        assert!(!refused(&oversight, "gh pr create --title t", &cwd));
+        let unclassified = SessionPolicy {
+            session_role: None,
+            ..worker_on_1298()
+        };
+        assert!(!refused(
+            &unclassified,
+            "git push --force origin anything",
+            &cwd
+        ));
+    }
+
+    #[test]
+    fn a_policy_without_a_branch_pattern_leaves_pushes_alone() {
+        let cwd = cwd();
+        let no_rules = SessionPolicy {
+            branch_pattern: None,
+            open_pr_allowed: None,
+            ..worker_on_1298()
+        };
+        assert!(!refused(
+            &no_rules,
+            "git push --force origin anything",
+            &cwd
+        ));
+        assert!(!refused(&no_rules, "gh pr create --title t", &cwd));
+    }
+
+    #[test]
+    fn a_pattern_that_does_not_compile_refuses_the_push() {
+        let broken = SessionPolicy {
+            branch_pattern: Some("^wi-(".into()),
+            ..worker_on_1298()
+        };
+        assert!(refused(&broken, "git push origin wi-1298-x", &cwd()));
+    }
+
+    #[test]
+    fn the_worker_reason_names_the_rule_and_the_pattern() {
+        let reason = check(&worker_on_1298(), "git push origin wi-1299-x", &cwd()).unwrap();
+        assert!(reason.contains("only its own branch"), "{reason}");
+        assert!(reason.contains("^wi-1298-[a-z0-9-]+$"), "{reason}");
     }
 }
