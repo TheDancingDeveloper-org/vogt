@@ -1770,6 +1770,87 @@ async fn create_list_and_kill_session() {
     assert_eq!(del.status(), StatusCode::OK);
 }
 
+/// WI-3976: the registry applies the Haiku window to the command it actually
+/// spawns, not only in the pure helper. A stub named `codex` prints its argv;
+/// an Opus-class model must keep the global window and get neither override.
+#[tokio::test]
+async fn a_codex_session_registry_applies_the_haiku_window_and_not_to_opus() {
+    let (base, _h) = boot().await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let stub = dir.path().join("codex");
+    // Write the argv to a file rather than scraping the screen: a session's
+    // grid is 24 rows, and a longer argv scrolls the first lines away.
+    std::fs::write(
+        &stub,
+        "#!/bin/sh\nout=\"$(dirname \"$0\")/argv.txt\"\n: > \"$out\"\n\
+         for a in \"$@\"; do printf '%s\\n' \"$a\" >> \"$out\"; done\nexec sleep 300\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let stub = stub.to_string_lossy().into_owned();
+    let argv_file = dir.path().join("argv.txt");
+
+    let start = |model: &'static str| {
+        let client = client.clone();
+        let base = base.clone();
+        let stub = stub.clone();
+        async move {
+            let created: Value = client
+                .post(format!("{base}/api/sessions"))
+                .json(&json!({
+                    "name": format!("codex-{model}"),
+                    "command": [stub, "-m", model],
+                }))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            created["id"].as_str().unwrap().to_string()
+        }
+    };
+    let wait_for_argv = |needle: &'static str| {
+        let argv_file = argv_file.clone();
+        async move {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                let text = std::fs::read_to_string(&argv_file).unwrap_or_default();
+                if text.contains(needle) {
+                    break text;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "session never printed {needle:?}: {text}"
+                );
+                tokio::time::sleep(Duration::from_millis(40)).await;
+            }
+        }
+    };
+
+    let haiku = start("claude-org-haiku").await;
+    let text = wait_for_argv("model_auto_compact_token_limit=170000").await;
+    assert!(text.contains("model_context_window=200000"), "{text}");
+    let _ = client
+        .delete(format!("{base}/api/sessions/{haiku}"))
+        .send()
+        .await;
+
+    let opus = start("claude-org-opus-low").await;
+    let text = wait_for_argv("claude-org-opus-low").await;
+    assert!(!text.contains("model_context_window="), "{text}");
+    assert!(!text.contains("model_auto_compact_token_limit="), "{text}");
+
+    let _ = client
+        .delete(format!("{base}/api/sessions/{opus}"))
+        .send()
+        .await;
+}
+
 #[tokio::test]
 async fn rename_session() {
     let (base, _h) = boot().await;
