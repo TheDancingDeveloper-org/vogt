@@ -836,6 +836,14 @@ than these routes.
   the agent's "blocked on a person" report, which rides on the summary and
   screen as `blocked`, publishes a `session-blocked` event and (when set)
   sends a push. Cleared when the session exits. Requires `sessions`.
+  The engine also clears it on its own (WI-1314), publishing the same
+  `session-blocked` event with `blocked` null, when a turn ends that dealt
+  with it: a turn begun after `/input` (or a person's typed keys on the
+  WebSocket, not terminal control replies) arrived after the report; the
+  turn an `/answer` to the session's dialog resumed; or a turn begun after
+  the report that ends with `AUTOPILOT: DONE` on screen. The engine's own
+  writes (autopilot nudge, budget warning, hibernate resume, task steering)
+  never count, and output nobody asked for leaves the report standing.
   A resting session whose own recent output names a provider refusal — an
   `Insufficient Balance` / `insufficient_quota` message, a `402`, `429` or
   `5xx` provider error, `Reconnecting N/5`, `exceeded retry limit`, or
@@ -2390,7 +2398,14 @@ engine id (WI-912; the design is `docs/design/session-hibernation.md`).
   session that has had no input or output for that long.
   `ENGINE_HIBERNATE_MEMAVAILABLE_BELOW` (`2GiB`, `512M`, or bytes)
   hibernates the quietest eligible session while the pod's available memory
-  is below it, one session per minute. Available memory is the cgroup
+  is below it, one session per minute. `ENGINE_HIBERNATE_DONE_AFTER` (off by
+  default; `10m` recommended) hibernates a session, trigger `done`, whose
+  agent declared itself done (`AUTOPILOT: DONE` or a `result` report) at least
+  that long ago with no input written to it since; an oversight session is
+  never taken this way, and autopilot does not exempt it. The change reads
+  `hibernated (done)` in `session_changes`. A blocked report a later turn
+  dealt with is cleared by the engine without a model turn (WI-1314, see
+  Blocked reports). Available memory is the cgroup
   `memory.max` minus `memory.current` when the pod has a limit, otherwise
   (and never more than) the host's `MemAvailable`. Both settings keep every
   exemption, and the watcher logs each one:
