@@ -243,6 +243,7 @@ mod tests {
             session_ref: Some("ses_TEST".into()),
             work_item: Some("WI-3986".into()),
             budget: None,
+            oversight: false,
         };
         let credential = HostGraftCredential::provision(
             provider.clone(),
