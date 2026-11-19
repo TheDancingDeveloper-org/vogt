@@ -72,22 +72,6 @@ impl AccountPool {
         })
     }
 
-    /// Rebuild the reservation of a session which was live when the engine
-    /// was restarted.  Unlike `reserve`, this preserves the recorded
-    /// assignment.  The slot is owned by the returned lease, so it can only be
-    /// taken once and is returned when the lease is dropped or released; there
-    /// is no way to hold a restored slot without a lease to give it back.
-    pub fn restore(self: &Arc<Self>, account: Option<&str>) -> Option<AccountLease> {
-        let account = account?;
-        let mut counts = self.counts.lock().ok()?;
-        let count = counts.get_mut(account)?;
-        *count += 1;
-        Some(AccountLease {
-            pool: Arc::clone(self),
-            account: Some(account.to_string()),
-            released: AtomicBool::new(false),
-        })
-    }
     fn release(&self, account: Option<&str>) {
         if let Some(account) = account {
             if let Ok(mut counts) = self.counts.lock() {

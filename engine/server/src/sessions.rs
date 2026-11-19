@@ -549,14 +549,8 @@ impl SessionRegistry {
             cfg.agent_onboarding.account_concurrency_cap,
         ));
         let records = Arc::new(DashMap::new());
+        recover_records(&cfg.state_dir, history.as_deref(), &records);
         let account_leases = Arc::new(DashMap::new());
-        recover_records(
-            &cfg.state_dir,
-            history.as_deref(),
-            &records,
-            &account_pool,
-            &account_leases,
-        );
         Self {
             cfg,
             bus,
@@ -1691,19 +1685,12 @@ impl SessionRegistry {
             let should_reserve =
                 matches!(creating, Creating::Fresh(_)) || matches!(creating, Creating::Wake(_));
             if matches!(creating, Creating::Wake(_)) {
-                match self.account_leases.remove(&id).map(|(_, lease)| lease) {
-                    Some(lease) => Some(lease),
-                    None => Some(Arc::new(
-                        self.account_pool
-                            .lease(account.as_deref())
-                            .map_err(|full| {
-                                ApiError::AtCapacity(format!(
-                                    "cap {}; counts {:?}",
-                                    full.cap, full.counts
-                                ))
-                            })?,
-                    )),
-                }
+                Some(wake_account_lease(
+                    &self.account_leases,
+                    &self.account_pool,
+                    id,
+                    account.as_deref(),
+                )?)
             } else if should_reserve {
                 Some(Arc::new(
                     self.account_pool
@@ -4710,6 +4697,26 @@ fn hibernated_summary(record: &Record, screen_bytes: u64) -> Option<SessionSumma
     })
 }
 
+/// The account slot a wake takes (WI-4423). A hibernated session holds no slot,
+/// so a wake leases one through the pool, pinned to the account its record
+/// names: that account's config directory is in the record's environment, so
+/// a wake never moves to another account. A lease a live process left in
+/// `account_leases` is reused. A full account refuses the wake with 429.
+fn wake_account_lease(
+    account_leases: &DashMap<Uuid, Arc<crate::account_pool::AccountLease>>,
+    account_pool: &Arc<crate::account_pool::AccountPool>,
+    id: Uuid,
+    account: Option<&str>,
+) -> crate::error::Result<Arc<crate::account_pool::AccountLease>> {
+    if let Some((_, lease)) = account_leases.remove(&id) {
+        return Ok(lease);
+    }
+    account_pool
+        .lease(account)
+        .map(Arc::new)
+        .map_err(|full| ApiError::AtCapacity(format!("cap {}; counts {:?}", full.cap, full.counts)))
+}
+
 /// Load the records left in `state_dir` and turn every one without a process
 /// — at boot that is all of them — into a hibernated session. One the engine
 /// had already hibernated keeps its trigger; one it never got to (a SIGKILL,
@@ -4724,8 +4731,6 @@ fn recover_records(
     state_dir: &std::path::Path,
     history: Option<&SessionHistory>,
     records: &DashMap<Uuid, Record>,
-    account_pool: &Arc<crate::account_pool::AccountPool>,
-    account_leases: &DashMap<Uuid, Arc<crate::account_pool::AccountLease>>,
 ) {
     let mut loaded = 0usize;
     for mut record in hibernation::load_all(state_dir) {
@@ -4746,9 +4751,6 @@ fn recover_records(
                 );
                 hibernation::remove(state_dir, id);
                 continue;
-            }
-            if let Some(lease) = account_pool.restore(record.account.as_deref()) {
-                account_leases.insert(id, Arc::new(lease));
             }
             record.hibernation = Some(Hibernation {
                 at: now_rfc3339(),
@@ -5828,6 +5830,80 @@ mod tests {
         rows.sort_by(super::session_list_order);
         let ids: Vec<u128> = rows.iter().map(|s| s.id.as_u128()).collect();
         assert_eq!(ids, vec![1, 3, 4, 5, 2]);
+    }
+}
+
+#[cfg(test)]
+mod account_lease_tests {
+    use super::*;
+    use crate::account_pool::AccountPool;
+
+    /// A record the engine had live when it stopped: a conversation to resume,
+    /// an account, and no hibernation (recovery turns it into one).
+    fn live_record(id: Uuid, account: &str, keep_awake: bool) -> crate::hibernation::Record {
+        let mut record = crate::hibernation::Record::new(
+            id,
+            format!("worker-{id}"),
+            "2026-11-19T22:00:00Z".into(),
+        );
+        record.account = Some(account.into());
+        record.keep_awake = keep_awake;
+        record.conversation = Some(vogt_engine_contract::AgentConversation {
+            agent: "claude".into(),
+            id: Uuid::new_v4().to_string(),
+        });
+        record
+    }
+
+    #[test]
+    fn recovered_sessions_hold_no_slot_until_woken() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ids = Vec::new();
+        for n in 0..12 {
+            let id = Uuid::new_v4();
+            crate::hibernation::write(dir.path(), &live_record(id, "a", n < 2)).unwrap();
+            ids.push(id);
+        }
+        let records = DashMap::new();
+        recover_records(dir.path(), None, &records);
+        let pool = Arc::new(AccountPool::new(["a".to_string()], 8));
+        let leases = DashMap::new();
+
+        // Recovered and hibernated, they take no slot: the account is empty.
+        assert_eq!(pool.counts()["a"], 0);
+        // Each wake holds its lease for the session's life, so keep them.
+        let mut held = Vec::new();
+        // Boot wakes the two pinned sessions first.
+        for id in &ids[..2] {
+            held.push(wake_account_lease(&leases, &pool, *id, Some("a")).unwrap());
+        }
+        assert_eq!(pool.counts()["a"], 2);
+        // Six further wakes succeed, filling the cap of 8.
+        for id in &ids[2..8] {
+            held.push(wake_account_lease(&leases, &pool, *id, Some("a")).unwrap());
+        }
+        assert_eq!(pool.counts()["a"], 8);
+        // The seventh further wake is refused, and the count does not move.
+        let refused = wake_account_lease(&leases, &pool, ids[8], Some("a")).unwrap_err();
+        assert!(matches!(refused, ApiError::AtCapacity(_)));
+        assert_eq!(pool.counts()["a"], 8);
+    }
+
+    #[test]
+    fn a_wake_reuses_the_recorded_account_when_it_has_room() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = Uuid::new_v4();
+        crate::hibernation::write(dir.path(), &live_record(id, "b", false)).unwrap();
+        let records = DashMap::new();
+        recover_records(dir.path(), None, &records);
+        let account = records.get(&id).unwrap().account.clone();
+        let pool = Arc::new(AccountPool::new(["a".to_string(), "b".to_string()], 1));
+        let leases = DashMap::new();
+
+        let lease = wake_account_lease(&leases, &pool, id, account.as_deref()).unwrap();
+        assert_eq!(lease.account(), Some("b"));
+        assert_eq!(pool.counts()["b"], 1);
+        assert_eq!(pool.counts()["a"], 0);
     }
 }
 
