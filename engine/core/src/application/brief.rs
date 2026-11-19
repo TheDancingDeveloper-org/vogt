@@ -188,7 +188,9 @@ fn landing_section(project: &Project, reference: &str) -> Result<Vec<String>, Vo
 }
 
 /// The landing rule, as the project stores it. Read whole, and matching the
-/// Python `LandingPolicy` the project write validates.
+/// Rust `LandingPolicy` the project write validates. Unknown fields are
+/// refused: every field the policy carries is listed here, so a field added to
+/// the policy must be added here too.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LandingFields {
@@ -203,6 +205,19 @@ struct LandingFields {
     linear_history: bool,
     #[serde(default = "default_deploy_by")]
     deploy_by: String,
+    // The core writes these back on every project write (WI-4417). The brief
+    // does not state them, so they are accepted and not rendered.
+    #[serde(default)]
+    #[allow(dead_code)]
+    initiative_bases: serde_json::Map<String, serde_json::Value>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    long_lived_branches: Vec<String>,
+    // The project's source (WI-4213), when it states one; the brief does not
+    // render it yet.
+    #[serde(default)]
+    #[allow(dead_code)]
+    source: Option<serde_json::Value>,
 }
 
 fn default_branch_pattern() -> String {
@@ -1090,6 +1105,74 @@ mod tests {
         assert_golden(
             &brief_for_project("vogt", SESSION, Some(&project)),
             "project_bare",
+        );
+    }
+
+    fn landing_rule(extra: Value) -> Value {
+        let mut rule = json!({
+            "base_branch": "main",
+            "worker_lands_by": "push_branch",
+            "merge_by": "oversight",
+            "merge_mode": "rebase",
+        });
+        rule.as_object_mut()
+            .expect("a rule is an object")
+            .extend(extra.as_object().expect("extra is an object").clone());
+        rule
+    }
+
+    #[test]
+    fn a_landing_rule_carrying_the_core_defaults_renders() {
+        // The core writes these three back on every project write (WI-4417).
+        let landing = landing_rule(json!({
+            "initiative_bases": {},
+            "long_lived_branches": [],
+            "source": null,
+        }));
+        let project = project_with(AgentPolicy {
+            landing: Some(landing),
+            ..AgentPolicy::default()
+        });
+        let lines = landing_section(&project, "WI-4420").expect("the full policy parses");
+        assert!(lines.contains(&"- **Base** `main`".to_string()));
+        assert!(lines.contains(&"- **Deploy by** operator".to_string()));
+    }
+
+    #[test]
+    fn a_landing_rule_with_an_initiative_base_and_a_graft_source_renders() {
+        let landing = landing_rule(json!({
+            "initiative_bases": {"init_rust": "rust-2"},
+            "long_lived_branches": ["rust-core"],
+            "source": {
+                "location": {"kind": "graft", "endpoint": "http://graft-dev:17888", "repo": "vogt"},
+                "ref": "rust-2",
+                "landing": "line",
+            },
+        }));
+        let project = project_with(AgentPolicy {
+            landing: Some(landing),
+            ..AgentPolicy::default()
+        });
+        let lines = landing_section(&project, "WI-4420").expect("the full policy parses");
+        assert!(lines.contains(&"- **Base** `main`".to_string()));
+        assert!(lines.contains(&"- **Lands by** push_branch".to_string()));
+    }
+
+    #[test]
+    fn a_landing_rule_with_a_field_outside_the_policy_is_still_refused() {
+        // Only the fields `LandingPolicy` carries are accepted; anything else
+        // is still a clear error, not silently dropped.
+        let landing = landing_rule(json!({"not_a_policy_field": true}));
+        let project = project_with(AgentPolicy {
+            landing: Some(landing),
+            ..AgentPolicy::default()
+        });
+        let error = landing_section(&project, "WI-4420").expect_err("unknown field refused");
+        assert!(
+            matches!(&error, VogtError::InvalidRequest(message)
+                if message.contains("unreadable landing rule")
+                    && message.contains("not_a_policy_field")),
+            "unexpected error: {error:?}"
         );
     }
 
