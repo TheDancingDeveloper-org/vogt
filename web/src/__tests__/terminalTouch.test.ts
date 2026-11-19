@@ -8,6 +8,7 @@ import {
   startTerminalFling,
   stepTerminalFling,
   moveTerminalTouch,
+  terminalCellAt,
   TERMINAL_TOUCH_INTENT_PX,
   type TerminalTouchGesture,
 } from "../terminalTouch";
@@ -158,5 +159,40 @@ describe("terminal fling (WI-2707)", () => {
     const rested = flick(-1.5);
     expect(startTerminalFling(rested.g, rested.t + 500, CELL, "normal")).toBeNull();
     expect(startTerminalFling(rested.g, rested.t, CELL, "normal", true)).toBeNull();
+  });
+});
+
+describe("terminal cell lookup for touch long-press", () => {
+  const container = { left: 10, top: 40, width: 400, height: 500 };
+
+  it("maps a point inside the screen layer to its cell", () => {
+    expect(
+      terminalCellAt({ container, screen: { left: 10, width: 400 } }, 80, 25, 10 + 4.5 * 5, 40 + 2.5 * 20),
+    ).toEqual({ column: 4, row: 2 });
+  });
+
+  it("uses the container's width when there is no screen layer", () => {
+    expect(terminalCellAt({ container, screen: null }, 40, 10, 10 + 10 * 10, 40 + 9 * 50)).toEqual({
+      column: 10,
+      row: 9,
+    });
+  });
+
+  it("uses the container's height when the screen layer reports zero height", () => {
+    // The phone layout makes `.xterm-screen` 0 high; a screen-only measurement
+    // selected nothing, so the row must come from the container.
+    const screen = { left: 10, width: 400, height: 0 };
+    expect(terminalCellAt({ container, screen }, 80, 25, 10 + 4.5 * 5, 40 + 2.5 * 20)).toEqual({
+      column: 4,
+      row: 2,
+    });
+  });
+
+  it("rejects points outside the grid and empty grids", () => {
+    expect(terminalCellAt({ container, screen: null }, 80, 25, 9, 40)).toBeNull();
+    expect(terminalCellAt({ container, screen: null }, 80, 25, 10, 39)).toBeNull();
+    expect(terminalCellAt({ container, screen: null }, 80, 25, 10 + 420, 40)).toBeNull();
+    expect(terminalCellAt({ container: { ...container, height: 0 }, screen: null }, 80, 25, 10, 40)).toBeNull();
+    expect(terminalCellAt({ container, screen: null }, 0, 25, 10, 40)).toBeNull();
   });
 });

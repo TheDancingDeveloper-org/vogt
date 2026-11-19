@@ -506,6 +506,15 @@ pub fn launch(command: Option<&[String]>, req: &LaunchRequest<'_>) -> Result<Lau
                 "tui.terminal_title=[\"agent-state\"]".to_string(),
                 "-c".to_string(),
                 "tui.animations=false".to_string(),
+                // The fullscreen transcript owns the alternate screen and
+                // turns on SGR mouse tracking. A browser terminal then sends
+                // drags to Codex instead of selecting them, so a plain drag
+                // (and a long-press on a phone) never reaches Vogt's copy
+                // path. Inline mode keeps the transcript in the normal
+                // buffer: xterm.js keeps its own scrollback and selection,
+                // and Codex never captures the mouse (WI-4391).
+                "-c".to_string(),
+                "tui.alternate_screen=\"never\"".to_string(),
             ]);
             if let Some(mcp) = req.mcp {
                 rewritten.extend(mcp.codex_args.iter().cloned());
@@ -1168,7 +1177,9 @@ mod tests {
                 "-c",
                 "tui.terminal_title=[\"agent-state\"]",
                 "-c",
-                "tui.animations=false"
+                "tui.animations=false",
+                "-c",
+                "tui.alternate_screen=\"never\""
             ])
         );
     }
@@ -1217,7 +1228,9 @@ mod tests {
                 "-c",
                 "tui.terminal_title=[\"agent-state\"]",
                 "-c",
-                "tui.animations=false"
+                "tui.animations=false",
+                "-c",
+                "tui.alternate_screen=\"never\""
             ])
         );
     }
@@ -1323,11 +1336,12 @@ mod tests {
             .unwrap()
             .command
             .unwrap();
-        // The brief stays last. Ahead of it: the default posture (WI-1143)
-        // and the two `-c` pairs that ask the fork for its `agent-state` title
-        // (WI-1145).
-        assert_eq!(codex.len(), 13);
-        assert!(codex[12].contains(BRIEF));
+        // The brief stays last. Ahead of it: the default posture (WI-1143),
+        // the `-c` pairs that ask the fork for its `agent-state` title
+        // (WI-1145), and inline mode so the browser owns selection and
+        // scrollback (WI-4391).
+        assert_eq!(codex.len(), 15);
+        assert!(codex[14].contains(BRIEF));
         assert!(codex.windows(2).any(|w| w == ["-a", "never"]));
         assert!(codex.windows(2).any(|w| w == ["-s", "danger-full-access"]));
         assert!(codex
@@ -1336,6 +1350,9 @@ mod tests {
         assert!(codex
             .windows(2)
             .any(|w| w == ["-c", "tui.animations=false"]));
+        assert!(codex
+            .windows(2)
+            .any(|w| w == ["-c", "tui.alternate_screen=\"never\""]));
 
         let opencode = launch(Some(&protected("opencode")), &with_brief())
             .unwrap()
@@ -1417,7 +1434,9 @@ mod tests {
                     "-c",
                     "tui.terminal_title=[\"agent-state\"]",
                     "-c",
-                    "tui.animations=false"
+                    "tui.animations=false",
+                    "-c",
+                    "tui.alternate_screen=\"never\""
                 ])
             ]
             .concat()
@@ -1441,7 +1460,9 @@ mod tests {
                 "-c",
                 "tui.terminal_title=[\"agent-state\"]",
                 "-c",
-                "tui.animations=false"
+                "tui.animations=false",
+                "-c",
+                "tui.alternate_screen=\"never\""
             ])
         );
         assert_eq!(
@@ -1553,6 +1574,8 @@ mod tests {
                     "tui.terminal_title=[\"agent-state\"]",
                     "-c",
                     "tui.animations=false",
+                    "-c",
+                    "tui.alternate_screen=\"never\"",
                     "--session-id",
                     &sid.to_string()
                 ])
@@ -1590,6 +1613,8 @@ mod tests {
                     "tui.terminal_title=[\"agent-state\"]",
                     "-c",
                     "tui.animations=false",
+                    "-c",
+                    "tui.alternate_screen=\"never\"",
                     "--session-id",
                     &sid.to_string()
                 ])
@@ -1715,6 +1740,8 @@ mod opencode_posture_tests {
                 "tui.terminal_title=[\"agent-state\"]",
                 "-c",
                 "tui.animations=false",
+                "-c",
+                "tui.alternate_screen=\"never\"",
             ]
         );
         assert!(got.env.is_empty(), "codex is not given claude settings");
@@ -1942,7 +1969,9 @@ mod permission_tests {
                 "-c",
                 "tui.terminal_title=[\"agent-state\"]",
                 "-c",
-                "tui.animations=false"
+                "tui.animations=false",
+                "-c",
+                "tui.alternate_screen=\"never\""
             ])
         );
         // `codex exec` rejects `-a`, so neither a default launch nor an
@@ -1975,7 +2004,9 @@ mod permission_tests {
                 "-c",
                 "tui.terminal_title=[\"agent-state\"]",
                 "-c",
-                "tui.animations=false"
+                "tui.animations=false",
+                "-c",
+                "tui.alternate_screen=\"never\""
             ])
         );
     }
