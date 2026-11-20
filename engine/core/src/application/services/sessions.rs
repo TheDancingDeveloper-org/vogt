@@ -3657,8 +3657,11 @@ where
 
 /// Python's `_started_by`: who is starting this session, from the caller's
 /// verified identity. A person is `person` with no session. A session is named
-/// by its engine id, and its kind is its engine role right now, or none when
-/// the engine cannot say. Nothing here is read from the start's parameters.
+/// by its engine id. An oversight session is `oversight` by its engine role. A
+/// worker's engine role is defaulted to `worker` for any session a person
+/// starts without one, so for a worker the kind is its own origin: `worker`
+/// only when an agent started it, else none (WI-4471). None too when the engine
+/// cannot say. Nothing here is read from the start's parameters.
 fn started_by<C, I>(
     ctx: &AppContext<C, I>,
     engine: &EngineClient,
@@ -3680,10 +3683,33 @@ where
     };
     let kind = match live.map(|session| session.role) {
         Some(role) if role == "oversight" => Some("oversight".to_string()),
-        Some(role) if role == "worker" => Some("worker".to_string()),
+        Some(role) if role == "worker" => worker_origin(ctx, &caller)?,
         _ => None,
     };
     Ok((Some(caller), kind))
+}
+
+/// `worker` when an agent started the caller session, else none (WI-4471).
+/// Read from the caller's own Vogt row: a session an oversight session or a
+/// worker started is a worker's child. A person's session, or one Vogt did not
+/// start, has no agent origin to hand on.
+fn worker_origin<C, I>(ctx: &AppContext<C, I>, caller: &str) -> Result<Option<String>, VogtError>
+where
+    C: Clock,
+    I: IdFactory,
+{
+    let row = ctx.declared.read()?.session_by_engine_id(caller)?;
+    Ok(match row {
+        Some(session)
+            if matches!(
+                session.started_by_kind.as_deref(),
+                Some("oversight") | Some("worker")
+            ) =>
+        {
+            Some("worker".to_string())
+        }
+        _ => None,
+    })
 }
 
 /// What the engine was asked to run.
