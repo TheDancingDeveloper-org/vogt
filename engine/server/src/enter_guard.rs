@@ -41,6 +41,19 @@ pub enum Clearance {
     Clear,
     Dialog,
     ReadFailed,
+    /// The session has a stranded line whose erase has not gone through, so
+    /// the composer holds text an Enter would submit. Nothing is typed.
+    Stranded,
+}
+
+/// While a session is stranded, every automated line and Enter defers until
+/// the background erase clears the composer (WI-4459 re-review). The erase
+/// itself does not defer: it is the one write that clears the mark.
+fn held_for_stranded(session: &Session) -> Option<Clearance> {
+    session
+        .stranded_input()
+        .is_some()
+        .then_some(Clearance::Stranded)
 }
 
 /// Whether any text reached the PTY before a skip. A caller that requeues a
@@ -91,7 +104,10 @@ pub(crate) async fn clearance(session: &Arc<Session>) -> Clearance {
 /// Press Enter on its own, if the screen is clear. `what` names the path for
 /// the log line, so a skip says which automated Enter it was.
 pub(crate) async fn send_enter(session: &Arc<Session>, what: &str) -> io::Result<EnterOutcome> {
-    let clear = clearance(session).await;
+    let clear = match held_for_stranded(session) {
+        Some(held) => held,
+        None => clearance(session).await,
+    };
     if clear != Clearance::Clear {
         skipped(session, what, clear);
         return Ok(EnterOutcome::Skipped(clear, Typed::Nothing));
@@ -121,7 +137,10 @@ pub(crate) async fn type_bytes_then_enter(
     typed: &[u8],
     what: &str,
 ) -> io::Result<EnterOutcome> {
-    let clear = clearance(session).await;
+    let clear = match held_for_stranded(session) {
+        Some(held) => held,
+        None => clearance(session).await,
+    };
     if clear != Clearance::Clear {
         skipped(session, what, clear);
         return Ok(EnterOutcome::Skipped(clear, Typed::Nothing));
@@ -196,6 +215,7 @@ fn skipped(session: &Session, what: &str, clear: Clearance) {
     let reason = match clear {
         Clearance::Dialog => "a permission dialog is open",
         Clearance::ReadFailed => "the screen could not be read",
+        Clearance::Stranded => "a stranded line is waiting to be erased",
         Clearance::Clear => return,
     };
     tracing::warn!(
@@ -457,5 +477,27 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(outcome, EnterOutcome::Stranded(Clearance::Dialog));
         assert_eq!(*writes.lock().unwrap(), typed);
+    }
+
+    /// WI-4459 re-review: while a session is stranded, another automated line
+    /// must not be typed onto the stranded text, and a bare Enter must not
+    /// submit it. Both defer until the erase clears the mark. Without the
+    /// stranded check the line is typed and the Enter sent.
+    #[tokio::test]
+    async fn an_automated_line_is_deferred_while_the_session_is_stranded() {
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let (session, _output) = recording_session(Arc::clone(&writes));
+        assert!(session.mark_stranded("carry on"));
+        let outcome = type_then_enter(&session, "nudge", "test").await.unwrap();
+        assert_eq!(
+            outcome,
+            EnterOutcome::Skipped(Clearance::Stranded, Typed::Nothing)
+        );
+        let outcome = send_enter(&session, "test").await.unwrap();
+        assert_eq!(
+            outcome,
+            EnterOutcome::Skipped(Clearance::Stranded, Typed::Nothing)
+        );
+        assert!(writes.lock().unwrap().is_empty());
     }
 }
