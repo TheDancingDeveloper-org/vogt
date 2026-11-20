@@ -256,6 +256,9 @@ pub struct UpdateProjectParams {
     /// Replaces the current list entirely. Leave unset to keep it; pass an empty list to collect everything.
     #[serde(default)]
     pub exclusions: Option<Vec<String>>,
+    /// MCP server names this project's worker sessions get on top of the worker set (vogt, cadastre, crw). Add-only: the worker servers are always kept. A name the host does not register is skipped with a warning, not a failed launch. Replaces the current list; leave unset to keep it, pass [] to clear it.
+    #[serde(default)]
+    pub mcp_extra: Option<Vec<String>>,
     /// Replaces the project's agent policy entirely. Leave unset to keep it. `forbidden_text` entries are regexes and must compile, and so must `landing.branch_pattern` once `{n}` stands for a number; `landing.merge_mode` is `fast_forward` or `rebase` — `merge` is refused. A pattern that does not compile is refused rather than stored.
     #[serde(default)]
     pub agent_policy: Option<AgentPolicy>,

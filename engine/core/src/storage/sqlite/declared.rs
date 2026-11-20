@@ -2010,6 +2010,13 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
                 false,
             )));
         }
+        if let Some(mcp_extra) = &update.mcp_extra {
+            set.push("mcp_extra = ?".into());
+            values.push(Box::new(crate::decisions::python_json_dumps(
+                &serde_json::json!(mcp_extra),
+                false,
+            )));
+        }
         if let Some(policy) = &update.agent_policy {
             set.push("agent_policy = ?".into());
             values.push(Box::new(
@@ -2959,6 +2966,8 @@ fn row_project(row: &Row<'_>) -> rusqlite::Result<Project> {
         write_back: row.get("write_back")?,
         link_state: row.get("link_state")?,
         exclusions: serde_json::from_str(&row.get::<_, String>("exclusions")?)
+            .map_err(|err| rusqlite::Error::InvalidColumnName(err.to_string()))?,
+        mcp_extra: serde_json::from_str(&row.get::<_, String>("mcp_extra")?)
             .map_err(|err| rusqlite::Error::InvalidColumnName(err.to_string()))?,
         trust_state: row.get("trust_state")?,
         created_at: moment(row, "created_at")?,

@@ -101,6 +101,8 @@ struct UpdateProjectParams {
     #[serde(default)]
     exclusions: Option<Vec<String>>,
     #[serde(default)]
+    mcp_extra: Option<Vec<String>>,
+    #[serde(default)]
     agent_policy: Option<crate::application::models::AgentPolicy>,
     reason: String,
 }
@@ -358,6 +360,7 @@ fn record_registration<C: Clock + 'static, I: IdFactory + 'static>(
                     .collect(),
                 Some(given) => given,
             },
+            mcp_extra: Vec::new(),
             trust_state: TrustState::Unverified,
             created_at: input.now,
             updated_at: input.now,
@@ -1414,10 +1417,54 @@ fn checked_agent_policy(
     serde_json::from_value(value).map_err(|e| VogtError::InvalidRequest(e.to_string()))
 }
 
+/// Bounds on a project's `mcp_extra` (WI-2750).
+const MCP_EXTRA_MAX: usize = 16;
+
+/// Checks the names an update gives for `mcp_extra`. Blank names are dropped
+/// later, as before; the rest must be keys the engine can address (1-64 ASCII
+/// letters, digits, `-` or `_`), and there are at most `MCP_EXTRA_MAX` of them.
+fn checked_mcp_extra(names: &[String]) -> Result<(), VogtError> {
+    let given: Vec<&str> = names
+        .iter()
+        .map(|name| name.trim())
+        .filter(|name| !name.is_empty())
+        .collect();
+    if given.len() > MCP_EXTRA_MAX {
+        return Err(VogtError::InvalidRequest(format!(
+            "mcp_extra holds at most {MCP_EXTRA_MAX} names"
+        )));
+    }
+    for name in given {
+        let valid = name.len() <= 64
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-');
+        if !valid {
+            return Err(VogtError::InvalidRequest(format!(
+                "mcp_extra name {} is not 1-64 characters of letters, digits, '-' or '_'",
+                py_repr(name)
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Trimmed, blank-free, first occurrence kept.
+fn normalised_mcp_extra(names: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for name in names.iter().map(|name| name.trim()) {
+        if !name.is_empty() && !out.iter().any(|kept| kept == name) {
+            out.push(name.to_string());
+        }
+    }
+    out
+}
+
 struct ProjectChange {
     slug: String,
     repo_url: Option<String>,
     exclusions: Option<Vec<String>>,
+    mcp_extra: Option<Vec<String>>,
     agent_policy: Option<crate::core::AgentPolicy>,
     lifecycle_state: Option<String>,
     at: crate::core::Moment,
@@ -1435,10 +1482,11 @@ fn apply_change<C: Clock + 'static, I: IdFactory + 'static>(
         if change.event == PROJECT_UPDATED_EVENT
             && change.repo_url.is_none()
             && change.exclusions.is_none()
+            && change.mcp_extra.is_none()
             && change.agent_policy.is_none()
         {
             return Err(VogtError::InvalidRequest(
-                "give --repo-url, --exclusions or --agent-policy; there is nothing else to update"
+                "give --repo-url, --exclusions, --mcp-extra or --agent-policy; there is nothing else to update"
                     .to_string(),
             ));
         }
@@ -1454,6 +1502,7 @@ fn apply_change<C: Clock + 'static, I: IdFactory + 'static>(
                 default_branch: None,
                 repo_url: change.repo_url.clone(),
                 exclusions: change.exclusions.clone(),
+                mcp_extra: change.mcp_extra.clone(),
                 agent_policy: change.agent_policy.clone(),
                 lifecycle_state: change.lifecycle_state.clone(),
                 ..ProjectUpdate::default()
@@ -1470,6 +1519,7 @@ fn apply_change<C: Clock + 'static, I: IdFactory + 'static>(
             json!({
                 "slug": project.slug,
                 "exclusions": updated.exclusions,
+                "mcp_extra": updated.mcp_extra,
                 "repo_url": updated.repo_url,
                 "agent_policy": serde_json::to_value(&updated.agent_policy).unwrap_or(Value::Null),
             })
@@ -1508,12 +1558,21 @@ fn update_project<C: Clock + 'static, I: IdFactory + 'static>(
         .as_ref()
         .map(checked_agent_policy)
         .transpose()?;
+    let mcp_extra = params
+        .mcp_extra
+        .as_deref()
+        .map(|names| -> Result<Vec<String>, VogtError> {
+            checked_mcp_extra(names)?;
+            Ok(normalised_mcp_extra(names))
+        })
+        .transpose()?;
     let updated = place_change(
         ctx,
         ProjectChange {
             slug: params.slug,
             repo_url: params.repo_url,
             exclusions: params.exclusions,
+            mcp_extra,
             agent_policy,
             lifecycle_state: None,
             at: now_of(&ctx.clock),
@@ -1536,6 +1595,7 @@ fn transition_project<C: Clock + 'static, I: IdFactory + 'static>(
             slug: params.slug,
             repo_url: None,
             exclusions: None,
+            mcp_extra: None,
             agent_policy: None,
             lifecycle_state: Some(params.to_state),
             at: now_of(&ctx.clock),
@@ -1916,6 +1976,56 @@ mod tests {
         }
         let got = get_op(&ctx, json!({"slug": "widget"})).unwrap();
         assert!(got["project"]["agent_policy"]["landing"].is_null(), "{got}");
+    }
+
+    #[test]
+    fn update_stores_mcp_extra_trimmed_blank_free_and_first_occurrence_kept() {
+        let ctx = context("local:test-user", None);
+        register_op(&ctx, registration("Widget", "/srv/widget")).unwrap();
+        let updated = update_op(
+            &ctx,
+            json!({"slug": "widget", "mcp_extra": [" grok ", "", "crw-2", "grok"], "reason": "a reason"}),
+        )
+        .unwrap();
+        assert_eq!(updated["project"]["mcp_extra"], json!(["grok", "crw-2"]));
+        let got = get_op(&ctx, json!({"slug": "widget"})).unwrap();
+        assert_eq!(
+            got["project"]["mcp_extra"],
+            json!(["grok", "crw-2"]),
+            "{got}"
+        );
+        let cleared = update_op(
+            &ctx,
+            json!({"slug": "widget", "mcp_extra": [], "reason": "a reason"}),
+        )
+        .unwrap();
+        assert_eq!(cleared["project"]["mcp_extra"], json!([]));
+    }
+
+    #[test]
+    fn update_refuses_a_bad_mcp_extra_name_or_too_many_and_stores_nothing() {
+        let ctx = context("local:test-user", None);
+        register_op(&ctx, registration("Widget", "/srv/widget")).unwrap();
+        let too_long = "x".repeat(65);
+        let too_many: Vec<String> = (0..=MCP_EXTRA_MAX).map(|n| format!("s{n}")).collect();
+        for bad in [
+            json!(["has space"]),
+            json!(["dotted.name"]),
+            json!([too_long]),
+            json!(too_many),
+        ] {
+            let error = update_op(
+                &ctx,
+                json!({"slug": "widget", "mcp_extra": bad.clone(), "reason": "a reason"}),
+            )
+            .unwrap_err();
+            assert!(
+                matches!(error, VogtError::InvalidRequest(_)),
+                "{bad}: {error}"
+            );
+        }
+        let got = get_op(&ctx, json!({"slug": "widget"})).unwrap();
+        assert_eq!(got["project"]["mcp_extra"], json!([]), "{got}");
     }
 
     #[test]

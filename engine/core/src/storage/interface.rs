@@ -160,6 +160,8 @@ pub struct ProjectUpdate {
     pub write_back: Option<String>,
     pub link_state: Option<String>,
     pub exclusions: Option<Vec<String>>,
+    /// Replaces the stored list entirely (WI-2750).
+    pub mcp_extra: Option<Vec<String>>,
     /// Replaces the stored policy entirely.
     pub agent_policy: Option<crate::core::AgentPolicy>,
     pub contract_adopted_at: Option<Moment>,
