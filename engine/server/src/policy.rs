@@ -125,6 +125,14 @@ pub fn check(policy: &SessionPolicy, command: &str, cwd: &Path) -> Option<String
     // (an oversight session, a session with no work item) is not judged here.
     if policy.session_role.as_deref() == Some("worker") {
         if let Some(pattern) = policy.branch_pattern.as_deref() {
+            // git reads its config from these variables; a worker sets none
+            // of them, so a push cannot be widened through the environment.
+            if command.contains("GIT_CONFIG") {
+                return Some(
+                    "refusing: a worker may not set git configuration through the environment"
+                        .to_string(),
+                );
+            }
             for simple in worker_commands(command) {
                 if let Some(reason) = worker_branch(policy, pattern, &simple, cwd) {
                     return Some(reason);
@@ -319,9 +327,7 @@ fn worker_branch(
 ) -> Option<String> {
     let words = command_words(simple);
     match words.first().map(|w| base(w)) {
-        Some("git") if git_subcommand(&words).as_deref() == Some("push") => {
-            worker_push(&words, pattern, policy, cwd)
-        }
+        Some("git") => worker_git(&words, pattern, policy, cwd),
         Some("gh") if gh_pr(&words) == Some("create") && policy.open_pr_allowed == Some(false) => {
             Some(
                 "refusing: a worker does not open pull requests; it lands its branch and stops"
@@ -332,8 +338,80 @@ fn worker_branch(
     }
 }
 
-/// A `git push` by a worker: no force, no deletion, no mirror or bulk push,
-/// and every ref it names must be the worker's own branch.
+/// A git command by a worker. Anything that can widen what a push sends is
+/// refused here: a `-c` or `--config-env` setting of a push key, a `git
+/// config` write of one, and a `git remote` mirror. The push itself is
+/// judged by [`worker_push`].
+fn worker_git(
+    words: &[String],
+    pattern: &str,
+    policy: &SessionPolicy,
+    cwd: &Path,
+) -> Option<String> {
+    if command_line_config(words)
+        .iter()
+        .any(|key| widens_push(key))
+    {
+        return Some(
+            "refusing: a worker may not set git push configuration on the command line".to_string(),
+        );
+    }
+    match git_subcommand(words).as_deref() {
+        Some("push") => worker_push(words, pattern, policy, cwd),
+        Some("config")
+            if git_args(words)
+                .iter()
+                .skip(1)
+                .any(|arg| widens_push(&arg.to_ascii_lowercase())) =>
+        {
+            Some("refusing: a worker may not change git push configuration".to_string())
+        }
+        Some("remote")
+            if words
+                .iter()
+                .any(|w| w == "--mirror" || w.starts_with("--mirror=")) =>
+        {
+            Some("refusing: a worker may not add a mirror remote".to_string())
+        }
+        _ => None,
+    }
+}
+
+/// The keys `-c key=value`, `-ckey=value` and `--config-env[=]key=ENV` set
+/// anywhere on the git command line, lowercased.
+fn command_line_config(words: &[String]) -> Vec<String> {
+    let mut keys = Vec::new();
+    let mut iter = words.iter().map(String::as_str).skip(1);
+    while let Some(word) = iter.next() {
+        let setting = if word == "-c" || word == "--config-env" {
+            iter.next()
+        } else if let Some(rest) = word.strip_prefix("--config-env=") {
+            Some(rest)
+        } else {
+            word.strip_prefix("-c").filter(|rest| !rest.is_empty())
+        };
+        if let Some(setting) = setting {
+            let key = setting.split('=').next().unwrap_or(setting);
+            keys.push(key.to_ascii_lowercase());
+        }
+    }
+    keys
+}
+
+/// Whether a git config key (lowercased) changes which refs a push sends or
+/// whether it is a mirror: `push.*`, `remote.pushdefault`, `remote.*.push`,
+/// `remote.*.mirror`, and the `*.pushremote` that picks the remote.
+fn widens_push(key: &str) -> bool {
+    key.starts_with("push.")
+        || key == "remote.pushdefault"
+        || key.ends_with(".pushremote")
+        || (key.starts_with("remote.") && (key.ends_with(".push") || key.ends_with(".mirror")))
+}
+
+/// A `git push` by a worker. Explicit refspecs must each name the worker's
+/// own branch. With none, git sends the remote's configured push refspecs or,
+/// failing those, the current branch; both are checked here, and so is a
+/// configured mirror.
 fn worker_push(
     words: &[String],
     pattern: &str,
@@ -342,7 +420,7 @@ fn worker_push(
 ) -> Option<String> {
     let args = git_args(words);
     let mut refs = Vec::new();
-    let mut seen_remote = false;
+    let mut named_remote: Option<String> = None;
     for arg in args.iter().skip(1) {
         if arg == "--" {
             continue;
@@ -370,43 +448,129 @@ fn worker_push(
             }
             continue;
         }
-        if !seen_remote && !arg.contains(':') && !arg.starts_with('+') {
-            seen_remote = true;
+        if named_remote.is_none() && refs.is_empty() && !arg.contains(':') && !arg.starts_with('+')
+        {
+            named_remote = Some(arg.clone());
             continue;
-        }
-        if arg.starts_with('+') {
-            return Some("refusing: a worker may not force-push".to_string());
-        }
-        if arg.starts_with(':') || arg.ends_with(':') {
-            return Some("refusing: a worker may not delete a remote branch".to_string());
         }
         refs.push(arg.clone());
     }
     let dir = git_dir(words, cwd);
     let current = current_branch(&dir);
-    if refs.is_empty() {
+    let remote = push_remote(&dir, current.as_deref(), named_remote.as_deref());
+    if let Some(remote) = &remote {
+        if config_mirror(&dir, remote) {
+            return Some(
+                "refusing: a worker may not push a mirror (remote.*.mirror is set)".to_string(),
+            );
+        }
+    }
+    if !refs.is_empty() {
+        return refs
+            .iter()
+            .find_map(|r| worker_refspec(r, current.as_deref(), pattern, policy));
+    }
+    if let Some(remote) = &remote {
+        let key = format!("remote.{remote}.push");
+        let configured = git_lines(&dir, &["config", "--get-all", &key]);
+        if !configured.is_empty() {
+            return configured
+                .iter()
+                .find_map(|r| worker_refspec(r, current.as_deref(), pattern, policy));
+        }
+    }
+    if git_line(&dir, &["config", "--get", "push.default"]).as_deref() == Some("matching") {
+        return Some(
+            "refusing: a worker may not push with push.default=matching, which pushes every matching branch"
+                .to_string(),
+        );
+    }
+    match current {
+        Some(branch) => worker_ref(&branch, pattern, policy),
+        None => Some(format!(
+            "refusing: a worker pushes only its own branch (pattern {pattern}), and the current branch is unknown"
+        )),
+    }
+}
+
+/// The remote a push with no refspec goes to, as git picks it: the branch's
+/// `pushRemote`, then `remote.pushDefault`, then the branch's remote, then
+/// `origin`. A named remote wins. `None` when the push names a URL, which
+/// has no configured refspecs or mirror.
+fn push_remote(dir: &Path, current: Option<&str>, named: Option<&str>) -> Option<String> {
+    if let Some(named) = named {
+        let is_url = named.contains("://") || named.contains(':') || named.starts_with(['/', '.']);
+        return (!is_url).then(|| named.to_string());
+    }
+    if let Some(branch) = current {
+        let key = format!("branch.{branch}.pushremote");
+        if let Some(remote) = git_line(dir, &["config", "--get", &key]) {
+            return Some(remote);
+        }
+    }
+    if let Some(remote) = git_line(dir, &["config", "--get", "remote.pushDefault"]) {
+        return Some(remote);
+    }
+    if let Some(branch) = current {
+        let key = format!("branch.{branch}.remote");
+        if let Some(remote) = git_line(dir, &["config", "--get", &key]) {
+            return Some(remote);
+        }
+    }
+    Some("origin".to_string())
+}
+
+/// Whether `remote.<name>.mirror` makes a push a mirror. The fetch-only and
+/// false spellings do not; any other value does.
+fn config_mirror(dir: &Path, remote: &str) -> bool {
+    let key = format!("remote.{remote}.mirror");
+    git_line(dir, &["config", "--get", &key]).is_some_and(|value| {
+        !matches!(
+            value.to_ascii_lowercase().as_str(),
+            "fetch" | "false" | "no" | "off" | "0"
+        )
+    })
+}
+
+/// The lines `git -C dir <args>` prints, empty when it prints none.
+fn git_lines(dir: &Path, args: &[&str]) -> Vec<String> {
+    git_output(dir, args, BRANCH_LOOKUP_TIMEOUT)
+        .map(|out| {
+            out.lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Whether a worker may send one refspec as pushed: no force (`+`), no
+/// deletion (`:dst`), and a destination that is its own branch. `HEAD` and
+/// `@` name the current branch.
+fn worker_refspec(
+    refspec: &str,
+    current: Option<&str>,
+    pattern: &str,
+    policy: &SessionPolicy,
+) -> Option<String> {
+    if refspec.starts_with('+') {
+        return Some("refusing: a worker may not force-push".to_string());
+    }
+    if refspec.starts_with(':') || refspec.ends_with(':') {
+        return Some("refusing: a worker may not delete a remote branch".to_string());
+    }
+    let named = refspec.split_once(':').map_or(refspec, |(_, dst)| dst);
+    let named = named.strip_prefix("refs/heads/").unwrap_or(named);
+    if named == "HEAD" || named == "@" {
         return match current {
-            Some(branch) => worker_ref(&branch, pattern, policy),
+            Some(branch) => worker_ref(branch, pattern, policy),
             None => Some(format!(
                 "refusing: a worker pushes only its own branch (pattern {pattern}), and the current branch is unknown"
             )),
         };
     }
-    refs.into_iter().find_map(|r| {
-        // The destination is the name the remote gets; with no `:`, the
-        // source is also the destination. `HEAD` and `@` are the current branch.
-        let named = r.split_once(':').map_or(r.as_str(), |(_, dst)| dst);
-        let named = named.strip_prefix("refs/heads/").unwrap_or(named);
-        if named == "HEAD" || named == "@" {
-            return match current.as_deref() {
-                Some(branch) => worker_ref(branch, pattern, policy),
-                None => Some(format!(
-                    "refusing: a worker pushes only its own branch (pattern {pattern}), and the current branch is unknown"
-                )),
-            };
-        }
-        worker_ref(named, pattern, policy)
-    })
+    worker_ref(named, pattern, policy)
 }
 
 /// Whether a worker may push to `branch`: never a landing branch, and only a
@@ -5264,5 +5428,126 @@ mod tests {
         let reason = check(&worker_on_1298(), "git push origin wi-1299-x", &cwd()).unwrap();
         assert!(reason.contains("only its own branch"), "{reason}");
         assert!(reason.contains("^wi-1298-[a-z0-9-]+$"), "{reason}");
+    }
+
+    /// A repository on `branch` whose git config holds `settings`, in a
+    /// directory of its own (`tag`), so tests that run in parallel do not
+    /// share one.
+    fn config_repo(tag: &str, branch: &str, settings: &[(&str, &str)]) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("vogt-policy-cfg-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut runs = vec![vec![
+            "init".to_string(),
+            "-q".into(),
+            "-b".into(),
+            branch.into(),
+        ]];
+        for (key, value) in settings {
+            runs.push(vec!["config".into(), (*key).into(), (*value).into()]);
+        }
+        // A commit, so the branch is born and `rev-parse` names it.
+        runs.push(vec![
+            "commit".into(),
+            "-q".into(),
+            "--allow-empty".into(),
+            "-m".into(),
+            "init".into(),
+        ]);
+        for args in runs {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&dir)
+                .args(&args)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@example.com")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@example.com")
+                .status()
+                .unwrap();
+            assert!(status.success(), "{args:?}");
+        }
+        dir
+    }
+
+    #[test]
+    fn a_worker_cannot_widen_its_push_through_git_config_on_the_command_line() {
+        let dir = config_repo("cmdline", "wi-1298-x", &[]);
+        let worker = worker_on_1298();
+        for command in [
+            "git -c remote.origin.push=+HEAD:refs/heads/main push origin",
+            "git -c remote.origin.push=+HEAD:refs/heads/main push",
+            "git -c remote.origin.mirror=true push origin",
+            "git -c push.default=matching push origin",
+            "git --config-env=remote.origin.push=PUSHSPEC push origin",
+            "git --config-env remote.origin.mirror=MIRROR push origin",
+            "git -cremote.origin.mirror=true push origin",
+            "git -c Remote.Origin.Push=+HEAD:refs/heads/main push origin",
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.push git push origin",
+            "export GIT_CONFIG_PARAMETERS=x; git push origin wi-1298-x",
+        ] {
+            assert!(refused(&worker, command, &dir), "should refuse: {command}");
+        }
+        for command in [
+            "git -c user.name=x push origin wi-1298-x",
+            "git -c user.name=x push origin",
+        ] {
+            assert!(!refused(&worker, command, &dir), "should allow: {command}");
+        }
+    }
+
+    #[test]
+    fn a_worker_cannot_widen_its_push_by_writing_git_config() {
+        let dir = config_repo("writes", "wi-1298-x", &[]);
+        let worker = worker_on_1298();
+        for command in [
+            "git config remote.origin.push +HEAD:refs/heads/main",
+            "git config --add remote.origin.mirror true",
+            "git config push.default matching",
+            "git config --unset remote.origin.push",
+            "git -C ../other config remote.origin.mirror true",
+            "git remote add --mirror=push up https://example.invalid/r.git",
+        ] {
+            assert!(refused(&worker, command, &dir), "should refuse: {command}");
+        }
+        assert!(!refused(&worker, "git config --get user.name", &dir));
+    }
+
+    #[test]
+    fn a_plain_push_reads_the_remotes_configured_refspecs_and_mirror_flag() {
+        let worker = worker_on_1298();
+        let mirror = config_repo("mirror", "wi-1298-x", &[("remote.origin.mirror", "true")]);
+        assert!(refused(&worker, "git push origin", &mirror));
+        assert!(refused(&worker, "git push", &mirror));
+        let refspec = config_repo(
+            "refspec",
+            "wi-1298-x",
+            &[("remote.origin.push", "+HEAD:refs/heads/main")],
+        );
+        assert!(refused(&worker, "git push origin", &refspec));
+        assert!(refused(&worker, "git push", &refspec));
+        let default_remote = config_repo(
+            "pushdefault",
+            "wi-1298-x",
+            &[
+                ("remote.pushDefault", "origin"),
+                ("remote.origin.push", "+HEAD:refs/heads/main"),
+            ],
+        );
+        assert!(refused(&worker, "git push", &default_remote));
+        let matching = config_repo("matching", "wi-1298-x", &[("push.default", "matching")]);
+        assert!(refused(&worker, "git push origin", &matching));
+        let own = config_repo(
+            "own",
+            "wi-1298-x",
+            &[("remote.origin.push", "HEAD:refs/heads/wi-1298-x")],
+        );
+        assert!(!refused(&worker, "git push origin", &own));
+        let plain = config_repo("plain", "wi-1298-x", &[]);
+        assert!(!refused(&worker, "git push origin", &plain));
+        // An explicit refspec is what git pushes, whatever the remote's
+        // configured refspec says, so the configured one is not read here.
+        assert!(!refused(&worker, "git push origin wi-1298-x", &refspec));
     }
 }
