@@ -614,6 +614,11 @@ fn required_capability(method: &Method, path: &str) -> Option<TokenCapability> {
     if *method == Method::GET && is_workspace_read(path) {
         return Some(TokenCapability::Sessions);
     }
+    // Changing which sessions the watcher hibernates (WI-4457) is a session
+    // decision; reading the policy is not.
+    if path == "/api/hibernation/policy" && *method != Method::GET {
+        return Some(TokenCapability::Sessions);
+    }
     if path.starts_with("/api/agent-clis/") && *method == Method::POST {
         return Some(TokenCapability::AgentClisWrite);
     }

@@ -55,7 +55,8 @@ use std::{sync::Arc, time::Duration};
 use uuid::Uuid;
 use vogt_engine_contract::{ActivityState, HibernateTrigger, SessionRole, WaitUntil, WakeRequest};
 
-use crate::{app::AppState, hibernation, pty::Session, sessions::SessionRegistry};
+use crate::{app::AppState, error::ApiError, hibernation, pty::Session, sessions::SessionRegistry};
+use axum::{extract::State, Json};
 
 /// The deployment's hibernation policy. The default is off.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -223,7 +224,8 @@ fn host_mem_available() -> Option<u64> {
 }
 
 /// A session policy may hibernate: its id, how long it has been quiet,
-/// whether the idle trigger must leave it alone (on autopilot), and how long
+/// whether the idle trigger must leave it alone (on autopilot, or an
+/// oversight session, WI-4457), and how long
 /// ago it declared itself done when the done trigger may take it (no input
 /// since, not an overseer).
 pub type Candidate = (Uuid, Duration, bool, Option<Duration>);
@@ -293,18 +295,193 @@ pub fn choose(
     chosen
 }
 
-/// Run the policy every minute, when a deployment configured one.
-pub fn spawn_watcher(state: Arc<AppState>) {
-    let policy = state.config.hibernation.clone();
-    if policy.is_off() {
-        return;
+/// The policy the watcher reads on every tick, changeable while the engine
+/// runs (WI-4457). It starts from the boot configuration, with any overrides
+/// saved by an earlier `PUT` laid over it, so a change made live survives a
+/// restart. The watcher re-reads it every minute, so a change takes effect on
+/// the next sweep with no restart.
+#[derive(Debug)]
+pub struct LivePolicy {
+    current: std::sync::RwLock<Policy>,
+    /// Where an accepted change is saved; `None` keeps it in memory only.
+    path: Option<std::path::PathBuf>,
+}
+
+impl LivePolicy {
+    /// Start from `boot`, with the overrides saved at `path` laid over it.
+    /// A saved file that cannot be read or parsed is logged and ignored: the
+    /// boot policy still applies rather than the engine refusing to start.
+    pub fn load(boot: Policy, path: Option<std::path::PathBuf>) -> Self {
+        let mut policy = boot;
+        if let Some(path) = path.as_deref() {
+            match std::fs::read_to_string(path) {
+                Ok(raw) => match serde_json::from_str::<serde_json::Value>(&raw)
+                    .map_err(|e| e.to_string())
+                    .and_then(|v| apply_patch(&policy, &v))
+                {
+                    Ok(saved) => policy = saved,
+                    Err(e) => tracing::warn!(
+                        path = %path.display(),
+                        error = %e,
+                        "ignoring a saved hibernation policy that does not parse"
+                    ),
+                },
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "could not read the saved hibernation policy"
+                ),
+            }
+        }
+        Self {
+            current: std::sync::RwLock::new(policy),
+            path,
+        }
     }
-    tracing::info!(?policy, "session hibernation policy is on");
+
+    /// The policy as the watcher will read it on its next tick.
+    pub fn get(&self) -> Policy {
+        self.current
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// Apply a partial change (see [`apply_patch`]), save it, and make it
+    /// the policy the next tick reads. Returns the (before, after) pair. A
+    /// change that cannot be saved is refused, so it never applies in memory
+    /// only.
+    pub fn update(&self, patch: &serde_json::Value) -> Result<(Policy, Policy), ApiError> {
+        let mut current = self
+            .current
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let before = current.clone();
+        let after = apply_patch(&before, patch).map_err(ApiError::BadRequest)?;
+        if let Some(path) = self.path.as_deref() {
+            save(path, &after)?;
+        }
+        *current = after.clone();
+        Ok((before, after))
+    }
+}
+
+/// The three live keys of a policy as JSON. Durations are seconds, sizes are
+/// bytes, and an unset trigger is `null`. `live_cap` is boot-only and is not
+/// written here.
+pub fn to_json(policy: &Policy) -> serde_json::Value {
+    serde_json::json!({
+        "idle_after": policy.idle_after.map(|d| d.as_secs()),
+        "done_after": policy.done_after.map(|d| d.as_secs()),
+        "memavailable_below": policy.memavailable_below,
+    })
+}
+
+/// Lay a partial change over `base`. Only the keys present change; `null`
+/// unsets a trigger. A duration takes `10m` or a number of seconds, a size
+/// takes `2GiB` or a number of bytes. `live_cap` is boot-only, and an unknown
+/// key is refused, so a typo cannot pass silently.
+pub fn apply_patch(base: &Policy, patch: &serde_json::Value) -> Result<Policy, String> {
+    let object = patch
+        .as_object()
+        .ok_or_else(|| "the body must be a JSON object".to_string())?;
+    let mut next = base.clone();
+    for (key, value) in object {
+        match key.as_str() {
+            "idle_after" => next.idle_after = duration_field(key, value)?,
+            "done_after" => next.done_after = duration_field(key, value)?,
+            "memavailable_below" => {
+                next.memavailable_below =
+                    match value {
+                        serde_json::Value::Null => None,
+                        serde_json::Value::Number(n) => Some(
+                            n.as_u64()
+                                .filter(|b| *b > 0)
+                                .ok_or_else(|| format!("{key} must be a positive size"))?,
+                        ),
+                        serde_json::Value::String(s) => Some(parse_size(s).ok_or_else(|| {
+                            format!("{key}={s:?} is not a size like 2GiB or 512M")
+                        })?),
+                        _ => return Err(format!("{key} must be a size, a number or null")),
+                    }
+            }
+            "live_cap" => return Err(
+                "live_cap is set at boot (ENGINE_HIBERNATE_LIVE_CAP) and cannot be changed live"
+                    .into(),
+            ),
+            other => return Err(format!("unknown hibernation policy key {other:?}")),
+        }
+    }
+    Ok(next)
+}
+
+fn duration_field(key: &str, value: &serde_json::Value) -> Result<Option<Duration>, String> {
+    match value {
+        serde_json::Value::Null => Ok(None),
+        serde_json::Value::Number(n) => n
+            .as_u64()
+            .filter(|s| *s > 0)
+            .map(|s| Some(Duration::from_secs(s)))
+            .ok_or_else(|| format!("{key} must be a positive number of seconds")),
+        serde_json::Value::String(s) => parse_duration(s)
+            .map(Some)
+            .ok_or_else(|| format!("{key}={s:?} is not a duration like 10m, 1h or 600")),
+        _ => Err(format!(
+            "{key} must be a duration, a number of seconds or null"
+        )),
+    }
+}
+
+/// Save the policy atomically: a temporary file, then a rename over the old.
+fn save(path: &std::path::Path, policy: &Policy) -> Result<(), ApiError> {
+    let body = serde_json::to_vec_pretty(&to_json(policy))
+        .map_err(|e| ApiError::Internal(format!("encoding the hibernation policy: {e}")))?;
+    let tmp = path.with_extension("json.tmp");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&tmp, body)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+/// `GET /api/hibernation/policy`: the policy the watcher reads on its next tick.
+pub async fn get_policy(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    Json(to_json(&state.hibernation.get()))
+}
+
+/// `PUT /api/hibernation/policy`: change one or more live keys. The change is
+/// audited, saved, and read by the next tick. Answers with the policy after the
+/// change.
+pub async fn put_policy(
+    State(state): State<Arc<AppState>>,
+    Json(patch): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let (before, after) = state.hibernation.update(&patch)?;
+    tracing::info!(
+        target: "vogt::audit",
+        event = "hibernation.policy",
+        before = %to_json(&before),
+        after = %to_json(&after),
+        "hibernation policy changed"
+    );
+    Ok(Json(to_json(&after)))
+}
+
+/// Run the policy every minute. It is always running; a policy with no
+/// trigger on is a tick that does nothing, so a cap set later takes effect
+/// with no restart (WI-4457).
+pub fn spawn_watcher(state: Arc<AppState>) {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(TICK);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             ticker.tick().await;
+            let policy = state.hibernation.get();
+            if policy.is_off() {
+                continue;
+            }
             run_once(&state.sessions, &policy).await;
         }
     });
@@ -318,7 +495,15 @@ pub async fn run_once(registry: &SessionRegistry, policy: &Policy) {
         .live_sessions()
         .iter()
         .filter_map(|s| match exemption(registry, s) {
-            None => Some((s.id, s.output_quiet_for(), s.autopilot(), done_for(s))),
+            // Oversight is spared the idle trigger as autopilot is: it is the
+            // session that brings the others back, and it sits quiet between
+            // sweeps by design (WI-4457). Memory pressure may still take it.
+            None => Some((
+                s.id,
+                s.output_quiet_for(),
+                s.autopilot() || s.role() == SessionRole::Oversight,
+                done_for(s),
+            )),
             Some(why) => {
                 tracing::debug!(session = %s.id, reason = %why, "not hibernating");
                 None
@@ -752,5 +937,81 @@ mod tests {
             ],
             "a session is chosen once"
         );
+    }
+}
+
+#[cfg(test)]
+mod live_policy_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn mins(m: u64) -> Duration {
+        Duration::from_secs(m * 60)
+    }
+
+    #[test]
+    fn a_patch_changes_only_the_keys_it_names() {
+        let base = Policy {
+            idle_after: Some(mins(60)),
+            done_after: Some(mins(10)),
+            ..Policy::default()
+        };
+        let next = apply_patch(&base, &json!({ "done_after": "5m" })).unwrap();
+        assert_eq!(next.idle_after, Some(mins(60)), "untouched");
+        assert_eq!(next.done_after, Some(mins(5)));
+        let unset = apply_patch(&next, &json!({ "idle_after": null })).unwrap();
+        assert_eq!(unset.idle_after, None, "null unsets a trigger");
+        let sized = apply_patch(&base, &json!({ "memavailable_below": "2GiB" })).unwrap();
+        assert_eq!(sized.memavailable_below, Some(2 << 30));
+        let seconds = apply_patch(&base, &json!({ "idle_after": 90 })).unwrap();
+        assert_eq!(seconds.idle_after, Some(Duration::from_secs(90)));
+    }
+
+    #[test]
+    fn a_patch_refuses_what_the_watcher_cannot_take_live() {
+        let base = Policy::default();
+        let live_cap = apply_patch(&base, &json!({ "live_cap": 3 })).unwrap_err();
+        assert!(live_cap.contains("boot"), "{live_cap}");
+        let typo = apply_patch(&base, &json!({ "idle_aftr": "1h" })).unwrap_err();
+        assert!(typo.contains("unknown"), "{typo}");
+        assert!(apply_patch(&base, &json!({ "idle_after": "2 hours" })).is_err());
+        assert!(apply_patch(&base, &json!({ "idle_after": 0 })).is_err());
+        assert!(apply_patch(&base, &json!({ "memavailable_below": true })).is_err());
+        assert!(apply_patch(&base, &json!(["idle_after"])).is_err());
+    }
+
+    #[test]
+    fn a_saved_change_is_what_the_next_boot_starts_from() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("hibernation-policy.json");
+        let boot = Policy {
+            idle_after: Some(mins(120)),
+            ..Policy::default()
+        };
+        let live = LivePolicy::load(boot.clone(), Some(path.clone()));
+        assert_eq!(live.get(), boot, "no saved file: the boot policy");
+        let (before, after) = live.update(&json!({ "idle_after": "15m" })).unwrap();
+        assert_eq!(before.idle_after, Some(mins(120)));
+        assert_eq!(after.idle_after, Some(mins(15)));
+        assert_eq!(live.get(), after);
+
+        let reboot = LivePolicy::load(boot, Some(path));
+        assert_eq!(
+            reboot.get().idle_after,
+            Some(mins(15)),
+            "survives a restart"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_saved_policy_falls_back_to_the_boot_policy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("hibernation-policy.json");
+        std::fs::write(&path, "{ not json").unwrap();
+        let boot = Policy {
+            done_after: Some(mins(10)),
+            ..Policy::default()
+        };
+        assert_eq!(LivePolicy::load(boot.clone(), Some(path)).get(), boot);
     }
 }
