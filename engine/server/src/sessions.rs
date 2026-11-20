@@ -586,6 +586,7 @@ impl SessionRegistry {
         let secret_broker = Arc::new(
             SecretBroker::new(&cfg)
                 .with_grant_projects(cfg.agent_grant_projects.clone())
+                .with_engine_identity(crate::pod_backend::engine_identity_from_env())
                 .with_account_dirs(account_dirs)
                 .with_codex_home(cfg.codex_transcript_root.clone()),
         );

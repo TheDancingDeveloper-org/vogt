@@ -522,6 +522,15 @@ pub const DEFAULT_ENGINE_ID: &str = "vogt-engine";
 fn default_engine_id() -> String {
     DEFAULT_ENGINE_ID.into()
 }
+/// This engine's identity as the pod backend labels its pods: the sanitized
+/// `ENGINE_POD_ENGINE_ID`, or the default. Read the same way as
+/// [`PodConfig::from_lookup`], so it works when pods are not configured.
+pub fn engine_identity_from_env() -> String {
+    std::env::var("ENGINE_POD_ENGINE_ID")
+        .or_else(|_| std::env::var("VOGT_ENGINE_POD_ENGINE_ID"))
+        .map(|raw| sanitize_engine_id(raw.trim()))
+        .unwrap_or_else(|_| DEFAULT_ENGINE_ID.into())
+}
 /// Make an operator-supplied engine id a valid label value (at most 63
 /// characters of `[A-Za-z0-9._-]`, starting and ending alphanumeric); an id
 /// that leaves nothing falls back to the default.
