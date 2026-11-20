@@ -7639,6 +7639,81 @@ async fn secret_broker_hands_a_session_one_declared_secret_and_only_that() {
     assert_eq!(r.status(), 401, "revoked with the session");
 }
 
+/// WI-4406: a project named only in `ENGINE_AGENT_AUTH_SECRETS_FILE` is
+/// grantable while the file composes. A bad live edit of the file falls back
+/// to the deploy-time manifest (by design, so launches never stop), which
+/// drops that project. The 403 must then name the refusing engine by its pod
+/// identity and say why the file was ignored, not just "not open to grants".
+#[tokio::test]
+async fn a_grant_for_a_project_named_only_in_the_manifest_file_says_why_it_is_refused() {
+    const STACK: &str = "stack-secret-for-file-grants-1234567890";
+    let tmp = tempfile::tempdir().unwrap();
+    let manifest_file = tmp.path().join("agent-auth-secrets");
+    std::fs::write(&manifest_file, "FILE_VAR fileproj file-secret ondemand\n").unwrap();
+    let mut cfg = broker_config(&tmp, "STACK stackproj stack-secret\n");
+    cfg.agent_auth_secrets_file = Some(manifest_file.clone());
+    cfg.vogt_core_token = Some(STACK.into());
+    std::env::set_var("ENGINE_POD_ENGINE_ID", "wi4406-lane");
+    let (base, _state, _h) = boot_with_state(cfg).await;
+    let operator = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let core = reqwest::Client::builder()
+        .default_headers(auth_for(STACK))
+        .build()
+        .unwrap();
+    let target = create_session_id(&operator, &base, "file-worker").await;
+    let in_an_hour = (OffsetDateTime::now_utc() + time::Duration::hours(1))
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap();
+    let grant = |id: &str, var: &str| {
+        json!({
+            "grant_id": id,
+            "var": var,
+            "project_id": "fileproj",
+            "secret_name": "file-granted",
+            "uses": "ttl",
+            "expires_at": in_an_hour,
+            "reason": "the worker needs the file's project",
+        })
+    };
+
+    // While the file composes, its project is grantable.
+    let applied = core
+        .post(format!("{base}/api/sessions/{target}/grants"))
+        .json(&grant("grt_file_1", "FILE_GRANT"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(applied.status(), 200, "{:?}", applied.text().await);
+
+    // A bad edit: the file re-declares STACK, so it no longer composes.
+    std::fs::write(
+        &manifest_file,
+        "FILE_VAR fileproj file-secret ondemand\nSTACK other other-secret\n",
+    )
+    .unwrap();
+    let refused = core
+        .post(format!("{base}/api/sessions/{target}/grants"))
+        .json(&grant("grt_file_2", "FILE_GRANT_2"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), 403);
+    let body = refused.text().await.unwrap();
+    assert!(
+        body.contains("refused by engine wi4406-lane, which counts 1 grantable project(s)"),
+        "{body}"
+    );
+    assert!(
+        body.contains("ENGINE_AGENT_AUTH_SECRETS_FILE is ignored: "),
+        "{body}"
+    );
+    assert!(body.contains("declares STACK again"), "{body}");
+    std::env::remove_var("ENGINE_POD_ENGINE_ID");
+}
+
 /// WI-973: a person-approved credential grant, as the engine holds and
 /// honours it. Only vogt-core's identity may apply or revoke one; it reaches
 /// only the session it was granted to; `once` is consumed by the first fetch;
@@ -7723,7 +7798,7 @@ async fn an_approved_grant_reaches_only_its_session_until_revoked_or_expired() {
     assert_eq!(unlisted.status(), 403);
     let refusal = unlisted.text().await.unwrap();
     assert!(refusal.contains("not open to grants"), "{refusal}");
-    assert!(refusal.contains("refused by the engine at"), "{refusal}");
+    assert!(refusal.contains("refused by engine "), "{refusal}");
     // `proj` (manifest) and `extra` (grant projects): two grantable projects.
     assert!(
         refusal.contains("counts 2 grantable project(s)"),
