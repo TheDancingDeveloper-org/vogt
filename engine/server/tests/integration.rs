@@ -23,6 +23,8 @@ const TEST_TOKEN: &str = "test-token-1234567890abcdef";
 fn test_config() -> Config {
     Config {
         pod_backends_enabled: false,
+        host_placement: Default::default(),
+        session_default_backend: "local".into(),
         bind: "127.0.0.1:0".parse().unwrap(),
         token: Some(TEST_TOKEN.to_string()),
         token_mutating_request_limit_per_minute: 600,
@@ -23004,7 +23006,10 @@ sleep 2
             pod_capable: false,
         };
         let mut h = harness_cfg(false, Some(vec![template]), |cfg| {
-            cfg.vogt_core_token = Some(GRAFT_CORE_TOKEN.into())
+            cfg.vogt_core_token = Some(GRAFT_CORE_TOKEN.into());
+            // These start Vogt workers on the host, which a worker is refused
+            // unless the transition override is set (WI-4428).
+            cfg.host_placement.allow_workers = true;
         })
         .await;
         h.client = client_for(GRAFT_CORE_TOKEN);

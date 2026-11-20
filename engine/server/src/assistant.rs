@@ -3137,6 +3137,8 @@ mod tests {
             agent_grant_projects: vec![],
             session_templates: vec![],
             pod_backends_enabled: false,
+            host_placement: Default::default(),
+            session_default_backend: "local".into(),
             assistant_api_key: None,
             assistant_base_url: "http://unused.invalid".into(),
             assistant_model: "test-model".into(),
