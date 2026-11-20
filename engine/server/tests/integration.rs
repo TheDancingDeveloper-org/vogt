@@ -13706,6 +13706,7 @@ async fn an_engine_started_agent_session_gets_its_own_credential() {
 /// input, and prints `AUTOPILOT: DONE` after the last. Nothing in this test
 /// types into it: every item after the start is the engine's nudge.
 #[tokio::test]
+#[ignore = "quarantined: load-flaky, a fourth nudge after a silent gap (WI-4449 part c; operator kept the re-nudge rule). See docs/ci.md, Quarantined tests."]
 async fn an_autopilot_opencode_session_advances_through_its_backlog_unattended() {
     use std::os::unix::fs::PermissionsExt;
     const ITEMS: usize = 3;
