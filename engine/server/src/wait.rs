@@ -66,10 +66,21 @@ async fn check(session: &Arc<Session>, until: WaitUntil) -> Result<Option<Outcom
     if until != WaitUntil::Ready {
         return Ok(None);
     }
-    // These end a wait for `ready` because no amount of waiting makes the
-    // session ready: a person has to act first.
+    // A reported block ends a wait for `ready`, because a person has to act
+    // first. A permission dialog ends it at once. Any other block ends it only
+    // once the session is back at its prompt: a woken agent is still working
+    // when its block is first seen, and a wait that ended then would answer
+    // `blocked` to a caller that input still cannot go to (WI-2232).
     if session.blocked().is_some() {
-        return Ok(Some(Outcome::Blocked));
+        if matches!(session.activity(), ActivityState::AwaitingApproval) {
+            return Ok(Some(Outcome::Blocked));
+        }
+        let screen = screen::session_screen(Arc::clone(session), 0).await?;
+        let at_prompt = matches!(
+            session.activity(),
+            ActivityState::Idle | ActivityState::WaitingForInput
+        );
+        return Ok((screen.ready && at_prompt).then_some(Outcome::Blocked));
     }
     match session.activity() {
         ActivityState::AwaitingApproval => Ok(Some(Outcome::AwaitingApproval)),

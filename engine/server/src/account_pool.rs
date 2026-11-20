@@ -30,26 +30,34 @@ impl AccountPool {
             counts: Mutex::new(counts),
         }
     }
-    pub fn reserve(&self, pinned: Option<&str>) -> Result<Option<String>, AtCapacity> {
-        if self.names.is_empty() {
-            return Ok(None);
+    /// Add an account the pool did not start with, such as a profile found
+    /// under the accounts root (WI-2734), at the default cap. It is only ever
+    /// taken by name: unpinned sessions still spread over the configured names.
+    pub fn register(&self, name: &str) {
+        if let Ok(mut counts) = self.counts.lock() {
+            counts.entry(name.to_string()).or_insert(0);
         }
+    }
+
+    pub fn reserve(&self, pinned: Option<&str>) -> Result<Option<String>, AtCapacity> {
         let mut counts = self.counts.lock().expect("account pool lock poisoned");
         let selected = match pinned {
-            Some(name) if self.names.iter().any(|known| known == name) => name,
+            Some(name) if counts.contains_key(name) => name.to_string(),
             Some(_) => {
                 return Err(AtCapacity {
                     counts: counts.clone(),
                     cap: self.cap,
                 })
             }
+            None if self.names.is_empty() => return Ok(None),
             None => self
                 .names
                 .iter()
                 .min_by_key(|n| (counts[*n], n.as_str()))
-                .expect("account candidates"),
+                .expect("account candidates")
+                .clone(),
         };
-        let count = counts.get_mut(selected).expect("account count");
+        let count = counts.get_mut(&selected).expect("account count");
         if *count >= self.cap {
             return Err(AtCapacity {
                 counts: counts.clone(),
@@ -157,6 +165,19 @@ mod tests {
         drop(leases.remove(1));
         assert!(pool.lease(Some("acct1")).is_err());
         assert_eq!(pool.lease(None).unwrap().account(), Some("acct2"));
+    }
+
+    #[test]
+    fn a_registered_account_is_taken_by_name_at_the_default_cap() {
+        // WI-2734: a discovered profile is refused until registered, then it
+        // holds the same cap as a configured one, and unpinned work still
+        // spreads over the configured names only.
+        let pool = AccountPool::new(["acct1".into()], 1);
+        assert!(pool.reserve(Some("found")).is_err());
+        pool.register("found");
+        assert_eq!(pool.reserve(Some("found")).unwrap(), Some("found".into()));
+        assert!(pool.reserve(Some("found")).is_err());
+        assert_eq!(pool.reserve(None).unwrap(), Some("acct1".into()));
     }
 
     #[test]
