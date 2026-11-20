@@ -23,6 +23,14 @@ const STABLE_READS: usize = 2;
 /// Gap between two reads, so a dialog still being drawn shows up in the second.
 pub(crate) const STABLE_GAP: Duration = Duration::from_millis(200);
 
+/// Ctrl-U: delete to the start of the line, the one erase both agent TUIs
+/// read as a line kill.
+const LINE_KILL: u8 = 0x15;
+
+/// Tries to clear a stranded line before giving up, and the gap between them.
+const CLEAR_ATTEMPTS: usize = 5;
+const CLEAR_GAP: Duration = Duration::from_secs(1);
+
 /// Pause between typing a line and its Enter, so a TUI reads the Enter as a
 /// keypress rather than the tail of a paste.
 const TYPE_TO_ENTER: Duration = Duration::from_millis(300);
@@ -38,8 +46,15 @@ pub enum Clearance {
 /// What became of one automated Enter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnterOutcome {
+    /// The Enter went out.
     Sent,
+    /// The line did not go out and the composer is clean: nothing was left
+    /// behind, so the caller may requeue the line and try again.
     Skipped(Clearance),
+    /// The text was typed, the Enter was held back, and the composer could
+    /// not be cleared (a dialog stayed open). The text is still in the
+    /// composer, so the caller must not retype it.
+    Stranded(Clearance),
 }
 
 /// Read the screen [`STABLE_READS`] times, [`STABLE_GAP`] apart. Any dialog
@@ -78,14 +93,62 @@ pub(crate) async fn type_then_enter(
     line: &str,
     what: &str,
 ) -> io::Result<EnterOutcome> {
+    type_bytes_then_enter(session, line.as_bytes(), what).await
+}
+
+/// [`type_then_enter`] for bytes that are not plain text, such as a steer's
+/// cancel byte followed by its text. The bytes are written only after a clear
+/// screen. If the Enter is then held back, the typed line is erased (Ctrl-U,
+/// sent only on a clear screen, never into a dialog) and the caller gets
+/// [`EnterOutcome::Skipped`] and may requeue. If it cannot be erased, the
+/// caller gets [`EnterOutcome::Stranded`].
+pub(crate) async fn type_bytes_then_enter(
+    session: &Arc<Session>,
+    typed: &[u8],
+    what: &str,
+) -> io::Result<EnterOutcome> {
     let clear = clearance(session).await;
     if clear != Clearance::Clear {
         skipped(session, what, clear);
         return Ok(EnterOutcome::Skipped(clear));
     }
-    session.write_input(line.as_bytes())?;
+    session.write_input(typed)?;
     tokio::time::sleep(TYPE_TO_ENTER).await;
-    send_enter(session, what).await
+    match send_enter(session, what).await? {
+        EnterOutcome::Sent => Ok(EnterOutcome::Sent),
+        EnterOutcome::Skipped(reason) => {
+            if erase_line(session, what).await {
+                Ok(EnterOutcome::Skipped(reason))
+            } else {
+                Ok(EnterOutcome::Stranded(reason))
+            }
+        }
+        EnterOutcome::Stranded(reason) => Ok(EnterOutcome::Stranded(reason)),
+    }
+}
+
+/// Erase the typed line with Ctrl-U once the screen reads clear. Retries a few
+/// times, [`CLEAR_GAP`] apart, so a dialog that is answered soon does not
+/// strand the text. Returns false if the line could not be erased.
+async fn erase_line(session: &Arc<Session>, what: &str) -> bool {
+    for attempt in 0..CLEAR_ATTEMPTS {
+        if attempt > 0 {
+            tokio::time::sleep(CLEAR_GAP).await;
+        }
+        if clearance(session).await == Clearance::Clear {
+            if session.write_input(&[LINE_KILL]).is_err() {
+                break;
+            }
+            return true;
+        }
+    }
+    tracing::warn!(
+        session = %session.id,
+        what,
+        event = "enter.stranded",
+        "held back an automatic Enter and could not clear the typed line; it stays in the composer"
+    );
+    false
 }
 
 fn skipped(session: &Session, what: &str, clear: Clearance) {
@@ -272,7 +335,49 @@ pub(crate) mod tests {
             std::future::pending::<()>().await;
         });
         let outcome = type_then_enter(&session, "carry on", "test").await.unwrap();
-        assert_eq!(outcome, EnterOutcome::Skipped(Clearance::Dialog));
+        // The dialog never clears, so the line cannot be erased: it is stranded
+        // in the composer and nothing more is written.
+        assert_eq!(outcome, EnterOutcome::Stranded(Clearance::Dialog));
         assert_eq!(*writes.lock().unwrap(), b"carry on");
+    }
+
+    /// WI-4459: a dialog holds the Enter back after the text, then clears
+    /// before the erase gives up. The typed line is erased with Ctrl-U and the
+    /// caller gets `Skipped`, so it may requeue the line without a double.
+    #[tokio::test]
+    async fn a_held_back_line_is_erased_once_the_dialog_clears() {
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let (session, output) = recording_session(Arc::clone(&writes));
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(350)).await;
+            output.send(dialog_output()).unwrap();
+            tokio::time::sleep(Duration::from_millis(1100)).await;
+            output.send(b"\x1b[2J\x1b[H".to_vec()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        let outcome = type_then_enter(&session, "carry on", "test").await.unwrap();
+        assert_eq!(outcome, EnterOutcome::Skipped(Clearance::Dialog));
+        assert_eq!(*writes.lock().unwrap(), b"carry on\x15");
+    }
+
+    /// WI-4459: an orchestrator steer types its cancel byte and text through
+    /// the guard, then sends the Enter. A dialog drawn after the text holds
+    /// the Enter back. The steer used to write text and Enter in one write
+    /// with no screen check.
+    #[tokio::test]
+    async fn a_steer_enter_is_held_back_when_a_dialog_is_drawn_after_the_text() {
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let (session, output) = recording_session(Arc::clone(&writes));
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(350)).await;
+            output.send(dialog_output()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        let typed = b"\x03stop";
+        let outcome = type_bytes_then_enter(&session, typed, "orchestrator steer")
+            .await
+            .unwrap();
+        assert_eq!(outcome, EnterOutcome::Stranded(Clearance::Dialog));
+        assert_eq!(*writes.lock().unwrap(), typed);
     }
 }

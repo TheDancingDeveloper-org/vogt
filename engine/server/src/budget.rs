@@ -521,7 +521,6 @@ async fn compact(session: &Arc<Session>, bus: &EventBus, r: &Reading<'_>, settle
         r.now,
     );
     let command = session.agent().and_then(|agent| compact_command(&agent));
-    session.set_budget_soft_sent(true);
     let (level, summary) = match &command {
         Some(_) => ("compact", format!("context {n} of {limit}: compacting")),
         None => (
@@ -529,16 +528,18 @@ async fn compact(session: &Arc<Session>, bus: &EventBus, r: &Reading<'_>, settle
             format!("context {n} of {limit}: over budget, agent has no compact command"),
         ),
     };
-    bus.publish(vogt_engine_contract::ServerEvent::SessionBudget {
-        id: session.id,
-        level: level.to_string(),
-        summary: summary.clone(),
-    });
-    if let Some(command) = command {
-        match type_line(session, &command, "budget compact").await {
+    // Marked only once the command is in: a held-back line is not marked, so
+    // the next pass tries it again (WI-4459).
+    if let Some(command) = &command {
+        match type_line(session, command, "budget compact").await {
             Ok(crate::enter_guard::EnterOutcome::Sent) => {}
-            // The guard logged the dialog that held it back.
+            // The guard logged the dialog that held it back; retry next pass.
             Ok(crate::enter_guard::EnterOutcome::Skipped(_)) => return,
+            // Stranded in the composer: marked, so it is never typed again.
+            Ok(crate::enter_guard::EnterOutcome::Stranded(_)) => {
+                session.set_budget_soft_sent(true);
+                return;
+            }
             Err(e) => {
                 tracing::warn!(
                     session = %session.id,
@@ -550,6 +551,12 @@ async fn compact(session: &Arc<Session>, bus: &EventBus, r: &Reading<'_>, settle
             }
         }
     }
+    session.set_budget_soft_sent(true);
+    bus.publish(vogt_engine_contract::ServerEvent::SessionBudget {
+        id: session.id,
+        level: level.to_string(),
+        summary: summary.clone(),
+    });
     tracing::info!(
         session = %session.id,
         level = level,
@@ -640,15 +647,15 @@ pub async fn run_once(
         match action {
             Action::Leave => {}
             Action::Soft { summary } => {
-                session.set_budget_soft_sent(true);
-                bus.publish(vogt_engine_contract::ServerEvent::SessionBudget {
-                    id: session.id,
-                    level: "soft".to_string(),
-                    summary: summary.clone(),
-                });
+                // Marked only once the warning is in. A held-back warning is
+                // not marked, so it is sent again on the next pass (WI-4459).
                 match type_line(&session, &summary, "budget warning").await {
                     Ok(crate::enter_guard::EnterOutcome::Sent) => {}
                     Ok(crate::enter_guard::EnterOutcome::Skipped(_)) => continue,
+                    Ok(crate::enter_guard::EnterOutcome::Stranded(_)) => {
+                        session.set_budget_soft_sent(true);
+                        continue;
+                    }
                     Err(e) => {
                         tracing::warn!(
                             session = %session.id,
@@ -659,6 +666,12 @@ pub async fn run_once(
                         continue;
                     }
                 }
+                session.set_budget_soft_sent(true);
+                bus.publish(vogt_engine_contract::ServerEvent::SessionBudget {
+                    id: session.id,
+                    level: "soft".to_string(),
+                    summary: summary.clone(),
+                });
                 tracing::info!(
                     session = %session.id,
                     level = "soft",

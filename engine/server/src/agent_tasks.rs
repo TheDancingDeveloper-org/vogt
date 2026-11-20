@@ -4127,11 +4127,35 @@ fn spawn_run_orchestrator(
             // No gates. Drain one steer per boundary pass.
             let next = control.steer.lock().pop_front();
             if let Some(item) = next {
-                let bytes = gates::steer_delivery_bytes(&item);
-                if let Err(e) = session.write_input(&bytes) {
-                    tracing::warn!(run = %run_id, error = %e, "failed to deliver steer to PTY");
+                // WI-4459: the steer's text is typed, then its Enter is sent
+                // through the shared guard, so a dialog drawn after the text
+                // holds the Enter back. The skip is logged by the guard.
+                let typed = gates::steer_typed_bytes(&item);
+                match crate::enter_guard::type_bytes_then_enter(
+                    &session,
+                    &typed,
+                    "orchestrator steer",
+                )
+                .await
+                {
+                    Ok(crate::enter_guard::EnterOutcome::Sent) => {
+                        registry.emit_steered(run_id, &item);
+                    }
+                    // Held back and erased: the steer goes back to the front
+                    // of the queue, so it is not lost (WI-4459).
+                    Ok(crate::enter_guard::EnterOutcome::Skipped(_)) => {
+                        control.steer.lock().push_front(item);
+                        wait_a_beat(&control.notify).await;
+                    }
+                    // Stranded in the composer: not retyped, so the steer is
+                    // not reported as delivered.
+                    Ok(crate::enter_guard::EnterOutcome::Stranded(_)) => {
+                        tracing::warn!(run = %run_id, "steer stranded in the composer; not delivered");
+                    }
+                    Err(e) => {
+                        tracing::warn!(run = %run_id, error = %e, "failed to deliver steer to PTY");
+                    }
                 }
-                registry.emit_steered(run_id, &item);
                 continue;
             }
 

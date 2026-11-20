@@ -337,8 +337,12 @@ pub async fn run_once(registry: &SessionRegistry, bus: &crate::events::EventBus,
                 match nudge(&session).await {
                     Ok(EnterOutcome::Sent) => {}
                     // The guard logged why: a dialog is open, so nothing was
-                    // sent and the nudge is not counted.
+                    // sent and the nudge is not counted. Its line was erased,
+                    // so the next pass types it afresh (WI-4459).
                     Ok(EnterOutcome::Skipped(_)) => continue,
+                    // The line is stuck in the composer: not counted, and logged
+                    // by the guard. It is not retyped here.
+                    Ok(EnterOutcome::Stranded(_)) => continue,
                     Err(e) => {
                         tracing::warn!(session = %session.id, error = %e, "could not nudge an autopilot session");
                         continue;
@@ -559,7 +563,30 @@ mod nudge_tests {
             std::future::pending::<()>().await;
         });
         let outcome = type_line(&session, NUDGE, "autopilot nudge").await.unwrap();
-        assert_eq!(outcome, EnterOutcome::Skipped(Clearance::Dialog));
+        // The dialog never clears, so the typed nudge cannot be erased: it is
+        // stranded and not retyped.
+        assert_eq!(outcome, EnterOutcome::Stranded(Clearance::Dialog));
         assert_eq!(*writes.lock().unwrap(), NUDGE.as_bytes());
+    }
+
+    /// WI-4459: a nudge whose Enter a dialog held back is erased from the
+    /// composer (Ctrl-U) once the screen clears, and the outcome is `Skipped`
+    /// so the nudge is typed afresh and not stacked on the old text.
+    #[tokio::test]
+    async fn a_held_back_nudge_is_erased_once_the_dialog_clears() {
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let (session, output) = recording_session(Arc::clone(&writes));
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(350)).await;
+            output.send(dialog_output()).unwrap();
+            tokio::time::sleep(Duration::from_millis(1100)).await;
+            output.send(b"\x1b[2J\x1b[H".to_vec()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        let outcome = type_line(&session, NUDGE, "autopilot nudge").await.unwrap();
+        assert_eq!(outcome, EnterOutcome::Skipped(Clearance::Dialog));
+        let mut expected = NUDGE.as_bytes().to_vec();
+        expected.push(0x15);
+        assert_eq!(*writes.lock().unwrap(), expected);
     }
 }
