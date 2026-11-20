@@ -250,6 +250,13 @@ to its subject with `vogt_work_item` (a ref like `WI-42`) or `vogt_project` (a
 slug) so the run's findings file as observations against that subject with the
 same freshness and trust every other kind of evidence carries.
 
+An autopilot worker started on a project with no item (`session_start` with
+`project`, `autopilot: true` and a `task`, and no `work_item` or
+`from_handoff`) gets a `local_only` chore titled `Session: <name or the task's
+first line>`, with the task as its body, and is bound to it. Its ref comes back
+in the result's `work_item`, so its hand-off has an item to land on (WI-1338).
+A review, an investigation or a start without autopilot gets none.
+
 ### Fresh sessions start from the hand-off
 
 A worker starts a **fresh** session from the item's hand-off, never by resuming
