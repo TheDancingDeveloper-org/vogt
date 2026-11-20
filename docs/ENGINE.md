@@ -3825,14 +3825,20 @@ The host is a capped exception. Pods are the default for work that runs on
 behalf of a worker, and the host is kept for oversight, a person's own shell,
 agent tasks and the assistant.
 
-- **Role policy.** A Vogt-started worker or review (any session that is not
+- **Role policy.** A Vogt-started worker or review (an API start that is not
   oversight and carries a work item or its `VOGT_SESSION_ID`) asking for
   `placement=host` is refused with `409`, the reason naming the policy.
   `ENGINE_HOST_PLACEMENT_ALLOW_WORKERS=1` lifts the refusal during the
-  transition. It is off by default.
+  transition. It is off by default. A wake is not refused: a worker already
+  placed on the host wakes there and counts against the cap.
+- **Default pod.** On a deployment whose default backend is `pod`, a Vogt
+  worker or review that names no template and no placement starts in the
+  default agent pod template, and the record keeps that template name.
+  Oversight, agent tasks, a person's own shell and template-less starts stay
+  on the host, and count against the cap.
 - **No silent host.** A named template that does not resolve is a `400`. A
-  bare start (no template, no placement) on a deployment whose default backend
-  is `pod` takes the deployment's default pod template.
+  wake whose recorded template is no longer configured is a `400` that names
+  the template; it is not started without it.
 - **Cap.** `ENGINE_HOST_SESSION_CAP` (default `0`, unlimited) caps the live
   host sessions, counting shells, agent tasks, assistant starts and wakes. A
   start over the cap is refused with `429` and a body of
