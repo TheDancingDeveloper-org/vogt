@@ -598,17 +598,28 @@ impl EngineClient {
             .map(|_| EngineWaitAny::from_payload(&payload)))
     }
 
+    /// Set or clear a session's blocked report. `needs` and `boundary` are the
+    /// WI-996 escalation fields; the engine defaults them to `person` and
+    /// `other`, and they are sent on a clear too, as Python's client does.
     pub fn set_blocked(
         &self,
         session_id: &str,
         blocked: bool,
         reason: Option<&str>,
         items: &[String],
+        needs: &str,
+        boundary: &str,
     ) -> Result<Option<EngineSession>, VogtError> {
         let payload = self.call(
             &session_path(session_id, "/blocked"),
             "POST",
-            Some(&serde_json::json!({"blocked": blocked, "reason": reason, "items": items})),
+            Some(&serde_json::json!({
+                "blocked": blocked,
+                "reason": reason,
+                "items": items,
+                "needs": needs,
+                "boundary": boundary,
+            })),
             true,
             None,
         )?;
@@ -1344,6 +1355,9 @@ pub struct EngineApproval {
     pub kind: String,
     /// `(number, label, selected)` per option, in menu order.
     pub options: Vec<(i64, String, bool)>,
+    /// The dialog's escalation key, `session:permission_prompt:hash(question)`
+    /// (WI-996), computed by the engine. Empty from an older engine.
+    pub key: String,
 }
 
 impl EngineApproval {
@@ -1378,6 +1392,7 @@ impl EngineApproval {
                         .collect()
                 })
                 .unwrap_or_default(),
+            key: string_field(object, "key"),
         })
     }
 }
@@ -1389,6 +1404,14 @@ pub struct EngineBlocked {
     pub reason: String,
     pub items: Vec<String>,
     pub since: Option<String>,
+    /// Who can resolve it: `person` (the default), `overseer` or `either`
+    /// (WI-996). An unknown value is read by the caller, not here.
+    pub needs: String,
+    /// What kind of boundary it is (WI-996); `other` when the engine sent none.
+    pub boundary: String,
+    /// `session:boundary:hash(reason)`, the content key (WI-996). Absent from
+    /// an older engine.
+    pub key: Option<String>,
 }
 
 impl EngineBlocked {
@@ -1407,6 +1430,9 @@ impl EngineBlocked {
                 })
                 .unwrap_or_default(),
             since: optional_str(object.get("since")),
+            needs: optional_str(object.get("needs")).unwrap_or_else(|| "person".to_string()),
+            boundary: optional_str(object.get("boundary")).unwrap_or_else(|| "other".to_string()),
+            key: optional_str(object.get("key")),
         })
     }
 }

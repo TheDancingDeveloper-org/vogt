@@ -29,6 +29,14 @@ pub enum VogtError {
     ReportRefused(String),
     /// An engine session names no person, and one is required (WI-983).
     PersonRequired(String),
+    /// The same refusal as `PersonRequired`, handed back as an escalation
+    /// (WI-996): the prompt is in the Inbox for a person. `details` carries the
+    /// facts beside the message (`outcome`, the escalation and Inbox keys, the
+    /// recommendation) and is `code` `person_required` on the wire.
+    Escalated {
+        message: String,
+        details: serde_json::Value,
+    },
     EngineOnly(String),
     InvalidRequest(String),
     InstallClosed(String),
@@ -122,6 +130,7 @@ pub enum Forge {
 impl VogtError {
     pub fn message(&self) -> &str {
         match self {
+            Self::Escalated { message, .. } => message,
             Self::NotInitialized(m)
             | Self::AlreadyInitialized(m)
             | Self::NotFound(m)
@@ -192,7 +201,7 @@ impl VogtError {
             Self::CommentRefused(_) => "comment_refused",
             Self::LandRefused(_) => "land_refused",
             Self::ReportRefused(_) => "report_refused",
-            Self::PersonRequired(_) => "person_required",
+            Self::PersonRequired(_) | Self::Escalated { .. } => "person_required",
             Self::EngineOnly(_) => "engine_only",
             Self::InvalidRequest(_) => "invalid_request",
             Self::InstallClosed(_) => "install_closed",
@@ -273,6 +282,7 @@ impl VogtError {
             | Self::LandRefused(_)
             | Self::ReportRefused(_)
             | Self::PersonRequired(_)
+            | Self::Escalated { .. }
             | Self::EngineOnly(_) => 403,
             Self::InvalidRequest(_)
             | Self::InvalidCursor(_)

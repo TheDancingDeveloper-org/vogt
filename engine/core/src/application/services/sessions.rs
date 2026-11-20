@@ -34,6 +34,7 @@ use crate::application::brief::{self, ComposedBrief, WhyResult, WorkBrief};
 use crate::application::context::{write_of, AppContext};
 use crate::application::dispatch as dispatch_profiles;
 use crate::application::resolve;
+use crate::application::session_blocked::{self, known_or, BOUNDARIES, NEEDS};
 use crate::application::session_commit;
 use crate::application::writes::{self, audited_action, audited_write, WriteOutcome};
 use crate::auth::{self, TOKEN_ENTROPY_BYTES};
@@ -885,6 +886,13 @@ pub struct SessionBlocked {
     pub blocker: String,
     pub items: Vec<String>,
     pub since: Option<String>,
+    /// Who can resolve it: `person`, `overseer` or `either` (WI-996).
+    pub needs: &'static str,
+    /// What kind of boundary it is (WI-996).
+    pub boundary: &'static str,
+    /// The content key `session:boundary:hash(reason)` (WI-996); null from an
+    /// older engine.
+    pub key: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -1049,6 +1057,10 @@ pub struct SessionSweepRow {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub screen_tail: Vec<String>,
     pub ready: Option<bool>,
+    /// On an `approval` row: an overseer's recorded pick for the dialog it
+    /// shows, `{option, label, by, at, escalation_key}` (WI-996 E0b). Null
+    /// otherwise.
+    pub recommendation: Option<Value>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -2099,11 +2111,21 @@ where
             stall,
             summary.done_at.as_deref(),
         );
+        // The overseer's recorded pick, shown on a dialog waiting for an
+        // answer (WI-996 E0b); never chosen for the person.
+        let recommendation = match (verdict.attention.as_str(), entry.session.approval.as_ref()) {
+            ("approval", Some(approval)) if !approval.options.is_empty() => {
+                let view = ctx.declared.read()?;
+                session_blocked::dialog_recommendation(&view, &entry.session.id, approval)?
+            }
+            _ => None,
+        };
         rows.push(SessionSweepRow {
             attention: verdict.attention.as_str().to_string(),
             attention_reason: verdict.reason.clone(),
             screen_tail: entry.screen_tail.clone(),
             ready: Some(entry.ready),
+            recommendation,
             session: summary,
         });
     }
@@ -2665,7 +2687,9 @@ where
         return None;
     }
     let was = current.blocked.as_ref()?;
-    let cleared = engine.set_blocked(engine_id, false, None, &[]).ok()??;
+    let cleared = engine
+        .set_blocked(engine_id, false, None, &[], "person", "other")
+        .ok()??;
     let entity = found
         .session
         .as_ref()
@@ -2869,16 +2893,29 @@ where
     // A person answers anything; an oversight session is relayed by its
     // engine id and may answer a permission prompt (WI-2028).
     let overseer = relayed_overseer(ctx, engine, person)?;
-    let answered = engine
-        .answer_session(
-            &engine_id,
-            params.option,
-            label,
-            params.expect_question.as_deref(),
-            person,
-            overseer.as_deref(),
-        )?
-        .ok_or_else(|| {
+    let answered = match engine.answer_session(
+        &engine_id,
+        params.option,
+        label,
+        params.expect_question.as_deref(),
+        person,
+        overseer.as_deref(),
+    ) {
+        // The engine refuses an agent's answer to a permission prompt: the
+        // prompt is a person's, so the refusal comes back as an escalation.
+        Err(VogtError::PersonRequired(refused)) => {
+            return Err(escalated(
+                ctx,
+                engine,
+                &engine_id,
+                &refused,
+                (params.option, label),
+                &reason,
+            )?)
+        }
+        answered => answered?,
+    }
+    .ok_or_else(|| {
             VogtError::NotFound(format!(
                 "the engine has no session {}, or predates answering (no POST /api/sessions/{{id}}/answer)",
                 py_repr(&params.id)
@@ -2937,6 +2974,77 @@ where
         "chosen": {"number": number, "label": chosen_label, "selected": true},
         "dismissed": dismissed,
     }))
+}
+
+/// The engine's refusal of an agent's answer to a permission prompt (WI-983),
+/// handed back as an escalation (WI-996): the prompt already stands in the
+/// Inbox for a person, so the refusal names that entry and the dialog's
+/// content key, with `outcome: escalated`. The caller waits on it or reports
+/// blocked; it does not retry. The agent's pick is recorded under the dialog's
+/// key as a recommendation (E0b): shown beside the person's buttons, never
+/// chosen for them.
+///
+/// Built from the engine's read of the session. When that read fails the
+/// refusal still carries the outcome; only the keys are missing.
+fn escalated<C, I>(
+    ctx: &AppContext<C, I>,
+    engine: &EngineClient,
+    engine_id: &str,
+    refused: &str,
+    pick: (Option<i64>, Option<&str>),
+    reason: &str,
+) -> Result<VogtError, VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let mut details = json!({
+        "outcome": "escalated",
+        "needs": "person",
+        "boundary": "permission_prompt",
+    });
+    let seen = match engine.get_session(engine_id) {
+        Ok(seen) => seen,
+        Err(VogtError::EngineUnavailable(_) | VogtError::NotFound(_)) => None,
+        Err(error) => return Err(error),
+    };
+    let mut inbox_key = None;
+    let mut recommended = false;
+    if let Some(seen) = seen.as_ref() {
+        details["session_id"] = json!(seen.id);
+        let key = match seen.approval.as_ref() {
+            None => session_blocked::approval_key(&seen.id, ""),
+            Some(approval) => {
+                session_blocked::dialog_key(&seen.id, &approval.key, &approval.question)
+            }
+        };
+        details["escalation_key"] = json!(key);
+        if seen.activity == "awaiting-approval" {
+            let inbox = format!(
+                "agent:session:{}:awaiting-approval:{}",
+                seen.id,
+                seen.activity_changed_at.as_deref().unwrap_or("unknown")
+            );
+            details["inbox_entry_key"] = json!(inbox);
+            inbox_key = Some(inbox);
+        }
+        if let Some(approval) = seen.approval.as_ref() {
+            recommended =
+                session_blocked::record_recommendation(ctx, &key, approval, pick, reason)?;
+            if recommended {
+                details["recommendation"] = json!("recorded");
+            }
+        }
+    }
+    let mut message = format!("{refused} The prompt is escalated to a person in the Inbox");
+    if let Some(inbox) = &inbox_key {
+        message.push_str(&format!(" ({inbox})"));
+    }
+    message.push_str("; wait for it, do not retry.");
+    if recommended {
+        message.push_str(" Your pick is shown to them as a recommendation.");
+    }
+    Ok(VogtError::Escalated { message, details })
 }
 
 /// Hibernate a session to free its memory, keeping it listed. The session's
@@ -4118,6 +4226,9 @@ fn blocked_of(blocked: &EngineBlocked) -> SessionBlocked {
         blocker: blocked.reason.clone(),
         items: blocked.items.clone(),
         since: blocked.since.clone(),
+        needs: known_or(&blocked.needs, &NEEDS, "person"),
+        boundary: known_or(&blocked.boundary, &BOUNDARIES, "other"),
+        key: blocked.key.clone(),
     }
 }
 
@@ -5314,6 +5425,8 @@ mod tests {
 
     use serde_json::json;
 
+    use serde_json::Value;
+
     use super::{at_prompt_for_input, not_ready_next_step};
     use crate::adapters::engine::{EngineClient, EngineScreen, EngineWait};
     use crate::application::context::{build_context, write_of};
@@ -6486,6 +6599,225 @@ mod tests {
         let result = started.expect("the start proceeds despite the warning");
         let warning = result["warning"].as_str().expect("a warning field");
         assert!(warning.contains("ghost-model"), "{warning}");
+    }
+
+    /// A session showing a permission prompt, as the engine reads it: the
+    /// engine's own escalation key rides on the dialog.
+    const PROMPTED: &str = r#"{"id":"eng-1","alive":true,"activity":"awaiting-approval","activity_changed_at":"2026-10-31T06:00:00Z","role":"worker","approval":{"question":"Do you want to proceed?","command_excerpt":"rm -rf /tmp/x","detected_at":"2026-10-31T06:00:00Z","kind":"permission","key":"eng-1:permission_prompt:abc123abc123abc1","options":[{"number":1,"label":"Yes","selected":true},{"number":2,"label":"No","selected":false}]}}"#;
+    const PROMPT_KEY: &str = "eng-1:permission_prompt:abc123abc123abc1";
+
+    /// An engine that refuses an agent's answer to a permission prompt (WI-983)
+    /// and serves `PROMPTED` on every read.
+    fn refusing_context(
+        name: &str,
+        principal: Principal,
+        seen: Arc<Mutex<Vec<(String, String, String)>>>,
+    ) -> (std::path::PathBuf, crate::application::context::Built) {
+        let dir = std::env::temp_dir().join(format!("vogt-ses-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut clock = None;
+        let mut ids = None;
+        crate::application::instance::init(&dir, &mut clock, &mut ids).unwrap();
+        let engine = EngineClient::new(
+            "http://engine",
+            None,
+            Some(std::sync::Arc::new(move |path, _, body, method| {
+                seen.lock().unwrap().push((
+                    method.to_string(),
+                    path.to_string(),
+                    String::from_utf8_lossy(body).to_string(),
+                ));
+                if method == "POST" {
+                    (
+                        403,
+                        b"forbidden: person required: a permission prompt is answered by a person"
+                            .to_vec(),
+                    )
+                } else {
+                    (200, PROMPTED.as_bytes().to_vec())
+                }
+            })),
+        );
+        let config = crate::config::VogtConfig {
+            data_dir: dir.clone(),
+            ..crate::config::VogtConfig::default()
+        };
+        let built = build_context(
+            config,
+            Some(principal),
+            Some(StepClock::new(Moment::from_unix(1_700_000_000, 123_000))),
+            None,
+            None,
+            Some(engine),
+            None,
+            None,
+        )
+        .unwrap();
+        (dir, built)
+    }
+
+    fn answer_as(
+        built: &crate::application::context::Built,
+        option: Option<i64>,
+    ) -> Result<Value, VogtError> {
+        crate::with_ctx!(&built, |ctx| super::answer(
+            ctx,
+            &super::AnswerParams {
+                id: "ses_1".to_string(),
+                option,
+                label: None,
+                expect_question: None,
+                reason: "picking".to_string(),
+            },
+        ))
+    }
+
+    #[test]
+    fn a_refused_answer_to_a_prompt_comes_back_escalated_with_its_pick_recorded() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let (dir, built) = refusing_context("escalate", agent("agent:worker"), Arc::clone(&seen));
+        record_session(&built, "ses_1", "eng-1");
+        let err = answer_as(&built, Some(2)).unwrap_err();
+        let VogtError::Escalated { message, details } = &err else {
+            panic!("expected an escalation, got {err:?}");
+        };
+        assert_eq!(details["outcome"], "escalated", "{details}");
+        assert_eq!(details["needs"], "person");
+        assert_eq!(details["boundary"], "permission_prompt");
+        assert_eq!(details["session_id"], "eng-1");
+        assert_eq!(details["escalation_key"], PROMPT_KEY);
+        assert_eq!(
+            details["inbox_entry_key"],
+            "agent:session:eng-1:awaiting-approval:2026-10-31T06:00:00Z"
+        );
+        assert_eq!(details["recommendation"], "recorded");
+        assert!(
+            message.contains(
+                "The prompt is escalated to a person in the Inbox (agent:session:eng-1:awaiting-approval:2026-10-31T06:00:00Z); wait for it, do not retry."
+            ) && message.ends_with("Your pick is shown to them as a recommendation."),
+            "{message}"
+        );
+        assert_eq!(err.code(), "person_required");
+
+        let events = crate::with_ctx!(&built, |ctx| {
+            let view = ctx.declared.read().unwrap();
+            view.list_events(0, 20, Some(PROMPT_KEY)).unwrap()
+        });
+        let recorded = events
+            .iter()
+            .find(|event| event.kind == "session.answer_recommended")
+            .expect("the pick is recorded under the dialog's key");
+        assert_eq!(recorded.summary["option"], json!(2));
+        assert_eq!(recorded.summary["label"], json!("No"));
+        assert_eq!(recorded.summary["by"], json!("agent:worker"));
+
+        // The Inbox and the oversight board read the same pick back.
+        let approval = crate::adapters::engine::EngineApproval {
+            question: "Do you want to proceed?".to_string(),
+            command_excerpt: "rm -rf /tmp/x".to_string(),
+            detected_at: "2026-10-31T06:00:00Z".to_string(),
+            deadline_seconds: None,
+            deadline_at: None,
+            kind: "permission".to_string(),
+            options: vec![(1, "Yes".to_string(), true), (2, "No".to_string(), false)],
+            key: PROMPT_KEY.to_string(),
+        };
+        let shown = crate::with_ctx!(&built, |ctx| {
+            let view = ctx.declared.read().unwrap();
+            crate::application::session_blocked::dialog_recommendation(&view, "eng-1", &approval)
+                .unwrap()
+        });
+        let shown = shown.expect("the recorded pick is shown on its own dialog");
+        assert_eq!(shown["option"], json!(2));
+        assert_eq!(shown["label"], json!("No"));
+        assert_eq!(shown["escalation_key"], json!(PROMPT_KEY));
+
+        // Another showing of the same question (a different command) does not
+        // carry the pick over, and neither does a relabelled option.
+        let other_command = crate::adapters::engine::EngineApproval {
+            command_excerpt: "rm -rf /".to_string(),
+            ..approval.clone()
+        };
+        let relabelled = crate::adapters::engine::EngineApproval {
+            options: vec![(1, "Yes".to_string(), true), (2, "Nope".to_string(), false)],
+            ..approval.clone()
+        };
+        crate::with_ctx!(&built, |ctx| {
+            let view = ctx.declared.read().unwrap();
+            for other in [other_command, relabelled] {
+                assert!(crate::application::session_blocked::dialog_recommendation(
+                    &view, "eng-1", &other
+                )
+                .unwrap()
+                .is_none());
+            }
+        });
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_pick_that_matches_no_option_escalates_without_a_recommendation() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let (dir, built) = refusing_context("nopick", agent("agent:worker"), Arc::clone(&seen));
+        record_session(&built, "ses_1", "eng-1");
+        let err = answer_as(&built, Some(9)).unwrap_err();
+        let VogtError::Escalated { message, details } = &err else {
+            panic!("expected an escalation, got {err:?}");
+        };
+        assert_eq!(details["outcome"], "escalated");
+        assert!(details.get("recommendation").is_none(), "{details}");
+        assert!(!message.contains("recommendation"), "{message}");
+        let events = crate::with_ctx!(&built, |ctx| {
+            let view = ctx.declared.read().unwrap();
+            view.list_events(0, 20, Some(PROMPT_KEY)).unwrap()
+        });
+        assert!(
+            events
+                .iter()
+                .all(|event| event.kind != "session.answer_recommended"),
+            "{events:?}"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn the_oversight_board_shows_the_recorded_pick_on_an_approval_row() {
+        let payload = format!(r#"[{{"summary":{PROMPTED},"screen_tail":[],"ready":false}}]"#);
+        let (dir, built, _seen) = context(
+            "sweep-pick",
+            person(),
+            None,
+            |_| {},
+            vec![payload.into_bytes()],
+        );
+        let approval = crate::adapters::engine::EngineApproval {
+            question: "Do you want to proceed?".to_string(),
+            command_excerpt: "rm -rf /tmp/x".to_string(),
+            detected_at: "2026-10-31T06:00:00Z".to_string(),
+            deadline_seconds: None,
+            deadline_at: None,
+            kind: "permission".to_string(),
+            options: vec![(1, "Yes".to_string(), true), (2, "No".to_string(), false)],
+            key: PROMPT_KEY.to_string(),
+        };
+        crate::with_ctx!(&built, |ctx| {
+            assert!(crate::application::session_blocked::record_recommendation(
+                ctx,
+                PROMPT_KEY,
+                &approval,
+                (Some(2), None),
+                "pick",
+            )
+            .unwrap());
+        });
+        let result = super::sweep_sessions_op(&built, json!({})).unwrap();
+        let row = &result["rows"][0];
+        assert_eq!(row["attention"], "approval", "{result}");
+        assert_eq!(row["recommendation"]["option"], json!(2), "{result}");
+        assert_eq!(row["recommendation"]["label"], json!("No"));
+        assert_eq!(row["recommendation"]["escalation_key"], json!(PROMPT_KEY));
+        std::fs::remove_dir_all(dir).ok();
     }
 
     /// Sweep payload from the engine: two terminals, one of them a person's

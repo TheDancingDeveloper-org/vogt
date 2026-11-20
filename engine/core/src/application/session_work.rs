@@ -17,6 +17,7 @@ use crate::adapters::engine::EngineSession;
 use crate::application::context::{write_of, AppContext, Built};
 use crate::application::services::sessions::SessionSummary;
 use crate::application::services::{now_of, resolve_session};
+use crate::application::session_blocked::{known_or, BOUNDARIES, NEEDS};
 use crate::application::writes::{audited_action, audited_write, WriteOutcome};
 use crate::core::{Clock, CodingSession, IdFactory};
 use crate::errors::VogtError;
@@ -460,6 +461,9 @@ fn apply_live(summary: &mut SessionSummary, live: &EngineSession) {
         blocker: blocked.reason.clone(),
         items: blocked.items.clone(),
         since: blocked.since.clone(),
+        needs: known_or(&blocked.needs, &NEEDS, "person"),
+        boundary: known_or(&blocked.boundary, &BOUNDARIES, "other"),
+        key: blocked.key.clone(),
     });
     summary.hibernation = live
         .hibernation

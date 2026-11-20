@@ -786,6 +786,18 @@ pub struct SessionBlocked {
     #[serde(default)]
     #[schemars(schema_with = "optional_date_time")]
     pub since: Option<String>,
+    /// Who can resolve it: `person`, `overseer` or `either` (WI-996).
+    #[serde(default)]
+    #[schemars(extend("default" = "person"))]
+    pub needs: String,
+    /// What kind of boundary it is (WI-996).
+    #[serde(default)]
+    #[schemars(extend("default" = "other"))]
+    pub boundary: String,
+    /// The content key `session:boundary:hash(reason)` (WI-996); null from an
+    /// older engine.
+    #[serde(default)]
+    pub key: Option<String>,
 }
 
 /// Limits the engine enforces on one session (C7).
