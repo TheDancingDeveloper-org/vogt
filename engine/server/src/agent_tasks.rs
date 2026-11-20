@@ -4690,7 +4690,7 @@ fn read_output_file(cwd: &str, rel: &str) -> Option<String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -5159,7 +5159,7 @@ mod tests {
 
     // --- workflow-engine dispatch ------------------------------------
 
-    fn test_config(state_dir: std::path::PathBuf) -> crate::config::Config {
+    pub(crate) fn test_config(state_dir: std::path::PathBuf) -> crate::config::Config {
         crate::config::Config {
             bind: "127.0.0.1:0".parse().unwrap(),
             token: Some("test-token-1234567890".into()),
@@ -5193,6 +5193,8 @@ mod tests {
             agent_grant_projects: vec![],
             session_templates: vec![],
             pod_backends_enabled: false,
+            host_placement: Default::default(),
+            session_default_backend: "local".into(),
             assistant_api_key: None,
             assistant_base_url: "http://unused.invalid".into(),
             assistant_model: "test-model".into(),

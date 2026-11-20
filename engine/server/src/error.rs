@@ -41,6 +41,14 @@ pub enum ApiError {
     InsufficientStorage(String),
     #[error("account at capacity: {0}")]
     AtCapacity(String),
+    /// The host already runs `ENGINE_HOST_SESSION_CAP` live host sessions.
+    /// `counts` says how many are live per origin, so the caller can see what
+    /// holds the slots (WI-4428).
+    #[error("host session cap reached: {cap} live host sessions")]
+    HostCapacity {
+        cap: usize,
+        counts: serde_json::Value,
+    },
 }
 
 impl ApiError {
@@ -52,6 +60,7 @@ impl ApiError {
             ApiError::Unauthorized => StatusCode::UNAUTHORIZED,
             ApiError::Conflict(_) => StatusCode::CONFLICT,
             ApiError::AtCapacity(_) => StatusCode::TOO_MANY_REQUESTS,
+            ApiError::HostCapacity { .. } => StatusCode::TOO_MANY_REQUESTS,
             ApiError::Forbidden(_) => StatusCode::FORBIDDEN,
             ApiError::TooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             ApiError::Config(_) | ApiError::Internal(_) | ApiError::Pty(_) | ApiError::Io(_) => {
@@ -72,6 +81,10 @@ impl IntoResponse for ApiError {
         let mut body = json!({ "error": self.to_string() });
         if matches!(self, ApiError::UnknownModel(_)) {
             body["code"] = json!("unknown_model");
+        }
+        if let ApiError::HostCapacity { cap, counts } = &self {
+            body["cap"] = json!(cap);
+            body["counts"] = counts.clone();
         }
         let body = Json(body);
         (status, body).into_response()

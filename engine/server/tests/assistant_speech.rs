@@ -115,6 +115,8 @@ async fn dead_url() -> String {
 fn test_config() -> Config {
     Config {
         pod_backends_enabled: false,
+        host_placement: Default::default(),
+        session_default_backend: "local".into(),
         bind: "127.0.0.1:0".parse().unwrap(),
         token: Some(TEST_TOKEN.to_string()),
         token_mutating_request_limit_per_minute: 600,

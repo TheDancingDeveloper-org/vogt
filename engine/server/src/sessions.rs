@@ -98,6 +98,45 @@ pub(crate) fn resolve_template_in<'a>(
     )))
 }
 
+/// A Vogt-started worker or review may not ask for the host (WI-4428 Q2): any
+/// session that is not oversight and carries a work item or its Vogt session
+/// id. A person's own shell and the engine's oversight, agent-task and
+/// assistant starts keep the host. `ENGINE_HOST_PLACEMENT_ALLOW_WORKERS` lifts
+/// the refusal during the transition.
+fn validate_host_placement_role(spec: &SessionSpec, allow_workers: bool) -> Result<()> {
+    let vogt_worker = spec.role != SessionRole::Oversight
+        && (spec.work_item.is_some()
+            || spec
+                .env
+                .iter()
+                .flatten()
+                .any(|(k, _)| k == "VOGT_SESSION_ID"));
+    if spec.placement.as_deref() == Some("host") && vogt_worker && !allow_workers {
+        return Err(ApiError::Conflict(
+            "placement \"host\" is refused for a worker or review: workers and reviews run in a pod (ENGINE_HOST_PLACEMENT_ALLOW_WORKERS=1 lifts this during the transition)".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// The deployment's default pod template: the first template whose default
+/// backend is pod. `None` when the default backend is local.
+fn default_pod_template(
+    templates: &[crate::config::SessionTemplate],
+) -> Option<&crate::config::SessionTemplate> {
+    templates.iter().find(|t| t.backend == "pod")
+}
+
+/// Removes a host session's scratch dirs once the session has ended (WI-4428).
+fn remove_host_scratch(root: &std::path::Path, id: Uuid) {
+    let dir = root.join(id.to_string());
+    if let Err(e) = std::fs::remove_dir_all(&dir) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!(session = %id, error = %e, "could not remove the host session's scratch dirs");
+        }
+    }
+}
+
 fn validate_template_placement(
     template: &crate::config::SessionTemplate,
     placement: Option<&str>,
@@ -392,6 +431,12 @@ pub struct SessionRegistry {
     /// The lease is retained only while a process is live. Removing it from
     /// this map on exit makes exit and failed-start cleanup symmetric.
     account_leases: Arc<DashMap<Uuid, Arc<crate::account_pool::AccountLease>>>,
+    /// Host sessions holding a host slot, with their origin (WI-4428). A slot
+    /// is held from the start until the process exits, so
+    /// `ENGINE_HOST_SESSION_CAP` counts what is running on the host.
+    host_slots: Arc<DashMap<Uuid, &'static str>>,
+    /// Serialises the cap check with the slot it takes.
+    host_slot_gate: std::sync::Mutex<()>,
     /// Creates and removes pods for pod-backed templates. Unset until the
     /// first pod session (or a test) needs it.
     pod_launcher: parking_lot::Mutex<Option<Arc<dyn crate::pod_backend::PodLauncher>>>,
@@ -551,6 +596,7 @@ impl SessionRegistry {
         let records = Arc::new(DashMap::new());
         recover_records(&cfg.state_dir, history.as_deref(), &records);
         let account_leases = Arc::new(DashMap::new());
+        let host_slots = Arc::new(DashMap::new());
         Self {
             cfg,
             bus,
@@ -564,6 +610,8 @@ impl SessionRegistry {
             core: Arc::new(std::sync::OnceLock::new()),
             minted: Arc::new(DashMap::new()),
             account_leases,
+            host_slots,
+            host_slot_gate: std::sync::Mutex::new(()),
             pod_launcher: parking_lot::Mutex::new(None),
             pod_create_waits: DashMap::new(),
             source_registry: parking_lot::Mutex::new(None),
@@ -1585,6 +1633,18 @@ impl SessionRegistry {
             spec.placement.as_deref(),
             spec.template.as_deref(),
         )?;
+        validate_host_placement_role(&spec, self.cfg.host_placement.allow_workers)?;
+        // A named template must resolve. An unknown name is refused here and
+        // never read as "no template", which would quietly start on the host
+        // (WI-4428).
+        if let Some(name) = spec
+            .template
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+        {
+            self.resolve_template(name)?;
+        }
         // A named template's placement is checked even when the caller copied
         // the template's command into the spec (the GUI does): placement is a
         // property of the template, not of who filled in the argv. Resolve
@@ -1785,12 +1845,16 @@ impl SessionRegistry {
             Creating::Wake(record) => record.fresh_conversation.unwrap_or(id),
             Creating::Fresh(_) => id,
         };
+        // Owned, so the host scratch env below can borrow `spec` mutably (WI-4428).
         let brief = spec
             .prompt
             .as_deref()
             .map(str::trim)
-            .filter(|text| !text.is_empty());
-        let brief_path = brief.map(|_| prompt_files::session_prompt_path(&self.cfg.state_dir, id));
+            .filter(|text| !text.is_empty())
+            .map(str::to_string);
+        let brief_path = brief
+            .as_deref()
+            .map(|_| prompt_files::session_prompt_path(&self.cfg.state_dir, id));
 
         // The guide is written before launch: the brief names its path, so it
         // has to exist first (WI-1243).
@@ -2240,7 +2304,7 @@ impl SessionRegistry {
         }
 
         // A worker brief says which MCP servers the session got (WI-2746).
-        let brief_text = brief.map(|text| {
+        let brief_text = brief.as_deref().map(|text| {
             if mcp_set != crate::mcp_set::McpSet::Worker {
                 return text.to_string();
             }
@@ -2350,27 +2414,23 @@ impl SessionRegistry {
             Creating::Wake(_) => crate::launch::Origin::Wake,
         };
         let spawn_started = std::time::Instant::now();
+        let pod_template =
+            self.pod_template_for(spec.template.as_deref(), spec.placement.as_deref());
+        // A start on the host takes a host slot first, so the cap counts it.
+        // The account lease above is dropped with a refused start, which
+        // returns its slot too (WI-4428).
+        if pod_template.is_none() {
+            self.reserve_host_slot(id, launch_origin.as_str())?;
+            if let Err(e) = self.add_host_scratch_env(id, &mut spec) {
+                self.host_slots.remove(&id);
+                return Err(e);
+            }
+        }
         // Install the lease before spawning: the child can exit immediately,
         // and its exit hook must always be able to remove the reservation.
         if let Some(lease) = account_lease.as_ref() {
             self.account_leases.insert(id, Arc::clone(lease));
         }
-        let pod_template = self
-            .cfg
-            .pod_backends_enabled
-            .then(|| {
-                spec.template
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|t| !t.is_empty())
-                    .and_then(|name| self.resolve_template(name).ok())
-                    .filter(|t| match spec.placement.as_deref() {
-                        Some("pod") => t.supports_pod(),
-                        Some("host") => false,
-                        _ => t.backend != "local",
-                    })
-            })
-            .flatten();
         // Whoever put the session's own core credential in its environment
         // (the core for a session it started, `mint_agent_token` for one the
         // engine did), the broker serves that same value back to the session
@@ -2419,6 +2479,7 @@ impl SessionRegistry {
                 // No exit hook is guaranteed for a failed spawn. Removing the
                 // map entry and dropping our local Arc returns the slot.
                 self.account_leases.remove(&id);
+                self.host_slots.remove(&id);
                 // A grant for a child that never started is a live token for
                 // nobody; forget it with the rest of the failed spawn.
                 self.secret_broker.revoke(id);
@@ -2904,7 +2965,11 @@ impl SessionRegistry {
         let broker = Arc::clone(&self.secret_broker);
         let account_leases = Arc::clone(&self.account_leases);
         let host_graft_credentials = Arc::clone(&self.host_graft_credentials);
+        let host_slots = Arc::clone(&self.host_slots);
+        let scratch_root = self.host_scratch_root();
         Box::new(move |session: &Session| {
+            // The process has ended, so its host slot is free (WI-4428).
+            host_slots.remove(&session.id);
             // An approved grant is for a running session; whatever stopped it,
             // the grant goes with the process (WI-973).
             broker.drop_grants(session.id);
@@ -2935,6 +3000,8 @@ impl SessionRegistry {
             if session.is_hibernating() || shutting_down.load(Ordering::Acquire) {
                 return;
             }
+            // The session ended, so its host scratch dirs go with it (WI-4428).
+            remove_host_scratch(&scratch_root, session.id);
             // The broker token ends with the process too (WI-4046): a stop
             // keeps the session for its scrollback, and a token that outlived
             // the process would still authenticate as it.
@@ -4050,17 +4117,98 @@ impl SessionRegistry {
     /// whose default is the host stays on the host unless the caller asks
     /// for a pod, so its default never moved (WI-3762).
     fn runs_in_pod(&self, template: Option<&str>, placement: Option<&str>) -> bool {
-        let template = || {
-            template
-                .map(str::trim)
-                .filter(|t| !t.is_empty())
-                .and_then(|name| self.resolve_template(name).ok())
+        self.pod_template_for(template, placement).is_some()
+    }
+
+    /// The pod template a start runs in, or `None` for the host (WI-4428). An
+    /// explicit `placement` decides. A named template runs in a pod when it is
+    /// pod-capable and not local. An empty template takes the deployment's
+    /// default pod template when the default backend is pod, so a bare start
+    /// is never a host start by default on such a deployment.
+    fn pod_template_for<'a>(
+        &'a self,
+        template: Option<&str>,
+        placement: Option<&str>,
+    ) -> Option<&'a crate::config::SessionTemplate> {
+        if !self.cfg.pod_backends_enabled || placement == Some("host") {
+            return None;
+        }
+        let named = template.map(str::trim).filter(|t| !t.is_empty());
+        let template = match named {
+            Some(name) => self.resolve_template(name).ok()?,
+            None if matches!(placement, None | Some("auto"))
+                && self.cfg.session_default_backend == "pod" =>
+            {
+                default_pod_template(&self.cfg.session_templates)?
+            }
+            None => return None,
         };
         match placement {
-            Some("pod") => template().is_some_and(|t| t.supports_pod()),
-            Some("host") => false,
-            _ => template().is_some_and(|t| t.backend != "local"),
+            Some("pod") => template.supports_pod().then_some(template),
+            _ => (template.backend != "local").then_some(template),
         }
+    }
+
+    /// Takes a host slot for `id`, or refuses with `ENGINE_HOST_SESSION_CAP`
+    /// counts when the host is full. `0` is unlimited (WI-4428).
+    fn reserve_host_slot(&self, id: Uuid, origin: &'static str) -> Result<()> {
+        let _gate = self
+            .host_slot_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let cap = self.cfg.host_placement.session_cap;
+        if cap > 0 && self.host_slots.len() >= cap {
+            return Err(ApiError::HostCapacity {
+                cap,
+                counts: self.host_slot_counts(),
+            });
+        }
+        self.host_slots.insert(id, origin);
+        Ok(())
+    }
+
+    /// Live host sessions by origin, for a refused start to say what holds
+    /// the slots.
+    fn host_slot_counts(&self) -> serde_json::Value {
+        let mut by_origin: std::collections::BTreeMap<&'static str, usize> =
+            std::collections::BTreeMap::new();
+        for slot in self.host_slots.iter() {
+            *by_origin.entry(*slot.value()).or_default() += 1;
+        }
+        serde_json::json!({ "live": self.host_slots.len(), "by_origin": by_origin })
+    }
+
+    /// Where host sessions keep their scratch dirs: the configured root, or
+    /// `<state_dir>/host-scratch` (WI-4428).
+    fn host_scratch_root(&self) -> std::path::PathBuf {
+        self.cfg
+            .host_placement
+            .scratch_root
+            .clone()
+            .unwrap_or_else(|| self.cfg.state_dir.join("host-scratch"))
+    }
+
+    /// Gives a host session its own `TMPDIR`, `CARGO_TARGET_DIR` and
+    /// `XDG_CACHE_HOME` under the scratch root, so its builds stop writing to
+    /// the engine's shared `/tmp`, cache and toolchain dirs. The variables go
+    /// last in the environment, so a caller cannot point them back at the
+    /// shared dirs (WI-4428).
+    fn add_host_scratch_env(&self, id: Uuid, spec: &mut SessionSpec) -> Result<()> {
+        let dir = self.host_scratch_root().join(id.to_string());
+        for sub in ["tmp", "cargo-target", "cache"] {
+            std::fs::create_dir_all(dir.join(sub))?;
+        }
+        let env = spec.env.get_or_insert_with(Vec::new);
+        env.push(("TMPDIR".into(), dir.join("tmp").display().to_string()));
+        env.push((
+            "CARGO_TARGET_DIR".into(),
+            dir.join("cargo-target").display().to_string(),
+        ));
+        env.push((
+            "XDG_CACHE_HOME".into(),
+            dir.join("cache").display().to_string(),
+        ));
+        Ok(())
     }
 
     pub fn template_summaries(&self) -> Vec<vogt_engine_contract::SessionTemplateSummary> {
@@ -4295,6 +4443,8 @@ impl SessionRegistry {
     }
 
     pub fn remove(&self, id: Uuid) -> Result<()> {
+        self.host_slots.remove(&id);
+        remove_host_scratch(&self.host_scratch_root(), id);
         let live = self.sessions.remove(&id).map(|(_, v)| v);
         let recorded = self.records.remove(&id);
         // A live session was already counted by its exit. A hibernated one
@@ -5926,5 +6076,207 @@ mod session_ref_wake_tests {
         for bad in ["ses_0001", "../x", "ses_01ARZ3NDEKTSV4RRFFQ69G5FAI", ""] {
             assert_eq!(checked_session_ref(Uuid::nil(), Some(bad)), None, "{bad}");
         }
+    }
+}
+
+/// WI-4428: host placement is an explicit, capped exception.
+#[cfg(test)]
+mod host_placement_tests {
+    use super::*;
+    use crate::config::SessionTemplate;
+
+    fn spec(name: &str, placement: Option<&str>) -> SessionSpec {
+        SessionSpec {
+            name: name.into(),
+            command: Some(vec!["cat".into()]),
+            template: None,
+            placement: placement.map(str::to_string),
+            cwd: None,
+            env: None,
+            prompt: None,
+            model: None,
+            effort: None,
+            resume: None,
+            permission_mode: None,
+            mcp_set: None,
+            mcp_extra: None,
+            account: None,
+            autopilot: false,
+            policy: None,
+            role: Default::default(),
+            work_item: None,
+            session_ref: None,
+            worktree: None,
+            cols: Some(80),
+            rows: Some(24),
+            scrollback_bytes: None,
+            companion: None,
+            charter: None,
+            budget: None,
+            source: None,
+        }
+    }
+
+    /// A Vogt-started worker: a work item and its Vogt session id.
+    fn worker_spec(name: &str, placement: Option<&str>) -> SessionSpec {
+        SessionSpec {
+            work_item: Some("WI-4428".into()),
+            env: Some(vec![("VOGT_SESSION_ID".into(), "ses_test".into())]),
+            ..spec(name, placement)
+        }
+    }
+
+    /// The refusal a start came back with (a session is not `Debug`, so
+    /// `unwrap_err` cannot be used on the start's result).
+    fn refusal(started: Result<Arc<Session>>) -> ApiError {
+        match started {
+            Err(error) => error,
+            Ok(_) => panic!("the start should have been refused"),
+        }
+    }
+
+    fn registry(
+        state_dir: std::path::PathBuf,
+        tweak: impl FnOnce(&mut crate::config::Config),
+    ) -> SessionRegistry {
+        let mut cfg = crate::agent_tasks::tests::test_config(state_dir);
+        tweak(&mut cfg);
+        SessionRegistry::new(Arc::new(cfg), EventBus::default(), None)
+    }
+
+    #[test]
+    fn a_worker_asking_for_the_host_is_refused_unless_the_override_is_set() {
+        let refused =
+            validate_host_placement_role(&worker_spec("w", Some("host")), false).unwrap_err();
+        assert!(matches!(refused, ApiError::Conflict(_)), "{refused:?}");
+        assert!(validate_host_placement_role(&worker_spec("w", Some("host")), true).is_ok());
+        // Oversight and a person's own shell keep the host.
+        let oversight = SessionSpec {
+            role: SessionRole::Oversight,
+            ..worker_spec("o", Some("host"))
+        };
+        assert!(validate_host_placement_role(&oversight, false).is_ok());
+        assert!(validate_host_placement_role(&spec("shell", Some("host")), false).is_ok());
+        // A worker that does not ask for the host is not refused.
+        assert!(validate_host_placement_role(&worker_spec("w", None), false).is_ok());
+    }
+
+    #[test]
+    fn a_refused_worker_host_start_spawns_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = registry(dir.path().to_path_buf(), |_| {});
+        let refused = refusal(sessions.create(worker_spec("w", Some("host"))));
+        assert!(matches!(refused, ApiError::Conflict(_)), "{refused:?}");
+        assert!(sessions.live_sessions().is_empty());
+    }
+
+    #[test]
+    fn an_unresolvable_template_is_a_bad_request_not_a_host_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = registry(dir.path().to_path_buf(), |_| {});
+        // The command is given, so only the template name can refuse it.
+        let mut bad = spec("t", None);
+        bad.template = Some("no-such-template".into());
+        let refused = refusal(sessions.create(bad));
+        assert!(matches!(refused, ApiError::BadRequest(_)), "{refused:?}");
+        assert!(sessions.live_sessions().is_empty());
+    }
+
+    #[test]
+    fn a_bare_start_takes_the_default_pod_template_on_a_pod_default_deployment() {
+        let dir = tempfile::tempdir().unwrap();
+        let pod_default = registry(dir.path().to_path_buf(), |cfg| {
+            cfg.pod_backends_enabled = true;
+            cfg.session_default_backend = "pod".into();
+            cfg.session_templates = SessionTemplate::default_templates_on("pod");
+        });
+        let pod = pod_default
+            .pod_template_for(None, None)
+            .expect("a bare start runs in a pod");
+        assert_eq!(pod.backend, "pod");
+        // An explicit host still means the host.
+        assert!(pod_default.pod_template_for(None, Some("host")).is_none());
+
+        // A local default keeps a bare start on the host, even though the
+        // built-in Pod template is pod-backed.
+        let local_default = registry(dir.path().to_path_buf(), |cfg| {
+            cfg.pod_backends_enabled = true;
+            cfg.session_templates = SessionTemplate::default_templates_on("local");
+        });
+        assert!(local_default.pod_template_for(None, None).is_none());
+    }
+
+    #[tokio::test]
+    async fn host_sessions_are_capped_and_a_stopped_one_frees_its_slot() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = registry(dir.path().to_path_buf(), |cfg| {
+            cfg.host_placement.session_cap = 2;
+            cfg.host_placement.scratch_root = Some(dir.path().join("scratch"));
+        });
+        let first = sessions.create(spec("a", Some("host"))).unwrap();
+        let _second = sessions.create(spec("b", Some("host"))).unwrap();
+        let refused = refusal(sessions.create(spec("c", Some("host"))));
+        match refused {
+            ApiError::HostCapacity { cap, counts } => {
+                assert_eq!(cap, 2);
+                assert_eq!(counts["live"], 2);
+                assert_eq!(counts["by_origin"]["api"], 2);
+            }
+            other => panic!("expected a host capacity refusal, got {other:?}"),
+        }
+        sessions.remove(first.id).unwrap();
+        assert!(sessions.create(spec("c", Some("host"))).is_ok());
+        for session in sessions.live_sessions() {
+            let _ = sessions.remove(session.id);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_host_session_gets_its_own_scratch_env_and_the_dirs_go_when_it_ends() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("scratch");
+        let out = dir.path().join("env.out");
+        let sessions = registry(dir.path().to_path_buf(), |cfg| {
+            cfg.host_placement.scratch_root = Some(root.clone());
+        });
+        let mut shell = spec("env", Some("host"));
+        shell.command = Some(vec![
+            "sh".into(),
+            "-c".into(),
+            "printf '%s\\n%s\\n%s\\n' \"$TMPDIR\" \"$CARGO_TARGET_DIR\" \"$XDG_CACHE_HOME\" > \"$OUT\""
+                .into(),
+        ]);
+        shell.env = Some(vec![
+            ("OUT".into(), out.display().to_string()),
+            ("TMPDIR".into(), "/shared/tmp".into()),
+        ]);
+        let session = sessions.create(shell).unwrap();
+        let id = session.id;
+        let scratch = root.join(id.to_string());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::fs::read_to_string(&out).is_err() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let seen = std::fs::read_to_string(&out).unwrap();
+        let lines: Vec<&str> = seen.lines().collect();
+        assert_eq!(
+            lines,
+            vec![
+                scratch.join("tmp").display().to_string(),
+                scratch.join("cargo-target").display().to_string(),
+                scratch.join("cache").display().to_string(),
+            ],
+            "a caller cannot point the scratch variables back at the shared dirs"
+        );
+        while session.ended_at().is_none() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        while scratch.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(
+            !scratch.exists(),
+            "the scratch dirs go when the session ends"
+        );
     }
 }
