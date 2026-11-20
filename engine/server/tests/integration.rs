@@ -24013,10 +24013,10 @@ sleep 2
     }
 
     /// WI-4442: the engine dies with no shutdown hook while the agent is
-    /// mid-output (an eviction or a kill gives no chance to hibernate). The
-    /// next engine adopts the pod at the log's end, the agent resumes from its
-    /// last ack, and the log holds every byte exactly once: no gap, no
-    /// duplicate.
+    /// mid-output. The dead engine took a chunk from the agent and never
+    /// wrote it, and never acknowledged it. The next engine adopts the pod at
+    /// the log's end, the agent resumes from its last ack and resends, and the
+    /// log holds every byte exactly once: no gap, no duplicate.
     #[tokio::test]
     async fn a_forced_kill_mid_output_adopts_the_pod_with_no_gap_or_duplicate() {
         let (mut h, _accounts) = claude_harness().await;
@@ -24042,10 +24042,14 @@ sleep 2
         )
         .await;
         assert_eq!(take(&mut agent).await, Frame::Ack { offset: 18 });
+        let log_path = h.state.history.as_ref().unwrap().log_path(id);
         log_len(&h, id, 18).await;
 
-        // Mid-output: the agent sends the next chunk and the engine dies
-        // without answering it. The agent's last ack is 18.
+        // The engine dies: its session reader writes nothing it takes from
+        // here on. The agent, mid-output, sends its next chunk. The dead engine
+        // takes it and never writes it, so it is never acknowledged.
+        let old_link = h.state.agent_auth.pod(id).unwrap();
+        old_link.crash();
         put(
             &mut agent,
             Frame::Output {
@@ -24054,20 +24058,27 @@ sleep 2
             },
         )
         .await;
-        drop(agent);
-        let log_path = h.state.history.as_ref().unwrap().log_path(id);
-        // The dead engine's reader may still hold what it took. Wait for the
-        // log to stop growing, so the cursor the next engine reads is final.
-        let mut settled = std::fs::metadata(&log_path).map_or(0, |m| m.len());
-        for _ in 0..100 {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-            let now = std::fs::metadata(&log_path).map_or(0, |m| m.len());
-            if now == settled && now >= 18 {
-                break;
+        // What the dead engine's socket says about it: no ack past 18.
+        let mut heard = Vec::new();
+        while let Ok(Some(Ok(message))) =
+            tokio::time::timeout(Duration::from_millis(500), agent.next()).await
+        {
+            if let Message::Text(text) = message {
+                heard.push(serde_json::from_str::<Frame>(&text).unwrap());
             }
-            settled = now;
         }
-        let old_link = h.state.agent_auth.pod(id).unwrap();
+        assert!(
+            !heard
+                .iter()
+                .any(|f| matches!(f, Frame::Ack { offset } if *offset > 18)),
+            "the agent was acked for bytes the dead engine never wrote: {heard:?}"
+        );
+        assert_eq!(
+            std::fs::metadata(&log_path).unwrap().len(),
+            18,
+            "the crashed engine wrote nothing further"
+        );
+        drop(agent);
         h.state.agent_auth.forget_pod(id);
 
         let launcher = fake_launcher(vec![running_pod(id)]);
@@ -24079,27 +24090,21 @@ sleep 2
             launcher.deleted.lock().unwrap().is_empty(),
             "the pod is kept"
         );
-        let cursor = std::fs::metadata(&log_path).unwrap().len();
 
-        // The agent resumes from its last ack. The engine answers with where
-        // its log ends, and the agent resends from there.
+        // The agent's last ack was 18, so it resumes there. The engine answers
+        // with exactly what its log holds, and the agent resends from there.
         let mut agent = h.dial(id, &token, 18).await;
-        let Frame::Ack { offset } = take(&mut agent).await else {
-            panic!("the resume is acknowledged");
-        };
-        assert_eq!(offset, cursor, "the resume cursor is the log's end");
-        let text = b"hello world more-1MIDEND";
-        if offset < 21 {
-            put(
-                &mut agent,
-                Frame::Output {
-                    offset,
-                    data: text[offset as usize..21].to_vec(),
-                },
-            )
-            .await;
-            assert_eq!(take(&mut agent).await, Frame::Ack { offset: 21 });
-        }
+        assert_eq!(take(&mut agent).await, Frame::Ack { offset: 18 });
+        put(
+            &mut agent,
+            Frame::Output {
+                offset: 18,
+                data: b"MID".to_vec(),
+            },
+        )
+        .await;
+        assert_eq!(take(&mut agent).await, Frame::Ack { offset: 21 });
+        log_len(&h, id, 21).await;
         put(
             &mut agent,
             Frame::Output {
@@ -24115,7 +24120,7 @@ sleep 2
 
         assert_eq!(
             std::fs::read(&log_path).unwrap(),
-            text.to_vec(),
+            b"hello world more-1MIDEND".to_vec(),
             "the client's output is continuous across the kill"
         );
     }
