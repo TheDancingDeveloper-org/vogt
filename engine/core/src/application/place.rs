@@ -782,6 +782,30 @@ mod place_bench {
                     source_url: None,
                     promoted: false,
                 },
+                issue(
+                    "vogt/linked/adopted",
+                    None,
+                    json!({"state": "open", "title": "adopted by a work item", "labels": []}),
+                ),
+                issue(
+                    "vogt/linked/scoped-hit",
+                    Some("prj_linked"),
+                    json!({"state": "open", "title": "scoped exact hit", "labels": []}),
+                ),
+                issue(
+                    "vogt/linked/scoped-miss",
+                    None,
+                    json!({"state": "open", "title": "scoped exact, other scope", "labels": []}),
+                ),
+                PendingObservation {
+                    kind: "marker".into(),
+                    subject_key: "vogt/markers/promoted".into(),
+                    payload: json!({"tag": "TODO", "path": "y.rs", "line": 2}),
+                    content_digest: "marker-promoted".into(),
+                    project_id: None,
+                    source_url: None,
+                    promoted: true,
+                },
             ];
             ctx.observed.append(&sweep.id, &findings, at).unwrap();
             ctx.observed
@@ -799,20 +823,51 @@ mod place_bench {
             json!({"subject": "vogt/linked/glob-*", "reason": "drops", "pattern": true}),
         )
         .unwrap();
+        let adopted = create_op(
+            &built,
+            json!({"kind": "feature", "title": "adopts a subject", "reason": "drops"}),
+        )
+        .unwrap();
+        let adopted_id = adopted["item"]["id"].as_str().unwrap().to_string();
+        crate::with_ctx!(&built, |ctx| {
+            use crate::storage::interface::{DeclaredStore, WriteTxn};
+            let mut txn = ctx.declared.write().unwrap();
+            txn.insert_work_link(&crate::core::WorkLink {
+                work_item_id: adopted_id.clone(),
+                subject_key: "vogt/linked/adopted".into(),
+                origin_kind: "drops".into(),
+                source_url: None,
+                relation: crate::core::LinkRelation::Completion,
+                created_at: at,
+            })
+            .unwrap();
+            txn.commit().unwrap();
+        });
+        for subject in ["vogt/linked/scoped-hit", "vogt/linked/scoped-miss"] {
+            crate::application::suppressions::suppress_op(
+                &built,
+                json!({"subject": subject, "reason": "drops", "project": "linked"}),
+            )
+            .unwrap();
+        }
         let counted = crate::with_ctx!(&built, |ctx| {
             crate::application::views::backlog_total_considered(ctx)
         })
         .unwrap();
         let full = crate::application::views::backlog_op(&built, json!({"limit": 1000})).unwrap();
         assert_eq!(counted, full["total_considered"].as_i64().unwrap());
-        // Kept: the open linked issue, the bug-labelled linked issue, and the PR
-        // whose implements target is absent. Everything else is dropped.
-        assert_eq!(counted, 3);
+        // Kept: the open linked issue, the bug-labelled linked issue, the PR whose
+        // implements target is absent, the out-of-scope suppression, and the
+        // promoted marker, plus the declared WI-1 that adopts the adopted subject.
+        // Everything else is dropped.
+        assert_eq!(counted, 6);
         let listed = full["items"].to_string();
         for kept in [
             "vogt/linked/open-kept",
             "vogt/linked/bug-kept",
             "vogt/pulls/implements-absent",
+            "vogt/linked/scoped-miss",
+            "vogt/markers/promoted",
         ] {
             assert!(listed.contains(kept), "{kept} should be ranked");
         }
@@ -823,6 +878,8 @@ mod place_bench {
             "vogt/linked/glob-suppressed",
             "vogt/pulls/implements-present",
             "vogt/markers/unpromoted",
+            "vogt/linked/adopted",
+            "vogt/linked/scoped-hit",
         ] {
             assert!(!listed.contains(dropped), "{dropped} should be dropped");
         }
@@ -860,12 +917,8 @@ mod place_bench {
         ));
         let conn = rusqlite::Connection::open(&observed_db).unwrap();
         crate::storage::sqlite::observed::open_backlog_count(&conn, &declared_db).unwrap();
-        let mut statement = conn
-            .prepare(&format!(
-                "EXPLAIN QUERY PLAN {}",
-                crate::storage::sqlite::observed::BACKLOG_COUNT_SQL
-            ))
-            .unwrap();
+        let sql = crate::storage::sqlite::observed::backlog_count_sql(&conn).unwrap();
+        let mut statement = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
         let plan: Vec<String> = statement
             .query_map(rusqlite::params!["bug", "open"], |row| {
                 row.get::<_, String>(3)
@@ -880,6 +933,59 @@ mod place_bench {
         );
         drop(statement);
         drop(conn);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A store still at observed schema 7 has no `idx_latest_observed`. The
+    /// count must not name it: it answers from the planner's own choice and
+    /// still equals the ranked total (WI-4448).
+    #[test]
+    fn backlog_count_runs_on_a_schema_7_store() {
+        let dir = std::env::temp_dir().join(format!("vogt-place-schema7-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut clock = None;
+        let mut ids = None;
+        crate::application::instance::init(&dir, &mut clock, &mut ids).unwrap();
+        let built = build_context(
+            crate::config::VogtConfig {
+                data_dir: dir.clone(),
+                ..crate::config::VogtConfig::default()
+            },
+            Some(Principal::new("local:schema7", ActorKind::Human, "Schema7").unwrap()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        for n in 0..20 {
+            create_op(
+                &built,
+                json!({"kind": "bug", "title": format!("schema7 item {n}"), "reason": "schema7"}),
+            )
+            .unwrap();
+        }
+        crate::with_ctx!(&built, |ctx| seed_observed(ctx));
+        // Take the index away, as a schema-7 store has it.
+        let (observed_db, _) = crate::with_ctx!(&built, |ctx| (
+            ctx.config.observed_db_path(),
+            ctx.config.declared_db_path()
+        ));
+        {
+            let conn = rusqlite::Connection::open(&observed_db).unwrap();
+            conn.execute_batch("DROP INDEX idx_latest_observed;")
+                .unwrap();
+        }
+        let counted = crate::with_ctx!(&built, |ctx| {
+            crate::application::views::backlog_total_considered(ctx)
+        })
+        .unwrap();
+        let full = crate::application::views::backlog_op(&built, json!({"limit": 1})).unwrap();
+        assert_eq!(counted, full["total_considered"].as_i64().unwrap());
+        assert_eq!(counted, 20 + 1000);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
