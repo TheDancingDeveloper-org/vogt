@@ -50,6 +50,14 @@ jobs:
           distribution: temurin
           java-version: "21"
       - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd
+
+      # Cache the Gradle wrapper distribution (WI-3308): services.gradle.org
+      # timeouts failed the merge queue.
+      - name: restore the Gradle wrapper distribution
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.gradle/wrapper/dists
+          key: gradle-wrapper-${{ runner.os }}-${{ hashFiles('mobile/android/gradle/wrapper/gradle-wrapper.properties') }}
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
