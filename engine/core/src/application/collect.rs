@@ -937,7 +937,7 @@ impl ErrorName for VogtError {
             Self::CommentRefused(_) => "CommentRefused",
             Self::LandRefused(_) => "LandRefused",
             Self::ReportRefused(_) => "ReportRefused",
-            Self::PersonRequired(_) => "PersonRequired",
+            Self::PersonRequired(_) | Self::Escalated { .. } => "PersonRequired",
             Self::EngineOnly(_) => "EngineOnly",
             Self::InvalidRequest(_) => "InvalidRequest",
             Self::InstallClosed(_) => "InstallClosed",

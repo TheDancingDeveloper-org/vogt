@@ -1054,10 +1054,27 @@ pub struct ReportBlockedParams {
     #[schemars(extend("maxItems" = 20))]
     #[schemars(extend("x-keep-default" = true))]
     pub items: Vec<String>,
+    /// Who can resolve it: `person`, your `overseer`, or `either`. A denied action or a missing credential a grant could cover can go to your overseer; anything else needs a person.
+    #[serde(default)]
+    #[schemars(schema_with = "report_blocked_needs")]
+    pub needs: Option<String>,
+    /// What you hit: `permission_prompt`, `denied_action` (a refused tool call or guard), `credential`, `decision`, or `other`.
+    #[serde(default)]
+    #[schemars(schema_with = "report_blocked_boundary")]
+    pub boundary: Option<String>,
     /// Why this write is being made (audited).
     #[schemars(length(min = 1))]
     pub reason: String,
 }
+
+fn report_blocked_needs(_: &mut SchemaGenerator) -> Schema {
+    json_schema!({"default": "person", "enum": ["person", "overseer", "either"], "type": "string"})
+}
+
+fn report_blocked_boundary(_: &mut SchemaGenerator) -> Schema {
+    json_schema!({"default": "other", "enum": ["permission_prompt", "denied_action", "credential", "decision", "other"], "type": "string"})
+}
+
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SessionBlockedResult {

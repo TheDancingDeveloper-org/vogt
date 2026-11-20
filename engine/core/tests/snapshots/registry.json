@@ -7675,6 +7675,31 @@
                 ],
                 "default": null,
                 "title": "Since"
+              },
+              "needs": {
+                "default": "person",
+                "description": "Who can resolve it: `person`, `overseer` or `either` (WI-996).",
+                "title": "Needs",
+                "type": "string"
+              },
+              "boundary": {
+                "default": "other",
+                "description": "What kind of boundary it is (WI-996).",
+                "title": "Boundary",
+                "type": "string"
+              },
+              "key": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "The content key `session:boundary:hash(reason)` (WI-996); null from an\nolder engine.",
+                "title": "Key"
               }
             },
             "required": [
@@ -10066,6 +10091,31 @@
                 ],
                 "default": null,
                 "title": "Since"
+              },
+              "needs": {
+                "default": "person",
+                "description": "Who can resolve it: `person`, `overseer` or `either` (WI-996).",
+                "title": "Needs",
+                "type": "string"
+              },
+              "boundary": {
+                "default": "other",
+                "description": "What kind of boundary it is (WI-996).",
+                "title": "Boundary",
+                "type": "string"
+              },
+              "key": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "The content key `session:boundary:hash(reason)` (WI-996); null from an\nolder engine.",
+                "title": "Key"
               }
             },
             "required": [
@@ -13880,6 +13930,31 @@
                 ],
                 "default": null,
                 "title": "Since"
+              },
+              "needs": {
+                "default": "person",
+                "description": "Who can resolve it: `person`, `overseer` or `either` (WI-996).",
+                "title": "Needs",
+                "type": "string"
+              },
+              "boundary": {
+                "default": "other",
+                "description": "What kind of boundary it is (WI-996).",
+                "title": "Boundary",
+                "type": "string"
+              },
+              "key": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "The content key `session:boundary:hash(reason)` (WI-996); null from an\nolder engine.",
+                "title": "Key"
               }
             },
             "required": [
@@ -16273,6 +16348,31 @@
                 ],
                 "default": null,
                 "title": "Since"
+              },
+              "needs": {
+                "default": "person",
+                "description": "Who can resolve it: `person`, `overseer` or `either` (WI-996).",
+                "title": "Needs",
+                "type": "string"
+              },
+              "boundary": {
+                "default": "other",
+                "description": "What kind of boundary it is (WI-996).",
+                "title": "Boundary",
+                "type": "string"
+              },
+              "key": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "The content key `session:boundary:hash(reason)` (WI-996); null from an\nolder engine.",
+                "title": "Key"
               }
             },
             "required": [
@@ -18661,6 +18761,31 @@
                 ],
                 "default": null,
                 "title": "Since"
+              },
+              "needs": {
+                "default": "person",
+                "description": "Who can resolve it: `person`, `overseer` or `either` (WI-996).",
+                "title": "Needs",
+                "type": "string"
+              },
+              "boundary": {
+                "default": "other",
+                "description": "What kind of boundary it is (WI-996).",
+                "title": "Boundary",
+                "type": "string"
+              },
+              "key": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "The content key `session:boundary:hash(reason)` (WI-996); null from an\nolder engine.",
+                "title": "Key"
               }
             },
             "required": [
@@ -21047,6 +21172,31 @@
                 ],
                 "default": null,
                 "title": "Since"
+              },
+              "needs": {
+                "default": "person",
+                "description": "Who can resolve it: `person`, `overseer` or `either` (WI-996).",
+                "title": "Needs",
+                "type": "string"
+              },
+              "boundary": {
+                "default": "other",
+                "description": "What kind of boundary it is (WI-996).",
+                "title": "Boundary",
+                "type": "string"
+              },
+              "key": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "The content key `session:boundary:hash(reason)` (WI-996); null from an\nolder engine.",
+                "title": "Key"
               }
             },
             "required": [
@@ -23431,6 +23581,31 @@
                 ],
                 "default": null,
                 "title": "Since"
+              },
+              "needs": {
+                "default": "person",
+                "description": "Who can resolve it: `person`, `overseer` or `either` (WI-996).",
+                "title": "Needs",
+                "type": "string"
+              },
+              "boundary": {
+                "default": "other",
+                "description": "What kind of boundary it is (WI-996).",
+                "title": "Boundary",
+                "type": "string"
+              },
+              "key": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "The content key `session:boundary:hash(reason)` (WI-996); null from an\nolder engine.",
+                "title": "Key"
               }
             },
             "required": [
@@ -33242,6 +33417,31 @@
                 ],
                 "default": null,
                 "title": "Since"
+              },
+              "needs": {
+                "default": "person",
+                "description": "Who can resolve it: `person`, `overseer` or `either` (WI-996).",
+                "title": "Needs",
+                "type": "string"
+              },
+              "boundary": {
+                "default": "other",
+                "description": "What kind of boundary it is (WI-996).",
+                "title": "Boundary",
+                "type": "string"
+              },
+              "key": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "The content key `session:boundary:hash(reason)` (WI-996); null from an\nolder engine.",
+                "title": "Key"
               }
             },
             "required": [
@@ -34802,6 +35002,31 @@
                 ],
                 "default": null,
                 "title": "Since"
+              },
+              "needs": {
+                "default": "person",
+                "description": "Who can resolve it: `person`, `overseer` or `either` (WI-996).",
+                "title": "Needs",
+                "type": "string"
+              },
+              "boundary": {
+                "default": "other",
+                "description": "What kind of boundary it is (WI-996).",
+                "title": "Boundary",
+                "type": "string"
+              },
+              "key": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "The content key `session:boundary:hash(reason)` (WI-996); null from an\nolder engine.",
+                "title": "Key"
               }
             },
             "required": [
@@ -36404,6 +36629,31 @@
                 ],
                 "default": null,
                 "title": "Since"
+              },
+              "needs": {
+                "default": "person",
+                "description": "Who can resolve it: `person`, `overseer` or `either` (WI-996).",
+                "title": "Needs",
+                "type": "string"
+              },
+              "boundary": {
+                "default": "other",
+                "description": "What kind of boundary it is (WI-996).",
+                "title": "Boundary",
+                "type": "string"
+              },
+              "key": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "The content key `session:boundary:hash(reason)` (WI-996); null from an\nolder engine.",
+                "title": "Key"
               }
             },
             "required": [
@@ -38636,6 +38886,31 @@
                 ],
                 "default": null,
                 "title": "Since"
+              },
+              "needs": {
+                "default": "person",
+                "description": "Who can resolve it: `person`, `overseer` or `either` (WI-996).",
+                "title": "Needs",
+                "type": "string"
+              },
+              "boundary": {
+                "default": "other",
+                "description": "What kind of boundary it is (WI-996).",
+                "title": "Boundary",
+                "type": "string"
+              },
+              "key": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "The content key `session:boundary:hash(reason)` (WI-996); null from an\nolder engine.",
+                "title": "Key"
               }
             },
             "required": [
@@ -40452,6 +40727,31 @@
                 ],
                 "default": null,
                 "title": "Since"
+              },
+              "needs": {
+                "default": "person",
+                "description": "Who can resolve it: `person`, `overseer` or `either` (WI-996).",
+                "title": "Needs",
+                "type": "string"
+              },
+              "boundary": {
+                "default": "other",
+                "description": "What kind of boundary it is (WI-996).",
+                "title": "Boundary",
+                "type": "string"
+              },
+              "key": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "The content key `session:boundary:hash(reason)` (WI-996); null from an\nolder engine.",
+                "title": "Key"
               }
             },
             "required": [
@@ -41970,6 +42270,31 @@
                 ],
                 "default": null,
                 "title": "Since"
+              },
+              "needs": {
+                "default": "person",
+                "description": "Who can resolve it: `person`, `overseer` or `either` (WI-996).",
+                "title": "Needs",
+                "type": "string"
+              },
+              "boundary": {
+                "default": "other",
+                "description": "What kind of boundary it is (WI-996).",
+                "title": "Boundary",
+                "type": "string"
+              },
+              "key": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "The content key `session:boundary:hash(reason)` (WI-996); null from an\nolder engine.",
+                "title": "Key"
               }
             },
             "required": [
@@ -43478,6 +43803,31 @@
                 ],
                 "default": null,
                 "title": "Since"
+              },
+              "needs": {
+                "default": "person",
+                "description": "Who can resolve it: `person`, `overseer` or `either` (WI-996).",
+                "title": "Needs",
+                "type": "string"
+              },
+              "boundary": {
+                "default": "other",
+                "description": "What kind of boundary it is (WI-996).",
+                "title": "Boundary",
+                "type": "string"
+              },
+              "key": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "The content key `session:boundary:hash(reason)` (WI-996); null from an\nolder engine.",
+                "title": "Key"
               }
             },
             "required": [
@@ -45112,6 +45462,31 @@
                 ],
                 "default": null,
                 "title": "Since"
+              },
+              "needs": {
+                "default": "person",
+                "description": "Who can resolve it: `person`, `overseer` or `either` (WI-996).",
+                "title": "Needs",
+                "type": "string"
+              },
+              "boundary": {
+                "default": "other",
+                "description": "What kind of boundary it is (WI-996).",
+                "title": "Boundary",
+                "type": "string"
+              },
+              "key": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "The content key `session:boundary:hash(reason)` (WI-996); null from an\nolder engine.",
+                "title": "Key"
               }
             },
             "required": [
@@ -46614,6 +46989,31 @@
                 ],
                 "default": null,
                 "title": "Since"
+              },
+              "needs": {
+                "default": "person",
+                "description": "Who can resolve it: `person`, `overseer` or `either` (WI-996).",
+                "title": "Needs",
+                "type": "string"
+              },
+              "boundary": {
+                "default": "other",
+                "description": "What kind of boundary it is (WI-996).",
+                "title": "Boundary",
+                "type": "string"
+              },
+              "key": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "The content key `session:boundary:hash(reason)` (WI-996); null from an\nolder engine.",
+                "title": "Key"
               }
             },
             "required": [
@@ -48126,6 +48526,31 @@
                 ],
                 "default": null,
                 "title": "Since"
+              },
+              "needs": {
+                "default": "person",
+                "description": "Who can resolve it: `person`, `overseer` or `either` (WI-996).",
+                "title": "Needs",
+                "type": "string"
+              },
+              "boundary": {
+                "default": "other",
+                "description": "What kind of boundary it is (WI-996).",
+                "title": "Boundary",
+                "type": "string"
+              },
+              "key": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "The content key `session:boundary:hash(reason)` (WI-996); null from an\nolder engine.",
+                "title": "Key"
               }
             },
             "required": [
@@ -49614,6 +50039,31 @@
                 ],
                 "default": null,
                 "title": "Since"
+              },
+              "needs": {
+                "default": "person",
+                "description": "Who can resolve it: `person`, `overseer` or `either` (WI-996).",
+                "title": "Needs",
+                "type": "string"
+              },
+              "boundary": {
+                "default": "other",
+                "description": "What kind of boundary it is (WI-996).",
+                "title": "Boundary",
+                "type": "string"
+              },
+              "key": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "The content key `session:boundary:hash(reason)` (WI-996); null from an\nolder engine.",
+                "title": "Key"
               }
             },
             "required": [
@@ -54037,6 +54487,31 @@
                 ],
                 "default": null,
                 "title": "Since"
+              },
+              "needs": {
+                "default": "person",
+                "description": "Who can resolve it: `person`, `overseer` or `either` (WI-996).",
+                "title": "Needs",
+                "type": "string"
+              },
+              "boundary": {
+                "default": "other",
+                "description": "What kind of boundary it is (WI-996).",
+                "title": "Boundary",
+                "type": "string"
+              },
+              "key": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "The content key `session:boundary:hash(reason)` (WI-996); null from an\nolder engine.",
+                "title": "Key"
               }
             },
             "required": [
@@ -54750,6 +55225,31 @@
                 ],
                 "default": null,
                 "title": "Since"
+              },
+              "needs": {
+                "default": "person",
+                "description": "Who can resolve it: `person`, `overseer` or `either` (WI-996).",
+                "title": "Needs",
+                "type": "string"
+              },
+              "boundary": {
+                "default": "other",
+                "description": "What kind of boundary it is (WI-996).",
+                "title": "Boundary",
+                "type": "string"
+              },
+              "key": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "The content key `session:boundary:hash(reason)` (WI-996); null from an\nolder engine.",
+                "title": "Key"
               }
             },
             "required": [
@@ -55309,6 +55809,31 @@
                 ],
                 "default": null,
                 "title": "Since"
+              },
+              "needs": {
+                "default": "person",
+                "description": "Who can resolve it: `person`, `overseer` or `either` (WI-996).",
+                "title": "Needs",
+                "type": "string"
+              },
+              "boundary": {
+                "default": "other",
+                "description": "What kind of boundary it is (WI-996).",
+                "title": "Boundary",
+                "type": "string"
+              },
+              "key": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "The content key `session:boundary:hash(reason)` (WI-996); null from an\nolder engine.",
+                "title": "Key"
               }
             },
             "required": [
@@ -56363,6 +56888,31 @@
                 ],
                 "default": null,
                 "title": "Since"
+              },
+              "needs": {
+                "default": "person",
+                "description": "Who can resolve it: `person`, `overseer` or `either` (WI-996).",
+                "title": "Needs",
+                "type": "string"
+              },
+              "boundary": {
+                "default": "other",
+                "description": "What kind of boundary it is (WI-996).",
+                "title": "Boundary",
+                "type": "string"
+              },
+              "key": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "The content key `session:boundary:hash(reason)` (WI-996); null from an\nolder engine.",
+                "title": "Key"
               }
             },
             "required": [
@@ -56876,6 +57426,30 @@
             "title": "Items",
             "type": "array"
           },
+          "needs": {
+            "default": null,
+            "description": "Who can resolve it: `person`, your `overseer`, or `either`. A denied action or a missing credential a grant could cover can go to your overseer; anything else needs a person.",
+            "enum": [
+              "person",
+              "overseer",
+              "either"
+            ],
+            "title": "Needs",
+            "type": "string"
+          },
+          "boundary": {
+            "default": null,
+            "description": "What you hit: `permission_prompt`, `denied_action` (a refused tool call or guard), `credential`, `decision`, or `other`.",
+            "enum": [
+              "permission_prompt",
+              "denied_action",
+              "credential",
+              "decision",
+              "other"
+            ],
+            "title": "Boundary",
+            "type": "string"
+          },
           "reason": {
             "description": "Why this write is being made (audited).",
             "minLength": 1,
@@ -56922,6 +57496,31 @@
                 ],
                 "default": null,
                 "title": "Since"
+              },
+              "needs": {
+                "default": "person",
+                "description": "Who can resolve it: `person`, `overseer` or `either` (WI-996).",
+                "title": "Needs",
+                "type": "string"
+              },
+              "boundary": {
+                "default": "other",
+                "description": "What kind of boundary it is (WI-996).",
+                "title": "Boundary",
+                "type": "string"
+              },
+              "key": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "The content key `session:boundary:hash(reason)` (WI-996); null from an\nolder engine.",
+                "title": "Key"
               }
             },
             "required": [
@@ -57353,6 +57952,31 @@
                 ],
                 "default": null,
                 "title": "Since"
+              },
+              "needs": {
+                "default": "person",
+                "description": "Who can resolve it: `person`, `overseer` or `either` (WI-996).",
+                "title": "Needs",
+                "type": "string"
+              },
+              "boundary": {
+                "default": "other",
+                "description": "What kind of boundary it is (WI-996).",
+                "title": "Boundary",
+                "type": "string"
+              },
+              "key": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "The content key `session:boundary:hash(reason)` (WI-996); null from an\nolder engine.",
+                "title": "Key"
               }
             },
             "required": [
