@@ -3819,6 +3819,31 @@ placement the template or deployment cannot provide is refused with a `400`
 naming it. Codex's pod-only rule is a refusal, not a default that silently
 moves: `placement=host` for Codex is `400`.
 
+### Host placement (WI-4428)
+
+The host is a capped exception. Pods are the default for work that runs on
+behalf of a worker, and the host is kept for oversight, a person's own shell,
+agent tasks and the assistant.
+
+- **Role policy.** A Vogt-started worker or review (any session that is not
+  oversight and carries a work item or its `VOGT_SESSION_ID`) asking for
+  `placement=host` is refused with `409`, the reason naming the policy.
+  `ENGINE_HOST_PLACEMENT_ALLOW_WORKERS=1` lifts the refusal during the
+  transition. It is off by default.
+- **No silent host.** A named template that does not resolve is a `400`. A
+  bare start (no template, no placement) on a deployment whose default backend
+  is `pod` takes the deployment's default pod template.
+- **Cap.** `ENGINE_HOST_SESSION_CAP` (default `0`, unlimited) caps the live
+  host sessions, counting shells, agent tasks, assistant starts and wakes. A
+  start over the cap is refused with `429` and a body of
+  `{"error", "cap", "counts": {"live", "by_origin"}}`. A host session's slot is
+  freed when its process exits, so stopping one lets the next start in.
+- **Scratch.** Each host session gets its own `TMPDIR`,
+  `CARGO_TARGET_DIR` and `XDG_CACHE_HOME` under
+  `<ENGINE_HOST_SESSION_SCRATCH_ROOT>/<session-id>/` (default root
+  `<state_dir>/host-scratch`). The directory is removed when the session
+  ends. A hibernated session keeps it for its wake.
+
 A pod template whose command names an agent CLI (`claude`, `codex` or
 `opencode`, bare or behind `vogt-agent-auth run --`) sets the pod's
 `VOGT_CLI` to that CLI and passes no argv. The session agent builds the

@@ -320,6 +320,20 @@ impl SessionTemplate {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct HostPlacement {
+    /// `ENGINE_HOST_PLACEMENT_ALLOW_WORKERS`: let workers and reviews ask for
+    /// the host. Off by default; a transition override only (WI-4428 Q2).
+    pub allow_workers: bool,
+    /// `ENGINE_HOST_SESSION_CAP`: most live host sessions at once, counting
+    /// shells, agent tasks and assistant starts. `0` is unlimited.
+    pub session_cap: usize,
+    /// `ENGINE_HOST_SESSION_SCRATCH_ROOT`: where each host session's `TMPDIR`,
+    /// `CARGO_TARGET_DIR` and `XDG_CACHE_HOME` live. `None` puts them under
+    /// `<state_dir>/host-scratch`.
+    pub scratch_root: Option<std::path::PathBuf>,
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub bind: SocketAddr,
@@ -449,6 +463,12 @@ pub struct Config {
     /// Permit templates to select the optional Kubernetes pod backend.
     /// Disabled by default so an unconfigured engine remains local-only.
     pub pod_backends_enabled: bool,
+    /// Who may run on the host, how many host sessions may run at once, and
+    /// where each host session's scratch dirs live (WI-4428).
+    pub host_placement: HostPlacement,
+    /// The backend the deployment's default templates run on
+    /// (`ENGINE_SESSION_BACKEND`): `pod` means a bare start is a pod start.
+    pub session_default_backend: String,
     /// Bearer key for the assistant's LLM backend. Sourced from
     /// `ENGINE_ASSISTANT_API_KEY` env or config file. Empty disables the
     /// assistant surface entirely (routes 404, PWA hides the tab).
@@ -948,6 +968,25 @@ pub fn load(
     .or(from_file.pod_backends_enabled)
     .unwrap_or(false);
 
+    let session_default_backend = default_templates_backend(pod_backends_enabled)?;
+    let host_placement = HostPlacement {
+        allow_workers: match engine_env("ENGINE_HOST_PLACEMENT_ALLOW_WORKERS") {
+            Ok(v) => parse_bool_env("ENGINE_HOST_PLACEMENT_ALLOW_WORKERS", &v)?,
+            Err(std::env::VarError::NotPresent) => false,
+            Err(e) => {
+                return Err(ApiError::Config(format!(
+                    "reading ENGINE_HOST_PLACEMENT_ALLOW_WORKERS: {e}"
+                )))
+            }
+        },
+        session_cap: parse_usize_env("ENGINE_HOST_SESSION_CAP")?.unwrap_or(0),
+        scratch_root: engine_env("ENGINE_HOST_SESSION_SCRATCH_ROOT")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .map(std::path::PathBuf::from),
+    };
+
     let gui_stream_verified = match std::env::var("GUI_STREAM_VERIFIED") {
         Ok(value) => Some(parse_bool_env("GUI_STREAM_VERIFIED", &value)?),
         Err(std::env::VarError::NotPresent) => None,
@@ -1135,11 +1174,11 @@ pub fn load(
             .unwrap_or_default(),
         session_templates: match from_file.session_templates {
             Some(templates) => templates,
-            None => SessionTemplate::default_templates_on(&default_templates_backend(
-                pod_backends_enabled,
-            )?),
+            None => SessionTemplate::default_templates_on(&session_default_backend),
         },
+        session_default_backend,
         pod_backends_enabled,
+        host_placement,
         assistant_api_key,
         assistant_base_url: match from_file
             .assistant_base_url
