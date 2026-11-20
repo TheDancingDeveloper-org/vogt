@@ -327,8 +327,8 @@ pub(crate) fn backlog_total_considered<C: Clock, I: IdFactory>(
     ctx: &AppContext<C, I>,
 ) -> Result<i64, VogtError> {
     // The same candidate set `backlog` with no filters ranks, counted without
-    // scoring or rendering rows (WI-700). `backlog` reads the freshness clock
-    // after the gather, and so does this, so the clock reads stay the same.
+    // scoring, trust or the per-row clock reads that feed them (WI-4448).
+    // `backlog` reads the freshness clock after the gather, and so does this.
     let query = GatherQuery {
         project: None,
         kinds: Vec::new(),
@@ -339,9 +339,9 @@ pub(crate) fn backlog_total_considered<C: Clock, I: IdFactory>(
         trust_states: Vec::new(),
         include_prs: true,
     };
-    let gathered = gather_with(ctx, &query, false)?;
+    let considered = considered_count(ctx, &query)?;
     crate::application::services::freshness::freshness_of(&ctx.observed, &ctx.clock)?;
-    Ok(gathered.considered)
+    Ok(considered)
 }
 
 /// How many declared rows a ranked view loads before scoring. Python's
@@ -359,9 +359,253 @@ fn gather<C: Clock, I: IdFactory>(
     gather_with(ctx, query, true)
 }
 
-/// [`gather`], with `score` off when only the count is wanted. The clock reads
-/// are the same either way: scoring is what is skipped, not the reads it
-/// scores from (WI-700).
+/// The observed kinds a ranked view reads. Pull requests join when the query
+/// wants them.
+fn observed_kinds(include_prs: bool) -> Vec<String> {
+    let mut kinds = vec!["forge.issue".to_string(), "marker".to_string()];
+    if include_prs {
+        kinds.push("forge.pull_request".to_string());
+    }
+    kinds
+}
+
+/// The kind and priority filters a ranked view applies after the drops. Both
+/// the ranked gather and the count apply them, so they count the same rows.
+fn wanted_by(query: &GatherQuery<'_>, kind: &str, priority: &str) -> bool {
+    (query.kinds.is_empty() || query.kinds.iter().any(|wanted| wanted == kind))
+        && (query.priorities.is_empty() || query.priorities.iter().any(|wanted| wanted == priority))
+}
+
+/// The store filter for the declared half of a ranked view. Kinds and
+/// priorities filter the declared half in the store, as Python's `WorkFilter`
+/// does (`views.py:393-414`).
+fn declared_filter(
+    view: &impl ReadView,
+    project_id: Option<String>,
+    query: &GatherQuery<'_>,
+) -> Result<crate::storage::interface::WorkFilter, VogtError> {
+    let exclude_unlinked_native = project_id.is_none();
+    Ok(crate::storage::interface::WorkFilter {
+        project_id,
+        kinds: query.kinds.clone(),
+        priorities: query.priorities.clone(),
+        assignee_actor_id: query
+            .assignee
+            .map(|identity| {
+                crate::application::resolve::actor(view, identity).map(|actor| actor.id)
+            })
+            .transpose()?,
+        initiative_id: query
+            .initiative
+            .map(|slug| {
+                crate::application::resolve::initiative(view, slug).map(|initiative| initiative.id)
+            })
+            .transpose()?,
+        label: query.label.map(str::to_string),
+        trust_states: query.trust_states.clone(),
+        exclude_terminal: true,
+        exclude_unlinked_native,
+        limit: RANKING_CANDIDATE_LIMIT,
+        ..crate::storage::interface::WorkFilter::default()
+    })
+}
+
+/// What the observed half of a ranked view reads before any drop: the latest
+/// observations and what they are linked to. Shared by the ranked gather and
+/// the count, so both drop the same subjects.
+struct ObservedInputs {
+    observations: Vec<crate::core::Observation>,
+    adopted: std::collections::BTreeMap<String, String>,
+    overlays: std::collections::BTreeMap<String, crate::core::WorkOverlay>,
+    projects: std::collections::HashMap<String, crate::core::Project>,
+    filter_set: SuppressionFilter,
+}
+
+fn observed_inputs<C: Clock, I: IdFactory>(
+    ctx: &AppContext<C, I>,
+    view: &impl ReadView,
+    project_id: Option<&str>,
+    include_prs: bool,
+) -> Result<ObservedInputs, VogtError> {
+    let observations =
+        ctx.observed
+            .latest(&observed_kinds(include_prs), project_id, false, true, 1000)?;
+    let keys: Vec<String> = observations
+        .iter()
+        .map(|observation| observation.subject_key.clone())
+        .collect();
+    let adopted = view.work_links_for_subjects(&keys)?;
+    // Projects are loaded once, as Python's `views.py` does (`projects = {p.id: p ...}`).
+    // `project_by_id` per observed row was a full table lookup for every candidate.
+    let projects: std::collections::HashMap<String, crate::core::Project> = view
+        .list_projects(10_000, 0)?
+        .into_iter()
+        .map(|project| (project.id.clone(), project))
+        .collect();
+    // An overlay only refines a forge issue on a linked project (the upstream
+    // truth join), so only those subjects' overlays are read.
+    let overlay_keys: Vec<String> = observations
+        .iter()
+        .filter(|observation| {
+            observation.kind == "forge.issue"
+                && observation
+                    .project_id
+                    .as_deref()
+                    .and_then(|id| projects.get(id))
+                    .is_some_and(crate::application::upstream::is_linked)
+        })
+        .map(|observation| observation.subject_key.clone())
+        .collect();
+    let overlays = view.work_overlays(&overlay_keys)?;
+    let filter_set = SuppressionFilter::build(&view.list_suppressions(false, 1000)?);
+    Ok(ObservedInputs {
+        observations,
+        adopted,
+        overlays,
+        projects,
+        filter_set,
+    })
+}
+
+/// An observed subject that survives every drop, with the fields a row
+/// renders. Trust and the git signals are added by the ranked gather only.
+struct ObservedCandidate<'a> {
+    observation: &'a crate::core::Observation,
+    kind: &'static str,
+    priority: String,
+    state: String,
+    project_slug: Option<String>,
+    adopted_as: Option<String>,
+}
+
+struct ObservedCandidates<'a> {
+    rows: Vec<ObservedCandidate<'a>>,
+    suppressed: i64,
+    closed_by_overlay: i64,
+}
+
+/// Every drop a ranked view makes on the observed half, in Python's order.
+/// Reads no clock: the per-row trust read belongs to the ranked gather.
+fn observed_candidates<'a>(
+    inputs: &'a ObservedInputs,
+    view: &impl ReadView,
+) -> Result<ObservedCandidates<'a>, VogtError> {
+    // Every observed subject is present before any PR is dropped, so a PR
+    // collapses under the issue it implements even when that issue is seen
+    // later. Adopted subjects count too; declared refs do not — a PR
+    // implementing a WI-n is its own row. Python's `present_subjects`.
+    let mut present: std::collections::HashSet<String> = inputs
+        .observations
+        .iter()
+        .map(|observation| observation.subject_key.clone())
+        .collect();
+    present.extend(inputs.adopted.keys().cloned());
+    let mut rows = Vec::new();
+    let mut suppressed = 0;
+    let mut closed_by_overlay = 0;
+    for observation in &inputs.observations {
+        if !crate::decisions::is_worklike(observation) {
+            continue;
+        }
+        if inputs
+            .filter_set
+            .hides(&observation.subject_key, observation.project_id.as_deref())
+        {
+            suppressed += 1;
+            continue;
+        }
+        let targets = crate::decisions::implemented_targets(observation);
+        if !targets.is_empty() && targets.iter().any(|target| present.contains(target)) {
+            continue;
+        }
+        if inputs.adopted.contains_key(&observation.subject_key) {
+            continue;
+        }
+        // The upstream-truth join: on a linked project a forge issue is the
+        // work item itself, so its overlay refines priority and state. A
+        // vogt-only terminal state drops the entry the way an upstream
+        // closure would.
+        let overlay = inputs.overlays.get(&observation.subject_key);
+        let mut state = "observed".to_string();
+        let mut priority = crate::decisions::priority_of(observation).to_string();
+        if observation.kind == "forge.issue" {
+            if let Some(project_id) = observation.project_id.as_deref() {
+                if inputs
+                    .projects
+                    .get(project_id)
+                    .is_some_and(crate::application::upstream::is_linked)
+                {
+                    let workflow =
+                        view.workflow_for(crate::decisions::work_kind_of(observation))?;
+                    state = crate::decisions::upstream_state(
+                        observation,
+                        overlay,
+                        &workflow.initial_state,
+                    );
+                    if crate::core::TERMINAL_STATES.contains(&state.as_str()) {
+                        closed_by_overlay += 1;
+                        continue;
+                    }
+                    if let Some(overlay_priority) = overlay.and_then(|overlay| overlay.priority) {
+                        priority = overlay_priority.to_string();
+                    }
+                }
+            }
+        }
+        let project_slug = observation
+            .project_id
+            .as_ref()
+            .and_then(|id| inputs.projects.get(id))
+            .map(|project| project.slug.clone());
+        rows.push(ObservedCandidate {
+            observation,
+            kind: crate::decisions::work_kind_of(observation),
+            priority,
+            state,
+            project_slug,
+            adopted_as: inputs.adopted.get(&observation.subject_key).cloned(),
+        });
+    }
+    Ok(ObservedCandidates {
+        rows,
+        suppressed,
+        closed_by_overlay,
+    })
+}
+
+/// The number of candidates [`gather_with`] would rank, read without scoring:
+/// no trust reads, no git signals, no fan-out, no `last_confirmed` (WI-4448).
+/// It applies the same drops through [`observed_candidates`], so it equals the
+/// ranked list's length.
+fn considered_count<C: Clock, I: IdFactory>(
+    ctx: &AppContext<C, I>,
+    query: &GatherQuery<'_>,
+) -> Result<i64, VogtError> {
+    let view = ctx.declared.read()?;
+    let project_id = query
+        .project
+        .map(|slug| crate::application::resolve::project(&view, slug))
+        .transpose()?
+        .map(|project| project.id);
+    let filter = declared_filter(&view, project_id.clone(), query)?;
+    // A ranked list loads at most `limit` declared rows, so the count caps the same way.
+    let declared = view.count_work_items(&filter)?.min(filter.limit);
+    if !ctx.observed.has_evidence_tables()? {
+        return Ok(declared);
+    }
+    let inputs = observed_inputs(ctx, &view, project_id.as_deref(), query.include_prs)?;
+    let candidates = observed_candidates(&inputs, &view)?;
+    let observed = candidates
+        .rows
+        .iter()
+        .filter(|row| wanted_by(query, row.kind, &row.priority))
+        .count() as i64;
+    Ok(declared + observed)
+}
+
+/// [`gather`], with `score` off when only the candidates are wanted. The clock
+/// reads that scoring needs are skipped with it, so the ranked order is only
+/// built when `score` is on (WI-700, WI-4448).
 fn gather_with<C: Clock, I: IdFactory>(
     ctx: &AppContext<C, I>,
     query: &GatherQuery<'_>,
@@ -372,35 +616,8 @@ fn gather_with<C: Clock, I: IdFactory>(
         .project
         .map(|slug| crate::application::resolve::project(&view, slug))
         .transpose()?;
-    // Kinds and priorities filter the declared half in the store, as Python's
-    // `WorkFilter` does (`views.py:393-414`): the declared rows and the
-    // `excluded_unlinked` count are both taken from that filtered query. The
-    // observed half is different. Python scores every observed candidate and
-    // only then drops rows (`views.py:556-559`), and each one reads the clock
-    // inside `trust_for` on the way, so that filter happens after scoring.
-    let filter = crate::storage::interface::WorkFilter {
-        project_id: project.as_ref().map(|project| project.id.clone()),
-        kinds: query.kinds.clone(),
-        priorities: query.priorities.clone(),
-        assignee_actor_id: query
-            .assignee
-            .map(|identity| {
-                crate::application::resolve::actor(&view, identity).map(|actor| actor.id)
-            })
-            .transpose()?,
-        initiative_id: query
-            .initiative
-            .map(|slug| {
-                crate::application::resolve::initiative(&view, slug).map(|initiative| initiative.id)
-            })
-            .transpose()?,
-        label: query.label.map(str::to_string),
-        trust_states: query.trust_states.clone(),
-        exclude_terminal: true,
-        exclude_unlinked_native: project.is_none(),
-        limit: RANKING_CANDIDATE_LIMIT,
-        ..crate::storage::interface::WorkFilter::default()
-    };
+    let project_id = project.as_ref().map(|project| project.id.clone());
+    let filter = declared_filter(&view, project_id.clone(), query)?;
     let excluded_unlinked = if project.is_none() {
         let unfiltered = crate::storage::interface::WorkFilter {
             exclude_unlinked_native: false,
@@ -414,11 +631,7 @@ fn gather_with<C: Clock, I: IdFactory>(
     let ids: Vec<String> = items.iter().map(|item| item.id.clone()).collect();
     let fan_out = view.blocking_fan_out(&ids)?;
     let weights = initiative_weights(&view)?;
-    let signals = git_signals(
-        ctx,
-        project.as_ref().map(|project| project.id.as_str()),
-        now_of(&ctx.clock),
-    )?;
+    let signals = git_signals(ctx, project_id.as_deref(), now_of(&ctx.clock))?;
     // Scoring waits until both halves are assembled. The candidates carry their
     // ranking inputs; the clock they score against is read once, afterwards.
     let mut declared_rows: Vec<DeclaredScore> = Vec::new();
@@ -440,155 +653,67 @@ fn gather_with<C: Clock, I: IdFactory>(
 
     let (mut ranked, considered, observed, suppressed, closed) =
         if ctx.observed.has_evidence_tables()? {
-            let mut kinds = vec!["forge.issue".to_string(), "marker".to_string()];
-            if query.include_prs {
-                kinds.push("forge.pull_request".to_string());
-            }
-            let observations = ctx.observed.latest(
-                &kinds,
-                project.as_ref().map(|project| project.id.as_str()),
-                false,
-                true,
-                1000,
-            )?;
-            let keys: Vec<String> = observations
+            let inputs = observed_inputs(ctx, &view, project_id.as_deref(), query.include_prs)?;
+            let keys: Vec<String> = inputs
+                .observations
                 .iter()
                 .map(|observation| observation.subject_key.clone())
                 .collect();
-            let adopted = view.work_links_for_subjects(&keys)?;
-            let overlays = view.work_overlays(&keys)?;
             let confirmed = ctx.observed.last_confirmed(&keys)?;
-            // Projects are loaded once, as Python's `views.py` does (`projects = {p.id: p ...}`).
-            // `project_by_id` per observed row was a full table lookup for every candidate.
-            let projects: std::collections::HashMap<String, crate::core::Project> = view
-                .list_projects(10_000, 0)?
+            let candidates = observed_candidates(&inputs, &view)?;
+            // Python reads the clock once per observed candidate inside `trust_for`
+            // (`views.py:189`), for every candidate before the kind and priority
+            // filters. The filters come after, so the reads stay the same.
+            let observed_rows: Vec<ObservedScore<'_>> = candidates
+                .rows
                 .into_iter()
-                .map(|project| (project.id.clone(), project))
-                .collect();
-            let filter_set = SuppressionFilter::build(&view.list_suppressions(false, 1000)?);
-            // Every observed subject is present before any PR is dropped, so a PR
-            // collapses under the issue it implements even when that issue is seen
-            // later. Adopted subjects count too; declared refs do not — a PR
-            // implementing a WI-n is its own row. Python's `present_subjects`.
-            let mut present: std::collections::HashSet<String> = observations
-                .iter()
-                .map(|observation| observation.subject_key.clone())
-                .collect();
-            present.extend(adopted.keys().cloned());
-            let mut observed_rows: Vec<ObservedScore> = Vec::new();
-            let mut suppressed = 0;
-            let mut observed_count = 0;
-            let mut closed_by_overlay = 0;
-            for observation in &observations {
-                if !crate::decisions::is_worklike(observation) {
-                    continue;
-                }
-                if filter_set.hides(&observation.subject_key, observation.project_id.as_deref()) {
-                    suppressed += 1;
-                    continue;
-                }
-                let targets = crate::decisions::implemented_targets(observation);
-                if !targets.is_empty() && targets.iter().any(|target| present.contains(target)) {
-                    continue;
-                }
-                if adopted.contains_key(&observation.subject_key) {
-                    continue;
-                }
-                // The upstream-truth join: on a linked project a forge issue is the
-                // work item itself, so its overlay refines priority and state. A
-                // vogt-only terminal state drops the entry the way an upstream
-                // closure would.
-                let overlay = overlays.get(&observation.subject_key);
-                let mut state = "observed".to_string();
-                let mut priority = crate::decisions::priority_of(observation).to_string();
-                if observation.kind == "forge.issue" {
-                    if let Some(project_id) = observation.project_id.as_deref() {
-                        if projects
-                            .get(project_id)
-                            .is_some_and(crate::application::upstream::is_linked)
-                        {
-                            let workflow =
-                                view.workflow_for(crate::decisions::work_kind_of(observation))?;
-                            state = crate::decisions::upstream_state(
-                                observation,
-                                overlay,
-                                &workflow.initial_state,
-                            );
-                            if crate::core::TERMINAL_STATES.contains(&state.as_str()) {
-                                closed_by_overlay += 1;
-                                continue;
-                            }
-                            if let Some(overlay_priority) =
-                                overlay.and_then(|overlay| overlay.priority)
-                            {
-                                priority = overlay_priority.to_string();
-                            }
-                        }
+                .map(|row| {
+                    let trust = trust_for(
+                        ctx,
+                        row.observation.observed_at,
+                        confirmed.get(&row.observation.subject_key).copied(),
+                    );
+                    let (open_pr, branch_activity) = signals.for_ref(&row.observation.subject_key);
+                    ObservedScore {
+                        observation: row.observation,
+                        kind: row.kind,
+                        priority: row.priority,
+                        trust,
+                        state: row.state,
+                        project_slug: row.project_slug,
+                        adopted_as: row.adopted_as,
+                        open_pr,
+                        branch_activity,
                     }
-                }
-                let kind = crate::decisions::work_kind_of(observation);
-                // Counted before the kind and priority filters, as Python's
-                // `observed.append` is: a filtered-out subject still counts.
-                observed_count += 1;
-                // The kind and priority filters come after scoring, not here.
-                // Python scores the whole candidate set (`views.py:554`) and only
-                // then drops rows (`views.py:556-559`), and every candidate reads
-                // the clock inside `trust_for` on the way. Filtering first spends
-                // fewer reads, so the scores land a few seconds fresher.
-                let trust = trust_for(
-                    ctx,
-                    observation.observed_at,
-                    confirmed.get(&observation.subject_key).copied(),
-                );
-                let (open_pr, branch_activity) = signals.for_ref(&observation.subject_key);
-                let project_slug = observation
-                    .project_id
-                    .as_ref()
-                    .and_then(|id| projects.get(id))
-                    .map(|project| project.slug.clone());
-                observed_rows.push(ObservedScore {
-                    observation,
-                    kind,
-                    priority,
-                    trust,
-                    state,
-                    project_slug,
-                    adopted_as: adopted.get(&observation.subject_key).cloned(),
-                    open_pr,
-                    branch_activity,
-                });
-            }
+                })
+                .collect();
+            let observed_count = observed_rows.len() as i64;
+            let observed_rows: Vec<ObservedScore<'_>> = observed_rows
+                .into_iter()
+                .filter(|row| wanted_by(query, row.kind, &row.priority))
+                .collect();
+            let closed = ctx
+                .observed
+                .count_closed(&observed_kinds(query.include_prs), project_id.as_deref())?
+                + candidates.closed_by_overlay;
+            let considered = (declared_rows.len() + observed_rows.len()) as i64;
             // Python reads the clock at `views.py:423` for git signals, once per
             // observed row inside `trust_for` (`views.py:189`) while assembling
             // them, then once at `views.py:554` for `_score_all`. Both halves
             // score from that last read, so it comes after the observed loop.
-            // Python scores the whole candidate set and only then filters by kind
-            // and priority (`views.py:554-559`). The clock reads above already
-            // happened for every row, which is what the scores are counted from, so
-            // dropping the unwanted rows here changes nothing about them.
-            let observed_rows: Vec<ObservedScore<'_>> = observed_rows
-                .into_iter()
-                .filter(|row| {
-                    (query.kinds.is_empty() || query.kinds.iter().any(|wanted| wanted == row.kind))
-                        && (query.priorities.is_empty()
-                            || query
-                                .priorities
-                                .iter()
-                                .any(|wanted| wanted == &row.priority))
-                })
-                .collect();
-            let closed = ctx
-                .observed
-                .count_closed(&kinds, project.as_ref().map(|project| project.id.as_str()))?
-                + closed_by_overlay;
-            let considered = (declared_rows.len() + observed_rows.len()) as i64;
             let scored = if score {
                 score_rows(&declared_rows, &observed_rows, now_of(&ctx.clock))
             } else {
                 let _ = now_of(&ctx.clock);
                 Vec::new()
             };
-            (scored, considered, observed_count, suppressed, closed)
+            (
+                scored,
+                considered,
+                observed_count,
+                candidates.suppressed,
+                closed,
+            )
         } else {
             // No observed rows, so no `trust_for` reads: the scoring read is the
             // second one, straight after the git-signals read. The declared rows

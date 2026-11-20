@@ -230,6 +230,56 @@ mod place_bench {
         ctx.observed.rebuild_latest().unwrap();
     }
 
+    /// A later sweep whose subjects sort first in `latest`: a PR that implements
+    /// a subject already present (dropped), a PR that implements nothing
+    /// present (kept), and an unpromoted marker (not worklike, dropped).
+    fn seed_newer_observed<C: crate::core::Clock, I: crate::core::IdFactory>(
+        ctx: &AppContext<C, I>,
+    ) {
+        use crate::core::{Moment, SweepOutcome};
+        use crate::storage::interface::ObservedStore;
+        use crate::storage::observed_types::PendingObservation;
+        let at = Moment::from_unix(1_700_000_100, 0);
+        let sweep = ctx
+            .observed
+            .begin_sweep("bench-forge", &["vogt".to_string()], at)
+            .unwrap();
+        let findings = vec![
+            PendingObservation {
+                kind: "forge.pull_request".into(),
+                subject_key: "vogt/pulls/newer-implements-present".into(),
+                payload: json!({"state": "open", "title": "pr implements a present issue", "number": 900, "implements": [{"subject": "vogt/issues/5"}]}),
+                content_digest: "pr-newer-present".into(),
+                project_id: None,
+                source_url: None,
+                promoted: false,
+            },
+            PendingObservation {
+                kind: "forge.pull_request".into(),
+                subject_key: "vogt/pulls/newer-implements-absent".into(),
+                payload: json!({"state": "open", "title": "pr implements nothing present", "number": 901, "implements": [{"subject": "vogt/issues/unknown"}]}),
+                content_digest: "pr-newer-absent".into(),
+                project_id: None,
+                source_url: None,
+                promoted: false,
+            },
+            PendingObservation {
+                kind: "marker".into(),
+                subject_key: "vogt/markers/newer-unpromoted".into(),
+                payload: json!({"tag": "TODO", "path": "x.rs", "line": 1}),
+                content_digest: "marker-newer".into(),
+                project_id: None,
+                source_url: None,
+                promoted: false,
+            },
+        ];
+        ctx.observed.append(&sweep.id, &findings, at).unwrap();
+        ctx.observed
+            .finish_sweep(&sweep.id, SweepOutcome::Ok, &[], at, None)
+            .unwrap();
+        ctx.observed.rebuild_latest().unwrap();
+    }
+
     /// The count-only path must answer what the ranked list holds (WI-700).
     #[test]
     fn backlog_count_matches_the_ranked_list() {
@@ -268,13 +318,27 @@ mod place_bench {
         let full = crate::application::views::backlog_op(&built, json!({"limit": 1})).unwrap();
         assert_eq!(counted, full["total_considered"].as_i64().unwrap());
         assert_eq!(counted, 20 + 1000);
+        // Newer subjects displace the oldest issues in `latest(1000)`: the PR
+        // implementing a present issue drops, the other PR and the issues count.
+        crate::with_ctx!(&built, |ctx| seed_newer_observed(ctx));
+        let counted_newer = crate::with_ctx!(&built, |ctx| {
+            crate::application::views::backlog_total_considered(ctx)
+        })
+        .unwrap();
+        let full_newer =
+            crate::application::views::backlog_op(&built, json!({"limit": 1})).unwrap();
+        assert_eq!(
+            counted_newer,
+            full_newer["total_considered"].as_i64().unwrap()
+        );
+        assert_eq!(counted_newer, 20 + 998);
         // The concurrent badge reads answer what the sequential reads answer.
         let metrics = place_metrics_op(&built, Value::Null).unwrap();
         crate::with_ctx!(&built, |ctx| {
             let view = ctx.declared.read().unwrap();
             assert_eq!(metrics["projects_total"], view.counts().unwrap().projects);
             assert_eq!(metrics["work_total"], list_work_total(ctx).unwrap());
-            assert_eq!(metrics["backlog_total_considered"], counted);
+            assert_eq!(metrics["backlog_total_considered"], counted_newer);
             let drift = !view
                 .list_drift(Some("open"), None, None, 1)
                 .unwrap()
@@ -312,6 +376,14 @@ mod place_bench {
         });
         let with_drift = place_metrics_op(&built, Value::Null).unwrap();
         assert_eq!(with_drift["drift_present"], true);
+        // The open-drift case: the count still equals the live ranked list.
+        crate::with_ctx!(&built, |ctx| {
+            let live = crate::application::views::backlog_total_considered(ctx).unwrap();
+            assert_eq!(live, counted_newer);
+        });
+        let full_with_drift =
+            crate::application::views::backlog_op(&built, json!({"limit": 1})).unwrap();
+        assert_eq!(full_with_drift["total_considered"], counted_newer);
         crate::with_ctx!(&built, |ctx| {
             let view = ctx.declared.read().unwrap();
             assert!(view.has_open_drift().unwrap());
