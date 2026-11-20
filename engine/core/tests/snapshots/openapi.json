@@ -855,8 +855,8 @@
     "/api/work/get": {
       "get": {
         "operationId": "work_get",
-        "summary": "Fetch one work item with its relations, labels and comments (`id` is accepted for `ref`).",
-        "description": "Fetch one work item with its relations, labels and comments (`id` is accepted for `ref`).",
+        "summary": "Fetch one work item with its relations, labels and comments (`id` is accepted for `ref`), and its `delivery`: landed, deployed per lane, verified, each with its evidence.",
+        "description": "Fetch one work item with its relations, labels and comments (`id` is accepted for `ref`), and its `delivery`: landed, deployed per lane, verified, each with its evidence.",
         "parameters": [
           {
             "name": "ref",
@@ -1066,8 +1066,8 @@
     "/api/work/transition": {
       "post": {
         "operationId": "work_transition",
-        "summary": "Move a work item to another state, validating the edge; a refusal lists the allowed edges and the shortest path. walk=true takes that path, one audited hop per edge.",
-        "description": "Move a work item to another state, validating the edge; a refusal lists the allowed edges and the shortest path. walk=true takes that path, one audited hop per edge.",
+        "summary": "Move a work item to another state, validating the edge; a refusal lists the allowed edges and the shortest path. walk=true takes that path, one audited hop per edge. An agent closing a feature or bug on a project whose policy has verification.required_for_done is refused (403 person_required) until a verification comment exists.",
+        "description": "Move a work item to another state, validating the edge; a refusal lists the allowed edges and the shortest path. walk=true takes that path, one audited hop per edge. An agent closing a feature or bug on a project whose policy has verification.required_for_done is refused (403 person_required) until a verification comment exists.",
         "requestBody": {
           "required": true,
           "content": {
@@ -11731,6 +11731,42 @@
         "title": "Comment",
         "type": "object"
       },
+      "Delivery": {
+        "additionalProperties": false,
+        "description": "Where a work item's change has got to: landed, deployed, verified (WI-1330).",
+        "properties": {
+          "landed": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Landed"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "deployed": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/LaneDeployed"
+            },
+            "title": "Deployed",
+            "type": "array"
+          },
+          "verified": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Verified"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "title": "Delivery",
+        "type": "object"
+      },
       "GitStoryDriftView": {
         "additionalProperties": false,
         "description": "One contradiction between a work item and its git evidence.\n\nDerived and read-only: Vogt *reports* the disagreement — a closed\nitem with an open PR, a merged PR under an open item, an active branch on a\ndone item — it does not reconcile it. `provenance` says which observation\nthe contradiction was read from, so a reader can check it.",
@@ -11852,6 +11888,69 @@
           }
         },
         "title": "HandoffFields",
+        "type": "object"
+      },
+      "Landed": {
+        "additionalProperties": false,
+        "description": "The change the item's latest hand-off names, and why it counts as landed.",
+        "properties": {
+          "sha": {
+            "title": "Sha",
+            "type": "string"
+          },
+          "branch": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Branch"
+          },
+          "evidence": {
+            "description": "What showed it landed, e.g. \"branch wi-7 tip abc123 is 0 behind main\".",
+            "title": "Evidence",
+            "type": "string"
+          }
+        },
+        "required": [
+          "sha",
+          "evidence"
+        ],
+        "title": "Landed",
+        "type": "object"
+      },
+      "LaneDeployed": {
+        "additionalProperties": false,
+        "description": "One lane's answer: does it run the landed change?",
+        "properties": {
+          "lane": {
+            "title": "Lane",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "deployed",
+              "not_deployed",
+              "unknown"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "evidence": {
+            "description": "The lane evidence the answer was read from.",
+            "title": "Evidence",
+            "type": "string"
+          }
+        },
+        "required": [
+          "lane",
+          "state",
+          "evidence"
+        ],
+        "title": "LaneDeployed",
         "type": "object"
       },
       "SessionApproval": {
@@ -13041,6 +13140,64 @@
         "title": "VerificationFields",
         "type": "object"
       },
+      "Verified": {
+        "additionalProperties": false,
+        "description": "The verification comment that counts, with who posted it and where.",
+        "properties": {
+          "comment_id": {
+            "title": "Comment Id",
+            "type": "string"
+          },
+          "lane": {
+            "title": "Lane",
+            "type": "string"
+          },
+          "what": {
+            "title": "What",
+            "type": "string"
+          },
+          "evidence": {
+            "title": "Evidence",
+            "type": "string"
+          },
+          "by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "By"
+          },
+          "head_sha": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Head Sha"
+          },
+          "at": {
+            "format": "date-time",
+            "title": "At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "comment_id",
+          "lane",
+          "what",
+          "evidence",
+          "at"
+        ],
+        "title": "Verified",
+        "type": "object"
+      },
       "WorkItemBranchView": {
         "additionalProperties": false,
         "description": "One branch bound to a work item, declared or observed or both.\n\n `source` is the whole point: `declared` is a branch a Vogt-started session\n said it would use, `observed` is one a sweep actually found in the\n checkout, and `both` is the two agreeing. A branch that is one but not the\n other is drift — declared and observed are kept separate and never merged\n, so the surface can show the disagreement rather than paper over\n it. `last_commit_age_seconds` is derived from `last_commit_at` at read time\n so it is always current without the observation churning every sweep.",
@@ -13589,6 +13746,17 @@
                 "type": "null"
               }
             ]
+          },
+          "delivery": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Delivery"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Where the item's change has got to (WI-1330): `landed` (the latest hand-off's branch, observed fully merged into the default branch), `deployed` (per deploy lane, from `deployed.versions`) and `verified` (the newest `verification` comment on an allowed lane), each with the evidence that set it. Populated by `work.get`; None elsewhere."
           }
         },
         "required": [

@@ -33,7 +33,7 @@ struct DeployedVersionsParams {
     lane: Option<String>,
 }
 
-fn versions<C: crate::core::Clock, I: crate::core::IdFactory>(
+pub(crate) fn versions<C: crate::core::Clock, I: crate::core::IdFactory>(
     ctx: &AppContext<C, I>,
     params: Value,
 ) -> Result<Value, VogtError> {

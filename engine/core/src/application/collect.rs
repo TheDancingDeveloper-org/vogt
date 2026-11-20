@@ -604,6 +604,7 @@ impl<C: Clock, I: IdFactory> DeclaredSessions for DeclaredSessionJoin<C, I> {
             return Vec::new();
         };
         let mut refs: HashMap<String, String> = HashMap::new();
+        let mut verified_by: HashMap<String, Option<String>> = HashMap::new();
         for session in &sessions {
             let Some(work_item_id) = session.work_item_id.as_deref() else {
                 continue;
@@ -612,12 +613,13 @@ impl<C: Clock, I: IdFactory> DeclaredSessions for DeclaredSessionJoin<C, I> {
                 continue;
             }
             if let Ok(Some(item)) = view.work_item_by_id(work_item_id) {
+                verified_by.insert(work_item_id.to_string(), verified_by_of(&view, &item.id));
                 refs.insert(work_item_id.to_string(), item.reference);
             }
         }
         sessions
             .iter()
-            .map(|session| session_record(session, &refs))
+            .map(|session| session_record(session, &refs, &verified_by))
             .collect()
     }
 
@@ -640,7 +642,28 @@ impl<C: Clock, I: IdFactory> DeclaredSessions for DeclaredSessionJoin<C, I> {
     }
 }
 
-fn session_record(session: &CodingSession, refs: &HashMap<String, String>) -> SessionRecord {
+/// Who posted the newest `verification` comment on an item (WI-1330).
+fn verified_by_of(view: &impl ReadView, work_item_id: &str) -> Option<String> {
+    let comments = view.comments_for(work_item_id, 500, true).ok()?;
+    comments
+        .into_iter()
+        .find(|comment| comment.kind == "verification" && comment.verification.is_some())
+        .map(|comment| {
+            comment
+                .verification
+                .as_ref()
+                .and_then(|fields| fields.get("by"))
+                .and_then(Value::as_str)
+                .filter(|by| !by.is_empty())
+                .map_or(comment.actor_display_name.clone(), str::to_string)
+        })
+}
+
+fn session_record(
+    session: &CodingSession,
+    refs: &HashMap<String, String>,
+    verified_by: &HashMap<String, Option<String>>,
+) -> SessionRecord {
     SessionRecord {
         id: session.id.clone(),
         engine_session_id: session.engine_session_id.clone(),
@@ -651,6 +674,10 @@ fn session_record(session: &CodingSession, refs: &HashMap<String, String>) -> Se
             .work_item_id
             .as_deref()
             .and_then(|id| refs.get(id).cloned()),
+        verified_by: session
+            .work_item_id
+            .as_deref()
+            .and_then(|id| verified_by.get(id).cloned().flatten()),
     }
 }
 

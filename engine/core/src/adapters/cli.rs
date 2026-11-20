@@ -2279,7 +2279,7 @@ mod tests {
             work.stdout
         );
         assert!(
-            work.stdout.contains("(`id` is accepted for `ref`)."),
+            work.stdout.contains("(`id` is accepted for `ref`)"),
             "{}",
             work.stdout
         );

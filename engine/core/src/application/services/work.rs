@@ -19,6 +19,7 @@ use serde_json::{json, Value};
 use crate::adapters::forge::registry::ForgeClient;
 use crate::adapters::forge::{ForgeProvider, RepoRef, WriteBackOutcome, WriteBackResult};
 use crate::application::context::{AppContext, Built};
+use crate::application::delivery_state;
 use crate::application::models::views::{
     VerdictFields, VerdictFieldsReviewerStartedBy, VerificationFields,
 };
@@ -1500,6 +1501,7 @@ fn get_work<C: Clock, I: IdFactory>(
     // `get_work` reads the clock in, which the next timestamp depends on.
     let branches = crate::application::git_story::branch_views_for(ctx, &view, &item)?;
     let git = crate::application::git_story::git_story_for(ctx, &item, &branches)?;
+    let delivery = delivery_of(ctx, &view, &item, native, &branches)?;
     let sessions = sessions_for(ctx, &view, &item)?;
     Ok(json!({
         "item": item,
@@ -1507,6 +1509,7 @@ fn get_work<C: Clock, I: IdFactory>(
         "sessions": sessions,
         "branches": branches,
         "git": git,
+        "delivery": delivery,
         "walked": [],
         "live_sessions": [],
         // Always present, null when no transition recorded a claim. Python's
@@ -1514,6 +1517,173 @@ fn get_work<C: Clock, I: IdFactory>(
         // key fails a client that decodes the schema.
         "claim_check": Value::Null,
     }))
+}
+
+/// How many of an item's comments the delivery projection reads, newest
+/// first. A hand-off or verification older than this is not looked for.
+const DELIVERY_COMMENT_LIMIT: i64 = 500;
+
+/// The `delivery` projection (WI-1330): every input is already recorded.
+///
+/// `landed` is the newest hand-off's branch, observed with nothing ahead of
+/// the default branch (every commit of it is on the default branch).
+/// `deployed` reads the project's `deployed.versions` lanes. `verified` reads
+/// the item's `verification` comments against the policy's lanes.
+fn delivery_of<C: Clock, I: IdFactory>(
+    ctx: &AppContext<C, I>,
+    view: &impl crate::storage::interface::ReadView,
+    item: &WorkItem,
+    native: bool,
+    branches: &[Value],
+) -> Result<crate::application::models::work::Delivery, VogtError> {
+    let project = match item.project_id.as_deref() {
+        Some(id) => view.project_by_id(id)?,
+        None => None,
+    };
+    let comments = if native {
+        view.comments_for(&item.id, DELIVERY_COMMENT_LIMIT, true)?
+    } else {
+        Vec::new()
+    };
+    let landed = landed_of(&comments, branches);
+    let mut lanes: Vec<delivery_state::LaneView> = Vec::new();
+    if let (Some(_), Some(project)) = (&landed, &project) {
+        let result = crate::application::deployed::versions(ctx, json!({"project": project.slug}))?;
+        lanes = result["lanes"]
+            .as_array()
+            .map(|rows| rows.iter().map(lane_view_of).collect())
+            .unwrap_or_default();
+    }
+    let policy = delivery_state::VerificationPolicy::from_value(
+        project
+            .as_ref()
+            .and_then(|project| project.agent_policy.verification.as_ref()),
+    );
+    Ok(delivery_state::project(
+        landed,
+        &lanes,
+        &verification_records(&comments),
+        policy
+            .as_ref()
+            .map_or(&[][..], |policy| policy.lanes.as_slice()),
+    ))
+}
+
+fn lane_view_of(row: &Value) -> delivery_state::LaneView {
+    delivery_state::LaneView {
+        name: row["name"].as_str().unwrap_or_default().to_string(),
+        status: row["status"].as_str().unwrap_or("unknown").to_string(),
+        commits_behind: row["commits_behind"].as_i64(),
+        unpromoted_shas: row["unpromoted_commits"]
+            .as_array()
+            .map(|commits| {
+                commits
+                    .iter()
+                    .filter_map(|commit| commit["sha"].as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        deployed_sha: row["deployed_sha"].as_str().map(str::to_string),
+    }
+}
+
+pub(super) fn landed_of(
+    comments: &[Comment],
+    branches: &[Value],
+) -> Option<crate::application::models::work::Landed> {
+    let mut newest_first: Vec<&Comment> = comments.iter().collect();
+    newest_first.sort_by_key(|comment| std::cmp::Reverse(comment.created_at));
+    let handoff = newest_first
+        .into_iter()
+        .filter(|comment| comment.kind == "handoff")
+        .filter_map(|comment| comment.handoff.as_ref())
+        .find(|handoff| {
+            handoff["branch"]
+                .as_str()
+                .is_some_and(|branch| !branch.is_empty())
+        })?;
+    let branch = handoff["branch"].as_str()?;
+    let row = branches
+        .iter()
+        .find(|row| row["name"].as_str() == Some(branch))?;
+    let tip = row["tip"].as_str()?;
+    if row["ahead"].as_i64() != Some(0) {
+        return None;
+    }
+    let base = row["default_branch"]
+        .as_str()
+        .filter(|name| !name.is_empty())
+        .or_else(|| handoff["base"].as_str().filter(|name| !name.is_empty()))
+        .unwrap_or("the default branch");
+    Some(crate::application::models::work::Landed {
+        sha: tip.to_string(),
+        branch: Some(branch.to_string()),
+        evidence: format!("branch {branch} tip {tip} has nothing ahead of {base}"),
+    })
+}
+
+fn verification_records(comments: &[Comment]) -> Vec<delivery_state::VerificationRecord> {
+    comments
+        .iter()
+        .filter(|comment| comment.kind == "verification")
+        .filter_map(|comment| {
+            let fields = serde_json::from_value(comment.verification.clone()?).ok()?;
+            Some(delivery_state::VerificationRecord {
+                comment_id: comment.id.clone(),
+                at: comment.created_at,
+                fields,
+            })
+        })
+        .collect()
+}
+
+/// Refuse an agent's close of an item that needs a verification record.
+///
+/// Needed when the project's `agent_policy.verification.required_for_done` is
+/// set and the item is a feature or bug (`delivery_state::VERIFIED_KINDS`). A
+/// verification on one of the policy's lanes (any lane when none are listed)
+/// lets it through. A person is never refused.
+fn require_verification(
+    is_agent: bool,
+    view: &impl crate::storage::interface::ReadView,
+    item: &WorkItem,
+) -> Result<(), VogtError> {
+    if !is_agent {
+        return Ok(());
+    }
+    let project = match item.project_id.as_deref() {
+        Some(id) => view.project_by_id(id)?,
+        None => None,
+    };
+    let policy = delivery_state::VerificationPolicy::from_value(
+        project
+            .as_ref()
+            .and_then(|project| project.agent_policy.verification.as_ref()),
+    );
+    if !delivery_state::needs_verification(&item.kind.to_string(), policy.as_ref()) {
+        return Ok(());
+    }
+    let Some(policy) = policy else {
+        return Ok(());
+    };
+    let records =
+        verification_records(&view.comments_for(&item.id, DELIVERY_COMMENT_LIMIT, true)?);
+    if delivery_state::project(None, &[], &records, &policy.lanes)
+        .verified
+        .is_none()
+    {
+        let lanes = if policy.lanes.is_empty() {
+            String::new()
+        } else {
+            format!(" on lane {}", policy.lanes.join(", "))
+        };
+        return Err(VogtError::PersonRequired(format!(
+            "{} needs a verification record{lanes} before an agent closes it: {}",
+            item.reference,
+            delivery_state::VERIFICATION_REQUIRED_MESSAGE
+        )));
+    }
+    Ok(())
 }
 
 /// Sessions bound to a declared item. An upstream item has no declared id, so
@@ -2080,6 +2250,12 @@ where
         }));
     }
     let item = resolve::work_item(&view, &reference)?;
+    let is_agent = ctx.principal.kind == crate::core::ActorKind::Agent;
+    // A walk is refused before its first hop (WI-1330); a single move is
+    // judged in its own transaction below, after the edge and the blockers.
+    if walk && to_state == "done" {
+        require_verification(is_agent, &view, &item)?;
+    }
     let workflow = view.workflow_for(&item.kind.to_string())?;
     let path = if walk {
         workflow
@@ -2129,6 +2305,7 @@ where
         let leaving = crate::core::TERMINAL_STATES.contains(&from.as_str())
             && !crate::core::TERMINAL_STATES.contains(&to.as_str());
         let hop_for_record = hop_reason.clone();
+        let is_agent = ctx.principal.kind == crate::core::ActorKind::Agent;
         let action = if entering {
             Some(crate::core::WriteBackAction::Close)
         } else if leaving {
@@ -2188,6 +2365,9 @@ where
                             &format!("{reference} is blocked by unfinished dependencies: {names}"),
                         ));
                     }
+                }
+                if to == "done" {
+                    require_verification(is_agent, txn, &fresh)?;
                 }
                 let now = super::now_of(&clock);
                 txn.update_work_item(

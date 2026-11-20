@@ -9,6 +9,7 @@ pub mod collect;
 pub mod context;
 pub mod contracts;
 pub mod coverage;
+pub mod delivery_state;
 pub mod deployed;
 pub mod dispatch;
 #[cfg(test)]
