@@ -490,19 +490,74 @@ enum Leader {
     Stopped,
 }
 
-/// A stop's request to remove the worktree after cleaning it (WI-1774).
+/// A stop's request to remove the worktree after cleaning it (WI-1774). Only
+/// ever made for a worktree the engine cut itself on this host (WI-4486).
 struct Removal {
-    base_ref: Option<String>,
+    /// The `workspace.path` the engine recorded when it cut the tree.
+    recorded_path: String,
+    /// The ref the engine cut the tree from.
+    base_ref: String,
+    /// The engine's workspace root: a removal never reaches outside it.
+    workspace_root: std::path::PathBuf,
+}
+
+/// Whether a stop may remove a session's worktree (WI-1774, WI-4486): the
+/// feature is on, the session runs on this host rather than in a pod, and the
+/// workspace is one the engine cut itself (it recorded the base ref). A
+/// worktree the engine did not create has no such record and is kept.
+fn removal_plan(
+    enabled: bool,
+    host_placed: bool,
+    workspace: Option<&vogt_engine_contract::Workspace>,
+    workspace_root: &std::path::Path,
+) -> Option<Removal> {
+    if !enabled || !host_placed {
+        return None;
+    }
+    let ws = workspace?;
+    let base_ref = ws.base_ref.as_deref().filter(|b| !b.is_empty())?;
+    Some(Removal {
+        recorded_path: ws.path.clone(),
+        base_ref: base_ref.to_string(),
+        workspace_root: workspace_root.to_path_buf(),
+    })
+}
+
+/// Whether linked worktree `root` is the one the engine recorded: the same
+/// folder as the recorded path, and inside the engine's workspace root.
+fn engine_created_worktree(
+    root: &std::path::Path,
+    recorded_path: &str,
+    workspace_root: &std::path::Path,
+) -> bool {
+    let canonical = |p: &std::path::Path| std::fs::canonicalize(p).ok();
+    let (Some(root), Some(recorded)) = (
+        canonical(root),
+        canonical(std::path::Path::new(recorded_path)),
+    ) else {
+        return false;
+    };
+    root == recorded
+        && crate::workspace_clean::confined(workspace_root, std::iter::empty::<&str>(), &root)
 }
 
 /// Remove a stopped session's linked worktree when nothing in it would be
-/// lost: the tree is clean (untracked files count, git-ignored ones do not),
-/// `HEAD` is in its base, upstream, `origin/HEAD` or `origin/main`, and the
-/// branch has no stash entries. The caller has already made sure no other
-/// running or hibernated session works there and the session's processes
-/// are gone. Any doubt keeps the tree; never forced.
-fn remove_stopped_worktree(id: Uuid, root: &std::path::Path, base_ref: Option<&str>) {
-    let plan = match crate::workspace_clean::plan_removal(root, base_ref, false) {
+/// lost: the engine created it (see [`engine_created_worktree`]), the tree is
+/// clean (untracked files count, git-ignored ones do not), `HEAD` is in its
+/// base, upstream, `origin/HEAD` or `origin/main`, and the branch has no stash
+/// entries. The caller has already made sure no other running or hibernated
+/// session works there and the session's processes are gone. Any doubt keeps
+/// the tree; never forced.
+fn remove_stopped_worktree(id: Uuid, root: &std::path::Path, removal: &Removal) {
+    if !engine_created_worktree(root, &removal.recorded_path, &removal.workspace_root) {
+        tracing::info!(
+            session = %id,
+            worktree = %root.display(),
+            "kept the stopped session's worktree: the engine did not create it at its recorded path"
+        );
+        return;
+    }
+    let plan = match crate::workspace_clean::plan_removal(root, Some(&removal.base_ref), false) {
         Ok(plan) => plan,
         Err(why) => {
             tracing::info!(session = %id, worktree = %root.display(), %why, "kept the stopped session's worktree");
@@ -4452,11 +4507,14 @@ impl SessionRegistry {
             s.request_stop(request);
         }
         let tree = self.tree_for_clean(&s);
+        // A pod session has a pod link; only a host session may have its
+        // worktree removed (WI-4486). Read before the kill, which may drop it.
+        let host_placed = crate::agent_stream::global().pod(id).is_none();
         s.kill()?;
         // The exit hook returns the slot too; doing it here as well means a
         // stop never leaves it held, whichever runs first.
         self.account_leases.remove(&id);
-        self.finish_for_clean(id, &s, tree);
+        self.finish_for_clean(id, &s, tree, host_placed);
         Ok(())
     }
 
@@ -4473,7 +4531,7 @@ impl SessionRegistry {
     /// After a stop's `SIGKILL` to the leader: with cleanup on, take the rest
     /// of the tree too (a cargo or node grandchild in its own group would
     /// otherwise keep writing into the directory), then clean.
-    fn finish_for_clean(&self, id: Uuid, s: &Session, tree: Vec<u32>) {
+    fn finish_for_clean(&self, id: Uuid, s: &Session, tree: Vec<u32>, host_placed: bool) {
         self.kill_strays(id);
         self.clean_scratch(id, Scratch::Remove);
         if !self.cfg.worktree_clean_on_stop {
@@ -4482,7 +4540,13 @@ impl SessionRegistry {
         if let Some(pid) = s.pid() {
             hibernation::kill_tree(pid, &tree);
         }
-        let removal = self.removal_for(s.workspace());
+        let workspace = s.workspace();
+        let removal = removal_plan(
+            self.cfg.worktree_remove_on_stop,
+            host_placed,
+            workspace.as_ref(),
+            &self.cfg.workspace_root,
+        );
         self.clean_worktree(id, &s.cwd, s.pid(), tree, removal);
     }
 
@@ -4558,15 +4622,6 @@ impl SessionRegistry {
         self.clean_worktree_after(id, cwd, Leader::Stopped, removal);
     }
 
-    /// Whether a stop should go on to remove the worktree (WI-1774): only
-    /// with `ENGINE_WORKTREE_REMOVE_ON_STOP`, carrying the ref the engine
-    /// cut it from so a branch merged into that base counts as merged.
-    fn removal_for(&self, workspace: Option<vogt_engine_contract::Workspace>) -> Option<Removal> {
-        self.cfg.worktree_remove_on_stop.then(|| Removal {
-            base_ref: workspace.and_then(|w| w.base_ref),
-        })
-    }
-
     fn clean_worktree_after(&self, id: Uuid, cwd: &str, leader: Leader, removal: Option<Removal>) {
         let Some(root) = crate::worktree_clean::linked_worktree(std::path::Path::new(cwd)) else {
             return;
@@ -4627,7 +4682,7 @@ impl SessionRegistry {
                 );
             }
             if let Some(removal) = removal {
-                remove_stopped_worktree(id, &root, removal.base_ref.as_deref());
+                remove_stopped_worktree(id, &root, &removal);
             }
         };
         match tokio::runtime::Handle::try_current() {
@@ -4639,6 +4694,9 @@ impl SessionRegistry {
     }
 
     pub fn remove(&self, id: Uuid) -> Result<()> {
+        // Read before anything is torn down: a pod session's link goes with it
+        // (WI-4486).
+        let pod_session = crate::agent_stream::global().pod(id).is_some();
         self.host_slots.remove(&id);
         remove_host_scratch(&self.host_scratch_root(), id);
         let live = self.sessions.remove(&id).map(|(_, v)| v);
@@ -4665,15 +4723,25 @@ impl SessionRegistry {
         }
         if let Some(s) = live {
             let tree = self.tree_for_clean(&s);
+            let host_placed = !pod_session;
             let _ = s.kill();
-            self.finish_for_clean(id, &s, tree);
+            self.finish_for_clean(id, &s, tree, host_placed);
         } else if self.cfg.worktree_clean_on_stop {
             // A hibernated session has no process left: its hibernation
             // stopped the tree, so removing it is the stop that cleans.
             self.clean_scratch(id, Scratch::Remove);
             if let Some((_, record)) = recorded_record.as_ref() {
                 if let Some(cwd) = record.cwd.as_deref() {
-                    let removal = self.removal_for(record.workspace.clone());
+                    // The spawn-time placement decides for a hibernated record:
+                    // a pod template or placement is not a host session (WI-4486).
+                    let host_placed =
+                        !self.runs_in_pod(record.template.as_deref(), record.placement.as_deref());
+                    let removal = removal_plan(
+                        self.cfg.worktree_remove_on_stop,
+                        host_placed,
+                        record.workspace.as_ref(),
+                        &self.cfg.workspace_root,
+                    );
                     self.clean_stopped_worktree(id, cwd, removal);
                 }
             }
@@ -5396,11 +5464,22 @@ mod tests {
         wt
     }
 
+    /// The removal the engine would plan for `wt`, recorded as the engine
+    /// records a worktree it cut itself (WI-4486).
+    fn engine_cut(wt: &std::path::Path, root: &std::path::Path) -> super::Removal {
+        super::Removal {
+            recorded_path: wt.to_string_lossy().into_owned(),
+            base_ref: "main".into(),
+            workspace_root: root.to_path_buf(),
+        }
+    }
+
     #[test]
     fn a_stopped_sessions_clean_merged_worktree_is_removed() {
         let tmp = tempfile::tempdir().unwrap();
         let wt = repo_with_linked_worktree(tmp.path());
-        super::remove_stopped_worktree(uuid::Uuid::from_u128(9), &wt, Some("main"));
+        let removal = engine_cut(&wt, tmp.path());
+        super::remove_stopped_worktree(uuid::Uuid::from_u128(9), &wt, &removal);
         assert!(!wt.exists(), "a clean merged worktree is removed on stop");
     }
 
@@ -5409,11 +5488,89 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let wt = repo_with_linked_worktree(tmp.path());
         std::fs::write(wt.join("notes.txt"), "unpushed work").unwrap();
-        super::remove_stopped_worktree(uuid::Uuid::from_u128(9), &wt, Some("main"));
+        let removal = engine_cut(&wt, tmp.path());
+        super::remove_stopped_worktree(uuid::Uuid::from_u128(9), &wt, &removal);
         assert!(
             wt.join("notes.txt").exists(),
             "a dirty worktree is never removed"
         );
+    }
+
+    #[test]
+    fn a_worktree_the_engine_did_not_create_is_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wt = repo_with_linked_worktree(tmp.path());
+        // The engine's record names some other folder: this worktree is one
+        // a person made, so it is kept even though it is clean and merged.
+        let removal = super::Removal {
+            recorded_path: tmp.path().join("elsewhere").to_string_lossy().into_owned(),
+            base_ref: "main".into(),
+            workspace_root: tmp.path().to_path_buf(),
+        };
+        super::remove_stopped_worktree(uuid::Uuid::from_u128(9), &wt, &removal);
+        assert!(wt.exists(), "a worktree the engine did not create is kept");
+    }
+
+    #[test]
+    fn a_worktree_outside_the_workspace_root_is_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wt = repo_with_linked_worktree(tmp.path());
+        // Recorded correctly, but the engine's root is elsewhere: never removed.
+        let removal = engine_cut(&wt, &tmp.path().join("other-root"));
+        super::remove_stopped_worktree(uuid::Uuid::from_u128(9), &wt, &removal);
+        assert!(wt.exists(), "a worktree outside the workspace root is kept");
+    }
+
+    #[test]
+    fn only_an_engine_cut_host_worktree_is_planned_for_removal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let cut = vogt_engine_contract::Workspace {
+            kind: vogt_engine_contract::WorkspaceKind::Worktree,
+            path: root.join("wt").to_string_lossy().into_owned(),
+            repo_root: root.join("repo").to_string_lossy().into_owned(),
+            branch: "feat".into(),
+            base_ref: Some("main".into()),
+            base_sha: None,
+            created_at: "2026-11-20T00:00:00Z".into(),
+            baseline_dirty: Vec::new(),
+            build_dirs: Vec::new(),
+            cleaned_at: None,
+        };
+        // Feature off: nothing is planned, whatever the workspace says.
+        assert!(super::removal_plan(false, true, Some(&cut), root).is_none());
+        // Host-placed and engine-cut: planned, carrying the recorded path.
+        let plan = super::removal_plan(true, true, Some(&cut), root).unwrap();
+        assert_eq!(plan.recorded_path, cut.path);
+        assert_eq!(plan.base_ref, "main");
+        // A workspace with no recorded base ref was not cut by the engine.
+        let not_cut = vogt_engine_contract::Workspace {
+            base_ref: None,
+            ..cut.clone()
+        };
+        assert!(super::removal_plan(true, true, Some(&not_cut), root).is_none());
+        // No workspace block at all: a tree the engine never recorded.
+        assert!(super::removal_plan(true, true, None, root).is_none());
+    }
+
+    #[test]
+    fn a_pod_session_worktree_is_never_planned_for_removal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cut = vogt_engine_contract::Workspace {
+            kind: vogt_engine_contract::WorkspaceKind::Worktree,
+            path: tmp.path().join("wt").to_string_lossy().into_owned(),
+            repo_root: tmp.path().join("repo").to_string_lossy().into_owned(),
+            branch: "feat".into(),
+            base_ref: Some("main".into()),
+            base_sha: None,
+            created_at: "2026-11-20T00:00:00Z".into(),
+            baseline_dirty: Vec::new(),
+            build_dirs: Vec::new(),
+            cleaned_at: None,
+        };
+        // Same engine-cut workspace, enabled, but the session is a pod session
+        // (the default placement): removal is not planned (WI-4486).
+        assert!(super::removal_plan(true, false, Some(&cut), tmp.path()).is_none());
     }
 
     #[test]

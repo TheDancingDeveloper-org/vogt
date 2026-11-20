@@ -2664,6 +2664,42 @@ call for each. Unknown merge state and ordinary checkouts are excluded.
 An unavailable workspace listing leaves the suggestions empty; the sweep
 never removes anything.
 
+#### Removing a stopped worktree
+
+With `ENGINE_WORKTREE_REMOVE_ON_STOP=true` (off by default, WI-1774), a stop
+goes on past the build-output cleanup and removes the linked worktree itself.
+It is planned only when all of these hold (WI-4486):
+
+- the session runs on this host. A pod session, which is the default for a
+  pod-capable template, is never removed; its checkout is not this host's.
+  A live session counts as a pod session while it has a pod link, and a
+  hibernated one by the placement and template it spawned with;
+- the engine cut the worktree itself: the workspace block it recorded names
+  the base ref it was cut from. A worktree a person or another tool made has
+  no such record and is kept;
+- at removal time the folder is the one the engine recorded, and it sits
+  inside the engine's workspace root. A recorded path that does not match, or a
+  folder outside the root, keeps the tree.
+
+Then the same checks as `POST /api/workspaces/clean` with `mode: "remove"` and
+no `force` apply: the tree must be clean (untracked files count, git-ignored
+ones do not), `HEAD` must be in its base ref, upstream, `origin/HEAD` or
+`origin/main`, and the branch must have no stash entries. `git worktree remove`
+then runs from the main checkout and the merged branch is deleted. Any doubt
+keeps the tree, and a hibernation never removes one.
+
+#### Terminal attach keepalive
+
+The engine pings each attached terminal socket every
+`ENGINE_WS_PING_INTERVAL_MS` (default 20 s, WI-2704). Any frame from the client
+counts as an answer, so a client that is typing is never closed for not
+echoing a ping. A socket that sends nothing for two intervals is closed
+`4000 idle`, so a half-open phone socket is noticed in well under a minute.
+An attach whose bearer the core could not verify is closed `4503`, which tells
+the client to retry; a refused bearer still gets `4401`. The attach metrics
+`vogt_ws_attach_total`, `vogt_ws_close_total` (by close code) and
+`vogt_ws_idle_close_total` count the outcomes.
+
 
 #### Session scratch, background processes and free space
 
