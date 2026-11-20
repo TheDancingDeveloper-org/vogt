@@ -4074,6 +4074,11 @@ fn spawn_run_orchestrator(
                         continue;
                     }
                     GateState::Answered { .. } => {
+                        // Not through the enter guard (WI-4459), on purpose:
+                        // the gate's own prompt is the dialog on screen, and
+                        // the guard refuses to press Enter into a dialog. This
+                        // answers a person's (or the audited auto-approve's)
+                        // choice on that prompt, so the raw write is the point.
                         if let Some(input) = record.answered_input() {
                             deliver_line(&session, input);
                         }
@@ -4127,29 +4132,16 @@ fn spawn_run_orchestrator(
             // No gates. Drain one steer per boundary pass.
             let next = control.steer.lock().pop_front();
             if let Some(item) = next {
-                // WI-4459: the steer's text is typed, then its Enter is sent
-                // through the shared guard, so a dialog drawn after the text
-                // holds the Enter back. The skip is logged by the guard.
-                let typed = gates::steer_typed_bytes(&item);
-                match crate::enter_guard::type_bytes_then_enter(
-                    &session,
-                    &typed,
-                    "orchestrator steer",
-                )
-                .await
-                {
-                    Ok(crate::enter_guard::EnterOutcome::Sent) => {
+                match deliver_steer(&session, &control.steer, item.clone()).await {
+                    Ok(SteerDelivery::Sent) => {
                         registry.emit_steered(run_id, &item);
                     }
-                    // Held back and erased: the steer goes back to the front
-                    // of the queue, so it is not lost (WI-4459).
-                    Ok(crate::enter_guard::EnterOutcome::Skipped(_)) => {
-                        control.steer.lock().push_front(item);
+                    Ok(SteerDelivery::Requeued) => {
                         wait_a_beat(&control.notify).await;
                     }
                     // Stranded in the composer: not retyped, so the steer is
                     // not reported as delivered.
-                    Ok(crate::enter_guard::EnterOutcome::Stranded(_)) => {
+                    Ok(SteerDelivery::Stranded) => {
                         tracing::warn!(run = %run_id, "steer stranded in the composer; not delivered");
                     }
                     Err(e) => {
@@ -4177,7 +4169,47 @@ async fn wait_a_beat(notify: &Notify) {
     .await;
 }
 
+/// What became of one steer at a prompt boundary.
+#[derive(Debug, PartialEq, Eq)]
+enum SteerDelivery {
+    /// Typed and sent.
+    Sent,
+    /// Held back and erased: back at the front of the queue, to be tried
+    /// again (WI-4459).
+    Requeued,
+    /// Stranded in the composer: not retyped and not reported as delivered.
+    Stranded,
+}
+
+/// Type one steer and send its Enter through the shared guard, so a dialog
+/// drawn after the text holds the Enter back (WI-4459).
+///
+/// A held-back steer goes back to the front of `queue` so it is not lost. If
+/// its cancel byte was already written before the erase, the requeued steer
+/// no longer carries the interrupt: the cancel went out once, and a retry must
+/// not send a second Ctrl-C into the CLI.
+async fn deliver_steer(
+    session: &Arc<Session>,
+    queue: &Mutex<VecDeque<SteerItem>>,
+    mut item: SteerItem,
+) -> std::io::Result<SteerDelivery> {
+    let typed = gates::steer_typed_bytes(&item);
+    match crate::enter_guard::type_bytes_then_enter(session, &typed, "orchestrator steer").await? {
+        crate::enter_guard::EnterOutcome::Sent => Ok(SteerDelivery::Sent),
+        crate::enter_guard::EnterOutcome::Skipped(_, typed_state) => {
+            if typed_state == crate::enter_guard::Typed::Erased {
+                item.interrupt = false;
+            }
+            queue.lock().push_front(item);
+            Ok(SteerDelivery::Requeued)
+        }
+        crate::enter_guard::EnterOutcome::Stranded(_) => Ok(SteerDelivery::Stranded),
+    }
+}
+
 /// Write a line to the PTY: the text, then the Enter the CLI is waiting for.
+/// A raw write, used only where the Enter answers the dialog on screen (a gate
+/// answer); every other automated line goes through the enter guard.
 fn deliver_line(session: &Arc<Session>, text: &str) {
     let mut bytes = text.as_bytes().to_vec();
     bytes.push(b'\r');
@@ -4669,7 +4701,17 @@ fn spawn_schema_watcher(
         // Failures so far; also the count of re-prompts spent, recorded as the
         // run's `retries`.
         let mut retries: u32 = 0;
+        // A correction the guard held back (a dialog on screen). Sent again
+        // on the next pass rather than dropped (WI-4459).
+        let mut pending: Option<String> = None;
         loop {
+            if let Some(msg) = pending.take() {
+                if let Ok(crate::enter_guard::EnterOutcome::Skipped(..)) =
+                    crate::enter_guard::type_then_enter(&session, &msg, "schema retry").await
+                {
+                    pending = Some(msg);
+                }
+            }
             let chunk =
                 match tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv()).await {
                     Ok(Ok(chunk)) => chunk,
@@ -4729,7 +4771,7 @@ fn spawn_schema_watcher(
                         "Your findings did not match output_schema ({reason}). \
                          Please output a corrected JSON findings block."
                     );
-                    deliver_line(&session, &msg);
+                    pending = Some(msg);
                 }
             }
         }
@@ -5697,5 +5739,39 @@ pub(crate) mod tests {
         let bare = task_bound_to(None, None);
         let wire = serde_json::to_value(&bare).unwrap();
         assert!(wire.get("workflow_engine").is_none());
+    }
+
+    /// WI-4459: an interrupt steer held back by a dialog is requeued at the
+    /// front, with its cancel byte dropped: the cancel went out once before the
+    /// erase, and the retry sends only the text.
+    #[tokio::test]
+    async fn a_held_back_interrupt_steer_is_requeued_without_a_second_cancel() {
+        use crate::enter_guard::tests::{dialog_output, recording_session};
+        let writes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (session, output) = recording_session(Arc::clone(&writes));
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+            output.send(dialog_output()).unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+            output.send(b"\x1b[2J\x1b[H".to_vec()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        let queue = Mutex::new(VecDeque::from([SteerItem {
+            text: "stop".into(),
+            interrupt: true,
+            actor: "test".into(),
+            reason: None,
+        }]));
+
+        let first = queue.lock().pop_front().unwrap();
+        let delivery = deliver_steer(&session, &queue, first).await.unwrap();
+        assert_eq!(delivery, SteerDelivery::Requeued);
+        assert!(!queue.lock().front().unwrap().interrupt);
+        assert_eq!(*writes.lock().unwrap(), b"\x03stop\x15");
+
+        let retry = queue.lock().pop_front().unwrap();
+        let delivery = deliver_steer(&session, &queue, retry).await.unwrap();
+        assert_eq!(delivery, SteerDelivery::Sent);
+        assert_eq!(*writes.lock().unwrap(), b"\x03stop\x15stop\r");
     }
 }
