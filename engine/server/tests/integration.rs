@@ -12229,6 +12229,126 @@ async fn a_named_claude_account_runs_the_session_in_its_own_config_dir() {
     }
 }
 
+/// WI-2232: a session reported blocked, whose block is seen before it is back
+/// at its prompt (as a woken agent's is), answers a `ready` wait only once it
+/// is there. The caller then types into it, so the wait and the input agree.
+#[tokio::test]
+async fn a_blocked_session_is_ready_for_input_once_it_is_back_at_its_prompt() {
+    let (base, _h) = boot().await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let id = create_session_with(
+        &client,
+        &base,
+        json!({
+            "name": "woken-blocked",
+            "command": ["/bin/sh", "-c", "sleep 1; printf '> '; sleep 30"],
+        }),
+    )
+    .await;
+    // The block is reported before the prompt has appeared.
+    let blocked = client
+        .post(format!("{base}/api/sessions/{id}/blocked"))
+        .json(&json!({ "blocked": true, "reason": "needs a person" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(blocked.status(), StatusCode::OK);
+
+    let waited: Value = client
+        .get(format!(
+            "{base}/api/sessions/{id}/wait?until=ready&timeout_s=20"
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(waited["outcome"], "blocked", "{waited:?}");
+    assert_eq!(waited["screen"]["ready"], true, "{waited:?}");
+
+    let typed = client
+        .post(format!("{base}/api/sessions/{id}/input"))
+        .json(&json!({ "text": "continue", "submit": true, "person": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(typed.status(), StatusCode::OK, "{waited:?}");
+
+    client
+        .delete(format!("{base}/api/sessions/{id}"))
+        .send()
+        .await
+        .unwrap();
+}
+
+/// WI-2734: a discovered account starts a session with the configured
+/// accounts present, under the same cap, and the same refusals as before
+/// still hold for a name that is neither.
+#[tokio::test]
+async fn a_discovered_account_starts_a_session_alongside_configured_accounts() {
+    let (tmp, mut cfg, _stub) = hibernation_sandbox();
+    let acct2 = tmp.path().join("acct2");
+    let root = tmp.path().join("accounts");
+    let found = root.join("found");
+    std::fs::create_dir_all(&found).unwrap();
+    std::fs::write(found.join(".vogt-claude-profile"), "").unwrap();
+    let workspace = cfg.workspace_root.clone();
+    cfg.agent_onboarding = vogt_engine_server::claude_config::Onboarding {
+        enabled: true,
+        default_dir: Some(tmp.path().join("default-home")),
+        settings_file: None,
+        opencode_config: None,
+        account_concurrency_cap: 8,
+        accounts_root: Some(root.clone()),
+        accounts: vogt_engine_server::claude_config::parse_accounts(Some(&format!(
+            "acct2={}",
+            acct2.display()
+        ))),
+        codex_policy: Ok(None),
+    };
+    let stub = tmp.path().join("bin").join("claude");
+    std::fs::write(
+        &stub,
+        "#!/bin/sh\nprintf 'cfg=[%s]\\n' \"$CLAUDE_CONFIG_DIR\"\nsleep 300 &\nprintf '> '\nwait\n",
+    )
+    .unwrap();
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let started = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({
+            "name": "discovered",
+            "command": [stub.to_string_lossy()],
+            "account": "found",
+            "cwd": workspace.to_string_lossy(),
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(started.status(), StatusCode::OK);
+    let created: Value = started.json().await.unwrap();
+    assert_eq!(created["account"], "found", "{created}");
+    let id = created["id"].as_str().unwrap().to_string();
+    let want = format!("cfg=[{}]", found.canonicalize().unwrap().display());
+    live_output_containing(&client, &base, &id, &[&want]).await;
+
+    let unknown = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({ "name": "nope", "command": [stub.to_string_lossy()], "account": "nope" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unknown.status(), StatusCode::BAD_REQUEST);
+}
+
 #[tokio::test]
 async fn the_sweep_returns_every_session_with_its_screen_tail_in_one_call() {
     let (tmp, cfg, _stub) = hibernation_sandbox();

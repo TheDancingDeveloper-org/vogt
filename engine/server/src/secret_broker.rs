@@ -534,6 +534,10 @@ pub struct SecretBroker {
     bundle: DashMap<(String, String), Vec<u8>>,
     bundle_versions: DashMap<(String, String), u64>,
     account_dirs: HashMap<String, PathBuf>,
+    /// Where accounts are discovered without a redeploy (WI-2734). An account
+    /// not in `account_dirs` resolves here, through the same checks the
+    /// session start makes.
+    accounts_root: Option<PathBuf>,
     /// The Codex home a pod Codex rollout is written under, when configured.
     /// Codex keeps every conversation under one home, so this is not an
     /// account directory (WI-3867).
@@ -670,6 +674,7 @@ impl SecretBroker {
             bundle: DashMap::new(),
             bundle_versions: DashMap::new(),
             account_dirs: HashMap::new(),
+            accounts_root: None,
             codex_home: None,
             account_locks: DashMap::new(),
             credential_max_lifetime: credential_max_lifetime_from_env(),
@@ -686,6 +691,22 @@ impl SecretBroker {
     pub fn with_account_dirs(mut self, dirs: HashMap<String, PathBuf>) -> Self {
         self.account_dirs = dirs;
         self
+    }
+
+    /// Resolve discovered accounts under `root` (WI-2734). `None` turns it off.
+    pub fn with_accounts_root(mut self, root: Option<PathBuf>) -> Self {
+        self.accounts_root = root;
+        self
+    }
+
+    /// The config directory of the Claude account `account`: a configured one,
+    /// else a discovered profile under the accounts root.
+    fn account_root(&self, account: &str) -> Option<PathBuf> {
+        self.account_dirs.get(account).cloned().or_else(|| {
+            self.accounts_root
+                .as_deref()
+                .and_then(|root| crate::claude_config::discovered_account_dir(root, account).ok())
+        })
     }
 
     /// Store pod Codex rollouts under `home` (WI-3867). `None` leaves Codex
@@ -1278,11 +1299,8 @@ impl SecretBroker {
         if bytes.len() > MAX_BUNDLE_REQUEST_BYTES {
             return Err(BundleRefusal::TooLarge);
         }
-        let root = self
-            .account_dirs
-            .get(account)
-            .map(FsPath::new)
-            .ok_or(BundleRefusal::Storage)?;
+        let root = self.account_root(account).ok_or(BundleRefusal::Storage)?;
+        let root = root.as_path();
         let account_lock = self
             .account_locks
             .entry(account.to_string())
@@ -1387,7 +1405,7 @@ impl SecretBroker {
                 .flatten()
         };
         let mut files = Vec::new();
-        if let Some(root) = self.account_dirs.get(account).map(FsPath::new) {
+        if let Some(root) = self.account_root(account).as_deref() {
             let account_lock = self
                 .account_locks
                 .entry(account.to_string())
@@ -1465,10 +1483,7 @@ impl SecretBroker {
                     return Err(BundleRefusal::ConversationScope);
                 }
                 (
-                    self.account_dirs
-                        .get(account)
-                        .map(FsPath::new)
-                        .ok_or(BundleRefusal::Storage)?,
+                    self.account_root(account).ok_or(BundleRefusal::Storage)?,
                     account.to_string(),
                 )
             }
@@ -1477,11 +1492,12 @@ impl SecretBroker {
                     return Err(BundleRefusal::ConversationScope);
                 }
                 (
-                    self.codex_home.as_deref().ok_or(BundleRefusal::Storage)?,
+                    self.codex_home.clone().ok_or(BundleRefusal::Storage)?,
                     "\0codex".to_string(),
                 )
             }
         };
+        let root = root.as_path();
         let account_lock = self
             .account_locks
             .entry(lock_key)
@@ -3504,6 +3520,25 @@ mod tests {
         assert!(MAX_BUNDLE_BODY_BYTES > full);
         assert!(MAX_BUNDLE_BODY_BYTES < full + 64 * 1024);
         assert_eq!(MAX_BUNDLE_REQUEST_BYTES, MAX_TRANSCRIPT_DELTA_BYTES);
+    }
+
+    #[test]
+    fn a_discovered_account_resolves_in_the_broker() {
+        // WI-2734: a profile under the accounts root is an account the broker
+        // writes bundles for, as a configured one is; an unmarked directory is not.
+        let root = tempfile::tempdir().unwrap();
+        let profile = root.path().join("found");
+        std::fs::create_dir_all(&profile).unwrap();
+        std::fs::write(profile.join(".vogt-claude-profile"), "").unwrap();
+        std::fs::create_dir_all(root.path().join("unmarked")).unwrap();
+        let broker =
+            broker_with("", "127.0.0.1:1").with_accounts_root(Some(root.path().to_path_buf()));
+        assert_eq!(
+            broker.account_root("found"),
+            Some(profile.canonicalize().unwrap())
+        );
+        assert!(broker.account_root("unmarked").is_none());
+        assert!(broker.account_root("missing").is_none());
     }
 
     #[cfg(unix)]

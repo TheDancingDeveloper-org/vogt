@@ -608,6 +608,7 @@ impl SessionRegistry {
                 .with_grant_projects(cfg.agent_grant_projects.clone())
                 .with_engine_identity(crate::pod_backend::engine_identity_from_env())
                 .with_account_dirs(account_dirs)
+                .with_accounts_root(cfg.agent_onboarding.accounts_root.clone())
                 .with_codex_home(cfg.codex_transcript_root.clone()),
         );
         let account_pool = Arc::new(crate::account_pool::AccountPool::new(
@@ -1797,11 +1798,22 @@ impl SessionRegistry {
                 .agent_onboarding
                 .account_dir(name)
                 .map_err(ApiError::BadRequest)?;
+            // A discovered profile is an account the pool has not seen yet
+            // (WI-2734): once it is a real account, it takes the default cap.
+            self.account_pool.register(name);
         }
         let account_lease = if is_claude {
             let should_reserve =
                 matches!(creating, Creating::Fresh(_)) || matches!(creating, Creating::Wake(_));
             if matches!(creating, Creating::Wake(_)) {
+                // After an engine restart the pool knows only the configured
+                // accounts: a discovered one that still resolves is registered
+                // again before its slot is taken.
+                if let Some(name) = account.as_deref() {
+                    if self.cfg.agent_onboarding.account_dir(name).is_ok() {
+                        self.account_pool.register(name);
+                    }
+                }
                 Some(wake_account_lease(
                     &self.account_leases,
                     &self.account_pool,
