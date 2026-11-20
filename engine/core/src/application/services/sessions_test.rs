@@ -539,6 +539,97 @@ fn a_worker_session_start_records_the_starting_session_and_its_role() {
     );
 }
 
+/// Seeds the Vogt row of a session an agent or a person started, so a child
+/// start can read its origin (WI-4471).
+fn seed_started_session(built: &Built, engine_id: &str, started_by_kind: Option<&str>) {
+    let Built::StepSequential(ctx) = built else {
+        unreachable!("opened() builds a step clock");
+    };
+    let actor = ctx
+        .declared
+        .read()
+        .unwrap()
+        .actor_by_identity("local:test-user")
+        .unwrap()
+        .unwrap();
+    let mut txn = ctx.declared.write().unwrap();
+    txn.insert_session(&crate::core::CodingSession {
+        id: format!("ses_{engine_id}"),
+        engine_session_id: engine_id.to_string(),
+        project_id: "prj_beta".to_string(),
+        work_item_id: None,
+        actor_id: actor.id,
+        cwd: "/work/tree".to_string(),
+        template: None,
+        model: None,
+        effort: None,
+        reason: "because".to_string(),
+        purpose: None,
+        started_by_session: None,
+        started_by_kind: started_by_kind.map(str::to_string),
+        started_at: moment(),
+        stopped_at: None,
+    })
+    .unwrap();
+    txn.commit().unwrap();
+}
+
+/// A worker that a person started, with no role given, is a worker by its
+/// engine role only by default. Its child is not labelled a worker (WI-4471).
+#[test]
+fn a_child_of_a_person_started_worker_is_not_labelled_worker() {
+    let script = script_with(vec![
+        (
+            200,
+            r#"{"id":"eng-c","name":"beta","cwd":"/work/tree"}"#.to_string(),
+        ),
+        (
+            200,
+            r#"{"id":"eng-p","name":"parent","cwd":"/work/tree","activity":"idle","alive":true,"autopilot":false,"autopilot_nudges":0,"keep_awake":false,"role":"worker"}"#
+                .to_string(),
+        ),
+    ]);
+    let built = opened_as(
+        Some(Arc::clone(&script)),
+        Principal::new("agent:engine:eng-p", ActorKind::Agent, "Parent").unwrap(),
+    );
+    insert_project(&built, "beta");
+    seed_started_session(&built, "eng-p", Some("person"));
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!("opened() builds a step clock");
+    };
+    let started = start_session(ctx, &start_params(Some("beta"), None, "because")).unwrap();
+    assert_eq!(started.session.started_by_session.as_deref(), Some("eng-p"));
+    assert_eq!(started.session.started_by_kind, None);
+}
+
+/// A worker that an oversight session started is a worker's child (WI-4471).
+#[test]
+fn a_child_of_an_oversight_started_worker_is_a_worker() {
+    let script = script_with(vec![
+        (
+            200,
+            r#"{"id":"eng-c","name":"beta","cwd":"/work/tree"}"#.to_string(),
+        ),
+        (
+            200,
+            r#"{"id":"eng-p","name":"parent","cwd":"/work/tree","activity":"idle","alive":true,"autopilot":false,"autopilot_nudges":0,"keep_awake":false,"role":"worker"}"#
+                .to_string(),
+        ),
+    ]);
+    let built = opened_as(
+        Some(Arc::clone(&script)),
+        Principal::new("agent:engine:eng-p", ActorKind::Agent, "Parent").unwrap(),
+    );
+    insert_project(&built, "beta");
+    seed_started_session(&built, "eng-p", Some("oversight"));
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!("opened() builds a step clock");
+    };
+    let started = start_session(ctx, &start_params(Some("beta"), None, "because")).unwrap();
+    assert_eq!(started.session.started_by_kind.as_deref(), Some("worker"));
+}
+
 /// The body of the engine's `POST` that created a session.
 fn engine_create_body(script: &Script) -> String {
     script
