@@ -10,6 +10,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::adapters::forge::registry::{identity_for, provider_for_host, ForgeClient};
+use crate::adapters::forge::KIND_DEPLOY_LANE;
 use crate::adapters::forge::{ForgeProvider, RepoRef};
 use crate::adapters::git::CloneRequest;
 use crate::application::context::{write_of, AppContext, Built};
@@ -17,8 +18,9 @@ use crate::application::resolve;
 use crate::application::services::{context_parts, next_id, now_of};
 use crate::application::writes::{audited_write, WriteContext, WriteOutcome};
 use crate::core::{
-    py_repr, slugify, Clock, ComplianceStatus, IdFactory, LinkState, Project, ProjectLifecycle,
-    TrustState, LOCAL_SCHEME,
+    py_repr, slugify, Clock, CodingSession, ComplianceStatus, IdFactory, InitiativeState,
+    LinkState, Moment, Project, ProjectLifecycle, TrustState, WorkItem, IN_PROGRESS, LOCAL_SCHEME,
+    TERMINAL_STATES,
 };
 use crate::decisions::{default_scaffold, roll_up, Scaffold, NOT_APPLICABLE};
 use crate::errors::VogtError;
@@ -922,6 +924,7 @@ fn brief_project<C: Clock, I: IdFactory>(
     by_state.sort();
     by_kind.sort();
     let observed_version = observed_version(ctx, &project.id)?;
+    let digest = status_digest(ctx, &view, &project, &items)?;
     drop(view);
     // The same population `backlog` and `bugs` rank, so the three views agree
     // about one project at one moment.
@@ -960,6 +963,7 @@ fn brief_project<C: Clock, I: IdFactory>(
         "ci_status": ci_summary(ctx, &project.id)?,
         "dependencies": dependency_summary(ctx, &project.id)?,
         "freshness": crate::application::services::freshness::freshness_of(&ctx.observed, &ctx.clock)?,
+        "digest": digest,
     }))
 }
 
@@ -1002,6 +1006,273 @@ fn observed_version<C: Clock, I: IdFactory>(
         .collect();
     tags.sort();
     Ok(tags.pop())
+}
+
+/// Caps on the digest (WI-2747): each list is bounded and each entry one line.
+const DIGEST_INITIATIVES: usize = 5;
+const DIGEST_IN_PROGRESS: usize = 8;
+const DIGEST_RESULTS: usize = 3;
+const DIGEST_REPORT_SCAN: i64 = 200;
+const DIGEST_LINE: usize = 160;
+
+/// `_line`: one line, at most `DIGEST_LINE` characters (code points, as Python counts).
+fn digest_line(text: &str) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= DIGEST_LINE {
+        return flat;
+    }
+    let mut cut: String = flat.chars().take(DIGEST_LINE - 1).collect();
+    cut.push('…');
+    cut
+}
+
+/// The derived status digest (WI-2747): computed on read, never stored.
+fn status_digest<C: Clock, I: IdFactory, V: ReadView>(
+    ctx: &AppContext<C, I>,
+    view: &V,
+    project: &Project,
+    items: &[WorkItem],
+) -> Result<Value, VogtError> {
+    let live: Vec<&WorkItem> = items
+        .iter()
+        .filter(|item| {
+            item.superseded_by.is_none() && !TERMINAL_STATES.contains(&item.state.as_str())
+        })
+        .collect();
+    Ok(json!({
+        "initiatives": digest_initiatives(view, &live)?,
+        "in_progress": digest_in_progress(view, project, &live)?,
+        "recent_results": digest_results(view, items)?,
+        "last_merge": digest_last_merge(ctx, project)?,
+        "last_deploy": digest_last_deploy(ctx, project)?,
+    }))
+}
+
+fn digest_initiatives<V: ReadView>(view: &V, live: &[&WorkItem]) -> Result<Vec<String>, VogtError> {
+    let mut counts: std::collections::BTreeMap<&str, i64> = std::collections::BTreeMap::new();
+    for item in live {
+        if let Some(initiative_id) = &item.initiative_id {
+            *counts.entry(initiative_id.as_str()).or_insert(0) += 1;
+        }
+    }
+    let mut found = Vec::new();
+    for (initiative_id, open_here) in counts {
+        if let Some(initiative) = view.initiative_by_id(initiative_id)? {
+            if matches!(initiative.state, InitiativeState::Open) {
+                found.push((initiative, open_here));
+            }
+        }
+    }
+    // Heaviest first, then by slug.
+    found.sort_by(|a, b| {
+        b.0.weight
+            .cmp(&a.0.weight)
+            .then_with(|| a.0.slug.cmp(&b.0.slug))
+    });
+    Ok(found
+        .iter()
+        .take(DIGEST_INITIATIVES)
+        .map(|(initiative, open_here)| {
+            digest_line(&format!(
+                "{} (weight {}, {} open here): {}",
+                initiative.slug, initiative.weight, open_here, initiative.title
+            ))
+        })
+        .collect())
+}
+
+fn digest_in_progress<V: ReadView>(
+    view: &V,
+    project: &Project,
+    live: &[&WorkItem],
+) -> Result<Vec<String>, VogtError> {
+    let mut working: Vec<&WorkItem> = live
+        .iter()
+        .copied()
+        .filter(|item| item.state == IN_PROGRESS)
+        .collect();
+    if working.is_empty() {
+        return Ok(Vec::new());
+    }
+    let sessions = view.list_sessions(Some(&project.id), None, false, 500, 0)?;
+    // The newest live session holds an item, whatever order the store
+    // returns them in (WI-2750).
+    let mut running: Vec<&CodingSession> = sessions
+        .iter()
+        .filter(|session| session.stopped_at.is_none())
+        .collect();
+    running.sort_by_key(|session| std::cmp::Reverse(session.started_at));
+    let mut held_by: std::collections::BTreeMap<&str, String> = std::collections::BTreeMap::new();
+    for session in running {
+        if let Some(work_item_id) = &session.work_item_id {
+            held_by
+                .entry(work_item_id.as_str())
+                .or_insert_with(|| format!("session {}", session.id));
+        }
+    }
+    working.sort_by_key(|item| std::cmp::Reverse(item.updated_at));
+    Ok(working
+        .iter()
+        .take(DIGEST_IN_PROGRESS)
+        .map(|item| {
+            let holder = held_by
+                .get(item.id.as_str())
+                .cloned()
+                .or_else(|| item.assignee_identity_ref.clone().filter(|r| !r.is_empty()))
+                .unwrap_or_else(|| "unheld".to_string());
+            digest_line(&format!("{} [{}]: {}", item.reference, holder, item.title))
+        })
+        .collect())
+}
+
+fn digest_results<V: ReadView>(view: &V, items: &[WorkItem]) -> Result<Vec<String>, VogtError> {
+    let refs: std::collections::BTreeMap<&str, &str> = items
+        .iter()
+        .map(|item| (item.id.as_str(), item.reference.as_str()))
+        .collect();
+    let mut lines = Vec::new();
+    let reports = view.list_session_reports(None, None, Some("result"), DIGEST_REPORT_SCAN)?;
+    for report in reports {
+        let Some(reference) = refs.get(report.work_item_id.as_deref().unwrap_or("")) else {
+            continue;
+        };
+        lines.push(digest_line(&format!(
+            "{} {}: {}",
+            minute_stamp(utc(report.created_at)),
+            reference,
+            report.summary
+        )));
+        if lines.len() == DIGEST_RESULTS {
+            break;
+        }
+    }
+    Ok(lines)
+}
+
+/// `%Y-%m-%d %H:%MZ`, the digest's one timestamp form.
+fn minute_stamp(when: chrono::DateTime<chrono::Utc>) -> String {
+    when.format("%Y-%m-%d %H:%MZ").to_string()
+}
+
+fn utc(moment: Moment) -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::from_timestamp(moment.unix_seconds(), moment.nanos())
+        .expect("a moment built here is in range")
+}
+
+/// `_parse_when`: an ISO-8601 instant, `Z` accepted; anything else is `None`.
+fn parse_when(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc3339(&value.replace('Z', "+00:00"))
+        .ok()
+        .map(|parsed| parsed.with_timezone(&chrono::Utc))
+}
+
+/// Python's truthiness for the JSON values a payload carries.
+fn truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(flag) => *flag,
+        Value::Number(number) => number.as_f64().is_some_and(|n| n != 0.0),
+        Value::String(text) => !text.is_empty(),
+        Value::Array(items) => !items.is_empty(),
+        Value::Object(map) => !map.is_empty(),
+    }
+}
+
+/// `str(value)` for the scalars a payload carries.
+fn py_str(value: &Value) -> String {
+    match value {
+        Value::Null => "None".to_string(),
+        Value::Bool(true) => "True".to_string(),
+        Value::Bool(false) => "False".to_string(),
+        Value::String(text) => text.clone(),
+        other => other.to_string(),
+    }
+}
+
+fn digest_last_merge<C: Clock, I: IdFactory>(
+    ctx: &AppContext<C, I>,
+    project: &Project,
+) -> Result<Option<String>, VogtError> {
+    if !ctx.observed.has_evidence_tables()? {
+        return Ok(None);
+    }
+    let seen = ctx.observed.latest(
+        &["forge.pull_request".to_string()],
+        Some(&project.id),
+        false,
+        false,
+        1000,
+    )?;
+    let mut best: Option<(chrono::DateTime<chrono::Utc>, String)> = None;
+    for observation in seen {
+        let payload = &observation.payload;
+        if payload.get("state").and_then(Value::as_str) != Some("merged") {
+            continue;
+        }
+        // `merged_at or closed_at`: the first truthy one decides, even when it
+        // does not parse, and an unparsed value falls back to the observation.
+        let stamp = ["merged_at", "closed_at"]
+            .iter()
+            .filter_map(|key| payload.get(*key))
+            .find(|value| truthy(value))
+            .and_then(Value::as_str)
+            .and_then(parse_when);
+        let when = stamp.unwrap_or_else(|| utc(observation.observed_at));
+        if best.as_ref().is_some_and(|(newest, _)| when <= *newest) {
+            continue;
+        }
+        let number = payload
+            .get("number")
+            .map(py_str)
+            .unwrap_or_else(|| "None".to_string());
+        let title = match payload.get("title") {
+            Some(value) if truthy(value) => py_str(value),
+            _ => String::new(),
+        };
+        best = Some((when, format!("{} #{number}: {title}", minute_stamp(when))));
+    }
+    Ok(best.map(|(_, text)| digest_line(&text)))
+}
+
+fn digest_last_deploy<C: Clock, I: IdFactory>(
+    ctx: &AppContext<C, I>,
+    project: &Project,
+) -> Result<Option<String>, VogtError> {
+    if !ctx.observed.has_evidence_tables()? {
+        return Ok(None);
+    }
+    let seen = ctx.observed.latest(
+        &[KIND_DEPLOY_LANE.to_string()],
+        Some(&project.id),
+        false,
+        false,
+        50,
+    )?;
+    let mut lines: Vec<(chrono::DateTime<chrono::Utc>, String)> = Vec::new();
+    for observation in seen {
+        let payload = &observation.payload;
+        // The live block's sha, else the receipt's.
+        let sha = ["live", "receipt"].iter().find_map(|source| {
+            payload
+                .get(*source)
+                .and_then(|block| block.get("source_sha"))
+                .and_then(Value::as_str)
+        });
+        let Some(sha) = sha else {
+            continue;
+        };
+        let lane = match payload.get("lane") {
+            Some(value) if truthy(value) => py_str(value),
+            _ => observation.subject_key.clone(),
+        };
+        let observed = utc(observation.observed_at);
+        let short: String = sha.chars().take(12).collect();
+        lines.push((
+            observed,
+            format!("{lane} at {short} (seen {})", minute_stamp(observed)),
+        ));
+    }
+    Ok(lines.into_iter().max().map(|(_, text)| digest_line(&text)))
 }
 
 fn ci_summary<C: Clock, I: IdFactory>(
@@ -1645,5 +1916,73 @@ mod tests {
         }
         let got = get_op(&ctx, json!({"slug": "widget"})).unwrap();
         assert!(got["project"]["agent_policy"]["landing"].is_null(), "{got}");
+    }
+
+    #[test]
+    fn a_digest_line_is_one_bounded_line() {
+        let line = digest_line(&format!("first\n\n{}", "x".repeat(400)));
+        assert!(!line.contains('\n'));
+        assert_eq!(line.chars().count(), DIGEST_LINE);
+        assert!(line.ends_with('…'));
+        assert_eq!(digest_line("  a \t b\n c  "), "a b c");
+    }
+
+    #[test]
+    fn an_empty_project_has_an_empty_digest() {
+        let ctx = context("local:test-user", None);
+        register_op(&ctx, registration("Widget", "/srv/widget")).unwrap();
+        let digest = brief_op(&ctx, json!({"slug": "widget"})).unwrap()["digest"].clone();
+        assert_eq!(
+            digest,
+            json!({
+                "initiatives": [],
+                "in_progress": [],
+                "recent_results": [],
+                "last_merge": null,
+                "last_deploy": null,
+            })
+        );
+    }
+
+    #[test]
+    fn the_digest_ranks_initiatives_and_names_who_holds_each_item() {
+        use crate::application::services::initiatives::initiative_create_op;
+        use crate::application::services::work::{create_op, transition_op};
+
+        let ctx = context("local:test-user", None);
+        register_op(&ctx, registration("Widget", "/srv/widget")).unwrap();
+        for (title, weight) in [("Light", 5), ("Heavy", 40)] {
+            initiative_create_op(
+                &ctx,
+                json!({"title": title, "weight": weight, "reason": "a reason"}),
+            )
+            .unwrap();
+        }
+        for slug in ["light", "heavy"] {
+            create_op(
+                &ctx,
+                json!({
+                    "kind": "feature",
+                    "title": format!("Under {slug}"),
+                    "project": "widget",
+                    "initiative": slug,
+                    "local_only": true,
+                    "reason": "a reason",
+                }),
+            )
+            .unwrap();
+        }
+        let first = json!({"ref": "WI-1", "to_state": "in_progress", "reason": "a reason"});
+        transition_op(&ctx, first).unwrap();
+
+        let digest = brief_op(&ctx, json!({"slug": "widget"})).unwrap()["digest"].clone();
+        assert_eq!(
+            digest["initiatives"],
+            json!([
+                "heavy (weight 40, 1 open here): Heavy",
+                "light (weight 5, 1 open here): Light",
+            ])
+        );
+        assert_eq!(digest["in_progress"], json!(["WI-1 [unheld]: Under light"]));
     }
 }

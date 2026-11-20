@@ -10738,6 +10738,62 @@
         "title": "Freshness",
         "type": "object"
       },
+      "ProjectDigest": {
+        "additionalProperties": false,
+        "description": "A compact status digest derived on read (WI-2747). Nothing here is stored: every line is computed from work items, sessions, session reports and observations when the brief is read. Each list is capped and each entry is one line.",
+        "properties": {
+          "initiatives": {
+            "description": "Open initiatives with open work here, heaviest first.",
+            "items": {
+              "type": "string"
+            },
+            "title": "Initiatives",
+            "type": "array"
+          },
+          "in_progress": {
+            "description": "Items in progress here, with who holds each.",
+            "items": {
+              "type": "string"
+            },
+            "title": "In Progress",
+            "type": "array"
+          },
+          "recent_results": {
+            "description": "The newest `result` session reports on this project's items.",
+            "items": {
+              "type": "string"
+            },
+            "title": "Recent Results",
+            "type": "array"
+          },
+          "last_merge": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The newest merged pull request observed.",
+            "title": "Last Merge"
+          },
+          "last_deploy": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The newest deployment lane observation.",
+            "title": "Last Deploy"
+          }
+        },
+        "title": "ProjectDigest",
+        "type": "object"
+      },
       "RankedItem": {
         "additionalProperties": false,
         "description": "One entry of a ranked view — declared or observed.\n\nObserved-first means both halves appear in the same list, ordered by the\nsame weights. The common fields are what ranking needs and what a\nreader wants; `item` carries the whole work item when there is one, and\n`subject_key` points at the evidence when there is not.",
@@ -11254,6 +11310,10 @@
           },
           "freshness": {
             "$ref": "#/components/schemas/Freshness"
+          },
+          "digest": {
+            "$ref": "#/components/schemas/ProjectDigest",
+            "description": "Derived status digest; bounded, one line per entry."
           }
         },
         "required": [
@@ -11268,7 +11328,8 @@
           "compliance_checked_at",
           "ci_status",
           "dependencies",
-          "freshness"
+          "freshness",
+          "digest"
         ],
         "title": "ProjectBriefResult"
       },

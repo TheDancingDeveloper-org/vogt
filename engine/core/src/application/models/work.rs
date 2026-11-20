@@ -78,6 +78,30 @@ pub struct ProjectBriefResult {
     pub ci_status: CiSummary,
     pub dependencies: DependencySummary,
     pub freshness: Freshness,
+    /// Derived status digest; bounded, one line per entry.
+    pub digest: ProjectDigest,
+}
+/// A compact status digest derived on read (WI-2747). Nothing here is stored: every line is computed from work items, sessions, session reports and observations when the brief is read. Each list is capped and each entry is one line.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectDigest {
+    /// Open initiatives with open work here, heaviest first.
+    #[serde(default)]
+    pub initiatives: Vec<String>,
+    /// Items in progress here, with who holds each.
+    #[serde(default)]
+    pub in_progress: Vec<String>,
+    /// The newest `result` session reports on this project's items.
+    #[serde(default)]
+    pub recent_results: Vec<String>,
+    /// The newest merged pull request observed.
+    #[serde(default)]
+    #[schemars(schema_with = "optional_string")]
+    pub last_merge: Option<String>,
+    /// The newest deployment lane observation.
+    #[serde(default)]
+    #[schemars(schema_with = "optional_string")]
+    pub last_deploy: Option<String>,
 }
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
