@@ -134,6 +134,12 @@ pub struct PodConfig {
     /// session is ended.
     #[serde(default = "default_pending_timeout")]
     pub pending_timeout: Duration,
+    /// How long a pod the scheduler has reported `Unschedulable` may sit
+    /// Pending before its session is ended with the scheduler's reason
+    /// (`ENGINE_POD_UNSCHEDULABLE_TIMEOUT`). Never longer than
+    /// `pending_timeout`: a pod still pulling its image keeps the longer wait.
+    #[serde(default = "default_unschedulable_timeout")]
+    pub unschedulable_timeout: Duration,
     /// How long a session pod may run before the kubelet terminates it
     /// (`activeDeadlineSeconds`, default 12 h). Zero leaves the deadline
     /// unset; a template policy may override it.
@@ -602,6 +608,9 @@ fn default_reconcile_interval() -> Duration {
 fn default_pending_timeout() -> Duration {
     Duration::from_secs(600)
 }
+fn default_unschedulable_timeout() -> Duration {
+    Duration::from_secs(120)
+}
 fn default_session_deadline() -> Duration {
     Duration::from_secs(12 * 60 * 60)
 }
@@ -666,6 +675,7 @@ impl Default for PodConfig {
             image_pull_secret: None,
             reconcile_interval: default_reconcile_interval(),
             pending_timeout: default_pending_timeout(),
+            unschedulable_timeout: default_unschedulable_timeout(),
             session_deadline: default_session_deadline(),
             reconnect_timeout: default_reconnect_timeout(),
             orphan_ttl: default_orphan_ttl(),
@@ -774,6 +784,10 @@ impl PodConfig {
         for (name, target) in [
             ("ENGINE_POD_CONNECT_TIMEOUT", &mut cfg.connect_timeout),
             ("ENGINE_POD_PENDING_TIMEOUT", &mut cfg.pending_timeout),
+            (
+                "ENGINE_POD_UNSCHEDULABLE_TIMEOUT",
+                &mut cfg.unschedulable_timeout,
+            ),
             ("ENGINE_POD_RECONNECT_TIMEOUT", &mut cfg.reconnect_timeout),
             ("ENGINE_POD_ORPHAN_TTL", &mut cfg.orphan_ttl),
             ("ENGINE_POD_RECONCILE_TIMEOUT", &mut cfg.reconcile_interval),
@@ -1386,6 +1400,26 @@ pub fn pod_fatal_waiting_reason(pod: &Pod) -> Option<String> {
                 _ => reason.to_string(),
             })
         })
+}
+
+/// The scheduler's reason a Pending pod has no node: the message of its
+/// `PodScheduled=False` condition when the reason is `Unschedulable` (the
+/// text of the `FailedScheduling` event, e.g. "0/4 nodes are available: ...").
+pub fn pod_unschedulable_message(pod: &Pod) -> Option<String> {
+    let condition = pod
+        .status
+        .as_ref()?
+        .conditions
+        .as_ref()?
+        .iter()
+        .find(|c| c.type_ == "PodScheduled" && c.status == "False")?;
+    if condition.reason.as_deref() != Some("Unschedulable") {
+        return None;
+    }
+    Some(match condition.message.as_deref().map(str::trim) {
+        Some(m) if !m.is_empty() => m.to_string(),
+        _ => "Unschedulable".to_string(),
+    })
 }
 
 /// Whether the kubelet stopped this pod because it outlived its
@@ -4561,6 +4595,7 @@ mod tests {
             lookup(&[
                 ("ENGINE_POD_CONNECT_TIMEOUT", "11"),
                 ("ENGINE_POD_PENDING_TIMEOUT", "22"),
+                ("ENGINE_POD_UNSCHEDULABLE_TIMEOUT", "7"),
                 ("ENGINE_POD_RECONNECT_TIMEOUT", "33"),
                 ("ENGINE_POD_RECONCILE_TIMEOUT", "44"),
                 ("ENGINE_POD_HEARTBEAT_TIMEOUT", "55"),
@@ -4570,6 +4605,7 @@ mod tests {
         .unwrap();
         assert_eq!(cfg.connect_timeout, Duration::from_secs(11));
         assert_eq!(cfg.pending_timeout, Duration::from_secs(22));
+        assert_eq!(cfg.unschedulable_timeout, Duration::from_secs(7));
         assert_eq!(cfg.reconnect_timeout, Duration::from_secs(33));
         assert_eq!(cfg.reconcile_interval, Duration::from_secs(44));
         assert_eq!(cfg.heartbeat_timeout, Duration::from_secs(55));
