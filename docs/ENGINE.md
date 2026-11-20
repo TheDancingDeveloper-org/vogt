@@ -987,6 +987,10 @@ than these routes.
   window into one line typed into the supervisor, naming each worker by the
   first eight characters of its id and never by its name, e.g.
   `[vogt] 2 workers changed (done: 3f9a1c0e, blocked: 7b2d44aa) — session_changes(since=41)`.
+  The wake is read from the overseer's own record when a change arrives, so it
+  fires only if the overseer was started with `wake_on`. A running overseer's
+  `wake_on` cannot be changed; there is no route or op to set it after start
+  (a follow-up), so an overseer that needs it must be started with it.
 - `SessionSpec.worktree` `{"branch": "...", "base_ref": "..."}` (WI-1298),
   sent by vogt-core when `session.start` is called with `worktree: true`.
   The engine creates a git worktree of `cwd` as a sibling directory named

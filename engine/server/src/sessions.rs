@@ -6337,14 +6337,44 @@ mod host_placement_tests {
         use crate::oversight_wake::{Coalescer, Overseer, MIN_GAP, WINDOW};
         use std::time::{Duration, Instant};
 
+        use crate::api::require_supervisor_authority;
+        use crate::auth::AuthorizedIdentity;
+
         let dir = tempfile::tempdir().unwrap();
         let sessions = registry(dir.path().to_path_buf(), |_| {});
-        let overseer = sessions.create(oversight_spec("overseer")).unwrap();
-        let one = sessions.create(spec("worker-one", None)).unwrap();
-        let two = sessions.create(spec("worker-two", None)).unwrap();
-        overseer.set_wake_on(vec!["done".into(), "blocked".into()]);
-        one.set_supervisor(Some(overseer.id));
-        two.set_supervisor(Some(overseer.id));
+        // The overseer is started by a person, the only caller that may set
+        // its wake kinds.
+        let overseer = sessions
+            .create(SessionSpec {
+                wake_on: vec!["done".into(), "blocked".into()],
+                ..oversight_spec("overseer")
+            })
+            .unwrap();
+        // Workers are started as vogt-core starts them for an overseer: the
+        // API's supervisor check, then the create that records the supervisor.
+        let core = AuthorizedIdentity {
+            name: "vogt-core".into(),
+            capabilities: Vec::new(),
+            scopes: Vec::new(),
+            core_bearer: None,
+            mutating_requests_per_minute: 0,
+            stack_secret: true,
+            break_glass: false,
+            person: false,
+        };
+        let start_worker = |name: &str| {
+            let worker = SessionSpec {
+                supervisor: Some(overseer.id),
+                ..spec(name, None)
+            };
+            require_supervisor_authority(Some(&core), &sessions, worker.supervisor).unwrap();
+            sessions.create(worker).unwrap()
+        };
+        let one = start_worker("worker-one");
+        let two = start_worker("worker-two");
+        assert_eq!(one.supervisor(), Some(overseer.id));
+        assert_eq!(two.supervisor(), Some(overseer.id));
+        assert_eq!(overseer.wake_on(), vec!["done", "blocked"]);
 
         let t0 = Instant::now();
         let mut coalescer = Coalescer::default();
