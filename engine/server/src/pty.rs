@@ -1283,7 +1283,6 @@ impl Session {
     pub fn last_person_input_at(&self) -> Option<time::OffsetDateTime> {
         *self.last_person_input_at.lock()
     }
-
     pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
         self.backend.resize(cols, rows)?;
         // Reflow the grid to match, so a screen read before the program's own

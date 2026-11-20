@@ -28,7 +28,17 @@ pub struct SessionHistory {
     /// Economics snapshots waiting for their flush, newest per session
     /// (WI-2703). A snapshot queued again before the flush replaces the last.
     economics_pending: Arc<Mutex<HashMap<Uuid, String>>>,
+    /// Last on-disk footprint (db bytes, log file count, log bytes) and when
+    /// it was taken. `/api/status` is polled; walking the log dir on every
+    /// call is what it is not allowed to do (WI-2700).
+    disk_stats: Mutex<Option<(std::time::Instant, DiskStats)>>,
 }
+
+/// db bytes, log file count, log bytes.
+type DiskStats = (u64, u64, u64);
+
+/// How long `/api/status` may report a cached on-disk footprint.
+pub const STORAGE_STATS_TTL: Duration = Duration::from_secs(30);
 
 /// How often coalesced economics snapshots reach the database (WI-2703). A
 /// session's economics change every turn; one write per session per interval
@@ -207,6 +217,7 @@ impl SessionHistory {
             db_path,
             log_dir,
             economics_pending,
+            disk_stats: Mutex::new(None),
         };
         history.init_schema().await?;
 
@@ -474,16 +485,40 @@ impl SessionHistory {
 
     pub async fn storage_stats(&self) -> Result<HistoryStorageStats> {
         let archived_session_count = self.count_sessions().await?;
-        let db_bytes = std::fs::metadata(&self.db_path)
-            .map(|meta| meta.len())
-            .unwrap_or(0);
-        let (log_file_count, log_bytes) = summarize_regular_files(&self.log_dir)?;
+        let (db_bytes, log_file_count, log_bytes) = self.disk_stats().await?;
         Ok(HistoryStorageStats {
             archived_session_count,
-            log_file_count: log_file_count as u64,
+            log_file_count,
             log_bytes,
             db_bytes,
         })
+    }
+
+    /// The db and log-dir footprint, rescanned off the runtime at most once
+    /// per [`STORAGE_STATS_TTL`] (WI-2700).
+    async fn disk_stats(&self) -> Result<DiskStats> {
+        if let Ok(cached) = self.disk_stats.lock() {
+            if let Some((at, stats)) = *cached {
+                if at.elapsed() < STORAGE_STATS_TTL {
+                    return Ok(stats);
+                }
+            }
+        }
+        let db_path = self.db_path.clone();
+        let log_dir = self.log_dir.clone();
+        let stats = tokio::task::spawn_blocking(move || -> Result<DiskStats> {
+            let db_bytes = std::fs::metadata(&db_path)
+                .map(|meta| meta.len())
+                .unwrap_or(0);
+            let (log_file_count, log_bytes) = summarize_regular_files(&log_dir)?;
+            Ok((db_bytes, log_file_count as u64, log_bytes))
+        })
+        .await
+        .map_err(|e| ApiError::Internal(format!("history storage scan panicked: {e}")))??;
+        if let Ok(mut cached) = self.disk_stats.lock() {
+            *cached = Some((std::time::Instant::now(), stats));
+        }
+        Ok(stats)
     }
 
     /// Search session output

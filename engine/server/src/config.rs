@@ -371,6 +371,12 @@ pub struct Config {
     /// redeployed client working; every use is logged and the path is slated
     /// for removal.
     pub ws_query_token_allowed: bool,
+    /// How often the engine sends a WebSocket Ping to each attached socket
+    /// (WI-2704). A socket that sends nothing back — no Pong, no frame — for
+    /// two intervals is closed `4000 idle`, so a half-open phone socket is
+    /// noticed in well under a minute. `ENGINE_WS_PING_INTERVAL_MS`,
+    /// default 20 s.
+    pub ws_ping_interval: std::time::Duration,
     /// Whether a WebPush subscription may name a non-https or non-routable
     /// (loopback/RFC-1918/link-local) endpoint. Off by default: the
     /// dispatcher POSTs to the stored endpoint from inside the pod netns, so
@@ -673,6 +679,12 @@ pub struct Config {
     /// git worktree removes regenerable build output there. Never a repo's
     /// main checkout.
     pub worktree_clean_on_stop: bool,
+    /// `ENGINE_WORKTREE_REMOVE_ON_STOP` set true (WI-1774): after a stop's
+    /// cleanup, also `git worktree remove` the linked worktree when it is
+    /// clean, merged or pushed, has no stash entries on its branch, and no
+    /// other running or hibernated session works there; the merged branch
+    /// goes with it. Off by default. Needs cleanup on stop to be on.
+    pub worktree_remove_on_stop: bool,
     /// `ENGINE_SCRATCH_PRUNE_GB` (2): with cleanup on, a hibernation drops
     /// Cargo `target` dirs from the session's Claude scratchpad and any
     /// top-level entry there larger than this; a stop removes the scratchpad
@@ -724,6 +736,7 @@ struct FileConfig {
     gui_stream_url: Option<String>,
     gui_stream_verified: Option<bool>,
     ws_query_token_allowed: Option<bool>,
+    ws_ping_interval_ms: Option<u64>,
     push_allow_insecure_endpoints: Option<bool>,
     state_dir: Option<String>,
     fcm_service_account_json: Option<String>,
@@ -1136,6 +1149,12 @@ pub fn load(
             .filter(|s| !s.is_empty()),
         gui_stream_verified,
         ws_query_token_allowed,
+        ws_ping_interval: std::time::Duration::from_millis(
+            parse_u64_env("ENGINE_WS_PING_INTERVAL_MS")?
+                .or(from_file.ws_ping_interval_ms)
+                .filter(|ms| *ms > 0)
+                .unwrap_or(20_000),
+        ),
         push_allow_insecure_endpoints,
         state_dir: from_file
             .state_dir
@@ -1349,6 +1368,12 @@ pub fn load(
         },
         worktree_clean_on_hibernate: worktree_clean.hibernate,
         worktree_clean_on_stop: worktree_clean.stop,
+        worktree_remove_on_stop: match engine_env("ENGINE_WORKTREE_REMOVE_ON_STOP").ok() {
+            Some(v) if !v.trim().is_empty() => {
+                parse_bool_env("ENGINE_WORKTREE_REMOVE_ON_STOP", &v)?
+            }
+            _ => false,
+        },
         scratch_prune_bytes: parse_gib(
             "ENGINE_SCRATCH_PRUNE_GB",
             engine_env("ENGINE_SCRATCH_PRUNE_GB").ok().as_deref(),
