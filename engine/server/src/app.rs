@@ -817,6 +817,11 @@ pub async fn serve_forever(cfg: Config) -> std::io::Result<()> {
             // archived to history as before.
             drain_state.sessions.hibernate_for_shutdown().await;
             drain_state.sessions.drain_to_history().await;
+            // The last turns' economics are queued, not yet written: flush
+            // them before the process goes (WI-2703).
+            if let Some(history) = drain_state.history.as_ref() {
+                history.flush_economics().await;
+            }
         })
         .await
 }
