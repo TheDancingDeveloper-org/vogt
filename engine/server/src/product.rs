@@ -14,7 +14,16 @@ pub const SOURCE_REF: &str = match option_env!("VOGT_SOURCE_REF") {
     _ => "local/dev",
 };
 
+/// The revision the build came from, as the build names it. On a graft line
+/// (rust-2) this is the changeset id, not a git commit.
 pub const SOURCE_SHA: &str = match option_env!("VOGT_SOURCE_SHA") {
+    Some(value) if !value.is_empty() => value,
+    _ => "local/dev",
+};
+
+/// The git commit the image was built from (`github.sha` in CI). Kept apart from
+/// `SOURCE_SHA` so a graft changeset id is never reported as a git commit.
+pub const GIT_SHA: &str = match option_env!("VOGT_GIT_SHA") {
     Some(value) if !value.is_empty() => value,
     _ => "local/dev",
 };

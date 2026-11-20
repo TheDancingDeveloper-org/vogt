@@ -97,6 +97,12 @@ ARG ESTATE_IMAGE=${POD_BASE_IMAGE}
 ARG VOGT_SOURCE_REF=local
 ARG VOGT_SOURCE_SHA=0000000000000000000000000000000000000000
 ARG VOGT_PRODUCT_VERSION=local/dev
+# The git commit the image came from, reported beside (not in place of) the
+# graft changeset id in VOGT_SOURCE_SHA.
+ARG VOGT_GIT_SHA=local/dev
+# The version the Rust core reports. Empty means "the product version"; CI passes
+# it explicitly, read from pyproject.toml.
+ARG VOGT_VERSION=
 # Off by default. A build that wants the pinned agent CLIs must ask for them:
 # the published stack/workbench bakes pass INSTALL_AI_CLIENTS=true, while a
 # from-source or custom image (the `vogt-dev` deployment among them) carries
@@ -206,6 +212,8 @@ FROM ${RUST_IMAGE} AS server-build
 ARG VOGT_SOURCE_REF
 ARG VOGT_SOURCE_SHA
 ARG VOGT_PRODUCT_VERSION
+ARG VOGT_VERSION
+ARG VOGT_GIT_SHA
 # The layout inside this stage mirrors the repository's, because rust-embed
 # resolves `../../web/dist/` against the *crate* directory. Build the workspace
 # at /app/engine and the bundle lands where the macro already looks: put the
@@ -237,6 +245,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     VOGT_SOURCE_REF="$VOGT_SOURCE_REF" \
     VOGT_SOURCE_SHA="$VOGT_SOURCE_SHA" \
     VOGT_PRODUCT_VERSION="${VOGT_PRODUCT_VERSION#v}" \
+    VOGT_GIT_SHA="$VOGT_GIT_SHA" \
+    VOGT_VERSION="${VOGT_VERSION:-${VOGT_PRODUCT_VERSION#v}}" \
     cargo build --release -p vogt-engine-server -p vogt-core \
     && cp target/release/vogt-engine /usr/local/bin/vogt-engine \
     && cp target/release/vogt-core /usr/local/bin/vogt-core \

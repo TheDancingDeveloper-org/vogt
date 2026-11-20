@@ -34,8 +34,10 @@ pub fn run(root: &Path, expected: Option<&str>) -> Result<(), String> {
     }
     let build = std::fs::read_to_string(root.join(".github/workflows/build.yml"))
         .map_err(|err| format!("build.yml: {err}"))?;
-    if !build.contains(&format!("VOGT_PRODUCT_VERSION={version}")) {
-        return Err("dev build does not inject the canonical product version".to_string());
+    // CI reads the version from pyproject.toml into this step output and passes
+    // it on; a literal here would let the build drift from the manifest.
+    if !build.contains("VOGT_PRODUCT_VERSION=${{ steps.product-version.outputs.version }}") {
+        return Err("dev build does not read the product version from pyproject.toml".to_string());
     }
     let release = std::fs::read_to_string(root.join(".github/workflows/release.yml"))
         .map_err(|err| format!("release.yml: {err}"))?;
@@ -52,8 +54,10 @@ pub fn run(root: &Path, expected: Option<&str>) -> Result<(), String> {
     }
     let core = std::fs::read_to_string(root.join("engine/core/src/main.rs"))
         .map_err(|err| format!("main.rs: {err}"))?;
-    if !core.contains(&format!("_ => \"{version}\"")) {
-        return Err("vogt-core VERSION fallback disagrees with pyproject.toml".to_string());
+    // The core names no version of its own: an image build passes VOGT_VERSION,
+    // and a local build says `unknown` rather than a stale literal.
+    if !core.contains("_ => \"unknown\"") {
+        return Err("vogt-core VERSION must not hard-code a product version".to_string());
     }
     Ok(())
 }

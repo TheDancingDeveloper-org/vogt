@@ -431,6 +431,15 @@ jobs:
           flavor: |
             latest=false
 
+      - name: read the product version from pyproject.toml
+        id: product-version
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^version = "\([^"]*\)"$/\1/p' pyproject.toml | head -n 1)"
+          test -n "$version"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "product version: ${version}"
+
       - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
         id: demo-candidate
         with:
@@ -443,7 +452,9 @@ jobs:
           build-args: |
             VOGT_SOURCE_REF=main
             VOGT_SOURCE_SHA=${{ github.sha }}
-            VOGT_PRODUCT_VERSION=0.7.22
+            VOGT_PRODUCT_VERSION=${{ steps.product-version.outputs.version }}
+            VOGT_VERSION=${{ steps.product-version.outputs.version }}
+            VOGT_GIT_SHA=${{ github.sha }}
           cache-from: |
             type=registry,ref=${{ env.CACHE_IMAGE }}:stack-main
             type=registry,ref=${{ env.CACHE_IMAGE }}:demo-main
@@ -559,7 +570,9 @@ jobs:
           build-args: |
             VOGT_SOURCE_REF=main
             VOGT_SOURCE_SHA=${{ github.sha }}
-            VOGT_PRODUCT_VERSION=0.7.22
+            VOGT_PRODUCT_VERSION=${{ steps.product-version.outputs.version }}
+            VOGT_VERSION=${{ steps.product-version.outputs.version }}
+            VOGT_GIT_SHA=${{ github.sha }}
           provenance: true
           sbom: true
           cache-from: |
@@ -683,6 +696,15 @@ jobs:
           flavor: |
             latest=false
 
+      - name: read the product version from pyproject.toml
+        id: product-version
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^version = "\([^"]*\)"$/\1/p' pyproject.toml | head -n 1)"
+          test -n "$version"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "product version: ${version}"
+
       # One BuildKit invocation (`.github/stack-bake.hcl`). `stack` is pushed
       # by digest with provenance and an SBOM and no tag. The smoke below pulls
       # the digest; the tag and the signature come only after it passes. A
@@ -711,7 +733,9 @@ jobs:
             --set "*.args.ESTATE_IMAGE=${ESTATE_IMAGE}"
             --set "*.args.VOGT_SOURCE_REF=${VOGT_SOURCE_REF}"
             --set "*.args.VOGT_SOURCE_SHA=${VOGT_SOURCE_SHA}"
-            --set "*.args.VOGT_PRODUCT_VERSION=0.7.22"
+            --set "*.args.VOGT_PRODUCT_VERSION=${{ steps.product-version.outputs.version }}"
+            --set "*.args.VOGT_VERSION=${{ steps.product-version.outputs.version }}"
+            --set "*.args.VOGT_GIT_SHA=${{ github.sha }}"
             --set "*.args.INSTALL_AI_CLIENTS=true"
           )
           # One label per line. A value is a url, a revision or a timestamp.
@@ -867,6 +891,15 @@ jobs:
       # the signature come only after the smoke. A failed smoke leaves an
       # untagged orphan, which ghcr-retention.yml prunes after the policy's
       # 7-day grace — that policy lists this package below.
+      - name: read the product version from pyproject.toml
+        id: product-version
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^version = "\([^"]*\)"$/\1/p' pyproject.toml | head -n 1)"
+          test -n "$version"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "product version: ${version}"
+
       - name: build the workbench stack once, by digest
         id: push
         env:
@@ -886,7 +919,9 @@ jobs:
             --set "*.args.ESTATE_IMAGE=${ESTATE_IMAGE}"
             --set "*.args.VOGT_SOURCE_REF=${VOGT_SOURCE_REF}"
             --set "*.args.VOGT_SOURCE_SHA=${VOGT_SOURCE_SHA}"
-            --set "*.args.VOGT_PRODUCT_VERSION=0.7.22"
+            --set "*.args.VOGT_PRODUCT_VERSION=${{ steps.product-version.outputs.version }}"
+            --set "*.args.VOGT_VERSION=${{ steps.product-version.outputs.version }}"
+            --set "*.args.VOGT_GIT_SHA=${{ github.sha }}"
           )
           # metadata-action's labels are newline-separated key=value.
           while IFS= read -r pair || [ -n "$pair" ]; do

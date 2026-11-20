@@ -200,6 +200,18 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
+      # pyproject.toml's [project] version is the one product version. The
+      # Python package and the web/mobile manifests must agree with it
+      # (scripts/check_product_version.py), so the image reports the same number.
+      - name: read the product version from pyproject.toml
+        id: product-version
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^version = "\([^"]*\)"$/\1/p' pyproject.toml | head -n 1)"
+          test -n "$version"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "product version: ${version}"
+
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
         with:
           driver-opts: network=host
@@ -235,6 +247,9 @@ jobs:
             ESTATE_IMAGE=${{ env.POD_IMAGE }}@${{ needs.pod.outputs.digest }}
             VOGT_SOURCE_REF=${{ github.ref_name }}
             VOGT_SOURCE_SHA=${{ needs.source.outputs.changeset }}
+            VOGT_GIT_SHA=${{ github.sha }}
+            VOGT_PRODUCT_VERSION=${{ steps.product-version.outputs.version }}
+            VOGT_VERSION=${{ steps.product-version.outputs.version }}
           outputs: type=image,name=${{ env.ENGINE_IMAGE }},push-by-digest=true,name-canonical=true,push=true
           provenance: true
           sbom: true
