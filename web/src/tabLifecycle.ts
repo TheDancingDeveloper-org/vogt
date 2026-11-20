@@ -20,6 +20,31 @@ export function shouldMountTab(
   return tab.id === activeTabId;
 }
 
+/**
+ * Live terminal panes kept mounted at once (WI-3129). Each mounted xterm holds
+ * a WebGL context and keeps parsing output, and Chrome caps a page at about
+ * 16 contexts. The rest unmount: their cache is saved on the way out, and a
+ * revisit restores it. Matches `MAX_DORMANT_SOCKETS`.
+ */
+export const MAX_LIVE_TERMINALS = 4;
+
+/**
+ * The live terminal set after `activeId` is shown: the shown terminal first,
+ * then the most recently shown ones, capped. Ids of terminals no longer open
+ * drop out. A non-terminal `activeId` leaves the set as it was.
+ */
+export function touchRecentTerminal(
+  recent: readonly string[],
+  activeId: string | null,
+  tabs: readonly Tab[],
+  limit = MAX_LIVE_TERMINALS,
+): string[] {
+  const open = new Set(tabs.filter((tab) => tab.kind === "terminal").map((tab) => tab.id));
+  const kept = recent.filter((id) => open.has(id) && id !== activeId);
+  if (activeId !== null && open.has(activeId)) kept.unshift(activeId);
+  return kept.slice(0, limit);
+}
+
 /** Retain terminal/xterm state while parking the socket for inactive panes. */
 export function terminalPaneParked(
   workspaceActive: boolean,
