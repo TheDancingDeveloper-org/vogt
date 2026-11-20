@@ -27,7 +27,8 @@ use crate::{
     error::Result,
     pod_backend::{
         pod_exit_code, pod_fatal_waiting_reason, pod_hit_active_deadline, pod_is_ours, pod_phase,
-        pod_reason, session_id_from_pod, PodConfig, PodLauncher, LOG_TAIL_LINES,
+        pod_reason, pod_unschedulable_message, session_id_from_pod, PodConfig, PodLauncher,
+        LOG_TAIL_LINES,
     },
 };
 use k8s_openapi::api::core::v1::Pod;
@@ -142,10 +143,22 @@ pub fn judge(pod: &Pod, link: Option<&PodLink>, cfg: &PodConfig, age: Option<Dur
                     note: format!("could not start: {reason}"),
                 };
             }
+            // A pod the scheduler has refused is ended sooner than one that
+            // is merely slow, and says why (WI-4494).
+            let unschedulable = pod_unschedulable_message(pod);
+            let limit = match unschedulable {
+                Some(_) => cfg.unschedulable_timeout.min(cfg.pending_timeout),
+                None => cfg.pending_timeout,
+            };
             match age {
-                Some(age) if age > cfg.pending_timeout => Verdict::End {
+                Some(age) if age > limit => Verdict::End {
                     code: 1,
-                    note: format!("was still pending after {}s", age.as_secs()),
+                    note: match unschedulable {
+                        Some(reason) => {
+                            format!("could not be scheduled after {}s: {reason}", age.as_secs())
+                        }
+                        None => format!("was still pending after {}s", age.as_secs()),
+                    },
                 },
                 _ => Verdict::Keep,
             }
@@ -577,6 +590,43 @@ mod tests {
             judge(&pod(id, phase("Pending")), Some(&link), &cfg, late),
             Verdict::End { code: 1, .. }
         ));
+    }
+
+    #[test]
+    fn an_unschedulable_pod_ends_early_with_the_schedulers_reason() {
+        use k8s_openapi::api::core::v1::PodCondition;
+        let id = Uuid::new_v4();
+        let (_auth, link) = live(id);
+        let cfg = cfg();
+        let mut status = phase("Pending");
+        status.conditions = Some(vec![PodCondition {
+            type_: "PodScheduled".into(),
+            status: "False".into(),
+            reason: Some("Unschedulable".into()),
+            message: Some("0/4 nodes are available: 3 didn't match node selector".into()),
+            ..Default::default()
+        }]);
+        let p = pod(id, status);
+        let early = cfg.unschedulable_timeout + Duration::from_secs(1);
+        assert!(early < cfg.pending_timeout);
+        // Within the unschedulable window the pod is kept.
+        assert_eq!(
+            judge(&p, Some(&link), &cfg, Some(Duration::from_secs(5))),
+            Verdict::Keep
+        );
+        // Past it, well before the 600 s pending limit, the note carries the reason.
+        match judge(&p, Some(&link), &cfg, Some(early)) {
+            Verdict::End { code: 1, note } => {
+                assert!(note.contains("could not be scheduled"), "{note}");
+                assert!(note.contains("3 didn't match node selector"), "{note}");
+            }
+            other => panic!("expected End, got {other:?}"),
+        }
+        // A pending pod with no scheduler verdict keeps the long limit.
+        assert_eq!(
+            judge(&pod(id, phase("Pending")), Some(&link), &cfg, Some(early)),
+            Verdict::Keep
+        );
     }
 
     #[test]
