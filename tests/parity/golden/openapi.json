@@ -5424,6 +5424,64 @@
         }
       }
     },
+    "/api/agent-auth/manifest": {
+      "get": {
+        "summary": "List the agent-auth manifest entries: names, flags and source, never values.",
+        "description": "List the agent-auth manifest entries: names, flags and source, never values.",
+        "operationId": "agent_auth_manifest",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentAuthManifestResult"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agent-auth/manifest/check": {
+      "post": {
+        "summary": "Dry-run whether a session would be allowed to fetch VAR from agent-auth, and why.",
+        "description": "Dry-run whether a session would be allowed to fetch VAR from agent-auth, and why.",
+        "operationId": "agent_auth_policy_check",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentAuthPolicyCheckParams"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentAuthPolicyCheckResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/agent-activity": {
       "get": {
         "summary": "Search the tool calls agents made (from their transcripts, redacted): by text, service, tool, errors, time, project or session.",
@@ -8904,6 +8962,148 @@
           "total"
         ],
         "title": "AgentActivitySummaryResult"
+      },
+      "AgentAuthManifestResult": {
+        "properties": {
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/AgentAuthManifestRow"
+            },
+            "type": "array",
+            "title": "Entries",
+            "default": []
+          },
+          "engine": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Engine"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "AgentAuthManifestResult"
+      },
+      "AgentAuthManifestRow": {
+        "properties": {
+          "var": {
+            "type": "string",
+            "title": "Var"
+          },
+          "project_id": {
+            "type": "string",
+            "title": "Project Id"
+          },
+          "secret_name": {
+            "type": "string",
+            "title": "Secret Name"
+          },
+          "policy": {
+            "type": "string",
+            "enum": [
+              "required",
+              "optional",
+              "ondemand"
+            ],
+            "title": "Policy"
+          },
+          "writable": {
+            "type": "boolean",
+            "title": "Writable",
+            "default": false
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "deploy",
+              "file",
+              "provider"
+            ],
+            "title": "Source"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "var",
+          "project_id",
+          "secret_name",
+          "policy",
+          "source"
+        ],
+        "title": "AgentAuthManifestRow",
+        "description": "One ENGINE_AGENT_AUTH_SECRETS entry: names and flags, never a value."
+      },
+      "AgentAuthPolicyCheckParams": {
+        "properties": {
+          "var": {
+            "type": "string",
+            "title": "Var",
+            "description": "The environment variable a session would fetch."
+          },
+          "template": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Template",
+            "description": "The session template the launch would use, echoed back. The manifest is deployment-wide, so it does not change the decision."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "var"
+        ],
+        "title": "AgentAuthPolicyCheckParams"
+      },
+      "AgentAuthPolicyCheckResult": {
+        "properties": {
+          "var": {
+            "type": "string",
+            "title": "Var"
+          },
+          "decision": {
+            "type": "string",
+            "enum": [
+              "allowed",
+              "refused"
+            ],
+            "title": "Decision"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason"
+          },
+          "template": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Template"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "var",
+          "decision",
+          "reason"
+        ],
+        "title": "AgentAuthPolicyCheckResult"
       },
       "AgentCliListResult": {
         "properties": {
