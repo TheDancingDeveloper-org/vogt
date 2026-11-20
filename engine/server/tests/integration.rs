@@ -15165,7 +15165,8 @@ async fn an_oversight_session_answers_a_workers_permission_prompt() {
     assert_eq!(answered.status(), StatusCode::OK);
     live_output_containing(&operator, &base, &id, &["chose 1"]).await;
 
-    // And by keys.
+    // By keys it is refused while the prompt is open: typing is not an answer,
+    // and the refusal says to answer by `session_answer` (WI-4455).
     let (keyed, _) = session_showing_dialog(&operator, &base, "keyed", &script).await;
     let typed = core
         .post(format!("{base}/api/sessions/{keyed}/input"))
@@ -15173,8 +15174,109 @@ async fn an_oversight_session_answers_a_workers_permission_prompt() {
         .send()
         .await
         .unwrap();
-    assert_eq!(typed.status(), StatusCode::OK);
-    live_output_containing(&operator, &base, &keyed, &["chose 1"]).await;
+    assert_eq!(typed.status(), StatusCode::FORBIDDEN);
+    let said: Value = typed.json().await.unwrap();
+    let said = said["error"].as_str().unwrap();
+    assert!(said.contains("person required"), "{said}");
+    assert!(said.contains("session_answer"), "{said}");
+}
+
+/// WI-4455: an oversight session's input is refused while a permission prompt
+/// is open, and accepted once the prompt has closed (answered by `/answer`).
+/// A plain worker's input stays refused throughout.
+#[tokio::test]
+async fn an_oversight_session_steers_once_the_prompt_has_closed() {
+    let (base, tmp, _guard) = wi983_front_door().await;
+    let operator = client_for(TEST_TOKEN);
+    let core = client_for(WI983_STACK);
+    let script = dialog_then_steering_script(tmp.path(), "steer.py");
+    let made: Value = operator
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({ "name": "overseer", "command": ["/bin/sh"] }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let overseer = made["id"].as_str().unwrap().to_string();
+    let promoted = operator
+        .post(format!("{base}/api/sessions/{overseer}/role"))
+        .json(&json!({ "role": "oversight" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(promoted.status(), StatusCode::OK);
+    let plain = operator
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({ "name": "plain worker", "command": ["/bin/sh"] }))
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+    let plain = plain["id"].as_str().unwrap().to_string();
+
+    let (id, approval) = session_showing_dialog(&operator, &base, "steered", &script).await;
+    assert_eq!(approval["kind"], "permission", "{approval}");
+
+    // While the prompt is open: the oversight session's input is refused, and
+    // so is a plain worker's, nothing typed.
+    for named in [overseer.as_str(), plain.as_str()] {
+        let refused = core
+            .post(format!("{base}/api/sessions/{id}/input"))
+            .json(&json!({ "text": "go\r", "person": false, "overseer": named }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), StatusCode::FORBIDDEN, "{named}");
+    }
+
+    // The overseer answers the prompt; it closes.
+    let answered = core
+        .post(format!("{base}/api/sessions/{id}/answer"))
+        .json(&json!({ "option": 1, "person": false, "overseer": overseer }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(answered.status(), StatusCode::OK);
+    live_output_containing(&operator, &base, &id, &["chose 1"]).await;
+
+    // Once the prompt is gone, the same overseer's steering input is accepted.
+    let steered = core
+        .post(format!("{base}/api/sessions/{id}/input"))
+        .json(&json!({ "text": "go\r", "person": false, "overseer": overseer }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(steered.status(), StatusCode::OK);
+    live_output_containing(&operator, &base, &id, &["steered"]).await;
+}
+
+/// A permission dialog that closes on its answer and then reads one more
+/// input from the terminal, so steering after the prompt has something to
+/// land in (WI-4455).
+fn dialog_then_steering_script(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+    let path = dir.join(name);
+    std::fs::write(
+        &path,
+        r#"import os, sys, tty
+fd = sys.stdin.fileno()
+tty.setraw(fd)
+def show(text):
+    sys.stdout.write("\x1b[2J\x1b[H" + text.replace("\n", "\r\n"))
+    sys.stdout.flush()
+show("Bash command\n\n  rm -rf build\n\nDo you want to proceed?\n❯ 1. Yes\n  2. No\n")
+while os.read(fd, 1) != b"\r":
+    pass
+show("chose 1\n")
+line = os.read(fd, 64)
+show("steered " + repr(line) + "\n")
+"#,
+    )
+    .unwrap();
+    path
 }
 
 /// WI-983 stops at permission prompts. An overseer still drives: it types
