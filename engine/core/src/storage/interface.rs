@@ -801,6 +801,15 @@ pub trait DeclaredStore {
     fn write(&self) -> Result<Self::Write<'_>, crate::errors::VogtError>;
 }
 
+/// What the backlog count needs from the declared store that the observed
+/// store cannot read itself: the initial state each work kind starts in, which
+/// decides whether a linked forge issue with no overlay state is terminal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BacklogCountInputs {
+    pub bug_initial_state: String,
+    pub feature_initial_state: String,
+}
+
 /// The observed store: append-oriented evidence plus collector coverage.
 pub trait ObservedStore {
     fn migrate(&self) -> Result<MigrationReport, crate::errors::VogtError>;
@@ -868,6 +877,15 @@ pub trait ObservedStore {
         &self,
         subject_key: &str,
     ) -> Result<Option<Observation>, crate::errors::VogtError>;
+    /// The backlog badge's candidate count, counted in the store (WI-4448).
+    /// It applies the same drops and the same latest-1000 read the ranked
+    /// backlog does, so it equals that list's length. `declared_db` is attached
+    /// read-only for the adoption, project, overlay and suppression rows.
+    fn count_backlog_candidates(
+        &self,
+        declared_db: &std::path::Path,
+        inputs: &BacklogCountInputs,
+    ) -> Result<i64, crate::errors::VogtError>;
     fn count_closed(
         &self,
         kinds: &[String],
