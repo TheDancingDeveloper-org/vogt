@@ -1717,16 +1717,32 @@ fn blocked_entry<C: Clock, I: IdFactory>(
     } else {
         session.name.as_str()
     };
-    let title = match &reference {
-        Some(reference) => format!("{reference} session {name} is blocked on you"),
-        None => format!("Session {name} is blocked on you"),
+    // Who the report waits on (WI-996): an unknown `needs` reads as a person.
+    let on = match crate::application::session_blocked::known_or(
+        &blocked.needs,
+        &crate::application::session_blocked::NEEDS,
+        "person",
+    ) {
+        "overseer" => "its overseer",
+        "either" => "you or its overseer",
+        _ => "you",
     };
-    Ok(entry(EntrySpec {
-        entry_key: format!(
+    let title = match &reference {
+        Some(reference) => format!("{reference} session {name} is blocked on {on}"),
+        None => format!("Session {name} is blocked on {on}"),
+    };
+    // One occurrence per ask: the report's content key (WI-996), falling back
+    // to its time for an engine that sends none.
+    let entry_key = match blocked.key.as_deref() {
+        Some(key) => format!("agent:session:{}:blocked:{key}", session.id),
+        None => format!(
             "agent:session:{}:blocked:{}",
             session.id,
             blocked.since.as_deref().unwrap_or("unknown")
         ),
+    };
+    Ok(entry(EntrySpec {
+        entry_key,
         source: "agent",
         kind: "session.blocked",
         occurred_at: Some(
@@ -1767,7 +1783,7 @@ fn session_entry<C: Clock, I: IdFactory>(
         Some(reference) => format!("{reference} {name}"),
         None => name.to_string(),
     };
-    let (title, summary) = if session.activity == "awaiting-approval" {
+    let (title, summary, evidence) = if session.activity == "awaiting-approval" {
         let what = session
             .approval
             .as_ref()
@@ -1779,12 +1795,31 @@ fn session_entry<C: Clock, I: IdFactory>(
                     .join(" ")
             })
             .unwrap_or_default();
-        let left = session
+        let mut left = session
             .approval
             .as_ref()
             .and_then(|approval| approval.deadline_seconds)
             .map(|seconds| format!(" Auto-deny in {seconds}s."))
             .unwrap_or_default();
+        // An overseer's recorded pick (WI-996 E0b): shown beside the buttons,
+        // never chosen. It goes before the screen text, so the cut keeps it.
+        let recommended = match session.approval.as_ref() {
+            Some(approval) => crate::application::session_blocked::dialog_recommendation(
+                view,
+                &session.id,
+                approval,
+            )?,
+            None => None,
+        };
+        let evidence = recommended.as_ref().map(|recommended| {
+            left.push_str(&format!(
+                " {} recommends {}. {}.",
+                recommended["by"].as_str().unwrap_or("an agent"),
+                recommended["option"],
+                recommended["label"].as_str().unwrap_or(""),
+            ));
+            json!({"recommendation": recommended})
+        });
         let question = session
             .approval
             .as_ref()
@@ -1793,11 +1828,13 @@ fn session_entry<C: Clock, I: IdFactory>(
         (
             format!("Session {label} is asking for approval"),
             truncate(format!("{question}{left} {what}").trim(), 1000),
+            evidence,
         )
     } else {
         (
             format!("Session {label} needs attention"),
             format!("Session is {}.", session.activity),
+            None,
         )
     };
     Ok(entry(EntrySpec {
@@ -1830,7 +1867,14 @@ fn session_entry<C: Clock, I: IdFactory>(
         freshness: "live",
         action: action_of("session", json!({"session_id": session.id})),
         actor: &actors::system_actor(),
-        extra: json!({"session_id": session.id, "provisional": true}),
+        // `extra` merges over the null evidence snapshot, so a recommendation
+        // rides on the entry the Inbox serves (the web reads it there).
+        extra: match evidence {
+            Some(evidence) => {
+                json!({"session_id": session.id, "provisional": true, "evidence_snapshot": evidence})
+            }
+            None => json!({"session_id": session.id, "provisional": true}),
+        },
     }))
 }
 
@@ -2435,6 +2479,111 @@ mod tests {
     use crate::errors::VogtError;
     use crate::storage::interface::DeclaredStore;
     use serde_json::json;
+
+    /// The engine's live sessions: one that reported itself blocked on its
+    /// overseer and is now showing an approval dialog (WI-996).
+    const LIVE_SESSIONS: &str = r#"[{"id":"eng-1","name":"w","alive":true,"activity":"awaiting-approval","activity_changed_at":"2026-10-31T06:00:00Z","role":"worker","blocked":{"reason":"the token is not held","items":[],"since":"2026-10-31T05:00:00Z","needs":"overseer","boundary":"credential","key":"eng-1:credential:0123456789abcdef"},"approval":{"question":"Do you want to proceed?","command_excerpt":"rm -rf /tmp/x","detected_at":"2026-10-31T06:00:00Z","kind":"permission","key":"eng-1:permission_prompt:abc123abc123abc1","options":[{"number":1,"label":"Yes","selected":true},{"number":2,"label":"No","selected":false}]}}]"#;
+
+    fn with_engine(name: &str, sessions: &'static str) -> Built {
+        let dir = std::env::temp_dir().join(format!("vogt-inbox-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let engine = crate::adapters::engine::EngineClient::new(
+            "http://engine",
+            None,
+            Some(std::sync::Arc::new(move |_path, _, _body, _method| {
+                (200, sessions.as_bytes().to_vec())
+            })),
+        );
+        let mut clock = None;
+        let mut ids = None;
+        crate::application::instance::init(&dir, &mut clock, &mut ids).unwrap();
+        let config = crate::config::VogtConfig {
+            data_dir: dir,
+            ..crate::config::VogtConfig::default()
+        };
+        crate::application::context::build_context(
+            config,
+            Some(
+                crate::core::Principal::new("local:ada", crate::core::ActorKind::Human, "Ada")
+                    .unwrap(),
+            ),
+            Some(crate::core::StepClock::new(
+                crate::application::services::services_test::moment(),
+            )),
+            Some(crate::core::SequentialIds::new(None).unwrap()),
+            None,
+            Some(engine),
+            None,
+            None,
+        )
+        .unwrap()
+    }
+
+    fn entries_of(listed: &serde_json::Value) -> Vec<serde_json::Value> {
+        listed
+            .get("entries")
+            .or_else(|| listed.get("inbox"))
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn a_blocked_report_names_who_it_waits_on_and_is_keyed_by_its_content_key() {
+        let built = with_engine("blocked", LIVE_SESSIONS);
+        let listed = inbox_list_op(&built, json!({})).unwrap();
+        let entries = entries_of(&listed);
+        let blocked = entries
+            .iter()
+            .find(|entry| entry["kind"] == "session.blocked")
+            .unwrap_or_else(|| panic!("no blocked entry in {listed}"));
+        assert_eq!(blocked["title"], "Session w is blocked on its overseer");
+        assert_eq!(
+            blocked["entry_key"],
+            "agent:session:eng-1:blocked:eng-1:credential:0123456789abcdef"
+        );
+    }
+
+    #[test]
+    fn an_overseers_recorded_pick_shows_on_the_dialog_entry_as_a_recommendation() {
+        let built = with_engine("pick", LIVE_SESSIONS);
+        let approval = crate::adapters::engine::EngineApproval {
+            question: "Do you want to proceed?".to_string(),
+            command_excerpt: "rm -rf /tmp/x".to_string(),
+            detected_at: "2026-10-31T06:00:00Z".to_string(),
+            deadline_seconds: None,
+            deadline_at: None,
+            kind: "permission".to_string(),
+            options: vec![(1, "Yes".to_string(), true), (2, "No".to_string(), false)],
+            key: "eng-1:permission_prompt:abc123abc123abc1".to_string(),
+        };
+        crate::with_ctx!(&built, |ctx| {
+            assert!(crate::application::session_blocked::record_recommendation(
+                ctx,
+                "eng-1:permission_prompt:abc123abc123abc1",
+                &approval,
+                (Some(2), None),
+                "pick",
+            )
+            .unwrap());
+        });
+        let listed = inbox_list_op(&built, json!({})).unwrap();
+        let entries = entries_of(&listed);
+        let dialog = entries
+            .iter()
+            .find(|entry| entry["kind"] == "session.attention")
+            .unwrap_or_else(|| panic!("no dialog entry in {listed}"));
+        assert!(
+            dialog["summary"]
+                .as_str()
+                .unwrap()
+                .contains(" recommends 2. No."),
+            "{dialog}"
+        );
+        assert_eq!(dialog["evidence_snapshot"]["recommendation"]["option"], 2);
+        assert_eq!(dialog["evidence_snapshot"]["recommendation"]["label"], "No");
+    }
 
     /// An empty inbox distinguishes "nothing here" from a failed read: the
     /// list succeeds and names no entry.

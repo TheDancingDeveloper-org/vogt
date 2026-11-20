@@ -128,6 +128,30 @@ pub enum Forge {
 }
 
 impl VogtError {
+    /// The structured facts beside the message (WI-996: an escalated refusal's
+    /// keys), `None` for every other error.
+    pub fn details(&self) -> Option<&serde_json::Value> {
+        match self {
+            Self::Escalated { details, .. } => Some(details),
+            _ => None,
+        }
+    }
+
+    /// The `error` object a transport returns: `code` and `message`, then the
+    /// details flattened beside them, as Python's transports write them.
+    pub fn error_object(&self, code: &str, message: &str) -> serde_json::Value {
+        let mut object = serde_json::json!({"code": code, "message": message});
+        if let (Some(target), Some(details)) = (
+            object.as_object_mut(),
+            self.details().and_then(serde_json::Value::as_object),
+        ) {
+            for (key, value) in details {
+                target.insert(key.clone(), value.clone());
+            }
+        }
+        object
+    }
+
     pub fn message(&self) -> &str {
         match self {
             Self::Escalated { message, .. } => message,

@@ -350,7 +350,7 @@ impl<'a, G: ToolGrant> Dispatcher<'a, G> {
                 "structuredContent": value,
                 "isError": false,
             }),
-            Err(error) => tool_error(tool_code(&error), &describe(operation, &error)),
+            Err(error) => failed_call(tool_code(&error), &describe(operation, &error), &error),
         };
         result(Some(message_id), body)
     }
@@ -412,6 +412,17 @@ fn tool_error(code: &str, message: &str) -> Value {
         "content": [{"type": "text", "text": format!("{code}: {message}")}],
         "isError": true,
     })
+}
+
+/// A failed tool call with the error's details beside it. An escalated refusal
+/// (WI-996) carries its keys in `structuredContent`, readable without parsing
+/// the text, as Python's MCP transports write them.
+fn failed_call(code: &str, message: &str, error: &crate::errors::VogtError) -> Value {
+    let mut body = tool_error(code, message);
+    if error.details().is_some() {
+        body["structuredContent"] = json!({"error": error.error_object(code, message)});
+    }
+    body
 }
 
 /// The code a tool error carries. A validation failure is `invalid_params`, the
@@ -745,6 +756,36 @@ mod tests {
         assert_eq!(response["result"]["isError"], true);
         let text = response["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("needs an instance context"), "{text}");
+    }
+
+    #[test]
+    fn an_escalated_refusal_carries_its_keys_as_structured_content() {
+        use crate::errors::VogtError;
+        let error = VogtError::Escalated {
+            message: "person required: a permission prompt is answered by a person. The prompt is escalated to a person in the Inbox; wait for it, do not retry.".to_string(),
+            details: serde_json::json!({
+                "outcome": "escalated",
+                "escalation_key": "eng-1:permission_prompt:abc123abc123abc1",
+            }),
+        };
+        let body = super::failed_call(error.code(), error.message(), &error);
+        assert_eq!(body["isError"], true);
+        assert!(body["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("person_required: person required:"));
+        let keys = &body["structuredContent"]["error"];
+        assert_eq!(keys["code"], "person_required");
+        assert_eq!(keys["outcome"], "escalated");
+        assert_eq!(
+            keys["escalation_key"],
+            "eng-1:permission_prompt:abc123abc123abc1"
+        );
+        // A failure with no details keeps the plain result: no structured content.
+        let plain = VogtError::NotFound("gone".to_string());
+        assert!(super::failed_call(plain.code(), plain.message(), &plain)
+            .get("structuredContent")
+            .is_none());
     }
 
     #[test]
