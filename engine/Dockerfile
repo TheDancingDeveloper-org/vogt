@@ -358,6 +358,8 @@ ARG CODEX_SHA
 ARG CODEX_ACP_VERSION
 ARG CLAUDE_CODE_VERSION
 ARG OPENCODE_VERSION
+ARG KLAUDIA_VERSION
+ARG INSTALL_KLAUDIA=true
 # --prefix=/usr/local (not the ambient $NPM_CONFIG_PREFIX, which points at
 # /home/sprooty/.npm-global) so these survive the runtime /home/sprooty bind
 # mount — same reasoning as the system pnpm install in the base. The dev pod is
@@ -421,8 +423,9 @@ RUN set -eu; \
     codex_acp_version="${CODEX_ACP_VERSION:-${VOGT_CODEX_ACP_VERSION}}"; \
     claude_code_version="${CLAUDE_CODE_VERSION:-${VOGT_CLAUDE_CODE_VERSION}}"; \
     opencode_version="${OPENCODE_VERSION:-${VOGT_OPENCODE_VERSION}}"; \
-    printf 'codex\t%s\tcodex\tVOGT_CODEX_SHA\tgithub-release\ncodex-acp\t@agentclientprotocol/codex-acp\tcodex-acp\tVOGT_CODEX_ACP_VERSION\tnpm\ncodex-npm\t@openai/codex\tcodex\tVOGT_CODEX_VERSION\tnpm\nclaude-code\t@anthropic-ai/claude-code\tclaude\tVOGT_CLAUDE_CODE_VERSION\tnpm\nopencode\topencode-ai\topencode\tVOGT_OPENCODE_VERSION\tnpm\ngo\thttps://go.dev/dl\tgo\tVOGT_GO_VERSION\tgo-dist\n' \
-        "$VOGT_CODEX_SOURCE" \
+    klaudia_version="${KLAUDIA_VERSION:-${VOGT_KLAUDIA_VERSION}}"; \
+    printf 'codex\t%s\tcodex\tVOGT_CODEX_SHA\tgithub-release\ncodex-acp\t@agentclientprotocol/codex-acp\tcodex-acp\tVOGT_CODEX_ACP_VERSION\tnpm\ncodex-npm\t@openai/codex\tcodex\tVOGT_CODEX_VERSION\tnpm\nclaude-code\t@anthropic-ai/claude-code\tclaude\tVOGT_CLAUDE_CODE_VERSION\tnpm\nopencode\topencode-ai\topencode\tVOGT_OPENCODE_VERSION\tnpm\ngo\thttps://go.dev/dl\tgo\tVOGT_GO_VERSION\tgo-dist\nklaudia\t%s\tklaudia\tVOGT_KLAUDIA_VERSION\tgo-src\n' \
+        "$VOGT_CODEX_SOURCE" "$VOGT_KLAUDIA_SOURCE" \
         > /usr/local/share/vogt/agent-clis.tools; \
     pkgs=""; \
     if [ "$INSTALL_AI_CLIENTS" = "true" ]; then \
@@ -488,6 +491,44 @@ RUN set -eu; \
         fi; \
     fi
 
+# Installed by default (WI-3069): the source,
+# https://github.com/TheDancingDeveloper-org/msp-klaudia
+# (VOGT_KLAUDIA_SOURCE), is public and fetches anonymously, and Klaudia is the
+# Codex gitguard hook. `--build-arg INSTALL_KLAUDIA=false` remains only as an
+# escape hatch (WI-3068) if the source is ever unreachable.
+# Without it /usr/local/bin/klaudia is absent and a Codex launch is refused
+# (claude_config.rs protected_hook_binary), not crashed.
+# Klaudia (WI-950), built from the pinned commit with the pinned Go: no
+# registry publishes it. Its own layer, so a Klaudia pin moves without
+# reinstalling the npm CLIs above. Only that commit is fetched, the build
+# must reproduce it exactly (`-mod=readonly`, `-trimpath`, CGO off), and the
+# module and build caches are dropped so the image carries the binary alone.
+# This copy is also the gitguard hook program: /etc/codex/requirements.toml
+# runs `/usr/local/bin/klaudia hook gitguard` by absolute path, so it must stay
+# a root-owned 0755 regular file in a root-owned directory (asserted below,
+# and checked by the engine before a Codex launch). A runtime
+# `VOGT_KLAUDIA_VERSION` pin lands under the session-owned /opt/vogt/agent-clis
+# and is never what the hook runs (WI-1146).
+RUN set -eu; \
+    if [ "$INSTALL_AI_CLIENTS" = "true" ] && [ "$INSTALL_KLAUDIA" = "true" ]; then \
+        . /usr/local/share/vogt/agent-versions.env; \
+        klaudia_version="${KLAUDIA_VERSION:-${VOGT_KLAUDIA_VERSION}}"; \
+        git init -q /tmp/klaudia; \
+        git -C /tmp/klaudia fetch -q --depth 1 "$VOGT_KLAUDIA_SOURCE" "$klaudia_version"; \
+        git -C /tmp/klaudia checkout -q --detach FETCH_HEAD; \
+        test "$(git -C /tmp/klaudia rev-parse HEAD)" = "$klaudia_version"; \
+        (cd /tmp/klaudia && CGO_ENABLED=0 GOFLAGS=-mod=readonly \
+            GOMODCACHE=/tmp/gomod GOCACHE=/tmp/gocache \
+            go build -trimpath -o /usr/local/bin/klaudia ./cmd/klaudia); \
+        GOMODCACHE=/tmp/gomod go clean -modcache; \
+        rm -rf /tmp/klaudia /tmp/gomod /tmp/gocache; \
+        chown root:root /usr/local/bin/klaudia; \
+        chmod 0755 /usr/local/bin/klaudia; \
+        test "$(stat -c '%u %a %F' /usr/local/bin/klaudia /usr/local/bin)" \
+            = "$(printf '0 755 regular file\n0 755 directory')"; \
+        /usr/local/bin/klaudia --version; \
+    fi
+
 # What this image *carries* as a managed pin, not what the build asked for.
 # The runtime installer treats a row here as proof that the matching image
 # copy exists (a request for the baked version then points `current` back at
@@ -514,6 +555,9 @@ RUN set -eu; \
         fi; \
         if [ -x /usr/local/bin/opencode ]; then \
             printf 'opencode=%s\n' "${OPENCODE_VERSION:-${VOGT_OPENCODE_VERSION}}" >> "$manifest"; \
+        fi; \
+        if [ -x /usr/local/bin/klaudia ]; then \
+            printf 'klaudia=%s\n' "${KLAUDIA_VERSION:-${VOGT_KLAUDIA_VERSION}}" >> "$manifest"; \
         fi; \
     fi; \
     printf 'go=%s\n' "$(go version | sed -n 's/^go version go\([^ ]*\) .*/\1/p')" >> "$manifest"; \
