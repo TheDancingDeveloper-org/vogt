@@ -312,6 +312,11 @@ pub struct Project {
     pub link_state: LinkState,
     #[serde(default)]
     pub exclusions: Vec<String>,
+    /// MCP servers a worker session of this project gets on top of the worker
+    /// set (WI-2746). Add-only: the worker servers are always kept, and a name
+    /// the host does not register is skipped with a warning.
+    #[serde(default)]
+    pub mcp_extra: Vec<String>,
     #[serde(default = "trust_state_default")]
     pub trust_state: TrustState,
     pub created_at: Moment,
@@ -338,6 +343,7 @@ impl Project {
             write_back: WriteBack::Disabled,
             link_state: LinkState::Unlinked,
             exclusions: Vec::new(),
+            mcp_extra: Vec::new(),
             trust_state: TrustState::Unverified,
             created_at: now,
             updated_at: now,

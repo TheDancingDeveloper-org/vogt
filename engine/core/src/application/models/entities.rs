@@ -388,6 +388,9 @@ pub struct Project {
     #[serde(default)]
     #[schemars(extend("x-keep-default" = true))]
     pub exclusions: Vec<String>,
+    #[serde(default)]
+    #[schemars(extend("x-keep-default" = true))]
+    pub mcp_extra: Vec<String>,
     #[serde(default = "trust_unverified")]
     pub trust_state: TrustState,
     #[schemars(schema_with = "date_time")]
