@@ -1467,7 +1467,7 @@ fn authorize_op(state: &AppState, identity: &AuthorizedIdentity, req: &GitOpReq)
 /// is `agent:session:<ses_…>`, found through the `VOGT_SESSION_ID` its record
 /// carries, and only when exactly one session carries it; one the engine
 /// started is `agent:engine:<uuid>`, and that uuid is the engine's id.
-fn caller_session(state: &AppState, name: &str) -> Option<uuid::Uuid> {
+pub(crate) fn caller_session(state: &AppState, name: &str) -> Option<uuid::Uuid> {
     if let Some(id) = name.strip_prefix("agent:engine:") {
         return id.parse().ok().filter(|id| state.sessions.knows(*id));
     }
