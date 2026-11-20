@@ -63,7 +63,32 @@ pub(crate) fn open_backlog_count(
         [declared_db.to_string_lossy().as_ref()],
     )
     .map_err(sql_err)?;
+    // The declared store is attached for reads only: with `query_only` no
+    // statement on this connection can write to either database.
+    conn.pragma_update(None, "query_only", true)
+        .map_err(sql_err)?;
     Ok(())
+}
+
+/// The count's SQL with the newest-first read chosen for this store. The
+/// index hint is used only when `idx_latest_observed` exists: a store still at
+/// observed schema 7 has no such index, and naming it would fail the badge.
+/// Without the hint the planner picks `idx_latest_promoted` and sorts, which is
+/// about eight times slower on a 50k-row store (WI-4448).
+pub(crate) fn backlog_count_sql(conn: &Connection) -> Result<String, VogtError> {
+    let indexed: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_latest_observed'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(sql_err)?;
+    let from = if indexed > 0 {
+        "latest_observations INDEXED BY idx_latest_observed"
+    } else {
+        "latest_observations"
+    };
+    Ok(BACKLOG_COUNT_SQL.replace("__LATEST_FROM__", from))
 }
 
 /// The backlog candidate count (WI-4448). It mirrors `views::observed_candidates`
@@ -76,7 +101,7 @@ pub(crate) fn open_backlog_count(
 pub(crate) const BACKLOG_COUNT_SQL: &str = "
 WITH capped AS (
     SELECT subject_key, kind, project_id, payload, promoted
-    FROM latest_observations INDEXED BY idx_latest_observed
+    FROM __LATEST_FROM__
     WHERE kind IN ('forge.issue', 'marker', 'forge.pull_request')
       AND lower(coalesce(json_extract(payload, '$.state'), '')) NOT IN ('closed', 'merged')
     ORDER BY observed_at DESC, subject_key
@@ -675,8 +700,9 @@ where
     ) -> Result<i64, VogtError> {
         let conn = self.open(false)?;
         open_backlog_count(&conn, declared_db)?;
+        let sql = backlog_count_sql(&conn)?;
         conn.query_row(
-            BACKLOG_COUNT_SQL,
+            &sql,
             rusqlite::params![inputs.bug_initial_state, inputs.feature_initial_state],
             |row| row.get(0),
         )
