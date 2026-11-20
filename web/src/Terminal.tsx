@@ -7,11 +7,14 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import { SearchAddon, type ISearchResultChangeEvent } from "@xterm/addon-search";
 import { SerializeAddon } from "@xterm/addon-serialize";
 import "@xterm/xterm/css/xterm.css";
+import { attachWebglRenderer } from "./terminalRenderer";
+import { createTerminalWriteCoalescer, type TerminalWriteCoalescer } from "./terminalWriteCoalesce";
 import { openAttach } from "./api";
 import type { RuntimeSocket } from "./runtimeTransport";
 import { readClipboardText, writeClipboardText } from "./clipboard";
 import { decodeOsc52 } from "./terminalClipboard";
 import { terminalContextMenuAction, terminalWordAt } from "./terminalContextMenu";
+import { type CompositionInput, wireCompositionInput } from "./terminalComposition";
 import { sessionsStore } from "./store";
 import { wakeSession } from "./sessionHibernation";
 import { getTheme, TERMINAL_THEME_EVENT } from "./terminalThemes";
@@ -23,10 +26,19 @@ import {
 import {
   loadTerminalCache,
   MAX_TERMINAL_CACHE_BYTES,
-  saveTerminalCache,
   type TerminalCacheEntry,
 } from "./terminalCache";
 import { createReplayReplyGuard } from "./terminalReplyGuard";
+import { postTerminalCacheWrite } from "./terminalCacheOffthread";
+import {
+  CACHE_PERSIST_IDLE_TIMEOUT_MS,
+  CACHE_PERSIST_INTERVAL_MS,
+  cacheNeedsPersist,
+  installCacheFlushOnPageHide,
+  scheduleOnIdle,
+  shouldScheduleCachePersist,
+  type IdleHandle,
+} from "./terminalCacheSchedule";
 import {
   createReplayQueue,
   prepareReplayTail,
@@ -76,6 +88,12 @@ export function workItemLinks(): ReturnType<typeof listSessions> {
 // entry and the one-write restore bounded while still filling the viewport and
 // a deep scroll on reload (WI-129).
 const SERIALIZE_MAX_SCROLLBACK = 2000;
+
+// Ids for restarted output streams, unique across panes and tabs, so a cache
+// record can tell which stream wrote it.
+let cacheStreamCounter = 0;
+const newCacheStreamId = (): string =>
+  `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}-${(cacheStreamCounter++).toString(36)}`;
 import { beginForegroundReplay } from "./terminalPrewarm";
 import { TerminalSizeTracker, type TermSize } from "./terminalSize";
 import {
@@ -99,6 +117,9 @@ import {
   moveTerminalTouch,
   TERMINAL_LONG_PRESS_MS,
   terminalCellAt,
+  startTerminalFling,
+  stepTerminalFling,
+  type TerminalFling,
   type TerminalTouchGesture,
 } from "./terminalTouch";
 import { onPageVisibility, onWake } from "./wakeCoordinator";
@@ -163,19 +184,18 @@ const MAX_PENDING_INPUT_BYTES = 4 * MAX_TERMINAL_INPUT_BYTES;
 
 function configureTerminalTextarea(textarea: HTMLTextAreaElement | undefined) {
   if (!textarea) return;
-  // Touch devices only: soft keyboards are unusable for prose without
-  // autocorrect/suggestions. On desktop, keep xterm's defaults (everything
-  // off) — enabling them routes hardware-keyboard input and paste through
-  // IME composition, which xterm can garble into duplicated/"corrected"
-  // characters.
+  // Touch devices only (desktop keeps xterm's defaults). Autocorrect rewrites
+  // a word after it was typed, which a PTY cannot follow — the "corrected"
+  // text arrives on top of the original — so every keyboard assist is off.
+  // What is left of IME composition is handled by TerminalCompositionGuard.
   if (!(window.matchMedia?.("(pointer: coarse)").matches ?? false)) return;
-  textarea.setAttribute("autocorrect", "on");
-  textarea.setAttribute("autocapitalize", "none");
-  textarea.setAttribute("autocomplete", "on");
+  textarea.setAttribute("autocorrect", "off");
+  textarea.setAttribute("autocapitalize", "off");
+  textarea.setAttribute("autocomplete", "off");
   textarea.setAttribute("inputmode", "text");
   textarea.setAttribute("enterkeyhint", "enter");
-  textarea.spellcheck = true;
-  textarea.setAttribute("spellcheck", "true");
+  textarea.spellcheck = false;
+  textarea.setAttribute("spellcheck", "false");
 }
 
 /**
@@ -213,15 +233,40 @@ const TerminalView: Component<Props> = (props) => {
   // time-slice the shared replay parser with the active pane.
   let deferredCache: TerminalCacheEntry | null = null;
   let cacheTimer: ReturnType<typeof setTimeout> | null = null;
-  // The outputPosition at the last successful persist, so an unchanged ring is
+  let cacheIdle: IdleHandle | null = null;
+  // The outputPosition at the last scheduled persist, so an unchanged ring is
   // not re-copied and re-written to IndexedDB.
   let lastPersistedPosition: number | undefined;
+  // The cursor of a write posted but not yet acknowledged.
+  let persistingPosition: number | undefined;
+  // The stream restarted (wake, server restart): offsets begin again at 0, so
+  // saves carry this stream's id until one is acknowledged, and replace a
+  // record left by any other stream rather than lose to it.
+  let replaceStoredCache: string | undefined;
+  // The stream this pane's records belong to: adopted from a restored record
+  // or minted on restart. Every save is stamped with it, so a writer that
+  // never saw this stream cannot overwrite its record (#1246).
+  let cacheStreamId: string | undefined;
+  // Bumped on every restart. A write acknowledged under an older epoch belongs
+  // to the old stream and must not move this stream's cursors.
+  let cacheStreamEpoch = 0;
+  // A resume replay of dormant bytes is still being parsed, so the xterm
+  // screen lags the cursor.
+  let pendingResumeReplay: ReplayHandle | null = null;
+  // Set on dormancy entry so the next persist runs without the 5 s wait.
+  let persistOnDormancy = false;
   let replay: ReplayHandle | null = null;
   const [readyToConnect, setReadyToConnect] = createSignal(false);
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let countdownTimer: ReturnType<typeof setInterval> | null = null;
   let reconnectAt = 0;
   let fitFrame: number | null = null;
+  // Live WebSocket frames, flushed once per animation frame (WI-2694).
+  // Replay and dormancy catch-up do not use this: they stay on the replay
+  // queue so a flush cannot overtake a snapshot still parsing.
+  let liveWrites: TerminalWriteCoalescer | null = null;
+  let disposeWebgl: (() => void) | null = null;
+  let pageHideCleanup: (() => void) | null = null;
   const reconnect = new ReconnectTracker();
   const watchdog = new SocketWatchdog();
   let watchdogTimer: ReturnType<typeof setInterval> | null = null;
@@ -272,6 +317,9 @@ const TerminalView: Component<Props> = (props) => {
   let pendingInput: Uint8Array<ArrayBuffer>[] = [];
   let pendingInputBytes = 0;
   let pasteTextareaRef: HTMLTextAreaElement | undefined;
+  // Soft-keyboard IME guard; reset on re-attach so a lost compositionend
+  // can't outlive the socket (WI-2707).
+  let composition: CompositionInput | null = null;
   const [showPasteModal, setShowPasteModal] = createSignal(false);
   const [statusText, setStatusText] = createSignal<string | null>("Connecting...");
   // The interactive reconnect overlay. Non-null only while we are between a
@@ -287,6 +335,8 @@ const TerminalView: Component<Props> = (props) => {
   const isCoarsePointer =
     window.matchMedia?.("(pointer: coarse)").matches ?? false;
   const [showCopyChip, setShowCopyChip] = createSignal(false);
+  // A long-press over blank cells offers Paste; it never pastes by itself.
+  const [showPasteChip, setShowPasteChip] = createSignal(false);
   // Jump-to-bottom affordance: a long-running session that scrolled far up its
   // scrollback (or has a program still writing while the reader is up there) is
   // hard to catch up to by dragging, especially on a phone. The chip appears
@@ -314,6 +364,7 @@ const TerminalView: Component<Props> = (props) => {
     text: string;
   } | null = null;
   let restoringStickyTouchSelection = false;
+  let runPasteChip: () => void = () => {};
   let pasteResolve: ((v: string | null) => void) | null = null;
 
   const isParked = () => Boolean(props.parked) || hiddenParked();
@@ -452,6 +503,9 @@ const TerminalView: Component<Props> = (props) => {
   // when serialization is unavailable or throws, so persistCache can fall back
   // to the raw ring.
   const trySerialize = (): string | null => {
+    // Pending live frames are already counted in outputPosition. Flush them
+    // first so the serialized screen matches that cursor.
+    liveWrites?.flush();
     if (!serializeAddon) return null;
     try {
       return serializeAddon.serialize({ scrollback: SERIALIZE_MAX_SCROLLBACK });
@@ -460,29 +514,97 @@ const TerminalView: Component<Props> = (props) => {
     }
   };
 
-  const persistCache = () => {
-    if (outputPosition === undefined) return;
-    // Skip the write when nothing new has arrived since the last persist
-    // OutputPosition is the monotonic byte cursor, so an unchanged
-    // value means the ring is identical and copying+writing it is wasted work.
-    if (outputPosition === lastPersistedPosition) return;
-    lastPersistedPosition = outputPosition;
-    const serialized = trySerialize();
-    void saveTerminalCache(
-      props.sessionId,
-      outputPosition,
-      serialized !== null ? { serialized } : { data: cachedBytes() },
-    );
+  const persistCache = (direct = false) => {
+    // Compare against an in-flight write too, so the same cursor is not
+    // posted twice while the first is still unacknowledged.
+    // The pagehide flush ignores it: the page may die before that write lands.
+    const floor = direct ? lastPersistedPosition : persistingPosition ?? lastPersistedPosition;
+    if (!cacheNeedsPersist(outputPosition, floor)) return;
+    const position = outputPosition;
+    persistingPosition = position;
+    persistOnDormancy = false;
+    // While the xterm screen lags the cursor, store the raw ring, which holds
+    // every byte up to `position`: a dormant pane parses nothing it receives,
+    // and a snapshot or resume replay is still being parsed. A serialized
+    // screen paired with that cursor would drop the unparsed output.
+    const screenLags = (socketDormant && dormantBytes > 0) || inSnapshot || pendingResumeReplay !== null;
+    const serialized = screenLags ? null : trySerialize();
+    const payload = serialized !== null ? { serialized } : { data: cachedBytes() };
+    const stream = replaceStoredCache;
+    const epoch = cacheStreamEpoch;
+    // Serialize needs the live xterm, so it stays on this thread. The IndexedDB
+    // put (up to 4 MiB) runs in a worker. The offset counts as persisted only
+    // once the write is acknowledged.
+    void postTerminalCacheWrite(
+      props.sessionId, position, payload, undefined, direct, stream,
+      stream === undefined ? cacheStreamId : undefined,
+    ).then((result) => {
+      // The stream restarted while this write was in flight: its cursor is an
+      // offset of the old stream, so it says nothing about the new one.
+      if (epoch !== cacheStreamEpoch) {
+        if (!destroyed && cacheNeedsPersist(outputPosition, lastPersistedPosition)) scheduleCachePersist();
+        return;
+      }
+      if (persistingPosition === position) persistingPosition = undefined;
+      // `stale` means the store already holds this stream at a later cursor,
+      // whether or not this write carried a stream id.
+      const saved = result === "written" || result === "stale";
+      if (result === "stale") {
+        console.debug("[vogt] terminal cache kept a newer record", { sessionId: props.sessionId, position });
+      }
+      if (saved) {
+        if (stream !== undefined && replaceStoredCache === stream) replaceStoredCache = undefined;
+        if (lastPersistedPosition === undefined || position > lastPersistedPosition) {
+          lastPersistedPosition = position;
+        }
+      }
+      // Output that arrived while this write was in flight still needs one.
+      if (!destroyed && cacheNeedsPersist(outputPosition, lastPersistedPosition)) {
+        scheduleCachePersist();
+      }
+    });
+  };
+
+  // The session's output stream restarted at 0: forget the persisted cursor
+  // and make the next save replace the stored record.
+  const restartCacheStream = () => {
+    lastPersistedPosition = undefined;
+    persistingPosition = undefined;
+    cacheStreamEpoch += 1;
+    replaceStoredCache = newCacheStreamId();
+    cacheStreamId = replaceStoredCache;
+  };
+
+  // Page closing or backgrounded: drop the pending timer/idle slot and write
+  // now, on this thread, so the pending scrollback is not lost.
+  const flushCacheNow = () => {
+    if (cacheTimer !== null) { clearTimeout(cacheTimer); cacheTimer = null; }
+    cacheIdle?.cancel();
+    cacheIdle = null;
+    persistCache(true);
+  };
+
+  const flushCacheSoon = () => {
+    if (cacheIdle) return;
+    cacheIdle = scheduleOnIdle(() => {
+      cacheIdle = null;
+      persistCache();
+    }, window, CACHE_PERSIST_IDLE_TIMEOUT_MS);
   };
 
   const scheduleCachePersist = () => {
-    if (cacheTimer !== null) return;
-    // 5s, not 1s: a reconnect cache does not need per-second freshness,
-    // and each persist copies up to 4 MiB and does a 4 MiB IndexedDB put.
+    if (!shouldScheduleCachePersist({
+      outputPosition,
+      lastPersistedPosition: persistingPosition ?? lastPersistedPosition,
+      alreadyScheduled: cacheTimer !== null || cacheIdle !== null,
+    })) return;
+    // Panes wait the 5 s cadence, then idle. A pane that just went dormant
+    // persists on the next idle slice.
+    const delay = persistOnDormancy ? 0 : CACHE_PERSIST_INTERVAL_MS;
     cacheTimer = setTimeout(() => {
       cacheTimer = null;
-      persistCache();
-    }, 5_000);
+      flushCacheSoon();
+    }, delay);
   };
 
   const dispatchInput = (data: string | ArrayBuffer) => {
@@ -515,6 +637,9 @@ const TerminalView: Component<Props> = (props) => {
     const target = size.target();
     if (!term || !target) return;
     if (term.cols === target.cols && term.rows === target.rows) return;
+    // Flush first so bytes painted for the old size are parsed before the
+    // resize changes the grid they land on.
+    liveWrites?.flush();
     try {
       term.resize(target.cols, target.rows);
     } catch {
@@ -695,11 +820,34 @@ const TerminalView: Component<Props> = (props) => {
       setShowCopyChip(false);
     };
 
+    let flingFrame: number | null = null;
+    const stopFling = () => {
+      if (flingFrame !== null) cancelAnimationFrame(flingFrame);
+      flingFrame = null;
+    };
+    const runFling = (start: TerminalFling) => {
+      stopFling();
+      let fling: TerminalFling | null = start;
+      let last = performance.now();
+      const tick = (now: number) => {
+        flingFrame = null;
+        if (!term || !fling || term.buffer.active.type !== "normal") return;
+        const step = stepTerminalFling(fling, Math.max(0, now - last), estimateCellHeight());
+        last = now;
+        fling = step.fling;
+        if (step.lines !== 0) term.scrollLines(step.lines);
+        if (fling) flingFrame = requestAnimationFrame(tick);
+      };
+      flingFrame = requestAnimationFrame(tick);
+    };
+
     const onTouchStart = (event: TouchEvent) => {
       cancelLongPress();
       longPressSelected = false;
       stickyTouchSelection = null;
       setShowCopyChip(false);
+      stopFling();
+      setShowPasteChip(false);
       const touch = event.touches.length === 1 ? event.touches[0] : undefined;
       gesture = touch ? beginTerminalTouch(touch.clientX, touch.clientY) : null;
       // xterm.js does not synthesise a selection for touch. Without this a
@@ -738,6 +886,7 @@ const TerminalView: Component<Props> = (props) => {
         estimateCellHeight(),
         term.buffer.active.type === "alternate" ? "alternate" : "normal",
         term.modes.mouseTrackingMode !== "none",
+        event.timeStamp || performance.now(),
       );
       // The swipe claimed its axis: it is a scroll, not a press, so it drops
       // any held word.
@@ -769,6 +918,16 @@ const TerminalView: Component<Props> = (props) => {
 
     const onTouchEnd = (event: TouchEvent) => {
       cancelLongPress();
+      if (term && gesture && event.touches.length === 0) {
+        const fling = startTerminalFling(
+          gesture,
+          event.timeStamp || performance.now(),
+          estimateCellHeight(),
+          term.buffer.active.type === "alternate" ? "alternate" : "normal",
+          term.modes.mouseTrackingMode !== "none",
+        );
+        if (fling) runFling(fling);
+      }
       const touch = event.touches.length === 1 ? event.touches[0] : undefined;
       gesture = touch ? beginTerminalTouch(touch.clientX, touch.clientY) : null;
       longPressSelected = false;
@@ -789,6 +948,7 @@ const TerminalView: Component<Props> = (props) => {
 
     return () => {
       cancelLongPress();
+      stopFling();
       hostRef?.removeEventListener("-xterm-gesturechange", suppressXtermScroll, true);
       hostRef?.removeEventListener("touchstart", onTouchStart);
       hostRef?.removeEventListener("touchmove", onTouchMove);
@@ -834,6 +994,24 @@ const TerminalView: Component<Props> = (props) => {
     search = new SearchAddon();
     term.loadAddon(search);
     search.onDidChangeResults((info) => props.onSearchResults?.(info));
+    liveWrites = createTerminalWriteCoalescer((chunk) => {
+      term?.write(chunk);
+    });
+    pageHideCleanup?.();
+    pageHideCleanup = installCacheFlushOnPageHide(flushCacheNow, window, document);
+    const opened = term;
+    void attachWebglRenderer(opened, {
+      onFallback: () => {
+        disposeWebgl = null;
+      },
+    }).then((dispose) => {
+      if (!dispose) return;
+      if (destroyed || term !== opened) {
+        dispose();
+        return;
+      }
+      disposeWebgl = dispose;
+    });
     // A PTY program's window title (OSC 0/2) names the tab, and its bell (BEL)
     // lights the tab's activity dot — neither reached the tabs before.
     term.onTitleChange((title) => {
@@ -869,7 +1047,18 @@ const TerminalView: Component<Props> = (props) => {
     term.onRender(() => refreshJumpToBottom());
 
     // Wire input: user keystrokes → PTY stdin.
-    term.onData((data) => dispatchInput(data));
+    // On a soft keyboard, IME composition commits are the one source of
+    // typed text (see TerminalCompositionGuard).
+    const textarea = term.textarea;
+    const input = isCoarsePointer && textarea
+      ? wireCompositionInput(textarea, (data) => dispatchInput(data))
+      : null;
+    composition = input;
+    if (input) onCleanup(() => input.dispose());
+    term.onData((data) => {
+      if (input) input.onData(data);
+      else dispatchInput(data);
+    });
 
     // Paste MUST go through term.paste(): it emits the bracketed-paste markers
     // (\x1b[200~...\x1b[201~) only when the foreground program enabled DECSET
@@ -924,7 +1113,8 @@ const TerminalView: Component<Props> = (props) => {
         if (v == null) return;
         text = v;
       }
-      if (text) term?.paste(text);
+      if (composition) composition.paste(text, (t) => term?.paste(t));
+      else if (text) term?.paste(text);
     };
 
     // Custom key handler for Ctrl+Shift+C/V and Cmd+C/V semantics.
@@ -1014,9 +1204,9 @@ const TerminalView: Component<Props> = (props) => {
         if (isCoarsePointer && stickyTouchSelection) return;
         copySelection().then(notifyCopy);
       } else if (action === "select") {
-        // A long-press: select the word under the finger. Over blank cells
-        // nothing is selected and nothing is pasted without an explicit tap.
-        selectWordAt(e.clientX, e.clientY);
+        // A long-press: select the word under the finger, or over blank
+        // cells offer Paste as a chip — never paste without that tap.
+        if (!selectWordAt(e.clientX, e.clientY)) setShowPasteChip(true);
       } else {
         void pasteFromClipboard();
       }
@@ -1035,6 +1225,7 @@ const TerminalView: Component<Props> = (props) => {
     // But a coarse pointer has neither: no right-click, and iOS Safari fires no
     // contextmenu on a long-press. So on touch we surface an explicit Copy chip
     // whenever there is a live selection — a tap copies, it does not auto-fire.
+    runPasteChip = () => void pasteFromClipboard();
     runCopyChip = () => {
       stickyTouchSelection = null;
       setShowCopyChip(false);
@@ -1167,6 +1358,7 @@ const TerminalView: Component<Props> = (props) => {
 
     void loadTerminalCache(props.sessionId).then((cached) => {
       if (destroyed) return;
+      if (cached?.stream !== undefined && cacheStreamId === undefined) cacheStreamId = cached.stream;
       // A live pane's initial load holds the pre-warm gate until snapshot-done.
       enterForegroundReplay();
       if (!cached) {
@@ -1241,6 +1433,7 @@ const TerminalView: Component<Props> = (props) => {
       clearCountdown();
       setReconnectView(null);
       setStatusText("Session unavailable");
+      liveWrites?.flush();
       term?.write("\r\n\x1b[31m[session not found — server may have restarted]\x1b[0m\r\n");
     }
   }
@@ -1308,6 +1501,8 @@ const TerminalView: Component<Props> = (props) => {
   function restoreCache(cached: TerminalCacheEntry, onDone: () => void): void {
     setStatusText("Restoring terminal...");
     if (typeof cached.serialized === "string") {
+      // A queued live frame belongs to the screen being replaced.
+      liveWrites?.cancel();
       term?.reset();
       cacheChunks = [];
       cacheBytes = 0;
@@ -1355,6 +1550,7 @@ const TerminalView: Component<Props> = (props) => {
     if (isParked() && initialAttachDone) return;
     if (isSessionGone()) { markSessionGone(); return; }
     replay?.cancel();
+    composition?.reset();
     inSnapshot = true;
     // We are actively attaching now, not waiting to retry — retire the overlay.
     clearCountdown();
@@ -1432,11 +1628,22 @@ const TerminalView: Component<Props> = (props) => {
               { kind: "snapshot" },
             );
             if (ctrl.reset !== false) {
+              // Drop frames queued before this snapshot so they cannot land
+              // ahead of the replay (a later rAF would otherwise write them).
+              liveWrites?.cancel();
               term?.reset();
               cacheChunks = [];
               cacheBytes = 0;
             }
             if (typeof ctrl.scrollback_pos === "number") {
+              // A snapshot ending before the cursor we already saved is a new
+              // stream (server restart), not an older view of this one.
+              // Compare against an in-flight write too: the first save after
+              // attach may not be acknowledged yet.
+              const savedThrough = Math.max(lastPersistedPosition ?? -1, persistingPosition ?? -1);
+              if (savedThrough >= 0 && ctrl.scrollback_pos < savedThrough) {
+                restartCacheStream();
+              }
               snapshotEndPosition = ctrl.scrollback_pos;
               // Re-anchor to the start of the payload we are about to replay.
               // On a reset:true that followed a resume_from (F1's aged-out or
@@ -1490,7 +1697,10 @@ const TerminalView: Component<Props> = (props) => {
                 if (heldForResize !== held) return;
                 heldForResize = null;
                 for (const item of held) {
-                  if (item instanceof Uint8Array) term?.write(item);
+                  if (item instanceof Uint8Array) {
+                    liveWrites?.flush();
+                    term?.write(item);
+                  }
                   else applyAnnouncedSize(item, false);
                 }
               });
@@ -1511,6 +1721,7 @@ const TerminalView: Component<Props> = (props) => {
               if (!destroyed && statusText() === notice) setStatusText(null);
             }, 4000);
           } else if (ctrl.type === "lag") {
+            liveWrites?.flush();
             term?.write("\r\n\x1b[31m[lag — reattaching]\x1b[0m\r\n");
             setStatusText("Reattaching terminal...");
             // Cancel any timer so the close event below doesn't double-schedule.
@@ -1542,6 +1753,8 @@ const TerminalView: Component<Props> = (props) => {
       // Resume writes this delta, or a bounded tail if it outgrows the budget.
       if (socketDormant) {
         dormantBytes += buf.byteLength;
+        // Hidden panes keep persisting on the same cadence: their cache is
+        // what a reload restores.
         scheduleCachePersist();
         return;
       }
@@ -1551,10 +1764,13 @@ const TerminalView: Component<Props> = (props) => {
       } else if (inSnapshot) {
         // Snapshot and immediately-following live frames share one ordered
         // queue until the snapshot parser has drained.
-        if (!replay?.enqueue(buf)) term?.write(buf);
+        if (!replay?.enqueue(buf)) {
+          liveWrites?.flush();
+          term?.write(buf);
+        }
       } else {
         scheduleCachePersist();
-        term?.write(buf);
+        liveWrites?.push(buf);
       }
     });
     socket.addEventListener("close", () => {
@@ -1571,6 +1787,7 @@ const TerminalView: Component<Props> = (props) => {
       if (!inSnapshot) {
         const { writeMarker } = reconnect.beginOutage();
         if (writeMarker) {
+          liveWrites?.flush();
           term?.write("\r\n\x1b[33m[disconnected]\x1b[0m\r\n");
         }
       }
@@ -1618,7 +1835,9 @@ const TerminalView: Component<Props> = (props) => {
     }
     socketDormant = true;
     dormantBytes = 0;
+    persistOnDormancy = true;
     setStatusText(null);
+    scheduleCachePersist();
   }
 
   // Back to visible. A small buffer is written as-is; past the budget the
@@ -1644,6 +1863,11 @@ const TerminalView: Component<Props> = (props) => {
     );
     replay.enqueue(plan.data);
     replay.finish();
+    const resumeReplay = replay;
+    pendingResumeReplay = resumeReplay;
+    void resumeReplay.done.then(() => {
+      if (pendingResumeReplay === resumeReplay) pendingResumeReplay = null;
+    });
   }
 
   function parkSocket() {
@@ -1727,6 +1951,7 @@ const TerminalView: Component<Props> = (props) => {
     hibernated = false;
     setHibernatedView(null);
     outputPosition = undefined;
+    restartCacheStream();
     setStatusText("Loading terminal...");
     if (!destroyed && !isParked()) connect();
   });
@@ -1742,12 +1967,20 @@ const TerminalView: Component<Props> = (props) => {
     stopWatchdog();
     if (hiddenTimer !== null) clearTimeout(hiddenTimer);
     if (cacheTimer !== null) { clearTimeout(cacheTimer); cacheTimer = null; }
+    cacheIdle?.cancel();
+    cacheIdle = null;
     persistCache();
     dropDormantSlot();
     if (fitFrame !== null) {
       cancelAnimationFrame(fitFrame);
       fitFrame = null;
     }
+    liveWrites?.cancel();
+    liveWrites = null;
+    disposeWebgl?.();
+    disposeWebgl = null;
+    pageHideCleanup?.();
+    pageHideCleanup = null;
     wakeCleanup?.();
     wakeCleanup = null;
     if (viewportHandler) {
@@ -1891,6 +2124,19 @@ const TerminalView: Component<Props> = (props) => {
             }}
           >
             Copy
+          </button>
+        </Show>
+        <Show when={showPasteChip()}>
+          <button
+            type="button"
+            class="terminal-copy-chip"
+            onPointerDown={(event) => {
+              event.preventDefault();
+              setShowPasteChip(false);
+              runPasteChip();
+            }}
+          >
+            Paste
           </button>
         </Show>
         <Show when={showJumpToBottom()}>

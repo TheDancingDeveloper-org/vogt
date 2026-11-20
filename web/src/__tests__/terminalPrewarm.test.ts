@@ -1,11 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { SessionSummary } from "../api";
+import { NARROW_QUERY } from "../narrow";
 import {
   MAX_PREWARM_SESSIONS,
   beginForegroundReplay,
   createPrewarmCoordinator,
   foregroundReplayActive,
+  prewarmEnabled,
+  readPrewarmEnvironment,
   resetForegroundReplayForTest,
   selectPrewarmTargets,
 } from "../terminalPrewarm";
@@ -51,11 +54,12 @@ describe("selectPrewarmTargets", () => {
     expect(targets[0]).toBe("s0"); // most recent
   });
 
-  it("excludes already-opened, already-warmed and exited sessions", () => {
+  it("excludes already-opened, already-warmed, hibernated and exited sessions", () => {
     const sessions = [
       session("open", iso(1)),
       session("warmed", iso(2)),
       session("exited", iso(3), { exit_code: 0 }),
+      session("asleep", iso(0), { activity: "hibernated" }),
       session("target", iso(4)),
     ];
     const targets = selectPrewarmTargets(
@@ -64,6 +68,30 @@ describe("selectPrewarmTargets", () => {
       new Set(["warmed"]),
     );
     expect(targets).toEqual(["target"]);
+  });
+});
+
+describe("prewarmEnabled", () => {
+  it("is off on a narrow viewport and when the browser asks to save data", () => {
+    expect(prewarmEnabled({ narrow: false, saveData: false })).toBe(true);
+    expect(prewarmEnabled({ narrow: true, saveData: false })).toBe(false);
+    expect(prewarmEnabled({ narrow: false, saveData: true })).toBe(false);
+  });
+
+  it("reads the mobile breakpoint and navigator.connection.saveData", () => {
+    const matchMedia = vi.fn((query: string) => ({
+      matches: query === NARROW_QUERY,
+      media: query,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }));
+    vi.stubGlobal("matchMedia", matchMedia);
+    Object.defineProperty(window.navigator, "connection", {
+      configurable: true,
+      value: { saveData: false },
+    });
+    expect(readPrewarmEnvironment()).toEqual({ narrow: true, saveData: false });
+    vi.unstubAllGlobals();
   });
 });
 
@@ -112,6 +140,101 @@ describe("prewarm coordinator", () => {
     await coordinator.idle();
     expect(order).toEqual(["a", "b"]);
     expect([...coordinator.warmed()].sort()).toEqual(["a", "b"]);
+  });
+
+  it("stops at the cap even when the roster is far larger", async () => {
+    const order: string[] = [];
+    const sessions = [
+      ...Array.from({ length: 1700 }, (_, i) =>
+        session(`h${i}`, iso(10_000 + i), { activity: "hibernated" }),
+      ),
+      ...Array.from({ length: 300 }, (_, i) => session(`s${i}`, iso(i))),
+    ];
+    const coordinator = createPrewarmCoordinator({
+      listSessions: () => sessions,
+      openSessionIds: () => new Set(),
+      isVisible: () => true,
+      foregroundActive: () => false,
+      warmAttach: async (id) => {
+        order.push(id);
+        return true;
+      },
+      startDelayMs: 0,
+    });
+    coordinator.start();
+    await vi.runAllTimersAsync();
+    await coordinator.idle();
+    expect(order).toHaveLength(MAX_PREWARM_SESSIONS);
+    expect(order.every((id) => id.startsWith("s"))).toBe(true);
+    expect(order[0]).toBe("s0");
+  });
+
+  it("does not count a failed warm toward the cap, and stops at twice the cap", async () => {
+    const order: string[] = [];
+    const sessions = Array.from({ length: 40 }, (_, i) => session(`s${i}`, iso(i)));
+    const coordinator = createPrewarmCoordinator({
+      listSessions: () => sessions,
+      openSessionIds: () => new Set(),
+      isVisible: () => true,
+      foregroundActive: () => false,
+      warmAttach: async (id) => {
+        order.push(id);
+        return false;
+      },
+      startDelayMs: 0,
+      limit: 8,
+    });
+    coordinator.start();
+    await vi.runAllTimersAsync();
+    await coordinator.idle();
+    expect(order).toHaveLength(16);
+    // A second kick cannot start another walk: the attempt budget is spent.
+    coordinator.kick();
+    await vi.runAllTimersAsync();
+    await coordinator.idle();
+    expect(order).toHaveLength(16);
+  });
+
+  it("does not warm when prewarm is disallowed (narrow or save-data)", async () => {
+    const order: string[] = [];
+    const coordinator = createPrewarmCoordinator({
+      listSessions: () => twoSessions(),
+      openSessionIds: () => new Set(),
+      isVisible: () => true,
+      prewarmAllowed: () => false,
+      foregroundActive: () => false,
+      warmAttach: async (id) => {
+        order.push(id);
+        return true;
+      },
+      startDelayMs: 0,
+    });
+    coordinator.start();
+    await vi.runAllTimersAsync();
+    await coordinator.idle();
+    expect(order).toEqual([]);
+  });
+
+  it("coalesces a burst of kicks into one pass", async () => {
+    let passes = 0;
+    const coordinator = createPrewarmCoordinator({
+      listSessions: () => twoSessions(),
+      openSessionIds: () => new Set(),
+      isVisible: () => true,
+      foregroundActive: () => false,
+      warmAttach: async () => {
+        passes += 1;
+        return true;
+      },
+      startDelayMs: 0,
+    });
+    coordinator.start();
+    coordinator.kick();
+    coordinator.kick();
+    coordinator.kick();
+    await vi.runAllTimersAsync();
+    await coordinator.idle();
+    expect(passes).toBe(2);
   });
 
   it("does not run while the document is hidden", async () => {
