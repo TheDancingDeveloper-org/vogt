@@ -2160,6 +2160,22 @@ Entries are `name=/absolute/dir`, comma-separated; a name is
 `[a-z0-9][a-z0-9_-]{0,31}`. A malformed or duplicate entry is skipped with a
 warning and the rest are kept.
 
+**Discovered accounts (no redeploy).** An account can also be a directory under
+`ENGINE_AGENT_CLAUDE_ACCOUNTS_ROOT` (default `$HOME/.claude-accounts`; `off`
+turns discovery off). `<root>/<name>` is account `<name>` when it holds a
+profile marker, `.vogt-claude-profile` (written by `claude-profile prepare`) or
+`.claude.json`, as a regular file. The engine reads the root on every session
+start, so a profile made after the engine started works at once, with no
+restart. The name rule applies. A symlink entry, a directory whose real path
+leaves the root, or a missing marker is refused with the same `400` as an
+unknown name, and nothing outside the root is probed. The directory the engine
+sets as `CLAUDE_CONFIG_DIR` is the resolved real path. Configured accounts win
+over a discovered one of the same name.
+
+The usage board (`VOGT_USAGE_ACCOUNTS`) is core configuration and does not
+read the engine's home, so a discovered account is not on it automatically.
+List the account there as well when the board should show it.
+
 - **`account` on `POST /api/sessions`** (and `session.start`) names one. The
   engine looks the name up itself and sets `CLAUDE_CONFIG_DIR` for the session,
   after the caller's own `env`, so a caller can pick a listed account but never

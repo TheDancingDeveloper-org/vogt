@@ -11773,6 +11773,7 @@ async fn a_claude_session_starts_with_its_directory_trusted_and_its_brief_readab
         default_dir: Some(claude_home.clone()),
         settings_file: None,
         opencode_config: None,
+        accounts_root: None,
         accounts: Vec::new(),
         account_concurrency_cap: 8,
         codex_policy: Ok(None),
@@ -11849,6 +11850,7 @@ fn one_slot_sandbox() -> (tempfile::TempDir, Config, std::path::PathBuf) {
         settings_file: None,
         opencode_config: None,
         account_concurrency_cap: 1,
+        accounts_root: None,
         accounts: vogt_engine_server::claude_config::parse_accounts(Some(&format!(
             "a={}",
             tmp.path().join("acct-a").display()
@@ -12130,6 +12132,7 @@ async fn a_named_claude_account_runs_the_session_in_its_own_config_dir() {
         settings_file: None,
         opencode_config: None,
         account_concurrency_cap: 8,
+        accounts_root: None,
         accounts: vogt_engine_server::claude_config::parse_accounts(Some(&format!(
             "acct2={}",
             acct2.display()
@@ -20911,6 +20914,7 @@ mod pod_stream {
                     settings_file: None,
                     opencode_config: None,
                     account_concurrency_cap: 8,
+                    accounts_root: None,
                     accounts: vogt_engine_server::claude_config::parse_accounts(Some(&format!(
                         "acct2={}",
                         dir.display()

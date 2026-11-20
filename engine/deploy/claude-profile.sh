@@ -125,6 +125,9 @@ cmd_prepare() {
     done
     mkdir -p "$dir"
     chmod 700 "$dir"
+    # The marker is what makes the engine treat this directory as an account
+    # under ENGINE_AGENT_CLAUDE_ACCOUNTS_ROOT (WI-2734), with no restart.
+    : > "$dir/.vogt-claude-profile"
     link_shared "$dir"
     dismiss_auto_mode "$dir"
     [[ "$mcp" == no ]] || register_mcp "$dir"
