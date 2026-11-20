@@ -739,17 +739,20 @@ fn prompt_resumed_overseer(state: &Arc<AppState>, id: Uuid) {
         .await
         {
             Ok(waited) if waited.matched => {
-                // Enter on its own, as the autopilot nudge types it: a TUI
-                // reads a burst ending in a carriage return as a paste.
-                let typed = match session.write_input(resume_prompt(&at).as_bytes()) {
-                    Ok(()) => {
-                        tokio::time::sleep(Duration::from_millis(300)).await;
-                        session.write_input(b"\r")
-                    }
-                    Err(e) => Err(e),
-                };
+                // Enter on its own, as the autopilot nudge types it, through
+                // the shared guard (WI-4459): a dialog holds the prompt back.
+                let typed = crate::enter_guard::type_then_enter(
+                    &session,
+                    &resume_prompt(&at),
+                    "overseer resume",
+                )
+                .await;
                 match typed {
-                    Ok(()) => tracing::info!(session = %id, "told a woken overseer it was resumed"),
+                    Ok(crate::enter_guard::EnterOutcome::Sent) => {
+                        tracing::info!(session = %id, "told a woken overseer it was resumed")
+                    }
+                    // The guard logged the dialog that held it back.
+                    Ok(crate::enter_guard::EnterOutcome::Skipped(_)) => {}
                     Err(e) => {
                         tracing::warn!(session = %id, error = %e, "could not prompt a woken overseer")
                     }
