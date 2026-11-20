@@ -4304,9 +4304,25 @@ fn spawn_retry_watcher(
             if session.exit_code().is_some() {
                 break;
             }
+            // WI-1001: a blind Enter accepts whatever the CLI highlights, so
+            // read the screen first and skip the retry over any dialog.
+            let reading = Arc::clone(&session);
+            let screen = tokio::task::spawn_blocking(move || reading.current_dialog()).await;
+            if !retry_enter_allowed(&screen) {
+                continue;
+            }
             let _ = session.write_input(b"\r");
         }
     });
+}
+
+/// Whether the retry watcher may send its Enter, given a fresh read of the
+/// screen (WI-1001). Only a read that succeeded and found no dialog or menu
+/// allows it; a failed read is treated as a dialog, so the Enter is skipped.
+fn retry_enter_allowed<E>(
+    screen: &std::result::Result<Option<crate::approval::Detected>, E>,
+) -> bool {
+    matches!(screen, Ok(None))
 }
 
 // --- outcomes, conclusion, and schema validation --------------------
@@ -4722,6 +4738,25 @@ pub(crate) mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(next, now + Duration::hours(12));
+    }
+
+    #[test]
+    fn retry_never_presses_enter_over_a_dialog() {
+        use crate::approval::Detected;
+        let dialog = Detected {
+            question: "Do you want to proceed?".into(),
+            command_excerpt: "rm -rf build".into(),
+            deadline_seconds: None,
+            kind: "permission",
+            options: vec![],
+            horizontal: false,
+        };
+        // A plain screen allows the retry Enter.
+        assert!(retry_enter_allowed::<()>(&Ok(None)));
+        // A permission dialog blocks it: Enter would approve it.
+        assert!(!retry_enter_allowed::<()>(&Ok(Some(dialog))));
+        // A failed screen read blocks it too (fail closed).
+        assert!(!retry_enter_allowed::<&str>(&Err("join failed")));
     }
 
     fn task_bound_to(project: Option<&str>, work_item: Option<&str>) -> AgentTask {
