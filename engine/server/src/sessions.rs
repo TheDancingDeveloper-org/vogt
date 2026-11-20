@@ -1998,6 +1998,14 @@ impl SessionRegistry {
             provider_limit.unwrap_or_else(crate::compact_backoff::default_limit),
             provider_window.unwrap_or(crate::compact_backoff::MODEL_WINDOW_TOKENS),
         );
+        if codex_agent {
+            let effective = codex_compact_limit.unwrap_or_else(|| {
+                provider_limit.unwrap_or_else(crate::compact_backoff::default_limit)
+            });
+            if let Some(warning) = crate::compact_backoff::low_limit_warning(effective) {
+                tracing::warn!(session = %id, "{warning}");
+            }
+        }
         let mut pod_launch = if pod_backed {
             // A wake (or an engine restart adopting a pod) replays a record
             // whose cwd and env were validated when the session started, so
