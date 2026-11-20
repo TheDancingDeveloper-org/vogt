@@ -1,4 +1,5 @@
 import { Component, For, Show, createEffect, createSignal, on, onCleanup, onMount, untrack } from "solid-js";
+import { recommendationCopy } from "./recommendation";
 import { useLocation, useNavigate } from "@solidjs/router";
 import {
   VogtUnavailable,
@@ -256,6 +257,13 @@ const Entry: Component<EntryProps> = (props) => {
           <h2>{props.entry.title}</h2>
         </div>
         <p class="inbox-entry-summary">{props.entry.summary ?? "No summary was provided by the server."}</p>
+        <Show when={recommendationCopy(props.entry.evidence_snapshot?.recommendation)}>
+          {(copy) => (
+            <p class="inbox-recommendation" aria-label="Overseer recommendation">
+              <strong>Recommendation</strong> {copy()}. The choice is yours.
+            </p>
+          )}
+        </Show>
         <Show when={props.entry.evidence_snapshot || props.entry.proposed_change}>
           <details class="inbox-evidence" open={evidenceOpen()}>
             <summary>Evidence</summary>

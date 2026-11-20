@@ -1769,6 +1769,13 @@ textarea {
   text-transform: uppercase;
 }
 
+.inbox-recommendation {
+  margin: 0.25rem 0;
+  padding: 0.375rem 0.625rem;
+  border-left: 3px solid var(--accent);
+  font-size: 0.875rem;
+}
+
 .inbox-entry-summary {
   margin: 0;
   color: var(--fg);

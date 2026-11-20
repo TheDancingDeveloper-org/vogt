@@ -1134,6 +1134,8 @@ export interface SessionSweepRow {
     | "exited"
     | "unknown";
   attention_reason: string;
+  /** WI-996 E0b: an overseer's recorded pick on the dialog an approval row shows. */
+  recommendation?: Record<string, unknown> | null;
   session: SessionSummary & {
     linked?: boolean;
     last_output_at?: string | null;

@@ -299,4 +299,23 @@ describe("canonical Inbox interactions", () => {
     expect(plainEvidence).toHaveAttribute("open");
     mounted.unmount();
   });
+
+  it("shows an overseer's recommendation on a dialog entry without acting on it", async () => {
+    const dialog = {
+      ...INBOX_ENTRY,
+      entry_key: "agent:session:s1:awaiting-approval:t1",
+      source: "agent",
+      title: "Session waits on a permission prompt",
+      action: { kind: "session" },
+      proposed_change: null,
+      evidence_snapshot: {
+        recommendation: { option: 2, label: "Yes, allow once", by: "oversight-1", at: "t", escalation_key: "k" },
+      },
+    };
+    fakeVogt({ "GET /inbox": { body: { ...INBOX_RESULT, entries: [dialog] } } });
+    const mounted = mountAt("/inbox", "/inbox", () => <Inbox />);
+    const note = await screen.findByLabelText("Overseer recommendation");
+    expect(note).toHaveTextContent("oversight-1 recommends 2. Yes, allow once");
+    mounted.unmount();
+  });
 });
