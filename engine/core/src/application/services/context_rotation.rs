@@ -657,6 +657,7 @@ where
         cold_wake_opt_out: false,
         wake_on: Vec::new(),
         explicit_null: Vec::new(),
+        override_reason: None,
     };
     let mut engine_started = false;
     match start_session_tracked(ctx, &params, &mut engine_started) {

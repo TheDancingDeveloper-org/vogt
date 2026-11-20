@@ -508,6 +508,14 @@ pub trait ReadView {
         offset: i64,
     ) -> Result<Vec<CodingSession>, crate::errors::VogtError>;
 
+    /// The sessions Vogt has not stopped that this engine session started,
+    /// newest first, at most `limit` (WI-1329: the worker cap).
+    fn list_live_sessions_started_by(
+        &self,
+        started_by_session: &str,
+        limit: i64,
+    ) -> Result<Vec<CodingSession>, crate::errors::VogtError>;
+
     fn list_events(
         &self,
         after: i64,

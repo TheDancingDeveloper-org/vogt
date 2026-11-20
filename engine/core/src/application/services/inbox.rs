@@ -37,6 +37,12 @@ const REF_FAILURE_KIND: &str = "ci.ref_failure";
 const BRANCH_CONCLUDED_KIND: &str = "ci.branch_concluded";
 const RUN_HUNG_KIND: &str = "ci.run_hung";
 const DEPLOY_FAILED_KIND: &str = "deploy.failed";
+/// Beside `session.attention`: an oversight session started past a dispatch
+/// rule with `override` (WI-1329). The audit operation of the same name.
+const DISPATCH_OVERRIDE_KIND: &str = super::sessions::DISPATCH_OVERRIDE;
+/// How long a session's latest report, and a dispatch override, stays an
+/// Inbox entry (Python `_REPORT_HORIZON`).
+const REPORT_HORIZON_SECONDS: i64 = 7 * 24 * 3600;
 const SOURCES: [&str; 4] = ["github", "drift", "ci", "agent"];
 
 pub fn inbox_list_op(built: &Built, params: Value) -> Result<Value, VogtError> {
@@ -1017,7 +1023,26 @@ where
     // Sessions' own reports (WI-2039) are not ported yet. Python reads the
     // clock here for the report horizon even when there are no reports, so the
     // clock advances once to keep later timestamps in step with Python.
-    let _report_horizon = now_of(&ctx.clock);
+    let report_horizon = now_of(&ctx.clock);
+    // Oversight overrides of the dispatch rules (WI-1329): one entry per
+    // override, for as long as a report would stay, so a person sees every
+    // start that went past the worker cap or the review rule.
+    let oldest = Moment::from_unix(
+        report_horizon.unix_seconds() - REPORT_HORIZON_SECONDS,
+        report_horizon.nanos(),
+    );
+    for record in view.list_audit(&crate::storage::interface::AuditQuery {
+        limit: MAX_SCAN.min(500),
+        offset: 0,
+        actor_id: None,
+        operation: Some(DISPATCH_OVERRIDE_KIND.to_string()),
+        entity_id: None,
+        project_id: None,
+        since: Some(oldest),
+        until: None,
+    })? {
+        entries.push(override_entry(view, &record, projects)?);
+    }
 
     for session in &live {
         let declared = view.session_by_engine_id(&session.id)?;
@@ -1591,6 +1616,49 @@ fn grant_entry(
 /// A question an agent asked and a person has yet to answer (WI-1321). The
 /// question, options and context are the asking agent's text: untrusted, shown
 /// verbatim, never acted on. Nothing is applied when the person answers.
+/// A start oversight made past the dispatch rules (WI-1329). The reason is the
+/// overseer's override text: untrusted, shown verbatim.
+fn override_entry(
+    view: &impl ReadView,
+    record: &crate::core::AuditRecord,
+    projects: &BTreeMap<String, Project>,
+) -> Result<Value, VogtError> {
+    let declared = view.session_by_id(&record.entity_id)?;
+    let project = declared
+        .as_ref()
+        .and_then(|session| projects.get(&session.project_id));
+    let reference = bound_ref(view, declared.as_ref(), None)?;
+    let label = match &reference {
+        Some(reference) => format!("{reference} session {}", record.entity_id),
+        None => record.entity_id.clone(),
+    };
+    let session_id = declared
+        .as_ref()
+        .map_or_else(|| record.entity_id.clone(), |s| s.engine_session_id.clone());
+    let title = format!(
+        "Dispatch override: {label} started by {}",
+        record.actor_identity_ref
+    );
+    Ok(entry(EntrySpec {
+        entry_key: format!("agent:dispatch.override:{}", record.id),
+        source: "agent",
+        kind: DISPATCH_OVERRIDE_KIND,
+        occurred_at: Some(record.at),
+        observed_at: None,
+        title: &title,
+        summary: &truncate(&record.reason, 1000),
+        project_slug: project.map(|project| project.slug.as_str()),
+        work_item_ref: reference.as_deref(),
+        source_subject_key: &record.entity_id,
+        source_url: None,
+        trust_state: "unverified".to_string(),
+        freshness: "live",
+        action: action_of("session", json!({"session_id": session_id})),
+        actor: &actors::system_actor(),
+        extra: json!({"session_id": session_id, "provisional": true}),
+    }))
+}
+
 fn decision_entry(
     view: &impl ReadView,
     decision: &crate::core::Decision,

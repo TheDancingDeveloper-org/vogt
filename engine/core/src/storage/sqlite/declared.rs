@@ -1572,6 +1572,18 @@ impl ReadView for SqliteReadView {
             row_session,
         )
     }
+    fn list_live_sessions_started_by(
+        &self,
+        started_by_session: &str,
+        limit: i64,
+    ) -> Result<Vec<CodingSession>, VogtError> {
+        many(
+            &self.conn,
+            "SELECT * FROM coding_sessions WHERE started_by_session = ? AND stopped_at IS NULL ORDER BY started_at DESC, id DESC LIMIT ?",
+            params![started_by_session, limit],
+            row_session,
+        )
+    }
     fn list_events(
         &self,
         after: i64,
@@ -1918,6 +1930,13 @@ impl<I: IdFactory> ReadView for SqliteWrite<I> {
         e: i64,
     ) -> Result<Vec<CodingSession>, VogtError> {
         self.view.list_sessions(a, b, c, d, e)
+    }
+    fn list_live_sessions_started_by(
+        &self,
+        a: &str,
+        b: i64,
+    ) -> Result<Vec<CodingSession>, VogtError> {
+        self.view.list_live_sessions_started_by(a, b)
     }
     fn list_events(&self, a: i64, b: i64, c: Option<&str>) -> Result<Vec<Event>, VogtError> {
         self.view.list_events(a, b, c)
