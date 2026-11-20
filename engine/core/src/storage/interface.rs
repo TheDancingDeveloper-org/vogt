@@ -514,6 +514,14 @@ pub trait ReadView {
         limit: i64,
         entity_id: Option<&str>,
     ) -> Result<Vec<Event>, crate::errors::VogtError>;
+    /// The newest events about one entity, newest first, at most `limit`. A
+    /// page from `after` is oldest first, so a caller that wants the latest
+    /// reads this (WI-996: a dialog's recommendations).
+    fn list_entity_events_newest(
+        &self,
+        entity_id: &str,
+        limit: i64,
+    ) -> Result<Vec<Event>, crate::errors::VogtError>;
     fn list_audit(&self, query: &AuditQuery) -> Result<Vec<AuditRecord>, crate::errors::VogtError>;
     fn count_audit(&self, query: &AuditQuery) -> Result<i64, crate::errors::VogtError>;
 }

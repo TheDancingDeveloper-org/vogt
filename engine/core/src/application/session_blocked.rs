@@ -329,9 +329,9 @@ pub(crate) fn dialog_recommendation(
     approval: &EngineApproval,
 ) -> Result<Option<Value>, VogtError> {
     let key = dialog_key(session_id, &approval.key, &approval.question);
-    let events = view.list_events(0, RECOMMENDATION_SCAN, Some(key.as_str()))?;
+    let events = view.list_entity_events_newest(&key, RECOMMENDATION_SCAN)?;
     let instance = dialog_instance(&approval.detected_at, &approval.command_excerpt);
-    for event in events.iter().rev() {
+    for event in &events {
         if event.kind != SESSION_ANSWER_RECOMMENDED
             || event.summary.get("dialog").and_then(Value::as_str) != Some(instance.as_str())
         {
@@ -342,12 +342,14 @@ pub(crate) fn dialog_recommendation(
         let (Some(option), Some(label)) = (option, label) else {
             continue;
         };
+        // The record holds the label cut to 200 characters (`record_recommendation`),
+        // so the shown one is cut the same way before the comparison.
         let shown = approval
             .options
             .iter()
             .find(|(number, _, _)| *number == option)
-            .map(|(_, text, _)| text.as_str());
-        if shown != Some(label) {
+            .map(|(_, text, _)| truncate_chars(text, 200));
+        if shown.as_deref() != Some(label) {
             continue;
         }
         return Ok(Some(json!({

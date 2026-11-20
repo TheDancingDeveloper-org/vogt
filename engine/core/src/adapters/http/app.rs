@@ -1646,7 +1646,7 @@ fn error_response(error: &VogtError) -> Response {
         StatusCode::from_u16(error.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     json_response(
         status,
-        serde_json::json!({"error": {"code": error.code(), "message": error.message()}}),
+        serde_json::json!({"error": error.error_object(error.code(), error.message())}),
     )
 }
 

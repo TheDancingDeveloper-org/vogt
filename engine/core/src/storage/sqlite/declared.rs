@@ -1593,6 +1593,18 @@ impl ReadView for SqliteReadView {
             ),
         }
     }
+    fn list_entity_events_newest(
+        &self,
+        entity_id: &str,
+        limit: i64,
+    ) -> Result<Vec<Event>, VogtError> {
+        many(
+            &self.conn,
+            "SELECT * FROM events WHERE entity_id = ? ORDER BY seq DESC LIMIT ?",
+            params![entity_id, limit],
+            row_event,
+        )
+    }
     fn list_audit(&self, query: &AuditQuery) -> Result<Vec<AuditRecord>, VogtError> {
         let (where_sql, mut params_box) = audit_where(query);
         params_box.push(Box::new(query.limit));
@@ -1909,6 +1921,9 @@ impl<I: IdFactory> ReadView for SqliteWrite<I> {
     }
     fn list_events(&self, a: i64, b: i64, c: Option<&str>) -> Result<Vec<Event>, VogtError> {
         self.view.list_events(a, b, c)
+    }
+    fn list_entity_events_newest(&self, a: &str, b: i64) -> Result<Vec<Event>, VogtError> {
+        self.view.list_entity_events_newest(a, b)
     }
     fn list_audit(&self, a: &AuditQuery) -> Result<Vec<AuditRecord>, VogtError> {
         self.view.list_audit(a)

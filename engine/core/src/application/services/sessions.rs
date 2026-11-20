@@ -3020,11 +3020,9 @@ where
         "needs": "person",
         "boundary": "permission_prompt",
     });
-    let seen = match engine.get_session(engine_id) {
-        Ok(seen) => seen,
-        Err(VogtError::EngineUnavailable(_) | VogtError::NotFound(_)) => None,
-        Err(error) => return Err(error),
-    };
+    // A failed read still leaves the refusal an escalation: only the keys are
+    // missing (the refusal's own outcome is what the caller acts on).
+    let seen = engine.get_session(engine_id).ok().flatten();
     let mut inbox_key = None;
     let mut recommended = false;
     if let Some(seen) = seen.as_ref() {
@@ -6635,6 +6633,17 @@ mod tests {
         principal: Principal,
         seen: Arc<Mutex<Vec<(String, String, String)>>>,
     ) -> (std::path::PathBuf, crate::application::context::Built) {
+        refusing_context_reading(name, principal, seen, true)
+    }
+
+    /// `refusing_context`, and when `readable` is false the session read fails
+    /// too: the refusal must still come back as an escalation, without keys.
+    fn refusing_context_reading(
+        name: &str,
+        principal: Principal,
+        seen: Arc<Mutex<Vec<(String, String, String)>>>,
+        readable: bool,
+    ) -> (std::path::PathBuf, crate::application::context::Built) {
         let dir = std::env::temp_dir().join(format!("vogt-ses-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -6656,8 +6665,10 @@ mod tests {
                         b"forbidden: person required: a permission prompt is answered by a person"
                             .to_vec(),
                     )
-                } else {
+                } else if readable {
                     (200, PROMPTED.as_bytes().to_vec())
+                } else {
+                    (500, b"engine read failed".to_vec())
                 }
             })),
         );
@@ -6839,6 +6850,65 @@ mod tests {
         assert_eq!(row["recommendation"]["option"], json!(2), "{result}");
         assert_eq!(row["recommendation"]["label"], json!("No"));
         assert_eq!(row["recommendation"]["escalation_key"], json!(PROMPT_KEY));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn an_unreadable_session_still_escalates_the_refusal_without_its_keys() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let (dir, built) = refusing_context_reading(
+            "unreadable",
+            agent("agent:worker"),
+            Arc::clone(&seen),
+            false,
+        );
+        record_session(&built, "ses_1", "eng-1");
+        let err = answer_as(&built, Some(2)).unwrap_err();
+        let VogtError::Escalated { message, details } = &err else {
+            panic!("expected an escalation, got {err:?}");
+        };
+        assert_eq!(details["outcome"], "escalated", "{details}");
+        assert!(details.get("escalation_key").is_none(), "{details}");
+        assert!(
+            message.contains("escalated to a person in the Inbox"),
+            "{message}"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn the_newest_pick_on_a_dialog_is_the_one_shown_and_a_long_label_still_matches() {
+        use crate::application::session_blocked::{dialog_recommendation, record_recommendation};
+        let (dir, built, _seen) = context("newest-pick", person(), None, |_| {}, vec![]);
+        let long = "y".repeat(250);
+        let approval = crate::adapters::engine::EngineApproval {
+            question: "Do you want to proceed?".to_string(),
+            command_excerpt: "rm -rf /tmp/x".to_string(),
+            detected_at: "2026-10-31T06:00:00Z".to_string(),
+            deadline_seconds: None,
+            deadline_at: None,
+            kind: "permission".to_string(),
+            options: vec![
+                (1, "Yes".to_string(), true),
+                (2, "No".to_string(), false),
+                (3, long.clone(), false),
+            ],
+            key: PROMPT_KEY.to_string(),
+        };
+        crate::with_ctx!(&built, |ctx| {
+            record_recommendation(ctx, PROMPT_KEY, &approval, (Some(1), None), "first").unwrap();
+            record_recommendation(ctx, PROMPT_KEY, &approval, (Some(2), None), "second").unwrap();
+            record_recommendation(ctx, PROMPT_KEY, &approval, (Some(3), None), "third").unwrap();
+        });
+        // Three picks on one dialog: the newest one is read, not the oldest.
+        // The third option's label is longer than the 200 characters recorded.
+        let shown = crate::with_ctx!(&built, |ctx| {
+            let view = ctx.declared.read().unwrap();
+            dialog_recommendation(&view, "eng-1", &approval).unwrap()
+        });
+        let shown = shown.expect("the newest pick is shown");
+        assert_eq!(shown["option"], json!(3), "{shown}");
+        assert_eq!(shown["label"], json!("y".repeat(200)));
         std::fs::remove_dir_all(dir).ok();
     }
 
