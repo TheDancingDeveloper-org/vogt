@@ -414,6 +414,11 @@ fn denied_config_key(key: &str) -> bool {
         "core.hookspath",
         "core.sshcommand",
         "core.bare",
+        "core.fsmonitor",
+        "core.editor",
+        "diff.external",
+        "gpg.program",
+        "filter.",
     ];
     PREFIXES.iter().any(|prefix| key.starts_with(prefix))
 }
@@ -501,6 +506,8 @@ fn assigns_source(word: &str) -> bool {
     let Some((name, _)) = word.split_once('=') else {
         return false;
     };
+    // `NAME+=value` is an append to the variable, so it names the same one.
+    let name = name.strip_suffix('+').unwrap_or(name);
     matches!(
         name,
         "HOME" | "XDG_CONFIG_HOME" | "GIT_DIR" | "GIT_COMMON_DIR" | "GIT_WORK_TREE"
@@ -5813,6 +5820,8 @@ mod tests {
             "sh -c 'HOME=/tmp/h git push origin wi-1298-x'",
             "export HOME=/tmp/h; git push origin wi-1298-x",
             "HOME=/tmp/h; git push origin wi-1298-x",
+            "HOME+=/sub git push origin wi-1298-x",
+            "XDG_CONFIG_HOME+=/x git push origin wi-1298-x",
         ] {
             assert!(refused(&worker, command, &dir), "should refuse: {command}");
         }
@@ -5841,6 +5850,13 @@ mod tests {
             "git -c core.sshCommand=x push origin wi-1298-x",
             "git -c protocol.file.allow=always push origin wi-1298-x",
             "git -c push.default=upstream push origin wi-1298-x",
+            "git -c core.fsmonitor=/bin/sh push origin wi-1298-x",
+            "git -c core.editor=/bin/sh push origin wi-1298-x",
+            "git -c core.hooksPath=/tmp/hooks push origin wi-1298-x",
+            "git -c diff.external=/bin/sh push origin wi-1298-x",
+            "git -c gpg.program=/bin/sh push origin wi-1298-x",
+            "git -c filter.x.clean=/bin/sh push origin wi-1298-x",
+            "git -c credential.helper=/bin/sh push origin wi-1298-x",
         ] {
             assert!(refused(&worker, command, &dir), "should refuse: {command}");
         }
