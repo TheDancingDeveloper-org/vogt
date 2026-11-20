@@ -1380,6 +1380,12 @@ where
         let audit_overrides = overrides.clone();
         let audit_budget = budget.as_ref().map(budget_wire);
         let audit_notes = dispatch_notes.clone();
+        // The override's own record names only the rules broken (Python).
+        let override_notes: Vec<String> = decision
+            .violations
+            .iter()
+            .map(|violation| violation.message.clone())
+            .collect();
         let audit_override = override_reason.clone();
         let audit_escalated = escalated.clone();
         let override_rules: Vec<&'static str> = decision
@@ -1445,7 +1451,7 @@ where
                         why,
                         work_item_ref.as_deref(),
                         &override_rules,
-                        &audit_notes,
+                        &override_notes,
                         now,
                     )?;
                 }

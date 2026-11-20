@@ -1024,6 +1024,7 @@ where
     // clock here for the report horizon even when there are no reports, so the
     // clock advances once to keep later timestamps in step with Python.
     let report_horizon = now_of(&ctx.clock);
+
     // Oversight overrides of the dispatch rules (WI-1329): one entry per
     // override, for as long as a report would stay, so a person sees every
     // start that went past the worker cap or the review rule.

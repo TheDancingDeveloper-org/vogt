@@ -1660,19 +1660,64 @@ fn an_oversight_override_starts_past_a_rule_and_is_audited() {
     assert_eq!(audits[0].actor_identity_ref, "agent:engine:eng-caller");
     let summary = started_summary(&built);
     assert_eq!(summary["override_reason"], "a spike on the small model");
-    // The Inbox raises it for a person.
+}
+
+/// The Inbox lists every oversight override; without the inbox change the
+/// entry is absent.
+#[test]
+fn an_override_is_raised_in_the_inbox_and_an_escalation_is_not_in_its_audit() {
+    let (built, _script) = agent_caller("oversight");
+    set_dispatch(
+        &built,
+        &[
+            ("dispatch.max_workers_per_overseer", json!({"value": 1})),
+            (
+                "dispatch.escalate_after_failed_reviews",
+                json!({"value": 1}),
+            ),
+        ],
+    );
+    seed_work_item_with_blockers(&built, 1);
+    seed_child_session(&built, "eng-live", Some("oversight"), Some("eng-caller"));
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!()
+    };
+    // Enforcement is off, so the escalation is only a note on the start; the
+    // override's own audit lists the broken rule alone.
+    let mut params = with_purpose(start_params(None, None, "because"), "implement");
+    params.work_item = Some("WI-1".to_string());
+    params.override_reason = Some("a spike past the cap".to_string());
+    start_session(ctx, &params).unwrap();
     let listed = super::inbox::inbox_list(ctx, json!({"limit": 50})).unwrap();
-    let entries = listed["entries"].as_array().expect("inbox entries");
-    let raised: Vec<_> = entries
+    let raised: Vec<_> = listed["entries"]
+        .as_array()
+        .expect("inbox entries")
         .iter()
         .filter(|entry| entry["kind"] == "dispatch.override")
         .collect();
     assert_eq!(raised.len(), 1, "{listed}");
-    assert_eq!(raised[0]["summary"], "a spike on the small model");
+    assert_eq!(raised[0]["summary"], "a spike past the cap");
     assert!(raised[0]["title"]
         .as_str()
         .unwrap()
         .contains("started by agent:engine:eng-caller"));
+    assert_eq!(raised[0]["provisional"], true);
+    let summary = started_summary(&built);
+    assert!(summary["dispatch_notes"]
+        .to_string()
+        .contains("escalate_after_failed_reviews"));
+    let events = ctx
+        .declared
+        .read()
+        .unwrap()
+        .list_events(0, 100, None)
+        .unwrap();
+    let audited = events
+        .iter()
+        .find(|event| event.kind == "dispatch.override")
+        .expect("an override event");
+    let notes = audited.summary["notes"].to_string();
+    assert!(notes.contains("max_workers_per_overseer") && !notes.contains("escalate"));
 }
 
 #[test]
