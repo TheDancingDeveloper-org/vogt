@@ -970,9 +970,19 @@ impl Session {
         true
     }
 
-    /// The stranded mark is cleared once the erase has gone through.
-    pub(crate) fn clear_stranded(&self) {
-        *self.stranded.lock() = None;
+    /// The stranded mark is cleared once the erase has gone through. Publishes
+    /// the session's state after the clear, so the feed, the Inbox and waiters
+    /// stop reading it as blocked: the agent's own report if it has one, else
+    /// none. Returns true when a mark was cleared.
+    pub(crate) fn clear_stranded(&self) -> bool {
+        if self.stranded.lock().take().is_none() {
+            return false;
+        }
+        self.bus.publish(ServerEvent::SessionBlocked {
+            id: self.id,
+            blocked: self.blocked(),
+        });
+        true
     }
 
     /// The stranded mark, if any: when it was set and what was being typed.
@@ -3254,5 +3264,46 @@ mod reported_status_tests {
         let r = report(R::Blocked, None, Some("sk-SECRET-TOKEN"));
         let line = disagreement(r.state, AwaitingApproval, Running).unwrap();
         assert!(!line.contains("SECRET"));
+    }
+}
+
+/// WI-4459 re-review: clearing a stranded mark publishes the unblock, so the
+/// feed, the Inbox and waiters stop reading the session as blocked.
+#[cfg(test)]
+mod stranded_mark_tests {
+    use std::sync::Arc;
+
+    use crate::enter_guard::tests::recording_session;
+    use crate::events::ServerEvent;
+
+    #[tokio::test]
+    async fn clearing_a_stranded_mark_publishes_the_unblock() {
+        let writes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (session, _output) = recording_session(writes);
+        let mut events = session.bus.subscribe();
+        assert!(session.mark_stranded("carry on"));
+        assert!(session.clear_stranded());
+        assert!(
+            !session.clear_stranded(),
+            "a second clear has nothing to clear"
+        );
+
+        let mut blocked = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if let ServerEvent::SessionBlocked {
+                blocked: report, ..
+            } = event
+            {
+                blocked.push(report);
+            }
+        }
+        // One notice when marked, then the state after the clear: not blocked.
+        assert_eq!(
+            blocked.len(),
+            2,
+            "expected the mark and the unblock: {blocked:?}"
+        );
+        assert!(blocked[0].is_some());
+        assert!(blocked[1].is_none());
     }
 }
