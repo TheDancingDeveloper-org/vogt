@@ -109,6 +109,16 @@ image (it exits 127). The red run stays visible in the Actions tab. Because
 the workflow has no pull-request or `merge_group` trigger, there is no
 required context to restrict.
 
+### Quarantined tests
+
+These are skipped with `#[ignore = "<reason>"]`, so they stay in the source and
+are listed by `cargo nextest run --run-ignored all`. Each one names its work
+item in the reason.
+
+| Test | Symptom | Item | Date | Un-quarantine |
+|---|---|---|---|---|
+| `vogt-engine-server` `integration::an_autopilot_opencode_session_advances_through_its_backlog_unattended` | fourth nudge after a silent gap (4 items, expected 3); 4/40 in the v2 load runs | WI-4449 (part c) | 2026-11-20 | remove the `#[ignore]` and this row once the re-nudge rule is decided |
+
 ### CodeQL
 
 CodeQL runs only when a release is cut, as an operator decision. It does not
