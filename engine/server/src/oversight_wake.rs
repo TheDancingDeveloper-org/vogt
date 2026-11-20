@@ -247,8 +247,10 @@ pub fn spawn_watcher(state: Arc<AppState>) {
                     let due = coalescer.due(now, |id| overseer_state(&state.sessions, id, now));
                     for (id, text) in due {
                         let Ok(session) = state.sessions.get(id) else { continue };
-                        match crate::autopilot::type_line(&session, &text).await {
-                            Ok(()) => tracing::info!(
+                        match crate::autopilot::type_line(&session, &text, "overseer wake").await {
+                            // A dialog holds the wake back; the guard logged it.
+                            Ok(crate::enter_guard::EnterOutcome::Skipped(_)) => {}
+                            Ok(crate::enter_guard::EnterOutcome::Sent) => tracing::info!(
                                 session = %id,
                                 event = "oversight.wake",
                                 line = %text,

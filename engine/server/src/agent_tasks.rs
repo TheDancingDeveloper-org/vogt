@@ -4252,7 +4252,19 @@ fn spawn_retry_watcher(
     push: Arc<PushManager>,
     session: Arc<Session>,
     task_name: String,
+    rx: tokio::sync::broadcast::Receiver<crate::pty::OutputChunk>,
+) {
+    spawn_retry_watcher_paced(push, session, task_name, rx, RETRY_BACKOFF_BASE);
+}
+
+/// The first retry waits `base`, then doubles. Split out so a test can pace
+/// the watcher without waiting out the real backoff.
+fn spawn_retry_watcher_paced(
+    push: Arc<PushManager>,
+    session: Arc<Session>,
+    task_name: String,
     mut rx: tokio::sync::broadcast::Receiver<crate::pty::OutputChunk>,
+    base: std::time::Duration,
 ) {
     tokio::spawn(async move {
         let mut tail = String::new();
@@ -4298,32 +4310,21 @@ fn spawn_retry_watcher(
                 break;
             }
 
-            let backoff_secs = 5u64.saturating_mul(1u64 << attempts.min(4));
+            let backoff = base.saturating_mul(1u32 << attempts.min(4));
             attempts += 1;
-            tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+            tokio::time::sleep(backoff).await;
             if session.exit_code().is_some() {
                 break;
             }
-            // WI-1001: a blind Enter accepts whatever the CLI highlights, so
-            // read the screen first and skip the retry over any dialog.
-            let reading = Arc::clone(&session);
-            let screen = tokio::task::spawn_blocking(move || reading.current_dialog()).await;
-            if !retry_enter_allowed(&screen) {
-                continue;
-            }
-            let _ = session.write_input(b"\r");
+            // WI-1001 / WI-4459: the shared guard checks the screen twice
+            // before the Enter and logs a skip over a dialog.
+            let _ = crate::enter_guard::send_enter(&session, "rate-limit retry").await;
         }
     });
 }
 
-/// Whether the retry watcher may send its Enter, given a fresh read of the
-/// screen (WI-1001). Only a read that succeeded and found no dialog or menu
-/// allows it; a failed read is treated as a dialog, so the Enter is skipped.
-fn retry_enter_allowed<E>(
-    screen: &std::result::Result<Option<crate::approval::Detected>, E>,
-) -> bool {
-    matches!(screen, Ok(None))
-}
+/// The first rate-limit retry waits this long; each later one doubles it.
+const RETRY_BACKOFF_BASE: std::time::Duration = std::time::Duration::from_secs(5);
 
 // --- outcomes, conclusion, and schema validation --------------------
 
@@ -4740,23 +4741,43 @@ pub(crate) mod tests {
         assert_eq!(next, now + Duration::hours(12));
     }
 
-    #[test]
-    fn retry_never_presses_enter_over_a_dialog() {
-        use crate::approval::Detected;
-        let dialog = Detected {
-            question: "Do you want to proceed?".into(),
-            command_excerpt: "rm -rf build".into(),
-            deadline_seconds: None,
-            kind: "permission",
-            options: vec![],
-            horizontal: false,
-        };
-        // A plain screen allows the retry Enter.
-        assert!(retry_enter_allowed::<()>(&Ok(None)));
-        // A permission dialog blocks it: Enter would approve it.
-        assert!(!retry_enter_allowed::<()>(&Ok(Some(dialog))));
-        // A failed screen read blocks it too (fail closed).
-        assert!(!retry_enter_allowed::<&str>(&Err("join failed")));
+    /// WI-4459: the retry watcher reads the screen once after its backoff.
+    /// Here the screen is clean at that read and a permission dialog is drawn
+    /// after it, so only the second read in the stable window sees it. The
+    /// watcher must not press Enter over it. On the old single-read code it
+    /// did, so this test fails there.
+    #[tokio::test]
+    async fn retry_never_presses_enter_over_a_dialog_drawn_after_its_first_look() {
+        use crate::enter_guard::tests::{dialog_output, recording_session};
+        use std::sync::{Arc, Mutex};
+        use std::time::Duration;
+
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let (session, output) = recording_session(Arc::clone(&writes));
+        let dir = tempfile::tempdir().unwrap().keep();
+        let push = Arc::new(PushManager::new(&dir, None).unwrap());
+        spawn_retry_watcher_paced(
+            push,
+            Arc::clone(&session),
+            "retry test".into(),
+            session.subscribe(),
+            Duration::from_millis(50),
+        );
+
+        // The rate limit starts the retry; the first look at 50 ms sees a
+        // clean screen. The dialog is drawn at 150 ms, before the second
+        // read at about 250 ms.
+        output
+            .send(b"Error: 429 Too Many Requests\r\n".to_vec())
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        output.send(dialog_output()).unwrap();
+        tokio::time::sleep(Duration::from_millis(800)).await;
+
+        assert!(
+            !writes.lock().unwrap().contains(&b'\r'),
+            "the retry pressed Enter over a permission dialog"
+        );
     }
 
     fn task_bound_to(project: Option<&str>, work_item: Option<&str>) -> AgentTask {
