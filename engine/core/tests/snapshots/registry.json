@@ -57904,6 +57904,18 @@
                 "default": "",
                 "title": "Summary",
                 "type": "string"
+              },
+              "escalation": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/SessionChangeEscalation"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Set when the change is an ask that someone else must resolve: a blocked report, a permission dialog or a grant request (WI-996 E1). Absent otherwise."
               }
             },
             "required": [
@@ -57912,6 +57924,49 @@
               "kind"
             ],
             "title": "SessionChange",
+            "type": "object"
+          },
+          "SessionChangeEscalation": {
+            "additionalProperties": false,
+            "description": "The escalation a session change carries (WI-996 E1).",
+            "properties": {
+              "needs": {
+                "description": "Who can resolve it: `person`, `overseer` or `either`.",
+                "title": "Needs",
+                "type": "string"
+              },
+              "boundary": {
+                "description": "What kind of boundary it is: `permission_prompt`, `denied_action`, `credential`, `decision` or `other`.",
+                "title": "Boundary",
+                "type": "string"
+              },
+              "ask": {
+                "description": "The ask, at most 120 characters. Untrusted text.",
+                "title": "Ask",
+                "type": "string"
+              },
+              "key": {
+                "default": "",
+                "description": "`session:boundary:hash`, the key the Inbox and push dedupe on; empty when the engine sent none.",
+                "title": "Key",
+                "type": "string"
+              },
+              "resolve": {
+                "default": [],
+                "description": "The ways it can be resolved: `answer`, `grant`, `do` or `lift_hold`.",
+                "items": {
+                  "type": "string"
+                },
+                "title": "Resolve",
+                "type": "array"
+              }
+            },
+            "required": [
+              "needs",
+              "boundary",
+              "ask"
+            ],
+            "title": "SessionChangeEscalation",
             "type": "object"
           }
         },
@@ -58426,6 +58481,18 @@
                 "default": "",
                 "title": "Summary",
                 "type": "string"
+              },
+              "escalation": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/SessionChangeEscalation"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Set when the change is an ask that someone else must resolve: a blocked report, a permission dialog or a grant request (WI-996 E1). Absent otherwise."
               }
             },
             "required": [
@@ -58434,6 +58501,49 @@
               "kind"
             ],
             "title": "SessionChange",
+            "type": "object"
+          },
+          "SessionChangeEscalation": {
+            "additionalProperties": false,
+            "description": "The escalation a session change carries (WI-996 E1).",
+            "properties": {
+              "needs": {
+                "description": "Who can resolve it: `person`, `overseer` or `either`.",
+                "title": "Needs",
+                "type": "string"
+              },
+              "boundary": {
+                "description": "What kind of boundary it is: `permission_prompt`, `denied_action`, `credential`, `decision` or `other`.",
+                "title": "Boundary",
+                "type": "string"
+              },
+              "ask": {
+                "description": "The ask, at most 120 characters. Untrusted text.",
+                "title": "Ask",
+                "type": "string"
+              },
+              "key": {
+                "default": "",
+                "description": "`session:boundary:hash`, the key the Inbox and push dedupe on; empty when the engine sent none.",
+                "title": "Key",
+                "type": "string"
+              },
+              "resolve": {
+                "default": [],
+                "description": "The ways it can be resolved: `answer`, `grant`, `do` or `lift_hold`.",
+                "items": {
+                  "type": "string"
+                },
+                "title": "Resolve",
+                "type": "array"
+              }
+            },
+            "required": [
+              "needs",
+              "boundary",
+              "ask"
+            ],
+            "title": "SessionChangeEscalation",
             "type": "object"
           },
           "SessionDigestResult": {

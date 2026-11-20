@@ -185,13 +185,25 @@ fn session_labels<C: Clock, I: IdFactory>(
 }
 
 fn change(one: &EngineChange, labels: &HashMap<String, String>) -> Value {
-    json!({
+    let mut out = json!({
         "seq": one.seq,
         "at": engine_timestamp(&one.at),
         "session": labels.get(&one.session).unwrap_or(&one.session),
         "kind": one.kind,
         "summary": one.summary,
-    })
+    });
+    // An ask someone else must resolve (WI-996 E1) rides along, so a waiter
+    // sees who can answer it without a second read.
+    if let Some(escalation) = &one.escalation {
+        out["escalation"] = json!({
+            "needs": escalation.needs,
+            "boundary": escalation.boundary,
+            "ask": escalation.ask,
+            "key": escalation.key,
+            "resolve": escalation.resolve,
+        });
+    }
+    out
 }
 
 /// The engine's RFC3339 string as pydantic renders a datetime, or `None` when
@@ -361,6 +373,46 @@ mod tests {
         assert!(changes[0]["at"].is_string());
         assert_eq!(changes[1]["session"], UNLINKED);
         assert_eq!(changes[1]["summary"], "blocked: needs a token");
+    }
+
+    #[test]
+    fn changes_and_wait_any_carry_the_escalation_an_ask_has() {
+        // WI-996 E1: the engine's escalation rides through to the MCP reply,
+        // so session_changes and session_wait_any name who must resolve it.
+        let (_, client) = engine(
+            200,
+            r#"{"changes":[{"seq":8,"at":"2026-01-01T00:00:01Z","session":"eng-1","kind":"blocked","summary":"blocked: needs a token","escalation":{"needs":"overseer","boundary":"credential","ask":"needs a token","key":"ses_00000000000000000000000001:credential:abc","resolve":["grant"]}},{"seq":9,"at":"2026-01-01T00:00:02Z","session":"eng-1","kind":"ready","summary":"ready"}],"next_cursor":9,"truncated":false}"#,
+        );
+        let changes_built = built("escalation-changes", client);
+        let page = run(
+            &changes_built,
+            "session.changes",
+            json!({"ids": ["ses_00000000000000000000000001"]}),
+        )
+        .unwrap();
+        let changes = page["changes"].as_array().unwrap();
+        let esc = &changes[0]["escalation"];
+        assert_eq!(esc["needs"], "overseer");
+        assert_eq!(esc["boundary"], "credential");
+        assert_eq!(esc["ask"], "needs a token");
+        assert_eq!(esc["key"], "ses_00000000000000000000000001:credential:abc");
+        assert_eq!(esc["resolve"], json!(["grant"]));
+        // A change that asks nothing carries no escalation key at all.
+        assert!(changes[1].get("escalation").is_none());
+
+        let (_, client) = engine(
+            200,
+            r#"{"outcome":"changed","change":{"seq":8,"at":"2026-01-01T00:00:01Z","session":"eng-1","kind":"blocked","summary":"blocked: needs a token","escalation":{"needs":"overseer","boundary":"credential","ask":"needs a token","key":"ses_00000000000000000000000001:credential:abc","resolve":["grant"]}},"next_cursor":8}"#,
+        );
+        let waitany_built = built("escalation-waitany", client);
+        let waited = run(
+            &waitany_built,
+            "session.wait_any",
+            json!({"ids": ["ses_00000000000000000000000001"], "until": ["blocked"]}),
+        )
+        .unwrap();
+        assert_eq!(waited["change"]["escalation"]["needs"], "overseer");
+        assert_eq!(waited["change"]["escalation"]["resolve"], json!(["grant"]));
     }
 
     #[test]

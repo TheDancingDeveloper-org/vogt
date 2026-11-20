@@ -1826,6 +1826,9 @@ pub struct EngineChange {
     pub session: String,
     pub kind: String,
     pub summary: String,
+    /// The escalation an ask that someone else must resolve carries (WI-996
+    /// E1). Absent from an older engine, and from a change that asks nothing.
+    pub escalation: Option<EngineEscalation>,
 }
 
 impl EngineChange {
@@ -1836,7 +1839,43 @@ impl EngineChange {
             session: python_str(payload, "session", ""),
             kind: python_str(payload, "kind", ""),
             summary: python_str(payload, "summary", ""),
+            escalation: EngineEscalation::from_payload(payload.get("escalation")),
         }
+    }
+}
+
+/// The escalation a session change carries (WI-996 E1): who can resolve it,
+/// what kind of boundary it is, the ask and its content key, and the ways it
+/// can be resolved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EngineEscalation {
+    /// `person`, `overseer` or `either`. Read by the caller, not here.
+    pub needs: String,
+    /// `permission_prompt`, `denied_action`, `credential`, `decision` or `other`.
+    pub boundary: String,
+    /// The ask, at most 120 characters. Untrusted text.
+    pub ask: String,
+    /// `session:boundary:hash`, the key the Inbox and push dedupe on. Empty
+    /// when the engine sent none.
+    pub key: String,
+    /// `answer`, `grant`, `do` or `lift_hold`.
+    pub resolve: Vec<String>,
+}
+
+impl EngineEscalation {
+    fn from_payload(payload: Option<&Value>) -> Option<Self> {
+        let object = payload?.as_object()?;
+        Some(Self {
+            needs: optional_str(object.get("needs")).unwrap_or_else(|| "person".to_string()),
+            boundary: optional_str(object.get("boundary")).unwrap_or_else(|| "other".to_string()),
+            ask: string_field(object, "ask"),
+            key: string_field(object, "key"),
+            resolve: object
+                .get("resolve")
+                .and_then(Value::as_array)
+                .map(|values| string_list(values))
+                .unwrap_or_default(),
+        })
     }
 }
 
@@ -3013,6 +3052,24 @@ mod tests {
         assert_eq!(page.changes[0].kind, "ready");
         assert_eq!(page.next_cursor, 3);
         assert!(page.truncated);
+    }
+
+    #[test]
+    fn a_change_keeps_the_escalation_the_engine_sends() {
+        let (_, transport) = scripted(
+            200,
+            r#"{"changes":[{"seq":4,"at":"x","session":"u1","kind":"escalated","summary":"grant request: r","escalation":{"needs":"person","boundary":"credential","ask":"r","key":"u1:credential:grant:g","resolve":["grant"]}},{"seq":5,"at":"x","session":"u1","kind":"ready","summary":"ready"}],"next_cursor":5,"truncated":false}"#,
+        );
+        let page = client(transport)
+            .session_changes(0, None, 100)
+            .unwrap()
+            .unwrap();
+        let esc = page.changes[0].escalation.as_ref().unwrap();
+        assert_eq!(esc.needs, "person");
+        assert_eq!(esc.boundary, "credential");
+        assert_eq!(esc.key, "u1:credential:grant:g");
+        assert_eq!(esc.resolve, vec!["grant".to_string()]);
+        assert!(page.changes[1].escalation.is_none());
     }
 
     #[test]

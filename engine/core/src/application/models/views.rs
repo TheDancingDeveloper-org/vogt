@@ -1982,6 +1982,28 @@ pub struct SessionChange {
     pub kind: String,
     #[serde(default)]
     pub summary: String,
+    /// Set when the change is an ask that someone else must resolve: a blocked report, a permission dialog or a grant request (WI-996 E1). Absent otherwise.
+    #[serde(default)]
+    pub escalation: Option<SessionChangeEscalation>,
+}
+
+/// The escalation a session change carries (WI-996 E1).
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SessionChangeEscalation {
+    /// Who can resolve it: `person`, `overseer` or `either`.
+    pub needs: String,
+    /// What kind of boundary it is: `permission_prompt`, `denied_action`, `credential`, `decision` or `other`.
+    pub boundary: String,
+    /// The ask, at most 120 characters. Untrusted text.
+    pub ask: String,
+    /// `session:boundary:hash`, the key the Inbox and push dedupe on; empty when the engine sent none.
+    #[serde(default)]
+    pub key: String,
+    /// The ways it can be resolved: `answer`, `grant`, `do` or `lift_hold`.
+    #[serde(default)]
+    #[schemars(extend("x-keep-default" = true))]
+    pub resolve: Vec<String>,
 }
 
 /// One agent CLI as the engine reports it.
