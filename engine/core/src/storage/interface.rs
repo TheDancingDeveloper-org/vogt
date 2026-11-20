@@ -391,6 +391,9 @@ pub trait ReadView {
         project_id: Option<&str>,
         limit: i64,
     ) -> Result<Vec<DriftProposal>, crate::errors::VogtError>;
+    /// Whether any drift proposal is open: the badge's answer without loading
+    /// a row (WI-700).
+    fn has_open_drift(&self) -> Result<bool, crate::errors::VogtError>;
     fn drift_by_id(
         &self,
         proposal_id: &str,
