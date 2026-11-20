@@ -106,6 +106,24 @@ pub fn launch_limit_for_window(
     (limit > default).then_some(limit)
 }
 
+/// Tokens a Codex launch spends before any work: the system prompt, tool
+/// definitions, the injected guidance and the brief. WI-2043 measured about 50k.
+pub const BASE_CONTEXT_TOKENS: u64 = 50_000;
+
+/// A warning for a launch whose compaction limit leaves less than the margin
+/// above the base context (WI-2043 b). Codex compacts again at once in that
+/// case, so the launch is logged as at risk of a compaction loop.
+pub fn low_limit_warning(limit: u64) -> Option<String> {
+    let floor = BASE_CONTEXT_TOKENS + COMPACT_MARGIN_TOKENS;
+    (limit < floor).then(|| {
+        format!(
+            "model_auto_compact_token_limit {limit} is below the base context \
+             ({BASE_CONTEXT_TOKENS} tokens) plus the {COMPACT_MARGIN_TOKENS}-token \
+             margin ({floor}); Codex may compact in a loop"
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -186,6 +204,17 @@ mod tests {
             launch_limit_for_window(dir.path(), id, 500_000, 1_000_000),
             Some(900_000)
         );
+    }
+
+    /// WI-2043 b: a limit that leaves no room above the base context warns at
+    /// launch; the default 128k and the 70k the incident ran with at the edge do not.
+    #[test]
+    fn a_limit_under_base_context_plus_margin_warns_at_launch() {
+        let floor = BASE_CONTEXT_TOKENS + COMPACT_MARGIN_TOKENS;
+        assert_eq!(floor, 70_000);
+        assert!(low_limit_warning(floor - 1).is_some_and(|w| w.contains("69999")));
+        assert_eq!(low_limit_warning(floor), None);
+        assert_eq!(low_limit_warning(128_000), None);
     }
 
     #[test]
