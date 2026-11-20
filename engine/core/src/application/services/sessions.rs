@@ -3572,6 +3572,7 @@ where
                     related.insert(relation.related_id.clone(), found);
                 }
             }
+            let author = decision_author(ctx, &view);
             let input = WorkBrief {
                 item,
                 session_id,
@@ -3579,6 +3580,7 @@ where
                 project: Some(&project),
                 comments: &comments,
                 related: &related,
+                decision_author: &author,
             };
             if review {
                 brief::review_brief_for_work_item(&input)
@@ -3609,6 +3611,84 @@ where
         is_scratch,
         source,
     })
+}
+
+/// Whose notes a worker brief carries (WI-1320): a person's, or oversight's.
+///
+/// A session author counts when the engine says its role is `oversight` now.
+/// A session that no longer exists, or an engine that cannot say (unreachable,
+/// refused, or rejecting the lookup), counts as a worker and its notes are
+/// dropped: the brief fails closed and the start goes ahead. One engine read
+/// per author; once the engine is unreachable, no later author is asked for.
+fn decision_author<'a, C, I>(
+    ctx: &'a AppContext<C, I>,
+    view: &'a impl ReadView,
+) -> impl Fn(&crate::core::Comment) -> bool + 'a
+where
+    C: Clock,
+    I: IdFactory,
+{
+    let roles: std::cell::RefCell<std::collections::HashMap<String, bool>> = Default::default();
+    let engine_down = std::cell::Cell::new(false);
+    let oversight = move |actor_id: &str| -> bool {
+        let Ok(Some(actor)) = view.actor_by_id(actor_id) else {
+            return false;
+        };
+        let Some(engine) = ctx.engine.as_ref() else {
+            return false;
+        };
+        if engine_down.get() {
+            return false;
+        }
+        let reference = actor.identity_ref;
+        let engine_id = if let Some(id) = reference.strip_prefix("agent:session:") {
+            match view.session_by_id(id) {
+                Ok(Some(row)) => row.engine_session_id,
+                _ => return false,
+            }
+        } else if let Some(id) = reference.strip_prefix(ENGINE_SESSION_ACTOR_PREFIX) {
+            id.to_string()
+        } else {
+            return false;
+        };
+        if engine_id.is_empty() {
+            return false;
+        }
+        match engine.get_session(&engine_id) {
+            Ok(live) => live.is_some_and(|session| session.role == "oversight"),
+            Err(VogtError::EngineUnavailable(error)) => {
+                engine_down.set(true);
+                tracing::warn!(
+                    target: "vogt.sessions",
+                    "brief decision notes: engine unavailable, session notes dropped actor_id={actor_id} error={error}"
+                );
+                false
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "vogt.sessions",
+                    "brief decision notes: engine refused the role lookup, note author counted as a worker actor_id={actor_id} error={}",
+                    error.code()
+                );
+                false
+            }
+        }
+    };
+    move |comment: &crate::core::Comment| {
+        let person = matches!(
+            view.actor_by_id(&comment.actor_id),
+            Ok(Some(actor)) if actor.kind == ActorKind::Human
+        );
+        if person {
+            return true;
+        }
+        if let Some(known) = roles.borrow().get(&comment.actor_id) {
+            return *known;
+        }
+        let judged = oversight(&comment.actor_id);
+        roles.borrow_mut().insert(comment.actor_id.clone(), judged);
+        judged
+    }
 }
 
 /// What a backfill should write for a project whose branch is not recorded

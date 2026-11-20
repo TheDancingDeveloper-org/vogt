@@ -109,6 +109,7 @@ fn brief(built: &Built, reference: &str, review: bool, project: Option<&Project>
         project,
         comments: &comments,
         related: &related,
+        decision_author: &|_| true,
     };
     if review {
         review_brief_for_work_item(&input).text
@@ -228,13 +229,16 @@ fn the_brief_leads_with_the_latest_handoff() {
     note(&built, &reference, "after the hand-off");
 
     let brief = brief(&built, &reference, false, None);
-    assert!(brief.contains("## Hand-off"), "{brief}");
-    assert!(brief.find("## Hand-off").unwrap() < brief.find("## Comments").unwrap());
+    assert!(brief.contains("## Latest hand-off"), "{brief}");
+    assert!(brief.contains("a claim, not evidence"));
+    // Decisions come first, then the hand-off (WI-1320).
+    assert!(brief.find("## Decisions").unwrap() < brief.find("## Latest hand-off").unwrap());
     assert!(brief.contains("new-branch"));
     assert!(brief.contains("second stop, the one that counts"));
     assert!(!brief.contains("old-branch"));
-    // A remark made before the latest hand-off is superseded by it.
-    assert!(!brief.contains("a later remark"));
+    assert!(brief.contains("1 earlier hand-off omitted."));
+    // Decision notes (the person's here) are kept whichever side of a hand-off.
+    assert!(brief.contains("a later remark"));
     assert!(brief.contains("after the hand-off"));
 }
 
@@ -270,7 +274,7 @@ fn a_review_brief_checks_the_diff_against_the_items_own_criteria() {
     assert!(!review.contains("a remark, not the review"));
     assert!(!review.contains("## Why this is ranked"));
     assert!(!review.contains("## Comments"));
-    assert!(worker.contains("## Hand-off") && !worker.contains("## The diff"));
+    assert!(worker.contains("## Latest hand-off") && !worker.contains("## The diff"));
 }
 
 #[test]
@@ -442,7 +446,7 @@ fn from_handoff_opens_on_the_item() {
         reference
     );
     let seen = script.seen.lock().unwrap().join("\n");
-    assert!(seen.contains("## Hand-off"), "{seen}");
+    assert!(seen.contains("## Latest hand-off"), "{seen}");
     assert!(seen.contains("where I stopped"));
 }
 
