@@ -822,7 +822,7 @@ pub struct SessionHibernation {
     #[serde(default)]
     #[schemars(schema_with = "optional_date_time")]
     pub at: Option<String>,
-    /// manual / idle / memory / shutdown (the engine was stopping) / recovered (found at the engine's boot without a process).
+    /// manual / idle / memory / shutdown (the engine was stopping) / recovered (found at the engine's boot without a process) / budget (a hard budget limit) / done (declared done, then quiet).
     pub trigger: String,
     #[serde(default)]
     #[schemars(schema_with = "optional_string")]

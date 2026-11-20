@@ -328,7 +328,7 @@ pub(crate) fn backlog_total_considered<C: Clock, I: IdFactory>(
 ) -> Result<i64, VogtError> {
     // Counted in the stores (WI-4448): the declared rows with a COUNT, the
     // observed candidates with one query that applies the ranked backlog's
-    // drops. No row is loaded, no trust or clock is read per row, and the count
+    // drops. No row is loaded and no trust is computed per row, and the count
     // equals the ranked list's length. `backlog` reads the freshness clock
     // after the gather, and so does this.
     let query = GatherQuery {
@@ -354,6 +354,15 @@ pub(crate) fn backlog_total_considered<C: Clock, I: IdFactory>(
     } else {
         0
     };
+    // The stepping clock still advances as the ranked gather would advance it
+    // (WI-4462): the git-signals read (`views.py:423`), one `trust_for` read
+    // per observed candidate (`views.py:189`; no kind or priority filter here,
+    // so every candidate is counted), and the `_score_all` read
+    // (`views.py:554`). Skipping them put every later fake-clock stamp behind
+    // Python's.
+    for _ in 0..observed + 2 {
+        let _ = now_of(&ctx.clock);
+    }
     crate::application::services::freshness::freshness_of(&ctx.observed, &ctx.clock)?;
     Ok(declared + observed)
 }
@@ -1085,7 +1094,9 @@ fn string_list(value: Option<&serde_json::Value>) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{backlog, projected, trust_for, RANKING_CANDIDATE_LIMIT};
+    use super::{
+        backlog, backlog_total_considered, now_of, projected, trust_for, RANKING_CANDIDATE_LIMIT,
+    };
     use crate::application::context::{build_context, Built};
     use crate::config::VogtConfig;
     use crate::core::{
@@ -1275,6 +1286,32 @@ mod tests {
                 "total_considered {considered} exceeded the ranking window {RANKING_CANDIDATE_LIMIT}"
             );
             assert_eq!(considered, RANKING_CANDIDATE_LIMIT);
+        });
+    }
+
+    #[test]
+    fn the_backlog_count_steps_the_clock_like_the_ranked_backlog() {
+        // `place.metrics` counts the backlog without ranking it (WI-4448), but
+        // the stepping clock must land where `backlog(limit=1)` leaves it, or
+        // every later fake-clock stamp drifts from Python's (WI-4462).
+        let now = Moment::from_unix(1_781_000_000, 0);
+        with_trust(now, |ctx| {
+            ctx.declared.migrate().unwrap();
+            ctx.declared
+                .bootstrap(&Principal::new("local:test-user", ActorKind::Human, "Test").unwrap())
+                .unwrap();
+            let steps = |run: &dyn Fn()| {
+                let before = now_of(&ctx.clock).unix_seconds();
+                run();
+                now_of(&ctx.clock).unix_seconds() - before
+            };
+            let ranked = steps(&|| {
+                backlog(ctx, serde_json::json!({"limit": 1})).unwrap();
+            });
+            let counted = steps(&|| {
+                backlog_total_considered(ctx).unwrap();
+            });
+            assert_eq!(counted, ranked);
         });
     }
 
