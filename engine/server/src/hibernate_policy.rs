@@ -703,6 +703,10 @@ pub fn spawn_boot_wake(state: Arc<AppState>) {
 /// line is dropped. A resumed Claude Code with MCP servers to start takes
 /// tens of seconds.
 const RESUME_PROMPT_WAIT: Duration = Duration::from_secs(300);
+/// A resume prompt held back by a dialog is typed again, this many times at
+/// most, [`RESUME_RETRY_GAP`] apart (WI-4459).
+const RESUME_ATTEMPTS: usize = 6;
+const RESUME_RETRY_GAP: Duration = Duration::from_secs(10);
 
 /// The line typed into an oversight session woken at boot, at `at`.
 pub fn resume_prompt(at: &str) -> String {
@@ -740,21 +744,30 @@ fn prompt_resumed_overseer(state: &Arc<AppState>, id: Uuid) {
         {
             Ok(waited) if waited.matched => {
                 // Enter on its own, as the autopilot nudge types it, through
-                // the shared guard (WI-4459): a dialog holds the prompt back.
-                let typed = crate::enter_guard::type_then_enter(
-                    &session,
-                    &resume_prompt(&at),
-                    "overseer resume",
-                )
-                .await;
-                match typed {
-                    Ok(crate::enter_guard::EnterOutcome::Sent) => {
-                        tracing::info!(session = %id, "told a woken overseer it was resumed")
+                // the shared guard (WI-4459). A dialog holds the prompt back
+                // and the line is erased, so it is typed again a little later;
+                // a stranded line is left alone rather than typed on top.
+                let line = resume_prompt(&at);
+                for attempt in 0..RESUME_ATTEMPTS {
+                    if attempt > 0 {
+                        tokio::time::sleep(RESUME_RETRY_GAP).await;
+                        if !session.is_alive() {
+                            break;
+                        }
                     }
-                    // The guard logged the dialog that held it back.
-                    Ok(crate::enter_guard::EnterOutcome::Skipped(_)) => {}
-                    Err(e) => {
-                        tracing::warn!(session = %id, error = %e, "could not prompt a woken overseer")
+                    match crate::enter_guard::type_then_enter(&session, &line, "overseer resume")
+                        .await
+                    {
+                        Ok(crate::enter_guard::EnterOutcome::Sent) => {
+                            tracing::info!(session = %id, "told a woken overseer it was resumed");
+                            break;
+                        }
+                        Ok(crate::enter_guard::EnterOutcome::Skipped(_)) => continue,
+                        Ok(crate::enter_guard::EnterOutcome::Stranded(_)) => break,
+                        Err(e) => {
+                            tracing::warn!(session = %id, error = %e, "could not prompt a woken overseer");
+                            break;
+                        }
                     }
                 }
             }
