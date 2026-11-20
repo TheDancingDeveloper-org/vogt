@@ -133,7 +133,7 @@ pub fn watch(bus: EventBus, session: Arc<Session>, policy: Policy) -> tokio::tas
             // first turn that never started.
             match resubmit(&session).await {
                 Ok(crate::enter_guard::EnterOutcome::Sent) => {}
-                Ok(crate::enter_guard::EnterOutcome::Skipped(_))
+                Ok(crate::enter_guard::EnterOutcome::Skipped(..))
                 | Ok(crate::enter_guard::EnterOutcome::Stranded(_))
                 | Err(_) => return,
             }
@@ -304,7 +304,7 @@ mod tests {
     use super::{resubmit, watches};
     use crate::enter_guard::{
         tests::{dialog_output, recording_session},
-        Clearance, EnterOutcome,
+        Clearance, EnterOutcome, Typed,
     };
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -324,7 +324,10 @@ mod tests {
             std::future::pending::<()>().await;
         });
         let outcome = resubmit(&session).await.unwrap();
-        assert_eq!(outcome, EnterOutcome::Skipped(Clearance::Dialog));
+        assert_eq!(
+            outcome,
+            EnterOutcome::Skipped(Clearance::Dialog, Typed::Nothing)
+        );
         assert!(writes.lock().unwrap().is_empty());
     }
 
