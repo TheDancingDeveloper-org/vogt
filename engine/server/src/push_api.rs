@@ -237,6 +237,9 @@ pub fn spawn_activity_watcher(state: Arc<AppState>) {
                 let data = json!({
                     "kind": "session-blocked",
                     "session_id": id.to_string(),
+                    "needs": report.needs,
+                    "boundary": report.boundary,
+                    "key": report.key,
                     "url": format!("/#/t/{id}"),
                 });
                 let counts = state

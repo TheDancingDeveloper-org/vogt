@@ -967,6 +967,7 @@ fn report_compaction_loop(
         since: time::OffsetDateTime::now_utc()
             .format(&time::format_description::well_known::Rfc3339)
             .unwrap_or_default(),
+        ..Default::default()
     };
     if let Err(e) = session.set_blocked(Some(report), bus) {
         tracing::warn!(session = %session.id, error = %e, "failed to report a compaction loop");

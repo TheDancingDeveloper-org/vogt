@@ -153,6 +153,7 @@ pub fn watch(bus: EventBus, session: Arc<Session>, policy: Policy) -> tokio::tas
             since: time::OffsetDateTime::now_utc()
                 .format(&time::format_description::well_known::Rfc3339)
                 .unwrap_or_default(),
+            ..Default::default()
         };
         if let Err(e) = session.set_blocked(Some(report), &bus) {
             tracing::warn!(session = %session.id, error = %e, "could not report a first turn that never started");
