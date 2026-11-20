@@ -5146,6 +5146,17 @@ At each launch the registry does three things, and nothing else:
   `[mcp_servers.*]` tables are merged into the shared `config.toml`, for a
   person's own CLI. The engine resolves each key through the helper when the
   pod boots, logging each resolution by name.
+- A Haiku-class Codex launch (a model name containing `haiku`, such as
+  `claude-org-haiku`) gets `model_context_window=200000` and
+  `model_auto_compact_token_limit=170000` (total scope) from
+  `vogt_session_agent::codex_args` (WI-3998, the WI-3976 override). It
+  replaces the provider's and the deployment's window for that launch, because
+  the global `model_context_window` in `~/.codex/config.toml` (850k) would let
+  Haiku reach its provider limit without compacting. Other models keep the
+  provider's or global values. The constants are `HAIKU_CONTEXT_WINDOW` and
+  `HAIKU_COMPACT_LIMIT` in `engine/session-agent/src/lib.rs`, so a change to
+  Haiku's window is a code change, not a config edit that a regenerated config
+  would undo.
 
 - A registered model that the catalog Codex would otherwise load does not list
   gets a real catalog entry, so Codex does not synthesize fallback metadata for
