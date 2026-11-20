@@ -546,6 +546,11 @@ mod place_bench {
             .unwrap()
         };
         let built = fresh();
+        // A boot migrates the observed store; a kept store from before the index needs it too.
+        crate::with_ctx!(&built, |ctx| {
+            use crate::storage::interface::ObservedStore;
+            ctx.observed.migrate().unwrap();
+        });
         if !already_seeded {
             let seeded = Instant::now();
             for n in 0..DECLARED {
@@ -821,6 +826,122 @@ mod place_bench {
         ] {
             assert!(!listed.contains(dropped), "{dropped} should be dropped");
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The count reads the newest observations through `idx_latest_observed`
+    /// (WI-4448), so the plan must name it and must not sort the whole set.
+    #[test]
+    fn backlog_count_plan_uses_the_observed_order_index() {
+        let dir = std::env::temp_dir().join(format!("vogt-place-plan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut clock = None;
+        let mut ids = None;
+        crate::application::instance::init(&dir, &mut clock, &mut ids).unwrap();
+        let built = build_context(
+            crate::config::VogtConfig {
+                data_dir: dir.clone(),
+                ..crate::config::VogtConfig::default()
+            },
+            Some(Principal::new("local:plan", ActorKind::Human, "Plan").unwrap()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        crate::with_ctx!(&built, |ctx| seed_observed(ctx));
+        let (observed_db, declared_db) = crate::with_ctx!(&built, |ctx| (
+            ctx.config.observed_db_path(),
+            ctx.config.declared_db_path()
+        ));
+        let conn = rusqlite::Connection::open(&observed_db).unwrap();
+        crate::storage::sqlite::observed::open_backlog_count(&conn, &declared_db).unwrap();
+        let mut statement = conn
+            .prepare(&format!(
+                "EXPLAIN QUERY PLAN {}",
+                crate::storage::sqlite::observed::BACKLOG_COUNT_SQL
+            ))
+            .unwrap();
+        let plan: Vec<String> = statement
+            .query_map(rusqlite::params!["bug", "open"], |row| {
+                row.get::<_, String>(3)
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(
+            plan.iter()
+                .any(|detail| detail.contains("idx_latest_observed")),
+            "the count should read idx_latest_observed, got {plan:?}"
+        );
+        drop(statement);
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Closed subjects leave the set before the 1000-row cap, as the ranked read
+    /// does, so a newer closed run cannot push open work out of the count.
+    #[test]
+    fn backlog_count_filters_closed_before_the_cap() {
+        let dir = std::env::temp_dir().join(format!("vogt-place-closed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut clock = None;
+        let mut ids = None;
+        crate::application::instance::init(&dir, &mut clock, &mut ids).unwrap();
+        let built = build_context(
+            crate::config::VogtConfig {
+                data_dir: dir.clone(),
+                ..crate::config::VogtConfig::default()
+            },
+            Some(Principal::new("local:closed", ActorKind::Human, "Closed").unwrap()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        crate::with_ctx!(&built, |ctx| {
+            seed_observed(ctx);
+            use crate::core::{Moment, SweepOutcome};
+            use crate::storage::interface::ObservedStore;
+            use crate::storage::observed_types::PendingObservation;
+            let at = Moment::from_unix(1_700_000_300, 0);
+            let sweep = ctx
+                .observed
+                .begin_sweep("bench-forge", &["vogt".to_string()], at)
+                .unwrap();
+            let findings: Vec<PendingObservation> = (0..50)
+                .map(|n| PendingObservation {
+                    kind: "forge.issue".into(),
+                    subject_key: format!("vogt/closed/{n}"),
+                    payload: json!({"state": "closed", "title": format!("closed {n}"), "labels": []}),
+                    content_digest: format!("closed-{n}"),
+                    project_id: None,
+                    source_url: None,
+                    promoted: false,
+                })
+                .collect();
+            ctx.observed.append(&sweep.id, &findings, at).unwrap();
+            ctx.observed
+                .finish_sweep(&sweep.id, SweepOutcome::Ok, &[], at, None)
+                .unwrap();
+            ctx.observed.rebuild_latest().unwrap();
+        });
+        let counted = crate::with_ctx!(&built, |ctx| {
+            crate::application::views::backlog_total_considered(ctx)
+        })
+        .unwrap();
+        let full = crate::application::views::backlog_op(&built, json!({"limit": 1})).unwrap();
+        assert_eq!(counted, full["total_considered"].as_i64().unwrap());
+        // No declared rows here: the first 1000 open issues after the closed run.
+        assert_eq!(counted, 1000);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
