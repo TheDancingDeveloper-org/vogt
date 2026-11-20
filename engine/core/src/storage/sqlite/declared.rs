@@ -1136,6 +1136,17 @@ impl ReadView for SqliteReadView {
             .optional()
             .map_err(sql_err)
     }
+    fn has_open_drift(&self) -> Result<bool, VogtError> {
+        let found: i64 = self
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM drift_proposals WHERE status = 'open')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(sql_err)?;
+        Ok(found != 0)
+    }
     fn list_drift(
         &self,
         status: Option<&str>,
@@ -1779,6 +1790,9 @@ impl<I: IdFactory> ReadView for SqliteWrite<I> {
         d: i64,
     ) -> Result<Vec<DriftProposal>, VogtError> {
         self.view.list_drift(a, b, c, d)
+    }
+    fn has_open_drift(&self) -> Result<bool, VogtError> {
+        self.view.has_open_drift()
     }
     fn drift_by_id(&self, a: &str) -> Result<Option<DriftProposal>, VogtError> {
         self.view.drift_by_id(a)
