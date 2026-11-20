@@ -2147,6 +2147,25 @@ impl SessionRegistry {
                     self.cfg.min_free_percent
                 )));
             }
+            // A host session writes into the engine container's own
+            // ephemeral quota, which the node's free space does not show
+            // (WI-4439). Past 75% of it, no new host session starts.
+            if !pod_backed {
+                let limit = crate::session_scratch::ephemeral_limit();
+                if let Some(used) = crate::session_scratch::short_of_ephemeral(limit, || {
+                    crate::session_scratch::ephemeral_used(&crate::session_scratch::writable_roots())
+                }) {
+                    tracing::warn!(
+                        used_percent = used,
+                        "the engine container's ephemeral storage is past its refusal line; refusing a host session"
+                    );
+                    return Err(ApiError::InsufficientStorage(format!(
+                        "the engine container's ephemeral storage is at {used}% of \
+                         ENGINE_EPHEMERAL_LIMIT; a host session needs it under 75%; \
+                         stop finished host sessions or run the work in a pod"
+                    )));
+                }
+            }
         }
 
         // Every refusal has passed: cut the worktree now. Its destination is
