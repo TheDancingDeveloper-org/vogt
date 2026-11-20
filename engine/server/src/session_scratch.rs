@@ -27,19 +27,41 @@ pub struct Removed {
 }
 
 /// The `claude-<uid>` directories a session's scratchpad can live under: the
-/// engine's temp dir and `/tmp`, once each.
+/// engine's temp dir and `/tmp`, once each, then `CLAUDE_CODE_TMPDIR` when
+/// it is set (dev points it at `.agent-tmp`, which Claude Code uses in place
+/// of the temp dir). The temp dir stays first: the shared Cargo target
+/// default is taken from it.
 pub fn roots() -> Vec<PathBuf> {
-    #[cfg(unix)]
-    let uid = unsafe { libc::getuid() };
-    #[cfg(not(unix))]
-    let uid = 0u32;
+    let claude_tmp = std::env::var_os("CLAUDE_CODE_TMPDIR").map(PathBuf::from);
+    roots_in(&std::env::temp_dir(), claude_tmp.as_deref(), current_uid())
+}
+
+/// `roots` for an explicit temp dir, `CLAUDE_CODE_TMPDIR` and uid.
+pub fn roots_in(tmp: &Path, claude_tmp: Option<&Path>, uid: u32) -> Vec<PathBuf> {
     let name = format!("claude-{uid}");
-    let mut out = vec![std::env::temp_dir().join(&name)];
-    let tmp = Path::new("/tmp").join(&name);
-    if !out.contains(&tmp) {
-        out.push(tmp);
+    let mut out = vec![tmp.join(&name)];
+    let slash_tmp = Path::new("/tmp").join(&name);
+    if !out.contains(&slash_tmp) {
+        out.push(slash_tmp);
+    }
+    if let Some(claude_tmp) = claude_tmp.filter(|p| !p.as_os_str().is_empty()) {
+        let root = claude_tmp.join(&name);
+        if !out.contains(&root) {
+            out.push(root);
+        }
     }
     out
+}
+
+fn current_uid() -> u32 {
+    #[cfg(unix)]
+    {
+        unsafe { libc::getuid() }
+    }
+    #[cfg(not(unix))]
+    {
+        0
+    }
 }
 
 /// Every scratch directory of session `id` under `roots`: a directory named
@@ -366,6 +388,82 @@ pub fn short_of_space(paths: &[PathBuf], min_free_percent: u8) -> Option<(PathBu
     })
 }
 
+/// The engine container's own ephemeral-storage limit, in bytes, from
+/// `ENGINE_EPHEMERAL_LIMIT`. The Deployment sets it from the downward API
+/// (`limits.ephemeral-storage`, divisor 1). `None` when unset or unreadable.
+pub fn ephemeral_limit() -> Option<u64> {
+    let raw = std::env::var("ENGINE_EPHEMERAL_LIMIT").ok()?;
+    let parsed = parse_quantity(&raw);
+    if parsed.is_none() {
+        tracing::warn!(value = %raw, "ENGINE_EPHEMERAL_LIMIT is not a byte count; the ephemeral guard is off");
+    }
+    parsed
+}
+
+/// A byte count: plain digits, or with a binary `Ki`, `Mi` or `Gi` suffix.
+pub fn parse_quantity(raw: &str) -> Option<u64> {
+    let raw = raw.trim();
+    let (digits, factor) = [("Gi", 1u64 << 30), ("Mi", 1 << 20), ("Ki", 1 << 10)]
+        .into_iter()
+        .find_map(|(suffix, factor)| raw.strip_suffix(suffix).map(|d| (d, factor)))
+        .unwrap_or((raw, 1));
+    let value: u64 = digits.trim().parse().ok()?;
+    value.checked_mul(factor)
+}
+
+/// The directories the engine container writes to, which its ephemeral limit
+/// covers: its temp dir and `/cache` (the writable layer's scratch).
+pub fn writable_roots() -> Vec<PathBuf> {
+    let mut out = vec![std::env::temp_dir()];
+    let cache = PathBuf::from("/cache");
+    if !out.contains(&cache) {
+        out.push(cache);
+    }
+    out
+}
+
+/// How long a sampled usage is reused before the next walk.
+const EPHEMERAL_SAMPLE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The last sampled usage of the writable roots, with when it was taken.
+static EPHEMERAL_SAMPLE: std::sync::Mutex<Option<(std::time::Instant, u64)>> =
+    std::sync::Mutex::new(None);
+
+/// Bytes used under `roots`, sampled and cached for `EPHEMERAL_SAMPLE_TTL`.
+pub fn ephemeral_used(roots: &[PathBuf]) -> u64 {
+    let now = std::time::Instant::now();
+    let mut sample = EPHEMERAL_SAMPLE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((taken, used)) = *sample {
+        if now.duration_since(taken) < EPHEMERAL_SAMPLE_TTL {
+            return used;
+        }
+    }
+    let used = roots.iter().map(|r| dir_bytes(r)).sum();
+    *sample = Some((now, used));
+    used
+}
+
+/// The percent of `limit` at which a host session is refused.
+const EPHEMERAL_REFUSE_PERCENT: u64 = 75;
+
+/// The percent of `limit` that `used` takes, when it is at or past the
+/// refusal line. `None` for no limit or under the line.
+pub fn over_ephemeral(used: u64, limit: u64) -> Option<u8> {
+    if limit == 0 {
+        return None;
+    }
+    let percent = used.saturating_mul(100) / limit;
+    (percent >= EPHEMERAL_REFUSE_PERCENT).then(|| percent.min(100) as u8)
+}
+
+/// The percent of the engine's ephemeral limit a host session would be
+/// refused at, when the engine is over the line. `used` is read only when
+/// there is a limit, so an unset limit costs no walk.
+pub fn short_of_ephemeral(limit: Option<u64>, used: impl FnOnce() -> u64) -> Option<u8> {
+    let limit = limit?;
+    over_ephemeral(used(), limit)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -534,6 +632,59 @@ mod tests {
         remove(&roots, id);
         assert!(!dir.exists());
         assert!(!main.join(".git/worktrees/wt").exists());
+    }
+
+    #[test]
+    fn a_host_session_is_refused_at_76_percent_of_the_ephemeral_limit_only() {
+        let limit = Some(1000);
+        // Fake usage: 76% refuses, 74% is accepted (the line is 75%).
+        assert_eq!(short_of_ephemeral(limit, || 760), Some(76));
+        assert_eq!(short_of_ephemeral(limit, || 740), None);
+        assert_eq!(short_of_ephemeral(limit, || 750), Some(75));
+        // No limit: the usage is not even read.
+        assert_eq!(
+            short_of_ephemeral(None, || panic!("usage must not be sampled")),
+            None
+        );
+        assert_eq!(over_ephemeral(5, 0), None);
+    }
+
+    #[test]
+    fn ephemeral_limit_takes_bytes_or_a_binary_suffix() {
+        assert_eq!(parse_quantity("8589934592"), Some(8 << 30));
+        assert_eq!(parse_quantity(" 8Gi "), Some(8 << 30));
+        assert_eq!(parse_quantity("512Mi"), Some(512 << 20));
+        assert_eq!(parse_quantity("64Ki"), Some(64 << 10));
+        assert_eq!(parse_quantity("8G"), None);
+        assert_eq!(parse_quantity(""), None);
+    }
+
+    #[test]
+    fn a_stale_scratch_dir_under_claude_code_tmpdir_is_pruned_like_tmp() {
+        let tmp = tempfile::tempdir().unwrap();
+        let claude_tmp = tmp.path().join("agent-tmp");
+        let uid = 4242;
+        let roots = roots_in(&tmp.path().join("tmp"), Some(&claude_tmp), uid);
+        // The temp dir stays first; CLAUDE_CODE_TMPDIR's root follows.
+        assert_eq!(roots[0], tmp.path().join("tmp").join("claude-4242"));
+        assert!(roots.contains(&claude_tmp.join("claude-4242")));
+        assert_eq!(roots_in(&tmp.path().join("tmp"), None, uid).len(), 2);
+
+        let id = Uuid::new_v4();
+        let dir = session_dir(&claude_tmp.join("claude-4242"), id);
+        let pad = dir.join("scratchpad");
+        let wt = pad.join("wt");
+        std::fs::create_dir_all(wt.join("target").join("debug")).unwrap();
+        std::fs::write(wt.join("Cargo.toml"), "").unwrap();
+        std::fs::write(wt.join("target").join("debug").join("bin"), "b").unwrap();
+        std::fs::write(pad.join("download.bin"), vec![0u8; 2048]).unwrap();
+        std::fs::write(dir.join("small.txt"), "s").unwrap();
+
+        let removed = prune(&roots, id, 1024);
+        assert!(!wt.join("target").exists());
+        assert!(!pad.join("download.bin").exists());
+        assert!(dir.join("small.txt").exists());
+        assert_eq!(removed.len(), 2);
     }
 
     #[test]
