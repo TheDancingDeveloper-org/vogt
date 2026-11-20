@@ -146,17 +146,39 @@ pub struct AgentAuthCheckRequest {
 pub async fn agent_auth_policy_check(
     State(state): State<Arc<AppState>>,
     Json(request): Json<AgentAuthCheckRequest>,
-) -> Json<serde_json::Value> {
+) -> Result<Json<serde_json::Value>> {
+    require_var(&request.var)?;
     let (decision, reason) = state
         .sessions
         .secret_broker()
         .manifest_decision(&request.var);
-    Json(serde_json::json!({
+    Ok(Json(serde_json::json!({
         "var": request.var,
         "decision": decision,
         "reason": reason,
         "template": request.template,
-    }))
+    })))
+}
+
+/// A check names one variable. An empty name is a caller error, not a
+/// refusal: the answer would say nothing about any real variable.
+fn require_var(var: &str) -> Result<()> {
+    if var.trim().is_empty() {
+        return Err(crate::error::ApiError::BadRequest("var is required".into()));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod agent_auth_route_tests {
+    use super::require_var;
+
+    #[test]
+    fn an_empty_or_blank_var_is_a_bad_request_and_a_name_passes() {
+        assert!(require_var("").is_err());
+        assert!(require_var("   ").is_err());
+        assert!(require_var("GH_TOKEN").is_ok());
+    }
 }
 
 fn manifest_policy_word(policy: crate::secret_broker::ManifestPolicy) -> &'static str {

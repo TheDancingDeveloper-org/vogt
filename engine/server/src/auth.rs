@@ -625,6 +625,12 @@ fn required_capability(method: &Method, path: &str) -> Option<TokenCapability> {
     if path == "/api/llm-providers" || path.starts_with("/api/llm-providers/") {
         return Some(TokenCapability::AgentClisWrite);
     }
+    // The agent-auth manifest names every var, project and secret the
+    // deployment brokers, and the dry run says which a session may fetch.
+    // Both are admin reads, as the llm-provider routes are.
+    if path == "/api/agent-auth/manifest" || path == "/api/agent-auth/manifest/check" {
+        return Some(TokenCapability::AgentClisWrite);
+    }
     if (path == "/api/gui/launch" || path == "/api/gui/kill") && *method == Method::POST {
         return Some(TokenCapability::GuiControl);
     }
@@ -746,6 +752,35 @@ mod tests {
                 "{method} {path} must be admin-gated"
             );
         }
+    }
+
+    #[test]
+    fn every_agent_auth_manifest_route_requires_admin_capability() {
+        for (method, path) in [
+            (Method::GET, "/api/agent-auth/manifest"),
+            (Method::POST, "/api/agent-auth/manifest/check"),
+        ] {
+            assert_eq!(
+                required_capability(&method, path),
+                Some(TokenCapability::AgentClisWrite),
+                "{method} {path} must be admin-gated"
+            );
+        }
+    }
+
+    #[test]
+    fn a_worker_token_is_refused_the_agent_auth_manifest_and_an_admin_is_not() {
+        let worker = identity("agent:vogt-worker", &["read", "work.write", "sessions"]);
+        let admin = identity("operator", &["admin"]);
+        let required = required_capability(&Method::GET, "/api/agent-auth/manifest")
+            .expect("the manifest route is gated");
+        assert!(
+            !worker.allows(required),
+            "a worker must not list the manifest"
+        );
+        assert!(admin.allows(required));
+        let refused = capability_refusal(&worker, required);
+        assert!(refused.contains("agent:vogt-worker"), "{refused}");
     }
 
     fn scopes(list: &[&str]) -> Vec<String> {
