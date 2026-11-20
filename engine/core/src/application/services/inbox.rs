@@ -308,12 +308,16 @@ where
     let (declared, observed, _, _, _, config) = context_parts(ctx);
     let view = declared.read()?;
 
-    let mut entries = {
+    // One engine read and one project read per request (WI-2691): the live
+    // half and the reachability status share the probe, and coverage counts
+    // the same project list the triage map is built from.
+    let (mut entries, engine_probe) = {
         let (listed, built) = listed_stored(ctx, observed, config)?;
         let projects = listed.projects.clone();
         let mut entries = rejudged(ctx, listed, built);
-        entries.extend(collect_live(ctx, &view, &projects)?);
-        entries
+        let (live, probe) = collect_live_probed(ctx, &view, &projects)?;
+        entries.extend(live);
+        (entries, probe)
     };
     let triage = view.inbox_triage_by_keys(
         &entries
@@ -329,6 +333,7 @@ where
         .into_iter()
         .map(|project| (project.slug, project.id))
         .collect();
+    let registered = project_ids.len() as i64;
     if let Some(slug) = project_filter.as_deref() {
         let project = resolve_project(&view, slug)?;
         project_ids = BTreeMap::from([(slug.to_string(), project.id)]);
@@ -401,8 +406,8 @@ where
         None
     };
 
-    let coverage = coverage_of(observed, &view, &entries, ctx.engine.is_some())?;
-    let (engine_status, engine_detail) = engine_status(ctx);
+    let coverage = coverage_of(observed, &entries, registered, ctx.engine.is_some())?;
+    let (engine_status, engine_detail) = engine_probe;
     let counts = json!({
         "active": entries.iter().filter(|entry| state_of(entry) == "active").count(),
         "archived": entries.iter().filter(|entry| state_of(entry) == "archived").count(),
@@ -945,13 +950,40 @@ where
     C: Clock,
     I: IdFactory,
 {
+    Ok(collect_live_probed(ctx, view, projects)?.0)
+}
+
+/// The engine's reachability as the inbox reports it: a status and an
+/// optional detail line.
+type EngineProbe = (&'static str, Option<String>);
+
+/// `collect_live` plus the engine status, from the one engine read the live
+/// half makes (WI-2691): the status is not a second session read.
+fn collect_live_probed<C, I>(
+    ctx: &AppContext<C, I>,
+    view: &impl ReadView,
+    projects: &BTreeMap<String, Project>,
+) -> Result<(Vec<Value>, EngineProbe), VogtError>
+where
+    C: Clock,
+    I: IdFactory,
+{
     let mut entries: Vec<Value> = Vec::new();
     // The live engine session list names grant targets and surfaces sessions
     // waiting on a person. An engine that is down or unconfigured leaves both
     // empty, exactly as Python does.
-    let live = match &ctx.engine {
-        Some(engine) => engine.list_sessions().unwrap_or_default(),
-        None => Vec::new(),
+    let (live, probe) = match &ctx.engine {
+        Some(engine) => match engine.list_sessions() {
+            Ok(rows) => (rows, ("available", None)),
+            Err(error) => (Vec::new(), ("unreachable", Some(error.to_string()))),
+        },
+        None => (
+            Vec::new(),
+            (
+                "not_configured",
+                Some("no session engine is configured".to_string()),
+            ),
+        ),
     };
     let live_by_id: BTreeMap<&str, &crate::adapters::engine::EngineSession> = live
         .iter()
@@ -1006,7 +1038,7 @@ where
         }
     }
 
-    Ok(entries)
+    Ok((entries, probe))
 }
 
 struct EntrySpec<'a> {
@@ -2111,15 +2143,14 @@ fn within_water(entry: &Value, water: &BTreeMap<String, Value>) -> bool {
 
 fn coverage_of<C, I>(
     observed: &crate::storage::sqlite::observed::SqliteObservedStore<C, I>,
-    view: &impl ReadView,
     entries: &[Value],
+    registered: i64,
     engine_configured: bool,
 ) -> Result<Value, VogtError>
 where
     C: Clock,
     I: IdFactory,
 {
-    let registered = view.list_projects(MAX_SCAN, 0)?.len() as i64;
     let sweeps = observed.coverage()?;
     let mut result = serde_json::Map::new();
     for (source, collector) in [
@@ -2171,23 +2202,6 @@ fn coverage_row(source: &str, sweep: Option<&Sweep>, entries: &[Value], register
             None => json!("this collector has not completed a sweep"),
         },
     })
-}
-
-fn engine_status<C, I>(ctx: &AppContext<C, I>) -> (&'static str, Option<String>)
-where
-    C: Clock,
-    I: IdFactory,
-{
-    let Some(engine) = ctx.engine.as_ref() else {
-        return (
-            "not_configured",
-            Some("no session engine is configured".to_string()),
-        );
-    };
-    match engine.list_sessions() {
-        Ok(_) => ("available", None),
-        Err(error) => ("unreachable", Some(error.to_string())),
-    }
 }
 
 fn entry_moment(entry: &Value) -> Result<Moment, VogtError> {
