@@ -601,7 +601,7 @@ const PROFILE_FIELDS: [&str; 7] = [
 
 /// The limits a start carries (Python `SessionBudgetParams`). Each field is one
 /// limit; a field left out is not set.
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionBudget {
     pub turns: Option<i64>,
@@ -628,6 +628,27 @@ fn budget_wire(budget: &SessionBudget) -> Value {
         }
     }
     Value::Object(wire)
+}
+
+/// Python's `_budget_params`: the engine's budget object as a summary carries
+/// it. Only positive limits survive (zero is not a limit), and a row that
+/// yields none is no budget rather than an empty one (WI-2026).
+pub(crate) fn budget_of_engine(
+    raw: Option<&serde_json::Map<String, Value>>,
+) -> Option<SessionBudget> {
+    let raw = raw?;
+    let limit = |key: &str| {
+        raw.get(key)
+            .and_then(Value::as_i64)
+            .filter(|value| *value > 0)
+    };
+    let budget = SessionBudget {
+        turns: limit("turns"),
+        context_tokens: limit("context_tokens"),
+        wall_clock_minutes: limit("wall_clock_minutes"),
+        session_wall_clock_minutes: limit("session_wall_clock_minutes"),
+    };
+    (budget != SessionBudget::default()).then_some(budget)
 }
 
 /// Python's `_budget`: the limits a start carries. Asked explicitly, that
@@ -940,8 +961,12 @@ pub struct SessionSummary {
     pub stop_reason: Option<String>,
     pub permission_mode: Option<String>,
     pub posture_lost_on_resume: bool,
+    /// Live from the engine: the named Claude Code account (WI-2026). Null is the default account.
+    pub account: Option<String>,
     pub running: Option<SessionRuntime>,
     pub resources: Option<SessionResources>,
+    /// Live from the engine: the limits this session was started with (WI-2026).
+    pub budget: Option<SessionBudget>,
     pub conversation_id: Option<String>,
     /// Digest-only: when autopilot declared itself done. Not on the wire summary.
     #[serde(skip)]
@@ -3844,6 +3869,8 @@ where
         stop_reason: None,
         permission_mode: None,
         posture_lost_on_resume: false,
+        account: None,
+        budget: None,
         running: None,
         resources: None,
         conversation_id: None,
@@ -3876,6 +3903,8 @@ fn apply_live(summary: &mut SessionSummary, live: &EngineSession) {
     summary.autopilot = Some(live.autopilot);
     summary.autopilot_nudges = Some(live.autopilot_nudges);
     summary.role = Some(live.role.clone());
+    summary.account = live.account.clone();
+    summary.budget = budget_of_engine(live.budget.as_ref());
     summary.conversation_id = live.conversation_id.clone();
     summary.resources = live.resources.as_ref().map(resources_of);
     summary.permission_mode = live.permission_mode.clone();
@@ -4105,6 +4134,8 @@ fn unlinked_summary(
         stop_reason: None,
         permission_mode: None,
         posture_lost_on_resume: false,
+        account: None,
+        budget: None,
         running: None,
         resources: None,
         conversation_id: None,
