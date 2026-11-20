@@ -156,7 +156,7 @@ pub fn build_operations() -> Vec<Operation> {
         ),
         Operation::new(
             "work.get",
-            "Fetch one work item with its relations, labels and comments (`id` is accepted for `ref`).",
+            "Fetch one work item with its relations, labels and comments (`id` is accepted for `ref`), and its `delivery`: landed, deployed per lane, verified, each with its evidence.",
             Scope::Read,
             false,
             HttpRoute::new(HttpMethod::Get, "/work/get"),
@@ -196,7 +196,7 @@ pub fn build_operations() -> Vec<Operation> {
         ),
         Operation::new(
             "work.transition",
-            "Move a work item to another state, validating the edge; a refusal lists the allowed edges and the shortest path. walk=true takes that path, one audited hop per edge.",
+            "Move a work item to another state, validating the edge; a refusal lists the allowed edges and the shortest path. walk=true takes that path, one audited hop per edge. An agent closing a feature or bug on a project whose policy has verification.required_for_done is refused (403 person_required) until a verification comment exists.",
             Scope::WorkWrite,
             true,
             HttpRoute::new(HttpMethod::Post, "/work/transition"),

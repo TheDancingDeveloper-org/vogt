@@ -192,7 +192,7 @@ mod session;
 mod session_ops;
 pub(crate) mod system;
 pub(crate) mod views;
-mod work;
+pub(crate) mod work;
 pub(crate) mod workspace;
 
 /// `(operation name, params schema, result schema)` for every name in

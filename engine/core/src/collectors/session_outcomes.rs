@@ -35,6 +35,9 @@ pub struct SessionRecord {
     pub started_at: Moment,
     pub stopped_at: Option<Moment>,
     pub work_item: Option<String>,
+    /// Who posted the newest `verification` comment on the session's work
+    /// item, when one exists (WI-1330).
+    pub verified_by: Option<String>,
 }
 
 /// The declared reads this collector needs, done for it.
@@ -143,6 +146,9 @@ impl<S: DeclaredSessions> SessionOutcomeCollector<S> {
             "started_at".to_string(),
             Value::String(record.started_at.to_iso()),
         );
+        if let Some(by) = &record.verified_by {
+            payload.insert("verified_by".to_string(), Value::String(by.clone()));
+        }
 
         if running {
             payload.insert("state".to_string(), Value::String("running".to_string()));
@@ -667,6 +673,7 @@ mod tests {
             started_at: started,
             stopped_at: None,
             work_item: None,
+            verified_by: None,
         };
         let engine = engine_with(|url| {
             if url.ends_with("/api/sessions") {
@@ -706,6 +713,7 @@ mod tests {
             started_at: from_iso(started).unwrap(),
             stopped_at: stopped.map(|text| from_iso(text).unwrap()),
             work_item: None,
+            verified_by: None,
         }
     }
 

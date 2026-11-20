@@ -166,6 +166,71 @@ pub struct WorkResult {
     pub live_sessions: Vec<SessionSummary>,
     #[serde(default)]
     pub claim_check: Option<ClaimCheck>,
+    /// Where the item's change has got to (WI-1330): `landed` (the latest hand-off's branch, observed fully merged into the default branch), `deployed` (per deploy lane, from `deployed.versions`) and `verified` (the newest `verification` comment on an allowed lane), each with the evidence that set it. Populated by `work.get`; None elsewhere.
+    #[serde(default)]
+    pub delivery: Option<Delivery>,
+}
+
+/// Where a work item's change has got to: landed, deployed, verified (WI-1330).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Delivery {
+    #[serde(default)]
+    pub landed: Option<Landed>,
+    #[serde(default)]
+    #[schemars(extend("x-keep-default" = true))]
+    pub deployed: Vec<LaneDeployed>,
+    #[serde(default)]
+    pub verified: Option<Verified>,
+}
+
+/// The change the item's latest hand-off names, and why it counts as landed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Landed {
+    pub sha: String,
+    #[serde(default)]
+    #[schemars(schema_with = "optional_string")]
+    pub branch: Option<String>,
+    /// What showed it landed, e.g. "branch wi-7 tip abc123 is 0 behind main".
+    pub evidence: String,
+}
+
+/// One lane's answer: does it run the landed change?
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LaneDeployed {
+    pub lane: String,
+    pub state: LaneDeployedState,
+    /// The lane evidence the answer was read from.
+    pub evidence: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(inline)]
+pub enum LaneDeployedState {
+    Deployed,
+    NotDeployed,
+    Unknown,
+}
+
+/// The verification comment that counts, with who posted it and where.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Verified {
+    pub comment_id: String,
+    pub lane: String,
+    pub what: String,
+    pub evidence: String,
+    #[serde(default)]
+    #[schemars(schema_with = "optional_string")]
+    pub by: Option<String>,
+    #[serde(default)]
+    #[schemars(schema_with = "optional_string")]
+    pub head_sha: Option<String>,
+    #[schemars(schema_with = "date_time")]
+    pub at: String,
 }
 
 /// A pull request a completion claim was checked against (WI-1835).

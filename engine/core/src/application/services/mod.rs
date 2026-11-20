@@ -161,6 +161,8 @@ mod budget_handoff_test;
 #[cfg(test)]
 mod context_rotation_test;
 #[cfg(test)]
+mod delivery_test;
+#[cfg(test)]
 mod handoff_test;
 #[cfg(test)]
 mod oversight_proof_test;
