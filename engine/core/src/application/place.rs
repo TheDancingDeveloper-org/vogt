@@ -49,27 +49,34 @@ pub fn clear_metrics_cache(data_dir: &std::path::Path) {
 
 /// The store counts, in Python's order. The backlog badge is the whole
 /// candidate population, which `backlog` ranks and reports.
+///
+/// The projects and drift reads touch no clock, so they run on a scoped thread
+/// beside the work and backlog reads (WI-700). Those two read the stepping
+/// clock, so they stay on this thread in Python's order.
 fn store_counts<C, I>(ctx: &AppContext<C, I>) -> Result<StoreCounts, VogtError>
 where
-    C: Clock + 'static,
-    I: IdFactory + 'static,
+    C: Clock + Send + 'static,
+    I: IdFactory + Send + 'static,
 {
     #[cfg(test)]
     COUNTS_COMPUTED.with(|n| n.set(n.get() + 1));
-    let projects_total = ctx.declared.read()?.counts()?.projects;
-    // Python asks `list_work(limit=1).total`: declared non-terminal rows plus
-    // upstream-truth items that no `work_link` has adopted. A raw declared
-    // count under-reports every linked project.
-    let work_total = list_work_total(ctx)?;
-    let backlog_total = backlog_total_considered(ctx).ok();
-    let drift_present = !ctx
-        .declared
-        .read()?
-        .list_drift(Some("open"), None, None, 1)?
-        .is_empty();
+    let (side, work_total, backlog_total) = std::thread::scope(|scope| {
+        let side = scope.spawn(|| -> Result<(i64, bool), VogtError> {
+            let view = ctx.declared.read()?;
+            Ok((view.counts()?.projects, view.has_open_drift()?))
+        });
+        // Python asks `list_work(limit=1).total`: declared non-terminal rows plus
+        // upstream-truth items that no `work_link` has adopted. A raw declared
+        // count under-reports every linked project.
+        let work_total = list_work_total(ctx);
+        let backlog_total = backlog_total_considered(ctx).ok();
+        (side.join(), work_total, backlog_total)
+    });
+    let (projects_total, drift_present) =
+        side.unwrap_or_else(|panic| std::panic::resume_unwind(panic))?;
     Ok(StoreCounts {
         projects_total,
-        work_total,
+        work_total: work_total?,
         backlog_total,
         drift_present,
     })
@@ -82,8 +89,8 @@ pub fn place_metrics_op(ctx: &Built, _params: Value) -> Result<Value, VogtError>
 
 fn metrics<C, I>(ctx: &AppContext<C, I>) -> Result<Value, VogtError>
 where
-    C: Clock + 'static,
-    I: IdFactory + 'static,
+    C: Clock + Send + 'static,
+    I: IdFactory + Send + 'static,
 {
     // The saved filter and the badge are read first, as Python does. An
     // unreadable filter means "no filter", and an unreadable badge is null.
@@ -260,6 +267,20 @@ mod place_bench {
         let full = crate::application::views::backlog_op(&built, json!({"limit": 1})).unwrap();
         assert_eq!(counted, full["total_considered"].as_i64().unwrap());
         assert_eq!(counted, 20 + 1000);
+        // The concurrent badge reads answer what the sequential reads answer.
+        let metrics = place_metrics_op(&built, Value::Null).unwrap();
+        crate::with_ctx!(&built, |ctx| {
+            let view = ctx.declared.read().unwrap();
+            assert_eq!(metrics["projects_total"], view.counts().unwrap().projects);
+            assert_eq!(metrics["work_total"], list_work_total(ctx).unwrap());
+            assert_eq!(metrics["backlog_total_considered"], counted);
+            let drift = !view
+                .list_drift(Some("open"), None, None, 1)
+                .unwrap()
+                .is_empty();
+            assert_eq!(view.has_open_drift().unwrap(), drift);
+            assert_eq!(metrics["drift_present"], drift);
+        });
         let _ = std::fs::remove_dir_all(&dir);
     }
 
