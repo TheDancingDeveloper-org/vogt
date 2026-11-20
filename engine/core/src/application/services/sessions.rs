@@ -4300,14 +4300,24 @@ fn type_then_submit(
         None,
     )?;
     if boxed {
+        // WI-4459: the Enter goes out only once the text is in the composer.
+        // A text that never shows is reported unsent, not submitted.
+        let mut shown = false;
         for _ in 0..TYPED_READS {
-            let Some(seen) = read_screen(engine, engine_id) else {
-                break;
-            };
-            if delivery::composer_holds(&seen.lines, text) {
-                break;
+            if let Some(seen) = read_screen(engine, engine_id) {
+                if delivery::composer_holds(&seen.lines, text) {
+                    shown = true;
+                    break;
+                }
             }
             std::thread::sleep(CONFIRM_INTERVAL);
+        }
+        if !shown {
+            return Ok(delivery::Verdict {
+                delivery: delivery::Delivery::Unconfirmed,
+                evidence: "the text never appeared in the input box, so no Enter was sent"
+                    .to_string(),
+            });
         }
     }
     send_all(
@@ -5707,6 +5717,36 @@ mod tests {
             "the held composer gets one more Enter: {calls:?}"
         );
         assert_eq!(verdict.delivery.as_str(), "delivered");
+    }
+
+    /// WI-4459 (WI-1763): the composer holds other text on every read, so the
+    /// typed text never shows. No Enter may follow it, and the verdict must
+    /// say it was not delivered.
+    #[test]
+    fn a_text_that_never_shows_in_the_composer_is_not_submitted() {
+        let other = serde_json::to_vec(&json!({
+            "id": "eng-1",
+            "activity": "idle",
+            "lines": ["› something else", "", "  gpt high · ~/work", "  ? for shortcuts"]
+        }))
+        .unwrap();
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let client = engine(vec![other; 20], Arc::clone(&seen));
+        let verdict =
+            type_then_submit(&client, "eng-1", "ses_1", "carry on", Some("idle"), true).unwrap();
+        let calls = seen.lock().unwrap();
+        let submits = calls
+            .iter()
+            .filter(|(method, path, body)| {
+                method == "POST" && path.ends_with("/input") && body.contains(r#""submit":true"#)
+            })
+            .count();
+        assert_eq!(
+            submits, 0,
+            "an Enter went out with the text never in the box: {calls:?}"
+        );
+        assert_eq!(verdict.delivery.as_str(), "unconfirmed");
     }
 
     #[test]

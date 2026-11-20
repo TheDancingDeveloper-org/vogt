@@ -42,7 +42,10 @@ use std::{sync::Arc, time::Duration};
 
 use vogt_engine_contract::{ActivityState, DoneSource};
 
-use crate::{app::AppState, events::ServerEvent, pty::Session, screen, sessions::SessionRegistry};
+use crate::{
+    app::AppState, enter_guard::EnterOutcome, events::ServerEvent, pty::Session, screen,
+    sessions::SessionRegistry,
+};
 
 /// The deployment's autopilot settings.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -331,9 +334,15 @@ pub async fn run_once(registry: &SessionRegistry, bus: &crate::events::EventBus,
                 );
             }
             Step::Nudge => {
-                if let Err(e) = nudge(&session).await {
-                    tracing::warn!(session = %session.id, error = %e, "could not nudge an autopilot session");
-                    continue;
+                match nudge(&session).await {
+                    Ok(EnterOutcome::Sent) => {}
+                    // The guard logged why: a dialog is open, so nothing was
+                    // sent and the nudge is not counted.
+                    Ok(EnterOutcome::Skipped(_)) => continue,
+                    Err(e) => {
+                        tracing::warn!(session = %session.id, error = %e, "could not nudge an autopilot session");
+                        continue;
+                    }
                 }
                 let count = session.count_autopilot_nudge();
                 tracing::info!(
@@ -350,16 +359,20 @@ pub async fn run_once(registry: &SessionRegistry, bus: &crate::events::EventBus,
 
 /// Type the nudge, then Enter on its own: a TUI that reads a burst ending in
 /// a carriage return as a paste would keep the newline as text.
-async fn nudge(session: &Session) -> std::io::Result<()> {
-    type_line(session, NUDGE).await
+async fn nudge(session: &Arc<Session>) -> std::io::Result<EnterOutcome> {
+    type_line(session, NUDGE, "autopilot nudge").await
 }
 
 /// Type one line into a session's prompt and submit it, the way a nudge is
-/// typed. Shared with the overseer wake (WI-1521).
-pub async fn type_line(session: &Session, line: &str) -> std::io::Result<()> {
-    session.write_input(line.as_bytes())?;
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    session.write_input(b"\r")
+/// typed. Shared with the overseer wake (WI-1521). The screen is checked
+/// before the text and again before the Enter (WI-4459); `what` names the
+/// caller in the log when a dialog holds it back.
+pub async fn type_line(
+    session: &Arc<Session>,
+    line: &str,
+    what: &str,
+) -> std::io::Result<EnterOutcome> {
+    crate::enter_guard::type_then_enter(session, line, what).await
 }
 
 /// Run the re-driver, unless the deployment turned nudging off.
@@ -521,5 +534,32 @@ mod tests {
         assert_eq!(decide(&policy, seen(true, 0)), Step::Nudge);
         assert_eq!(decide(&policy, seen(true, 1)), Step::Refused);
         assert_eq!(decide(&policy, seen(false, 1)), Step::Nudge);
+    }
+}
+
+#[cfg(test)]
+mod nudge_tests {
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use super::*;
+    use crate::enter_guard::tests::{dialog_output, recording_session};
+    use crate::enter_guard::Clearance;
+
+    /// WI-4459: the nudge's Enter goes out only on a clear screen. The dialog
+    /// is drawn after the nudge text is typed, inside the gap before the
+    /// Enter, so the Enter is held back and the text is left unsent.
+    #[tokio::test]
+    async fn a_nudge_enter_is_held_back_when_a_dialog_is_drawn_after_the_text() {
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let (session, output) = recording_session(Arc::clone(&writes));
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(350)).await;
+            output.send(dialog_output()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        let outcome = type_line(&session, NUDGE, "autopilot nudge").await.unwrap();
+        assert_eq!(outcome, EnterOutcome::Skipped(Clearance::Dialog));
+        assert_eq!(*writes.lock().unwrap(), NUDGE.as_bytes());
     }
 }
