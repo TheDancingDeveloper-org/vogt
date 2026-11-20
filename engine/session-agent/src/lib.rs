@@ -1044,21 +1044,12 @@ async fn flush_memory(
 /// a transport failure is retried on the next flush. Claude's account files
 /// need a Claude root and account; a Codex pod has neither and still ships its
 /// rollout.
-/// Every call to [`flush_bundle`], so a test can count the flush clock's ticks.
-#[cfg(test)]
-pub(crate) static FLUSH_ATTEMPTS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
-
 async fn flush_bundle(
     config: &Config,
     tls: &Arc<rustls::ClientConfig>,
     seen: &mut std::collections::HashMap<PathBuf, [u8; 32]>,
     offsets: &mut std::collections::HashMap<PathBuf, u64>,
 ) -> bool {
-    #[cfg(test)]
-    {
-        FLUSH_ATTEMPTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    }
     // The login and global config are the Claude account's and are written
     // back with or without a conversation (WI-3334).
     let claude = match (
@@ -2283,6 +2274,12 @@ pub fn spawn_pty(config: &Config) -> Result<PtyIo, AgentError> {
     Ok((reader, writer, child, pair.master))
 }
 
+/// Timer-path bundle flushes, counted so a test can show the flush clock
+/// fires under traffic. Startup, exit and `Flush` flushes are not counted.
+#[cfg(test)]
+pub(crate) static TIMER_FLUSHES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 pub async fn run(config: Config) -> Result<(), AgentError> {
     let tls = tls_config()?;
     let mut bundle_seen = std::collections::HashMap::new();
@@ -2431,6 +2428,8 @@ pub async fn run(config: Config) -> Result<(), AgentError> {
                         }
                     }
                     _ = tick.tick() => {
+                        #[cfg(test)]
+                        TIMER_FLUSHES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         let _ = flush_bundle(&config, &tls, &mut bundle_seen, &mut transcript_offsets).await;
                         if let Some(c) = child.as_mut() {
                             if let Ok(Some(status)) = c.try_wait() {
@@ -2864,7 +2863,7 @@ mod tests {
             "-c".into(),
             "while :; do echo busy; sleep 0.3; done".into(),
         ]);
-        let flushes_before = FLUSH_ATTEMPTS.load(std::sync::atomic::Ordering::SeqCst);
+        let flushes_before = TIMER_FLUSHES.load(std::sync::atomic::Ordering::SeqCst);
         let result = tokio::time::timeout(BUSY_FOR * 5, run(config)).await;
         assert!(
             matches!(result, Ok(Ok(()))),
@@ -2873,8 +2872,8 @@ mod tests {
         // One tick a second: a 6 s run ticks about six times.
         let beats = heartbeats.load(std::sync::atomic::Ordering::SeqCst);
         assert!(beats >= 4, "heartbeats: {beats}");
-        let flushes = FLUSH_ATTEMPTS.load(std::sync::atomic::Ordering::SeqCst) - flushes_before;
-        assert!(flushes >= 4, "bundle-flush attempts: {flushes}");
+        let flushes = TIMER_FLUSHES.load(std::sync::atomic::Ordering::SeqCst) - flushes_before;
+        assert!(flushes >= 4, "timer-path bundle flushes: {flushes}");
     }
 
     /// A fake engine on one port: bundle-file POSTs are answered 200 and their
