@@ -129,6 +129,10 @@ pub struct StartSessionParams {
     /// Why this write is being made (audited).
     #[schemars(length(min = 1))]
     pub reason: String,
+    /// Why this start may break the dispatch rules (WI-1329): the worker cap, review by oversight only and the profile's model. Accepted only from an oversight session; audited as `dispatch.override` with this text as its reason, and raised in the Inbox.
+    #[serde(default)]
+    #[schemars(schema_with = "optional_string", length(min = 1))]
+    pub r#override: Option<String>,
     /// What the session is for (WI-1323, design §2.4): implement, implement-careful, review, mechanical, investigate or design. The deployment's dispatch profile for it fills template, model, effort, budget, worktree, repo_map and autopilot wherever this start leaves them unset; a value given here wins and is audited as an override. Recorded on the session.
     #[serde(default)]
     pub purpose: Option<StartSessionParamsPurpose>,
@@ -180,6 +184,9 @@ pub struct SessionResult {
     /// On `session.start` for a project with a landing rule: the rule the worker runs under and any task lines it overrode.
     #[serde(default)]
     pub effective_policy: Option<EffectivePolicy>,
+    /// On `session.start`: the purpose an `implement` start ran as instead, because its item failed review `dispatch.escalate_after_failed_reviews` times (WI-1329).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub escalated_to: Option<String>,
     /// On `session.start`: the requested model is served by no registered LLM provider on this instance. The start proceeded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,

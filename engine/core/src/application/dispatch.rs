@@ -38,6 +38,8 @@ pub const REVIEW_BY_OVERSIGHT_KEY: &str = "dispatch.review_by_oversight_only";
 /// How many times the core restarts an item's worker from its hand-off after
 /// a budget stop (WI-1833). `0` turns the restart off.
 pub const BUDGET_RESTARTS_KEY: &str = "dispatch.budget_restarts_per_item";
+/// Whether `check` refuses an agent's start that breaks a rule (WI-1329).
+pub const ENFORCE_KEY: &str = "dispatch.enforce";
 /// Per-role context budget (WI-3132): `{"oversight": {"tokens": 250000}}`.
 /// A role that crosses its budget is asked for a hand-off and replaced by a
 /// fresh session seeded with it. A role with no entry is never rotated.
@@ -49,6 +51,8 @@ pub const DEFAULT_MAX_WORKERS_PER_OVERSEER: i64 = 5;
 pub const DEFAULT_ESCALATE_AFTER_FAILED_REVIEWS: i64 = 2;
 pub const DEFAULT_REVIEW_BY_OVERSIGHT_ONLY: bool = true;
 pub const DEFAULT_BUDGET_RESTARTS_PER_ITEM: i64 = 1;
+/// Off, so a deployment's starts change only once a person turns it on.
+pub const DEFAULT_ENFORCE: bool = false;
 
 /// The start defaults one purpose resolves to.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -108,6 +112,8 @@ pub struct DispatchSettings {
     pub escalate_after_failed_reviews: i64,
     pub review_by_oversight_only: bool,
     pub budget_restarts_per_item: i64,
+    /// Refuse an agent's start that breaks a dispatch rule (WI-1329).
+    pub enforce: bool,
     /// Context-token budget by role; a role absent here has none.
     pub context_budget: BTreeMap<String, i64>,
 }
@@ -121,13 +127,14 @@ impl DispatchSettings {
 
 /// The preference keys a write may name. Every other `dispatch.*` key is
 /// refused, so a typo is said rather than stored and silently ignored.
-pub const KEYS: [&str; 6] = [
+pub const KEYS: [&str; 7] = [
     CONTEXT_BUDGET_KEY,
     PROFILES_KEY,
     MAX_WORKERS_KEY,
     ESCALATE_KEY,
     REVIEW_BY_OVERSIGHT_KEY,
     BUDGET_RESTARTS_KEY,
+    ENFORCE_KEY,
 ];
 
 /// The prefix every dispatch preference key carries (Python `KEY_PREFIX`).
@@ -522,6 +529,7 @@ pub fn resolve(stored: &BTreeMap<String, Value>) -> DispatchSettings {
             .unwrap_or(DEFAULT_REVIEW_BY_OVERSIGHT_ONLY),
         budget_restarts_per_item: scalar_count(stored, BUDGET_RESTARTS_KEY)
             .unwrap_or(DEFAULT_BUDGET_RESTARTS_PER_ITEM),
+        enforce: scalar_bool(stored, ENFORCE_KEY).unwrap_or(DEFAULT_ENFORCE),
         context_budget: context_budget(stored),
     }
 }
@@ -604,6 +612,117 @@ fn scalar_count(stored: &BTreeMap<String, Value>, key: &str) -> Option<i64> {
 /// A scalar setting is stored as `{"value": b}` with `b` a boolean.
 fn scalar_bool(stored: &BTreeMap<String, Value>, key: &str) -> Option<bool> {
     stored.get(key)?.get("value")?.as_bool()
+}
+
+/// The dispatch rules a start can break (Python `Rule`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Rule {
+    ReviewByOversightOnly,
+    ProfileModel,
+    MaxWorkersPerOverseer,
+}
+
+impl Rule {
+    /// The rule's name, as recorded on an override's audit row.
+    pub fn name(self) -> &'static str {
+        match self {
+            Rule::ReviewByOversightOnly => "review_by_oversight_only",
+            Rule::ProfileModel => "profile_model",
+            Rule::MaxWorkersPerOverseer => "max_workers_per_overseer",
+        }
+    }
+}
+
+/// One dispatch rule a start breaks, with the values that broke it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Violation {
+    pub rule: Rule,
+    pub message: String,
+}
+
+/// What `check` found: the rules broken.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Decision {
+    pub violations: Vec<Violation>,
+}
+
+/// The purpose a start that names none is judged as: the default implement
+/// profile. Without it an agent could leave the purpose out to run any model
+/// and skip the escalation (WI-1329).
+pub const DEFAULT_PURPOSE: &str = "implement";
+
+/// The purpose the dispatch rules judge a start as.
+pub fn judged_purpose(purpose: Option<&str>) -> &str {
+    purpose.unwrap_or(DEFAULT_PURPOSE)
+}
+
+/// `implement-careful` when an `implement` item has failed review enough. A
+/// start with no purpose is judged as `implement`.
+pub fn escalation(
+    purpose: Option<&str>,
+    blockers_count: i64,
+    settings: &DispatchSettings,
+) -> Option<&'static str> {
+    (judged_purpose(purpose) == "implement"
+        && blockers_count >= settings.escalate_after_failed_reviews)
+        .then_some("implement-careful")
+}
+
+/// A start, as `check` judges it (Python `check`'s keyword arguments).
+pub struct StartFacts<'a> {
+    /// The purpose the start will run, after any escalation.
+    pub purpose: Option<&'a str>,
+    pub review: bool,
+    /// The model the start will run, the caller's or the profile's.
+    pub model: Option<&'a str>,
+    /// The starter's role (`person` for a person); `None` when unknown.
+    pub caller_role: Option<&'a str>,
+    /// The caller's live started sessions.
+    pub live_workers: i64,
+}
+
+/// Judge one start against the dispatch rules (design §2.4, WI-1329). A rule
+/// that has nothing to judge (no model, an unknown role) is not broken. The
+/// project's `review.never_models` is not judged here: that refusal holds for
+/// every caller and is made before this (WI-1590).
+pub fn check(facts: &StartFacts<'_>, settings: &DispatchSettings) -> Decision {
+    let mut violations = Vec::new();
+    if facts.review && facts.caller_role == Some("worker") && settings.review_by_oversight_only {
+        violations.push(Violation {
+            rule: Rule::ReviewByOversightOnly,
+            message: "review_by_oversight_only=true: a worker session cannot start a reviewer; \
+                      a person or an oversight session does"
+                .to_string(),
+        });
+    }
+    let judged = judged_purpose(facts.purpose);
+    if let (false, Some(model), Some(profile)) =
+        (facts.review, facts.model, settings.profile(judged))
+    {
+        if model != profile.model {
+            violations.push(Violation {
+                rule: Rule::ProfileModel,
+                message: format!(
+                    "purpose={judged} runs model {} by the dispatch profile, not {}",
+                    py_repr(&profile.model),
+                    py_repr(model)
+                ),
+            });
+        }
+    }
+    let cap = settings.max_workers_per_overseer;
+    if matches!(facts.caller_role, Some("oversight") | Some("worker")) && facts.live_workers >= cap
+    {
+        violations.push(Violation {
+            rule: Rule::MaxWorkersPerOverseer,
+            message: format!(
+                "max_workers_per_overseer={cap} reached: this session already has {} live \
+                 workers; stop one first",
+                facts.live_workers
+            ),
+        });
+    }
+    Decision { violations }
 }
 
 #[cfg(test)]

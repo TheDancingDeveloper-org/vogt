@@ -135,6 +135,7 @@ pub(super) fn start_params(
         cold_wake_opt_out: false,
         wake_on: Vec::new(),
         explicit_null: Vec::new(),
+        override_reason: None,
     }
 }
 
@@ -609,6 +610,15 @@ fn a_worker_session_start_records_the_starting_session_and_its_role() {
 /// Seeds the Vogt row of a session an agent or a person started, so a child
 /// start can read its origin (WI-4471).
 fn seed_started_session(built: &Built, engine_id: &str, started_by_kind: Option<&str>) {
+    seed_child_session(built, engine_id, started_by_kind, None);
+}
+
+fn seed_child_session(
+    built: &Built,
+    engine_id: &str,
+    started_by_kind: Option<&str>,
+    started_by_session: Option<&str>,
+) {
     let Built::StepSequential(ctx) = built else {
         unreachable!("opened() builds a step clock");
     };
@@ -632,7 +642,7 @@ fn seed_started_session(built: &Built, engine_id: &str, started_by_kind: Option<
         effort: None,
         reason: "because".to_string(),
         purpose: None,
-        started_by_session: None,
+        started_by_session: started_by_session.map(str::to_string),
         started_by_kind: started_by_kind.map(str::to_string),
         started_at: moment(),
         stopped_at: None,
@@ -1426,4 +1436,341 @@ fn a_sessions_account_and_budget_come_back_from_the_engine() {
     assert_eq!(keys, ["account", "budget", "id"], "{slim}");
     assert_eq!(slim["sessions"][0]["account"], json!("acct2"), "{slim}");
     assert_eq!(slim["sessions"][0]["budget"]["turns"], json!(4), "{slim}");
+}
+
+// -- dispatch enforcement (WI-1329) -------------------------------------------
+
+/// A person's `dispatch.*` preferences, as the dispatch table reads them.
+fn set_dispatch(built: &Built, rows: &[(&str, serde_json::Value)]) {
+    let Built::StepSequential(ctx) = built else {
+        unreachable!("opened() builds a step clock");
+    };
+    let human = ctx
+        .declared
+        .read()
+        .unwrap()
+        .actor_by_identity("local:test-user")
+        .unwrap()
+        .expect("the bootstrapped human");
+    let mut txn = ctx.declared.write().unwrap();
+    for (key, value) in rows {
+        txn.upsert_actor_preference(&ActorPreference {
+            actor_id: human.id.clone(),
+            key: key.to_string(),
+            value: value.clone(),
+            version: 1,
+            updated_at: moment(),
+        })
+        .unwrap();
+    }
+    txn.commit().unwrap();
+}
+
+fn enforcing(built: &Built) {
+    set_dispatch(built, &[("dispatch.enforce", json!({"value": true}))]);
+}
+
+fn caller_role_answer(role: &str) -> (u16, String) {
+    (
+        200,
+        format!(
+            r#"{{"id":"eng-caller","name":"caller","cwd":"/work/tree","activity":"idle","alive":true,"autopilot":false,"autopilot_nudges":0,"keep_awake":false,"role":"{role}"}}"#
+        ),
+    )
+}
+
+/// An agent session built over a scripted engine: the caller's lookup answers
+/// with `role`, and the start with a new session.
+fn agent_caller(role: &str) -> (Built, Arc<Script>) {
+    let script = script_with(vec![
+        (
+            200,
+            r#"{"id":"eng-new","name":"beta","cwd":"/work/tree"}"#.to_string(),
+        ),
+        caller_role_answer(role),
+    ]);
+    let built = opened_as(
+        Some(Arc::clone(&script)),
+        Principal::new("agent:engine:eng-caller", ActorKind::Agent, "Caller").unwrap(),
+    );
+    insert_project(&built, "beta");
+    if role == "worker" {
+        // A worker's kind is its origin (WI-4471): an agent started it.
+        seed_started_session(&built, "eng-caller", Some("oversight"));
+    }
+    (built, script)
+}
+
+fn created(script: &Script) -> bool {
+    script
+        .seen
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|line| line.starts_with("POST "))
+}
+
+fn started_summary(built: &Built) -> serde_json::Value {
+    let Built::StepSequential(ctx) = built else {
+        unreachable!("opened() builds a step clock");
+    };
+    let events = ctx
+        .declared
+        .read()
+        .unwrap()
+        .list_events(0, 100, None)
+        .unwrap();
+    events
+        .into_iter()
+        .rev()
+        .find(|event| event.kind == "session.started")
+        .expect("a session.started event")
+        .summary
+}
+
+fn override_audits(built: &Built) -> Vec<crate::core::AuditRecord> {
+    let Built::StepSequential(ctx) = built else {
+        unreachable!("opened() builds a step clock");
+    };
+    ctx.declared
+        .read()
+        .unwrap()
+        .list_audit(&crate::storage::interface::AuditQuery {
+            limit: 100,
+            offset: 0,
+            actor_id: None,
+            operation: Some("dispatch.override".to_string()),
+            entity_id: None,
+            project_id: None,
+            since: None,
+            until: None,
+        })
+        .unwrap()
+}
+
+fn review_params() -> StartSessionParams {
+    with_purpose(start_params(Some("beta"), None, "because"), "review")
+}
+
+#[test]
+fn an_enforced_worker_start_of_a_reviewer_is_refused_before_the_engine() {
+    let (built, script) = agent_caller("worker");
+    enforcing(&built);
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!()
+    };
+    let error = start_session(ctx, &review_params()).unwrap_err();
+    assert!(
+        matches!(&error, VogtError::InvalidRequest(text)
+            if text.contains("dispatch refused this start")
+                && text.contains("review_by_oversight_only")),
+        "{error:?}"
+    );
+    assert!(!created(&script), "no terminal may be started");
+}
+
+#[test]
+fn without_enforcement_the_broken_rule_is_recorded_not_refused() {
+    let (built, script) = agent_caller("worker");
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!()
+    };
+    start_session(ctx, &review_params()).unwrap();
+    assert!(created(&script));
+    let notes = started_summary(&built)["dispatch_notes"].clone();
+    assert!(
+        notes.to_string().contains("review_by_oversight_only"),
+        "{notes}"
+    );
+}
+
+#[test]
+fn a_person_is_never_refused_even_when_enforcing() {
+    let script = script_with(vec![(
+        200,
+        r#"{"id":"eng-new","name":"beta","cwd":"/work/tree"}"#.to_string(),
+    )]);
+    let built = opened(Some(Arc::clone(&script)));
+    insert_project(&built, "beta");
+    enforcing(&built);
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!()
+    };
+    let mut params = with_purpose(start_params(Some("beta"), None, "because"), "implement");
+    params.model = Some("haiku".to_string());
+    start_session(ctx, &params).unwrap();
+    assert!(created(&script));
+}
+
+#[test]
+fn an_enforced_start_must_run_its_profiles_model() {
+    let (built, script) = agent_caller("oversight");
+    enforcing(&built);
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!()
+    };
+    // No purpose is judged as implement (sonnet by default).
+    let mut params = start_params(Some("beta"), None, "because");
+    params.model = Some("haiku".to_string());
+    let error = start_session(ctx, &params).unwrap_err();
+    assert!(
+        matches!(&error, VogtError::InvalidRequest(text) if text.contains("profile")),
+        "{error:?}"
+    );
+    assert!(!created(&script));
+}
+
+#[test]
+fn an_enforced_start_past_the_worker_cap_is_refused() {
+    let (built, script) = agent_caller("oversight");
+    set_dispatch(
+        &built,
+        &[
+            ("dispatch.enforce", json!({"value": true})),
+            ("dispatch.max_workers_per_overseer", json!({"value": 1})),
+        ],
+    );
+    seed_child_session(&built, "eng-live", Some("oversight"), Some("eng-caller"));
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!()
+    };
+    let error = start_session(ctx, &start_params(Some("beta"), None, "because")).unwrap_err();
+    assert!(
+        matches!(&error, VogtError::InvalidRequest(text) if text.contains("max_workers_per_overseer=1")),
+        "{error:?}"
+    );
+    assert!(!created(&script));
+}
+
+#[test]
+fn an_oversight_override_starts_past_a_rule_and_is_audited() {
+    let (built, script) = agent_caller("oversight");
+    enforcing(&built);
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!()
+    };
+    let mut params = start_params(Some("beta"), None, "because");
+    params.model = Some("haiku".to_string());
+    params.override_reason = Some("a spike on the small model".to_string());
+    start_session(ctx, &params).unwrap();
+    assert!(created(&script));
+    let audits = override_audits(&built);
+    assert_eq!(audits.len(), 1, "{audits:?}");
+    assert_eq!(audits[0].reason, "a spike on the small model");
+    assert_eq!(audits[0].actor_identity_ref, "agent:engine:eng-caller");
+    let summary = started_summary(&built);
+    assert_eq!(summary["override_reason"], "a spike on the small model");
+    // The Inbox raises it for a person.
+    let listed = super::inbox::inbox_list(ctx, json!({"limit": 50})).unwrap();
+    let entries = listed["entries"].as_array().expect("inbox entries");
+    let raised: Vec<_> = entries
+        .iter()
+        .filter(|entry| entry["kind"] == "dispatch.override")
+        .collect();
+    assert_eq!(raised.len(), 1, "{listed}");
+    assert_eq!(raised[0]["summary"], "a spike on the small model");
+    assert!(raised[0]["title"]
+        .as_str()
+        .unwrap()
+        .contains("started by agent:engine:eng-caller"));
+}
+
+#[test]
+fn a_worker_cannot_override() {
+    let (built, script) = agent_caller("worker");
+    enforcing(&built);
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!()
+    };
+    let mut params = start_params(Some("beta"), None, "because");
+    params.override_reason = Some("let me".to_string());
+    let error = start_session(ctx, &params).unwrap_err();
+    assert!(
+        matches!(&error, VogtError::InvalidRequest(text)
+            if text.contains("override is accepted only from an oversight session")),
+        "{error:?}"
+    );
+    assert!(!created(&script));
+    assert!(override_audits(&built).is_empty());
+}
+
+#[test]
+fn an_item_that_keeps_failing_review_escalates_an_enforced_implement_start() {
+    let (built, _script) = agent_caller("oversight");
+    set_dispatch(
+        &built,
+        &[
+            ("dispatch.enforce", json!({"value": true})),
+            (
+                "dispatch.escalate_after_failed_reviews",
+                json!({"value": 1}),
+            ),
+        ],
+    );
+    seed_work_item_with_blockers(&built, 1);
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!()
+    };
+    let mut params = with_purpose(start_params(None, None, "because"), "implement");
+    params.work_item = Some("WI-1".to_string());
+    let started = start_session(ctx, &params).unwrap();
+    assert_eq!(started.escalated_to.as_deref(), Some("implement-careful"));
+    assert_eq!(
+        started.session.purpose.as_deref(),
+        Some("implement-careful")
+    );
+}
+
+/// WI-1 with `blockers` stored `verdict=blockers` comments.
+fn seed_work_item_with_blockers(built: &Built, blockers: usize) {
+    let Built::StepSequential(ctx) = built else {
+        unreachable!("opened() builds a step clock");
+    };
+    let actor = ctx
+        .declared
+        .read()
+        .unwrap()
+        .actor_by_identity("local:test-user")
+        .unwrap()
+        .unwrap();
+    let mut txn = ctx.declared.write().unwrap();
+    txn.insert_work_item(&WorkItem {
+        id: "wrk_WI-1".to_string(),
+        reference: "WI-1".to_string(),
+        kind: WorkKind::Feature,
+        title: "an item".to_string(),
+        body: String::new(),
+        state: "open".to_string(),
+        priority: Priority::P2,
+        effort: None,
+        project_id: Some("prj_beta".to_string()),
+        project_slug: Some("beta".to_string()),
+        initiative_id: None,
+        origin: Origin::Created,
+        trust_state: TrustState::Unverified,
+        assignee_actor_id: None,
+        assignee_identity_ref: None,
+        labels: Vec::new(),
+        relations: Vec::new(),
+        superseded_by: None,
+        created_at: moment(),
+        updated_at: moment(),
+    })
+    .unwrap();
+    for n in 0..blockers {
+        txn.insert_comment(&crate::core::Comment {
+            id: format!("cmt_{n}"),
+            work_item_id: "wrk_WI-1".to_string(),
+            actor_id: actor.id.clone(),
+            actor_display_name: "reviewer".to_string(),
+            body: "review".to_string(),
+            created_at: moment(),
+            kind: "verdict".to_string(),
+            handoff: None,
+            verdict: Some(json!({"verdict": "blockers"})),
+            verification: None,
+        })
+        .unwrap();
+    }
+    txn.commit().unwrap();
 }

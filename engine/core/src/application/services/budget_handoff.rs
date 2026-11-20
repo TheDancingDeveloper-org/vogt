@@ -263,6 +263,7 @@ fn restart_params(
         cold_wake_opt_out: false,
         wake_on: Vec::new(),
         explicit_null: Vec::new(),
+        override_reason: None,
     })
 }
 

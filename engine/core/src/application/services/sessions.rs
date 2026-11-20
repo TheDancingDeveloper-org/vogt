@@ -47,6 +47,9 @@ use crate::errors::VogtError;
 use crate::storage::interface::{DeclaredStore, ReadView, WriteTxn};
 
 const SESSION_START: &str = "session.start";
+/// The audit operation (and event) an oversight `override` writes beside the
+/// start it allowed (WI-1329); the Inbox lists them.
+pub const DISPATCH_OVERRIDE: &str = "dispatch.override";
 const SESSION_STOP: &str = "session.stop";
 const SESSION_INPUT: &str = "session.input";
 const SESSION_ANSWER: &str = "session.answer";
@@ -172,6 +175,17 @@ where
                 .into_iter()
                 .filter(|field| matches!(params.get(*field), Some(Value::Null)))
                 .collect(),
+            override_reason: optional_string(&params, "override")?
+                .map(|text| {
+                    if text.is_empty() {
+                        Err(VogtError::InvalidRequest(
+                            "override must not be empty".to_string(),
+                        ))
+                    } else {
+                        Ok(text)
+                    }
+                })
+                .transpose()?,
         };
     check_named_provider(
         ctx,
@@ -596,6 +610,9 @@ pub struct StartSessionParams {
     /// Profile fields the caller sent as an explicit null. Python counts these
     /// in `model_fields_set`: they are overrides, and the profile leaves them.
     pub explicit_null: Vec<&'static str>,
+    /// Why this start may break the dispatch rules (WI-1329). Accepted only
+    /// from an oversight session; audited as `dispatch.override`.
+    pub override_reason: Option<String>,
 }
 
 /// The start fields a dispatch profile fills, in Python's override order.
@@ -1015,6 +1032,11 @@ fn linked_default() -> bool {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SessionResult {
     pub session: SessionSummary,
+    /// On `session.start`: the purpose an `implement` start ran as instead,
+    /// because its item failed review `dispatch.escalate_after_failed_reviews`
+    /// times (WI-1329).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub escalated_to: Option<String>,
 }
 
 /// One digest row. Field order matches `views::SessionDigest` / Python
@@ -1206,13 +1228,56 @@ where
         )));
     }
     let engine = engine_of(ctx)?;
+    let (started_by_session, started_by_kind) = started_by(ctx, engine)?;
+    let override_reason = override_reason(params, started_by_kind.as_deref())?;
+    let settings = dispatch_profiles::resolve(&dispatch_preferences(ctx)?);
+    let blockers_count = failed_reviews(ctx, params)?;
+    // Escalation before the profile fills the start (WI-1329): an item that
+    // keeps failing review gets the careful profile's model and budget.
+    let escalated_to =
+        dispatch_profiles::escalation(params.purpose.as_deref(), blockers_count, &settings);
+    let enforcing = ctx.principal.kind == ActorKind::Agent && settings.enforce;
+    let mut escalated_params = params.clone();
+    if let (Some(purpose), true) = (escalated_to, enforcing) {
+        escalated_params.purpose = Some(purpose.to_string());
+    }
     // Resolved after the guards above: a profile carries neither a role nor a
     // permission posture, so naming a purpose cannot raise a start past what
     // the caller could ask for directly (WI-1323).
-    let (resolved, read_only, overrides) = resolve_purpose(ctx, params)?;
+    let (resolved, read_only, overrides) = resolve_purpose(ctx, &escalated_params)?;
     refuse_task_without_agent(&resolved)?;
     let params = &resolved;
-    let (started_by_session, started_by_kind) = started_by(ctx, engine)?;
+    let decision = dispatch_check(
+        ctx,
+        params,
+        &settings,
+        started_by_session.as_deref(),
+        started_by_kind.as_deref(),
+    )?;
+    if enforcing && override_reason.is_none() && !decision.violations.is_empty() {
+        // Refused before the engine is asked: no terminal is started.
+        let message = decision
+            .violations
+            .iter()
+            .map(|violation| violation.message.as_str())
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(VogtError::InvalidRequest(format!(
+            "dispatch refused this start — {message}"
+        )));
+    }
+    let mut dispatch_notes: Vec<String> = decision
+        .violations
+        .iter()
+        .map(|violation| violation.message.clone())
+        .collect();
+    if let (Some(purpose), false) = (escalated_to, enforcing) {
+        dispatch_notes.push(format!(
+            "escalate_after_failed_reviews={}: {blockers_count} failed reviews would run {purpose}",
+            settings.escalate_after_failed_reviews
+        ));
+    }
+    let escalated = escalated_to.filter(|_| enforcing).map(str::to_string);
     backfill_default_branch(ctx, params)?;
     let mut writing = write_of(ctx);
     let session_id = fresh(&writing, "ses");
@@ -1314,11 +1379,19 @@ where
         let started_by_kind = started_by_kind.clone();
         let audit_overrides = overrides.clone();
         let audit_budget = budget.as_ref().map(budget_wire);
+        let audit_notes = dispatch_notes.clone();
+        let audit_override = override_reason.clone();
+        let audit_escalated = escalated.clone();
+        let override_rules: Vec<&'static str> = decision
+            .violations
+            .iter()
+            .map(|violation| violation.rule.name())
+            .collect();
         audited_write(
             &mut writing,
             SESSION_START,
             &reason.clone(),
-            move |txn, _actor| {
+            move |txn, caller| {
                 let actor = Actor {
                     id: actor_id.clone(),
                     kind: ActorKind::Agent,
@@ -1364,6 +1437,18 @@ where
                     txn.set_session_cold_wake_opt_out(&session_id, true)?;
                 }
                 let payload = audited_payload(&recorded);
+                if let Some(why) = &audit_override {
+                    audit_dispatch_override(
+                        txn,
+                        caller,
+                        &recorded.id,
+                        why,
+                        work_item_ref.as_deref(),
+                        &override_rules,
+                        &audit_notes,
+                        now,
+                    )?;
+                }
                 // The declared half of the branch binding: a session opened for a
                 // work item records the branch it will use. The summary's branch
                 // is what was recorded, which is nothing when there is no item.
@@ -1403,6 +1488,13 @@ where
                         "repo_map": audit_repo_map,
                         "started_by_session": started_by_session,
                         "started_by_kind": started_by_kind,
+                        // Dispatch (WI-1329): the rules this start broke but
+                        // was not refused for (a person, enforcement off, or
+                        // an override), the override's reason, and any
+                        // escalation.
+                        "dispatch_notes": audit_notes,
+                        "override_reason": audit_override,
+                        "escalated_to": audit_escalated,
                         "engine_spawn_ms": engine_spawn_ms,
                     }),
                 ))
@@ -1421,7 +1513,145 @@ where
     }
     Ok(SessionResult {
         session: summarize(ctx, &stored?, Some(&started))?,
+        escalated_to: escalated,
     })
+}
+
+/// The cleaned `override` text, refused unless oversight sent it (WI-1329).
+///
+/// A worker that could override would lift its own cap; a person is never held
+/// to the rules, so it has nothing to override.
+fn override_reason(
+    params: &StartSessionParams,
+    started_by_kind: Option<&str>,
+) -> Result<Option<String>, VogtError> {
+    let Some(text) = params.override_reason.as_deref() else {
+        return Ok(None);
+    };
+    if started_by_kind != Some("oversight") {
+        return Err(VogtError::InvalidRequest(format!(
+            "override is accepted only from an oversight session (this caller is {}); ask \
+             oversight or a person to start this session",
+            started_by_kind.unwrap_or("of unknown role")
+        )));
+    }
+    writes::validate_reason(text).map(Some)
+}
+
+/// How many `verdict=blockers` comments the start's item has (WI-1319).
+fn failed_reviews<C, I>(
+    ctx: &AppContext<C, I>,
+    params: &StartSessionParams,
+) -> Result<i64, VogtError>
+where
+    C: Clock,
+    I: IdFactory,
+{
+    let Some(reference) = params
+        .work_item
+        .as_ref()
+        .or(params.review_of.as_ref())
+        .or(params.from_handoff.as_ref())
+    else {
+        return Ok(0);
+    };
+    let view = ctx.declared.read()?;
+    let Ok(item) = resolve::work_item(&view, reference) else {
+        return Ok(0);
+    };
+    Ok(view
+        .comments_for(&item.id, MAX_COMMENTS_SCANNED, false)?
+        .iter()
+        .filter(|comment| {
+            comment.kind == "verdict"
+                && comment
+                    .verdict
+                    .as_ref()
+                    .and_then(|verdict| verdict.get("verdict"))
+                    .and_then(Value::as_str)
+                    == Some("blockers")
+        })
+        .count() as i64)
+}
+
+const MAX_COMMENTS_SCANNED: i64 = 1000;
+
+/// The dispatch rules this start breaks (WI-1329), judged for any caller.
+///
+/// Live workers are the caller's started sessions Vogt has not stopped; an
+/// agent can start only workers, so every one counts.
+fn dispatch_check<C, I>(
+    ctx: &AppContext<C, I>,
+    params: &StartSessionParams,
+    settings: &dispatch_profiles::DispatchSettings,
+    started_by_session: Option<&str>,
+    started_by_kind: Option<&str>,
+) -> Result<dispatch_profiles::Decision, VogtError>
+where
+    C: Clock,
+    I: IdFactory,
+{
+    let live_workers = match started_by_session {
+        Some(caller) => ctx
+            .declared
+            .read()?
+            .list_live_sessions_started_by(caller, settings.max_workers_per_overseer + 1)?
+            .len() as i64,
+        None => 0,
+    };
+    Ok(dispatch_profiles::check(
+        &dispatch_profiles::StartFacts {
+            purpose: params.purpose.as_deref(),
+            review: params.purpose.as_deref() == Some("review") || params.review_of.is_some(),
+            model: params.model.as_deref(),
+            caller_role: started_by_kind,
+            live_workers,
+        },
+        settings,
+    ))
+}
+
+/// The audit row and event an oversight override leaves (WI-1329).
+///
+/// Its own operation, so the Inbox and `audit_list` find every override
+/// without reading start payloads; the override text is its reason.
+#[allow(clippy::too_many_arguments)]
+fn audit_dispatch_override(
+    txn: &mut impl WriteTxn,
+    actor: &Actor,
+    session_id: &str,
+    reason: &str,
+    work_item: Option<&str>,
+    rules: &[&str],
+    notes: &[String],
+    at: Moment,
+) -> Result<(), VogtError> {
+    let payload = json!({
+        "session": session_id,
+        "work_item": work_item,
+        "override_reason": reason,
+        "rules": rules,
+        "notes": notes,
+    });
+    let record = txn.append_audit(
+        actor,
+        DISPATCH_OVERRIDE,
+        "session",
+        session_id,
+        reason,
+        &crate::decisions::digest_of(&payload),
+        at,
+    )?;
+    txn.append_event(
+        DISPATCH_OVERRIDE,
+        "session",
+        session_id,
+        Some(&actor.id),
+        Some(&record.id),
+        &payload,
+        at,
+    )?;
+    Ok(())
 }
 
 /// Stop a session and revoke the token it ran with.
@@ -1497,6 +1727,7 @@ where
         .unwrap_or(session);
     Ok(SessionResult {
         session: summarize(ctx, &stopped, None)?,
+        escalated_to: None,
     })
 }
 
@@ -2823,7 +3054,10 @@ where
         Some(session) => summarize(ctx, session, Some(&updated))?,
         None => unlinked_summary(&ctx.declared.read()?, &updated)?,
     };
-    Ok(SessionResult { session: summary })
+    Ok(SessionResult {
+        session: summary,
+        escalated_to: None,
+    })
 }
 
 /// Change a session's role. Nominating oversight is a person's act.
@@ -2880,7 +3114,10 @@ where
         Some(session) => summarize(ctx, session, Some(&updated))?,
         None => unlinked_summary(&ctx.declared.read()?, &updated)?,
     };
-    Ok(SessionResult { session: summary })
+    Ok(SessionResult {
+        session: summary,
+        escalated_to: None,
+    })
 }
 
 /// Answer the dialog a session shows — a permission request or a startup gate —
@@ -3120,6 +3357,7 @@ where
         )?;
         return Ok(SessionResult {
             session: unlinked_summary(&ctx.declared.read()?, &hibernated)?,
+            escalated_to: None,
         });
     };
     let mut writing = write_of(ctx);
@@ -3162,6 +3400,7 @@ where
     )?;
     Ok(SessionResult {
         session: summarize(ctx, &session, Some(&hibernated))?,
+        escalated_to: None,
     })
 }
 
@@ -3656,7 +3895,10 @@ where
     let mut summary = unlinked_summary(&ctx.declared.read()?, &session)?;
     summary.alive = killed.then_some(false);
     summary.stopped_at = Some(stopped_at);
-    Ok(SessionResult { session: summary })
+    Ok(SessionResult {
+        session: summary,
+        escalated_to: None,
+    })
 }
 
 /// A `task` needs an agent to read it (WI-1807). Without a template the
@@ -3788,6 +4030,7 @@ where
         dispatch_profiles::ESCALATE_KEY,
         dispatch_profiles::REVIEW_BY_OVERSIGHT_KEY,
         dispatch_profiles::BUDGET_RESTARTS_KEY,
+        dispatch_profiles::ENFORCE_KEY,
         dispatch_profiles::CONTEXT_BUDGET_KEY,
     ] {
         if let Some(row) = view.latest_human_preference(key)? {
@@ -4828,7 +5071,10 @@ where
             Some(session) => summarize(ctx, session, Some(&current))?,
             None => unlinked_summary(&ctx.declared.read()?, &current)?,
         };
-        return Ok(SessionResult { session: summary });
+        return Ok(SessionResult {
+            session: summary,
+            escalated_to: None,
+        });
     }
     let (decision, fresh_prompt) = cold_wake_of(ctx, &current, session.as_ref())?;
     let Some(session) = session else {
@@ -4856,6 +5102,7 @@ where
         )?;
         return Ok(SessionResult {
             session: unlinked_summary(&ctx.declared.read()?, &woken)?,
+            escalated_to: None,
         });
     };
     if session.stopped_at.is_some() {
@@ -4930,6 +5177,7 @@ where
     })?;
     Ok(SessionResult {
         session: summarize(ctx, &session, Some(&woken))?,
+        escalated_to: None,
     })
 }
 
@@ -5189,7 +5437,10 @@ where
         Some(session) => summarize(ctx, session, Some(&current))?,
         None => unlinked_summary(&ctx.declared.read()?, &current)?,
     };
-    Ok(SessionResult { session: summary })
+    Ok(SessionResult {
+        session: summary,
+        escalated_to: None,
+    })
 }
 
 /// Kill a session if it still runs and have the engine forget it.
@@ -5243,7 +5494,10 @@ where
         let mut summary = unlinked_summary(&ctx.declared.read()?, &before)?;
         summary.alive = Some(false);
         summary.stopped_at = Some(now(&writing));
-        return Ok(SessionResult { session: summary });
+        return Ok(SessionResult {
+            session: summary,
+            escalated_to: None,
+        });
     }
 
     let Some(session) = found.session else {
@@ -5278,7 +5532,10 @@ where
             .ok_or_else(|| VogtError::NotFound(format!("no session {}", py_repr(&session_id))))?;
         let summary = summarize(ctx, &after, None)?;
         Ok(WriteOutcome::new(
-            SessionResult { session: summary },
+            SessionResult {
+                session: summary,
+                escalated_to: None,
+            },
             "session",
             &session_id,
             audited_payload(&after),

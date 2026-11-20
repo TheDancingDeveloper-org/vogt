@@ -6,8 +6,8 @@ use std::collections::BTreeMap;
 use serde_json::{json, Value};
 
 use super::dispatch::{
-    resolve, validate, DispatchSettings, ESCALATE_KEY, MAX_WORKERS_KEY, PROFILES_KEY, PURPOSES,
-    REVIEW_BY_OVERSIGHT_KEY,
+    check, escalation, resolve, validate, Decision, DispatchSettings, StartFacts, ENFORCE_KEY,
+    ESCALATE_KEY, MAX_WORKERS_KEY, PROFILES_KEY, PURPOSES, REVIEW_BY_OVERSIGHT_KEY,
 };
 
 fn table(entries: &[(&str, Value)]) -> DispatchSettings {
@@ -179,4 +179,138 @@ fn each_key_is_validated_by_its_own_shape() {
         validate("dispatch.profiles", &json!({})).unwrap(),
         json!({})
     );
+}
+
+// -- check (WI-1329) ----------------------------------------------------------
+
+fn facts<'a>(
+    purpose: Option<&'a str>,
+    review: bool,
+    model: Option<&'a str>,
+    caller_role: &'a str,
+    live_workers: i64,
+) -> StartFacts<'a> {
+    StartFacts {
+        purpose,
+        review,
+        model,
+        caller_role: Some(caller_role),
+        live_workers,
+    }
+}
+
+fn rules(decision: &Decision) -> Vec<&'static str> {
+    decision.violations.iter().map(|v| v.rule.name()).collect()
+}
+
+#[test]
+fn enforcement_is_off_by_default() {
+    assert!(!table(&[]).enforce);
+    assert!(table(&[(ENFORCE_KEY, json!({"value": true}))]).enforce);
+    assert!(validate(ENFORCE_KEY, &json!({"value": true})).is_ok());
+    assert!(validate(ENFORCE_KEY, &json!({"value": 3})).is_err());
+}
+
+#[test]
+fn a_worker_starting_a_review_breaks_review_by_oversight_only() {
+    let settings = table(&[]);
+    let judge = |role| rules(&check(&facts(None, true, None, role, 0), &settings));
+    assert_eq!(judge("worker"), ["review_by_oversight_only"]);
+    assert!(judge("oversight").is_empty());
+    assert!(judge("person").is_empty());
+    let off = table(&[(REVIEW_BY_OVERSIGHT_KEY, json!({"value": false}))]);
+    assert!(rules(&check(&facts(None, true, None, "worker", 0), &off)).is_empty());
+}
+
+#[test]
+fn a_model_other_than_the_profiles_is_named() {
+    let settings = table(&[]);
+    for purpose in [
+        "implement",
+        "implement-careful",
+        "mechanical",
+        "investigate",
+    ] {
+        let decision = check(
+            &facts(Some(purpose), false, Some("something-else"), "oversight", 0),
+            &settings,
+        );
+        assert_eq!(rules(&decision), ["profile_model"], "{purpose}");
+        assert!(decision.violations[0].message.contains("something-else"));
+        let model = settings.profiles[purpose].model.clone();
+        let ok = check(
+            &facts(Some(purpose), false, Some(&model), "oversight", 0),
+            &settings,
+        );
+        assert!(rules(&ok).is_empty(), "{purpose}");
+    }
+}
+
+#[test]
+fn the_model_rule_follows_a_profile_override() {
+    let settings = table(&[(PROFILES_KEY, json!({"implement": {"model": "grok-4.8"}}))]);
+    let judge = |model| {
+        rules(&check(
+            &facts(Some("implement"), false, Some(model), "oversight", 0),
+            &settings,
+        ))
+    };
+    assert!(judge("grok-4.8").is_empty());
+    assert_eq!(judge("grok-4.7"), ["profile_model"]);
+}
+
+#[test]
+fn no_purpose_is_judged_as_implement() {
+    let settings = table(&[]);
+    let decision = check(
+        &facts(None, false, Some("something-else"), "oversight", 0),
+        &settings,
+    );
+    assert_eq!(rules(&decision), ["profile_model"]);
+    assert!(decision.violations[0].message.contains("purpose=implement"));
+    let model = settings.profiles["implement"].model.clone();
+    assert!(rules(&check(
+        &facts(None, false, Some(&model), "oversight", 0),
+        &settings
+    ))
+    .is_empty());
+}
+
+#[test]
+fn a_review_is_not_held_to_the_profile_model() {
+    let decision = check(
+        &facts(Some("review"), true, Some("other"), "oversight", 0),
+        &table(&[]),
+    );
+    assert!(rules(&decision).is_empty());
+}
+
+#[test]
+fn the_worker_cap_refuses_the_sixth() {
+    let settings = table(&[]);
+    let judge = |live, role| check(&facts(None, false, None, role, live), &settings);
+    assert!(rules(&judge(4, "oversight")).is_empty());
+    let over = judge(5, "oversight");
+    assert!(over.violations[0]
+        .message
+        .starts_with("max_workers_per_overseer=5 reached"));
+    assert!(rules(&judge(9, "person")).is_empty());
+    let unknown = StartFacts {
+        caller_role: None,
+        ..facts(None, false, None, "x", 9)
+    };
+    assert!(rules(&check(&unknown, &settings)).is_empty());
+}
+
+#[test]
+fn failed_reviews_escalate_implement_and_a_start_with_no_purpose() {
+    let settings = table(&[]);
+    assert_eq!(escalation(Some("implement"), 1, &settings), None);
+    assert_eq!(
+        escalation(Some("implement"), 2, &settings),
+        Some("implement-careful")
+    );
+    assert_eq!(escalation(Some("mechanical"), 5, &settings), None);
+    assert_eq!(escalation(None, 2, &settings), Some("implement-careful"));
+    assert_eq!(escalation(None, 1, &settings), None);
 }

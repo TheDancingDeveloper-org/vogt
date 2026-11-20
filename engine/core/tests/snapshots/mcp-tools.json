@@ -3915,6 +3915,19 @@
             "title": "Reason",
             "type": "string"
           },
+          "override": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Why this start may break the dispatch rules (WI-1329): the worker cap, review by oversight only and the profile's model. Accepted only from an oversight session; audited as `dispatch.override` with this text as its reason, and raised in the Inbox.",
+            "title": "Override"
+          },
           "purpose": {
             "anyOf": [
               {
