@@ -970,8 +970,23 @@ than these routes.
   one the GUI started the label is the binding. An agent task run carries its
   task's `vogt_work_item` as the label. The PWA's Places rail shows it as a
   `✦ WI-n` chip. Requires `sessions`. This is an additive field on
-  `SessionSpec`/`SessionSummary`, the same shape as `role`; WI-956 slice 2's
-  `supervisor` is to be added beside it the same way.
+  `SessionSpec`/`SessionSummary`, the same shape as `role`.
+- `SessionSpec.supervisor` (WI-1521) is the engine session id of the oversight
+  session that started this one; vogt-core sets it when an oversight session
+  calls `session.start`, and a person's or a worker's start sends none. It is
+  kept in the record, shown on the summary (absent when none), and is who a
+  wake line is typed into. Only vogt-core (the stack secret) or a person may
+  name one, and only an oversight session may be named: any other session token
+  is refused `403`, and a worker, shell or missing id is `400`. The engine cannot
+  see which session core acts for; it relies on core naming only the oversight
+  session that made the call, the same trust as `session_ref`.
+- `SessionSpec.wake_on` (WI-1521): the change kinds (`done`, `reported`,
+  `blocked`, `approval`, `errored`, `budget`) an oversight session wants a
+  wake line for. Empty (the default) types nothing; an unknown kind is `400`.
+  A supervised session's change in one of those kinds is coalesced over a 60 s
+  window into one line typed into the supervisor, naming each worker by the
+  first eight characters of its id and never by its name, e.g.
+  `[vogt] 2 workers changed (done: 3f9a1c0e, blocked: 7b2d44aa) — session_changes(since=41)`.
 - `SessionSpec.worktree` `{"branch": "...", "base_ref": "..."}` (WI-1298),
   sent by vogt-core when `session.start` is called with `worktree: true`.
   The engine creates a git worktree of `cwd` as a sibling directory named

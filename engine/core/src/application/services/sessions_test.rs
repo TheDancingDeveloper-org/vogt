@@ -132,6 +132,7 @@ pub(super) fn start_params(
         worktree: None,
         repo_map: None,
         cold_wake_opt_out: false,
+        wake_on: Vec::new(),
         explicit_null: Vec::new(),
     }
 }
