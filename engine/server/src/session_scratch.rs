@@ -425,22 +425,34 @@ pub fn writable_roots() -> Vec<PathBuf> {
 /// How long a sampled usage is reused before the next walk.
 const EPHEMERAL_SAMPLE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// The last sampled usage of the writable roots, with when it was taken.
-static EPHEMERAL_SAMPLE: std::sync::Mutex<Option<(std::time::Instant, u64)>> =
-    std::sync::Mutex::new(None);
+/// The bytes used under the writable roots, sampled and cached for
+/// `EPHEMERAL_SAMPLE_TTL`. One per engine (a test makes its own).
+pub struct EphemeralUsage {
+    roots: Vec<PathBuf>,
+    sample: std::sync::Mutex<Option<(std::time::Instant, u64)>>,
+}
 
-/// Bytes used under `roots`, sampled and cached for `EPHEMERAL_SAMPLE_TTL`.
-pub fn ephemeral_used(roots: &[PathBuf]) -> u64 {
-    let now = std::time::Instant::now();
-    let mut sample = EPHEMERAL_SAMPLE.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some((taken, used)) = *sample {
-        if now.duration_since(taken) < EPHEMERAL_SAMPLE_TTL {
-            return used;
+impl EphemeralUsage {
+    pub fn new(roots: Vec<PathBuf>) -> Self {
+        Self {
+            roots,
+            sample: std::sync::Mutex::new(None),
         }
     }
-    let used = roots.iter().map(|r| dir_bytes(r)).sum();
-    *sample = Some((now, used));
-    used
+
+    /// Bytes used under the roots, from the cached sample while it is fresh.
+    pub fn used(&self) -> u64 {
+        let now = std::time::Instant::now();
+        let mut sample = self.sample.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((taken, used)) = *sample {
+            if now.duration_since(taken) < EPHEMERAL_SAMPLE_TTL {
+                return used;
+            }
+        }
+        let used = self.roots.iter().map(|r| dir_bytes(r)).sum();
+        *sample = Some((now, used));
+        used
+    }
 }
 
 /// The percent of `limit` at which a host session is refused.
