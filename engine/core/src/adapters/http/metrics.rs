@@ -12,8 +12,11 @@
 //! `component="core"`, which tells the core from the engine in a scrape that
 //! sees both. Python's `python_gc_*` series have no Rust counterpart.
 
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{LazyLock, Mutex};
+use std::time::Duration;
 
 use axum::http::header;
 use axum::response::IntoResponse;
@@ -27,8 +30,81 @@ pub const METRICS_ENV: &str = "VOGT_METRICS_ADDR";
 pub const DEFAULT_ADDR: &str = "0.0.0.0:9465";
 pub const COMPONENT: &str = "core";
 
+/// Response header carrying the route template the core matched. The engine's
+/// `/api/vogt` proxy hop reads it to label its own timing (WI-2697).
+pub const ROUTE_HEADER: &str = "x-vogt-route";
+/// The route label for a request no route claimed: one series, not one per path.
+pub const UNMATCHED: &str = "unmatched";
+/// Seconds. Prometheus' default buckets: request latency, 5 ms to 10 s.
+pub const REQUEST_BUCKETS: &[f64] = &[
+    0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0,
+];
+
 /// Set once a listener is up, so a second start cannot bind the port twice.
 static STARTED: AtomicBool = AtomicBool::new(false);
+
+/// One label set of `vogt_core_http_request_seconds`: cumulative bucket counts,
+/// the sum of observed seconds and the observation count.
+#[derive(Default)]
+struct RequestSeries {
+    buckets: Vec<u64>,
+    sum: f64,
+    count: u64,
+}
+
+/// The labels of one series: route template, method, status.
+type RequestKey = (String, String, u16);
+
+/// Request latency by route template, method and status. The label values are
+/// bounded by the registry's route table and the status codes, never a path.
+static REQUESTS: LazyLock<Mutex<BTreeMap<RequestKey, RequestSeries>>> =
+    LazyLock::new(|| Mutex::new(BTreeMap::new()));
+
+/// Time one answered request under its route template (WI-2697).
+pub fn observe_request(route: &str, method: &str, status: u16, elapsed: Duration) {
+    let seconds = elapsed.as_secs_f64();
+    let mut series = REQUESTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let entry = series
+        .entry((route.to_string(), method.to_string(), status))
+        .or_insert_with(|| RequestSeries {
+            buckets: vec![0; REQUEST_BUCKETS.len()],
+            ..RequestSeries::default()
+        });
+    for (bound, count) in REQUEST_BUCKETS.iter().zip(entry.buckets.iter_mut()) {
+        if seconds <= *bound {
+            *count += 1;
+        }
+    }
+    entry.sum += seconds;
+    entry.count += 1;
+}
+
+/// The request-latency family in the text exposition format.
+fn render_requests(out: &mut String) {
+    const NAME: &str = "vogt_core_http_request_seconds";
+    out.push_str(&format!(
+        "# HELP {NAME} Time the core took to start answering a request, by route template, method and status.\n# TYPE {NAME} histogram\n"
+    ));
+    let series = REQUESTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    for ((route, method, status), entry) in series.iter() {
+        let labels = format!("route=\"{route}\",method=\"{method}\",status=\"{status}\"");
+        for (bound, count) in REQUEST_BUCKETS.iter().zip(&entry.buckets) {
+            out.push_str(&format!(
+                "{NAME}_bucket{{{labels},le=\"{bound}\"}} {count}\n"
+            ));
+        }
+        out.push_str(&format!(
+            "{NAME}_bucket{{{labels},le=\"+Inf\"}} {}\n",
+            entry.count
+        ));
+        out.push_str(&format!("{NAME}_sum{{{labels}}} {}\n", entry.sum));
+        out.push_str(&format!("{NAME}_count{{{labels}}} {}\n", entry.count));
+    }
+}
 
 /// `host:port`. A bare port or a missing host is refused, not guessed.
 pub fn parse_addr(value: &str) -> Result<SocketAddr, VogtError> {
@@ -98,6 +174,7 @@ pub fn render() -> String {
         "Start time of the process since unix epoch in seconds.",
         process.start_time,
     );
+    render_requests(&mut out);
     out
 }
 
@@ -200,6 +277,28 @@ mod tests {
         body.lines()
             .filter(|line| line.starts_with(name) && !line.starts_with('#'))
             .collect()
+    }
+
+    #[test]
+    fn a_request_is_timed_under_its_route_template() {
+        observe_request(
+            "/api/wi2697-test/{id}",
+            "GET",
+            200,
+            Duration::from_millis(30),
+        );
+        let body = render();
+        let count = series(&body, "vogt_core_http_request_seconds_count")
+            .into_iter()
+            .find(|line| line.contains("/api/wi2697-test/{id}"))
+            .expect("the request is in the scrape");
+        assert!(count.ends_with(" 1"), "{count}");
+        // 30 ms falls inside the 50 ms bucket and every bucket above it.
+        let bucket = series(&body, "vogt_core_http_request_seconds_bucket")
+            .into_iter()
+            .find(|line| line.contains("wi2697-test") && line.contains("le=\"0.05\""))
+            .expect("the bucket is in the scrape");
+        assert!(bucket.ends_with(" 1"), "{bucket}");
     }
 
     #[test]

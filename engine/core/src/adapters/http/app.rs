@@ -20,6 +20,7 @@ use axum::Router;
 
 use crate::adapters::auth_gate::{self, Grant, Request as AuthRequest};
 use crate::adapters::http::etag;
+use crate::adapters::http::metrics;
 use crate::core::{Clock, IdFactory, Principal};
 use crate::errors::VogtError;
 use crate::registry::{
@@ -494,10 +495,44 @@ fn bootstrap_params(body: &[u8]) -> Result<serde_json::Value, VogtError> {
     Ok(serde_json::Value::Object(out))
 }
 
+/// Where [`dispatch_routed`] records the route template it matched, so the
+/// wrapper that times the request can label it (WI-2697). Set at most once.
+#[derive(Clone, Default)]
+struct RouteSlot(Arc<std::sync::OnceLock<&'static str>>);
+
+/// Time every API request to its response start, under the route template it
+/// matched (`/api/work/{id}`, never the id), and name that template in the
+/// `x-vogt-route` response header for the engine's proxy hop.
 async fn dispatch<C: Clock + Send + 'static, I: IdFactory + Send + 'static>(
+    State(routed): State<Routed<C, I>>,
+    mut request: Request<Body>,
+) -> Response {
+    let method = request.method().as_str().to_string();
+    let slot = RouteSlot::default();
+    request.extensions_mut().insert(slot.clone());
+    let started = std::time::Instant::now();
+    let mut response = dispatch_routed(State(routed), request).await;
+    let route = match slot.0.get() {
+        Some(path) => format!("{API_PREFIX}{path}"),
+        None => metrics::UNMATCHED.to_string(),
+    };
+    metrics::observe_request(
+        &route,
+        &method,
+        response.status().as_u16(),
+        started.elapsed(),
+    );
+    if let Ok(value) = HeaderValue::from_str(&route) {
+        response.headers_mut().insert(metrics::ROUTE_HEADER, value);
+    }
+    response
+}
+
+async fn dispatch_routed<C: Clock + Send + 'static, I: IdFactory + Send + 'static>(
     State((state, build, clock_for)): State<Routed<C, I>>,
     request: Request<Body>,
 ) -> Response {
+    let route_slot = request.extensions().get::<RouteSlot>().cloned();
     let method = request.method().clone();
     let path = request.uri().path().to_string();
     let query = request.uri().query().map(str::to_string);
@@ -606,6 +641,9 @@ async fn dispatch<C: Clock + Send + 'static, I: IdFactory + Send + 'static>(
         return not_found();
     }
     let operation = matched.expect("just checked").clone();
+    if let Some(slot) = &route_slot {
+        let _ = slot.0.set(operation.http_route().path);
+    }
     if method == Method::HEAD {
         return method_not_allowed(&state.registry, operation_path);
     }
