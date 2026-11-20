@@ -199,6 +199,11 @@ moves on:
   failing: ci — <log>`) into each live session started for that item, once per
   conclusion, so an agent waiting on CI wakes instead of polling
   (`ci_watch_notify_sessions` turns the nudge off).
+- **`CI run may be hung: <workflow> queued|running <n> min`** — a run on a
+  bound branch still queued past `ci_hung_queued_after_minutes` (30) or
+  running past `ci_hung_running_after_minutes` (90). It names the run and the
+  suggested `gh run cancel <id>`, clears when the run concludes, and the
+  item's live sessions get one notice per run. Nothing is cancelled for you.
 - **`Deploy failed on lane <lane>`** — a configured deploy lane's receipt
   (`deploy_lanes`) reports the deploy or its smoke test failed; it clears when
   a later receipt reports success.

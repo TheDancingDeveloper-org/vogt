@@ -35,6 +35,7 @@ const MAX_BOUND: i64 = 500;
 const KIND_TASK_RUN: &str = "agent_task.run";
 const REF_FAILURE_KIND: &str = "ci.ref_failure";
 const BRANCH_CONCLUDED_KIND: &str = "ci.branch_concluded";
+const RUN_HUNG_KIND: &str = "ci.run_hung";
 const DEPLOY_FAILED_KIND: &str = "deploy.failed";
 const SOURCES: [&str; 4] = ["github", "drift", "ci", "agent"];
 
@@ -867,6 +868,8 @@ where
             .or_default()
             .push((*observation).clone());
     }
+    let hung_now = now_of(&ctx.clock).unix_seconds();
+    let hung_after = crate::application::ci_watch::hung_thresholds(config);
     for overlay in view.bound_branch_overlays(MAX_BOUND)? {
         let mut settled: Vec<(String, decisions::BranchCi)> = Vec::new();
         for branch in &overlay.branches {
@@ -874,7 +877,7 @@ where
             else {
                 continue;
             };
-            if let Some(ci) = decisions::branch_ci(runs, branch) {
+            if let Some(ci) = decisions::branch_ci_at(runs, branch, Some((hung_now, hung_after))) {
                 settled.push((branch.clone(), ci));
             }
         }
@@ -893,14 +896,20 @@ where
             continue;
         }
         for (branch, ci) in settled {
+            if !projects.contains_key(&overlay.project_id) {
+                continue;
+            }
             if matches!(
                 ci.state,
                 decisions::BranchState::Passed
                     | decisions::BranchState::Failed
                     | decisions::BranchState::Cancelled
-            ) && projects.contains_key(&overlay.project_id)
-            {
+            ) {
                 entries.push(bound_branch_entry(ctx, &overlay, &branch, &ci, &projects));
+            }
+            // WI-1334: one entry per hung run; it goes when the run concludes.
+            for hung in &ci.hung {
+                entries.push(hung_run_entry(ctx, &overlay, &branch, hung, &projects));
             }
         }
     }
@@ -1382,6 +1391,69 @@ fn bound_branch_entry<C: Clock, I: IdFactory>(
         action: action_of(
             "observation",
             json!({"subject_key": newest.observation.subject_key}),
+        ),
+        actor: &actors::system_actor(),
+        extra: json!({}),
+    })
+}
+
+/// A run on a bound branch still queued or running past its threshold.
+fn hung_run_entry<C: Clock, I: IdFactory>(
+    ctx: &AppContext<C, I>,
+    overlay: &crate::core::WorkOverlay,
+    branch: &str,
+    hung: &decisions::HungRun,
+    projects: &BTreeMap<String, Project>,
+) -> Value {
+    let project = projects.get(&overlay.project_id);
+    let observation = &hung.observation;
+    let run = hung
+        .run_id
+        .map_or_else(|| "unknown run".to_string(), |id| id.to_string());
+    let state = match hung.phase {
+        decisions::HungPhase::Queued => "queued",
+        decisions::HungPhase::Running => "running",
+    };
+    let basis = if hung.since_field == "run_started_at" {
+        ""
+    } else {
+        " (measured from the run's last update: the forge gave no start time)"
+    };
+    let cancel = hung
+        .run_id
+        .map(|id| format!(" Suggested: `gh run cancel {id}`."))
+        .unwrap_or_default();
+    let summary = truncate(
+        &format!(
+            "{} run {run} on {branch} for {} has been {state} {} min, since {}{basis}.{cancel} Clears when the run concludes.",
+            hung.workflow, overlay.subject_key, hung.elapsed_minutes, hung.since
+        ),
+        1000,
+    );
+    let (trust, freshness) = freshness(observation.observed_at, ctx);
+    entry(EntrySpec {
+        entry_key: format!(
+            "ci:hung:{}",
+            crate::application::ci_watch::hung_entity(hung)
+        ),
+        source: "ci",
+        kind: RUN_HUNG_KIND,
+        occurred_at: Some(parse_moment(&hung.since).unwrap_or(observation.observed_at)),
+        observed_at: Some(observation.observed_at),
+        title: &format!(
+            "CI run may be hung: {} {state} {} min",
+            hung.workflow, hung.elapsed_minutes
+        ),
+        summary: &summary,
+        project_slug: project.map(|project| project.slug.as_str()),
+        work_item_ref: Some(&overlay.subject_key),
+        source_subject_key: &observation.subject_key,
+        source_url: observation.source_url.as_deref(),
+        trust_state: trust,
+        freshness,
+        action: action_of(
+            "observation",
+            json!({"subject_key": observation.subject_key}),
         ),
         actor: &actors::system_actor(),
         extra: json!({}),

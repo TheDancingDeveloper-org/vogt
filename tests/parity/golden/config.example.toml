@@ -76,6 +76,14 @@
 # default policy: behaviour
 # ci_watch_notify_sessions = true
 
+# A run on a bound branch still queued (waiting for a runner) this many minutes after it started raises a `ci.run_hung` Inbox entry and one notice to the item's live sessions. Zero turns queued detection off. Detection only: nothing is cancelled.
+# default policy: behaviour
+# ci_hung_queued_after_minutes = 30
+
+# A run on a bound branch still in progress this many minutes after it started raises a `ci.run_hung` Inbox entry and one notice to the item's live sessions. Zero turns running detection off. Detection only: nothing is cancelled.
+# default policy: behaviour
+# ci_hung_running_after_minutes = 90
+
 # When true, the session sweep treats an `AUTOPILOT: DONE` as done only if the session posted a `result` report (`session.report`) since its turn began; otherwise the row reads `waiting` with the reason `done without a result report`, so oversight asks for one instead of trusting the line. Off by default.
 # default policy: behaviour
 # autopilot_done_requires_result_report = false

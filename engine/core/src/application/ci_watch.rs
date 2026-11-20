@@ -10,6 +10,12 @@
 //!   feed and types a one-line notice into each live session started for the
 //!   item, so the agent wakes on the result.
 //!
+//! A run still queued or in progress past `ci_hung_queued_after_minutes` /
+//! `ci_hung_running_after_minutes` (WI-1334) is a `ci.run_hung` Inbox entry
+//! (gone once the run concludes) and one notice per run into the same
+//! sessions, recorded as a `ci.run_hung` event keyed by the run. Detection
+//! only: nothing is cancelled.
+//!
 //! "Once" is the event: its entity id names the item, branch, revision and
 //! verdict, so a conclusion that already has an event is never re-announced,
 //! not by the next sweep and not by a restart. Only fresh conclusions (the last
@@ -23,13 +29,16 @@ use serde_json::{json, Value};
 use crate::adapters::engine::EngineClient;
 use crate::adapters::forge::KIND_CHECK;
 use crate::application::context::AppContext;
+use crate::config::VogtConfig;
 use crate::core::{Clock, IdFactory, Moment, Observation, WorkOverlay, TERMINAL_STATES};
-use crate::decisions::{self, BranchCi, BranchState};
+use crate::decisions::{self, BranchCi, BranchState, HungPhase, HungRun, HungThresholds};
 use crate::errors::VogtError;
 use crate::storage::interface::{DeclaredStore, ObservedStore, ReadView};
 
 /// `ci_watch.py` `CI_BRANCH_CONCLUDED_EVENT`.
 pub const CI_BRANCH_CONCLUDED_EVENT: &str = "ci.branch_concluded";
+/// `ci_watch.py` `CI_RUN_HUNG_EVENT`.
+pub const CI_RUN_HUNG_EVENT: &str = "ci.run_hung";
 /// How recent a conclusion must be to be announced to a session: six hours.
 const FRESH_WINDOW_SECONDS: i64 = 6 * 3600;
 /// Bound overlays considered per read. Python's `ci_watch.MAX_BOUND`.
@@ -104,6 +113,32 @@ fn settled(ci: &BranchCi) -> bool {
     )
 }
 
+/// The configured hung-run thresholds; zero minutes is off.
+pub fn hung_thresholds(config: &VogtConfig) -> HungThresholds {
+    let seconds = |minutes: i64| (minutes > 0).then(|| minutes * 60);
+    HungThresholds {
+        queued: seconds(config.ci_hung_queued_after_minutes),
+        running: seconds(config.ci_hung_running_after_minutes),
+    }
+}
+
+/// What a hung run is deduped by: the run (and attempt) itself, or the
+/// observation's subject where the forge gave no run id.
+pub fn hung_entity(hung: &HungRun) -> String {
+    let payload = &hung.observation.payload;
+    if hung.run_id.is_none() {
+        return format!("run:{}", hung.observation.subject_key);
+    }
+    let suffix = payload
+        .get("run_attempt")
+        .and_then(Value::as_i64)
+        .map(|attempt| format!(".{attempt}"))
+        .unwrap_or_default();
+    let repo = payload.get("repo").and_then(Value::as_str).unwrap_or("");
+    let run_id = hung.run_id.unwrap_or_default();
+    format!("run:{repo}:{run_id}{suffix}")
+}
+
 /// CI on the newest revision of every branch an open item is bound to.
 ///
 /// `checks_by_branch` is keyed `(project_id, branch)`, built once from the
@@ -112,10 +147,11 @@ fn settled(ci: &BranchCi) -> bool {
 pub fn bound_branches(
     view: &impl ReadView,
     checks_by_branch: &BTreeMap<(String, String), Vec<Observation>>,
+    hung_after: Option<(i64, HungThresholds)>,
 ) -> Result<Vec<BoundBranch>, VogtError> {
     let mut found = Vec::new();
     for overlay in view.bound_branch_overlays(MAX_BOUND)? {
-        let settled_branches = settled_on(&overlay, checks_by_branch);
+        let settled_branches = settled_on(&overlay, checks_by_branch, hung_after);
         if settled_branches.is_empty() {
             continue;
         }
@@ -147,13 +183,14 @@ pub fn bound_branches(
 fn settled_on(
     overlay: &WorkOverlay,
     checks_by_branch: &BTreeMap<(String, String), Vec<Observation>>,
+    hung_after: Option<(i64, HungThresholds)>,
 ) -> Vec<(String, BranchCi)> {
     let mut found = Vec::new();
     for branch in &overlay.branches {
         let Some(runs) = checks_by_branch.get(&(overlay.project_id.clone(), branch.clone())) else {
             continue;
         };
-        if let Some(ci) = decisions::branch_ci(runs, branch) {
+        if let Some(ci) = decisions::branch_ci_at(runs, branch, hung_after) {
             found.push((branch.clone(), ci));
         }
     }
@@ -219,6 +256,25 @@ pub fn notice_text(bound: &BoundBranch) -> String {
         .collect()
 }
 
+/// The one line typed into a bound session about a hung run.
+pub fn hung_notice_text(bound: &BoundBranch, hung: &HungRun) -> String {
+    let run = hung
+        .run_id
+        .map_or_else(|| "?".to_owned(), |id| id.to_string());
+    let verb = match hung.phase {
+        HungPhase::Queued => "been queued",
+        HungPhase::Running => "been running",
+    };
+    let line = format!(
+        "[vogt] CI run {run} ({}) on {} has {verb} {} min; it may be hung ({})",
+        hung.workflow, bound.branch, hung.elapsed_minutes, bound.work_item_ref
+    );
+    line.chars()
+        .filter(|ch| crate::core::py_printable(*ch))
+        .take(NOTICE_MAX_CHARS)
+        .collect()
+}
+
 /// Whether a conclusion finished recently enough to announce. `concluded_at`
 /// must carry an offset, as Python's `fromisoformat` check requires: a naive
 /// timestamp is never fresh.
@@ -271,10 +327,13 @@ pub fn announce_concluded<C: Clock + 'static, I: IdFactory + 'static>(
                 CHECKS_PER_PROJECT,
             )?);
         }
-        bound_branches(&view, &index_by_branch(&checks))?
+        let now = moment_now(ctx).unix_seconds();
+        let hung_after = Some((now, hung_thresholds(&ctx.config)));
+        bound_branches(&view, &index_by_branch(&checks), hung_after)?
     };
     let mut announced = 0;
     for bound in found {
+        announce_hung(ctx, &bound)?;
         let now = moment_now(ctx).unix_seconds();
         if !settled(&bound.ci) || !fresh(bound.ci.concluded_at.as_deref(), now) {
             continue;
@@ -298,7 +357,7 @@ pub fn announce_concluded<C: Clock + 'static, I: IdFactory + 'static>(
             ctx.engine.as_ref(),
             ctx.config.ci_watch_notify_sessions,
             &sessions,
-            &bound,
+            &notice_text(&bound),
         )?;
         ctx.declared.publish_event(
             CI_BRANCH_CONCLUDED_EVENT,
@@ -319,6 +378,58 @@ pub fn announce_concluded<C: Clock + 'static, I: IdFactory + 'static>(
     Ok(announced)
 }
 
+/// One event and one session notice per hung run, ever. Returns how many runs
+/// were announced.
+fn announce_hung<C: Clock + 'static, I: IdFactory + 'static>(
+    ctx: &AppContext<C, I>,
+    bound: &BoundBranch,
+) -> Result<usize, VogtError> {
+    let mut announced = 0;
+    for hung in &bound.ci.hung {
+        let entity = hung_entity(hung);
+        let sessions: Vec<String> = {
+            let view = ctx.declared.read()?;
+            if !view.list_events(0, 1, Some(entity.as_str()))?.is_empty() {
+                continue;
+            }
+            match &bound.work_item_id {
+                None => Vec::new(),
+                Some(work_item_id) => view
+                    .list_sessions(None, Some(work_item_id), false, MAX_SESSIONS, 0)?
+                    .into_iter()
+                    .map(|session| session.engine_session_id)
+                    .collect(),
+            }
+        };
+        let nudged = nudge(
+            ctx.engine.as_ref(),
+            ctx.config.ci_watch_notify_sessions,
+            &sessions,
+            &hung_notice_text(bound, hung),
+        )?;
+        ctx.declared.publish_event(
+            CI_RUN_HUNG_EVENT,
+            "ci_run",
+            &entity,
+            &json!({
+                "work_item": bound.work_item_ref,
+                "branch": bound.branch,
+                "workflow": hung.workflow,
+                "run_id": hung.run_id,
+                "phase": match hung.phase {
+                    HungPhase::Queued => "queued",
+                    HungPhase::Running => "running",
+                },
+                "elapsed_minutes": hung.elapsed_minutes,
+                "sessions_notified": nudged,
+            }),
+            moment_now(ctx),
+        )?;
+        announced += 1;
+    }
+    Ok(announced)
+}
+
 /// Type the notice and then Enter into each session. A session at a permission
 /// prompt refuses the input (WI-983): that is a person's answer to give, so the
 /// session hears about the conclusion the next time it reads the Inbox.
@@ -326,18 +437,17 @@ fn nudge(
     engine: Option<&EngineClient>,
     notify: bool,
     engine_ids: &[String],
-    bound: &BoundBranch,
+    text: &str,
 ) -> Result<usize, VogtError> {
     let Some(engine) = engine.filter(|_| notify) else {
         return Ok(0);
     };
-    let text = notice_text(bound);
     let mut sent = 0;
     for engine_id in engine_ids {
         // The text, then the Enter that submits it. The Enter is sent only when
         // the text was taken.
         let delivered = || -> Result<bool, VogtError> {
-            Ok(engine.send_input(engine_id, &text, false, false, None)?
+            Ok(engine.send_input(engine_id, text, false, false, None)?
                 && engine.send_input(engine_id, "", true, false, None)?)
         };
         match delivered() {
@@ -591,6 +701,7 @@ mod tests {
             runs: Vec::new(),
             failing: failing.iter().map(|name| (*name).to_owned()).collect(),
             concluded_at: Some("2026-10-04T00:00:00Z".to_owned()),
+            hung: Vec::new(),
         }
     }
 
@@ -734,5 +845,146 @@ mod tests {
         seed(ctx, &[("ci", Some("success"))], "2000-01-01T00:00:00Z");
         assert_eq!(announce_concluded(ctx).unwrap(), 0);
         assert!(concluded_events(&built).is_empty());
+    }
+
+    /// One run of workflow `ci` on `wi-1`, still going or concluded, started
+    /// `started` (an RFC 3339 stamp); sealed as one sweep.
+    fn seed_run(
+        ctx: &AppContext<StepClock, SequentialIds>,
+        conclusion: Option<&str>,
+        started: &str,
+        status: &str,
+    ) {
+        let project_id = ctx
+            .declared
+            .read()
+            .unwrap()
+            .list_projects(10, 0)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap()
+            .id;
+        let at = moment_now(ctx);
+        let finding = PendingObservation {
+            kind: KIND_CHECK.to_owned(),
+            subject_key: format!("ci:acme/app@{}:ci@wi-1", "b".repeat(40)),
+            payload: json!({
+                "revision": "b".repeat(40),
+                "check": "ci",
+                "conclusion": conclusion,
+                "status": if conclusion.is_some() { "completed" } else { status },
+                "branch": "wi-1",
+                "event": "push",
+                "updated_at": started,
+                "run_started_at": started,
+                "run_id": 4242,
+                "run_attempt": 1,
+                "repo": "acme/app",
+            }),
+            content_digest: format!("run-{conclusion:?}-{started}"),
+            project_id: Some(project_id.clone()),
+            source_url: Some("https://github.com/acme/app/actions/runs/4242".to_owned()),
+            promoted: false,
+        };
+        let row = ctx
+            .observed
+            .begin_sweep(COLLECTOR_CHECKS, std::slice::from_ref(&project_id), at)
+            .unwrap();
+        ctx.observed.append(&row.id, &[finding], at).unwrap();
+        ctx.observed
+            .finish_sweep(&row.id, SweepOutcome::Ok, &[("projects", 1)], at, None)
+            .unwrap();
+        ctx.observed.rebuild_latest().unwrap();
+    }
+
+    fn minutes_ago(ctx: &AppContext<StepClock, SequentialIds>, minutes: i64) -> String {
+        chrono::DateTime::from_timestamp(moment_now(ctx).unix_seconds() - minutes * 60, 0)
+            .unwrap()
+            .to_rfc3339()
+    }
+
+    fn hung_rows(built: &Built) -> Vec<Value> {
+        let listed = crate::application::services::inbox::inbox_list_op(built, json!({})).unwrap();
+        listed["entries"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|entry| entry["kind"] == "ci.run_hung")
+            .collect()
+    }
+
+    fn hung_events(built: &Built) -> Vec<Value> {
+        let ctx = context(built);
+        let view = ctx.declared.read().unwrap();
+        view.list_events(0, 500, None)
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.kind == CI_RUN_HUNG_EVENT)
+            .map(|event| event.summary)
+            .collect()
+    }
+
+    #[test]
+    fn a_hung_run_is_one_inbox_row_and_one_notice_until_it_concludes() {
+        let (seen, engine) = recording_engine();
+        let built = bound_instance("hung", Some(engine));
+        let ctx = context(&built);
+        live_session(ctx, "eng-hung");
+
+        seed_run(ctx, None, &minutes_ago(ctx, 10), "in_progress");
+        assert!(hung_rows(&built).is_empty(), "10 min is inside the limit");
+
+        seed_run(ctx, None, &minutes_ago(ctx, 120), "in_progress");
+        let rows = hung_rows(&built);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0]["work_item_ref"], "WI-1");
+        assert_eq!(
+            rows[0]["source_url"],
+            "https://github.com/acme/app/actions/runs/4242"
+        );
+        let summary = rows[0]["summary"].as_str().unwrap();
+        assert!(summary.contains("gh run cancel 4242"), "{summary}");
+        assert!(summary.contains("min, since"), "{summary}");
+        assert_eq!(rows[0]["entry_key"], "ci:hung:run:acme/app:4242.1");
+
+        announce_concluded(ctx).unwrap();
+        announce_concluded(ctx).unwrap();
+        let sent = seen.lock().unwrap().clone();
+        let typed: Vec<&String> = sent
+            .iter()
+            .filter(|request| request.contains("[vogt] CI run 4242 (ci)"))
+            .collect();
+        assert_eq!(typed.len(), 1, "{sent:?}");
+        assert!(typed[0].contains("it may be hung"), "{}", typed[0]);
+        let events = hung_events(&built);
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0]["sessions_notified"], 1);
+        assert_eq!(events[0]["phase"], "running");
+
+        seed_run(ctx, Some("success"), &minutes_ago(ctx, 120), "in_progress");
+        assert!(hung_rows(&built).is_empty(), "gone once the run concludes");
+    }
+
+    #[test]
+    fn a_queued_run_uses_the_queued_limit() {
+        let built = bound_instance("hung-queued", None);
+        let ctx = context(&built);
+        seed_run(ctx, None, &minutes_ago(ctx, 35), "queued");
+        assert_eq!(hung_rows(&built).len(), 1, "queued past 30 min");
+        seed_run(ctx, None, &minutes_ago(ctx, 35), "in_progress");
+        assert!(hung_rows(&built).is_empty(), "running is allowed 90 min");
+    }
+
+    #[test]
+    fn zero_minutes_turns_a_phase_off() {
+        let config = VogtConfig {
+            ci_hung_queued_after_minutes: 0,
+            ..VogtConfig::default()
+        };
+        let thresholds = hung_thresholds(&config);
+        assert_eq!(thresholds.queued, None);
+        assert_eq!(thresholds.running, Some(90 * 60));
     }
 }

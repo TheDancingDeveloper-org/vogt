@@ -1,4 +1,5 @@
-// Pure: observations in, verdicts out. Nothing here reads a store or a clock.
+// Pure: observations in, verdicts out. Nothing here reads a store or a clock;
+// hung-run detection takes `now` from the caller.
 
 const PULL_REQUEST_EVENTS: &[&str] = &["pull_request", "pull_request_target", "merge_group"];
 const GITHUB_MANAGED_EVENTS: &[&str] = &["dynamic"];
@@ -247,6 +248,38 @@ pub struct BranchRun {
     pub conclusion: Option<String>,
 }
 
+/// Statuses of a run that has not got a runner yet. Anything else short of
+/// `completed` counts as running.
+const QUEUED_STATUSES: &[&str] = &["queued", "waiting", "pending", "requested", "blocked"];
+
+/// How long a run may sit queued or running before it looks hung, in seconds.
+/// `None` turns that phase's detection off.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HungThresholds {
+    pub queued: Option<i64>,
+    pub running: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HungPhase {
+    Queued,
+    Running,
+}
+
+/// A run still going past its phase's threshold.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HungRun {
+    pub observation: crate::core::Observation,
+    pub workflow: String,
+    pub run_id: Option<i64>,
+    pub phase: HungPhase,
+    /// The moment measured from, and which payload field it came from:
+    /// `run_started_at`, or `updated_at` when the forge did not say.
+    pub since: String,
+    pub since_field: &'static str,
+    pub elapsed_minutes: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BranchCi {
     pub branch: String,
@@ -255,11 +288,25 @@ pub struct BranchCi {
     pub runs: Vec<BranchRun>,
     pub failing: Vec<String>,
     pub concluded_at: Option<String>,
+    /// Runs still going past a threshold (only when `branch_ci` got a clock).
+    pub hung: Vec<HungRun>,
 }
 
 /// What CI says about `branch`'s newest observed revision, or `None` when no
 /// run on the branch has been observed.
+#[cfg(test)]
 pub fn branch_ci(checks: &[crate::core::Observation], branch: &str) -> Option<BranchCi> {
+    branch_ci_at(checks, branch, None)
+}
+
+/// [`branch_ci`] with hung-run detection: given `(now_unix_seconds,
+/// thresholds)`, runs still going past their phase's threshold are listed in
+/// `hung`.
+pub fn branch_ci_at(
+    checks: &[crate::core::Observation],
+    branch: &str,
+    hung_after: Option<(i64, HungThresholds)>,
+) -> Option<BranchCi> {
     let on_branch: Vec<&crate::core::Observation> = checks
         .iter()
         .filter(|check| {
@@ -349,6 +396,13 @@ pub fn branch_ci(checks: &[crate::core::Observation], branch: &str) -> Option<Br
             stamps.iter().copied().max().map(str::to_string)
         }
     };
+    let hung = match hung_after {
+        None => Vec::new(),
+        Some((now, thresholds)) => runs
+            .iter()
+            .filter_map(|run| hung_run(&run.observation, now, thresholds))
+            .collect(),
+    };
     Some(BranchCi {
         branch: branch.to_string(),
         revision,
@@ -356,7 +410,62 @@ pub fn branch_ci(checks: &[crate::core::Observation], branch: &str) -> Option<Br
         runs,
         failing,
         concluded_at,
+        hung,
     })
+}
+
+/// `check` as a hung run, or `None` when it is concluded, has no usable start
+/// stamp, or is within its phase's threshold.
+pub fn hung_run(
+    check: &crate::core::Observation,
+    now_unix: i64,
+    hung_after: HungThresholds,
+) -> Option<HungRun> {
+    let payload = &check.payload;
+    let status = payload.get("status").and_then(serde_json::Value::as_str);
+    if ci_conclusion_of(check).is_some() || status == Some("completed") {
+        return None;
+    }
+    let phase = if status.is_some_and(|status| QUEUED_STATUSES.contains(&status)) {
+        HungPhase::Queued
+    } else {
+        HungPhase::Running
+    };
+    let limit = match phase {
+        HungPhase::Queued => hung_after.queued,
+        HungPhase::Running => hung_after.running,
+    }?;
+    let (since_field, since) = match payload_str(payload, "run_started_at") {
+        Some(since) => ("run_started_at", since),
+        None => (
+            "updated_at",
+            payload
+                .get("updated_at")
+                .and_then(serde_json::Value::as_str)?,
+        ),
+    };
+    let moment = parse_stamp(since)?;
+    let elapsed = now_unix - moment;
+    if elapsed < limit {
+        return None;
+    }
+    Some(HungRun {
+        observation: check.clone(),
+        workflow: ci_workflow_of(check),
+        run_id: payload.get("run_id").and_then(serde_json::Value::as_i64),
+        phase,
+        since: since.to_string(),
+        since_field,
+        elapsed_minutes: elapsed.div_euclid(60),
+    })
+}
+
+/// Unix seconds of a stamp that carries an offset; a naive or unparseable one
+/// is `None`.
+fn parse_stamp(stamp: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(&stamp.replace(' ', "T"))
+        .ok()
+        .map(|moment| moment.timestamp())
 }
 
 #[cfg(test)]
@@ -476,6 +585,107 @@ mod ci_alert_tests {
                 .map(|run| run.workflow.as_str())
                 .collect::<Vec<_>>(),
             vec!["build", "test"]
+        );
+    }
+
+    const NOW: i64 = 1_793_419_200;
+
+    fn stamp(minutes_ago: i64) -> String {
+        chrono::DateTime::from_timestamp(NOW - minutes_ago * 60, 0)
+            .unwrap()
+            .to_rfc3339()
+    }
+
+    fn run(extra: serde_json::Value) -> crate::core::Observation {
+        let mut observation = check("wi-1", "push", "ci", "", &stamp(1));
+        observation.payload["conclusion"] = serde_json::Value::Null;
+        observation.payload["status"] = "in_progress".into();
+        observation.payload["run_id"] = 77.into();
+        for (key, value) in extra.as_object().unwrap() {
+            observation.payload[key] = value.clone();
+        }
+        observation
+    }
+
+    const LIMITS: HungThresholds = HungThresholds {
+        queued: Some(30 * 60),
+        running: Some(45 * 60),
+    };
+
+    #[test]
+    fn a_run_in_progress_for_50_min_is_hung_and_30_is_not() {
+        let hung = hung_run(
+            &run(serde_json::json!({"run_started_at": stamp(50)})),
+            NOW,
+            LIMITS,
+        )
+        .unwrap();
+        assert_eq!(hung.phase, HungPhase::Running);
+        assert_eq!(hung.elapsed_minutes, 50);
+        assert_eq!(hung.since_field, "run_started_at");
+        assert_eq!(hung.run_id, Some(77));
+        assert!(hung_run(
+            &run(serde_json::json!({"run_started_at": stamp(30)})),
+            NOW,
+            LIMITS
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn queued_and_running_have_separate_thresholds() {
+        let queued = run(serde_json::json!({"status": "queued", "run_started_at": stamp(35)}));
+        assert_eq!(
+            hung_run(&queued, NOW, LIMITS).unwrap().phase,
+            HungPhase::Queued
+        );
+        let running = run(serde_json::json!({"run_started_at": stamp(35)}));
+        assert!(hung_run(&running, NOW, LIMITS).is_none());
+        let off = HungThresholds {
+            queued: None,
+            running: Some(45 * 60),
+        };
+        assert!(hung_run(&queued, NOW, off).is_none());
+    }
+
+    #[test]
+    fn a_concluded_run_is_never_hung() {
+        let done = run(serde_json::json!({
+            "status": "completed", "conclusion": "success", "run_started_at": stamp(500)
+        }));
+        assert!(hung_run(&done, NOW, LIMITS).is_none());
+        let completed_without = run(serde_json::json!({
+            "status": "completed", "run_started_at": stamp(500)
+        }));
+        assert!(hung_run(&completed_without, NOW, LIMITS).is_none());
+    }
+
+    #[test]
+    fn without_run_started_at_it_falls_back_to_updated_at() {
+        let hung = hung_run(
+            &run(serde_json::json!({"updated_at": stamp(60)})),
+            NOW,
+            LIMITS,
+        )
+        .unwrap();
+        assert_eq!(hung.since_field, "updated_at");
+        let naive = run(serde_json::json!({"run_started_at": "2026-10-31T00:00:00"}));
+        assert!(hung_run(&naive, NOW, LIMITS).is_none(), "naive stamp");
+    }
+
+    #[test]
+    fn branch_ci_lists_hung_runs_only_when_given_a_clock() {
+        let observation = run(serde_json::json!({"run_started_at": stamp(60)}));
+        let plain = branch_ci(std::slice::from_ref(&observation), "wi-1").unwrap();
+        assert!(plain.hung.is_empty());
+        let timed = branch_ci_at(&[observation], "wi-1", Some((NOW, LIMITS))).unwrap();
+        assert_eq!(
+            timed
+                .hung
+                .iter()
+                .map(|hung| hung.run_id)
+                .collect::<Vec<_>>(),
+            vec![Some(77)]
         );
     }
 }

@@ -319,6 +319,8 @@ pub struct VogtConfig {
     pub ci_alert_branches: Vec<String>,
     pub ci_alert_tags: Vec<String>,
     pub ci_watch_notify_sessions: bool,
+    pub ci_hung_queued_after_minutes: i64,
+    pub ci_hung_running_after_minutes: i64,
     pub deploy_lanes: Vec<DeployLane>,
     pub autopilot_done_requires_result_report: bool,
     pub usage_accounts: Vec<UsageAccount>,
@@ -461,6 +463,8 @@ impl Default for VogtConfig {
             ci_alert_branches: vec!["main".to_string(), "master".to_string(), "prod".to_string()],
             ci_alert_tags: vec!["v*".to_string()],
             ci_watch_notify_sessions: true,
+            ci_hung_queued_after_minutes: 30,
+            ci_hung_running_after_minutes: 90,
             deploy_lanes: Vec::new(),
             autopilot_done_requires_result_report: false,
             usage_accounts: Vec::new(),
@@ -922,6 +926,8 @@ fn apply_field(config: &mut VogtConfig, field: &FieldDoc, value: &Value) -> Resu
             match name {
                 "log_slow_request_ms" => config.log_slow_request_ms = number,
                 "retention_days" => config.retention_days = number,
+                "ci_hung_queued_after_minutes" => config.ci_hung_queued_after_minutes = number,
+                "ci_hung_running_after_minutes" => config.ci_hung_running_after_minutes = number,
                 "agent_activity_max_bytes_per_sweep" => {
                     config.agent_activity_max_bytes_per_sweep = number
                 }
@@ -1398,6 +1404,26 @@ const FIELD_CATALOGUE: &[FieldDoc] = &[
         example: "true",
     },
     FieldDoc {
+        name: "ci_hung_queued_after_minutes",
+        env_var: "VOGT_CI_HUNG_QUEUED_AFTER_MINUTES",
+        type_label: "integer",
+        default_label: "`30`",
+        policy: DefaultPolicy::Behaviour,
+        description: "A run on a bound branch still queued (waiting for a runner) this many minutes after it started raises a `ci.run_hung` Inbox entry and one notice to the item's live sessions. Zero turns queued detection off. Detection only: nothing is cancelled.",
+        kind: Kind::Int { min: 0, max: None },
+        example: "30",
+    },
+    FieldDoc {
+        name: "ci_hung_running_after_minutes",
+        env_var: "VOGT_CI_HUNG_RUNNING_AFTER_MINUTES",
+        type_label: "integer",
+        default_label: "`90`",
+        policy: DefaultPolicy::Behaviour,
+        description: "A run on a bound branch still in progress this many minutes after it started raises a `ci.run_hung` Inbox entry and one notice to the item's live sessions. Zero turns running detection off. Detection only: nothing is cancelled.",
+        kind: Kind::Int { min: 0, max: None },
+        example: "90",
+    },
+    FieldDoc {
         name: "autopilot_done_requires_result_report",
         env_var: "VOGT_AUTOPILOT_DONE_REQUIRES_RESULT_REPORT",
         type_label: "boolean",
@@ -1858,6 +1884,8 @@ const FIELD_NAMES: &[&str] = &[
     "ci_alert_branches",
     "ci_alert_tags",
     "ci_watch_notify_sessions",
+    "ci_hung_queued_after_minutes",
+    "ci_hung_running_after_minutes",
     "autopilot_done_requires_result_report",
     "deploy_lanes",
     "usage_accounts",

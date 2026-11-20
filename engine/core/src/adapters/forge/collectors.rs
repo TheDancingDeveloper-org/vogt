@@ -306,6 +306,9 @@ fn check_finding(
             check.run_attempt.map(Value::from).unwrap_or(Value::Null),
         );
     }
+    if let Some(started) = &check.run_started_at {
+        payload.insert("run_started_at".into(), Value::String(started.clone()));
+    }
     if let Some(jobs) = failed_jobs(ctx, check)? {
         payload.insert("failed_jobs".into(), Value::Array(jobs));
     }

@@ -254,6 +254,7 @@ impl<T: ForgeTransport> ForgeProvider for ForgejoProvider<T> {
                     .or_else(|| text(item.get("created_at")))
                     .map(str::to_owned);
                 check.source_url = text(item.get("url")).map(str::to_owned);
+                check.run_started_at = text(item.get("run_started_at")).map(str::to_owned);
                 check
             })
             .collect())
