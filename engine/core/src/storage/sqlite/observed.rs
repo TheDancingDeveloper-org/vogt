@@ -33,6 +33,62 @@ const OPEN_STATE_SQL: &str =
 const CLOSED_STATE_SQL: &str =
     "lower(coalesce(json_extract(payload, '$.state'), '')) IN ('closed', 'merged')";
 
+/// The backlog candidate count (WI-4448). It mirrors `views::observed_candidates`
+/// row for row: the newest 1000 observed subjects (`latest`), then the drops in
+/// the ranked backlog's order, as one conjunction. A subject is kept when it is
+/// worklike, not suppressed (exact, scoped or glob), not implemented by a PR
+/// that names a subject in the same read, not adopted by a work item, and not
+/// closed out by a linked project's overlay. The two `?` are the bug and
+/// feature initial states.
+const BACKLOG_COUNT_SQL: &str = "
+WITH capped AS (
+    SELECT subject_key, kind, project_id, payload, promoted
+    FROM latest_observations
+    WHERE kind IN ('forge.issue', 'marker', 'forge.pull_request')
+      AND lower(coalesce(json_extract(payload, '$.state'), '')) NOT IN ('closed', 'merged')
+    ORDER BY observed_at DESC, subject_key
+    LIMIT 1000
+),
+sup AS (
+    SELECT match_kind, subject_key_or_pattern AS pat, scope_project_id AS scope
+    FROM decl.suppressions
+    WHERE revoked_at IS NULL
+    ORDER BY created_at DESC, id DESC
+    LIMIT 1000
+)
+SELECT COUNT(*) FROM capped r
+WHERE (r.kind <> 'marker' OR r.promoted = 1)
+  AND NOT EXISTS (
+    SELECT 1 FROM sup s
+    WHERE s.match_kind = 'exact' AND s.pat = r.subject_key
+      AND (s.scope IS NULL OR s.scope = r.project_id))
+  AND NOT EXISTS (
+    SELECT 1 FROM sup s
+    WHERE s.match_kind = 'pattern' AND (s.scope IS NULL OR s.scope = r.project_id)
+      AND vogt_glob(s.pat, r.subject_key))
+  AND NOT (r.kind = 'forge.pull_request'
+    AND json_type(r.payload, '$.implements') = 'array'
+    AND EXISTS (
+      SELECT 1 FROM json_each(r.payload, '$.implements') e
+      WHERE CAST(json_extract(e.value, '$.subject') AS TEXT) IN (SELECT subject_key FROM capped)
+        AND ((json_type(e.value, '$.subject') = 'text' AND json_extract(e.value, '$.subject') <> '')
+          OR (json_type(e.value, '$.subject') IN ('integer', 'real')
+              AND json_extract(e.value, '$.subject') <> 0))))
+  AND NOT EXISTS (
+    SELECT 1 FROM decl.work_links l JOIN decl.work_items w ON w.id = l.work_item_id
+    WHERE l.subject_key = r.subject_key)
+  AND NOT (r.kind = 'forge.issue'
+    AND EXISTS (SELECT 1 FROM decl.projects p WHERE p.id = r.project_id AND p.link_state = 'linked')
+    AND (lower(trim(coalesce(json_extract(r.payload, '$.state'), ''))) IN ('closed', 'merged')
+      OR coalesce(
+          nullif((SELECT o.workflow_state FROM decl.work_overlay o WHERE o.subject_key = r.subject_key), ''),
+          CASE WHEN json_type(r.payload, '$.labels') = 'array' AND EXISTS (
+                 SELECT 1 FROM json_each(r.payload, '$.labels') l
+                 WHERE l.type = 'text'
+                   AND lower(l.value) IN ('bug', 'defect', 'regression', 'crash'))
+               THEN ? ELSE ? END) IN ('done', 'wont_do')))
+";
+
 pub struct SqliteObservedStore<C, I> {
     path: PathBuf,
     /// Shared with the context and the declared store, so one tick or one draw
@@ -574,6 +630,44 @@ where
                 clauses.join(" AND ")
             ),
             params_from_iter(values),
+            |row| row.get(0),
+        )
+        .map_err(sql_err)
+    }
+
+    fn count_backlog_candidates(
+        &self,
+        declared_db: &std::path::Path,
+        inputs: &crate::storage::interface::BacklogCountInputs,
+    ) -> Result<i64, VogtError> {
+        if !declared_db.exists() {
+            return Err(VogtError::InvalidRequest(
+                "the declared store is missing, so the backlog cannot be counted".to_string(),
+            ));
+        }
+        let conn = self.open(false)?;
+        // `suppression.pattern` globs are matched by the same function the
+        // ranked backlog uses, so the count cannot disagree on a pattern.
+        conn.create_scalar_function(
+            "vogt_glob",
+            2,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8
+                | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+            |ctx| {
+                let pattern: String = ctx.get(0)?;
+                let text: String = ctx.get(1)?;
+                Ok(crate::glob::glob_match(&pattern, &text))
+            },
+        )
+        .map_err(sql_err)?;
+        conn.execute(
+            "ATTACH DATABASE ? AS decl",
+            [declared_db.to_string_lossy().as_ref()],
+        )
+        .map_err(sql_err)?;
+        conn.query_row(
+            BACKLOG_COUNT_SQL,
+            rusqlite::params![inputs.bug_initial_state, inputs.feature_initial_state],
             |row| row.get(0),
         )
         .map_err(sql_err)

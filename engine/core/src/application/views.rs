@@ -326,9 +326,11 @@ pub(crate) fn brief_population<C: Clock, I: IdFactory>(
 pub(crate) fn backlog_total_considered<C: Clock, I: IdFactory>(
     ctx: &AppContext<C, I>,
 ) -> Result<i64, VogtError> {
-    // The same candidate set `backlog` with no filters ranks, counted without
-    // scoring, trust or the per-row clock reads that feed them (WI-4448).
-    // `backlog` reads the freshness clock after the gather, and so does this.
+    // Counted in the stores (WI-4448): the declared rows with a COUNT, the
+    // observed candidates with one query that applies the ranked backlog's
+    // drops. No row is loaded, no trust or clock is read per row, and the count
+    // equals the ranked list's length. `backlog` reads the freshness clock
+    // after the gather, and so does this.
     let query = GatherQuery {
         project: None,
         kinds: Vec::new(),
@@ -339,9 +341,21 @@ pub(crate) fn backlog_total_considered<C: Clock, I: IdFactory>(
         trust_states: Vec::new(),
         include_prs: true,
     };
-    let considered = considered_count(ctx, &query)?;
+    let view = ctx.declared.read()?;
+    let filter = declared_filter(&view, None, &query)?;
+    let declared = view.count_work_items(&filter)?.min(filter.limit);
+    let observed = if ctx.observed.has_evidence_tables()? {
+        let inputs = crate::storage::interface::BacklogCountInputs {
+            bug_initial_state: view.workflow_for("bug")?.initial_state,
+            feature_initial_state: view.workflow_for("feature")?.initial_state,
+        };
+        ctx.observed
+            .count_backlog_candidates(&ctx.config.declared_db_path(), &inputs)?
+    } else {
+        0
+    };
     crate::application::services::freshness::freshness_of(&ctx.observed, &ctx.clock)?;
-    Ok(considered)
+    Ok(declared + observed)
 }
 
 /// How many declared rows a ranked view loads before scoring. Python's
@@ -571,36 +585,6 @@ fn observed_candidates<'a>(
         suppressed,
         closed_by_overlay,
     })
-}
-
-/// The number of candidates [`gather_with`] would rank, read without scoring:
-/// no trust reads, no git signals, no fan-out, no `last_confirmed` (WI-4448).
-/// It applies the same drops through [`observed_candidates`], so it equals the
-/// ranked list's length.
-fn considered_count<C: Clock, I: IdFactory>(
-    ctx: &AppContext<C, I>,
-    query: &GatherQuery<'_>,
-) -> Result<i64, VogtError> {
-    let view = ctx.declared.read()?;
-    let project_id = query
-        .project
-        .map(|slug| crate::application::resolve::project(&view, slug))
-        .transpose()?
-        .map(|project| project.id);
-    let filter = declared_filter(&view, project_id.clone(), query)?;
-    // A ranked list loads at most `limit` declared rows, so the count caps the same way.
-    let declared = view.count_work_items(&filter)?.min(filter.limit);
-    if !ctx.observed.has_evidence_tables()? {
-        return Ok(declared);
-    }
-    let inputs = observed_inputs(ctx, &view, project_id.as_deref(), query.include_prs)?;
-    let candidates = observed_candidates(&inputs, &view)?;
-    let observed = candidates
-        .rows
-        .iter()
-        .filter(|row| wanted_by(query, row.kind, &row.priority))
-        .count() as i64;
-    Ok(declared + observed)
 }
 
 /// [`gather`], with `score` off when only the candidates are wanted. The clock
