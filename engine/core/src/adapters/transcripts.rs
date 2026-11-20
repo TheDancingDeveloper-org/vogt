@@ -877,6 +877,10 @@ fn is_id(value: &str) -> bool {
 }
 
 /// `(--session-id|--resume|--session)[= ]'?value`.
+///
+/// Works on bytes throughout: `index` steps one byte at a time and can land
+/// inside a multi-byte character, so the command is never sliced by a byte
+/// offset. Only the ASCII id run is sliced, and its ends are ASCII boundaries.
 fn flag_values(command: &str) -> Vec<(&str, String)> {
     let mut out = Vec::new();
     let bytes = command.as_bytes();
@@ -884,7 +888,7 @@ fn flag_values(command: &str) -> Vec<(&str, String)> {
     while index < bytes.len() {
         if let Some(flag) = ["--session-id", "--resume", "--session"]
             .into_iter()
-            .find(|flag| command[index..].starts_with(flag) && boundary(bytes, index))
+            .find(|flag| bytes[index..].starts_with(flag.as_bytes()) && boundary(bytes, index))
         {
             let mut cursor = index + flag.len();
             // `--session` must not swallow the prefix of `--session-id`.
@@ -918,12 +922,12 @@ fn codex_resume_values(command: &str) -> Vec<String> {
     let bytes = command.as_bytes();
     let mut index = 0;
     while index + "codex".len() <= bytes.len() {
-        if command[index..].starts_with("codex") && boundary(bytes, index) {
+        if bytes[index..].starts_with(b"codex") && boundary(bytes, index) {
             let mut cursor = index + "codex".len();
             while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
                 cursor += 1;
             }
-            if command[cursor..].starts_with("resume") {
+            if bytes[cursor..].starts_with(b"resume") {
                 cursor += "resume".len();
                 while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
                     cursor += 1;
@@ -956,11 +960,14 @@ fn is_id_byte(byte: u8) -> bool {
 }
 
 fn uuid_tail(stem: &str) -> Option<String> {
-    if stem.len() < 36 {
+    // Slice the bytes, not the str: a stem may end in a multi-byte character
+    // whose start falls inside the last 36 bytes. The tail is checked to be
+    // ASCII hex and dashes before it is read back as a str.
+    let all = stem.as_bytes();
+    if all.len() < 36 {
         return None;
     }
-    let tail = &stem[stem.len() - 36..];
-    let bytes = tail.as_bytes();
+    let bytes = &all[all.len() - 36..];
     let groups = [8, 4, 4, 4, 12];
     let mut cursor = 0;
     for (index, length) in groups.iter().enumerate() {
@@ -978,7 +985,7 @@ fn uuid_tail(stem: &str) -> Option<String> {
         }
         cursor += length;
     }
-    Some(tail.to_string())
+    std::str::from_utf8(bytes).ok().map(str::to_string)
 }
 
 #[cfg(test)]
@@ -1410,6 +1417,49 @@ mod tests {
         assert!(named_ids(None).is_empty());
         // A flag value that is not an id never counts.
         assert!(named_ids(Some("claude --resume --model")).is_empty());
+    }
+
+    #[test]
+    fn named_ids_survive_non_ascii_in_the_command() {
+        // Multi-byte characters before, between and after the flags: the scan
+        // steps byte by byte, so it must never slice the str mid-character.
+        assert_eq!(
+            named_ids(Some("claude — say 🚀 --resume abc-1 — done")),
+            vec![("abc-1".to_string(), "resume-id")]
+        );
+        assert_eq!(
+            named_ids(Some("claude --session-id 'u-1' — 🚀🚀 café")),
+            vec![("u-1".to_string(), "session-id")]
+        );
+        assert_eq!(
+            named_ids(Some("claude — --session=u-2")),
+            vec![("u-2".to_string(), "resume-id")]
+        );
+        // Non-ASCII where a value should be is not an id, and does not panic.
+        assert!(named_ids(Some("claude --resume é— ")).is_empty());
+        assert!(named_ids(Some("claude --resume 🚀")).is_empty());
+        assert!(named_ids(Some("🚀 — no flags here")).is_empty());
+    }
+
+    #[test]
+    fn codex_resume_ids_survive_non_ascii_in_the_command() {
+        assert_eq!(
+            named_ids(Some("écho — codex resume abc-1 — 🚀")),
+            vec![("abc-1".to_string(), "resume-id")]
+        );
+        assert!(named_ids(Some("codex resume 🚀 — 🚀")).is_empty());
+    }
+
+    #[test]
+    fn uuid_tail_reads_a_stem_that_ends_in_non_ascii() {
+        let uuid = "0f8fad5b-d9cb-469f-a165-70867728950e";
+        // A multi-byte character before the uuid is outside the last 36 bytes.
+        assert_eq!(uuid_tail(&format!("—{uuid}")), Some(uuid.to_string()));
+        // A multi-byte character inside the last 36 bytes is not a uuid, and
+        // slicing it must not panic.
+        assert_eq!(uuid_tail(&format!("{}é", &uuid[..35])), None);
+        assert_eq!(uuid_tail("🚀".repeat(12).as_str()), None);
+        assert_eq!(uuid_tail("short—"), None);
     }
 
     #[test]
