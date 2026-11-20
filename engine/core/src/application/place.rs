@@ -186,6 +186,7 @@ mod place_bench {
     use crate::application::context::AppContext;
     use crate::application::services::work::create_op;
     use crate::core::{ActorKind, Principal};
+    use crate::storage::interface::WriteTxn;
     use std::time::Instant;
 
     const ITEMS: usize = 850;
@@ -280,6 +281,44 @@ mod place_bench {
                 .is_empty();
             assert_eq!(view.has_open_drift().unwrap(), drift);
             assert_eq!(metrics["drift_present"], drift);
+        });
+        // An open drift proposal flips the badge and the EXISTS check to true,
+        // and the same answer comes out of a sequential read.
+        assert_eq!(metrics["drift_present"], false);
+        crate::with_ctx!(&built, |ctx| {
+            let mut txn = ctx.declared.write().unwrap();
+            txn.insert_drift(&crate::core::DriftProposal {
+                id: "drift-open-count".to_string(),
+                kind: "work_item.unlinked".to_string(),
+                subject_kind: "project".to_string(),
+                subject_id: "prj".to_string(),
+                project_id: None,
+                project_slug: None,
+                summary: "open drift for the badge".to_string(),
+                evidence_observation_id: None,
+                evidence_snapshot: json!({}),
+                proposed_change: json!({}),
+                status: crate::core::DriftStatus::Open,
+                opened_at: crate::core::Moment::from_unix(1_700_000_000, 0),
+                superseded_at: None,
+                superseded_detail: None,
+                resolved_by_actor_id: None,
+                resolved_by_identity_ref: None,
+                resolved_at: None,
+                resolution_reason: None,
+            })
+            .unwrap();
+            txn.commit().unwrap();
+        });
+        let with_drift = place_metrics_op(&built, Value::Null).unwrap();
+        assert_eq!(with_drift["drift_present"], true);
+        crate::with_ctx!(&built, |ctx| {
+            let view = ctx.declared.read().unwrap();
+            assert!(view.has_open_drift().unwrap());
+            assert!(!view
+                .list_drift(Some("open"), None, None, 1)
+                .unwrap()
+                .is_empty());
         });
         let _ = std::fs::remove_dir_all(&dir);
     }
