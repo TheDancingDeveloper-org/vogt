@@ -1611,8 +1611,12 @@ fn transition_project<C: Clock + 'static, I: IdFactory + 'static>(
 mod tests {
     use super::*;
     use crate::adapters::git::CloneOutcome;
-    use crate::core::{ActorKind, Principal, SequentialIds, StepClock};
-    use crate::storage::interface::DeclaredStore;
+    use crate::core::{
+        ActorKind, Principal, SequentialIds, SessionReport, SessionReportFields, StepClock,
+        SweepOutcome,
+    };
+    use crate::storage::interface::{DeclaredStore, ReadView};
+    use crate::storage::observed_types::PendingObservation;
 
     fn moment() -> crate::core::Moment {
         crate::core::Moment::from_unix(1_700_000_000, 0)
@@ -2094,5 +2098,332 @@ mod tests {
             ])
         );
         assert_eq!(digest["in_progress"], json!(["WI-1 [unheld]: Under light"]));
+    }
+
+    fn at(unix: i64) -> Moment {
+        Moment::from_unix(unix, 0)
+    }
+
+    fn project_id_of(built: &Built, slug: &str) -> String {
+        crate::with_ctx!(built, |ctx| {
+            let view = ctx.declared.read().unwrap();
+            view.project_by_slug(slug)
+                .unwrap()
+                .expect("the project is registered")
+                .id
+        })
+    }
+
+    fn work_id_of(built: &Built, reference: &str) -> String {
+        crate::with_ctx!(built, |ctx| {
+            let view = ctx.declared.read().unwrap();
+            view.work_item_by_ref(reference)
+                .unwrap()
+                .expect("the work item exists")
+                .id
+        })
+    }
+
+    /// A coding session on the project, optionally holding a work item.
+    fn seed_session(
+        built: &Built,
+        id: &str,
+        project_id: &str,
+        work_item_id: Option<&str>,
+        started: i64,
+        stopped: Option<i64>,
+    ) {
+        let id = id.to_string();
+        let project_id = project_id.to_string();
+        let work_item_id = work_item_id.map(str::to_string);
+        crate::with_ctx!(built, |ctx| {
+            let mut write = write_of(ctx);
+            audited_write(&mut write, "session.start", "test", move |txn, actor| {
+                txn.insert_session(&CodingSession {
+                    id: id.clone(),
+                    engine_session_id: format!("eng_{id}"),
+                    project_id: project_id.clone(),
+                    work_item_id: work_item_id.clone(),
+                    actor_id: actor.id.clone(),
+                    cwd: "/srv/widget".to_string(),
+                    template: None,
+                    model: None,
+                    effort: None,
+                    reason: "test".to_string(),
+                    purpose: None,
+                    started_by_session: None,
+                    started_by_kind: None,
+                    started_at: at(started),
+                    stopped_at: stopped.map(at),
+                })?;
+                Ok(WriteOutcome {
+                    result: json!({}),
+                    entity_kind: "session".to_string(),
+                    entity_id: "ses".to_string(),
+                    payload: json!({}),
+                    event_kind: "session.started".to_string(),
+                    summary: json!({}),
+                })
+            })
+        })
+        .unwrap();
+    }
+
+    /// A session report on a work item, as `session_report` writes it.
+    fn seed_report(
+        built: &Built,
+        id: &str,
+        work_item_id: &str,
+        kind: &str,
+        summary: &str,
+        unix: i64,
+    ) {
+        let id = id.to_string();
+        let work_item_id = work_item_id.to_string();
+        let kind = kind.to_string();
+        let summary = summary.to_string();
+        crate::with_ctx!(built, |ctx| {
+            let mut write = write_of(ctx);
+            audited_write(&mut write, "session.report", "test", move |txn, actor| {
+                txn.insert_session_report(&SessionReport {
+                    id: id.clone(),
+                    actor_id: actor.id.clone(),
+                    engine_session_id: None,
+                    work_item_id: Some(work_item_id.clone()),
+                    kind: kind.clone(),
+                    summary: summary.clone(),
+                    fields: SessionReportFields::default(),
+                    created_at: at(unix),
+                })?;
+                Ok(WriteOutcome {
+                    result: json!({}),
+                    entity_kind: "session_report".to_string(),
+                    entity_id: "rpt".to_string(),
+                    payload: json!({}),
+                    event_kind: "session.report".to_string(),
+                    summary: json!({}),
+                })
+            })
+        })
+        .unwrap();
+    }
+
+    /// The observed store is migrated once per test, before its first sweep.
+    fn migrate_observed(built: &Built) {
+        crate::with_ctx!(built, |ctx| ctx.observed.migrate().unwrap());
+    }
+
+    /// One sweep of forge or deploy observations, as a collector appends them.
+    fn seed_observations(built: &Built, unix: i64, rows: Vec<PendingObservation>) {
+        crate::with_ctx!(built, |ctx| {
+            let moment = at(unix);
+            let sweep = ctx.observed.begin_sweep("test", &[], moment).unwrap();
+            ctx.observed.append(&sweep.id, &rows, moment).unwrap();
+            ctx.observed
+                .finish_sweep(&sweep.id, SweepOutcome::Ok, &[], moment, None)
+                .unwrap();
+            ctx.observed.rebuild_latest().unwrap();
+        });
+    }
+
+    fn observation(
+        kind: &str,
+        subject: &str,
+        project_id: &str,
+        payload: Value,
+    ) -> PendingObservation {
+        PendingObservation {
+            kind: kind.to_string(),
+            subject_key: subject.to_string(),
+            content_digest: payload.to_string(),
+            payload,
+            project_id: Some(project_id.to_string()),
+            source_url: None,
+            promoted: false,
+        }
+    }
+
+    /// Two work items on the widget project: WI-1 "Under light", WI-2 "Under heavy".
+    fn widget_with_items(ctx: &Built) {
+        use crate::application::services::work::create_op;
+        register_op(ctx, registration("Widget", "/srv/widget")).unwrap();
+        for title in ["Under light", "Under heavy"] {
+            create_op(
+                ctx,
+                json!({
+                    "kind": "feature",
+                    "title": title,
+                    "project": "widget",
+                    "local_only": true,
+                    "reason": "a reason",
+                }),
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn recent_results_are_the_newest_three_result_lines_one_line_each() {
+        let ctx = context("local:test-user", None);
+        widget_with_items(&ctx);
+        let item = work_id_of(&ctx, "WI-1");
+        // 1_700_000_000 is 2023-11-14 22:13:20 UTC; each report a minute later.
+        for n in 0..5 {
+            seed_report(
+                &ctx,
+                &format!("rpt_{n}"),
+                &item,
+                "result",
+                &format!("result {n}\nsecond line"),
+                1_700_000_000 + 60 * n,
+            );
+        }
+        seed_report(
+            &ctx,
+            "rpt_progress",
+            &item,
+            "progress",
+            "not a result",
+            1_700_001_000,
+        );
+
+        let digest = brief_op(&ctx, json!({"slug": "widget"})).unwrap()["digest"].clone();
+
+        assert_eq!(
+            digest["recent_results"],
+            json!([
+                "2023-11-14 22:17Z WI-1: result 4 second line",
+                "2023-11-14 22:16Z WI-1: result 3 second line",
+                "2023-11-14 22:15Z WI-1: result 2 second line",
+            ])
+        );
+    }
+
+    #[test]
+    fn an_item_is_held_by_its_newest_live_session() {
+        use crate::application::services::work::transition_op;
+        let ctx = context("local:test-user", None);
+        widget_with_items(&ctx);
+        transition_op(
+            &ctx,
+            json!({"ref": "WI-1", "to_state": "in_progress", "reason": "a reason"}),
+        )
+        .unwrap();
+        let project = project_id_of(&ctx, "widget");
+        let item = work_id_of(&ctx, "WI-1");
+        // A stopped session is ignored even though it is the newest.
+        seed_session(&ctx, "ses_stopped", &project, Some(&item), 900, Some(1_000));
+        seed_session(&ctx, "ses_old", &project, Some(&item), 100, None);
+        seed_session(&ctx, "ses_new", &project, Some(&item), 500, None);
+
+        let digest = brief_op(&ctx, json!({"slug": "widget"})).unwrap()["digest"].clone();
+
+        assert_eq!(
+            digest["in_progress"],
+            json!(["WI-1 [session ses_new]: Under light"])
+        );
+    }
+
+    #[test]
+    fn last_merge_is_the_newest_merged_pull_request_with_its_fallbacks() {
+        let ctx = context("local:test-user", None);
+        widget_with_items(&ctx);
+        migrate_observed(&ctx);
+        let project = project_id_of(&ctx, "widget");
+        let pr = |subject: &str, payload: Value| {
+            observation("forge.pull_request", subject, &project, payload)
+        };
+        // 2023-11-16 22:13:20 is two days after the first sweep.
+        seed_observations(
+            &ctx,
+            1_700_000_000,
+            vec![
+                pr(
+                    "pr:10",
+                    json!({"state": "merged", "number": 10, "title": "Older merge",
+                           "merged_at": "2023-11-13T10:00:00Z"}),
+                ),
+                pr(
+                    "pr:11",
+                    json!({"state": "merged", "number": 11, "title": "Newest merge",
+                           "merged_at": "2023-11-15T09:30:00Z"}),
+                ),
+                // Closed without merging: never a merge.
+                pr(
+                    "pr:12",
+                    json!({"state": "closed", "number": 12, "title": "Closed unmerged",
+                           "closed_at": "2023-11-20T00:00:00Z"}),
+                ),
+            ],
+        );
+        let digest = brief_op(&ctx, json!({"slug": "widget"})).unwrap()["digest"].clone();
+        assert_eq!(
+            digest["last_merge"],
+            json!("2023-11-15 09:30Z #11: Newest merge")
+        );
+
+        // An empty merged_at is falsy, so the merge falls back to when it
+        // was observed, which is newer than any stamp above.
+        seed_observations(
+            &ctx,
+            1_700_172_800,
+            vec![pr(
+                "pr:14",
+                json!({"state": "merged", "number": 14, "title": "Unstamped",
+                       "merged_at": "", "closed_at": null}),
+            )],
+        );
+        let digest = brief_op(&ctx, json!({"slug": "widget"})).unwrap()["digest"].clone();
+        assert_eq!(
+            digest["last_merge"],
+            json!("2023-11-16 22:13Z #14: Unstamped")
+        );
+    }
+
+    #[test]
+    fn last_deploy_is_the_newest_lane_sha_with_live_before_receipt() {
+        let ctx = context("local:test-user", None);
+        widget_with_items(&ctx);
+        migrate_observed(&ctx);
+        let project = project_id_of(&ctx, "widget");
+        let lane = |subject: &str, payload: Value| {
+            observation(KIND_DEPLOY_LANE, subject, &project, payload)
+        };
+        seed_observations(
+            &ctx,
+            1_700_000_000,
+            vec![lane(
+                "lane:dev",
+                json!({
+                    "lane": "dev",
+                    "live": {"source_sha": "0123456789abcdef9999"},
+                    "receipt": {"source_sha": "ffffffffffff"},
+                }),
+            )],
+        );
+        let digest = brief_op(&ctx, json!({"slug": "widget"})).unwrap()["digest"].clone();
+        assert_eq!(
+            digest["last_deploy"],
+            json!("dev at 0123456789ab (seen 2023-11-14 22:13Z)")
+        );
+
+        // A day later: prod has only a receipt, so its receipt sha is shown.
+        // A lane with no sha at all is skipped even though it is newest.
+        seed_observations(
+            &ctx,
+            1_700_086_400,
+            vec![
+                lane(
+                    "lane:prod",
+                    json!({"lane": "prod", "receipt": {"source_sha": "fedcba987654aaaa"}}),
+                ),
+                lane("lane:staging", json!({"lane": "staging", "live": {}})),
+            ],
+        );
+        let digest = brief_op(&ctx, json!({"slug": "widget"})).unwrap()["digest"].clone();
+        assert_eq!(
+            digest["last_deploy"],
+            json!("prod at fedcba987654 (seen 2023-11-15 22:13Z)")
+        );
     }
 }
