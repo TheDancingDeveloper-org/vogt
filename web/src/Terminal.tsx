@@ -11,7 +11,7 @@ import { openAttach } from "./api";
 import type { RuntimeSocket } from "./runtimeTransport";
 import { readClipboardText, writeClipboardText } from "./clipboard";
 import { decodeOsc52 } from "./terminalClipboard";
-import { terminalContextMenuAction } from "./terminalContextMenu";
+import { terminalContextMenuAction, terminalWordAt } from "./terminalContextMenu";
 import { sessionsStore } from "./store";
 import { wakeSession } from "./sessionHibernation";
 import { getTheme, TERMINAL_THEME_EVENT } from "./terminalThemes";
@@ -97,9 +97,7 @@ import {
   beginTerminalTouch,
   moveTerminalTouch,
   TERMINAL_LONG_PRESS_MS,
-  TERMINAL_TOUCH_INTENT_PX,
   terminalCellAt,
-  wordSpanAt,
   type TerminalTouchGesture,
 } from "./terminalTouch";
 import { onPageVisibility, onWake } from "./wakeCoordinator";
@@ -304,9 +302,17 @@ const TerminalView: Component<Props> = (props) => {
     term?.focus();
   };
   let runCopyChip: () => void = () => {};
-  // A word selected by a touch long-press. xterm collapses a selection on
-  // finger-up, so this is re-applied after release until the next touch.
-  let touchSticky: { row: number; col: number; length: number } | null = null;
+  // The range a touch long-press selected. xterm collapses a touch selection
+  // when the finger lifts, which also hides the Copy chip; remembering the
+  // range lets the selection-change handler put it back until the next gesture
+  // or an explicit copy clears it.
+  let stickyTouchSelection: {
+    column: number;
+    row: number;
+    length: number;
+    text: string;
+  } | null = null;
+  let restoringStickyTouchSelection = false;
   let pasteResolve: ((v: string | null) => void) | null = null;
 
   const isParked = () => Boolean(props.parked) || hiddenParked();
@@ -619,6 +625,48 @@ const TerminalView: Component<Props> = (props) => {
     );
   };
 
+  // Select the word under a touch point and remember it as the sticky range.
+  // Returns false over blank cells, where there is nothing to select.
+  const selectWordAt = (x: number, y: number): boolean => {
+    if (!term) return false;
+    const container = term.element;
+    const screen = container?.querySelector(".xterm-screen");
+    const rows = container?.querySelector(".xterm-rows");
+    // With the WebGL/canvas renderer there is no rows layer and the screen
+    // layer's computed height is 0 (the site zeroes it); the canvas is sized
+    // to the whole grid, so it is the exact cell height source.
+    const canvas = container?.querySelector("canvas");
+    const outer = container?.getBoundingClientRect();
+    const inner = screen?.getBoundingClientRect();
+    const gridRows = rows?.getBoundingClientRect();
+    const gridCanvas = canvas?.getBoundingClientRect();
+    if (!outer) return false;
+    const cell = terminalCellAt(
+      {
+        container: outer,
+        screen: inner,
+        rows: gridRows && gridRows.height > 0 ? gridRows : gridCanvas,
+      },
+      term.cols,
+      term.rows,
+      x,
+      y,
+    );
+    if (!cell) return false;
+    const bufferRow = term.buffer.active.viewportY + cell.row;
+    const line = term.buffer.active.getLine(bufferRow)?.translateToString(false) ?? "";
+    const word = terminalWordAt(line, cell.column);
+    if (!word) return false;
+    term.select(word[0], bufferRow, word[1] - word[0]);
+    stickyTouchSelection = {
+      column: word[0],
+      row: bufferRow,
+      length: word[1] - word[0],
+      text: line.slice(word[0], word[1]),
+    };
+    return true;
+  };
+
   const installTouchGestures = () => {
     if (!hostRef) return () => {};
 
@@ -628,57 +676,43 @@ const TerminalView: Component<Props> = (props) => {
     const suppressXtermScroll = (event: Event) => event.stopImmediatePropagation();
     hostRef.addEventListener("-xterm-gesturechange", suppressXtermScroll, true);
     let gesture: TerminalTouchGesture | null = null;
-
-    // Long-press word selection, coarse pointers only. A still hold for
-    // TERMINAL_LONG_PRESS_MS selects the word under the finger; the Copy chip
-    // then copies it. Phones have no Shift-drag, and xterm does not select on
-    // touch, so without this a hold selects nothing under mouse tracking.
-    let pressTimer: ReturnType<typeof setTimeout> | null = null;
-    let pressing = false;
-    let pressStart = { x: 0, y: 0 };
-    const cancelPress = () => {
-      if (pressTimer !== null) clearTimeout(pressTimer);
-      pressTimer = null;
+    let longPressTimer: number | null = null;
+    let longPressSelected = false;
+    const cancelLongPress = () => {
+      if (longPressTimer !== null) window.clearTimeout(longPressTimer);
+      longPressTimer = null;
     };
-    const applyTouchSticky = () => {
-      if (!term || !touchSticky) return;
-      term.select(touchSticky.col, touchSticky.row, touchSticky.length);
-    };
-    const startLongPress = () => {
-      pressTimer = null;
-      if (!term?.element) return;
-      // Width from `.xterm-screen`, height from the element holding the rows:
-      // `.xterm-screen` is 0-high in the phone layout (see terminalCellAt).
-      const grid = term.element.getBoundingClientRect();
-      const screenEl = term.element.querySelector(".xterm-screen");
-      const screen = screenEl?.getBoundingClientRect() ?? grid;
-      const cell = terminalCellAt(
-        pressStart.x,
-        pressStart.y,
-        screen,
-        grid,
-        term.cols,
-        term.rows,
-      );
-      const row = term.buffer.active.viewportY + cell.row;
-      const text = term.buffer.active.getLine(row)?.translateToString(true) ?? "";
-      const span = wordSpanAt(text, cell.col);
-      if (!span) return;
-      pressing = true;
-      touchSticky = { row, col: span.start, length: span.length };
-      applyTouchSticky();
+    const clearLongPressSelection = () => {
+      longPressSelected = false;
+      stickyTouchSelection = null;
+      if (term?.hasSelection()) term.clearSelection();
+      setShowCopyChip(false);
     };
 
     const onTouchStart = (event: TouchEvent) => {
+      cancelLongPress();
+      longPressSelected = false;
+      stickyTouchSelection = null;
+      setShowCopyChip(false);
       const touch = event.touches.length === 1 ? event.touches[0] : undefined;
       gesture = touch ? beginTerminalTouch(touch.clientX, touch.clientY) : null;
-      // A new touch drops the last long-press selection; a tap or swipe ends it.
-      touchSticky = null;
-      cancelPress();
-      pressing = false;
+      // xterm.js does not synthesise a selection for touch. Without this a
+      // long-press on a phone sends nothing (no mouse report, no selection),
+      // so Codex and Vogt's Copy chip both see an empty terminal. Select the
+      // word under the finger once the press has stayed still past the intent
+      // threshold; a swipe that starts afterwards clears it and scrolls.
       if (touch && isCoarsePointer) {
-        pressStart = { x: touch.clientX, y: touch.clientY };
-        pressTimer = setTimeout(startLongPress, TERMINAL_LONG_PRESS_MS);
+        const x = touch.clientX;
+        const y = touch.clientY;
+        longPressTimer = window.setTimeout(() => {
+          longPressTimer = null;
+          if (!term || !gesture || gesture.axis !== "pending") return;
+          const ok = selectWordAt(x, y);
+          if (ok) {
+            longPressSelected = true;
+            setShowCopyChip(true);
+          }
+        }, TERMINAL_LONG_PRESS_MS);
       }
     };
 
@@ -686,23 +720,10 @@ const TerminalView: Component<Props> = (props) => {
       if (!term || !gesture) return;
       if (event.touches.length !== 1) {
         gesture = null;
-        cancelPress();
         return;
       }
       const touch = event.touches[0];
       if (!touch) return;
-      if (pressTimer !== null) {
-        const travelled = Math.hypot(
-          touch.clientX - pressStart.x,
-          touch.clientY - pressStart.y,
-        );
-        if (travelled >= TERMINAL_TOUCH_INTENT_PX) cancelPress();
-      }
-      if (pressing) {
-        // Holding a selection: keep the page and the terminal still.
-        if (event.cancelable) event.preventDefault();
-        return;
-      }
 
       const move = moveTerminalTouch(
         gesture,
@@ -712,6 +733,12 @@ const TerminalView: Component<Props> = (props) => {
         term.buffer.active.type === "alternate" ? "alternate" : "normal",
         term.modes.mouseTrackingMode !== "none",
       );
+      // The swipe claimed its axis: it is a scroll, not a press, so it drops
+      // any held word.
+      if (move.gesture.axis !== "pending") {
+        cancelLongPress();
+        if (longPressSelected) clearLongPressSelection();
+      }
       gesture = move.gesture;
       if (move.claim && event.cancelable) event.preventDefault();
       if (move.scrollLines !== 0) term.scrollLines(move.scrollLines);
@@ -735,31 +762,27 @@ const TerminalView: Component<Props> = (props) => {
     };
 
     const onTouchEnd = (event: TouchEvent) => {
-      cancelPress();
-      if (pressing) {
-        pressing = false;
-        // xterm collapses the selection on finger-up. Put the word back once
-        // that settles, so the Copy chip still has something to copy.
-        setTimeout(applyTouchSticky, 50);
-      }
+      cancelLongPress();
       const touch = event.touches.length === 1 ? event.touches[0] : undefined;
       gesture = touch ? beginTerminalTouch(touch.clientX, touch.clientY) : null;
+      longPressSelected = false;
     };
 
     const onTouchCancel = () => {
+      cancelLongPress();
+      if (longPressSelected) clearLongPressSelection();
       gesture = null;
-      cancelPress();
-      pressing = false;
     };
 
-    const listenerOptions: AddEventListenerOptions = { passive: false };
-    hostRef.addEventListener("touchstart", onTouchStart, listenerOptions);
-    hostRef.addEventListener("touchmove", onTouchMove, listenerOptions);
-    hostRef.addEventListener("touchend", onTouchEnd, listenerOptions);
-    hostRef.addEventListener("touchcancel", onTouchCancel, listenerOptions);
+    // Only touchmove ever prevents a default; the rest stay passive so the
+    // browser need not wait on them (and a long-press can start).
+    hostRef.addEventListener("touchstart", onTouchStart, { passive: true });
+    hostRef.addEventListener("touchmove", onTouchMove, { passive: false });
+    hostRef.addEventListener("touchend", onTouchEnd, { passive: true });
+    hostRef.addEventListener("touchcancel", onTouchCancel, { passive: true });
 
     return () => {
-      cancelPress();
+      cancelLongPress();
       hostRef?.removeEventListener("-xterm-gesturechange", suppressXtermScroll, true);
       hostRef?.removeEventListener("touchstart", onTouchStart);
       hostRef?.removeEventListener("touchmove", onTouchMove);
@@ -972,13 +995,22 @@ const TerminalView: Component<Props> = (props) => {
       const action = terminalContextMenuAction(
         e.shiftKey,
         term?.hasSelection() ?? false,
+        isCoarsePointer,
       );
       // Shift+right-click is the escape hatch to the browser's own menu — do
       // NOT preventDefault, and run none of the custom copy/paste path.
       if (action === "native") return;
       e.preventDefault();
       if (action === "copy") {
+        // Android Chrome fires contextmenu for the same long-press our timer
+        // already used to select a word. Copying here would write the
+        // clipboard with no explicit tap; the Copy chip is the action.
+        if (isCoarsePointer && stickyTouchSelection) return;
         copySelection().then(notifyCopy);
+      } else if (action === "select") {
+        // A long-press: select the word under the finger. Over blank cells
+        // nothing is selected and nothing is pasted without an explicit tap.
+        selectWordAt(e.clientX, e.clientY);
       } else {
         void pasteFromClipboard();
       }
@@ -998,14 +1030,43 @@ const TerminalView: Component<Props> = (props) => {
     // contextmenu on a long-press. So on touch we surface an explicit Copy chip
     // whenever there is a live selection — a tap copies, it does not auto-fire.
     runCopyChip = () => {
+      stickyTouchSelection = null;
       setShowCopyChip(false);
-      touchSticky = null;
       void copySelection().then(notifyCopy);
       term?.clearSelection();
     };
     if (isCoarsePointer) {
       term.onSelectionChange(() => {
-        setShowCopyChip((term?.getSelection() ?? "").length > 0);
+        const selection = term?.getSelection() ?? "";
+        if (selection.length === 0 && stickyTouchSelection && !restoringStickyTouchSelection) {
+          const target = stickyTouchSelection;
+          if (!term?.buffer.active.getLine(target.row)) {
+            stickyTouchSelection = null;
+            setShowCopyChip(false);
+            return;
+          }
+          // xterm releases a touch selection when the finger lifts, and that
+          // empty selection would take the Copy chip with it. Restore the
+          // range once; the next touchstart or an explicit copy clears it.
+          restoringStickyTouchSelection = true;
+          try {
+            term.select(target.column, target.row, target.length);
+          } finally {
+            restoringStickyTouchSelection = false;
+          }
+          // Inline output streams into scrollback, so the same absolute row
+          // can later hold different text. If the restored range no longer
+          // matches, drop it rather than copying the wrong line.
+          if (term.getSelection() !== target.text) {
+            stickyTouchSelection = null;
+            term.clearSelection();
+            setShowCopyChip(false);
+            return;
+          }
+          setShowCopyChip(true);
+          return;
+        }
+        setShowCopyChip(selection.length > 0);
       });
     }
 
