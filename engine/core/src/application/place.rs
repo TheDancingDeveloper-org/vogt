@@ -501,4 +501,326 @@ mod place_bench {
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// A prod-sized store: 20k declared rows, 50k observed subjects (ranking
+    /// reads the newest 1000), 200 suppressions, 5k PRs implementing issues.
+    /// Run on demand:
+    /// `cargo test -p vogt-core --bin vogt-core place_bench_prod_sized -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "prod-sized timing harness, run on demand"]
+    fn place_bench_prod_sized() {
+        const DECLARED: usize = 20_000;
+        const ISSUES: usize = 45_000;
+        const PULLS: usize = 5_000;
+        const SUPPRESSIONS: usize = 200;
+        // `VOGT_PROD_BENCH_DIR` names a store to keep: it is seeded once if empty,
+        // then every later run reads that same seed, so before and after match.
+        let reuse = std::env::var_os("VOGT_PROD_BENCH_DIR").map(std::path::PathBuf::from);
+        let dir = reuse.clone().unwrap_or_else(|| {
+            std::env::temp_dir().join(format!("vogt-place-prod-bench-{}", std::process::id()))
+        });
+        let already_seeded = dir.join("declared.sqlite3").exists();
+        if !already_seeded {
+            if reuse.is_none() {
+                let _ = std::fs::remove_dir_all(&dir);
+            }
+            std::fs::create_dir_all(&dir).unwrap();
+            let mut clock = None;
+            let mut ids = None;
+            crate::application::instance::init(&dir, &mut clock, &mut ids).unwrap();
+        }
+        let fresh = || {
+            build_context(
+                crate::config::VogtConfig {
+                    data_dir: dir.clone(),
+                    ..crate::config::VogtConfig::default()
+                },
+                Some(Principal::new("local:prod", ActorKind::Human, "Prod").unwrap()),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap()
+        };
+        let built = fresh();
+        if !already_seeded {
+            let seeded = Instant::now();
+            for n in 0..DECLARED {
+                create_op(
+                    &built,
+                    json!({"kind": "bug", "title": format!("prod item {n}"), "reason": "bench"}),
+                )
+                .unwrap();
+            }
+            println!("PROD seeded declared={DECLARED} in {:?}", seeded.elapsed());
+            let seeded = Instant::now();
+            crate::with_ctx!(&built, |ctx| {
+                use crate::core::{Moment, SweepOutcome};
+                use crate::storage::interface::ObservedStore;
+                use crate::storage::observed_types::PendingObservation;
+                let at = Moment::from_unix(1_700_000_000, 0);
+                let sweep = ctx
+                    .observed
+                    .begin_sweep("bench-forge", &["vogt".to_string()], at)
+                    .unwrap();
+                let mut findings = Vec::with_capacity(ISSUES + PULLS);
+                for n in 0..ISSUES {
+                    let labels = if n % 2 == 0 {
+                        json!(["bug"])
+                    } else {
+                        json!([])
+                    };
+                    findings.push(PendingObservation {
+                        kind: "forge.issue".into(),
+                        subject_key: format!("vogt/issues/{n}"),
+                        payload: json!({"state": "open", "title": format!("issue {n}"), "number": n, "labels": labels}),
+                        content_digest: format!("issue-{n}"),
+                        project_id: None,
+                        source_url: None,
+                        promoted: false,
+                    });
+                }
+                for n in 0..PULLS {
+                    findings.push(PendingObservation {
+                        kind: "forge.pull_request".into(),
+                        subject_key: format!("vogt/pulls/{n}"),
+                        payload: json!({"state": "open", "title": format!("pr {n}"), "number": n, "head": format!("wi-{n}"), "implements": [{"subject": format!("vogt/issues/{}", n * 9 % ISSUES)}]}),
+                        content_digest: format!("pr-{n}"),
+                        project_id: None,
+                        source_url: None,
+                        promoted: false,
+                    });
+                }
+                ctx.observed.append(&sweep.id, &findings, at).unwrap();
+                ctx.observed
+                    .finish_sweep(&sweep.id, SweepOutcome::Ok, &[], at, None)
+                    .unwrap();
+                ctx.observed.rebuild_latest().unwrap();
+            });
+            println!(
+                "PROD seeded observed={} in {:?}",
+                ISSUES + PULLS,
+                seeded.elapsed()
+            );
+            for n in 0..SUPPRESSIONS {
+                let subject = if n % 20 == 0 {
+                    json!({"subject": format!("vogt/pulls/old-{n}-*"), "reason": "bench", "pattern": true})
+                } else {
+                    json!({"subject": format!("vogt/issues/{}", n * 211 % ISSUES), "reason": "bench"})
+                };
+                crate::application::suppressions::suppress_op(&built, subject).unwrap();
+            }
+        }
+        let median = |mut v: Vec<u128>| {
+            v.sort_unstable();
+            v[v.len() / 2]
+        };
+        let mut cold = Vec::new();
+        let mut backlog = Vec::new();
+        let mut full_backlog = Vec::new();
+        for _ in 0..5 {
+            clear_metrics_cache(&dir);
+            let built = fresh();
+            let t = Instant::now();
+            let _ = place_metrics_op(&built, Value::Null).unwrap();
+            cold.push(t.elapsed().as_micros());
+            let t = Instant::now();
+            let total = crate::with_ctx!(&built, |ctx| {
+                crate::application::views::backlog_total_considered(ctx)
+            })
+            .unwrap();
+            backlog.push(t.elapsed().as_micros());
+            let t = Instant::now();
+            let full = crate::application::views::backlog_op(&built, json!({"limit": 1})).unwrap();
+            full_backlog.push(t.elapsed().as_micros());
+            assert_eq!(total, full["total_considered"].as_i64().unwrap());
+            println!("PROD backlog_total_considered={total}");
+        }
+        println!("PROD place_metrics_cold_median_us={}", median(cold));
+        println!(
+            "PROD backlog_total_considered_median_us={}",
+            median(backlog)
+        );
+        println!(
+            "PROD backlog_op_limit1_full_median_us={}",
+            median(full_backlog)
+        );
+        if reuse.is_none() {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// The count's drops equal the ranked list's (WI-4448): a closed issue and an
+    /// overlay-terminal issue on a linked project, an exact and a glob suppression
+    /// hit, a PR implementing a present subject, and an unpromoted marker.
+    #[test]
+    fn backlog_count_drops_match_the_ranked_list() {
+        let dir = std::env::temp_dir().join(format!("vogt-place-drops-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut clock = None;
+        let mut ids = None;
+        crate::application::instance::init(&dir, &mut clock, &mut ids).unwrap();
+        let built = build_context(
+            crate::config::VogtConfig {
+                data_dir: dir.clone(),
+                ..crate::config::VogtConfig::default()
+            },
+            Some(Principal::new("local:drops", ActorKind::Human, "Drops").unwrap()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let at = crate::core::Moment::from_unix(1_700_000_200, 0);
+        crate::with_ctx!(&built, |ctx| {
+            use crate::storage::interface::{DeclaredStore, WriteTxn};
+            let mut txn = ctx.declared.write().unwrap();
+            let mut project =
+                crate::core::Project::new("prj_linked", "linked", "Linked", "/srv/linked", at);
+            project.link_state = crate::core::LinkState::Linked;
+            txn.insert_project(&project).unwrap();
+            txn.upsert_work_overlay(&crate::core::WorkOverlay {
+                subject_key: "vogt/linked/overlay-done".into(),
+                project_id: "prj_linked".into(),
+                rank: None,
+                workflow_state: Some("done".into()),
+                priority: None,
+                effort: None,
+                assignee_actor_id: None,
+                initiative_id: None,
+                branches: Vec::new(),
+                created_at: at,
+                updated_at: at,
+            })
+            .unwrap();
+            txn.commit().unwrap();
+        });
+        crate::with_ctx!(&built, |ctx| {
+            use crate::core::SweepOutcome;
+            use crate::storage::interface::ObservedStore;
+            use crate::storage::observed_types::PendingObservation;
+            let sweep = ctx
+                .observed
+                .begin_sweep("bench-forge", &["vogt".to_string()], at)
+                .unwrap();
+            let issue = |key: &str, project: Option<&str>, payload: Value| PendingObservation {
+                kind: "forge.issue".into(),
+                subject_key: key.into(),
+                payload,
+                content_digest: key.into(),
+                project_id: project.map(str::to_string),
+                source_url: None,
+                promoted: false,
+            };
+            let findings = vec![
+                issue(
+                    "vogt/linked/closed-1",
+                    Some("prj_linked"),
+                    json!({"state": "closed", "title": "closed upstream", "labels": []}),
+                ),
+                issue(
+                    "vogt/linked/overlay-done",
+                    Some("prj_linked"),
+                    json!({"state": "open", "title": "done in vogt", "labels": []}),
+                ),
+                issue(
+                    "vogt/linked/open-kept",
+                    Some("prj_linked"),
+                    json!({"state": "open", "title": "open linked", "labels": []}),
+                ),
+                issue(
+                    "vogt/linked/bug-kept",
+                    Some("prj_linked"),
+                    json!({"state": "open", "title": "bug linked", "labels": ["bug"]}),
+                ),
+                issue(
+                    "vogt/linked/exact-suppressed",
+                    None,
+                    json!({"state": "open", "title": "exact hit", "labels": []}),
+                ),
+                issue(
+                    "vogt/linked/glob-suppressed",
+                    None,
+                    json!({"state": "open", "title": "glob hit", "labels": []}),
+                ),
+                PendingObservation {
+                    kind: "forge.pull_request".into(),
+                    subject_key: "vogt/pulls/implements-present".into(),
+                    payload: json!({"state": "open", "title": "implements a present subject", "implements": [{"subject": "vogt/linked/open-kept"}]}),
+                    content_digest: "pr-implements-present".into(),
+                    project_id: None,
+                    source_url: None,
+                    promoted: false,
+                },
+                PendingObservation {
+                    kind: "forge.pull_request".into(),
+                    subject_key: "vogt/pulls/implements-absent".into(),
+                    payload: json!({"state": "open", "title": "implements nothing present", "implements": [{"subject": "vogt/nowhere/9"}]}),
+                    content_digest: "pr-implements-absent".into(),
+                    project_id: None,
+                    source_url: None,
+                    promoted: false,
+                },
+                PendingObservation {
+                    kind: "marker".into(),
+                    subject_key: "vogt/markers/unpromoted".into(),
+                    payload: json!({"tag": "TODO", "path": "x.rs", "line": 1}),
+                    content_digest: "marker-unpromoted".into(),
+                    project_id: None,
+                    source_url: None,
+                    promoted: false,
+                },
+            ];
+            ctx.observed.append(&sweep.id, &findings, at).unwrap();
+            ctx.observed
+                .finish_sweep(&sweep.id, SweepOutcome::Ok, &[], at, None)
+                .unwrap();
+            ctx.observed.rebuild_latest().unwrap();
+        });
+        crate::application::suppressions::suppress_op(
+            &built,
+            json!({"subject": "vogt/linked/exact-suppressed", "reason": "drops"}),
+        )
+        .unwrap();
+        crate::application::suppressions::suppress_op(
+            &built,
+            json!({"subject": "vogt/linked/glob-*", "reason": "drops", "pattern": true}),
+        )
+        .unwrap();
+        let counted = crate::with_ctx!(&built, |ctx| {
+            crate::application::views::backlog_total_considered(ctx)
+        })
+        .unwrap();
+        let full = crate::application::views::backlog_op(&built, json!({"limit": 1000})).unwrap();
+        assert_eq!(counted, full["total_considered"].as_i64().unwrap());
+        // Kept: the open linked issue, the bug-labelled linked issue, and the PR
+        // whose implements target is absent. Everything else is dropped.
+        assert_eq!(counted, 3);
+        let listed = full["items"].to_string();
+        for kept in [
+            "vogt/linked/open-kept",
+            "vogt/linked/bug-kept",
+            "vogt/pulls/implements-absent",
+        ] {
+            assert!(listed.contains(kept), "{kept} should be ranked");
+        }
+        for dropped in [
+            "vogt/linked/closed-1",
+            "vogt/linked/overlay-done",
+            "vogt/linked/exact-suppressed",
+            "vogt/linked/glob-suppressed",
+            "vogt/pulls/implements-present",
+            "vogt/markers/unpromoted",
+        ] {
+            assert!(!listed.contains(dropped), "{dropped} should be dropped");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
