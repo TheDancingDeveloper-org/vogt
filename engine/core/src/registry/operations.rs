@@ -859,6 +859,22 @@ pub fn build_operations() -> Vec<Operation> {
             CliBinding::new(&["llm-provider", "remove"]),
         ),
         Operation::new(
+            "agent_auth.manifest",
+            "List the agent-auth manifest entries: names, flags and source, never values.",
+            Scope::Admin,
+            false,
+            HttpRoute::new(HttpMethod::Get, "/agent-auth/manifest"),
+            CliBinding::new(&["agent-auth", "manifest"]),
+        ),
+        Operation::new(
+            "agent_auth.policy_check",
+            "Dry-run whether a session would be allowed to fetch VAR from agent-auth, and why.",
+            Scope::Admin,
+            false,
+            HttpRoute::new(HttpMethod::Post, "/agent-auth/manifest/check"),
+            CliBinding::new(&["agent-auth", "check"]),
+        ),
+        Operation::new(
             "agent_activity.search",
             "Search the tool calls agents made (from their transcripts, redacted): by text, service, tool, errors, time, project or session.",
             Scope::Read,

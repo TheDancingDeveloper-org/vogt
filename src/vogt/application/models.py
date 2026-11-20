@@ -5938,6 +5938,44 @@ class LlmProviderRemoveResult(Result):
     removed: bool
 
 
+class AgentAuthManifestParams(Params):
+    pass
+
+
+class AgentAuthManifestRow(Result):
+    """One ENGINE_AGENT_AUTH_SECRETS entry: names and flags, never a value."""
+
+    var: str
+    project_id: str
+    secret_name: str
+    policy: Literal["required", "optional", "ondemand"]
+    writable: bool = False
+    source: Literal["deploy", "file", "provider"]
+
+
+class AgentAuthManifestResult(Result):
+    entries: list[AgentAuthManifestRow] = []
+    engine: str | None = None
+
+
+class AgentAuthPolicyCheckParams(Params):
+    var: str = Field(description="The environment variable a session would fetch.")
+    template: str | None = Field(
+        default=None,
+        description=(
+            "The session template the launch would use, echoed back. The manifest "
+            "is deployment-wide, so it does not change the decision."
+        ),
+    )
+
+
+class AgentAuthPolicyCheckResult(Result):
+    var: str
+    decision: Literal["allowed", "refused"]
+    reason: str
+    template: str | None = None
+
+
 class SearchOutputParams(Params):
     q: str = Field(
         description=(

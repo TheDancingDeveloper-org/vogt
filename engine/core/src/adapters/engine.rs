@@ -1054,6 +1054,20 @@ impl EngineClient {
         self.call("/api/llm-providers", "POST", Some(payload), false, None)
     }
 
+    pub fn agent_auth_manifest(&self) -> Result<Value, VogtError> {
+        self.call("/api/agent-auth/manifest", "GET", None, false, None)
+    }
+
+    pub fn agent_auth_policy_check(&self, payload: &Value) -> Result<Value, VogtError> {
+        self.call(
+            "/api/agent-auth/manifest/check",
+            "POST",
+            Some(payload),
+            false,
+            None,
+        )
+    }
+
     pub fn remove_llm_provider(&self, name: &str) -> Result<Value, VogtError> {
         self.call(
             "/api/llm-providers/remove",

@@ -111,6 +111,63 @@ pub async fn llm_provider_set(
     Ok(Json(serde_json::json!({"provider": status})))
 }
 
+/// `GET /api/agent-auth/manifest` — the deployment's agent-auth manifest as
+/// names, flags and source, for an admin (`agent_auth.manifest`). Never a value.
+pub async fn agent_auth_manifest(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let entries: Vec<serde_json::Value> = state
+        .sessions
+        .secret_broker()
+        .manifest_report()
+        .into_iter()
+        .map(|(entry, source)| {
+            serde_json::json!({
+                "var": entry.var,
+                "project_id": entry.project_id,
+                "secret_name": entry.secret_name,
+                "policy": manifest_policy_word(entry.policy),
+                "writable": entry.writable,
+                "source": source,
+            })
+        })
+        .collect();
+    Json(serde_json::json!({"entries": entries}))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AgentAuthCheckRequest {
+    pub var: String,
+    #[serde(default)]
+    pub template: Option<String>,
+}
+
+/// `POST /api/agent-auth/manifest/check` — whether a session would be allowed
+/// to fetch `var` from agent-auth, and why (`agent_auth.policy_check`). A dry
+/// run against the manifest in force now; it returns no secret value.
+pub async fn agent_auth_policy_check(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<AgentAuthCheckRequest>,
+) -> Json<serde_json::Value> {
+    let (decision, reason) = state
+        .sessions
+        .secret_broker()
+        .manifest_decision(&request.var);
+    Json(serde_json::json!({
+        "var": request.var,
+        "decision": decision,
+        "reason": reason,
+        "template": request.template,
+    }))
+}
+
+fn manifest_policy_word(policy: crate::secret_broker::ManifestPolicy) -> &'static str {
+    use crate::secret_broker::ManifestPolicy;
+    match policy {
+        ManifestPolicy::Required => "required",
+        ManifestPolicy::Optional => "optional",
+        ManifestPolicy::OnDemand => "ondemand",
+    }
+}
+
 pub async fn llm_provider_remove(
     State(state): State<Arc<AppState>>,
     Json(request): Json<LlmProviderRemoveRequest>,

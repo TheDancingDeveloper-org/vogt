@@ -10,6 +10,10 @@ from vogt.application.services.agent_activity import (
     search_agent_activity,
     summarize_agent_activity,
 )
+from vogt.application.services.agent_auth import (
+    agent_auth_manifest,
+    agent_auth_policy_check,
+)
 from vogt.application.services.agent_clis import agent_cli_list, agent_cli_update
 from vogt.application.services.auth import (
     create_user,
@@ -200,6 +204,8 @@ from vogt.application.services.writeback import (
 
 __all__ = [
     "adopt",
+    "agent_auth_manifest",
+    "agent_auth_policy_check",
     "agent_cli_list",
     "agent_cli_update",
     "answer_decision",

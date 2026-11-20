@@ -1742,6 +1742,16 @@ class EngineClient:
         )
         return result if isinstance(result, dict) else {}
 
+    def agent_auth_manifest(self) -> dict[str, Any]:
+        payload = self._call("/api/agent-auth/manifest")
+        return payload if isinstance(payload, dict) else {}
+
+    def agent_auth_policy_check(self, payload: dict[str, Any]) -> dict[str, Any]:
+        result = self._call(
+            "/api/agent-auth/manifest/check", method="POST", payload=payload
+        )
+        return result if isinstance(result, dict) else {}
+
     def _call(
         self,
         path: str,
