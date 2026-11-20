@@ -33,6 +33,39 @@ const OPEN_STATE_SQL: &str =
 const CLOSED_STATE_SQL: &str =
     "lower(coalesce(json_extract(payload, '$.state'), '')) IN ('closed', 'merged')";
 
+/// Prepares a connection for [`BACKLOG_COUNT_SQL`]: the glob scalar the
+/// suppressions use, and the declared store attached read-only as `decl`.
+pub(crate) fn open_backlog_count(
+    conn: &Connection,
+    declared_db: &std::path::Path,
+) -> Result<(), VogtError> {
+    if !declared_db.exists() {
+        return Err(VogtError::InvalidRequest(
+            "the declared store is missing, so the backlog cannot be counted".to_string(),
+        ));
+    }
+    // `suppression.pattern` globs are matched by the same function the ranked
+    // backlog uses, so the count cannot disagree on a pattern.
+    conn.create_scalar_function(
+        "vogt_glob",
+        2,
+        rusqlite::functions::FunctionFlags::SQLITE_UTF8
+            | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| {
+            let pattern: String = ctx.get(0)?;
+            let text: String = ctx.get(1)?;
+            Ok(crate::glob::glob_match(&pattern, &text))
+        },
+    )
+    .map_err(sql_err)?;
+    conn.execute(
+        "ATTACH DATABASE ? AS decl",
+        [declared_db.to_string_lossy().as_ref()],
+    )
+    .map_err(sql_err)?;
+    Ok(())
+}
+
 /// The backlog candidate count (WI-4448). It mirrors `views::observed_candidates`
 /// row for row: the newest 1000 observed subjects (`latest`), then the drops in
 /// the ranked backlog's order, as one conjunction. A subject is kept when it is
@@ -40,10 +73,10 @@ const CLOSED_STATE_SQL: &str =
 /// that names a subject in the same read, not adopted by a work item, and not
 /// closed out by a linked project's overlay. The two `?` are the bug and
 /// feature initial states.
-const BACKLOG_COUNT_SQL: &str = "
+pub(crate) const BACKLOG_COUNT_SQL: &str = "
 WITH capped AS (
     SELECT subject_key, kind, project_id, payload, promoted
-    FROM latest_observations
+    FROM latest_observations INDEXED BY idx_latest_observed
     WHERE kind IN ('forge.issue', 'marker', 'forge.pull_request')
       AND lower(coalesce(json_extract(payload, '$.state'), '')) NOT IN ('closed', 'merged')
     ORDER BY observed_at DESC, subject_key
@@ -640,31 +673,8 @@ where
         declared_db: &std::path::Path,
         inputs: &crate::storage::interface::BacklogCountInputs,
     ) -> Result<i64, VogtError> {
-        if !declared_db.exists() {
-            return Err(VogtError::InvalidRequest(
-                "the declared store is missing, so the backlog cannot be counted".to_string(),
-            ));
-        }
         let conn = self.open(false)?;
-        // `suppression.pattern` globs are matched by the same function the
-        // ranked backlog uses, so the count cannot disagree on a pattern.
-        conn.create_scalar_function(
-            "vogt_glob",
-            2,
-            rusqlite::functions::FunctionFlags::SQLITE_UTF8
-                | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
-            |ctx| {
-                let pattern: String = ctx.get(0)?;
-                let text: String = ctx.get(1)?;
-                Ok(crate::glob::glob_match(&pattern, &text))
-            },
-        )
-        .map_err(sql_err)?;
-        conn.execute(
-            "ATTACH DATABASE ? AS decl",
-            [declared_db.to_string_lossy().as_ref()],
-        )
-        .map_err(sql_err)?;
+        open_backlog_count(&conn, declared_db)?;
         conn.query_row(
             BACKLOG_COUNT_SQL,
             rusqlite::params![inputs.bug_initial_state, inputs.feature_initial_state],
