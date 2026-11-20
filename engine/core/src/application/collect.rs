@@ -1646,6 +1646,39 @@ mod tests {
         assert_eq!(second_markers["unchanged"], 1);
     }
 
+    /// A second sweep that finds nothing new is silent on the event stream:
+    /// every collector reports `new == 0`, so none is announced (WI-1253).
+    #[test]
+    fn a_quiet_second_sweep_publishes_no_sweep_completed() {
+        let dir =
+            std::env::temp_dir().join(format!("vogt-quiet-{}-{}", std::process::id(), unique()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("notes.rs"), "// TODO(vogt): port the sweeper\n").unwrap();
+
+        let built = opened();
+        register(&built, "alpha", &dir, None);
+
+        sweep_op(&built, json!({})).unwrap();
+        let before = sweep_completed_count(&built);
+        assert!(before > 0);
+
+        let second = sweep_op(&built, json!({})).unwrap();
+        for report in second["reports"].as_array().unwrap() {
+            assert_eq!(report["new"], 0, "{report}");
+        }
+        assert_eq!(sweep_completed_count(&built), before);
+    }
+
+    fn sweep_completed_count(built: &Built) -> usize {
+        let events = events_list_op(built, json!({"limit": 1000})).unwrap();
+        events["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|event| event["kind"] == "sweep.completed")
+            .count()
+    }
+
     #[test]
     fn missing_collector_is_not_found() {
         let built = opened();
