@@ -24012,6 +24012,185 @@ sleep 2
         assert_eq!(String::from_utf8_lossy(&bytes), "XYZ!!");
     }
 
+    /// WI-4442: the engine dies with no shutdown hook while the agent is
+    /// mid-output (an eviction or a kill gives no chance to hibernate). The
+    /// next engine adopts the pod at the log's end, the agent resumes from its
+    /// last ack, and the log holds every byte exactly once: no gap, no
+    /// duplicate.
+    #[tokio::test]
+    async fn a_forced_kill_mid_output_adopts_the_pod_with_no_gap_or_duplicate() {
+        let (mut h, _accounts) = claude_harness().await;
+        let id = h.start().await;
+        let token = h.session_token(id).await;
+        let mut agent = h.dial(id, &token, 0).await;
+        assert_eq!(take(&mut agent).await, Frame::Ack { offset: 0 });
+        put(
+            &mut agent,
+            Frame::Output {
+                offset: 0,
+                data: b"hello world".to_vec(),
+            },
+        )
+        .await;
+        assert_eq!(take(&mut agent).await, Frame::Ack { offset: 11 });
+        put(
+            &mut agent,
+            Frame::Output {
+                offset: 11,
+                data: b" more-1".to_vec(),
+            },
+        )
+        .await;
+        assert_eq!(take(&mut agent).await, Frame::Ack { offset: 18 });
+        log_len(&h, id, 18).await;
+
+        // Mid-output: the agent sends the next chunk and the engine dies
+        // without answering it. The agent's last ack is 18.
+        put(
+            &mut agent,
+            Frame::Output {
+                offset: 18,
+                data: b"MID".to_vec(),
+            },
+        )
+        .await;
+        drop(agent);
+        let log_path = h.state.history.as_ref().unwrap().log_path(id);
+        // The dead engine's reader may still hold what it took. Wait for the
+        // log to stop growing, so the cursor the next engine reads is final.
+        let mut settled = std::fs::metadata(&log_path).map_or(0, |m| m.len());
+        for _ in 0..100 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let now = std::fs::metadata(&log_path).map_or(0, |m| m.len());
+            if now == settled && now >= 18 {
+                break;
+            }
+            settled = now;
+        }
+        let old_link = h.state.agent_auth.pod(id).unwrap();
+        h.state.agent_auth.forget_pod(id);
+
+        let launcher = fake_launcher(vec![running_pod(id)]);
+        let registry = restarted(&h, launcher.clone());
+        let adopted = registry.readopt_pods().await;
+        old_link.finish(137);
+        assert_eq!(adopted, vec![id]);
+        assert!(
+            launcher.deleted.lock().unwrap().is_empty(),
+            "the pod is kept"
+        );
+        let cursor = std::fs::metadata(&log_path).unwrap().len();
+
+        // The agent resumes from its last ack. The engine answers with where
+        // its log ends, and the agent resends from there.
+        let mut agent = h.dial(id, &token, 18).await;
+        let Frame::Ack { offset } = take(&mut agent).await else {
+            panic!("the resume is acknowledged");
+        };
+        assert_eq!(offset, cursor, "the resume cursor is the log's end");
+        let text = b"hello world more-1MIDEND";
+        if offset < 21 {
+            put(
+                &mut agent,
+                Frame::Output {
+                    offset,
+                    data: text[offset as usize..21].to_vec(),
+                },
+            )
+            .await;
+            assert_eq!(take(&mut agent).await, Frame::Ack { offset: 21 });
+        }
+        put(
+            &mut agent,
+            Frame::Output {
+                offset: 21,
+                data: b"END".to_vec(),
+            },
+        )
+        .await;
+        assert_eq!(take(&mut agent).await, Frame::Ack { offset: 24 });
+        log_len(&h, id, 24).await;
+        put(&mut agent, Frame::Exited { status: Some(0) }).await;
+        ended(&registry, id).await;
+
+        assert_eq!(
+            std::fs::read(&log_path).unwrap(),
+            text.to_vec(),
+            "the client's output is continuous across the kill"
+        );
+    }
+
+    /// WI-4442: an adopted link's silence is judged by the heartbeat timeout
+    /// only from the moment its agent reconnects. Before that the reconnect
+    /// timeout owns it, and the redial starts a full heartbeat window.
+    #[tokio::test]
+    async fn an_adopted_link_gets_a_full_heartbeat_timeout_from_its_reconnect() {
+        let (mut h, _accounts) = claude_harness().await;
+        let id = h.start().await;
+        let token = h.session_token(id).await;
+        let mut agent = h.dial(id, &token, 0).await;
+        assert_eq!(take(&mut agent).await, Frame::Ack { offset: 0 });
+        let old_link = h.state.agent_auth.pod(id).unwrap();
+        h.state.agent_auth.forget_pod(id);
+        drop(agent);
+
+        let launcher = fake_launcher(vec![running_pod(id)]);
+        let registry = restarted(&h, launcher.clone());
+        let adopted = registry.readopt_pods().await;
+        old_link.finish(137);
+        assert_eq!(adopted, vec![id]);
+        let link = h.state.agent_auth.pod(id).unwrap();
+        // The agent is away for longer than the heartbeat timeout.
+        tokio::time::sleep(Duration::from_millis(1_200)).await;
+        let cfg = vogt_engine_server::pod_backend::PodConfig {
+            heartbeat_timeout: Duration::from_secs(1),
+            reconnect_timeout: Duration::from_secs(3600),
+            connect_timeout: Duration::from_secs(3600),
+            ..Default::default()
+        };
+        let pod = running_pod(id);
+        assert!(
+            matches!(
+                vogt_engine_server::pod_reconcile::judge(&pod, Some(&link), &cfg, None),
+                vogt_engine_server::pod_reconcile::Verdict::Keep
+            ),
+            "an away agent is the reconnect timeout's to judge, not the heartbeat's"
+        );
+
+        let mut agent = h.dial(id, &token, 0).await;
+        assert_eq!(take(&mut agent).await, Frame::Ack { offset: 0 });
+        let attached = tokio::time::timeout(Duration::from_secs(5), async {
+            while !link.is_connected() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(attached.is_ok(), "the redial attaches");
+        assert!(
+            link.heartbeat_age() < cfg.heartbeat_timeout,
+            "the reconnect starts a full heartbeat window"
+        );
+        assert!(
+            matches!(
+                vogt_engine_server::pod_reconcile::judge(&pod, Some(&link), &cfg, None),
+                vogt_engine_server::pod_reconcile::Verdict::Keep
+            ),
+            "a freshly reconnected agent is not judged silent"
+        );
+
+        // Once the window passes with no heartbeat, the silence is judged.
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        assert!(
+            matches!(
+                vogt_engine_server::pod_reconcile::judge(&pod, Some(&link), &cfg, None),
+                vogt_engine_server::pod_reconcile::Verdict::End { .. }
+            ),
+            "a reconnected agent silent past the heartbeat timeout is ended"
+        );
+        put(&mut agent, Frame::Exited { status: Some(0) }).await;
+        ended(&registry, id).await;
+    }
+
     #[tokio::test]
     async fn an_adopted_pod_whose_agent_never_returns_is_reported_and_left_running() {
         let (mut h, _accounts) = claude_harness().await;
