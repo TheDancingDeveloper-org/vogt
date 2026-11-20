@@ -125,11 +125,23 @@ pub fn check(policy: &SessionPolicy, command: &str, cwd: &Path) -> Option<String
     // (an oversight session, a session with no work item) is not judged here.
     if policy.session_role.as_deref() == Some("worker") {
         if let Some(pattern) = policy.branch_pattern.as_deref() {
-            // git reads its config from these variables; a worker sets none
-            // of them, so a push cannot be widened through the environment.
-            if command.contains("GIT_CONFIG") {
+            // A git line may not name a variable or the home directory that
+            // decides where git reads its configuration or which repository it
+            // opens: `HOME=… git push` reads another user's config (WI-1327).
+            const SOURCES: [&str; 6] = [
+                "GIT_CONFIG",
+                "GIT_DIR",
+                "GIT_COMMON_DIR",
+                "GIT_WORK_TREE",
+                "HOME",
+                "XDG_CONFIG_HOME",
+            ];
+            let git_line_present = command
+                .split(|c: char| c.is_whitespace() || ";&|()".contains(c))
+                .any(|token| base(token) == "git");
+            if git_line_present && SOURCES.iter().any(|source| command.contains(source)) {
                 return Some(
-                    "refusing: a worker may not set git configuration through the environment"
+                    "refusing: a worker may not change where git reads its configuration from"
                         .to_string(),
                 );
             }
@@ -338,10 +350,12 @@ fn worker_branch(
     }
 }
 
-/// A git command by a worker. Anything that can widen what a push sends is
-/// refused here: a `-c` or `--config-env` setting of a push key, a `git
-/// config` write of one, and a `git remote` mirror. The push itself is
-/// judged by [`worker_push`].
+/// A git command by a worker. A worker's git reads its configuration from
+/// the repository and the user's files, and nothing on its command line may
+/// change that beyond the user's identity: a `-c` or `--config-env` key other
+/// than `user.*`, an explicit git directory, a config write, a mirror, or an
+/// alias all can widen a push or pull in another config (WI-1327). The push
+/// itself is judged by [`worker_push`].
 fn worker_git(
     words: &[String],
     pattern: &str,
@@ -350,22 +364,24 @@ fn worker_git(
 ) -> Option<String> {
     if command_line_config(words)
         .iter()
-        .any(|key| widens_push(key))
+        .any(|key| !key.starts_with("user."))
     {
         return Some(
-            "refusing: a worker may not set git push configuration on the command line".to_string(),
+            "refusing: a worker may set only user.* git configuration on the command line"
+                .to_string(),
         );
     }
+    if words
+        .iter()
+        .any(|w| w.starts_with("--git-dir") || w.starts_with("--work-tree"))
+    {
+        return Some("refusing: a worker may not point git at another git directory".to_string());
+    }
+    let dir = git_dir(words, cwd);
     match git_subcommand(words).as_deref() {
-        Some("push") => worker_push(words, pattern, policy, cwd),
-        Some("config")
-            if git_args(words)
-                .iter()
-                .skip(1)
-                .any(|arg| widens_push(&arg.to_ascii_lowercase())) =>
-        {
-            Some("refusing: a worker may not change git push configuration".to_string())
-        }
+        Some("push") => worker_push(words, pattern, policy, &dir),
+        Some("config") => (!read_only_config(words))
+            .then(|| "refusing: a worker may read git configuration but not change it".to_string()),
         Some("remote")
             if words
                 .iter()
@@ -373,8 +389,48 @@ fn worker_git(
         {
             Some("refusing: a worker may not add a mirror remote".to_string())
         }
-        _ => None,
+        Some(name) => git_line(&dir, &["config", "--get", &format!("alias.{name}")])
+            .is_some()
+            .then(|| "refusing: a worker may not run a git alias".to_string()),
+        None => None,
     }
+}
+
+/// Whether a `git config` only reads: a read flag and no write flag, or a
+/// single key with no value.
+fn read_only_config(words: &[String]) -> bool {
+    const WRITES: &[&str] = &[
+        "--add",
+        "--replace-all",
+        "--unset",
+        "--unset-all",
+        "--remove-section",
+        "--rename-section",
+        "-e",
+        "--edit",
+    ];
+    const READS: &[&str] = &[
+        "--get",
+        "--get-all",
+        "--get-regexp",
+        "--get-urlmatch",
+        "--list",
+        "-l",
+        "--show-origin",
+        "--show-scope",
+        "--name-only",
+        "--null",
+        "-z",
+    ];
+    let args = git_args(words);
+    let args = &args[1..];
+    if args.iter().any(|a| WRITES.contains(&a.as_str())) {
+        return false;
+    }
+    if args.iter().any(|a| READS.contains(&a.as_str())) {
+        return true;
+    }
+    args.iter().filter(|a| !a.starts_with('-')).count() == 1
 }
 
 /// The keys `-c key=value`, `-ckey=value` and `--config-env[=]key=ENV` set
@@ -398,16 +454,6 @@ fn command_line_config(words: &[String]) -> Vec<String> {
     keys
 }
 
-/// Whether a git config key (lowercased) changes which refs a push sends or
-/// whether it is a mirror: `push.*`, `remote.pushdefault`, `remote.*.push`,
-/// `remote.*.mirror`, and the `*.pushremote` that picks the remote.
-fn widens_push(key: &str) -> bool {
-    key.starts_with("push.")
-        || key == "remote.pushdefault"
-        || key.ends_with(".pushremote")
-        || (key.starts_with("remote.") && (key.ends_with(".push") || key.ends_with(".mirror")))
-}
-
 /// A `git push` by a worker. Explicit refspecs must each name the worker's
 /// own branch. With none, git sends the remote's configured push refspecs or,
 /// failing those, the current branch; both are checked here, and so is a
@@ -416,7 +462,7 @@ fn worker_push(
     words: &[String],
     pattern: &str,
     policy: &SessionPolicy,
-    cwd: &Path,
+    dir: &Path,
 ) -> Option<String> {
     let args = git_args(words);
     let mut refs = Vec::new();
@@ -455,11 +501,10 @@ fn worker_push(
         }
         refs.push(arg.clone());
     }
-    let dir = git_dir(words, cwd);
-    let current = current_branch(&dir);
-    let remote = push_remote(&dir, current.as_deref(), named_remote.as_deref());
+    let current = current_branch(dir);
+    let remote = push_remote(dir, current.as_deref(), named_remote.as_deref());
     if let Some(remote) = &remote {
-        if config_mirror(&dir, remote) {
+        if config_mirror(dir, remote) {
             return Some(
                 "refusing: a worker may not push a mirror (remote.*.mirror is set)".to_string(),
             );
@@ -472,14 +517,14 @@ fn worker_push(
     }
     if let Some(remote) = &remote {
         let key = format!("remote.{remote}.push");
-        let configured = git_lines(&dir, &["config", "--get-all", &key]);
+        let configured = git_lines(dir, &["config", "--get-all", &key]);
         if !configured.is_empty() {
             return configured
                 .iter()
                 .find_map(|r| worker_refspec(r, current.as_deref(), pattern, policy));
         }
     }
-    if git_line(&dir, &["config", "--get", "push.default"]).as_deref() == Some("matching") {
+    if git_line(dir, &["config", "--get", "push.default"]).as_deref() == Some("matching") {
         return Some(
             "refusing: a worker may not push with push.default=matching, which pushes every matching branch"
                 .to_string(),
@@ -5549,5 +5594,59 @@ mod tests {
         // An explicit refspec is what git pushes, whatever the remote's
         // configured refspec says, so the configured one is not read here.
         assert!(!refused(&worker, "git push origin wi-1298-x", &refspec));
+    }
+
+    #[test]
+    fn a_worker_cannot_run_a_git_alias_that_pushes() {
+        let worker = worker_on_1298();
+        let cwd = cwd();
+        for command in [
+            "git -c alias.p='push --force origin HEAD:main' p",
+            "git -c alias.p=push p origin",
+            "git --config-env=alias.p=PUSHALIAS p",
+            "git config alias.p 'push --mirror origin'",
+            "git config --add alias.p 'push origin HEAD:main'",
+            "git config --global alias.p 'push --mirror origin'",
+        ] {
+            assert!(refused(&worker, command, &cwd), "should refuse: {command}");
+        }
+        // An alias already on disk: `git p` runs its expansion.
+        let on_disk = config_repo("alias", "wi-1298-x", &[("alias.p", "push --mirror origin")]);
+        assert!(refused(&worker, "git p", &on_disk));
+        assert!(refused(&worker, "git p origin", &on_disk));
+        // A plain built-in is not an alias.
+        assert!(!refused(&worker, "git status", &on_disk));
+    }
+
+    #[test]
+    fn a_worker_cannot_include_another_config_file() {
+        let worker = worker_on_1298();
+        let dir = config_repo("include", "wi-1298-x", &[]);
+        for command in [
+            "git -c include.path=/tmp/evil.cfg push origin wi-1298-x",
+            "git -c includeIf.gitdir:/x/.path=/tmp/evil.cfg push origin wi-1298-x",
+            "git config include.path /tmp/evil.cfg",
+            "git config --add includeIf.gitdir:/x/.path /tmp/evil.cfg",
+        ] {
+            assert!(refused(&worker, command, &dir), "should refuse: {command}");
+        }
+    }
+
+    #[test]
+    fn a_worker_push_cannot_change_where_git_reads_its_config() {
+        let worker = worker_on_1298();
+        let dir = config_repo("sources", "wi-1298-x", &[]);
+        for command in [
+            "HOME=/tmp/h git push origin wi-1298-x",
+            "XDG_CONFIG_HOME=/tmp/x git push origin wi-1298-x",
+            "GIT_CONFIG_GLOBAL=/tmp/g git push origin wi-1298-x",
+            "GIT_CONFIG_SYSTEM=/tmp/s git push origin wi-1298-x",
+            "GIT_DIR=/tmp/other/.git git push origin wi-1298-x",
+            "export HOME=/tmp/h; git push origin wi-1298-x",
+            "git --git-dir=/tmp/other/.git push origin wi-1298-x",
+        ] {
+            assert!(refused(&worker, command, &dir), "should refuse: {command}");
+        }
+        assert!(!refused(&worker, "git push origin wi-1298-x", &dir));
     }
 }
