@@ -196,6 +196,10 @@ pub fn service_for(name: &str) -> Option<ServiceFn> {
         "llm_provider.list" => Some(crate::application::services::llm_providers::list_op),
         "llm_provider.set" => Some(crate::application::services::llm_providers::set_op),
         "llm_provider.remove" => Some(crate::application::services::llm_providers::remove_op),
+        "agent_auth.manifest" => Some(crate::application::services::agent_auth::manifest_op),
+        "agent_auth.policy_check" => {
+            Some(crate::application::services::agent_auth::policy_check_op)
+        }
         "agent_activity.search" => {
             Some(crate::application::services::agent_activity::search_agent_activity_op)
         }

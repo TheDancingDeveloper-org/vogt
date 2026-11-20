@@ -57676,6 +57676,201 @@
       "exclusion_reason": null
     },
     {
+      "name": "agent_auth.manifest",
+      "summary": "List the agent-auth manifest entries: names, flags and source, never values.",
+      "scope": "admin",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "GET",
+      "http_path": "/agent-auth/manifest",
+      "mcp_tool": "agent_auth_manifest",
+      "cli_path": [
+        "agent-auth",
+        "manifest"
+      ],
+      "params_schema": {
+        "additionalProperties": false,
+        "properties": {},
+        "title": "AgentAuthManifestParams",
+        "type": "object"
+      },
+      "result_schema": {
+        "$defs": {
+          "AgentAuthManifestRow": {
+            "additionalProperties": false,
+            "description": "One ENGINE_AGENT_AUTH_SECRETS entry: names and flags, never a value.",
+            "properties": {
+              "var": {
+                "title": "Var",
+                "type": "string"
+              },
+              "project_id": {
+                "title": "Project Id",
+                "type": "string"
+              },
+              "secret_name": {
+                "title": "Secret Name",
+                "type": "string"
+              },
+              "policy": {
+                "enum": [
+                  "required",
+                  "optional",
+                  "ondemand"
+                ],
+                "title": "Policy",
+                "type": "string"
+              },
+              "writable": {
+                "default": false,
+                "title": "Writable",
+                "type": "boolean"
+              },
+              "source": {
+                "enum": [
+                  "deploy",
+                  "file",
+                  "provider"
+                ],
+                "title": "Source",
+                "type": "string"
+              }
+            },
+            "required": [
+              "var",
+              "project_id",
+              "secret_name",
+              "policy",
+              "source"
+            ],
+            "title": "AgentAuthManifestRow",
+            "type": "object"
+          }
+        },
+        "additionalProperties": false,
+        "properties": {
+          "entries": {
+            "default": [],
+            "items": {
+              "$ref": "#/$defs/AgentAuthManifestRow"
+            },
+            "title": "Entries",
+            "type": "array"
+          },
+          "engine": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Engine"
+          }
+        },
+        "title": "AgentAuthManifestResult",
+        "type": "object"
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "agent_auth.policy_check",
+      "summary": "Dry-run whether a session would be allowed to fetch VAR from agent-auth, and why.",
+      "scope": "admin",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "POST",
+      "http_path": "/agent-auth/manifest/check",
+      "mcp_tool": "agent_auth_policy_check",
+      "cli_path": [
+        "agent-auth",
+        "check"
+      ],
+      "params_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "var": {
+            "description": "The environment variable a session would fetch.",
+            "title": "Var",
+            "type": "string"
+          },
+          "template": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "The session template the launch would use, echoed back. The manifest is deployment-wide, so it does not change the decision.",
+            "title": "Template"
+          }
+        },
+        "required": [
+          "var"
+        ],
+        "title": "AgentAuthPolicyCheckParams",
+        "type": "object"
+      },
+      "result_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "var": {
+            "title": "Var",
+            "type": "string"
+          },
+          "decision": {
+            "enum": [
+              "allowed",
+              "refused"
+            ],
+            "title": "Decision",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "template": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Template"
+          }
+        },
+        "required": [
+          "var",
+          "decision",
+          "reason"
+        ],
+        "title": "AgentAuthPolicyCheckResult",
+        "type": "object"
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
       "name": "agent_activity.search",
       "summary": "Search the tool calls agents made (from their transcripts, redacted): by text, service, tool, errors, time, project or session.",
       "scope": "read",

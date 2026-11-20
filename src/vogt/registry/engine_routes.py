@@ -61,6 +61,8 @@ ENGINE_COUNTERPARTS: Mapping[str, str] = {
     "GET /api/llm-providers": "llm_provider.list",
     "POST /api/llm-providers": "llm_provider.set",
     "POST /api/llm-providers/remove": "llm_provider.remove",
+    "GET /api/agent-auth/manifest": "agent_auth.manifest",
+    "POST /api/agent-auth/manifest/check": "agent_auth.policy_check",
     "GET /api/workspaces": "workspace.list",
     "POST /api/workspaces/clean": "workspace.clean",
     "GET /api/history/sessions": "session.history_list",
