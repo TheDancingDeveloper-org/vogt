@@ -1535,6 +1535,7 @@ impl AgentTaskRegistry {
                 // (WI-998).
                 work_item: task.vogt_work_item.clone(),
                 supervisor: None,
+                started_by: None,
                 wake_on: Vec::new(),
                 session_ref: None,
                 worktree: None,
@@ -5337,6 +5338,7 @@ pub(crate) mod tests {
             agent_auth_public_url: None,
             cadastre_mcp_url: None,
             vogt_prod_mcp_url: None,
+            lane: None,
             crw_mcp_url: None,
             ws_query_token_allowed: false,
             ws_ping_interval: std::time::Duration::from_secs(20),

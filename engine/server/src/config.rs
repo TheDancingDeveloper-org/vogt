@@ -616,6 +616,11 @@ pub struct Config {
     /// entry is handed out only while the agent-auth manifest declares
     /// `VOGT_PROD_TOKEN` or the session holds a grant for it.
     pub vogt_prod_mcp_url: Option<String>,
+    /// Which deployment lane this engine serves (WI-4489): `ENGINE_LANE`,
+    /// e.g. `dev` or `prod`. A `dev` engine never hands out the remote Vogt:
+    /// `vogt_prod_mcp_url` is dropped at load, and the broker refuses
+    /// `VOGT_PROD_TOKEN` to every session, whatever else is configured.
+    pub lane: Option<String>,
     /// Optional crw MCP URL (path included) for pod sessions (WI-4489). The
     /// host default is a tailnet address a pod cannot reach, so unset means
     /// no crw entry in a pod.
@@ -788,6 +793,7 @@ struct FileConfig {
     agent_auth_public_url: Option<String>,
     cadastre_mcp_url: Option<String>,
     vogt_prod_mcp_url: Option<String>,
+    lane: Option<String>,
     crw_mcp_url: Option<String>,
     vogt_core_url: Option<String>,
     vogt_core_token: Option<String>,
@@ -1132,7 +1138,7 @@ pub fn load(
             .ok()
             .as_deref(),
     )?;
-    let config = Config {
+    let mut config = Config {
         bind,
         token,
         token_mutating_request_limit_per_minute,
@@ -1348,6 +1354,11 @@ pub fn load(
                     value.strip_suffix("/mcp").unwrap_or(value).to_string()
                 }),
         )?,
+        lane: from_file
+            .lane
+            .or_else(|| engine_env("ENGINE_LANE").ok())
+            .map(|value| value.trim().to_ascii_lowercase())
+            .filter(|value| !value.is_empty()),
         crw_mcp_url: validate_mcp_url(
             "ENGINE_CRW_MCP_URL",
             from_file
@@ -1450,7 +1461,19 @@ pub fn load(
         dirs_home().as_deref(),
         &config.state_dir,
     )?;
+    if config.is_dev_lane() && config.vogt_prod_mcp_url.take().is_some() {
+        tracing::warn!(
+            "ENGINE_LANE=dev: the vogt-prod MCP URL is ignored; a dev lane never reaches production"
+        );
+    }
     Ok(config)
+}
+
+impl Config {
+    /// Whether this engine serves the dev lane (WI-4489).
+    pub fn is_dev_lane(&self) -> bool {
+        self.lane.as_deref() == Some("dev")
+    }
 }
 
 /// The engine config-file path from the environment (`ENGINE_CONFIG`).

@@ -778,6 +778,99 @@ fn a_worker_start_sends_no_supervisor_to_the_engine() {
     assert!(!body.contains("wake_on"), "{body}");
 }
 
+fn worker_caller_script() -> Arc<Script> {
+    script_with(vec![
+        (
+            200,
+            r#"{"id":"eng-8","name":"beta","cwd":"/work/tree"}"#.to_string(),
+        ),
+        (
+            200,
+            r#"{"id":"eng-worker","name":"worker","cwd":"/work/tree","activity":"idle","alive":true,"autopilot":false,"autopilot_nudges":0,"keep_awake":false,"role":"worker"}"#
+                .to_string(),
+        ),
+    ])
+}
+
+/// WI-4489: a worker's child never outranks it. A worker that asks for an
+/// oversight session, or for the full MCP set, is refused before the engine
+/// is asked, whatever the supervisor or autopilot fields say.
+#[test]
+fn a_worker_cannot_start_an_oversight_or_full_set_session() {
+    for (role, mcp_set, refused) in [
+        ("oversight", None, "role=oversight"),
+        ("worker", Some("full"), "mcp_set=full"),
+    ] {
+        let script = worker_caller_script();
+        let built = opened_as(
+            Some(Arc::clone(&script)),
+            Principal::new("agent:engine:eng-worker", ActorKind::Agent, "Worker").unwrap(),
+        );
+        insert_project(&built, "beta");
+        let Built::StepSequential(ctx) = &built else {
+            unreachable!("opened() builds a step clock");
+        };
+        let mut params = start_params(Some("beta"), None, "because");
+        params.role = role.to_string();
+        params.mcp_set = mcp_set.map(str::to_string);
+        params.autopilot = Some(true);
+        let error = start_session(ctx, &params).unwrap_err().to_string();
+        assert!(error.contains(refused), "{error}");
+        assert!(
+            !script.seen.lock().unwrap().iter().any(|l| l.starts_with("POST ")),
+            "the engine was asked to start it"
+        );
+    }
+}
+
+/// WI-4489: a worker's start names its caller to the engine as `started_by`,
+/// so the engine holds the child to the parent's standing too.
+#[test]
+fn a_worker_start_names_its_caller_as_started_by() {
+    let script = worker_caller_script();
+    let built = opened_as(
+        Some(Arc::clone(&script)),
+        Principal::new("agent:engine:eng-worker", ActorKind::Agent, "Worker").unwrap(),
+    );
+    insert_project(&built, "beta");
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!("opened() builds a step clock");
+    };
+    start_session(ctx, &start_params(Some("beta"), None, "because")).unwrap();
+    let body = engine_create_body(&script);
+    assert!(body.contains(r#""started_by":"eng-worker""#), "{body}");
+}
+
+/// WI-4489: an oversight session may still start one on the full set.
+#[test]
+fn an_oversight_session_may_start_a_full_set_session() {
+    let script = script_with(vec![
+        (
+            200,
+            r#"{"id":"eng-8","name":"beta","cwd":"/work/tree"}"#.to_string(),
+        ),
+        (
+            200,
+            r#"{"id":"eng-parent","name":"parent","cwd":"/work/tree","activity":"idle","alive":true,"autopilot":false,"autopilot_nudges":0,"keep_awake":false,"role":"oversight"}"#
+                .to_string(),
+        ),
+    ]);
+    let built = opened_as(
+        Some(Arc::clone(&script)),
+        Principal::new("agent:engine:eng-parent", ActorKind::Agent, "Parent").unwrap(),
+    );
+    insert_project(&built, "beta");
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!("opened() builds a step clock");
+    };
+    let mut params = start_params(Some("beta"), None, "because");
+    params.mcp_set = Some("full".to_string());
+    start_session(ctx, &params).unwrap();
+    let body = engine_create_body(&script);
+    assert!(body.contains(r#""mcp_set":"full""#), "{body}");
+    assert!(body.contains(r#""started_by":"eng-parent""#), "{body}");
+}
+
 /// WI-1521: a person's start names no supervisor. Wake kinds stay unset unless
 /// the person asks for them, which is how an overseer is started.
 #[test]

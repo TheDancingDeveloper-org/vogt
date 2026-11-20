@@ -182,6 +182,7 @@ async fn handle<C: Clock + Clone + Send + 'static, I: IdFactory + Send + 'static
     request: Request<Body>,
 ) -> Response {
     let presented = bearer(request.headers().get("authorization"));
+    let worker_profile = is_worker_profile(request.uri().query());
     // The same cap `/api` applies, and it is applied before anything else reads
     // the body: an unauthenticated caller must not be able to stream an
     // unbounded body into memory.
@@ -216,11 +217,63 @@ async fn handle<C: Clock + Clone + Send + 'static, I: IdFactory + Send + 'static
     // writing it here is what the line reads when the handler returns. A
     // refusal above never gets here, and stays unattributed.
     crate::observability::set_request_actor(Some(admitted.principal.identity_ref.clone()));
+    if worker_profile {
+        if let Some(refused) = worker_profile_refusal(&admitted.message) {
+            return refused;
+        }
+    }
     let outcome = tokio::task::spawn_blocking(move || dispatch(admitted, build)).await;
     match outcome {
         Ok(response) => response,
         Err(_) => plain_internal(),
     }
+}
+
+/// Whether the caller asked for the worker tool profile (`?profile=worker`,
+/// WI-4489). The engine puts it on a worker session's vogt URL.
+fn is_worker_profile(query: Option<&str>) -> bool {
+    query.is_some_and(|query| query.split('&').any(|pair| pair == "profile=worker"))
+}
+
+/// A worker-profile caller may not start an oversight session or one on the
+/// full MCP set (WI-4489). The profile is the URL the engine handed the
+/// session, so this is a second fence: the start itself refuses any agent
+/// that is not oversight, whatever URL it used.
+fn worker_profile_refusal(message: &Map<String, Value>) -> Option<Response> {
+    let registry = crate::registry::default_registry();
+    let operation = called_operation(message, &registry)?;
+    if operation.name != "session.start" {
+        return None;
+    }
+    let arguments = message
+        .get("params")
+        .and_then(|params| params.get("arguments"));
+    let field = |name: &str| {
+        arguments
+            .and_then(|arguments| arguments.get(name))
+            .and_then(Value::as_str)
+            .map(str::trim)
+    };
+    let asked = if field("role") == Some("oversight") {
+        "role=oversight"
+    } else if field("mcp_set") == Some("full") {
+        "mcp_set=full"
+    } else {
+        return None;
+    };
+    Some(json_response(
+        StatusCode::OK,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": message.get("id").cloned().unwrap_or(Value::Null),
+            "result": {
+                "content": [{"type": "text", "text": format!(
+                    "forbidden: session.start with {asked} is not available on the worker tool profile"
+                )}],
+                "isError": true
+            }
+        }),
+    ))
 }
 
 fn plain_internal() -> Response {
@@ -912,6 +965,46 @@ mod tests {
                 .unwrap()
                 .len()
                 < 300
+        );
+    }
+
+    /// WI-4489: the worker profile is enforced at the door, not a hint. A
+    /// session_start asking for oversight or the full set is refused before it
+    /// reaches the operation; the same call without the profile goes through
+    /// to it (and fails there for its own reasons, not this one).
+    #[test]
+    fn the_worker_profile_refuses_an_oversight_or_full_start() {
+        let served = test_harness::serve(false);
+        let admin = test_harness::admin_secret(served.addr);
+        let token = test_harness::mint_token(served.addr, &admin, "human:ada", "admin");
+        let call = |path: &str, arguments: Value| {
+            let body = serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "session_start", "arguments": arguments},
+            });
+            let (status, response) =
+                test_harness::send(served.addr, "POST", path, Some(&token), Some(&body));
+            assert_eq!(status, 200, "{response}");
+            serde_json::from_str::<Value>(&response).unwrap()
+        };
+        let worker = format!("{MCP_PATH}?profile=worker");
+        for arguments in [
+            serde_json::json!({"project": "p", "reason": "r", "role": "oversight"}),
+            serde_json::json!({"project": "p", "reason": "r", "mcp_set": "full"}),
+        ] {
+            let refused = call(&worker, arguments.clone());
+            let text = refused["result"]["content"][0]["text"].as_str().unwrap();
+            assert!(text.contains("worker tool profile"), "{refused}");
+            let open = call(MCP_PATH, arguments);
+            assert!(!open.to_string().contains("worker tool profile"), "{open}");
+        }
+        let worker_start = call(
+            &worker,
+            serde_json::json!({"project": "p", "reason": "r", "mcp_set": "worker"}),
+        );
+        assert!(
+            !worker_start.to_string().contains("worker tool profile"),
+            "{worker_start}"
         );
     }
 
