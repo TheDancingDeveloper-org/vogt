@@ -17,9 +17,9 @@ This item records no description, so it states no acceptance criteria. Say so in
 - **branch** wi-2-x
 - **base** main
 
-Review `git diff main...wi-2-x` — branch `wi-2-x` against `main` — and nothing older.
+Review `git diff main...<tip>` — branch `wi-2-x` against `main` — where `<tip>` is the branch's current remote tip, and nothing older.
 
-The hand-off names no head sha. Resolve one with `git rev-parse wi-2-x` before you start, review that sha, and say in the verdict that the hand-off left it out.
+The hand-off names no head sha. Before you start, `git fetch origin wi-2-x` and resolve the tip with `git rev-parse origin/wi-2-x`, review that sha, and say in the verdict that the hand-off left it out.
 
 ## What the worker claims
 

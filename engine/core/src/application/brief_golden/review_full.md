@@ -21,9 +21,9 @@ Keep it exact.
 - **base** rust-core
 - **session** ses_a
 
-Review `git diff rust-core...abc1234` — branch `wi-1058-brief` against `rust-core` — and nothing older.
+Review `git diff rust-core...<tip>` — branch `wi-1058-brief` against `rust-core` — where `<tip>` is the branch's current remote tip, and nothing older.
 
-Check the branch tip first (`git rev-parse wi-1058-brief`). If it is not `abc1234`, review `abc1234` and say the branch has moved.
+Before you start, `git fetch origin wi-1058-brief` and resolve the tip with `git rev-parse origin/wi-1058-brief`. The hand-off names head `abc1234`. If the tip is that sha, review it. If the tip has moved past it, review the tip, not `abc1234`: the newer commits are part of the change and nobody else will review them. Read `git log abc1234..<tip>` as well, and put both heads side by side at the top of the verdict: `hand-off head abc1234 · reviewed tip <tip>`. If the tip does not contain the hand-off head (a force-push), say so and review the tip.
 
 ## What the worker claims
 

@@ -354,31 +354,32 @@ fn handoff_claims(fields: &HandoffFields) -> Vec<String> {
     rows
 }
 
-/// The concrete diff command, with the hand-off's own base and head.
+/// The concrete diff command: the branch's current tip, not a stale head
+/// (WI-1837). A worker can push again without a fresh hand-off, so the
+/// reviewer resolves the remote tip and reviews it, and shows the hand-off
+/// head beside it when the two differ.
 fn review_diff(fields: &HandoffFields) -> Vec<String> {
     let branch = fields.branch.as_deref().unwrap_or_default();
     let base = fields.base.as_deref().unwrap_or_default();
-    let head = fields
-        .head_sha
-        .as_deref()
-        .filter(|sha| !sha.is_empty())
-        .unwrap_or(branch);
+    let resolve = format!(
+        "`git fetch origin {branch}` and resolve the tip with `git rev-parse origin/{branch}`"
+    );
     let mut lines = vec![
         format!(
-            "Review `git diff {base}...{head}` — branch `{branch}` against `{base}` — and nothing older."
+            "Review `git diff {base}...<tip>` — branch `{branch}` against `{base}` — where `<tip>` is the branch's current remote tip, and nothing older."
         ),
         String::new(),
     ];
     match fields.head_sha.as_deref().filter(|sha| !sha.is_empty()) {
         Some(sha) => lines.extend([
             format!(
-                "Check the branch tip first (`git rev-parse {branch}`). If it is not `{sha}`, review `{sha}` and say the branch has moved."
+                "Before you start, {resolve}. The hand-off names head `{sha}`. If the tip is that sha, review it. If the tip has moved past it, review the tip, not `{sha}`: the newer commits are part of the change and nobody else will review them. Read `git log {sha}..<tip>` as well, and put both heads side by side at the top of the verdict: `hand-off head {sha} · reviewed tip <tip>`. If the tip does not contain the hand-off head (a force-push), say so and review the tip."
             ),
             String::new(),
         ]),
         None => lines.extend([
             format!(
-                "The hand-off names no head sha. Resolve one with `git rev-parse {branch}` before you start, review that sha, and say in the verdict that the hand-off left it out."
+                "The hand-off names no head sha. Before you start, {resolve}, review that sha, and say in the verdict that the hand-off left it out."
             ),
             String::new(),
         ]),
@@ -1088,6 +1089,36 @@ mod tests {
             related: &BTreeMap::new(),
         });
         assert_golden(&brief, "review_no_head");
+    }
+
+    #[test]
+    fn a_review_reviews_the_branch_tip_not_only_the_hand_off_head() {
+        let item = item_full();
+        let comments = comments_full();
+        let related = related_full();
+        let project = project_with(policy_full());
+        let brief = review_brief_for_work_item(&WorkBrief {
+            item: &item,
+            session_id: SESSION,
+            ranking: None,
+            project: Some(&project),
+            comments: &comments,
+            related: &related,
+        });
+        assert!(
+            brief
+                .text
+                .contains("where `<tip>` is the branch's current remote tip"),
+            "the review does not name the branch tip: {}",
+            brief.text
+        );
+        assert!(
+            brief
+                .text
+                .contains("hand-off head abc1234 · reviewed tip <tip>"),
+            "the review does not show both heads: {}",
+            brief.text
+        );
     }
 
     #[test]

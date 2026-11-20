@@ -108,6 +108,9 @@ impl EngineClient {
         if let Some(template) = &spec.template {
             body.insert("template".to_string(), Value::String(template.clone()));
         }
+        if let Some(mcp_set) = &spec.mcp_set {
+            body.insert("mcp_set".to_string(), Value::String(mcp_set.clone()));
+        }
         if let Some(supervisor) = &spec.supervisor {
             body.insert("supervisor".to_string(), Value::String(supervisor.clone()));
         }
@@ -1309,6 +1312,10 @@ pub struct CreateSession {
     /// The change kinds an oversight session is woken for. Sent only when
     /// non-empty.
     pub wake_on: Vec<String>,
+    /// The MCP set the agent starts with (WI-2740, WI-2833). Sent whenever
+    /// named, `full` included: an absent value lets the engine pick its agent
+    /// default (Codex: worker), so `full` has to travel.
+    pub mcp_set: Option<String>,
 }
 
 impl CreateSession {
@@ -1333,6 +1340,7 @@ impl CreateSession {
             companion: None,
             policy: None,
             budget: None,
+            mcp_set: None,
             worktree: None,
             source: None,
             supervisor: None,

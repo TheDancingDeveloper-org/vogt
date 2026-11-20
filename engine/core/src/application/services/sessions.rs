@@ -165,6 +165,7 @@ where
             },
             worktree: optional_bool(&params, "worktree")?,
             repo_map: optional_bool(&params, "repo_map")?,
+            mcp_set: optional_mcp_set(&params)?,
             cold_wake_opt_out: optional_bool(&params, "cold_wake_opt_out")?.unwrap_or(false),
             wake_on: optional_string_list(&params, "wake_on")?.unwrap_or_default(),
             explicit_null: PROFILE_FIELDS
@@ -583,6 +584,10 @@ pub struct StartSessionParams {
     pub worktree: Option<bool>,
     /// Draw a repo map into the brief. Unset, the profile decides.
     pub repo_map: Option<bool>,
+    /// The MCP set the agent starts with (WI-2833): `worker` or `full`. Unset,
+    /// the profile decides; a value that names `full` is sent, since an unset
+    /// value lets the engine pick its own agent default.
+    pub mcp_set: Option<String>,
     /// Never compact this session on a cold wake (WI-2037).
     pub cold_wake_opt_out: bool,
     /// The change kinds an oversight session is woken for (WI-1521), sent to
@@ -594,7 +599,7 @@ pub struct StartSessionParams {
 }
 
 /// The start fields a dispatch profile fills, in Python's override order.
-const PROFILE_FIELDS: [&str; 7] = [
+const PROFILE_FIELDS: [&str; 8] = [
     "template",
     "model",
     "effort",
@@ -602,7 +607,19 @@ const PROFILE_FIELDS: [&str; 7] = [
     "worktree",
     "repo_map",
     "autopilot",
+    "mcp_set",
 ];
+
+/// The `mcp_set` a start names, when it names one: `worker` or `full` (WI-2833).
+fn optional_mcp_set(params: &Value) -> Result<Option<String>, VogtError> {
+    let value = optional_string(params, "mcp_set")?;
+    match value.as_deref() {
+        None | Some("full") | Some("worker") => Ok(value),
+        Some(other) => Err(VogtError::InvalidRequest(format!(
+            "mcp_set must be full or worker, not {other:?}"
+        ))),
+    }
+}
 
 /// The limits a start carries (Python `SessionBudgetParams`). Each field is one
 /// limit; a field left out is not set.
@@ -3704,6 +3721,7 @@ where
         params.worktree.is_some(),
         params.repo_map.is_some(),
         params.autopilot.is_some(),
+        params.mcp_set.is_some(),
     ];
     let overrides: Vec<&'static str> = PROFILE_FIELDS
         .into_iter()
@@ -3748,6 +3766,9 @@ where
     }
     if !caller("autopilot") {
         filled.autopilot = Some(profile.autopilot);
+    }
+    if !caller("mcp_set") {
+        filled.mcp_set = profile.mcp_set.clone();
     }
     Ok((filled, profile.read_only, overrides))
 }
@@ -3875,6 +3896,7 @@ where
     spec.wake_on = params.wake_on.clone();
     spec.source = subject.source.clone();
     spec.autopilot = autopilot;
+    spec.mcp_set = params.mcp_set.clone();
     spec.prompt = Some(brief_with_task(
         &subject.brief.text,
         params.task.as_deref(),
