@@ -1118,6 +1118,62 @@ impl SecretBroker {
             .map(|entry| *entry.key())
     }
 
+    /// Every manifest entry with where it came from: `deploy` (the stack's
+    /// `ENGINE_AGENT_AUTH_SECRETS`), `file` (the live manifest file) or
+    /// `provider` (a registered LLM provider's key). Names and flags only.
+    pub fn manifest_report(&self) -> Vec<(ManifestSecret, &'static str)> {
+        let providers = crate::llm_providers::manifest_entries(&self.providers());
+        self.manifest()
+            .into_iter()
+            .map(|entry| {
+                let source = if self.manifest.iter().any(|d| d.var == entry.var) {
+                    "deploy"
+                } else if providers.iter().any(|p| p.var == entry.var) {
+                    "provider"
+                } else {
+                    "file"
+                };
+                (entry, source)
+            })
+            .collect()
+    }
+
+    /// Whether a session would be allowed to fetch `var` from the manifest in
+    /// force now, and why: `("allowed"|"refused", reason)`. A dry run for the
+    /// admin check; it reads names and flags only, never a value.
+    pub fn manifest_decision(&self, var: &str) -> (&'static str, String) {
+        if !self.enabled() {
+            return (
+                "refused",
+                "on-demand secret brokering is not configured on this engine (ENGINE_AGENT_AUTH_SECRETS declares nothing)".to_string(),
+            );
+        }
+        if let Some((entry, source)) = self
+            .manifest_report()
+            .into_iter()
+            .find(|(entry, _)| entry.var == var)
+        {
+            let policy = match entry.policy {
+                ManifestPolicy::Required => "required",
+                ManifestPolicy::Optional => "optional",
+                ManifestPolicy::OnDemand => "ondemand",
+            };
+            return (
+                "allowed",
+                format!("{var} is a {policy} entry in the {source} manifest"),
+            );
+        }
+        let mut reason = format!(
+            "no ENGINE_AGENT_AUTH_SECRETS line declares {var}; a session cannot fetch it. Add a manifest line (VAR PROJECT_ID SECRET_NAME [flags])"
+        );
+        if let Some(error) = self.manifest_file_error() {
+            reason.push_str(&format!(
+                "; ENGINE_AGENT_AUTH_SECRETS_FILE is ignored: {error}"
+            ));
+        }
+        ("refused", reason)
+    }
+
     /// The manifest entry for `var`, if the deployment declared one.
     pub fn permitted(&self, var: &str) -> Option<ManifestSecret> {
         self.manifest().into_iter().find(|entry| entry.var == var)
@@ -2680,6 +2736,63 @@ fn refusal(status: StatusCode, reason: &str) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_admin_manifest_names_sources_and_flags_and_never_a_value() {
+        let file = std::env::temp_dir().join(format!("agent-auth-{}.manifest", Uuid::new_v4()));
+        std::fs::write(&file, "FILE_KEY proj-f file-secret ondemand,writable\n").unwrap();
+        let broker = SecretBroker::with(
+            "127.0.0.1:1".parse().unwrap(),
+            PathBuf::from("/nonexistent/helper"),
+            parse_manifest("GH_TOKEN proj-a github-token\n").unwrap(),
+        )
+        .with_manifest_file(Some(file.clone()));
+        let report = broker.manifest_report();
+        let source = |var: &str| {
+            report
+                .iter()
+                .find(|(entry, _)| entry.var == var)
+                .map(|(_, source)| *source)
+        };
+        assert_eq!(source("GH_TOKEN"), Some("deploy"));
+        assert_eq!(source("FILE_KEY"), Some("file"));
+        let file_entry = report.iter().find(|(e, _)| e.var == "FILE_KEY").unwrap();
+        assert!(file_entry.0.writable);
+        assert_eq!(file_entry.0.policy, ManifestPolicy::OnDemand);
+        std::fs::remove_file(file).ok();
+    }
+
+    #[test]
+    fn a_policy_check_allows_only_declared_names_and_says_why() {
+        let broker = SecretBroker::with(
+            "127.0.0.1:1".parse().unwrap(),
+            PathBuf::from("/nonexistent/helper"),
+            parse_manifest("GH_TOKEN proj-a github-token\nDB_PASSWORD proj-c prod-db ondemand\n")
+                .unwrap(),
+        );
+        let (decision, reason) = broker.manifest_decision("GH_TOKEN");
+        assert_eq!(decision, "allowed");
+        assert!(reason.contains("GH_TOKEN"));
+        let (decision, reason) = broker.manifest_decision("DB_PASSWORD");
+        assert_eq!(decision, "allowed");
+        assert!(reason.contains("ondemand"));
+        let (decision, reason) = broker.manifest_decision("NOT_DECLARED");
+        assert_eq!(decision, "refused");
+        assert!(reason.contains("NOT_DECLARED"));
+        assert!(!reason.contains("github-token"));
+    }
+
+    #[test]
+    fn an_empty_manifest_refuses_with_the_broker_reason() {
+        let broker = SecretBroker::with(
+            "127.0.0.1:1".parse().unwrap(),
+            PathBuf::from("/nonexistent/helper"),
+            Vec::new(),
+        );
+        let (decision, reason) = broker.manifest_decision("ANYTHING");
+        assert_eq!(decision, "refused");
+        assert!(reason.contains("not configured"));
+    }
 
     #[test]
     fn manifest_grammar_matches_the_helper() {

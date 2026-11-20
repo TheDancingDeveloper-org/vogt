@@ -435,6 +435,11 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
             get(api::llm_providers).post(api::llm_provider_set),
         )
         .route("/api/llm-providers/remove", post(api::llm_provider_remove))
+        .route("/api/agent-auth/manifest", get(api::agent_auth_manifest))
+        .route(
+            "/api/agent-auth/manifest/check",
+            post(api::agent_auth_policy_check),
+        )
         .route(
             "/api/files",
             get(files::read_file)

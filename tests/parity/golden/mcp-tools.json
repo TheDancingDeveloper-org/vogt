@@ -8735,6 +8735,56 @@
         "type": "object"
       },
       "name": "audit_list"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "List the agent-auth manifest entries: names, flags and source, never values.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "title": "AgentAuthManifestParams",
+        "type": "object"
+      },
+      "name": "agent_auth_manifest"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Dry-run whether a session would be allowed to fetch VAR from agent-auth, and why.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "template": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "The session template the launch would use, echoed back. The manifest is deployment-wide, so it does not change the decision.",
+            "title": "Template"
+          },
+          "var": {
+            "description": "The environment variable a session would fetch.",
+            "title": "Var",
+            "type": "string"
+          }
+        },
+        "required": [
+          "var"
+        ],
+        "title": "AgentAuthPolicyCheckParams",
+        "type": "object"
+      },
+      "name": "agent_auth_policy_check"
     }
   ]
 }

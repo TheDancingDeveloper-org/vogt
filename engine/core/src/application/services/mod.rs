@@ -11,6 +11,7 @@
 //! over the clock and the id factory.
 
 pub mod agent_activity;
+pub mod agent_auth;
 pub mod agent_clis;
 pub mod auth;
 pub mod bootstrap;

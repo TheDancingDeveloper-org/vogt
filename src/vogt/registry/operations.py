@@ -20,6 +20,10 @@ from vogt.application.models import (
     AgentActivitySearchResult,
     AgentActivitySummaryParams,
     AgentActivitySummaryResult,
+    AgentAuthManifestParams,
+    AgentAuthManifestResult,
+    AgentAuthPolicyCheckParams,
+    AgentAuthPolicyCheckResult,
     AgentCliListParams,
     AgentCliListResult,
     AgentCliUpdateParams,
@@ -1835,6 +1839,38 @@ def build_operations() -> list[Operation[Any, Any]]:
             handler=services.llm_provider_remove,
             route=HttpRoute("POST", "/llm-providers/remove"),
             cli=CliBinding(("llm-provider", "remove")),
+        ),
+        # -- agent-auth manifest (admin) --------------------------
+        #
+        # Names, flags and source of the deployment's manifest, and a dry run
+        # of "would a session fetch VAR?". Neither returns a secret value.
+        Operation(
+            name="agent_auth.manifest",
+            summary=(
+                "List the agent-auth manifest entries: names, flags and source, "
+                "never values."
+            ),
+            scope="admin",
+            mutating=False,
+            params_model=AgentAuthManifestParams,
+            result_model=AgentAuthManifestResult,
+            handler=services.agent_auth_manifest,
+            route=HttpRoute("GET", "/agent-auth/manifest"),
+            cli=CliBinding(("agent-auth", "manifest")),
+        ),
+        Operation(
+            name="agent_auth.policy_check",
+            summary=(
+                "Dry-run whether a session would be allowed to fetch VAR from "
+                "agent-auth, and why."
+            ),
+            scope="admin",
+            mutating=False,
+            params_model=AgentAuthPolicyCheckParams,
+            result_model=AgentAuthPolicyCheckResult,
+            handler=services.agent_auth_policy_check,
+            route=HttpRoute("POST", "/agent-auth/manifest/check"),
+            cli=CliBinding(("agent-auth", "check")),
         ),
         # -- agent activity index ---------------------------------
         #

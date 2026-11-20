@@ -473,6 +473,8 @@ SCRIPT: list[tuple[str, StepParams]] = [
         },
     ),
     ("llm_provider.remove", {"name": "parity-provider", "reason": WHY}),
+    ("agent_auth.manifest", {}),
+    ("agent_auth.policy_check", {"var": "PARITY_PROVIDER_KEY"}),
     (
         "session.log_tail",
         {"id": "01000000-0000-0000-0000-000000000001"},
@@ -1243,6 +1245,18 @@ def _stand_in_engine() -> EngineClient:
                         "default_placement": "pod",
                     },
                 ]
+            ).encode()
+        if method == "GET" and path.endswith("/api/agent-auth/manifest"):
+            return 200, b'{"entries":[]}'
+        if method == "POST" and path.endswith("/api/agent-auth/manifest/check"):
+            var = spec.get("var", "")
+            return 200, json.dumps(
+                {
+                    "var": var,
+                    "decision": "refused",
+                    "reason": f"no ENGINE_AGENT_AUTH_SECRETS line declares {var}",
+                    "template": spec.get("template"),
+                }
             ).encode()
         if method == "GET" and path.endswith("/api/llm-providers"):
             return 200, b'{"providers":[]}'

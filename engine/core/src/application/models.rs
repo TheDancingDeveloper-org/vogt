@@ -151,6 +151,8 @@ pub const DERIVED: &[&str] = &[
     "llm_provider.list",
     "llm_provider.set",
     "llm_provider.remove",
+    "agent_auth.manifest",
+    "agent_auth.policy_check",
     "agent_activity.search",
     "agent_activity.summary",
     "session.history_list",
@@ -869,6 +871,16 @@ pub fn derived_schemas() -> Vec<(&'static str, serde_json::Value, serde_json::Va
             schema_of::<LlmProviderRemoveResult>(),
         ),
         (
+            "agent_auth.manifest",
+            schema_of::<AgentAuthManifestParams>(),
+            schema_of::<AgentAuthManifestResult>(),
+        ),
+        (
+            "agent_auth.policy_check",
+            schema_of::<AgentAuthPolicyCheckParams>(),
+            schema_of::<AgentAuthPolicyCheckResult>(),
+        ),
+        (
             "agent_activity.search",
             schema_of::<session_ops::AgentActivitySearchParams>(),
             schema_of::<session_ops::AgentActivitySearchResult>(),
@@ -1300,6 +1312,59 @@ pub struct LlmProviderRemoveResult {
     pub removed: bool,
 }
 
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
+#[schemars(schema_with = "empty_object")]
+pub struct AgentAuthManifestParams {}
+
+/// One ENGINE_AGENT_AUTH_SECRETS entry: names and flags, never a value.
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
+#[schemars(deny_unknown_fields)]
+pub struct AgentAuthManifestRow {
+    pub var: String,
+    pub project_id: String,
+    pub secret_name: String,
+    #[schemars(schema_with = "agent_auth_policy_schema")]
+    pub policy: String,
+    #[serde(default)]
+    #[schemars(default)]
+    pub writable: bool,
+    #[schemars(schema_with = "agent_auth_source_schema")]
+    pub source: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
+#[schemars(deny_unknown_fields)]
+pub struct AgentAuthManifestResult {
+    #[serde(default)]
+    #[schemars(default, extend("x-keep-default" = true))]
+    pub entries: Vec<AgentAuthManifestRow>,
+    #[serde(default)]
+    pub engine: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
+#[schemars(deny_unknown_fields)]
+pub struct AgentAuthPolicyCheckParams {
+    #[schemars(description = "The environment variable a session would fetch.")]
+    pub var: String,
+    #[serde(default)]
+    #[schemars(
+        description = "The session template the launch would use, echoed back. The manifest is deployment-wide, so it does not change the decision."
+    )]
+    pub template: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
+#[schemars(deny_unknown_fields)]
+pub struct AgentAuthPolicyCheckResult {
+    pub var: String,
+    #[schemars(schema_with = "agent_auth_decision_schema")]
+    pub decision: String,
+    pub reason: String,
+    #[serde(default)]
+    pub template: Option<String>,
+}
+
 fn default_chat() -> String {
     "chat".to_string()
 }
@@ -1310,6 +1375,18 @@ fn empty_object(_: &mut SchemaGenerator) -> Schema {
 
 fn wire_api_schema(_: &mut SchemaGenerator) -> Schema {
     json_schema!({"default": "chat", "enum": ["chat", "responses"], "type": "string"})
+}
+
+fn agent_auth_policy_schema(_: &mut SchemaGenerator) -> Schema {
+    json_schema!({"enum": ["required", "optional", "ondemand"], "type": "string"})
+}
+
+fn agent_auth_source_schema(_: &mut SchemaGenerator) -> Schema {
+    json_schema!({"enum": ["deploy", "file", "provider"], "type": "string"})
+}
+
+fn agent_auth_decision_schema(_: &mut SchemaGenerator) -> Schema {
+    json_schema!({"enum": ["allowed", "refused"], "type": "string"})
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
