@@ -1771,16 +1771,31 @@ fn writes_git_internals(words: &[String]) -> bool {
     }
 }
 
+/// Whether `value` is a literal relative path that stays inside the
+/// repository (WI-4404): no leading `/` or `~`, no `..` component, and only
+/// plain path characters, so nothing is expanded, split or redirected.
+/// Git resolves a relative hooks path from the working tree, so it cannot
+/// name a file outside the repository.
+fn inside_repo_path(value: &str) -> bool {
+    !value.is_empty()
+        && !value.starts_with(['/', '~'])
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '/' | '+' | '@'))
+        && value.split('/').all(|part| part != "..")
+}
+
 /// Whether `value`, given to the setting `key` that names a command, runs
 /// nothing but a known-harmless program: empty, `cat`, `true`, `false`,
 /// `:`, `less`/`more` with flags that write no file ([`pager_flags`]), or
 /// for an ssh setting `ssh` with flags that name no command or config
 /// file. No expansion, separator or redirection. A hooks path is harmless
-/// only as `/dev/null`; the paths git searches for programs never are.
+/// as `/dev/null`, or as a relative path inside the repository (WI-4404);
+/// the paths git searches for programs never are.
 fn harmless_command(value: &str, key: &str) -> bool {
     let key = key.to_ascii_lowercase();
     if key.ends_with("hookspath") {
-        return value.is_empty() || value == "/dev/null";
+        return value.is_empty() || value == "/dev/null" || inside_repo_path(value);
     }
     if matches!(
         key.as_str(),
@@ -5065,6 +5080,39 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// WI-4404: a hooks path that stays inside the repository is a literal
+    /// setting, so it does not make a call aliased and does not widen the
+    /// discard guard to the whole baseline. A hooks path that leaves the
+    /// repository, or names a file through expansion, is still refused.
+    #[test]
+    fn wi4404_relative_hooks_path_does_not_trip_the_discard_guard() {
+        let root = Path::new("/x");
+        let p = workspace(&["a", "b"], Some("checkout"), root);
+        assert_allowed(
+            &p,
+            root,
+            &[
+                "git -C /x -c core.hooksPath=.githooks commit -q -m x",
+                "git -C /x config core.hooksPath .githooks",
+                "git -c core.hooksPath=.githooks/hooks commit -m x",
+                "git commit -q -m x",
+            ],
+        );
+        assert_refused(
+            &p,
+            root,
+            &[
+                "git -c core.hooksPath=../hooks commit -m x",
+                "git -c core.hooksPath=.githooks/../../hooks commit -m x",
+                "git -c core.hooksPath=/tmp/h commit -m x",
+                "git -c core.hooksPath='$HOME/h' commit -m x",
+                "git -c core.hooksPath=~/h commit -m x",
+                "git config core.hooksPath ../hooks",
+                "git config core.hooksPath /tmp/h",
+            ],
+        );
+    }
+
     /// Blocker 4: git configuration and environment that run a command.
     #[test]
     fn round4_command_config_is_refused() {
@@ -5853,6 +5901,7 @@ mod tests {
             "git -c core.fsmonitor=/bin/sh push origin wi-1298-x",
             "git -c core.editor=/bin/sh push origin wi-1298-x",
             "git -c core.hooksPath=/tmp/hooks push origin wi-1298-x",
+            "git -c core.hooksPath=.githooks push origin wi-1298-x",
             "git -c diff.external=/bin/sh push origin wi-1298-x",
             "git -c gpg.program=/bin/sh push origin wi-1298-x",
             "git -c filter.x.clean=/bin/sh push origin wi-1298-x",
