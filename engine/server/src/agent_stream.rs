@@ -155,6 +155,9 @@ pub struct PodLink {
     reader_stopped: AtomicBool,
     /// Set by [`Self::crash`]: the reader writes nothing it takes after this.
     crashed: AtomicBool,
+    /// The session's output log. Set by [`Self::keep_log`] before the reader
+    /// takes output; each durable offset is checkpointed beside it.
+    log: std::sync::Mutex<Option<std::path::PathBuf>>,
 }
 
 /// Output queued for the session reader: the stream offset just past the
@@ -195,6 +198,36 @@ impl PodLink {
             durable: watch::Sender::new(0),
             reader_stopped: AtomicBool::new(false),
             crashed: AtomicBool::new(false),
+            log: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// Keep the session's output log, so every durable offset is checkpointed
+    /// beside it (see [`checkpoint_path`]). Call before the reader takes output.
+    pub fn keep_log(&self, log: std::path::PathBuf) {
+        *self.log.lock().expect("pod link lock poisoned") = Some(log);
+    }
+
+    /// Checkpoint `offset` (the stream offset the reader has written through)
+    /// together with the log's length now. The log holds fewer or more bytes
+    /// than the stream offset whenever a gap marker or a stripped OSC 7501
+    /// query was written, so a restart needs both numbers. Returns false when
+    /// the checkpoint could not be written: the offset must then stay unacked.
+    fn checkpoint(&self, offset: u64) -> bool {
+        let Some(log) = self.log.lock().expect("pod link lock poisoned").clone() else {
+            return true;
+        };
+        let written = std::fs::metadata(&log)
+            .map_err(|e| e.to_string())
+            .and_then(|m| {
+                write_checkpoint(&checkpoint_path(&log), offset, m.len()).map_err(|e| e.to_string())
+            });
+        match written {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::warn!(error = %e, "could not checkpoint the agent stream offset; output stays unacked");
+                false
+            }
         }
     }
 
@@ -495,7 +528,11 @@ impl Read for PodReader {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         if self.at >= self.pending.len() {
             if let Some(link) = &self.link {
-                link.mark_durable(self.end);
+                // Checkpoint before the mark: an ack follows the mark, so the
+                // checkpoint always covers every byte the agent was told is safe.
+                if link.checkpoint(self.end) {
+                    link.mark_durable(self.end);
+                }
             }
             if self.crashed() {
                 return Ok(0);
@@ -526,6 +563,57 @@ impl Drop for PodReader {
             link.note_reader_stopped();
         }
     }
+}
+
+/// The checkpoint kept beside a session's output log: `<id>.offset`, holding
+/// `"<stream offset> <log length>"`.
+pub fn checkpoint_path(log: &std::path::Path) -> std::path::PathBuf {
+    log.with_extension("offset")
+}
+
+/// Write the checkpoint atomically, and durably, so a crash leaves either the
+/// old pair or the new one.
+fn write_checkpoint(path: &std::path::Path, offset: u64, log_len: u64) -> std::io::Result<()> {
+    let tmp = path.with_extension("offset.tmp");
+    let mut file = std::fs::File::create(&tmp)?;
+    std::io::Write::write_all(&mut file, format!("{offset} {log_len}\n").as_bytes())?;
+    file.sync_data()?;
+    std::fs::rename(&tmp, path)
+}
+
+fn read_checkpoint(path: &std::path::Path) -> Option<(u64, u64)> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut parts = text.split_whitespace();
+    let offset = parts.next()?.parse().ok()?;
+    let log_len = parts.next()?.parse().ok()?;
+    Some((offset, log_len))
+}
+
+/// Where a restarted engine resumes a pod session's stream, and what it does
+/// to the log to make that true. The checkpoint's offset is the cursor, and
+/// the log is cut back to the checkpoint's length: bytes past the checkpoint
+/// were never acknowledged, so the agent still holds them and resends them.
+/// A session with no checkpoint (one from before checkpoints existed) resumes
+/// at the log's end, as it always did.
+pub fn restore_resume_point(log: &std::path::Path) -> std::io::Result<u64> {
+    let log_len = std::fs::metadata(log).map_or(0, |m| m.len());
+    let Some((offset, checkpoint_len)) = read_checkpoint(&checkpoint_path(log)) else {
+        return Ok(log_len);
+    };
+    if log_len > checkpoint_len {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(log)?
+            .set_len(checkpoint_len)?;
+    } else if log_len < checkpoint_len {
+        tracing::warn!(
+            log = %log.display(),
+            log_len,
+            checkpoint_len,
+            "the session log is shorter than its checkpoint; output between them is lost"
+        );
+    }
+    Ok(offset)
 }
 #[derive(Debug, Deserialize)]
 pub struct BootstrapRequest {
@@ -851,8 +939,11 @@ impl AgentAuth {
         cursor: u64,
         session_token: String,
     ) -> (Arc<PodLink>, PodReader) {
-        let (link, reader) = self.register_pod(id);
+        let (link, mut reader) = self.register_pod(id);
         *link.next_offset.lock().expect("pod link lock poisoned") = cursor;
+        // The reader starts at the cursor, so its first checkpoint is the
+        // stream offset the log already holds, not zero.
+        reader.end = cursor;
         link.mark_durable(cursor);
         link.adopted.store(true, Ordering::Release);
         self.sessions.lock().await.insert(
@@ -2478,5 +2569,103 @@ mod tests {
                 "{dir}: {config}"
             );
         }
+    }
+
+    /// Drives a session reader the way `pty.rs` does: take the stream's
+    /// output, strip the OSC 7501 queries, append what is left to the log.
+    fn drive_session_log(
+        mut reader: PodReader,
+        log: std::path::PathBuf,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::task::spawn_blocking(move || {
+            let mut file = std::fs::OpenOptions::new().append(true).open(log).unwrap();
+            let mut buf = [0u8; 8192];
+            while let Ok(n) = reader.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                let kept = crate::osc7501::strip_queries(&buf[..n]);
+                std::io::Write::write_all(&mut file, &kept).unwrap();
+            }
+        })
+    }
+
+    /// WI-4453: a log with a gap marker and a stripped OSC 7501 query is
+    /// shorter than its stream offset, so the log length is the wrong resume
+    /// point. Crash with a byte written to the log but never acknowledged, then
+    /// readopt: the engine resumes at the stream offset, drops the unacked
+    /// byte, and the replayed overlap lands once. The log is exact bytes.
+    #[tokio::test]
+    async fn a_restart_resumes_at_the_stream_offset_not_the_log_length() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("session.log");
+        std::fs::write(&log, b"").unwrap();
+        let auth = Arc::new(AgentAuth::default());
+        let id = Uuid::new_v4();
+        let (link, reader) = auth.register_pod(id);
+        link.keep_log(log.clone());
+        let session = drive_session_log(reader, log.clone());
+        let agent = connect(&auth, id).await;
+
+        // Stream: 18 bytes, then 4 the agent lost, then 20 more (42 in all).
+        // The log takes 9 + an 18-byte marker + 10 = 37 of them.
+        let first = b"alpha\x1b]7501;?\x07beta".to_vec();
+        let second = b"gamma\x1b]7501;?\x1b\\delta".to_vec();
+        let third = b"epsilon".to_vec();
+        agent.send(Frame::Output {
+            offset: 0,
+            data: first,
+        });
+        agent.send(Frame::Gap {
+            offset: 18,
+            lost: 4,
+        });
+        agent.send(Frame::Output {
+            offset: 22,
+            data: second.clone(),
+        });
+        link.durable_watch().wait_for(|v| *v >= 42).await.unwrap();
+        let before_crash = b"alphabeta\r\n[4 bytes lost]\r\ngammadelta";
+        assert_eq!(std::fs::read(&log).unwrap(), before_crash);
+
+        // The engine dies after the log took "epsilon" but before any ack.
+        link.crash();
+        link.finish(0);
+        session.await.unwrap();
+        let mut log_file = std::fs::OpenOptions::new().append(true).open(&log).unwrap();
+        std::io::Write::write_all(&mut log_file, &third).unwrap();
+        drop(log_file);
+
+        // The next engine resumes at the checkpoint, 42, and cuts the log back to it.
+        let cursor = restore_resume_point(&log).unwrap();
+        assert_eq!(cursor, 42);
+        assert_eq!(std::fs::read(&log).unwrap(), before_crash);
+
+        let restarted = Arc::new(AgentAuth::default());
+        let (restarted_link, reader) = restarted.adopt_pod(id, cursor, "token".into()).await;
+        restarted_link.keep_log(log.clone());
+        let session = drive_session_log(reader, log.clone());
+        let agent = connect(&restarted, id).await;
+        agent.send(Frame::Resume { cursor });
+        // The agent replays from 22, which overlaps what the log holds, then
+        // carries on with "epsilon". The overlap is dropped; "epsilon" lands once.
+        let mut replay = second;
+        replay.extend_from_slice(&third);
+        agent.send(Frame::Output {
+            offset: 22,
+            data: replay,
+        });
+        restarted_link
+            .durable_watch()
+            .wait_for(|v| *v >= 49)
+            .await
+            .unwrap();
+        restarted_link.finish(0);
+        session.await.unwrap();
+
+        assert_eq!(
+            std::fs::read(&log).unwrap(),
+            b"alphabeta\r\n[4 bytes lost]\r\ngammadeltaepsilon"
+        );
     }
 }
