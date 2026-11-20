@@ -145,6 +145,12 @@ pub struct PodConfig {
     /// unset; a template policy may override it.
     #[serde(default = "default_session_deadline")]
     pub session_deadline: Duration,
+    /// The size limit on each session pod's own `emptyDir` volumes
+    /// (`ENGINE_POD_TMP_SIZE_LIMIT`, default 10Gi). The kubelet evicts a pod
+    /// that writes past it, so one session cannot fill the node's disk. Empty
+    /// leaves the volumes unbounded.
+    #[serde(default = "default_tmp_size_limit")]
+    pub tmp_size_limit: Option<k8s_openapi::apimachinery::pkg::api::resource::Quantity>,
     /// How long an adopted pod's agent has to dial in again after an engine
     /// restart before the pod is given up as lost.
     #[serde(default = "default_reconnect_timeout")]
@@ -614,6 +620,36 @@ fn default_unschedulable_timeout() -> Duration {
 fn default_session_deadline() -> Duration {
     Duration::from_secs(12 * 60 * 60)
 }
+fn default_tmp_size_limit() -> Option<k8s_openapi::apimachinery::pkg::api::resource::Quantity> {
+    Some(k8s_openapi::apimachinery::pkg::api::resource::Quantity(
+        "10Gi".into(),
+    ))
+}
+/// A Kubernetes quantity the `emptyDir` `sizeLimit` accepts: a whole or
+/// decimal number with an optional binary (`Ki`..`Ei`) or decimal (`k`, `M`,
+/// `G`, `T`, `P`, `E`) suffix. Anything else is refused at startup rather than
+/// as an API error on every session pod.
+fn is_size_quantity(value: &str) -> bool {
+    let digits = value.trim_end_matches(|c: char| c.is_ascii_alphabetic());
+    let suffix = &value[digits.len()..];
+    let number_ok = !digits.is_empty()
+        && digits.chars().all(|c| c.is_ascii_digit() || c == '.')
+        && digits.chars().filter(|&c| c == '.').count() <= 1
+        && digits.chars().any(|c| c.is_ascii_digit());
+    let suffix_ok = matches!(
+        suffix,
+        "" | "Ki" | "Mi" | "Gi" | "Ti" | "Pi" | "Ei" | "k" | "M" | "G" | "T" | "P" | "E"
+    );
+    number_ok && suffix_ok
+}
+/// An `emptyDir` bounded by the deployment's `tmp_size_limit`, so a session
+/// that fills it is evicted rather than filling the node's disk.
+fn bounded_empty_dir(cfg: &PodConfig) -> EmptyDirVolumeSource {
+    EmptyDirVolumeSource {
+        size_limit: cfg.tmp_size_limit.clone(),
+        ..Default::default()
+    }
+}
 impl Default for PodConfig {
     fn default() -> Self {
         Self {
@@ -677,6 +713,7 @@ impl Default for PodConfig {
             pending_timeout: default_pending_timeout(),
             unschedulable_timeout: default_unschedulable_timeout(),
             session_deadline: default_session_deadline(),
+            tmp_size_limit: default_tmp_size_limit(),
             reconnect_timeout: default_reconnect_timeout(),
             orphan_ttl: default_orphan_ttl(),
             workspace: None,
@@ -809,6 +846,15 @@ impl PodConfig {
                 ))
             })?;
             cfg.session_deadline = Duration::from_secs(secs);
+        }
+        if let Some(v) = text("ENGINE_POD_TMP_SIZE_LIMIT") {
+            if !v.is_empty() && !is_size_quantity(&v) {
+                return Err(ApiError::Config(format!(
+                    "ENGINE_POD_TMP_SIZE_LIMIT must be a quantity such as 10Gi, got {v:?}"
+                )));
+            }
+            cfg.tmp_size_limit = (!v.is_empty())
+                .then_some(k8s_openapi::apimachinery::pkg::api::resource::Quantity(v));
         }
         if let Some(v) = text("ENGINE_POD_ENGINE_ID") {
             cfg.engine_id = sanitize_engine_id(&v);
@@ -1621,7 +1667,7 @@ pub fn pod_template(
         });
         volumes.push(Volume {
             name: WORKSPACE_VOLUME.into(),
-            empty_dir: Some(EmptyDirVolumeSource::default()),
+            empty_dir: Some(bounded_empty_dir(cfg)),
             ..Default::default()
         });
     }
@@ -1635,7 +1681,7 @@ pub fn pod_template(
     });
     volumes.push(Volume {
         name: PRIVATE_CACHE_VOLUME.into(),
-        empty_dir: Some(EmptyDirVolumeSource::default()),
+        empty_dir: Some(bounded_empty_dir(cfg)),
         ..Default::default()
     });
     if !cfg.cache_pvc.is_empty() {
@@ -1727,7 +1773,7 @@ pub fn pod_template(
         });
         volumes.push(Volume {
             name: name.into(),
-            empty_dir: Some(EmptyDirVolumeSource::default()),
+            empty_dir: Some(bounded_empty_dir(cfg)),
             ..Default::default()
         });
     }
@@ -4542,6 +4588,73 @@ mod tests {
             None
         )
         .is_err());
+    }
+
+    #[test]
+    fn every_session_emptydir_carries_the_tmp_size_limit() {
+        let cfg = PodConfig {
+            workspace: Some(PodWorkspace {
+                dir: "/work-tree".into(),
+                source: "/srv/workspace".into(),
+                max_bytes: 1024,
+            }),
+            ..Default::default()
+        };
+        let volumes = pod_template_for(&cfg).spec.unwrap().volumes.unwrap();
+        let empty: Vec<&Volume> = volumes.iter().filter(|v| v.empty_dir.is_some()).collect();
+        assert!(!empty.is_empty());
+        for volume in &empty {
+            assert_eq!(
+                volume
+                    .empty_dir
+                    .as_ref()
+                    .unwrap()
+                    .size_limit
+                    .as_ref()
+                    .unwrap()
+                    .0,
+                "10Gi",
+                "{} must carry the size limit",
+                volume.name
+            );
+        }
+        for name in ["session-home", "session-tmp", "session-work", "session-run"] {
+            assert!(
+                empty.iter().any(|v| v.name == name),
+                "{name} is an emptyDir"
+            );
+        }
+        let unbounded = PodConfig {
+            tmp_size_limit: None,
+            ..cfg
+        };
+        let volumes = pod_template_for(&unbounded).spec.unwrap().volumes.unwrap();
+        assert!(volumes.iter().filter(|v| v.empty_dir.is_some()).all(|v| v
+            .empty_dir
+            .as_ref()
+            .unwrap()
+            .size_limit
+            .is_none()));
+    }
+
+    #[test]
+    fn the_tmp_size_limit_is_read_from_the_environment_and_must_be_a_quantity() {
+        let default = PodConfig::from_lookup(lookup(&[]), None).unwrap();
+        assert_eq!(default.tmp_size_limit.as_ref().unwrap().0, "10Gi");
+        let cfg = PodConfig::from_lookup(lookup(&[("ENGINE_POD_TMP_SIZE_LIMIT", "512Mi")]), None)
+            .unwrap();
+        assert_eq!(cfg.tmp_size_limit.as_ref().unwrap().0, "512Mi");
+        let cfg =
+            PodConfig::from_lookup(lookup(&[("ENGINE_POD_TMP_SIZE_LIMIT", "")]), None).unwrap();
+        assert_eq!(cfg.tmp_size_limit, None);
+        for bad in ["10GB", "ten", "1.2.3Gi", "Gi", "-5Gi"] {
+            assert!(
+                PodConfig::from_lookup(lookup(&[("ENGINE_POD_TMP_SIZE_LIMIT", bad)]), None)
+                    .is_err(),
+                "{bad} must be refused"
+            );
+        }
+        assert!(is_size_quantity("1.5Gi") && is_size_quantity("20G") && is_size_quantity("3"));
     }
 
     #[test]

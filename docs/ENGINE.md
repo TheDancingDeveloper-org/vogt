@@ -5684,6 +5684,14 @@ pod the kubelet stops at that deadline ends its session with the distinct
 reason `hit its active deadline: …` from the reconciler, not the generic
 failure note.
 
+Every `emptyDir` the pod has (the home, `/tmp`, the work tree, the run
+directory, the private tool cache and the workspace tree) carries a
+`sizeLimit` from `ENGINE_POD_TMP_SIZE_LIMIT` (default `10Gi`; empty leaves
+them unbounded, a malformed quantity stops the engine at startup). A session
+that writes past it is evicted by the kubelet, so one runaway build cannot
+fill the node's disk. The container's `ephemeral-storage` limit still applies
+on top.
+
 **Workspace tree (WI-3373, WI-3374; engine-served since WI-4127).** Off by
 default. With `ENGINE_POD_WORKSPACE=1`, the engine adds a `workspace-config`
 init container and a pod-local `emptyDir`, and mounts that volume read-only at

@@ -68,6 +68,7 @@ the example does: compiled defaults are not portable operator choices.
 | `ENGINE_POD_TOLERATIONS` | JSON array of Kubernetes tolerations; `[]` tolerates nothing beyond the defaults. |
 | `ENGINE_POD_TEMPLATE_POLICIES` | JSON map keyed by template: resource_requests, resource_limits, node_selector, affinity and active_deadline_seconds overrides. A policy node_selector adds keys to `ENGINE_POD_NODE_SELECTOR`, cannot change a value the deployment set, and cannot name a node `ENGINE_POD_EXCLUDED_NODES` forbids. |
 | `ENGINE_POD_SESSION_DEADLINE_SECONDS` | `activeDeadlineSeconds` for every session pod, default 43200 (12 h); `0` leaves it unset. |
+| `ENGINE_POD_TMP_SIZE_LIMIT` | `sizeLimit` on every session pod's own `emptyDir` volumes (home, `/tmp`, work tree, run dir, tool caches, workspace tree), a Kubernetes quantity such as `10Gi`, default `10Gi`. The kubelet evicts a session that writes past it. Empty leaves the volumes unbounded; a malformed value stops the engine at startup. |
 | `ENGINE_POD_CACHE_PVC` | Read-only seed claim; empty disables. Writable tool caches use private emptyDir. |
 | `ENGINE_POD_CACHE_NODE` | Hard cache-node pin; empty allows normal scheduling. |
 | `ENGINE_POD_CACHE_ENV_CONFIG_MAP` | Cache environment ConfigMap; empty disables. |
