@@ -7,9 +7,8 @@ import {
   beginTerminalTouch,
   moveTerminalTouch,
   TERMINAL_TOUCH_INTENT_PX,
-  terminalCellAt,
   type TerminalTouchGesture,
-  wordSpanAt,
+  terminalCellAt,
 } from "../terminalTouch";
 
 const CELL = 20;
@@ -123,54 +122,60 @@ it("routes a normal-buffer mouse-tracking application's swipe to wheel input", (
   expect(move.scrollLines).toBe(0);
 });
 
-// WI-4392: a touch long-press selects the word under the finger. The cell
-// comes from the screen's width and the rows' element's height, because the
-// screen is 0-high in the phone layout.
-describe("terminalCellAt", () => {
-  it("maps a touch to the cell it lands on", () => {
-    // 80 cols x 24 rows, 800px wide, 480px tall, origin at (10, 20).
-    const screen = { left: 10, width: 800 };
-    const grid = { top: 20, height: 480 };
-    expect(terminalCellAt(10 + 5 * 10 + 1, 20 + 3 * 20 + 1, screen, grid, 80, 24)).toEqual({
-      col: 5,
-      row: 3,
-    });
+describe("terminal cell lookup for touch long-press", () => {
+  const container = { left: 10, top: 40, width: 400, height: 500 };
+  const screen = { left: 10, top: 40, width: 400, height: 500 };
+
+  it("maps a point inside the screen layer to its cell", () => {
+    expect(
+      terminalCellAt({ container, screen }, 80, 25, 10 + 4.5 * 5, 40 + 2.5 * 20),
+    ).toEqual({ column: 4, row: 2 });
   });
 
-  it("reads the height from the grid when the screen is 0-high", () => {
-    // The screen element reports no height; only its width is read.
-    const screen = { left: 0, width: 400 };
-    const grid = { top: 0, height: 240 };
-    expect(terminalCellAt(45, 110, screen, grid, 40, 24)).toEqual({
-      col: 4,
-      row: 11,
-    });
+  it("uses the container's width when there is no screen layer", () => {
+    expect(
+      terminalCellAt({ container, screen: null }, 40, 10, 10 + 10 * 10, 40 + 9 * 50),
+    ).toEqual({ column: 10, row: 9 });
   });
 
-  it("clamps a touch outside the grid to its edge cells", () => {
-    const screen = { left: 0, width: 400 };
-    const grid = { top: 0, height: 240 };
-    expect(terminalCellAt(-30, -5, screen, grid, 40, 24)).toEqual({ col: 0, row: 0 });
-    expect(terminalCellAt(9999, 9999, screen, grid, 40, 24)).toEqual({ col: 39, row: 23 });
-  });
-});
-
-describe("wordSpanAt", () => {
-  it("selects the whole word under the column", () => {
-    const line = "run SELECTME-ALPHA now";
-    expect(wordSpanAt(line, 6)).toEqual({ start: 4, length: 14 });
+  it("uses the container's height when the screen layer reports zero height", () => {
+    // The phone layout makes `.xterm-screen` 0 high; a screen-only measurement
+    // selected nothing, so the row must come from the container.
+    const collapsed = { ...screen, height: 0 };
+    expect(
+      terminalCellAt({ container, screen: collapsed }, 80, 25, 10 + 4.5 * 5, 40 + 2.5 * 20),
+    ).toEqual({ column: 4, row: 2 });
   });
 
-  it("keeps path and URL punctuation inside one word", () => {
-    expect(wordSpanAt("see ./src/app.ts:12", 6)).toEqual({ start: 4, length: 15 });
+  it("uses the rows layer's exact height, not a font-size estimate", () => {
+    // 24 real rows of 18.6px (446.4) inside a 485px container: 38.6px of
+    // FitAddon remainder. A 15.6px estimate drifts a whole row by row 10.
+    const tall = { ...container, height: 485 };
+    const rowsBox = { top: 40, height: 446.4 };
+    const onRowTen = 40 + 10.5 * 18.6;
+    expect(
+      terminalCellAt({ container: tall, screen: null, rows: rowsBox }, 80, 24, 10 + 4.5 * 5, onRowTen),
+    ).toEqual({ column: 4, row: 10 });
   });
 
-  it("returns null on blank space and on punctuation alone", () => {
-    expect(wordSpanAt("a  b", 1)).toBeNull();
-    expect(wordSpanAt("a , b", 2)).toBeNull();
+  it("keeps a press in FitAddon's bottom remainder off the last row", () => {
+    const tall = { ...container, height: 505 };
+    const rowsBox = { top: 40, height: 500 };
+    expect(
+      terminalCellAt({ container: tall, screen: null, rows: rowsBox }, 80, 25, 10, 40 + 24 * 20 + 15),
+    ).toEqual({ column: 0, row: 24 });
+    expect(
+      terminalCellAt({ container: tall, screen: null, rows: rowsBox }, 80, 25, 10, 40 + 25 * 20 + 1),
+    ).toBeNull();
   });
 
-  it("returns null past the end of the line", () => {
-    expect(wordSpanAt("abc", 9)).toBeNull();
+  it("rejects points outside the grid and empty grids", () => {
+    expect(terminalCellAt({ container, screen: null }, 80, 25, 9, 40)).toBeNull();
+    expect(terminalCellAt({ container, screen: null }, 80, 25, 10, 39)).toBeNull();
+    expect(terminalCellAt({ container, screen: null }, 80, 25, 10 + 420, 40)).toBeNull();
+    expect(
+      terminalCellAt({ container: { ...container, height: 0 }, screen: null }, 80, 25, 10, 40),
+    ).toBeNull();
+    expect(terminalCellAt({ container, screen: null }, 0, 25, 10, 40)).toBeNull();
   });
 });
