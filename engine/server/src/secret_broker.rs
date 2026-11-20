@@ -526,6 +526,9 @@ pub struct SecretBroker {
     /// Projects beyond the manifest's that an approved grant may fetch from
     /// (`ENGINE_AGENT_GRANT_PROJECTS`).
     grant_projects: Vec<String>,
+    /// This engine's identity (`ENGINE_POD_ENGINE_ID`), named in a grant
+    /// refusal so the operator knows which engine said no.
+    engine: String,
     /// Session id → the person-approved credential grants it holds (WI-973).
     session_grants: DashMap<Uuid, Vec<HeldGrant>>,
     bundle: DashMap<(String, String), Vec<u8>>,
@@ -588,13 +591,16 @@ pub enum GrantRefusal {
     Invalid(String),
     /// The name is a manifest entry; a grant never shadows one.
     ShadowsManifest(String),
-    /// The project is not open to grants. Carries the refusing engine's bind
-    /// address and how many projects it counts as grantable, so the 403 says
-    /// which engine refused and what it would have accepted.
+    /// The project is not open to grants. Carries the refusing engine's
+    /// identity, how many projects it counts as grantable, and why the live
+    /// manifest file was ignored when it was (a bad edit falls back to the
+    /// deploy-time manifest, so a file-only project vanishes silently
+    /// otherwise).
     ProjectNotGrantable {
         project: String,
-        engine: SocketAddr,
+        engine: String,
         grantable: usize,
+        manifest_file: Option<String>,
     },
     /// Another live grant already lets this session fetch that `var`.
     VarInUse(String),
@@ -617,10 +623,17 @@ impl std::fmt::Display for GrantRefusal {
                 project,
                 engine,
                 grantable,
-            } => write!(
-                f,
-                "project {project} is not open to grants: grants may fetch only from projects the manifest names or ENGINE_AGENT_GRANT_PROJECTS lists; refused by the engine at {engine}, which counts {grantable} grantable project(s)"
-            ),
+                manifest_file,
+            } => {
+                write!(
+                    f,
+                    "project {project} is not open to grants: grants may fetch only from projects the manifest names or ENGINE_AGENT_GRANT_PROJECTS lists; refused by engine {engine}, which counts {grantable} grantable project(s)"
+                )?;
+                match manifest_file {
+                    Some(why) => write!(f, "; ENGINE_AGENT_AUTH_SECRETS_FILE is ignored: {why}"),
+                    None => Ok(()),
+                }
+            }
             GrantRefusal::VarInUse(var) => write!(
                 f,
                 "the session already holds a live grant for {var}; revoke it first, or choose another var"
@@ -652,6 +665,7 @@ impl SecretBroker {
             grants: DashMap::new(),
             vogt_tokens: DashMap::new(),
             grant_projects: Vec::new(),
+            engine: crate::pod_backend::DEFAULT_ENGINE_ID.into(),
             session_grants: DashMap::new(),
             bundle: DashMap::new(),
             bundle_versions: DashMap::new(),
@@ -850,6 +864,19 @@ impl SecretBroker {
             || self.grant_projects.iter().any(|p| p == project)
     }
 
+    /// Name this engine for a grant refusal (the pod engine id).
+    pub fn with_engine_identity(mut self, engine: String) -> Self {
+        self.engine = engine;
+        self
+    }
+
+    /// Why the manifest file does not compose, when it is set and does not.
+    /// Read live, like the manifest itself.
+    pub fn manifest_file_error(&self) -> Option<String> {
+        let path = self.manifest_file.as_deref()?;
+        compose_manifest(&self.manifest, Some(path)).err()
+    }
+
     /// How many distinct projects an approved grant may fetch from: the
     /// manifest's projects plus `ENGINE_AGENT_GRANT_PROJECTS`.
     pub fn grantable_count(&self) -> usize {
@@ -902,8 +929,9 @@ impl SecretBroker {
         if !self.project_grantable(&grant.project_id) {
             return Err(GrantRefusal::ProjectNotGrantable {
                 project: grant.project_id,
-                engine: self.bind,
+                engine: self.engine.clone(),
                 grantable: self.grantable_count(),
+                manifest_file: self.manifest_file_error(),
             });
         }
         let expires_at = time::OffsetDateTime::parse(
@@ -2762,6 +2790,43 @@ mod tests {
         let text = "A p a\nB p b optional\nC p c ondemand,writable\nD p d writable\n";
         let entries = parse_manifest(text).unwrap();
         assert_eq!(parse_manifest(&render_manifest(&entries)).unwrap(), entries);
+    }
+
+    #[test]
+    fn a_project_refusal_names_the_engine_and_a_bad_manifest_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("manifest");
+        std::fs::write(&file, "STACK other other\n").unwrap();
+        let broker = SecretBroker::with(
+            "127.0.0.1:8910".parse().unwrap(),
+            PathBuf::from("/bin/false"),
+            parse_manifest("STACK proj stack\n").unwrap(),
+        )
+        .with_manifest_file(Some(file))
+        .with_engine_identity("lane-a".into());
+        let grant = vogt_engine_contract::SessionGrant {
+            grant_id: "grt_unit".into(),
+            var: "UNIT_GRANT".into(),
+            project_id: "unlisted".into(),
+            secret_name: "unit".into(),
+            uses: vogt_engine_contract::GrantUses::Ttl,
+            expires_at: (time::OffsetDateTime::now_utc() + time::Duration::hours(1))
+                .format(&time::format_description::well_known::Rfc3339)
+                .unwrap(),
+            reason: "unit".into(),
+        };
+        let refusal = broker
+            .apply_grant(Uuid::new_v4(), grant, time::OffsetDateTime::now_utc())
+            .unwrap_err();
+        let text = refusal.to_string();
+        assert!(
+            text.contains("refused by engine lane-a, which counts 1 grantable project(s)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("ENGINE_AGENT_AUTH_SECRETS_FILE is ignored: "),
+            "{text}"
+        );
     }
 
     #[test]
