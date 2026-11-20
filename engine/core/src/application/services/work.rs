@@ -3675,6 +3675,110 @@ mod tests {
         assert_eq!(comment["subject_key"], "gh:o/r#22");
     }
 
+    /// A native item migrated upstream (`superseded_by` names its gh: successor),
+    /// on a project with the given write-back policy.
+    fn migrated_item(policy: &str) -> Built {
+        use crate::application::services::forge_ops_test::insert_project;
+        use crate::application::services::forge_writeback::writeback_op;
+        use crate::storage::interface::WorkItemUpdate;
+
+        let built = opened();
+        let Built::StepSequential(ctx) = &built else {
+            unreachable!("opened() builds a step clock");
+        };
+        insert_project(
+            &built,
+            "widget",
+            Some("https://github.com/o/r"),
+            "/tmp",
+            true,
+        );
+        writeback_op(
+            &built,
+            json!({"project": "widget", "policy": policy, "reason": "arm it"}),
+        )
+        .unwrap();
+        create_work(
+            ctx,
+            json!({"kind": "chore", "title": "one", "project": "widget", "reason": "test"}),
+        )
+        .unwrap();
+        let id = ctx
+            .declared
+            .read()
+            .unwrap()
+            .work_item_by_ref("WI-1")
+            .unwrap()
+            .unwrap()
+            .id;
+        let mut txn = ctx.declared.write().unwrap();
+        txn.update_work_item(
+            &id,
+            &WorkItemUpdate {
+                superseded_by: Some("gh:o/r#22".into()),
+                ..WorkItemUpdate::default()
+            },
+            moment(),
+        )
+        .unwrap();
+        txn.commit().unwrap();
+        built
+    }
+
+    /// The ledger row for `action`, or a panic naming what was written.
+    fn ledger_row(built: &Built, action: &str) -> Value {
+        use crate::application::services::forge_writeback::writeback_list_op;
+        let ledger = writeback_list_op(built, json!({})).unwrap();
+        ledger["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["action"] == action)
+            .cloned()
+            .unwrap_or_else(|| panic!("no {action} ledger row in {ledger}"))
+    }
+
+    /// Bug WI-799: a transition to done on a migrated item must close the linked
+    /// GitHub issue. Without the successor fallback the close is skipped as
+    /// "not linked to a forge object" and the issue stays open.
+    #[test]
+    fn a_transition_to_done_on_a_migrated_item_closes_its_successor() {
+        let built = migrated_item("full");
+        let Built::StepSequential(ctx) = &built else {
+            unreachable!("opened() builds a step clock");
+        };
+        transition_work(
+            ctx,
+            json!({"ref": "WI-1", "to_state": "done", "walk": true, "reason": "test"}),
+        )
+        .unwrap();
+        let close = ledger_row(&built, "close");
+        let detail = close["detail"].as_str().unwrap_or_default();
+        assert!(!detail.contains("not linked"), "{detail}");
+        assert_eq!(close["subject_key"], "gh:o/r#22");
+        assert_eq!(close["policy"], "full");
+    }
+
+    /// The close respects the write-back policy: `comment_only` may not close,
+    /// so the ledger names the refusal and nothing is sent to the forge.
+    #[test]
+    fn a_transition_to_done_respects_a_comment_only_policy() {
+        let built = migrated_item("comment_only");
+        let Built::StepSequential(ctx) = &built else {
+            unreachable!("opened() builds a step clock");
+        };
+        transition_work(
+            ctx,
+            json!({"ref": "WI-1", "to_state": "done", "walk": true, "reason": "test"}),
+        )
+        .unwrap();
+        let close = ledger_row(&built, "close");
+        let detail = close["detail"].as_str().unwrap_or_default();
+        assert!(detail.contains("not permitted"), "{detail}");
+        assert!(!detail.contains("not linked"), "{detail}");
+        assert_eq!(close["outcome"], "skipped");
+    }
+
     #[test]
     fn a_walk_records_each_hop_and_a_cycle_is_refused() {
         let built = opened();
