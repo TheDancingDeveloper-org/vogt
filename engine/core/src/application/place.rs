@@ -334,6 +334,39 @@ mod place_bench {
             "BENCH backlog_op_limit1_full_median_us={}",
             median(full_backlog)
         );
+        let mut parts: Vec<(&str, Vec<u128>)> = vec![
+            ("inbox_badge", vec![]),
+            ("projects_count", vec![]),
+            ("work_total", vec![]),
+            ("drift_present", vec![]),
+        ];
+        for _ in 0..9 {
+            let built = fresh();
+            crate::with_ctx!(&built, |ctx| {
+                let saved = saved_inbox_filter(ctx).ok().flatten();
+                let t = Instant::now();
+                let _ = inbox_badge(ctx, saved.as_ref());
+                parts[0].1.push(t.elapsed().as_micros());
+                let t = Instant::now();
+                let _ = ctx.declared.read().unwrap().counts().unwrap().projects;
+                parts[1].1.push(t.elapsed().as_micros());
+                let t = Instant::now();
+                let _ = list_work_total(ctx).unwrap();
+                parts[2].1.push(t.elapsed().as_micros());
+                let t = Instant::now();
+                let _ = !ctx
+                    .declared
+                    .read()
+                    .unwrap()
+                    .list_drift(Some("open"), None, None, 1)
+                    .unwrap()
+                    .is_empty();
+                parts[3].1.push(t.elapsed().as_micros());
+            });
+        }
+        for (name, v) in parts {
+            println!("BENCH part_{name}_median_us={}", median(v));
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
