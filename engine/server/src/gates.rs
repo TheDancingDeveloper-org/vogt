@@ -272,7 +272,7 @@ impl std::fmt::Display for GateError {
 /// One queued steering instruction, delivered to the PTY at the next prompt
 /// boundary. Pure data: the byte translation and the actual write live in the
 /// runtime, but the ordering guarantee (`interrupt` first) is expressed by
-/// [`steer_delivery_bytes`], which is tested here.
+/// [`steer_typed_bytes`], which is tested here.
 #[derive(Debug, Clone)]
 pub struct SteerItem {
     pub text: String,
@@ -285,18 +285,17 @@ pub struct SteerItem {
 /// The ETX byte a PTY line discipline turns into SIGINT — the CLI's cancel.
 pub const CANCEL_BYTE: u8 = 0x03;
 
-/// The exact bytes a steer delivers, in order: the cancel first when
-/// `interrupt` is set, then the text with an Enter appended so the CLI reads a
-/// completed line. Factored out of the runtime so the "cancel first" ordering
-/// is a property a unit test pins rather than a sequence of writes a reader has
-/// to trust.
-pub fn steer_delivery_bytes(item: &SteerItem) -> Vec<u8> {
-    let mut out = Vec::with_capacity(item.text.len() + 2);
+/// The bytes a steer types, in order: the cancel first when `interrupt` is
+/// set, then the text. No Enter: the runtime sends that on its own through the
+/// shared guard (WI-4459), so a dialog drawn after the text holds it back. The
+/// "cancel first" ordering is a property a unit test pins rather than a
+/// sequence of writes a reader has to trust.
+pub fn steer_typed_bytes(item: &SteerItem) -> Vec<u8> {
+    let mut out = Vec::with_capacity(item.text.len() + 1);
     if item.interrupt {
         out.push(CANCEL_BYTE);
     }
     out.extend_from_slice(item.text.as_bytes());
-    out.push(b'\r');
     out
 }
 
@@ -486,7 +485,7 @@ mod tests {
             actor: "operator".into(),
             reason: None,
         };
-        assert_eq!(steer_delivery_bytes(&plain), b"focus on the failing test\r");
+        assert_eq!(steer_typed_bytes(&plain), b"focus on the failing test");
 
         let interrupt = SteerItem {
             text: "stop".into(),
@@ -494,9 +493,9 @@ mod tests {
             actor: "operator".into(),
             reason: None,
         };
-        let bytes = steer_delivery_bytes(&interrupt);
+        let bytes = steer_typed_bytes(&interrupt);
         assert_eq!(bytes[0], CANCEL_BYTE, "cancel must be delivered first");
-        assert_eq!(&bytes[1..], b"stop\r");
+        assert_eq!(&bytes[1..], b"stop");
     }
 
     #[test]

@@ -113,11 +113,25 @@ impl Coalescer {
 
     /// Lines due now, each with its overseer. `state` says whether one can
     /// take a line; a busy overseer keeps its batch for the next call.
+    #[cfg(test)]
     pub fn due(
         &mut self,
         now: Instant,
-        mut state: impl FnMut(Uuid) -> Overseer,
+        state: impl FnMut(Uuid) -> Overseer,
     ) -> Vec<(Uuid, String)> {
+        self.due_batches(now, state)
+            .into_iter()
+            .map(|(id, batch)| (id, line(&batch)))
+            .collect()
+    }
+
+    /// The batches due now, taken out of the queue. A batch that could not be
+    /// typed goes back with [`Coalescer::requeue`], so it is not lost.
+    fn due_batches(
+        &mut self,
+        now: Instant,
+        mut state: impl FnMut(Uuid) -> Overseer,
+    ) -> Vec<(Uuid, Batch)> {
         let mut out = Vec::new();
         let ids: Vec<Uuid> = self.pending.keys().copied().collect();
         for id in ids {
@@ -140,11 +154,26 @@ impl Coalescer {
                 Overseer::Ready => {
                     let batch = self.pending.remove(&id).expect("listed above");
                     self.last_wake.insert(id, now);
-                    out.push((id, line(&batch)));
+                    out.push((id, batch));
                 }
             }
         }
         out
+    }
+}
+
+impl Coalescer {
+    /// Put back a batch whose wake line was held back (WI-4459), so the next
+    /// tick types it. Its changes go ahead of any that arrived since, and the
+    /// minimum gap after the failed wake is lifted, so it is not delayed by it.
+    fn requeue(&mut self, id: Uuid, mut batch: Batch) {
+        self.last_wake.remove(&id);
+        if let Some(newer) = self.pending.remove(&id) {
+            batch.changes.extend(newer.changes);
+            batch.opened = batch.opened.min(newer.opened);
+            batch.since = batch.since.min(newer.since);
+        }
+        self.pending.insert(id, batch);
     }
 }
 
@@ -244,12 +273,19 @@ pub fn spawn_watcher(state: Arc<AppState>) {
                 },
                 _ = ticker.tick() => {
                     let now = Instant::now();
-                    let due = coalescer.due(now, |id| overseer_state(&state.sessions, id, now));
-                    for (id, text) in due {
+                    let due = coalescer.due_batches(now, |id| overseer_state(&state.sessions, id, now));
+                    for (id, batch) in due {
                         let Ok(session) = state.sessions.get(id) else { continue };
+                        let text = line(&batch);
                         match crate::autopilot::type_line(&session, &text, "overseer wake").await {
-                            // A dialog holds the wake back; the guard logged it.
-                            Ok(crate::enter_guard::EnterOutcome::Skipped(_)) => {}
+                            // A dialog held the wake back, and the line was
+                            // erased: put the batch back for the next tick.
+                            Ok(crate::enter_guard::EnterOutcome::Skipped(_)) => {
+                                coalescer.requeue(id, batch);
+                            }
+                            // The line is stranded in the composer: retyping it
+                            // would double it, so the batch is dropped here.
+                            Ok(crate::enter_guard::EnterOutcome::Stranded(_)) => {}
                             Ok(crate::enter_guard::EnterOutcome::Sent) => tracing::info!(
                                 session = %id,
                                 event = "oversight.wake",
@@ -281,6 +317,28 @@ mod tests {
             kind: kind.to_string(),
             summary: kind.to_string(),
         }
+    }
+
+    /// WI-4459: a wake whose line a dialog held back is put back, and it is
+    /// due on the next tick rather than dropped or waiting out the gap.
+    #[test]
+    fn a_held_back_wake_is_due_again_on_the_next_tick() {
+        let overseer = Uuid::new_v4();
+        let t0 = Instant::now();
+        let mut c = Coalescer::default();
+        c.add(overseer, "vogt-1513".into(), &change(42, "done"), t0);
+        let first = c.due_batches(t0 + WINDOW, |_| Overseer::Ready);
+        assert_eq!(first.len(), 1);
+        let (id, batch) = first.into_iter().next().unwrap();
+        c.requeue(id, batch);
+        let next = t0 + WINDOW + TICK;
+        let again = c.due(next, |_| Overseer::Ready);
+        assert_eq!(
+            again.len(),
+            1,
+            "the held-back wake comes back on the next tick"
+        );
+        assert!(again[0].1.contains("vogt-1513"));
     }
 
     #[test]
