@@ -7705,6 +7705,31 @@ async fn an_approved_grant_reaches_only_its_session_until_revoked_or_expired() {
         403
     );
 
+    // A project neither the manifest nor ENGINE_AGENT_GRANT_PROJECTS names is
+    // refused with a 403 whose body says which engine refused it and how many
+    // projects that engine would grant (WI-4406).
+    let unlisted = core
+        .post(format!("{base}/api/sessions/{target}/grants"))
+        .json(&grant(
+            "grt_unlisted",
+            "GRANT_OTHER",
+            "not-listed",
+            "once",
+            &in_an_hour,
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unlisted.status(), 403);
+    let refusal = unlisted.text().await.unwrap();
+    assert!(refusal.contains("not open to grants"), "{refusal}");
+    assert!(refusal.contains("refused by the engine at"), "{refusal}");
+    // `proj` (manifest) and `extra` (grant projects): two grantable projects.
+    assert!(
+        refusal.contains("counts 2 grantable project(s)"),
+        "{refusal}"
+    );
+
     // Only vogt-core applies a grant: the break-glass operator token holds
     // `sessions` and is still refused.
     let refused = operator
