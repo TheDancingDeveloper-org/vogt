@@ -30,11 +30,11 @@ async function host(): Promise<HTMLElement> {
 }
 
 describe("#592 — a vertical swipe over the terminal is the page's, never the browser's", () => {
-  it("prevents the default of the first vertical-leaning move", async () => {
+  it("prevents the default only once the vertical intent is decided", async () => {
     const el = await host();
     touch("touchstart", el, 100, 300);
     const first = touch("touchmove", el, 100, 303);
-    expect(first.defaultPrevented).toBe(true);
+    expect(first.defaultPrevented).toBe(false);
     const later = touch("touchmove", el, 102, 260);
     expect(later.defaultPrevented).toBe(true);
     touch("touchend", el, 102, 260);

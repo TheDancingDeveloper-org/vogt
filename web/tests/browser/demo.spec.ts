@@ -1,6 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { DEMO_NOW } from "../../src/demo/fixtures";
+import { TERMINAL_RENDERER_STORAGE_KEY } from "../../src/terminalRenderer";
 
 const sha = "23ac0a9b8f7c6d5e4a32100123456789abcdef01";
 const mobileShowcase = readFileSync(
@@ -245,6 +246,12 @@ test("canonical demo compositions stay visually stable at target widths", async 
   // setFixedTime pins Date.now() without pausing timers, so the scripted
   // terminal streams below still play out for the three-pane shot.
   await page.clock.setFixedTime(new Date(DEMO_NOW));
+  // These baselines pin the DOM renderer's pixels. Headless Chromium has a
+  // software WebGL context, so without this the panes paint on the WebGL
+  // canvas, whose cell metrics (and missing DOM scrollbar gutter) wrap lines
+  // at different columns (WI-2694). Renderer choice is not what this shot
+  // checks.
+  await page.addInitScript((key) => localStorage.setItem(key, "dom"), TERMINAL_RENDERER_STORAGE_KEY);
   await installDemo(page);
 
   await page.setViewportSize({ width: 1440, height: 1000 });
