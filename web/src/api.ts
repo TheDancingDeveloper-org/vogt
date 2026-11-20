@@ -1374,6 +1374,8 @@ export interface PublicConfig {
   product_version?: string;
   source_ref?: string;
   source_sha?: string;
+  /** The git commit the engine was built from; `source_sha` is the changeset id on a graft line. */
+  git_sha?: string;
   release_url?: string | null;
   /** Build-time feature availability, e.g. `{ selkies: "1.6.2" | null }`. */
   features?: Record<string, string | null | undefined>;
@@ -1505,6 +1507,8 @@ export interface OperationalStatus {
   product_version?: string;
   source_ref?: string;
   source_sha?: string;
+  /** The git commit the engine was built from; `source_sha` is the changeset id on a graft line. */
+  git_sha?: string;
   release_url?: string | null;
   session_count: number;
   push_subscription_count: number;

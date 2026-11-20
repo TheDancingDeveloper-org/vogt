@@ -492,6 +492,7 @@ async fn config_endpoint_is_public_and_returns_shape() {
     );
     assert!(body["source_ref"].as_str().is_some(), "missing source ref");
     assert!(body["source_sha"].as_str().is_some(), "missing source sha");
+    assert!(body["git_sha"].as_str().is_some(), "missing git sha");
 }
 
 #[tokio::test]
@@ -3556,6 +3557,10 @@ async fn artifact_cleanup_collects_prompts_of_sessions_the_registry_forgot() {
         .await
         .unwrap();
     assert_eq!(status["agent_tasks"]["session_prompt_file_count"], 2);
+    assert!(
+        status["git_sha"].as_str().is_some(),
+        "/api/status is missing git_sha"
+    );
 
     let cleanup: Value = client
         .post(format!("{base}/api/agent-tasks/artifacts/cleanup"))

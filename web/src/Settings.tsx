@@ -1805,6 +1805,7 @@ const Settings: Component<Props> = (props) => {
               {(config) => {
                 const version = config().product_version ?? config().version;
                 const sourceSha = config().source_sha;
+                const gitSha = config().git_sha;
                 return (
                   <div style={opsCardStyle} aria-label="Product version">
                     <div style={opsLabelStyle}>Vogt product</div>
@@ -1812,6 +1813,7 @@ const Settings: Component<Props> = (props) => {
                     <div style={opsMetaStyle}>
                       {config().source_ref ?? "local/dev"}
                       {sourceSha ? `@${sourceSha.slice(0, 12)}` : ""}
+                      {gitSha ? ` · git ${gitSha.slice(0, 12)}` : ""}
                       <Show when={config().release_url}>
                         {(url) => (
                           <>
