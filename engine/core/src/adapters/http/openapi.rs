@@ -9,10 +9,9 @@
 //! own (login, install, the health probes, `/mcp`) come from `openapi_hand.json`,
 //! extracted from the Python document, because their models are not in the registry.
 //!
-//! The golden `tests/parity/golden/openapi.json` is the document the Python server
-//! serves. Regenerate it with `VOGT_DATA_DIR=<scratch> uv run vogt init`, then
-//! `uv run vogt serve --host 127.0.0.1 --port <p> --no-auth --no-schedule` and
-//! `curl http://127.0.0.1:<p>/openapi.json`.
+//! The document is pinned by the Rust-native snapshot
+//! `engine/core/tests/snapshots/openapi.json` (WI-4467); see `crate::snapshot`
+//! for the regenerate command.
 
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::get;
@@ -408,8 +407,6 @@ fn first_difference(ours: Option<&Value>, expected: Option<&Value>) -> String {
 mod tests {
     use super::*;
 
-    const GOLDEN: &str = include_str!("../../../../../tests/parity/golden/openapi.json");
-
     #[test]
     fn the_document_names_vogt_and_lists_a_registry_route() {
         let document = openapi();
@@ -469,20 +466,14 @@ mod tests {
         );
     }
 
-    /// The document the Python server serves, byte for byte in meaning. Any drift
-    /// names the route or component that differs.
+    /// The whole document against its Rust-native snapshot (WI-4467). Any
+    /// drift names the route or component that differs.
     #[test]
-    fn the_document_matches_the_python_golden() {
-        let mut golden: Value = serde_json::from_str(GOLDEN).expect("the golden is JSON");
-        crate::parity_divergence::patch_openapi(&mut golden, &openapi());
-        let ours = normalised(openapi());
-        let expected = normalised(golden);
-        let found = differences(&ours, &expected);
-        assert!(
-            found.is_empty(),
-            "{} differences:\n{}",
-            found.len(),
-            found.join("\n")
-        );
+    fn the_document_matches_its_snapshot() {
+        let ours = openapi();
+        crate::snapshot::assert_json_snapshot("openapi", &ours, |expected| {
+            let found = differences(&normalised(ours.clone()), &normalised(expected.clone()));
+            format!("{} differences:\n{}", found.len(), found.join("\n"))
+        });
     }
 }
