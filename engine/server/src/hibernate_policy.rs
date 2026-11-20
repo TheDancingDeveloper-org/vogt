@@ -451,13 +451,51 @@ pub async fn get_policy(State(state): State<Arc<AppState>>) -> Json<serde_json::
     Json(to_json(&state.hibernation.get()))
 }
 
+/// Who may change the caps (WI-4457): a person, the break-glass operator, or
+/// vogt-core (decided by the gate's flags, never by `name`), or a session the
+/// engine has marked oversight. Any other token, a worker's included, is
+/// refused with a 403 and an audit line, however many scopes it holds: the
+/// `sessions` capability that gates the route is granted to every writer.
+fn require_policy_authority(
+    state: &AppState,
+    identity: Option<&crate::auth::AuthorizedIdentity>,
+) -> Result<(), ApiError> {
+    let Some(identity) = identity else {
+        return Err(ApiError::Unauthorized);
+    };
+    if identity.person || identity.break_glass || identity.stack_secret {
+        return Ok(());
+    }
+    let role = crate::git::caller_session(state, &identity.name)
+        .and_then(|id| state.sessions.summary_of(id))
+        .map(|s| s.role);
+    if role == Some(SessionRole::Oversight) {
+        return Ok(());
+    }
+    tracing::warn!(
+        target: "vogt::audit",
+        event = "hibernation.policy",
+        outcome = "refused",
+        caller = %identity.name,
+        "hibernation policy change refused"
+    );
+    Err(ApiError::Forbidden(format!(
+        "only a person or an oversight session changes the hibernation caps \
+         ({} is neither)",
+        identity.name
+    )))
+}
+
 /// `PUT /api/hibernation/policy`: change one or more live keys. The change is
 /// audited, saved, and read by the next tick. Answers with the policy after the
-/// change.
+/// change. Only a person or an oversight session may change it
+/// (`require_policy_authority`).
 pub async fn put_policy(
     State(state): State<Arc<AppState>>,
+    identity: Option<axum::Extension<crate::auth::AuthorizedIdentity>>,
     Json(patch): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    require_policy_authority(&state, identity.as_deref())?;
     let (before, after) = state.hibernation.update(&patch)?;
     tracing::info!(
         target: "vogt::audit",

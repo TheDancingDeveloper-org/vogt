@@ -11003,6 +11003,110 @@ async fn an_idle_cap_changed_live_hibernates_workers_and_spares_oversight() {
 }
 
 #[tokio::test]
+async fn only_a_person_or_an_oversight_session_changes_the_hibernation_caps() {
+    let (_tmp, mut cfg, stub) = hibernation_sandbox();
+    // Every writer holds `sessions`; the policy route still refuses them.
+    cfg.vogt_core_url = Some(
+        stand_in_core_knowing(vec![
+            (
+                "worker-token-1234567890abcdef",
+                "agent:session:ses_workerwork0000000000001",
+                vec!["read", "work.write"],
+            ),
+            (
+                "reader-token-1234567890abcdef",
+                "agent:session:ses_readerread0000000000001",
+                vec!["read"],
+            ),
+            (
+                "person-token-1234567890abcdef",
+                "human:ada",
+                vec!["read", "work.write"],
+            ),
+            (
+                "overseer-token-1234567890abcdef",
+                "agent:session:ses_overseerover0000000001",
+                vec!["read", "work.write"],
+            ),
+        ])
+        .await,
+    );
+    let (base, _state, _h) = boot_with_state(cfg).await;
+    let admin = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    // The oversight session carries the VOGT_SESSION_ID the stand-in core
+    // names for the overseer token, so the engine can find its role.
+    let overseer = admin
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({
+            "name": "overseer",
+            "command": [stub.to_string_lossy()],
+            "role": "oversight",
+            "env": [["VOGT_SESSION_ID", "ses_overseerover0000000001"]],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(overseer.status(), StatusCode::OK);
+    let change = json!({ "idle_after": 1 });
+    let put_as = |token: &'static str| {
+        let base = base.clone();
+        let change = change.clone();
+        async move {
+            reqwest::Client::builder()
+                .default_headers(auth_for(token))
+                .build()
+                .unwrap()
+                .put(format!("{base}/api/hibernation/policy"))
+                .json(&change)
+                .send()
+                .await
+                .unwrap()
+                .status()
+        }
+    };
+    for token in [
+        "worker-token-1234567890abcdef",
+        "reader-token-1234567890abcdef",
+    ] {
+        assert_eq!(
+            put_as(token).await,
+            StatusCode::FORBIDDEN,
+            "{token} must not change the caps"
+        );
+    }
+    // Reading the caps is open to any valid token, a reader's included.
+    let read = reqwest::Client::new()
+        .get(format!("{base}/api/hibernation/policy"))
+        .headers(auth_for("reader-token-1234567890abcdef"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(read.status(), StatusCode::OK, "reading the caps is open");
+    assert_eq!(
+        put_as("person-token-1234567890abcdef").await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        put_as("overseer-token-1234567890abcdef").await,
+        StatusCode::OK
+    );
+    // A worker's refusal left the caps as they were; the person's change stuck.
+    let after: Value = reqwest::Client::new()
+        .get(format!("{base}/api/hibernation/policy"))
+        .headers(auth_for("person-token-1234567890abcdef"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(after["idle_after"], 1);
+}
+
+#[tokio::test]
 async fn a_session_pinned_awake_wakes_by_itself_after_a_restart() {
     let (_tmp, cfg, stub) = hibernation_sandbox();
     let (base, state, guard) = boot_with_state(cfg.clone()).await;

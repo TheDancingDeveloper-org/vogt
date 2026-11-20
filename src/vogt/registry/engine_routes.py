@@ -179,6 +179,14 @@ _SESSION_SELF = (
     "person or another agent."
 )
 
+_HIBERNATION_POLICY = (
+    "The hibernation watcher's live caps (WI-4457), read and changed in the "
+    "GUI. A change is limited to a person or an oversight session "
+    "(`require_policy_authority`), and this first slice keeps the caps off "
+    "MCP; exposing them as a tool is a later slice, once the bulk session "
+    "sweep that uses them exists."
+)
+
 #: Engine route -> why it has no MCP counterpart.
 ENGINE_ONLY: Mapping[str, str] = {
     "GET /healthz": _PROBE,
@@ -187,6 +195,8 @@ ENGINE_ONLY: Mapping[str, str] = {
     "GET /connection-info": _PROBE,
     "GET /health/ready": _PROBE,
     "GET /health/live": _PROBE,
+    "GET /api/hibernation/policy": _HIBERNATION_POLICY,
+    "PUT /api/hibernation/policy": _HIBERNATION_POLICY,
     "GET /api/config": _BOOTSTRAP,
     "GET /api/install/status": _BOOTSTRAP,
     "POST /api/install/bootstrap": _BOOTSTRAP,
