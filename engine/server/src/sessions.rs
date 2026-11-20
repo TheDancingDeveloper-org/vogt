@@ -421,6 +421,11 @@ pub struct SessionRegistry {
     bus: EventBus,
     history: Option<Arc<SessionHistory>>,
     sessions: DashMap<Uuid, Arc<Session>>,
+    /// The engine container's ephemeral limit (`ENGINE_EPHEMERAL_LIMIT`) and
+    /// the usage a host session is judged against (WI-4439). `None` limit
+    /// turns the guard off.
+    ephemeral_limit: Option<u64>,
+    ephemeral_usage: crate::session_scratch::EphemeralUsage,
     /// Owned here because a broker token's lifetime is a session record's
     /// lifetime: issued as the session is created, revoked as it is
     /// forgotten.
@@ -620,6 +625,10 @@ impl SessionRegistry {
             sessions: DashMap::new(),
             secret_broker,
             account_pool,
+            ephemeral_limit: crate::session_scratch::ephemeral_limit(),
+            ephemeral_usage: crate::session_scratch::EphemeralUsage::new(
+                crate::session_scratch::writable_roots(),
+            ),
             records,
             transitions: DashMap::new(),
             shutting_down: Arc::new(AtomicBool::new(false)),
@@ -2171,10 +2180,11 @@ impl SessionRegistry {
             // ephemeral quota, which the node's free space does not show
             // (WI-4439). Past 75% of it, no new host session starts.
             if !pod_backed {
-                let limit = crate::session_scratch::ephemeral_limit();
-                if let Some(used) = crate::session_scratch::short_of_ephemeral(limit, || {
-                    crate::session_scratch::ephemeral_used(&crate::session_scratch::writable_roots())
-                }) {
+                if let Some(used) =
+                    crate::session_scratch::short_of_ephemeral(self.ephemeral_limit, || {
+                        self.ephemeral_usage.used()
+                    })
+                {
                     tracing::warn!(
                         used_percent = used,
                         "the engine container's ephemeral storage is past its refusal line; refusing a host session"
@@ -6389,6 +6399,43 @@ mod host_placement_tests {
                 assert!(message.contains("Retired Template"), "{message}");
             }
             other => panic!("expected a bad request, got {other:?}"),
+        }
+    }
+
+    /// A registry whose ephemeral quota is `limit` bytes and whose writable
+    /// usage is `used` bytes, written into a fresh root (WI-4439).
+    fn quota_registry(dir: &std::path::Path, limit: u64, used: u64) -> SessionRegistry {
+        let usage_root = dir.join("usage");
+        std::fs::create_dir_all(&usage_root).unwrap();
+        std::fs::write(usage_root.join("fill"), vec![0u8; used as usize]).unwrap();
+        let mut sessions = registry(dir.join("state"), |_| {});
+        sessions.ephemeral_limit = Some(limit);
+        sessions.ephemeral_usage = crate::session_scratch::EphemeralUsage::new(vec![usage_root]);
+        sessions
+    }
+
+    #[tokio::test]
+    async fn a_host_start_is_refused_at_76_percent_of_the_ephemeral_quota_and_taken_at_74() {
+        let dir = tempfile::tempdir().unwrap();
+        let full = quota_registry(&dir.path().join("full"), 1000, 760);
+        let refused = refusal(full.create(spec("a", Some("host"))));
+        match refused {
+            ApiError::InsufficientStorage(message) => {
+                assert!(message.contains("76%"), "{message}");
+                assert!(message.contains("ENGINE_EPHEMERAL_LIMIT"), "{message}");
+            }
+            other => panic!("expected a low-storage refusal, got {other:?}"),
+        }
+        assert!(
+            full.live_sessions().is_empty(),
+            "a refused start spawns nothing"
+        );
+
+        let under = quota_registry(&dir.path().join("under"), 1000, 740);
+        let started = under.create(spec("b", Some("host")));
+        assert!(started.is_ok(), "74% must be accepted: {:?}", started.err());
+        for session in under.live_sessions() {
+            let _ = under.remove(session.id);
         }
     }
 
