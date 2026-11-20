@@ -183,6 +183,17 @@ pub struct SessionSpec {
     /// the record, so a wake keeps it, and in history, so a resume can.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_item: Option<String>,
+    /// The session that started this one (WI-1521): an engine session id.
+    /// vogt-core sets it when `session.start` is called by an oversight or
+    /// worker session. Kept in the record, so a wake keeps it; the engine
+    /// uses it to wake that overseer when this session changes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supervisor: Option<Uuid>,
+    /// For an oversight session (WI-1521): the change kinds of a supervised
+    /// session that make the engine type one wake line into this one while it
+    /// rests at its prompt. Empty (the default) never types anything.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wake_on: Vec<String>,
     /// The core's own id for the session (e.g. `ses_01M...`), when the start
     /// came from vogt-core. It is not the engine's session id: the core keeps
     /// its identifier, and provider credentials that are bound to a session
@@ -423,6 +434,14 @@ pub struct SessionSummary {
     /// `SessionSpec::work_item`); absent when it is bound to none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_item: Option<String>,
+    /// The session that started this one (WI-1521, see
+    /// `SessionSpec::supervisor`); absent when a person did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supervisor: Option<Uuid>,
+    /// Change kinds that wake this overseer (WI-1521, see
+    /// `SessionSpec::wake_on`); absent when it is never woken.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wake_on: Vec<String>,
     /// The git tree the session runs in, when its cwd is inside one
     /// (WI-1324): what kind, where, and what was already dirty before it
     /// started. Absent for a session outside any repo.
