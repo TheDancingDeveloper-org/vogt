@@ -877,6 +877,47 @@ pub async fn list_session_grants(
     ))
 }
 
+/// Whether this caller may name `supervisor` for the session it starts
+/// (WI-1521). A wake line is typed into the supervisor, so only vogt-core (the
+/// stack secret, which names the oversight session that asked for the start) or
+/// a person may name one, and only an oversight session may be named. Any other
+/// session token is refused, so a worker cannot point wake lines at an
+/// overseer, and a core start cannot name a worker or a shell as one.
+pub(crate) fn require_supervisor_authority(
+    identity: Option<&crate::auth::AuthorizedIdentity>,
+    sessions: &crate::sessions::SessionRegistry,
+    supervisor: Option<Uuid>,
+) -> Result<()> {
+    let Some(supervisor) = supervisor else {
+        return Ok(());
+    };
+    match identity {
+        Some(identity) if identity.stack_secret || identity.person || identity.break_glass => {}
+        Some(identity) => {
+            tracing::warn!(
+                target: "vogt::audit",
+                event = "session.supervisor",
+                outcome = "refused",
+                caller = %identity.name,
+                supervisor = %supervisor,
+                "session supervisor refused"
+            );
+            return Err(crate::error::ApiError::Forbidden(format!(
+                "supervisor is set by vogt-core when an oversight session starts a session; \
+                 {} is an agent and may not name one",
+                identity.name
+            )));
+        }
+        None => return Err(crate::error::ApiError::Unauthorized),
+    }
+    match sessions.get(supervisor) {
+        Ok(named) if named.role() == vogt_engine_contract::SessionRole::Oversight => Ok(()),
+        _ => Err(crate::error::ApiError::BadRequest(format!(
+            "supervisor {supervisor} is not an oversight session"
+        ))),
+    }
+}
+
 /// Let an oversight session answer `dialog` on `session`, or refuse it as
 /// `person_gate` would (WI-1831, WI-2028, `oversight_answer`). The overseer
 /// must be a live session the engine has marked oversight, other than the
@@ -1077,6 +1118,7 @@ pub async fn create_session(
     }
     require_source_authority(identity.as_deref(), spec.source.as_ref())?;
     require_session_ref_authority(identity.as_deref(), spec.session_ref.as_deref())?;
+    require_supervisor_authority(identity.as_deref(), &state.sessions, spec.supervisor)?;
     let s = state.sessions.create_launched(spec).await?;
     Ok(Json(s.summary()))
 }
