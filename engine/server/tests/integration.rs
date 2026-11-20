@@ -17117,6 +17117,75 @@ async fn only_a_person_or_the_core_starts_an_oversight_session() {
     }
 }
 
+/// WI-4489: a child never outranks the session that made it. An agent token
+/// may not name a parent or ask for the full MCP set, and its own unnamed
+/// start is on the worker set. vogt-core (the stack secret) naming a worker
+/// as the parent cannot get an oversight session or the full set either,
+/// and an unnamed set under that parent is the worker set.
+#[tokio::test]
+async fn a_child_never_outranks_the_session_that_started_it() {
+    let door = wi1255_front_door().await;
+    let spec = |extra: Value| {
+        let mut body = json!({
+            "name": "child",
+            "cwd": door.repo.to_string_lossy(),
+            "command": ["/bin/bash", "-c", "sleep 300"],
+        });
+        for (k, v) in extra.as_object().unwrap() {
+            body[k] = v.clone();
+        }
+        body
+    };
+    let post = |token: &'static str, body: Value| {
+        let base = door.base.clone();
+        async move {
+            client_for(token)
+                .post(format!("{base}/api/sessions"))
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+        }
+    };
+    let worker = door.worker.to_string();
+
+    for token in [WI1255_WORKER, WI1255_STRANGER] {
+        for extra in [json!({"mcp_set": "full"}), json!({"started_by": worker})] {
+            let res = post(token, spec(extra.clone())).await;
+            assert_eq!(res.status(), StatusCode::FORBIDDEN, "{token} {extra}");
+        }
+        let res = post(token, spec(json!({}))).await;
+        assert_eq!(res.status(), StatusCode::OK, "{token}");
+        let row: Value = res.json().await.unwrap();
+        assert_eq!(row["mcp_set"], "worker", "{token} {row}");
+    }
+
+    for extra in [
+        json!({"started_by": worker, "mcp_set": "full"}),
+        json!({"started_by": worker, "role": "oversight"}),
+        json!({"started_by": uuid::Uuid::new_v4().to_string(), "mcp_set": "full"}),
+    ] {
+        let res = post(WI1255_STACK, spec(extra.clone())).await;
+        assert_eq!(res.status(), StatusCode::FORBIDDEN, "{extra}");
+        let said: Value = res.json().await.unwrap();
+        assert!(
+            said["error"]
+                .as_str()
+                .unwrap()
+                .contains("child never gets more standing"),
+            "{said}"
+        );
+    }
+    let res = post(WI1255_STACK, spec(json!({"started_by": worker}))).await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let row: Value = res.json().await.unwrap();
+    assert_eq!(row["mcp_set"], "worker", "{row}");
+
+    // A person's own start, with no parent, may still ask for the full set.
+    let res = post(WI1255_PERSON, spec(json!({"mcp_set": "full"}))).await;
+    assert_eq!(res.status(), StatusCode::OK);
+}
+
 /// git in `dir` for the worktree tests, failing the test if git does.
 fn worktree_git(dir: &std::path::Path, args: &[&str]) -> String {
     let out = std::process::Command::new("git")
@@ -21488,6 +21557,96 @@ mod pod_stream {
                 .unwrap();
             assert_eq!(summary["summary"]["mcp_set"], want, "{start}: {summary}");
         }
+    }
+
+    /// WI-4489: a pod a worker started (vogt-core names it `started_by`),
+    /// with no set named, gets the worker set and no vogt-prod, though no
+    /// supervisor or autopilot marks it as dispatched.
+    #[tokio::test]
+    async fn a_worker_started_pod_child_gets_the_worker_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let helper = fake_broker_helper(dir.path());
+        let mut h = harness_cfg(false, None, move |cfg| {
+            cfg.vogt_prod_mcp_url = Some("https://vogt-prod.example.test".into());
+            cfg.agent_auth_helper = helper;
+            cfg.agent_auth_secrets = vogt_engine_server::secret_broker::parse_manifest(
+                "VOGT_PROD_TOKEN acct prod-bridge-token ondemand\n",
+            )
+            .unwrap();
+        })
+        .await;
+        let parent = h
+            .start_body(json!({"name": "parent", "template": "pod", "mcp_set": "worker"}))
+            .await;
+        let _ = h.created.recv().await.unwrap();
+        let child = h
+            .start_body(json!({
+                "name": "child", "template": "pod", "started_by": parent.to_string(),
+            }))
+            .await;
+        let (_, token) = h.created.recv().await.unwrap();
+        let boot: Value = h
+            .bootstrap_as(child, &token, "claude")
+            .await
+            .json()
+            .await
+            .unwrap();
+        assert!(
+            boot["mcp_config"]["mcpServers"].get("vogt-prod").is_none(),
+            "{boot}"
+        );
+        let summary: Value = h
+            .client
+            .get(format!("{}/api/sessions/{child}", h.base))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(summary["summary"]["mcp_set"], "worker", "{summary}");
+    }
+
+    /// WI-4489: on a dev lane no session reaches production. A full-set pod
+    /// gets no vogt-prod entry, and the broker refuses it VOGT_PROD_TOKEN,
+    /// though the URL and the manifest line are both configured.
+    #[tokio::test]
+    async fn a_dev_lane_never_hands_out_vogt_prod() {
+        let dir = tempfile::tempdir().unwrap();
+        let helper = fake_broker_helper(dir.path());
+        let mut h = harness_cfg(false, None, move |cfg| {
+            cfg.lane = Some("dev".into());
+            cfg.vogt_prod_mcp_url = Some("https://vogt-prod.example.test".into());
+            cfg.agent_auth_helper = helper;
+            cfg.agent_auth_secrets = vogt_engine_server::secret_broker::parse_manifest(
+                "VOGT_PROD_TOKEN acct prod-bridge-token ondemand\n",
+            )
+            .unwrap();
+        })
+        .await;
+        let id = h
+            .start_body(json!({"name": "full", "template": "pod", "mcp_set": "full"}))
+            .await;
+        let (_, token) = h.created.recv().await.unwrap();
+        let boot: Value = h
+            .bootstrap_as(id, &token, "claude")
+            .await
+            .json()
+            .await
+            .unwrap();
+        assert!(
+            boot["mcp_config"]["mcpServers"].get("vogt-prod").is_none(),
+            "{boot}"
+        );
+        assert!(!boot.to_string().contains("VOGT_PROD_TOKEN"), "{boot}");
+        let broker = h.state.sessions.secret_broker();
+        let r = reqwest::Client::new()
+            .post(format!("{}/api/agent-auth/fetch/VOGT_PROD_TOKEN", h.base))
+            .bearer_auth(broker.issue(id))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 403);
     }
 
     /// WI-4489: a bootstrap whose launch details are gone fails closed, on

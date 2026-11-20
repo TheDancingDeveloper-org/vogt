@@ -919,6 +919,12 @@ impl SessionRegistry {
         )))
     }
 
+    /// Whether this engine serves the dev lane, which never reaches
+    /// production (WI-4489).
+    pub fn is_dev_lane(&self) -> bool {
+        self.cfg.is_dev_lane()
+    }
+
     /// Whether a remote Vogt is configured for pod sessions (WI-4289).
     pub fn vogt_prod_configured(&self) -> bool {
         self.cfg.vogt_prod_mcp_url.is_some() && !self.cfg.is_dev_lane()

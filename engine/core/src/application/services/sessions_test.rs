@@ -817,7 +817,12 @@ fn a_worker_cannot_start_an_oversight_or_full_set_session() {
         let error = start_session(ctx, &params).unwrap_err().to_string();
         assert!(error.contains(refused), "{error}");
         assert!(
-            !script.seen.lock().unwrap().iter().any(|l| l.starts_with("POST ")),
+            !script
+                .seen
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|l| l.starts_with("POST ")),
             "the engine was asked to start it"
         );
     }

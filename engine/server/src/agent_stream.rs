@@ -1336,8 +1336,9 @@ pub async fn bootstrap(
             ..PodLaunch::default()
         });
     // WI-4489: and only to a full-set session; a worker never gets it, so its
-    // token is not fetched around a worker's agent either.
-    if launch.mcp_set != crate::mcp_set::McpSet::Full {
+    // token is not fetched around a worker's agent either. A dev lane hands
+    // it to nobody.
+    if launch.mcp_set != crate::mcp_set::McpSet::Full || state.sessions.is_dev_lane() {
         breadcrumbs
             .ondemand
             .retain(|var| var != crate::session_endpoints::VOGT_PROD_TOKEN_ENV);
