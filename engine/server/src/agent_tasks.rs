@@ -1461,6 +1461,25 @@ impl AgentTaskRegistry {
         }
 
         let session_name = format!("[Task] {}", task.name);
+        // Capture the run's starting git position in its own workspace, so the
+        // conclusion can report the final sha of the bound branch and the diff
+        // stats against where the run began. This runs before the session
+        // spawns: the agent may commit before a later read, and a base taken
+        // after that commit makes the diff empty (WI-4449). The directory is
+        // the one the spawn will use. A workspace that is not a repo yields
+        // `None` for both, and the conclusion simply omits the git half — the
+        // feature degrades to "no git story here" rather than failing the run.
+        let start_cwd = match self.sessions.resolve_spawn_cwd(task.cwd.as_deref()) {
+            Ok(Some(cwd)) => cwd,
+            Ok(None) => self.sessions.default_cwd().to_string_lossy().into_owned(),
+            // The spawn refuses the same path, so the run fails there.
+            Err(_) => String::new(),
+        };
+        let (start_branch, start_sha) = if start_cwd.is_empty() {
+            (None, None)
+        } else {
+            git_run_start(&start_cwd, task.branch.as_deref())
+        };
         let session = self
             .sessions
             .create_for_task(SessionSpec {
@@ -1499,14 +1518,6 @@ impl AgentTaskRegistry {
                 source: None,
             })
             .await?;
-
-        // Capture the run's starting git position in its own workspace, so the
-        // conclusion can report the final sha of the bound branch and the diff
-        // stats against where the run began. A workspace that is
-        // not a repo yields `None` for both, and the conclusion simply omits
-        // the git half — the feature degrades to "no git story here" rather
-        // than failing the run.
-        let (start_branch, start_sha) = git_run_start(&session.cwd, task.branch.as_deref());
 
         let run = AgentTaskRun {
             id: run_id,

@@ -7032,6 +7032,68 @@ async fn a_succeeded_run_records_a_conclusion_with_git_stats() {
     );
 }
 
+/// The head a git checkout is on, or `None` for one with no commit yet.
+fn git_head(repo: &std::path::Path) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["rev-parse", "--verify", "--quiet", "HEAD"])
+        .output()
+        .unwrap();
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// WI-4449: a run's base is the head the checkout was on before the agent ran,
+/// even when the agent commits at once. The base used to be read after the
+/// agent spawned, so a commit that landed first made the base the commit itself
+/// and the diff empty. Each round starts from the head the previous one left,
+/// so the window is hit again and again.
+#[tokio::test]
+async fn a_run_that_commits_at_once_diffs_from_the_head_it_started_on() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    init_git_repo(&repo);
+
+    let mut cfg = test_config();
+    cfg.default_cwd = tmp.path().to_path_buf();
+    cfg.workspace_root = tmp.path().canonicalize().unwrap();
+    cfg.state_dir = tmp.path().join("state");
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    for round in 0..10 {
+        let started_on = git_head(&repo);
+        let (task_id, _run) = create_and_run(
+            &client,
+            &base,
+            json!({
+                "name": format!("commits-at-once-{round}"),
+                "prompt": "Make a checkpoint.",
+                "schedule": { "kind": "manual" },
+                "command": fake_agent_command("edit+commit"),
+                "cwd": repo.to_string_lossy(),
+            }),
+        )
+        .await;
+        let detail = wait_for_run_finish(&client, &base, &task_id).await;
+        let concl = &detail["runs"][0]["conclusion"];
+        assert_eq!(
+            concl["base_sha"].as_str().map(str::to_string),
+            started_on,
+            "round {round}: the base is the head the run started on: {concl}"
+        );
+        assert!(
+            concl["diffstat"]["files"].as_u64().unwrap_or(0) >= 1,
+            "round {round}: the run's own commit is in its diff: {concl}"
+        );
+    }
+}
+
 /// A non-zero exit concludes `failed`, and the conclusion records the code.
 #[tokio::test]
 async fn a_nonzero_exit_concludes_failed() {

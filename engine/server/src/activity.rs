@@ -181,6 +181,18 @@ pub fn terminal_state(exit_code: Option<i32>, stop_requested: bool) -> Option<Ac
 ///
 /// `idle_after_ms` is the quiet window before Running collapses to Idle. An
 /// exited child is always `exited`/`errored`, whatever the tail says.
+/// How long the screen must stay quiet past the `idle_after_ms` window before a
+/// turn is read as ended (WI-4449). A pause in a busy turn's output that outlasts
+/// the window used to read as the turn's end, and the output after it as a new
+/// turn; this hold keeps a short stall inside the turn.
+pub const IDLE_DEBOUNCE_MS: u64 = 300;
+
+/// The quiet time, since the last screen change, after which a session reads
+/// as at rest: the window plus the debounce.
+pub fn collapse_after_ms(idle_after_ms: u64) -> u64 {
+    idle_after_ms + IDLE_DEBOUNCE_MS
+}
+
 pub fn classify(
     last_output: Option<Instant>,
     tail: &[u8],
@@ -201,7 +213,7 @@ pub fn classify(
         None => ActivityState::Idle,
         Some(t) => {
             let elapsed = t.elapsed().as_millis() as u64;
-            if elapsed < idle_after_ms {
+            if elapsed < collapse_after_ms(idle_after_ms) {
                 ActivityState::Running
             } else {
                 ActivityState::Idle
@@ -272,6 +284,27 @@ mod tests {
         let t = Instant::now() - std::time::Duration::from_secs(10);
         let s = classify(Some(t), b"hello", 1500, None);
         assert_eq!(s, ActivityState::Idle);
+    }
+
+    /// WI-4449: a stall in a turn's output that is only just longer than the
+    /// quiet window is not the turn's end. The rest must hold for the debounce
+    /// as well, or a busy turn that paused for a moment reads as finished and
+    /// the next output reads as a new turn.
+    #[test]
+    fn a_quiet_gap_just_past_the_window_still_reads_running() {
+        let gap = std::time::Duration::from_millis(200 + IDLE_DEBOUNCE_MS / 2);
+        let t = Instant::now() - gap;
+        assert_eq!(
+            classify(Some(t), b"hello", 200, None),
+            ActivityState::Running
+        );
+    }
+
+    #[test]
+    fn a_quiet_gap_past_the_window_and_the_debounce_reads_idle() {
+        let gap = std::time::Duration::from_millis(200 + IDLE_DEBOUNCE_MS + 50);
+        let t = Instant::now() - gap;
+        assert_eq!(classify(Some(t), b"hello", 200, None), ActivityState::Idle);
     }
 
     #[test]

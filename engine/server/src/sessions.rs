@@ -1647,6 +1647,33 @@ impl SessionRegistry {
         created
     }
 
+    /// The directory a session's client-supplied `cwd` resolves to: a path
+    /// resolved against the workspace root (refusing anything that escapes it
+    /// with `..`), or `None` for an empty or absent one, which spawns in the
+    /// default cwd. `create_inner` runs its spawn in exactly this directory, so
+    /// a caller that reads git state there before the spawn reads the run's
+    /// own checkout (WI-4449).
+    pub fn resolve_spawn_cwd(&self, raw: Option<&str>) -> Result<Option<String>> {
+        let Some(raw) = raw else {
+            return Ok(None);
+        };
+        let raw = raw.trim();
+        if raw.is_empty() {
+            return Ok(None);
+        }
+        let canon = workspace_path::resolve_existing_allow_absolute(&self.cfg.workspace_root, raw)
+            .map_err(|e| match e {
+                ApiError::BadRequest(msg) => ApiError::BadRequest(format!("cwd {raw:?}: {msg}")),
+                other => other,
+            })?;
+        Ok(Some(canon.to_string_lossy().into_owned()))
+    }
+
+    /// The default cwd a session with no `cwd` spawns in.
+    pub fn default_cwd(&self) -> std::path::PathBuf {
+        self.cfg.default_cwd.clone()
+    }
+
     fn create_inner(
         &self,
         mut spec: SessionSpec,
@@ -1850,22 +1877,7 @@ impl SessionRegistry {
         // Resolve client-supplied cwd against workspace_root. Reject anything
         // that escapes the workspace via `..` so a stray API call can't spawn
         // a shell with cwd=/etc.
-        if let Some(raw) = spec.cwd.as_deref() {
-            let raw = raw.trim();
-            if !raw.is_empty() {
-                let canon =
-                    workspace_path::resolve_existing_allow_absolute(&self.cfg.workspace_root, raw)
-                        .map_err(|e| match e {
-                            ApiError::BadRequest(msg) => {
-                                ApiError::BadRequest(format!("cwd {raw:?}: {msg}"))
-                            }
-                            other => other,
-                        })?;
-                spec.cwd = Some(canon.to_string_lossy().into_owned());
-            } else {
-                spec.cwd = None;
-            }
-        }
+        spec.cwd = self.resolve_spawn_cwd(spec.cwd.as_deref())?;
         // Allocated here rather than inside `pty::spawn` so the prompt file
         // below can be named for the session it belongs to, so the file
         // exists before the child does, and so the agent's launch can name
