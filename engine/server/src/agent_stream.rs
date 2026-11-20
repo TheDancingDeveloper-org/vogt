@@ -18,7 +18,7 @@ use std::{
     time::{Duration, Instant},
 };
 use subtle::ConstantTimeEq;
-use tokio::sync::{mpsc, Mutex, Notify};
+use tokio::sync::{mpsc, watch, Mutex, Notify};
 use uuid::Uuid;
 use vogt_engine_contract::source::SourceDescriptor;
 use vogt_session_agent::Frame;
@@ -117,7 +117,7 @@ pub enum FlushOutcome {
 pub struct PodLink {
     /// Absolute offset of the next output byte the engine has not yet taken.
     next_offset: std::sync::Mutex<u64>,
-    out: std::sync::Mutex<Option<std::sync::mpsc::SyncSender<Vec<u8>>>>,
+    out: std::sync::Mutex<Option<std::sync::mpsc::SyncSender<PodChunk>>>,
     exit: std::sync::Mutex<Option<i32>>,
     exited: Condvar,
     exit_notify: Notify,
@@ -147,7 +147,20 @@ pub struct PodLink {
     /// a launch: its cursor came from the output log, and until an agent
     /// dials in the pod's fate is unknown.
     adopted: AtomicBool,
+    /// Stream offset up to which the session reader has written the output to
+    /// the log. The engine acknowledges an agent's output only up to here, so
+    /// an ack never covers bytes a kill could lose (WI-4442).
+    durable: watch::Sender<u64>,
+    /// The session reader has stopped: nothing more will be written.
+    reader_stopped: AtomicBool,
+    /// Set by [`Self::crash`]: the reader writes nothing it takes after this.
+    crashed: AtomicBool,
 }
+
+/// Output queued for the session reader: the stream offset just past the
+/// bytes, and the bytes (a gap marker is text the log holds but the stream does
+/// not).
+type PodChunk = (u64, Vec<u8>);
 
 /// Output the agent sent that does not continue the stream.
 #[derive(Debug, PartialEq, Eq)]
@@ -157,7 +170,7 @@ pub struct OutputGap {
 }
 
 impl PodLink {
-    fn new(out: std::sync::mpsc::SyncSender<Vec<u8>>) -> Self {
+    fn new(out: std::sync::mpsc::SyncSender<PodChunk>) -> Self {
         Self {
             next_offset: std::sync::Mutex::new(0),
             out: std::sync::Mutex::new(Some(out)),
@@ -179,7 +192,53 @@ impl PodLink {
             last_heartbeat: std::sync::Mutex::new(Instant::now()),
             disconnected_at: std::sync::Mutex::new(None),
             adopted: AtomicBool::new(false),
+            durable: watch::Sender::new(0),
+            reader_stopped: AtomicBool::new(false),
+            crashed: AtomicBool::new(false),
         }
+    }
+
+    /// Stream offset up to which the output is in the log.
+    pub fn durable_offset(&self) -> u64 {
+        *self.durable.borrow()
+    }
+
+    /// The session reader wrote the output up to `offset`.
+    fn mark_durable(&self, offset: u64) {
+        self.durable.send_if_modified(|v| {
+            if *v < offset {
+                *v = offset;
+                true
+            } else {
+                false
+            }
+        });
+    }
+
+    /// A receiver that wakes when the durable offset moves or the reader stops.
+    fn durable_watch(&self) -> watch::Receiver<u64> {
+        self.durable.subscribe()
+    }
+
+    /// The session reader is gone, so nothing more will reach the log.
+    fn note_reader_stopped(&self) {
+        self.reader_stopped.store(true, Ordering::Release);
+        self.durable.send_modify(|_| {});
+    }
+
+    fn reader_stopped(&self) -> bool {
+        self.reader_stopped.load(Ordering::Acquire)
+    }
+
+    /// Simulate the engine dying between an ack and its log write: the session
+    /// reader writes nothing it takes from here on. Only tests call this.
+    #[doc(hidden)]
+    pub fn crash(&self) {
+        self.crashed.store(true, Ordering::Release);
+    }
+
+    fn crashed(&self) -> bool {
+        self.crashed.load(Ordering::Acquire)
     }
 
     /// The pod behind this link has been deleted and the stream forgotten.
@@ -254,14 +313,19 @@ impl PodLink {
         self.adopted.load(Ordering::Acquire)
     }
 
-    /// Move the cursor forward over output the engine acknowledged before a
-    /// crash but never logged. Only an adopted link does this, and only
-    /// forward: the bytes are gone, and refusing the agent would strand it.
+    /// Move the cursor forward past output the engine acknowledged but whose
+    /// log no longer holds it. A kill cannot cause that: an ack waits for the
+    /// log write (see [`Self::durable_offset`]), so the log always holds every
+    /// acknowledged byte. The skip stays for a log that was lost or truncated
+    /// after the fact. Only an adopted link does this, and only forward: the
+    /// bytes are gone, and refusing the agent would strand it.
     fn skip_to(&self, cursor: u64) {
         let mut next = self.next_offset.lock().expect("pod link lock poisoned");
         if cursor > *next {
             *next = cursor;
         }
+        drop(next);
+        self.mark_durable(cursor);
     }
 
     /// How long ago the engine registered this link (the pod was asked for).
@@ -298,7 +362,7 @@ impl PodLink {
                 expected: *next,
                 got: offset,
             })?;
-            self.enqueue(fresh.to_vec(), *next, offset)?;
+            self.enqueue(fresh.to_vec(), end, *next, offset)?;
             *next = end;
         }
         Ok(*next)
@@ -333,6 +397,7 @@ impl PodLink {
             let missing = end - *next;
             self.enqueue(
                 format!("\r\n[{missing} bytes lost]\r\n").into_bytes(),
+                end,
                 *next,
                 offset,
             )?;
@@ -341,12 +406,14 @@ impl PodLink {
         Ok(*next)
     }
 
-    fn enqueue(&self, data: Vec<u8>, expected: u64, got: u64) -> Result<(), OutputGap> {
+    /// Queue `data`, which ends at stream offset `end`, for the session reader.
+    fn enqueue(&self, data: Vec<u8>, end: u64, expected: u64, got: u64) -> Result<(), OutputGap> {
         let out = self.out.lock().expect("pod link lock poisoned");
         let Some(out) = out.as_ref() else {
             return Err(OutputGap { expected, got });
         };
-        out.try_send(data).map_err(|_| OutputGap { expected, got })
+        out.try_send((end, data))
+            .map_err(|_| OutputGap { expected, got })
     }
 
     /// Record the exit and end the output stream, so the reader thread sees
@@ -404,17 +471,42 @@ impl PodLink {
 
 /// The session reader thread's view of the agent's output: a blocking `Read`
 /// that returns EOF once the link is finished.
+///
+/// Each read is called only after the reader has written the bytes the
+/// previous read returned, so a read marks those bytes durable before it
+/// blocks. That is what lets the engine acknowledge them (WI-4442).
 pub struct PodReader {
-    rx: std::sync::mpsc::Receiver<Vec<u8>>,
+    rx: std::sync::mpsc::Receiver<PodChunk>,
     pending: Vec<u8>,
     at: usize,
+    /// Stream offset just past `pending`.
+    end: u64,
+    /// The link this reader serves; `None` for a reader built on its own.
+    link: Option<Arc<PodLink>>,
+}
+
+impl PodReader {
+    fn crashed(&self) -> bool {
+        self.link.as_ref().is_some_and(|link| link.crashed())
+    }
 }
 
 impl Read for PodReader {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         if self.at >= self.pending.len() {
+            if let Some(link) = &self.link {
+                link.mark_durable(self.end);
+            }
+            if self.crashed() {
+                return Ok(0);
+            }
             match self.rx.recv() {
-                Ok(chunk) => {
+                Ok((end, chunk)) => {
+                    // A crashed engine never writes the chunk it took last.
+                    if self.crashed() {
+                        return Ok(0);
+                    }
+                    self.end = end;
                     self.pending = chunk;
                     self.at = 0;
                 }
@@ -425,6 +517,14 @@ impl Read for PodReader {
         buf[..n].copy_from_slice(&self.pending[self.at..self.at + n]);
         self.at += n;
         Ok(n)
+    }
+}
+
+impl Drop for PodReader {
+    fn drop(&mut self) {
+        if let Some(link) = &self.link {
+            link.note_reader_stopped();
+        }
     }
 }
 #[derive(Debug, Deserialize)]
@@ -730,14 +830,14 @@ impl AgentAuth {
             .lock()
             .expect("pod links lock poisoned")
             .insert(id, Arc::clone(&link));
-        (
-            link,
-            PodReader {
-                rx,
-                pending: Vec::new(),
-                at: 0,
-            },
-        )
+        let reader = PodReader {
+            rx,
+            pending: Vec::new(),
+            at: 0,
+            end: 0,
+            link: Some(Arc::clone(&link)),
+        };
+        (link, reader)
     }
 
     /// Rebuild the engine's half of a pod session's stream after the engine
@@ -753,6 +853,7 @@ impl AgentAuth {
     ) -> (Arc<PodLink>, PodReader) {
         let (link, reader) = self.register_pod(id);
         *link.next_offset.lock().expect("pod link lock poisoned") = cursor;
+        link.mark_durable(cursor);
         link.adopted.store(true, Ordering::Release);
         self.sessions.lock().await.insert(
             id,
@@ -1423,10 +1524,28 @@ where
         });
     }
     let mut resync = ResyncGate::default();
+    // Output is acknowledged only once the log holds it: `owed` is the offset
+    // the agent is waiting on, and `durable` wakes the loop as the log catches up.
+    let mut durable = link.durable_watch();
+    let mut owed: Option<u64> = None;
     loop {
         tokio::select! {
             Some(frame) = commands.recv() => {
                 if !send_frame(&mut socket, &frame).await { break; }
+            }
+            Ok(()) = durable.changed(), if owed.is_some() => {
+                let due = owed.unwrap_or_default();
+                if link.durable_offset() >= due {
+                    owed = None;
+                    if !send_frame(&mut socket, &Frame::Ack { offset: due }).await { break; }
+                } else if link.reader_stopped() {
+                    // Nothing more will be written, so the owed bytes never will be.
+                    let _ = send_frame(&mut socket, &Frame::Error {
+                        code: "output_not_written".into(),
+                        message: format!("the engine stopped writing before offset {due}"),
+                    }).await;
+                    break;
+                }
             }
             msg = socket.next() => match msg {
                 Some(Ok(axum::extract::ws::Message::Text(t))) => if let Ok(frame) = serde_json::from_str::<Frame>(&t) {
@@ -1450,8 +1569,12 @@ where
                                 }).await;
                                 break;
                             }
-                            // Tell the agent how much it can discard.
-                            if !send_frame(&mut socket, &Frame::Ack { offset: next }).await { break; }
+                            // Tell the agent how much it can discard: what the log
+                            // holds now, and the rest once it is written.
+                            let ack = link.durable_offset().min(next);
+                            let due = owed.map_or(next, |o| o.max(next));
+                            owed = (due > ack).then_some(due);
+                            if !send_frame(&mut socket, &Frame::Ack { offset: ack }).await { break; }
                         }
                         Frame::Output { offset, data } => {
                             // Output is proof the agent is alive, not only its
@@ -1479,7 +1602,12 @@ where
                             match refused {
                             Ok(next) => {
                                 resync.accepted();
-                                if !send_frame(&mut socket, &Frame::Ack { offset: next }).await { break; }
+                                let due = owed.map_or(next, |o| o.max(next));
+                                owed = Some(due);
+                                if link.durable_offset() >= due {
+                                    owed = None;
+                                    if !send_frame(&mut socket, &Frame::Ack { offset: due }).await { break; }
+                                }
                             }
                             Err((gap, error)) => {
                                 // Say where the stream ends, so the agent can
@@ -1503,7 +1631,12 @@ where
                             match link.ingest_gap(offset, lost) {
                             Ok(next) => {
                                 resync.accepted();
-                                if !send_frame(&mut socket, &Frame::Ack { offset: next }).await { break; }
+                                let due = owed.map_or(next, |o| o.max(next));
+                                owed = Some(due);
+                                if link.durable_offset() >= due {
+                                    owed = None;
+                                    if !send_frame(&mut socket, &Frame::Ack { offset: due }).await { break; }
+                                }
                             }
                             Err(gap) => {
                                 if let Some(offset) = resync.refused(&gap, link.output_closed()) {
@@ -1768,6 +1901,96 @@ mod tests {
         assert!(silent_link.heartbeat_age() > timeout);
     }
 
+    /// One read of a session reader, on the blocking pool, handed back with
+    /// the bytes it returned.
+    async fn read_once(mut reader: PodReader) -> (PodReader, Vec<u8>) {
+        tokio::task::spawn_blocking(move || {
+            let mut buf = [0u8; 64];
+            let n = reader.read(&mut buf).unwrap();
+            (reader, buf[..n].to_vec())
+        })
+        .await
+        .unwrap()
+    }
+
+    fn acks(frames: &[Frame]) -> Vec<u64> {
+        frames
+            .iter()
+            .filter_map(|frame| match frame {
+                Frame::Ack { offset } => Some(*offset),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// WI-4442: the engine acknowledges output only once the log holds it.
+    /// It dies after taking output from the agent but before writing it. The
+    /// agent never saw an ack for those bytes, so the next engine's cursor is
+    /// the last logged byte, the agent resends from there, and the log has no
+    /// gap and no duplicate.
+    #[tokio::test]
+    async fn an_ack_waits_for_the_log_write_so_a_kill_in_the_window_loses_nothing() {
+        let auth = Arc::new(AgentAuth::default());
+        let id = Uuid::new_v4();
+        let (_link, reader) = auth.register_pod(id);
+        let mut agent = connect(&auth, id).await;
+        agent.send(Frame::Output {
+            offset: 0,
+            data: b"hello".to_vec(),
+        });
+        let (frames, _) = agent.drain().await;
+        assert!(
+            acks(&frames).is_empty(),
+            "output acked before the log has it: {frames:?}"
+        );
+
+        // The session reader takes "hello", writes it, and reads again: that
+        // read is what marks "hello" durable, and the agent hears the ack.
+        let (reader, taken) = read_once(reader).await;
+        assert_eq!(taken, b"hello");
+        let next = tokio::spawn(read_once(reader));
+        let (frames, _) = agent.drain().await;
+        assert_eq!(acks(&frames), vec![5]);
+
+        // The agent sends "world". The reader takes it and dies before it
+        // writes it.
+        agent.send(Frame::Output {
+            offset: 5,
+            data: b"world".to_vec(),
+        });
+        let (reader, taken) = next.await.unwrap();
+        assert_eq!(taken, b"world");
+        drop(reader);
+        let (frames, closed) = agent.drain().await;
+        assert!(
+            acks(&frames).is_empty(),
+            "an ack for bytes never written: {frames:?}"
+        );
+        assert!(
+            closed,
+            "the relay ends when its output can never be written"
+        );
+
+        // The next engine adopts the pod at the log's end, "hello". The agent
+        // resumes from its last ack, resends "world", and it lands once.
+        let restarted = Arc::new(AgentAuth::default());
+        let (_adopted, reader) = restarted.adopt_pod(id, 5, "token".into()).await;
+        let mut agent = connect(&restarted, id).await;
+        agent.send(Frame::Resume { cursor: 5 });
+        agent.send(Frame::Output {
+            offset: 5,
+            data: b"world".to_vec(),
+        });
+        let (reader, taken) = read_once(reader).await;
+        assert_eq!(taken, b"world", "the resent bytes arrive exactly once");
+        let next = tokio::spawn(read_once(reader));
+        let (frames, _) = agent.drain().await;
+        assert_eq!(acks(&frames), vec![5, 10]);
+        // Close the link so the blocked read returns: the runtime waits for it.
+        restarted.pod(id).unwrap().finish(0);
+        next.await.unwrap();
+    }
+
     #[tokio::test]
     async fn relay_sends_one_resync_for_a_burst_of_refused_frames() {
         let auth = Arc::new(AgentAuth::default());
@@ -1898,9 +2121,9 @@ mod tests {
         assert!(link.ingest(1, b"b").is_err());
         assert!(link.ingest_gap(1, 1).is_err());
         assert_eq!(link.next_offset(), 1);
-        assert_eq!(receiver.recv().unwrap(), b"a");
+        assert_eq!(receiver.recv().unwrap(), (1, b"a".to_vec()));
         assert_eq!(link.ingest(1, b"b"), Ok(2));
-        assert_eq!(receiver.recv().unwrap(), b"b");
+        assert_eq!(receiver.recv().unwrap(), (2, b"b".to_vec()));
         drop(receiver);
         assert!(link.ingest(2, b"c").is_err());
         assert_eq!(link.next_offset(), 2);
@@ -1929,7 +2152,7 @@ mod tests {
         assert_eq!(link.ingest_gap(0, lost), Ok(lost));
         assert_eq!(
             receiver.recv().unwrap(),
-            format!("\r\n[{lost} bytes lost]\r\n").into_bytes()
+            (lost, format!("\r\n[{lost} bytes lost]\r\n").into_bytes())
         );
         assert_eq!(link.ingest(lost, b"x"), Ok(lost + 1));
     }
@@ -2179,6 +2402,8 @@ mod tests {
             rx,
             pending: Vec::new(),
             at: 0,
+            end: 0,
+            link: None,
         };
         let mut all = Vec::new();
         reader.read_to_end(&mut all).unwrap();
@@ -2207,6 +2432,8 @@ mod tests {
             rx,
             pending: Vec::new(),
             at: 0,
+            end: 0,
+            link: None,
         };
         let mut all = Vec::new();
         reader.read_to_end(&mut all).unwrap();
