@@ -6048,6 +6048,7 @@ mod tests {
             reason: "needs a person".into(),
             items: vec![],
             since: "2020-01-01T00:00:00Z".into(),
+            ..Default::default()
         });
         assert!(!hidden(&blocked));
 
@@ -6060,6 +6061,7 @@ mod tests {
             detected_at: "2020-01-01T00:00:00Z".into(),
             kind: "permission".into(),
             options: vec![],
+            key: String::new(),
         });
         assert!(!hidden(&approval));
     }
@@ -6104,6 +6106,7 @@ mod tests {
             reason: "x".into(),
             items: vec![],
             since: "2026-10-12T09:00:00Z".into(),
+            ..Default::default()
         });
         summary.last_person_input_at = Some("2026-10-12T08:00:00Z".into());
         assert_eq!(super::latest_event_at(&summary), "2026-10-12T09:00:00Z");
@@ -6326,6 +6329,7 @@ mod host_placement_tests {
             session: session.id,
             kind: kind.into(),
             summary: kind.into(),
+            escalation: None,
         }
     }
 
@@ -6380,7 +6384,7 @@ mod host_placement_tests {
         let mut coalescer = Coalescer::default();
         for (seq, worker, kind, at) in [(10, &one, "done", 0), (11, &two, "blocked", 20)] {
             let change = change_of_session(seq, worker, kind);
-            if let Some((who, label)) = crate::oversight_wake::route(&sessions, &change) {
+            if let Some((who, label, _)) = crate::oversight_wake::route(&sessions, &change) {
                 coalescer.add(who, label, &change, t0 + Duration::from_secs(at));
             }
         }
@@ -6419,7 +6423,7 @@ mod host_placement_tests {
         worker.set_supervisor(Some(overseer.id));
 
         let change = change_of_session(1, &worker, "done");
-        let (who, label) = crate::oversight_wake::route(&sessions, &change).unwrap();
+        let (who, label, _) = crate::oversight_wake::route(&sessions, &change).unwrap();
         assert_eq!(label, worker.id.to_string()[..8]);
         let t0 = Instant::now();
         let mut coalescer = Coalescer::default();

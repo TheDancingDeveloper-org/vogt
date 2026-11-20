@@ -912,8 +912,48 @@ pub struct AttentionHint {
     pub at: String,
 }
 
+/// Who can resolve an escalation (WI-996): a person, the session's overseer,
+/// or either. An untyped blocked report needs a person.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EscalationNeeds {
+    #[default]
+    Person,
+    Overseer,
+    Either,
+}
+
+/// What kind of boundary a session hit (WI-996). An untyped blocked report is
+/// `other`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EscalationBoundary {
+    /// A permission dialog the agent cannot answer itself.
+    PermissionPrompt,
+    /// An action the harness or a guard refused.
+    DeniedAction,
+    /// A credential the session does not hold.
+    Credential,
+    /// A choice that belongs to someone else.
+    Decision,
+    #[default]
+    Other,
+}
+
+impl EscalationBoundary {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::PermissionPrompt => "permission_prompt",
+            Self::DeniedAction => "denied_action",
+            Self::Credential => "credential",
+            Self::Decision => "decision",
+            Self::Other => "other",
+        }
+    }
+}
+
 /// An agent's own report that it cannot go on without a person.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlockedReport {
     /// Why, in the agent's words. Untrusted text.
     pub reason: String,
@@ -922,6 +962,17 @@ pub struct BlockedReport {
     pub items: Vec<String>,
     /// When it was reported (RFC 3339).
     pub since: String,
+    /// Who can resolve it (WI-996).
+    #[serde(default)]
+    pub needs: EscalationNeeds,
+    /// What kind of boundary it is (WI-996).
+    #[serde(default)]
+    pub boundary: EscalationBoundary,
+    /// `session:boundary:hash(reason)`, set by the engine: the same ask
+    /// reported again keeps its key, so the Inbox and push dedupe on content,
+    /// not on `since`. Empty only on a report from an older engine.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub key: String,
 }
 
 /// `POST /api/sessions/{id}/blocked`: set (`blocked: true`, with a reason) or
@@ -933,6 +984,12 @@ pub struct SetBlocked {
     pub reason: Option<String>,
     #[serde(default)]
     pub items: Vec<String>,
+    /// Who can resolve it; a person when absent.
+    #[serde(default)]
+    pub needs: EscalationNeeds,
+    /// What kind of boundary it is; `other` when absent.
+    #[serde(default)]
+    pub boundary: EscalationBoundary,
 }
 
 /// What `GET /api/sessions/{id}/wait` waits for.
@@ -976,6 +1033,27 @@ pub struct SessionChange {
     pub kind: String,
     /// At most 120 characters.
     pub summary: String,
+    /// Set when the change is an ask that someone else must resolve: a
+    /// blocked report, a permission dialog or a grant request (WI-996 E1).
+    /// `until=escalated` waits for any change that carries one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub escalation: Option<ChangeEscalation>,
+}
+
+/// The escalation a session change carries (WI-996 E1): who can resolve it,
+/// what kind of boundary it is, the ask and its content key, and the ways it
+/// can be resolved (`answer`, `grant`, `do`, `lift_hold`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChangeEscalation {
+    pub needs: EscalationNeeds,
+    pub boundary: EscalationBoundary,
+    /// The ask, at most 120 characters. Untrusted text.
+    pub ask: String,
+    /// `session:boundary:hash`, the same key the Inbox and push dedupe on.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub key: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resolve: Vec<String>,
 }
 
 /// The answer to `GET /api/sessions/changes`.
@@ -1026,6 +1104,11 @@ pub struct ApprovalPrompt {
     /// number with `POST /api/sessions/{id}/answer`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub options: Vec<ApprovalOption>,
+    /// The dialog's escalation key, `session:permission_prompt:hash(question)`
+    /// (WI-996). The engine computes it in one place; callers use it rather
+    /// than hashing the question themselves. Empty from an older engine.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub key: String,
 }
 
 fn default_permission() -> String {
