@@ -113,6 +113,7 @@ fn report<C: Clock + 'static, I: IdFactory + 'static>(
             .map(redact)
             .collect(),
         next_step: blank(next_step, true),
+        idempotency_key: None,
     };
     let mut writing = write_of(ctx);
     // Python reads the clock and mints ids inside the write, after the
