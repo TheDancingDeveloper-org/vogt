@@ -1397,8 +1397,9 @@ pub struct SessionInputReq {
 
 /// Type into a session. Refused with `403 person required`, nothing typed,
 /// when a permission prompt is showing and the caller is not a person: on a
-/// modal dialog every keystroke is an answer to it (WI-983). An oversight
-/// session vogt-core relays may answer a `permission` prompt (WI-2028).
+/// modal dialog every keystroke is an answer to it (WI-983). That holds for
+/// an oversight session too, which answers the prompt by `/answer` (WI-2028);
+/// its input is accepted once the prompt has closed (WI-4455).
 pub async fn session_input(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
@@ -1418,27 +1419,28 @@ pub async fn session_input(
         _ => None,
     };
     if !person {
+        // Typing is never an answer to a permission prompt (WI-4455): while one
+        // is open, only a person may type, and an overseer answers it with
+        // `/answer`. Once the prompt has gone, an overseer's input is accepted.
         let reading = Arc::clone(&session);
-        let person = req.person;
-        let gate_state = Arc::clone(&state);
-        tokio::task::spawn_blocking(move || match overseer {
-            Some(overseer) => match crate::person_gate::permission_dialog(&reading) {
-                Some(dialog) => oversight_may_answer(
-                    &gate_state,
+        let who = identity
+            .as_ref()
+            .map_or("unidentified", |i| i.name.as_str())
+            .to_string();
+        let relayed = overseer.is_some();
+        tokio::task::spawn_blocking(move || {
+            match crate::person_gate::permission_dialog(&reading) {
+                Some(dialog) if relayed => {
+                    Err(crate::person_gate::refuse_steering(&reading, &who, &dialog))
+                }
+                Some(dialog) => Err(crate::person_gate::refuse(
                     &reading,
+                    &who,
                     &dialog,
-                    &overseer,
-                    "input",
-                    "(keys)",
-                ),
+                    crate::person_gate::Via::Input,
+                )),
                 None => Ok(()),
-            },
-            None => crate::person_gate::guard(
-                &reading,
-                identity.as_ref(),
-                person,
-                crate::person_gate::Via::Input,
-            ),
+            }
         })
         .await
         .map_err(|e| crate::error::ApiError::Internal(format!("read the screen: {e}")))??;
