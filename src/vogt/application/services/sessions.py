@@ -303,15 +303,22 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
     # An autopilot worker on a bare project gets a chore first (WI-1338): its
     # hand-off needs an item, and the brief and env name it before the spawn.
     params, created_chore = _bind_unbound_worker(ctx, params)
-    started_by_session, started_by_kind = _started_by(ctx, engine)
-    session_id = ctx.id_factory("ses")
-    subject = _subject(ctx, params, session_id)
-    if params.cwd:
-        subject.cwd = _existing_worktree_cwd(params.cwd, subject.cwd)
-    caller_merges = _caller_merges(subject.policy, params, started_by_kind)
-    actor_ref = f"agent:session:{session_id}"
-    session_scopes = _session_scopes(ctx)
-    credential = issue(session_scopes)
+    # The chore exists from here on, so every refusal before the spawn (a bad
+    # cwd, a failed credential) must close it, not only the engine call below.
+    try:
+        started_by_session, started_by_kind = _started_by(ctx, engine)
+        session_id = ctx.id_factory("ses")
+        subject = _subject(ctx, params, session_id)
+        if params.cwd:
+            subject.cwd = _existing_worktree_cwd(params.cwd, subject.cwd)
+        caller_merges = _caller_merges(subject.policy, params, started_by_kind)
+        actor_ref = f"agent:session:{session_id}"
+        session_scopes = _session_scopes(ctx)
+        credential = issue(session_scopes)
+    except BaseException:
+        if created_chore is not None:
+            _abandon_unbound_chore(ctx, created_chore)
+        raise
 
     # How long the engine took to accept the session (WI-927): on the audit
     # row, and logged, so a slow or refused start is attributable afterwards.
