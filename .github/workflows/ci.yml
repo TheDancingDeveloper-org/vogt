@@ -654,7 +654,7 @@ jobs:
         # native-layer wedge fails in minutes with a diagnosis instead of
         # hanging the runner for 90+ min. SIGINT lets Playwright name what it
         # was doing; the `list` reporter makes per-test progress legible.
-        run: timeout --signal=SIGINT 420 pnpm exec playwright test tests/browser/demo.spec.ts --project=desktop --project=phone --reporter=list
+        run: timeout --signal=SIGINT 420 pnpm exec playwright test tests/browser/demo.spec.ts tests/browser/terminalLiveCap.spec.ts --project=desktop --project=phone --reporter=list
 
       # A screenshot that disagrees with its baseline is undiagnosable from
       # the log alone, and a baseline can only be refreshed from the renderer
