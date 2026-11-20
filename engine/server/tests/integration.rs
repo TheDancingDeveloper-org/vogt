@@ -37,6 +37,7 @@ fn test_config() -> Config {
         gui_stream_url: None,
         gui_stream_verified: false,
         ws_query_token_allowed: false,
+        ws_ping_interval: std::time::Duration::from_secs(20),
         // The push tests subscribe a loopback http stand-in service.
         push_allow_insecure_endpoints: true,
         state_dir: tempfile::tempdir().unwrap().keep(),
@@ -101,6 +102,7 @@ fn test_config() -> Config {
         session_rss_warn_bytes: None,
         worktree_clean_on_hibernate: false,
         worktree_clean_on_stop: false,
+        worktree_remove_on_stop: false,
         disk_warn_percent: 85,
         scratch_prune_bytes: 2 << 30,
         min_free_percent: 0,

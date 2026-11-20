@@ -490,6 +490,44 @@ enum Leader {
     Stopped,
 }
 
+/// A stop's request to remove the worktree after cleaning it (WI-1774).
+struct Removal {
+    base_ref: Option<String>,
+}
+
+/// Remove a stopped session's linked worktree when nothing in it would be
+/// lost: the tree is clean (untracked files count, git-ignored ones do not),
+/// `HEAD` is in its base, upstream, `origin/HEAD` or `origin/main`, and the
+/// branch has no stash entries. The caller has already made sure no other
+/// running or hibernated session works there and the session's processes
+/// are gone. Any doubt keeps the tree; never forced.
+fn remove_stopped_worktree(id: Uuid, root: &std::path::Path, base_ref: Option<&str>) {
+    let plan = match crate::workspace_clean::plan_removal(root, base_ref, false) {
+        Ok(plan) => plan,
+        Err(why) => {
+            tracing::info!(session = %id, worktree = %root.display(), %why, "kept the stopped session's worktree");
+            return;
+        }
+    };
+    match crate::workspace_clean::remove(&plan) {
+        Ok((bytes, branch)) => tracing::info!(
+            target: "vogt::audit",
+            event = "workspace.clean",
+            session = %id,
+            path = %root.display(),
+            mode = "remove",
+            actor = "engine",
+            outcome = "done",
+            bytes_freed = bytes,
+            branch_deleted = branch.as_deref().unwrap_or(""),
+            "removed the stopped session's merged, clean worktree"
+        ),
+        Err(why) => {
+            tracing::warn!(session = %id, worktree = %root.display(), %why, "could not remove the stopped session's worktree")
+        }
+    }
+}
+
 /// Which sessions a hibernation may take, and how a session was created.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Origin {
@@ -2954,7 +2992,7 @@ impl SessionRegistry {
             return None;
         }
         let record = self.records.get(&id)?;
-        let screen_len = hibernation::read_screen(&self.cfg.state_dir, id).len() as u64;
+        let screen_len = screen_len_of(&record, &self.cfg.state_dir);
         hibernated_summary(&record, screen_len)
     }
 
@@ -3303,6 +3341,7 @@ impl SessionRegistry {
         }
         record.rows = Some(rows);
         record.cols = Some(cols);
+        record.screen_len = Some(screen.len() as u64);
         // A handoff survives a forced wake and a later hibernation that does
         // not name one: the live session carries the mark the record had.
         record.superseded_by = superseded_by.or_else(|| session.superseded_by());
@@ -3368,7 +3407,7 @@ impl SessionRegistry {
         self.secret_broker.revoke(id);
         self.kill_strays(id);
         if self.cfg.worktree_clean_on_hibernate {
-            self.clean_worktree(id, &session.cwd, session.pid(), tree);
+            self.clean_worktree(id, &session.cwd, session.pid(), tree, None);
         }
         self.clean_scratch(id, Scratch::Prune);
         self.bus
@@ -4093,6 +4132,7 @@ impl SessionRegistry {
         let (screen, rows, cols) = session.screen_source(hibernation::SCREEN_BYTES);
         record.rows = Some(rows);
         record.cols = Some(cols);
+        record.screen_len = Some(screen.len() as u64);
         if let Err(e) = hibernation::write_screen(&self.cfg.state_dir, session.id, &screen)
             .and_then(|()| hibernation::write(&self.cfg.state_dir, &record))
         {
@@ -4117,32 +4157,38 @@ impl SessionRegistry {
     /// the default list leaves out (WI-1289). `include_hidden` returns the
     /// aged-out rows too; `hidden_count` counts them either way.
     pub fn list(&self, include_hidden: bool) -> vogt_engine_contract::SessionList {
-        let mut out: Vec<_> = self
-            .sessions
-            .iter()
-            .map(|kv| kv.value().summary())
-            .collect();
-        let hibernated: Vec<Uuid> = self
-            .records
-            .iter()
-            .filter(|r| r.hibernation.is_some() && !self.sessions.contains_key(r.key()))
-            .map(|r| *r.key())
-            .collect();
-        out.extend(
-            hibernated
-                .into_iter()
-                .filter_map(|id| self.hibernated_summary(id)),
-        );
         let now = time::OffsetDateTime::now_utc();
-        for summary in &mut out {
-            summary.last_event_at = Some(latest_event_at(summary));
+        let retain = self.cfg.session_list_retain_after;
+        let mut hidden_count = 0u64;
+        let mut out = Vec::new();
+        for kv in self.sessions.iter() {
+            let mut summary = kv.value().summary();
+            summary.last_event_at = Some(latest_event_at(&summary));
+            if session_is_hidden(&summary, retain, now) {
+                hidden_count += 1;
+                if !include_hidden {
+                    continue;
+                }
+            }
+            out.push(summary);
         }
-        let hidden_count = out
-            .iter()
-            .filter(|s| session_is_hidden(s, self.cfg.session_list_retain_after, now))
-            .count() as u64;
-        if !include_hidden {
-            out.retain(|s| !session_is_hidden(s, self.cfg.session_list_retain_after, now));
+        // A hibernated record is decided from the record itself, so an
+        // aged-out one never reads its screen file (WI-2692).
+        for kv in self.records.iter() {
+            if kv.hibernation.is_none() || self.sessions.contains_key(kv.key()) {
+                continue;
+            }
+            if record_is_hidden(&kv, retain, now) {
+                hidden_count += 1;
+                if !include_hidden {
+                    continue;
+                }
+            }
+            let screen_len = screen_len_of(&kv, &self.cfg.state_dir);
+            if let Some(mut summary) = hibernated_summary(&kv, screen_len) {
+                summary.last_event_at = Some(latest_event_at(&summary));
+                out.push(summary);
+            }
         }
         out.sort_by(session_list_order);
         vogt_engine_contract::SessionList {
@@ -4436,7 +4482,8 @@ impl SessionRegistry {
         if let Some(pid) = s.pid() {
             hibernation::kill_tree(pid, &tree);
         }
-        self.clean_worktree(id, &s.cwd, s.pid(), tree);
+        let removal = self.removal_for(s.workspace());
+        self.clean_worktree(id, &s.cwd, s.pid(), tree, removal);
     }
 
     /// `SIGKILL` whatever still runs with session `id`'s environment after
@@ -4494,17 +4541,33 @@ impl SessionRegistry {
     /// running after a short wait, or while another session — running, or
     /// hibernated, which a wake brings back — has its directory inside the
     /// same worktree. An exited session left in the registry builds nothing.
-    fn clean_worktree(&self, id: Uuid, cwd: &str, pid: Option<u32>, tree: Vec<u32>) {
-        self.clean_worktree_after(id, cwd, Leader::Process(pid, tree));
+    fn clean_worktree(
+        &self,
+        id: Uuid,
+        cwd: &str,
+        pid: Option<u32>,
+        tree: Vec<u32>,
+        removal: Option<Removal>,
+    ) {
+        self.clean_worktree_after(id, cwd, Leader::Process(pid, tree), removal);
     }
 
     /// `clean_worktree` for a session whose processes are already gone: a
     /// hibernated one being removed, whose tree its hibernation stopped.
-    fn clean_stopped_worktree(&self, id: Uuid, cwd: &str) {
-        self.clean_worktree_after(id, cwd, Leader::Stopped);
+    fn clean_stopped_worktree(&self, id: Uuid, cwd: &str, removal: Option<Removal>) {
+        self.clean_worktree_after(id, cwd, Leader::Stopped, removal);
     }
 
-    fn clean_worktree_after(&self, id: Uuid, cwd: &str, leader: Leader) {
+    /// Whether a stop should go on to remove the worktree (WI-1774): only
+    /// with `ENGINE_WORKTREE_REMOVE_ON_STOP`, carrying the ref the engine
+    /// cut it from so a branch merged into that base counts as merged.
+    fn removal_for(&self, workspace: Option<vogt_engine_contract::Workspace>) -> Option<Removal> {
+        self.cfg.worktree_remove_on_stop.then(|| Removal {
+            base_ref: workspace.and_then(|w| w.base_ref),
+        })
+    }
+
+    fn clean_worktree_after(&self, id: Uuid, cwd: &str, leader: Leader, removal: Option<Removal>) {
         let Some(root) = crate::worktree_clean::linked_worktree(std::path::Path::new(cwd)) else {
             return;
         };
@@ -4563,6 +4626,9 @@ impl SessionRegistry {
                     "cleaned build output from the session's worktree"
                 );
             }
+            if let Some(removal) = removal {
+                remove_stopped_worktree(id, &root, removal.base_ref.as_deref());
+            }
         };
         match tokio::runtime::Handle::try_current() {
             Ok(runtime) => {
@@ -4607,7 +4673,8 @@ impl SessionRegistry {
             self.clean_scratch(id, Scratch::Remove);
             if let Some((_, record)) = recorded_record.as_ref() {
                 if let Some(cwd) = record.cwd.as_deref() {
-                    self.clean_stopped_worktree(id, cwd);
+                    let removal = self.removal_for(record.workspace.clone());
+                    self.clean_stopped_worktree(id, cwd, removal);
                 }
             }
         }
@@ -4794,6 +4861,42 @@ pub struct PodAccountConversation {
 
 fn parse_rfc3339(raw: &str) -> Option<time::OffsetDateTime> {
     time::OffsetDateTime::parse(raw, &time::format_description::well_known::Rfc3339).ok()
+}
+
+/// Bytes of a hibernated screen without reading it (WI-2692): the length
+/// stored when the file was written, else the file's metadata. A missing
+/// file is zero. The detail path still reads the bytes.
+fn screen_len_of(record: &Record, state_dir: &std::path::Path) -> u64 {
+    record
+        .screen_len
+        .unwrap_or_else(|| hibernation::screen_metadata_len(state_dir, record.id))
+}
+
+/// Hidden for a hibernated record, decided from the record alone (WI-2692).
+/// The same rule as [`session_is_hidden`] for a summary whose activity is
+/// hibernated: it has no person input, and its only clock is the hibernation.
+fn record_is_hidden(
+    record: &Record,
+    retain: Option<std::time::Duration>,
+    now: time::OffsetDateTime,
+) -> bool {
+    let Some(retain) = retain else {
+        return false;
+    };
+    if record.role == SessionRole::Oversight || record.keep_awake {
+        return false;
+    }
+    if record.blocked.is_some() {
+        return false;
+    }
+    let window_start = now - retain;
+    let recent = |at: &str| parse_rfc3339(at).is_some_and(|t| t >= window_start);
+    let at = record
+        .hibernation
+        .as_ref()
+        .map(|h| h.at.as_str())
+        .unwrap_or(record.created_at.as_str());
+    !recent(at)
 }
 
 /// Whether the default list leaves this session out (WI-1289, WI-2689). A
@@ -5041,9 +5144,13 @@ fn recover_records(
                 resumable,
                 superseded_by: record.superseded_by.clone(),
             });
-            if hibernation::read_screen(state_dir, id).is_empty() {
+            if record.screen_len.unwrap_or(0) == 0
+                && hibernation::screen_metadata_len(state_dir, id) == 0
+            {
                 if let Some(tail) = history.and_then(|h| log_tail(&h.log_path(id))) {
-                    let _ = hibernation::write_screen(state_dir, id, &tail);
+                    if hibernation::write_screen(state_dir, id, &tail).is_ok() {
+                        record.screen_len = Some(tail.len() as u64);
+                    }
                 }
             }
             if let Err(e) = hibernation::write(state_dir, &record) {
@@ -5258,6 +5365,91 @@ mod tests {
         validate_pod_placement_fields, validate_requested_placement, validate_template_placement,
     };
     use crate::config::SessionTemplate;
+
+    /// `git` in `dir`, asserting it succeeds (WI-1774 fixtures).
+    fn git_in(dir: &std::path::Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    /// A repo with one commit on `main` and a linked worktree at `root/wt` on
+    /// a branch `feat` cut from that commit, so `feat` is merged into `main`.
+    fn repo_with_linked_worktree(root: &std::path::Path) -> std::path::PathBuf {
+        let main = root.join("repo");
+        std::fs::create_dir(&main).unwrap();
+        git_in(&main, &["init", "-q", "-b", "main"]);
+        git_in(&main, &["config", "user.email", "t@example.com"]);
+        git_in(&main, &["config", "user.name", "t"]);
+        std::fs::write(main.join("README"), "r").unwrap();
+        git_in(&main, &["add", "README"]);
+        git_in(&main, &["commit", "-qm", "init"]);
+        let wt = root.join("wt");
+        git_in(
+            &main,
+            &["worktree", "add", "-q", "-b", "feat", wt.to_str().unwrap()],
+        );
+        wt
+    }
+
+    #[test]
+    fn a_stopped_sessions_clean_merged_worktree_is_removed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wt = repo_with_linked_worktree(tmp.path());
+        super::remove_stopped_worktree(uuid::Uuid::from_u128(9), &wt, Some("main"));
+        assert!(!wt.exists(), "a clean merged worktree is removed on stop");
+    }
+
+    #[test]
+    fn a_stopped_sessions_worktree_with_untracked_work_is_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wt = repo_with_linked_worktree(tmp.path());
+        std::fs::write(wt.join("notes.txt"), "unpushed work").unwrap();
+        super::remove_stopped_worktree(uuid::Uuid::from_u128(9), &wt, Some("main"));
+        assert!(
+            wt.join("notes.txt").exists(),
+            "a dirty worktree is never removed"
+        );
+    }
+
+    #[test]
+    fn a_stored_screen_len_is_used_when_the_screen_file_is_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = uuid::Uuid::from_u128(7);
+        let mut record =
+            crate::hibernation::Record::new(id, "aged".into(), "2020-01-01T00:00:00Z".into());
+        record.screen_len = Some(4096);
+        assert_eq!(super::screen_len_of(&record, dir.path()), 4096);
+        // With no stored length the rail falls back to the file's metadata,
+        // which is zero when there is no file (WI-2692).
+        record.screen_len = None;
+        assert_eq!(super::screen_len_of(&record, dir.path()), 0);
+    }
+
+    #[test]
+    fn a_hidden_hibernated_record_is_decided_without_a_screen_file() {
+        let mut record = crate::hibernation::Record::new(
+            uuid::Uuid::nil(),
+            "old".into(),
+            "2020-01-01T00:00:00Z".into(),
+        );
+        record.hibernation = Some(vogt_engine_contract::Hibernation {
+            at: "2020-01-01T00:00:00Z".into(),
+            trigger: vogt_engine_contract::HibernateTrigger::Idle,
+            reason: None,
+            resumable: false,
+            superseded_by: None,
+        });
+        let retain = Some(std::time::Duration::from_secs(60));
+        let now = time::OffsetDateTime::now_utc();
+        assert!(super::record_is_hidden(&record, retain, now));
+        record.keep_awake = true;
+        assert!(!super::record_is_hidden(&record, retain, now));
+    }
 
     #[test]
     fn claude_cli_model_names_are_the_aliases_ids_and_the_1m_suffix() {
