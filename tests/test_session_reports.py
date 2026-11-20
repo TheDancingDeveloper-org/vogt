@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 from datetime import timedelta
+from pathlib import Path
 
 import pytest
 
@@ -331,6 +332,18 @@ def test_a_refused_start_closes_the_chore_it_made(
     engine.refuse_starts = True
     with pytest.raises(VogtError):
         start_session(wired, _unbound(wired))
+    item = get_work(wired, GetWorkParams(ref="WI-2")).item
+    assert item.state == "wont_do"
+
+
+def test_a_start_refused_before_the_spawn_closes_the_chore_it_made(
+    wired: AppContext, engine: Engine, tmp_path: Path
+) -> None:
+    # A cwd that does not exist is refused by _existing_worktree_cwd, before
+    # the engine is called: the chore made for the start must still close.
+    with pytest.raises(InvalidRequest):
+        start_session(wired, _unbound(wired, cwd=str(tmp_path / "missing")))
+    assert engine.counter == 0
     item = get_work(wired, GetWorkParams(ref="WI-2")).item
     assert item.state == "wont_do"
 
