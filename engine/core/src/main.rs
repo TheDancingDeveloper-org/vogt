@@ -26,15 +26,14 @@ mod scripts;
 mod snapshot;
 mod storage;
 
-/// The product version. Nothing sets `VOGT_VERSION` today, so this resolves to
-/// the pinned fallback, which is what Python's `vogt.__version__` reports. It
-/// deliberately does not read `VOGT_PRODUCT_VERSION`: the image build defaults
-/// that to `local/dev` (see `engine/Dockerfile`), and the core must not announce
-/// a version Python never would. `scripts/check_product_version.py` keeps the
-/// fallback equal to `pyproject.toml`. Health and MCP both report this.
+/// The product version, baked at compile time from `VOGT_VERSION`. CI derives it
+/// from `pyproject.toml` and the image build passes it through (see
+/// `engine/Dockerfile`). A build that was not told its version says `unknown`
+/// rather than a literal that could go stale. It deliberately does not read
+/// `VOGT_PRODUCT_VERSION`, which the engine reads. Health and MCP both report this.
 pub const VERSION: &str = match option_env!("VOGT_VERSION") {
     Some(value) if !value.is_empty() => value,
-    _ => "0.7.22",
+    _ => "unknown",
 };
 
 use std::net::SocketAddr;

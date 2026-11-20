@@ -24,8 +24,11 @@ def main() -> int:
         if json.loads((ROOT / relative).read_text()).get("version") != version:
             raise SystemExit(f"{relative} disagrees with product version {version}")
     build = (ROOT / ".github/workflows/build.yml").read_text()
-    if f"VOGT_PRODUCT_VERSION={version}" not in build:
-        raise SystemExit("dev build does not inject the canonical product version")
+    # CI reads the version from pyproject.toml into this step output and passes it on.
+    if "VOGT_PRODUCT_VERSION=${{ steps.product-version.outputs.version }}" not in build:
+        raise SystemExit(
+            "dev build does not read the product version from pyproject.toml"
+        )
     # A release promotes the images build.yml built for the tagged commit
     # (build once, promote by digest), so the version above, baked by build.yml,
     # is the one a release ships. A release that built again would ship bytes
@@ -40,8 +43,8 @@ def main() -> int:
     if '"local/dev"' not in (ROOT / "engine/server/src/product.rs").read_text():
         raise SystemExit("engine local/dev fallback is missing")
     core = (ROOT / "engine/core/src/main.rs").read_text()
-    if f'_ => "{version}"' not in core:
-        raise SystemExit("vogt-core VERSION fallback disagrees with pyproject.toml")
+    if '_ => "unknown"' not in core:
+        raise SystemExit("vogt-core VERSION must not hard-code a product version")
     return 0
 
 

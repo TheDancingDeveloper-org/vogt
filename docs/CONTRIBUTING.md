@@ -139,6 +139,13 @@ The script does not run everything. Run these yourself when they apply:
   only at release: a feature or fix pull request does not bump them, and CI
   asserts that the manifests agree with each other rather than that they
   changed. A release bump is a release change and touches all of them.
+- **Where the version comes from.** `pyproject.toml`'s `[project] version` is the one
+  source. The image workflows (`build.yml`, `rust2-images.yml`) read it into a
+  step output and pass it as `VOGT_PRODUCT_VERSION` (the engine) and `VOGT_VERSION`
+  (the Rust core's `VERSION`). A build given no `VOGT_VERSION` reports `unknown`
+  rather than a literal. `VOGT_GIT_SHA` (the git commit, `github.sha`) is passed
+  beside `VOGT_SOURCE_SHA`; on a graft line the latter is the changeset id, and
+  status reports the two separately (`git_sha` on `/api/status`).
 - **Voice sidecar.** `voice/` is its own Cargo workspace with native
   prerequisites (`voice/README.md`): `cargo fmt --all -- --check`,
   `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`,

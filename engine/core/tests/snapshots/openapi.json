@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Vogt",
-    "version": "0.7.22",
+    "version": "unknown",
     "description": "Every capability is available here, on the CLI, and over MCP — all three generated from one operation registry."
   },
   "paths": {

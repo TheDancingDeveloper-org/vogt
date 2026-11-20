@@ -34,6 +34,14 @@ variable "VOGT_PRODUCT_VERSION" {
   default = ""
 }
 
+variable "VOGT_VERSION" {
+  default = ""
+}
+
+variable "VOGT_GIT_SHA" {
+  default = ""
+}
+
 target "stack" {
   context    = "."
   dockerfile = "engine/Dockerfile"
@@ -43,6 +51,8 @@ target "stack" {
     VOGT_SOURCE_REF      = VOGT_SOURCE_REF
     VOGT_SOURCE_SHA      = VOGT_SOURCE_SHA
     VOGT_PRODUCT_VERSION = VOGT_PRODUCT_VERSION
+    VOGT_VERSION         = VOGT_VERSION
+    VOGT_GIT_SHA         = VOGT_GIT_SHA
     INSTALL_AI_CLIENTS   = "true"
   }
   labels = {
