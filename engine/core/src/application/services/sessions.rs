@@ -1247,6 +1247,7 @@ where
     let (resolved, read_only, overrides) = resolve_purpose(ctx, &escalated_params)?;
     refuse_task_without_agent(&resolved)?;
     let params = &resolved;
+    refuse_privilege_above_caller(ctx, params, started_by_kind.as_deref())?;
     let decision = dispatch_check(
         ctx,
         params,
@@ -1305,6 +1306,9 @@ where
         _ => None,
     };
     let mut spec = build_spec(ctx, params, &subject, &secret, read_only, supervisor)?;
+    // Every agent-made start names its caller to the engine (WI-4489), so
+    // the engine can hold the child to its parent's standing on its own.
+    spec.started_by = started_by_session.clone();
     spec.budget = budget.as_ref().map(budget_wire);
     if worktree {
         spec.worktree = Some(json!({
@@ -4187,6 +4191,40 @@ where
         }
         _ => None,
     })
+}
+
+/// Refuse a start that would give the new session more standing than its
+/// caller (WI-4489). Only a person, or an oversight session, may start an
+/// oversight session or one on the full MCP set; any other agent caller (a
+/// worker, a worker's child, or a token with no live session) is refused.
+/// Checked after the purpose fills the start, so a profile cannot carry a
+/// start past it either.
+fn refuse_privilege_above_caller<C, I>(
+    ctx: &AppContext<C, I>,
+    params: &StartSessionParams,
+    started_by_kind: Option<&str>,
+) -> Result<(), VogtError>
+where
+    C: Clock,
+    I: IdFactory,
+{
+    if ctx.principal.kind != ActorKind::Agent || started_by_kind == Some("oversight") {
+        return Ok(());
+    }
+    let asked = if params.role == "oversight" {
+        "role=oversight"
+    } else if params.mcp_set.as_deref() == Some("full") {
+        "mcp_set=full"
+    } else {
+        return Ok(());
+    };
+    Err(VogtError::InvalidRequest(format!(
+        "{asked} can only be started by a person or an oversight session, not by {} ({}); \
+         a child session never gets more standing than the session that starts it; \
+         start it on the worker set, or ask a person to start it",
+        ctx.principal.identity_ref,
+        started_by_kind.unwrap_or("an agent with no oversight role")
+    )))
 }
 
 /// What the engine was asked to run.

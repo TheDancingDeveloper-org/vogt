@@ -114,6 +114,9 @@ impl EngineClient {
         if let Some(supervisor) = &spec.supervisor {
             body.insert("supervisor".to_string(), Value::String(supervisor.clone()));
         }
+        if let Some(started_by) = &spec.started_by {
+            body.insert("started_by".to_string(), Value::String(started_by.clone()));
+        }
         if !spec.wake_on.is_empty() {
             body.insert(
                 "wake_on".to_string(),
@@ -1309,6 +1312,10 @@ pub struct CreateSession {
     /// The engine session that started this one, when it was an oversight
     /// session (WI-1521). The engine checks it names a live oversight session.
     pub supervisor: Option<String>,
+    /// The engine session that made this start (WI-4489): any agent
+    /// caller, oversight or not. The engine refuses an oversight role or the
+    /// full MCP set under a parent that is not oversight.
+    pub started_by: Option<String>,
     /// The change kinds an oversight session is woken for. Sent only when
     /// non-empty.
     pub wake_on: Vec<String>,
@@ -1344,6 +1351,7 @@ impl CreateSession {
             worktree: None,
             source: None,
             supervisor: None,
+            started_by: None,
             wake_on: Vec::new(),
         }
     }

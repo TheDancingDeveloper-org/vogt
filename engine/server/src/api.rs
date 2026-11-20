@@ -1021,6 +1021,50 @@ pub async fn list_session_grants(
 /// a person may name one, and only an oversight session may be named. Any other
 /// session token is refused, so a worker cannot point wake lines at an
 /// overseer, and a core start cannot name a worker or a shell as one.
+/// Who may name a start's parent, and what an agent may ask for itself
+/// (WI-4489). `started_by` is vogt-core's to set (or a person's), never an
+/// agent's: an agent naming an oversight session as its parent would borrow
+/// that standing. An agent calling the engine directly is its own parent: it
+/// may not ask for the full MCP set (the oversight role is refused above).
+fn require_started_by_authority(
+    identity: Option<&crate::auth::AuthorizedIdentity>,
+    spec: &mut SessionSpec,
+) -> Result<()> {
+    let Some(identity) = identity else {
+        return Err(crate::error::ApiError::Unauthorized);
+    };
+    if identity.stack_secret || identity.person || identity.break_glass {
+        return Ok(());
+    }
+    let refused = if spec.started_by.is_some() {
+        "started_by is set by vogt-core when a session starts a session; an agent may not name one"
+    } else if spec.mcp_set.as_deref().map(str::trim) == Some("full") {
+        "mcp_set=full can only be started by a person or an oversight session through vogt-core"
+    } else {
+        // Left unnamed, an agent's own start is on the worker set.
+        if spec
+            .mcp_set
+            .as_deref()
+            .map(str::trim)
+            .is_none_or(str::is_empty)
+        {
+            spec.mcp_set = Some(crate::mcp_set::McpSet::Worker.name().to_string());
+        }
+        return Ok(());
+    };
+    tracing::warn!(
+        target: "vogt::audit",
+        event = "session.started_by",
+        outcome = "refused",
+        caller = %identity.name,
+        "agent start refused"
+    );
+    Err(crate::error::ApiError::Forbidden(format!(
+        "{refused} ({} is an agent)",
+        identity.name
+    )))
+}
+
 pub(crate) fn require_supervisor_authority(
     identity: Option<&crate::auth::AuthorizedIdentity>,
     sessions: &crate::sessions::SessionRegistry,
@@ -1247,7 +1291,7 @@ pub async fn answer_session(
 pub async fn create_session(
     State(state): State<Arc<AppState>>,
     identity: Option<axum::Extension<crate::auth::AuthorizedIdentity>>,
-    Json(spec): Json<SessionSpec>,
+    Json(mut spec): Json<SessionSpec>,
 ) -> Result<Json<SessionSummary>> {
     // Starting an overseer is nominating one (WI-1255): a worker that could
     // start one would drive its terminal and borrow its standing.
@@ -1257,6 +1301,7 @@ pub async fn create_session(
     require_source_authority(identity.as_deref(), spec.source.as_ref())?;
     require_session_ref_authority(identity.as_deref(), spec.session_ref.as_deref())?;
     require_supervisor_authority(identity.as_deref(), &state.sessions, spec.supervisor)?;
+    require_started_by_authority(identity.as_deref(), &mut spec)?;
     let s = state.sessions.create_launched(spec).await?;
     Ok(Json(s.summary()))
 }

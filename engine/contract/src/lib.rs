@@ -189,6 +189,14 @@ pub struct SessionSpec {
     /// uses it to wake that overseer when this session changes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supervisor: Option<Uuid>,
+    /// The session whose agent made this start (WI-4489): an engine session
+    /// id, set by vogt-core for every start an agent session makes, oversight
+    /// or not. Unlike `supervisor` it wakes nobody; the engine holds the new
+    /// session to its parent's standing with it: under a parent that is not
+    /// oversight, no `oversight` role and no `full` MCP set, and an unnamed
+    /// set is the worker set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_by: Option<Uuid>,
     /// For an oversight session (WI-1521): the change kinds of a supervised
     /// session that make the engine type one wake line into this one while it
     /// rests at its prompt. Empty (the default) never types anything.

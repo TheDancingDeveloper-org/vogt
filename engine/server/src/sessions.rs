@@ -858,7 +858,7 @@ impl SessionRegistry {
             .cfg
             .vogt_prod_mcp_url
             .as_deref()
-            .filter(|_| vogt_prod_bearer)
+            .filter(|_| vogt_prod_bearer && !self.cfg.is_dev_lane())
         {
             endpoints = crate::session_endpoints::with_vogt_prod(endpoints, origin);
         }
@@ -872,15 +872,56 @@ impl SessionRegistry {
     /// session whose set is unknown, is refused, so hiding the name from its
     /// breadcrumbs is not the only thing between a worker and `vogt-prod`.
     pub fn may_fetch_vogt_prod(&self, id: Uuid) -> bool {
-        self.summary_of(id).is_some_and(|s| {
-            s.role == SessionRole::Oversight
-                || s.mcp_set.as_deref() == Some(crate::mcp_set::McpSet::Full.name())
-        })
+        // A dev lane never reaches production, whoever asks (WI-4489).
+        !self.cfg.is_dev_lane()
+            && self.summary_of(id).is_some_and(|s| {
+                s.role == SessionRole::Oversight
+                    || s.mcp_set.as_deref() == Some(crate::mcp_set::McpSet::Full.name())
+            })
+    }
+
+    /// Refuse a start that would outrank the session that made it (WI-4489).
+    /// Under a parent that is not oversight (a worker, or one this engine no
+    /// longer knows), the child may be neither an oversight session nor on
+    /// the full MCP set. A start with no parent is a person's or vogt-core's
+    /// own, and the caller's authority decides it.
+    pub fn check_parent_standing(&self, spec: &SessionSpec) -> Result<()> {
+        let Some(parent) = spec.started_by else {
+            return Ok(());
+        };
+        let parent_is_oversight = self
+            .summary_of(parent)
+            .is_some_and(|s| s.role == SessionRole::Oversight);
+        if parent_is_oversight {
+            return Ok(());
+        }
+        let asked = if spec.role == SessionRole::Oversight {
+            "role=oversight"
+        } else if crate::mcp_set::McpSet::parse(spec.mcp_set.as_deref())?
+            == crate::mcp_set::McpSet::Full
+            && spec.mcp_set.is_some()
+        {
+            "mcp_set=full"
+        } else {
+            return Ok(());
+        };
+        tracing::warn!(
+            target: "vogt::audit",
+            event = "session.create",
+            outcome = "refused",
+            parent = %parent,
+            asked,
+            "start above its parent's standing refused"
+        );
+        Err(ApiError::Forbidden(format!(
+            "{asked} refused: session {parent} that made this start is not an oversight \
+             session, and a child never gets more standing than its parent"
+        )))
     }
 
     /// Whether a remote Vogt is configured for pod sessions (WI-4289).
     pub fn vogt_prod_configured(&self) -> bool {
-        self.cfg.vogt_prod_mcp_url.is_some()
+        self.cfg.vogt_prod_mcp_url.is_some() && !self.cfg.is_dev_lane()
     }
 
     /// Start a session whose process runs in a pod: register the engine's half
@@ -1436,6 +1477,7 @@ impl SessionRegistry {
     /// token, because the person at it is a person. A session vogt-core
     /// started arrives with its own token and is left alone.
     pub async fn create_launched(&self, mut spec: SessionSpec) -> Result<Arc<Session>> {
+        self.check_parent_standing(&spec)?;
         // Before the host graft preparation below, which asks the same
         // placement question (WI-4428).
         self.default_worker_pod_template(&mut spec, &Creating::Fresh(Origin::Api));
@@ -2208,8 +2250,8 @@ impl SessionRegistry {
         // WI-4489: a start another session or autopilot made, and that is
         // not an oversight session, is a worker: with no set named it gets
         // the worker set, never the full one.
-        let dispatched =
-            spec.role != SessionRole::Oversight && (spec.supervisor.is_some() || spec.autopilot);
+        let dispatched = spec.role != SessionRole::Oversight
+            && (spec.supervisor.is_some() || spec.started_by.is_some() || spec.autopilot);
         let mcp_set = crate::mcp_set::McpSet::for_agent(
             spec.mcp_set
                 .as_deref()
@@ -3753,6 +3795,7 @@ impl SessionRegistry {
             role: record.role,
             work_item: record.work_item.clone(),
             supervisor: record.supervisor,
+            started_by: None,
             wake_on: record.wake_on.clone(),
             session_ref: checked_session_ref(record.id, record.session_ref.as_deref()),
             // A wake returns to the worktree the first start already cut; it
@@ -6653,6 +6696,7 @@ mod host_placement_tests {
             role: Default::default(),
             work_item: None,
             supervisor: None,
+            started_by: None,
             wake_on: Vec::new(),
             session_ref: None,
             worktree: None,
