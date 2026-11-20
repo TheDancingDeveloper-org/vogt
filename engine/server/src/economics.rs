@@ -208,8 +208,10 @@ impl Meter {
 
     /// The length of the current compaction loop once it is long enough to
     /// act on, else `None`.
-    pub(crate) fn compaction_loop(&self) -> Option<i64> {
-        (self.compaction_streak >= COMPACTION_LOOP_STREAK).then_some(self.compaction_streak)
+    /// `threshold` is `ENGINE_COMPACTION_LOOP_THRESHOLD`; zero turns the guard
+    /// off (WI-2834).
+    pub(crate) fn compaction_loop(&self, threshold: i64) -> Option<i64> {
+        (threshold > 0 && self.compaction_streak >= threshold).then_some(self.compaction_streak)
     }
 
     /// True once `needed` compactions in a row each had real work before them,
@@ -903,7 +905,8 @@ pub fn spawn_economics_tailer(state: Arc<AppState>, home: PathBuf, tick: Duratio
                     tail.persisted_json = json.clone();
                 }
                 if !tail.loop_reported {
-                    if let Some(streak) = tail.meter.compaction_loop() {
+                    let threshold = i64::from(state.config.compaction_loop_threshold);
+                    if let Some(streak) = tail.meter.compaction_loop(threshold) {
                         tail.loop_reported = true;
                         report_compaction_loop(&session, &state.bus, streak);
                         // The next launch of this session backs its limit off
@@ -1268,7 +1271,10 @@ mod tests {
             thrash.feed_line(output);
         }
         assert_eq!(thrash.snapshot().compactions, COMPACTION_LOOP_STREAK);
-        assert_eq!(thrash.compaction_loop(), Some(COMPACTION_LOOP_STREAK));
+        assert_eq!(
+            thrash.compaction_loop(COMPACTION_LOOP_STREAK),
+            Some(COMPACTION_LOOP_STREAK)
+        );
 
         let mut working = Meter::new("codex");
         for _ in 0..COMPACTION_LOOP_STREAK * 2 {
@@ -1277,7 +1283,25 @@ mod tests {
                 working.feed_line(call);
             }
         }
-        assert_eq!(working.compaction_loop(), None);
+        assert_eq!(working.compaction_loop(COMPACTION_LOOP_STREAK), None);
+    }
+
+    /// WI-2834: the threshold is configurable, and zero turns the guard off.
+    #[test]
+    fn compaction_loop_threshold_is_configurable_and_zero_disables_it() {
+        let compacted = r#"{"type":"compacted","payload":{"message":""}}"#;
+        let call = r#"{"type":"response_item","payload":{"type":"function_call","name":"shell"}}"#;
+        let output = r#"{"type":"response_item","payload":{"type":"function_call_output"}}"#;
+
+        let mut meter = Meter::new("codex");
+        for _ in 0..3 {
+            meter.feed_line(compacted);
+            meter.feed_line(call);
+            meter.feed_line(output);
+        }
+        assert_eq!(meter.compaction_loop(3), Some(3));
+        assert_eq!(meter.compaction_loop(4), None);
+        assert_eq!(meter.compaction_loop(0), None);
     }
 
     /// Python: test_claude_usage_is_the_latest_turn_and_peak_is_the_largest
