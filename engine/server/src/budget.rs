@@ -499,6 +499,54 @@ fn note_refusal(session: &Session, bus: &EventBus, refusal: &str) {
     );
 }
 
+/// Type one budget line through the guard and, once it is in, mark the budget
+/// sent and publish it. A line the guard held back is not marked, so the next
+/// pass sends it again. A stranded line is marked, so it is never typed again
+/// (WI-4459). With no `line` (an agent with no compact command) nothing is
+/// typed, and the change is published.
+async fn send_budget_line(
+    session: &Arc<Session>,
+    bus: &EventBus,
+    line: Option<&str>,
+    what: &str,
+    level: &str,
+    summary: &str,
+) {
+    if let Some(line) = line {
+        match type_line(session, line, what).await {
+            Ok(crate::enter_guard::EnterOutcome::Sent) => {}
+            // The guard logged the dialog that held it back; retry next pass.
+            Ok(crate::enter_guard::EnterOutcome::Skipped(..)) => return,
+            // Stranded in the composer: marked, so it is never typed again.
+            Ok(crate::enter_guard::EnterOutcome::Stranded(_)) => {
+                session.set_budget_soft_sent(true);
+                return;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    session = %session.id,
+                    error = %e,
+                    event = "session.budget",
+                    "could not type a budget line: {what}"
+                );
+                return;
+            }
+        }
+    }
+    session.set_budget_soft_sent(true);
+    bus.publish(vogt_engine_contract::ServerEvent::SessionBudget {
+        id: session.id,
+        level: level.to_string(),
+        summary: summary.to_string(),
+    });
+    tracing::info!(
+        session = %session.id,
+        level,
+        event = "session.budget",
+        "{summary}"
+    );
+}
+
 /// Compact an overseer whose context crossed its limit, once per climb, at
 /// the prompt. Never hibernates it. An agent with no compact command gets the
 /// change but nothing typed.
@@ -528,41 +576,15 @@ async fn compact(session: &Arc<Session>, bus: &EventBus, r: &Reading<'_>, settle
             format!("context {n} of {limit}: over budget, agent has no compact command"),
         ),
     };
-    // Marked only once the command is in: a held-back line is not marked, so
-    // the next pass tries it again (WI-4459).
-    if let Some(command) = &command {
-        match type_line(session, command, "budget compact").await {
-            Ok(crate::enter_guard::EnterOutcome::Sent) => {}
-            // The guard logged the dialog that held it back; retry next pass.
-            Ok(crate::enter_guard::EnterOutcome::Skipped(_)) => return,
-            // Stranded in the composer: marked, so it is never typed again.
-            Ok(crate::enter_guard::EnterOutcome::Stranded(_)) => {
-                session.set_budget_soft_sent(true);
-                return;
-            }
-            Err(e) => {
-                tracing::warn!(
-                    session = %session.id,
-                    error = %e,
-                    event = "session.budget",
-                    "could not type the compact command"
-                );
-                return;
-            }
-        }
-    }
-    session.set_budget_soft_sent(true);
-    bus.publish(vogt_engine_contract::ServerEvent::SessionBudget {
-        id: session.id,
-        level: level.to_string(),
-        summary: summary.clone(),
-    });
-    tracing::info!(
-        session = %session.id,
-        level = level,
-        event = "budget.compact",
-        "{summary}"
-    );
+    send_budget_line(
+        session,
+        bus,
+        command.as_deref(),
+        "budget compact",
+        level,
+        &summary,
+    )
+    .await;
 }
 
 /// Look at every live session once.
@@ -647,37 +669,15 @@ pub async fn run_once(
         match action {
             Action::Leave => {}
             Action::Soft { summary } => {
-                // Marked only once the warning is in. A held-back warning is
-                // not marked, so it is sent again on the next pass (WI-4459).
-                match type_line(&session, &summary, "budget warning").await {
-                    Ok(crate::enter_guard::EnterOutcome::Sent) => {}
-                    Ok(crate::enter_guard::EnterOutcome::Skipped(_)) => continue,
-                    Ok(crate::enter_guard::EnterOutcome::Stranded(_)) => {
-                        session.set_budget_soft_sent(true);
-                        continue;
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            session = %session.id,
-                            error = %e,
-                            event = "session.budget",
-                            "could not type the soft budget warning"
-                        );
-                        continue;
-                    }
-                }
-                session.set_budget_soft_sent(true);
-                bus.publish(vogt_engine_contract::ServerEvent::SessionBudget {
-                    id: session.id,
-                    level: "soft".to_string(),
-                    summary: summary.clone(),
-                });
-                tracing::info!(
-                    session = %session.id,
-                    level = "soft",
-                    event = "session.budget",
-                    "{summary}"
-                );
+                send_budget_line(
+                    &session,
+                    bus,
+                    Some(summary.as_str()),
+                    "budget warning",
+                    "soft",
+                    &summary,
+                )
+                .await;
             }
             Action::Hard { summary, .. } => {
                 let id = session.id;
@@ -1069,5 +1069,72 @@ mod tests {
             &budget(None, None, None),
             Some(&economics(1, 0))
         ));
+    }
+
+    /// WI-4459: a budget line a dialog holds back is not marked, so the next
+    /// pass types it again.
+    #[tokio::test]
+    async fn a_budget_line_held_back_by_a_dialog_is_not_marked() {
+        use crate::enter_guard::tests::{dialog_output, recording_session};
+        let writes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (session, output) = recording_session(Arc::clone(&writes));
+        output.send(dialog_output()).unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        send_budget_line(
+            &session,
+            &EventBus::default(),
+            Some("/compact"),
+            "budget compact",
+            "compact",
+            "context 9 of 10: compacting",
+        )
+        .await;
+        assert!(!session.budget_soft_sent());
+        assert!(writes.lock().unwrap().is_empty());
+    }
+
+    /// A budget line that goes out is marked as sent, with its command typed
+    /// and Enter pressed.
+    #[tokio::test]
+    async fn a_budget_line_that_goes_out_is_marked() {
+        use crate::enter_guard::tests::recording_session;
+        let writes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (session, _output) = recording_session(Arc::clone(&writes));
+        send_budget_line(
+            &session,
+            &EventBus::default(),
+            Some("/compact"),
+            "budget compact",
+            "compact",
+            "context 9 of 10: compacting",
+        )
+        .await;
+        assert!(session.budget_soft_sent());
+        assert_eq!(*writes.lock().unwrap(), b"/compact\r");
+    }
+
+    /// WI-4459: a line stranded in the composer (the dialog never clears) is
+    /// marked, so it is never typed on top of itself.
+    #[tokio::test]
+    async fn a_stranded_budget_line_is_marked_and_not_typed_again() {
+        use crate::enter_guard::tests::{dialog_output, recording_session};
+        let writes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (session, output) = recording_session(Arc::clone(&writes));
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(350)).await;
+            output.send(dialog_output()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        send_budget_line(
+            &session,
+            &EventBus::default(),
+            Some("/compact"),
+            "budget warning",
+            "soft",
+            "context 9 of 10",
+        )
+        .await;
+        assert!(session.budget_soft_sent());
+        assert_eq!(*writes.lock().unwrap(), b"/compact");
     }
 }
