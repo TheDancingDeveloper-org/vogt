@@ -165,6 +165,7 @@ where
             worktree: optional_bool(&params, "worktree")?,
             repo_map: optional_bool(&params, "repo_map")?,
             cold_wake_opt_out: optional_bool(&params, "cold_wake_opt_out")?.unwrap_or(false),
+            wake_on: optional_string_list(&params, "wake_on")?.unwrap_or_default(),
             explicit_null: PROFILE_FIELDS
                 .into_iter()
                 .filter(|field| matches!(params.get(*field), Some(Value::Null)))
@@ -583,6 +584,9 @@ pub struct StartSessionParams {
     pub repo_map: Option<bool>,
     /// Never compact this session on a cold wake (WI-2037).
     pub cold_wake_opt_out: bool,
+    /// The change kinds an oversight session is woken for (WI-1521), sent to
+    /// the engine as `wake_on`. Empty types nothing.
+    pub wake_on: Vec<String>,
     /// Profile fields the caller sent as an explicit null. Python counts these
     /// in `model_fields_set`: they are overrides, and the profile leaves them.
     pub explicit_null: Vec<&'static str>,
@@ -1198,7 +1202,14 @@ where
     let audit_worktree = params.worktree;
     let audit_repo_map = params.repo_map;
     let worktree = params.worktree.unwrap_or(false);
-    let mut spec = build_spec(ctx, params, &subject, &secret, read_only)?;
+    // A start by an oversight session makes it the supervisor, so the engine
+    // can wake it when this session changes (WI-1521). A worker's or a
+    // person's start names no supervisor.
+    let supervisor = match (started_by_kind.as_deref(), started_by_session.as_deref()) {
+        (Some("oversight"), Some(caller)) => Some(caller.to_string()),
+        _ => None,
+    };
+    let mut spec = build_spec(ctx, params, &subject, &secret, read_only, supervisor)?;
     spec.budget = budget.as_ref().map(budget_wire);
     if worktree {
         spec.worktree = Some(json!({
@@ -3682,6 +3693,7 @@ fn build_spec<C, I>(
     subject: &Subject,
     token: &str,
     read_only: bool,
+    supervisor: Option<String>,
 ) -> Result<CreateSession, VogtError>
 where
     C: Clock,
@@ -3704,6 +3716,8 @@ where
     spec.role = params.role.clone();
     spec.work_item = subject.work_item_ref.clone();
     spec.session_ref = Some(subject.session_id.clone());
+    spec.supervisor = supervisor;
+    spec.wake_on = params.wake_on.clone();
     spec.source = subject.source.clone();
     spec.autopilot = autopilot;
     spec.prompt = Some(brief_with_task(

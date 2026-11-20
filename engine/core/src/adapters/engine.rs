@@ -108,6 +108,15 @@ impl EngineClient {
         if let Some(template) = &spec.template {
             body.insert("template".to_string(), Value::String(template.clone()));
         }
+        if let Some(supervisor) = &spec.supervisor {
+            body.insert("supervisor".to_string(), Value::String(supervisor.clone()));
+        }
+        if !spec.wake_on.is_empty() {
+            body.insert(
+                "wake_on".to_string(),
+                Value::Array(spec.wake_on.iter().cloned().map(Value::String).collect()),
+            );
+        }
         if let Some(placement) = &spec.placement {
             body.insert("placement".to_string(), Value::String(placement.clone()));
         }
@@ -1269,6 +1278,12 @@ pub struct CreateSession {
     /// A worktree to cut and start in. Sent only when non-empty.
     pub worktree: Option<Value>,
     pub source: Option<SourceDescriptor>,
+    /// The engine session that started this one, when it was an oversight
+    /// session (WI-1521). The engine checks it names a live oversight session.
+    pub supervisor: Option<String>,
+    /// The change kinds an oversight session is woken for. Sent only when
+    /// non-empty.
+    pub wake_on: Vec<String>,
 }
 
 impl CreateSession {
@@ -1295,6 +1310,8 @@ impl CreateSession {
             budget: None,
             worktree: None,
             source: None,
+            supervisor: None,
+            wake_on: Vec::new(),
         }
     }
 }
