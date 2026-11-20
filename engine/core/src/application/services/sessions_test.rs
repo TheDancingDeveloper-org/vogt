@@ -539,6 +539,96 @@ fn a_worker_session_start_records_the_starting_session_and_its_role() {
     );
 }
 
+/// The body of the engine's `POST` that created a session.
+fn engine_create_body(script: &Script) -> String {
+    script
+        .seen
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|line| line.starts_with("POST "))
+        .expect("a session create")
+        .clone()
+}
+
+/// WI-1521: a start by an oversight session names it as the supervisor, and
+/// passes the wake kinds it asked for, so the engine can wake it.
+#[test]
+fn an_oversight_start_sends_its_supervisor_and_wake_on_to_the_engine() {
+    let script = script_with(vec![
+        (
+            200,
+            r#"{"id":"eng-8","name":"beta","cwd":"/work/tree"}"#.to_string(),
+        ),
+        (
+            200,
+            r#"{"id":"eng-parent","name":"parent","cwd":"/work/tree","activity":"idle","alive":true,"autopilot":false,"autopilot_nudges":0,"keep_awake":false,"role":"oversight"}"#
+                .to_string(),
+        ),
+    ]);
+    let built = opened_as(
+        Some(Arc::clone(&script)),
+        Principal::new("agent:engine:eng-parent", ActorKind::Agent, "Parent").unwrap(),
+    );
+    insert_project(&built, "beta");
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!("opened() builds a step clock");
+    };
+    let mut params = start_params(Some("beta"), None, "because");
+    params.wake_on = vec!["done".to_string(), "blocked".to_string()];
+    start_session(ctx, &params).unwrap();
+    let body = engine_create_body(&script);
+    assert!(body.contains(r#""supervisor":"eng-parent""#), "{body}");
+    assert!(body.contains(r#""wake_on":["done","blocked"]"#), "{body}");
+}
+
+/// WI-1521: a worker's start names no supervisor and sends no wake kinds.
+#[test]
+fn a_worker_start_sends_no_supervisor_to_the_engine() {
+    let script = script_with(vec![
+        (
+            200,
+            r#"{"id":"eng-8","name":"beta","cwd":"/work/tree"}"#.to_string(),
+        ),
+        (
+            200,
+            r#"{"id":"eng-worker","name":"worker","cwd":"/work/tree","activity":"idle","alive":true,"autopilot":false,"autopilot_nudges":0,"keep_awake":false,"role":"worker"}"#
+                .to_string(),
+        ),
+    ]);
+    let built = opened_as(
+        Some(Arc::clone(&script)),
+        Principal::new("agent:engine:eng-worker", ActorKind::Agent, "Worker").unwrap(),
+    );
+    insert_project(&built, "beta");
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!("opened() builds a step clock");
+    };
+    start_session(ctx, &start_params(Some("beta"), None, "because")).unwrap();
+    let body = engine_create_body(&script);
+    assert!(!body.contains("supervisor"), "{body}");
+    assert!(!body.contains("wake_on"), "{body}");
+}
+
+/// WI-1521: a person's start names no supervisor. Wake kinds stay unset unless
+/// the person asks for them, which is how an overseer is started.
+#[test]
+fn a_person_start_sends_no_supervisor_to_the_engine() {
+    let script = script_with(vec![(
+        200,
+        r#"{"id":"eng-8","name":"beta","cwd":"/work/tree"}"#.to_string(),
+    )]);
+    let built = opened(Some(Arc::clone(&script)));
+    insert_project(&built, "beta");
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!("opened() builds a step clock");
+    };
+    start_session(ctx, &start_params(Some("beta"), None, "because")).unwrap();
+    let body = engine_create_body(&script);
+    assert!(!body.contains("supervisor"), "{body}");
+    assert!(!body.contains("wake_on"), "{body}");
+}
+
 /// The summary of the `session.started` event: where the start's audited
 /// facts (purpose, overrides, budget, worktree, repo map) are recorded.
 fn session_start_audit(built: &Built) -> serde_json::Value {
