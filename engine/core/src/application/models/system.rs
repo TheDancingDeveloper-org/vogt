@@ -108,6 +108,10 @@ pub struct EngineStatusResult {
     #[serde(default)]
     #[schemars(schema_with = "optional_string")]
     pub source_sha: Option<String>,
+    /// The git commit the engine was built from; `source_sha` is the changeset id on a graft line.
+    #[serde(default)]
+    #[schemars(schema_with = "optional_string")]
+    pub git_sha: Option<String>,
     #[serde(default)]
     #[schemars(schema_with = "optional_string")]
     pub release_url: Option<String>,

@@ -9113,6 +9113,18 @@
             ],
             "title": "Source Sha"
           },
+          "git_sha": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The git commit the engine was built from; `source_sha` is the changeset id on a graft line.",
+            "title": "Git Sha"
+          },
           "release_url": {
             "anyOf": [
               {

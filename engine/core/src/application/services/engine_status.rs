@@ -61,6 +61,7 @@ fn empty() -> Map<String, Value> {
         "version",
         "source_ref",
         "source_sha",
+        "git_sha",
         "release_url",
         "session_count",
         "push_subscription_count",
@@ -94,7 +95,7 @@ fn report(payload: &Value) -> Result<Value, VogtError> {
     };
     let mut out = empty();
     out.insert("version".to_string(), version);
-    for field in ["source_ref", "source_sha", "release_url"] {
+    for field in ["source_ref", "source_sha", "git_sha", "release_url"] {
         out.insert(field.to_string(), text(payload.get(field)));
     }
     for field in [

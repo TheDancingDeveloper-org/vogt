@@ -195,6 +195,28 @@ fn a_disk_row_is_read_as_pydantic_reads_it() {
 }
 
 #[test]
+fn engine_status_carries_git_sha_apart_from_the_changeset() {
+    let git = "0123456789abcdef0123456789abcdef01234567";
+    let built = opened(Some(engine((
+        200,
+        json!({
+            "version": "0.7.22",
+            "source_sha": "c21f63482dc6c",
+            "git_sha": git,
+        })
+        .to_string(),
+    ))));
+    let out = engine_status(&built);
+    assert_eq!(out["source_sha"], "c21f63482dc6c");
+    assert_eq!(out["git_sha"], git);
+    // The DTO refuses unknown fields, so the status shape must declare git_sha too.
+    let parsed: crate::application::models::system::EngineStatusResult =
+        serde_json::from_value(out).expect("the status report parses as its DTO");
+    assert_eq!(parsed.git_sha.as_deref(), Some(git));
+    assert_eq!(parsed.source_sha.as_deref(), Some("c21f63482dc6c"));
+}
+
+#[test]
 fn engine_status_says_why_when_the_engine_cannot_be_asked() {
     let none = engine_status(&opened(None));
     assert_eq!(
@@ -213,6 +235,7 @@ fn engine_status_says_why_when_the_engine_cannot_be_asked() {
             "version",
             "source_ref",
             "source_sha",
+            "git_sha",
             "release_url",
             "session_count",
             "push_subscription_count",
@@ -272,6 +295,7 @@ fn engine_status_reads_the_report_as_python_does() {
             "version": "0.7.20",
             "source_ref": null,
             "source_sha": "abc",
+            "git_sha": null,
             "release_url": null,
             "session_count": 3,
             "push_subscription_count": null,

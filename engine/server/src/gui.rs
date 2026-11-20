@@ -191,6 +191,7 @@ pub struct PublicConfig {
     pub product_version: &'static str,
     pub source_ref: &'static str,
     pub source_sha: &'static str,
+    pub git_sha: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub release_url: Option<String>,
     /// Build-time feature availability, read from `/etc/vogt/features.json`.
@@ -257,6 +258,7 @@ pub async fn public_config(State(state): State<Arc<AppState>>) -> Json<PublicCon
         product_version: crate::product::VERSION,
         source_ref: crate::product::SOURCE_REF,
         source_sha: crate::product::SOURCE_SHA,
+        git_sha: crate::product::GIT_SHA,
         release_url: crate::product::release_url(),
         features,
         session_templates: state.config.session_templates.clone(),
