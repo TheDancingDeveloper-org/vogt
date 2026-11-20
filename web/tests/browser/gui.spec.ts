@@ -3440,6 +3440,315 @@ test("Phone terminal surfaces a Copy chip over a live selection", async ({ page 
   await expect(chip).toHaveText("Copy");
 });
 
+// A TUI that enables SGR mouse tracking (Codex's fullscreen transcript did)
+// receives xterm.js's mouse reports, so xterm never forms its own selection.
+// A phone has no Shift to force one, and a long-press sends nothing at all.
+// Vogt selects the word under the finger itself and surfaces the Copy chip.
+test("Phone terminal long-press selects a word while the program tracks the mouse", async ({
+  page,
+  context,
+}) => {
+  test.skip(test.info().project.name !== "phone", "Touch long-press is the coarse-pointer path");
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await installFixtures(page, {}, [liveSession]);
+  await page.routeWebSocket(/\/api\/sessions\/[^/]+\/attach$/, (socket) => {
+    socket.onMessage(() => undefined);
+    socket.send(JSON.stringify({ type: "snapshot-start", scrollback_bytes: 0, scrollback_pos: 0 }));
+    // The modes Codex's alternate-screen TUI enables. They are what made the
+    // plain drag and the long-press fail before the fix.
+    socket.send(Buffer.from("\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h"));
+    socket.send(Buffer.from("SELECTME-ALPHA SELECTME-BETA SELECTME-GAMMA\r\n"));
+    socket.send(JSON.stringify({ type: "snapshot-done" }));
+  });
+  await page.goto("/#/t/browser-session");
+  const host = page.locator(".terminal-host").first();
+  await expect(host).toBeVisible();
+  const box = await host.boundingBox();
+  expect(box).not.toBeNull();
+
+  const cdp = await context.newCDPSession(page);
+  // xterm's write queue drains on animation frames, so retry the hold until
+  // the row is painted and the word is under the finger.
+  await expect.poll(async () => {
+    const point = { x: Math.round(box!.x + 30), y: Math.round(box!.y + 8) };
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [point] });
+    await page.waitForTimeout(700);
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    return page.locator(".terminal-copy-chip").count();
+  }, { timeout: 8000 }).toBeGreaterThan(0);
+
+  const chip = page.locator(".terminal-copy-chip");
+  await expect(chip).toBeVisible();
+  await chip.tap();
+  await expect
+    .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+    .toBe("SELECTME-ALPHA");
+});
+
+// The sticky range replays an empty selection until something clears it. If a
+// swipe did not clear it, the chip would follow the reader around and the word
+// could never be dismissed.
+test("Phone terminal long-press then a vertical swipe clears the Copy chip", async ({
+  page,
+  context,
+}) => {
+  test.skip(test.info().project.name !== "phone", "Touch gestures are the coarse-pointer path");
+  await installFixtures(page, {}, [liveSession]);
+  await page.routeWebSocket(/\/api\/sessions\/[^/]+\/attach$/, (socket) => {
+    socket.onMessage(() => undefined);
+    socket.send(JSON.stringify({ type: "snapshot-start", scrollback_bytes: 0, scrollback_pos: 0 }));
+    socket.send(Buffer.from("\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h"));
+    socket.send(Buffer.from("SWIPE-ALPHA SWIPE-BETA SWIPE-GAMMA\r\n"));
+    socket.send(JSON.stringify({ type: "snapshot-done" }));
+  });
+  await page.goto("/#/t/browser-session");
+  const host = page.locator(".terminal-host").first();
+  await expect(host).toBeVisible();
+  const box = await host.boundingBox();
+  expect(box).not.toBeNull();
+  const point = { x: Math.round(box!.x + 30), y: Math.round(box!.y + 8) };
+  const chip = page.locator(".terminal-copy-chip");
+  const cdp = await context.newCDPSession(page);
+
+  // Wait for xterm's write queue to paint the row under the finger.
+  await expect.poll(async () => {
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [point] });
+    await page.waitForTimeout(700);
+    const visible = await chip.count();
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    return visible;
+  }, { timeout: 8000 }).toBeGreaterThan(0);
+
+  // One gesture: hold until the word is selected, then swipe vertically far
+  // enough to claim the axis. The claim must clear the sticky range.
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [point] });
+  await expect(chip).toBeVisible();
+  await cdp.send("Input.dispatchTouchEvent", {
+    type: "touchMove",
+    touchPoints: [{ x: point.x, y: point.y + 80 }],
+  });
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  await expect(chip).toHaveCount(0);
+  await page.waitForTimeout(300);
+  await expect(chip).toHaveCount(0);
+});
+
+// Copy is the explicit tap. After it, an unrelated selection change (a click
+// elsewhere) must not resurrect the chip from the stale range.
+test("Phone terminal Copy tap drops the sticky range", async ({ page, context }) => {
+  test.skip(test.info().project.name !== "phone", "Touch gestures are the coarse-pointer path");
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await installFixtures(page, {}, [liveSession]);
+  await page.routeWebSocket(/\/api\/sessions\/[^/]+\/attach$/, (socket) => {
+    socket.onMessage(() => undefined);
+    socket.send(JSON.stringify({ type: "snapshot-start", scrollback_bytes: 0, scrollback_pos: 0 }));
+    socket.send(Buffer.from("\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h"));
+    socket.send(Buffer.from("COPY-ALPHA COPY-BETA COPY-GAMMA\r\n"));
+    socket.send(JSON.stringify({ type: "snapshot-done" }));
+  });
+  await page.goto("/#/t/browser-session");
+  const host = page.locator(".terminal-host").first();
+  await expect(host).toBeVisible();
+  const box = await host.boundingBox();
+  expect(box).not.toBeNull();
+  const point = { x: Math.round(box!.x + 30), y: Math.round(box!.y + 8) };
+  const chip = page.locator(".terminal-copy-chip");
+  const cdp = await context.newCDPSession(page);
+
+  await expect.poll(async () => {
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [point] });
+    await page.waitForTimeout(700);
+    const visible = await chip.count();
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    return visible;
+  }, { timeout: 8000 }).toBeGreaterThan(0);
+
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [point] });
+  await expect(chip).toBeVisible();
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  await expect(chip).toBeVisible();
+  await chip.tap();
+  await expect
+    .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+    .toBe("COPY-ALPHA");
+
+  await page.mouse.click(box!.x + 80, box!.y + 30);
+  await expect(chip).toHaveCount(0);
+  await page.waitForTimeout(300);
+  await expect(chip).toHaveCount(0);
+});
+
+// The row must come from xterm's measured grid, not a font-size estimate: a
+// 15.6px estimate against an 18.6px row drifts a whole row by row 10, which
+// selected (and copied) the wrong word. Press on row 10 and check the text.
+test("Phone terminal long-press selects the word on a deep row", async ({
+  page,
+  context,
+}) => {
+  test.skip(test.info().project.name !== "phone", "Touch long-press is the coarse-pointer path");
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await installFixtures(page, {}, [liveSession]);
+  const filler = Array.from({ length: 10 }, (_, i) => `FILLER-${i}\r\n`).join("");
+  await page.routeWebSocket(/\/api\/sessions\/[^/]+\/attach$/, (socket) => {
+    socket.onMessage(() => undefined);
+    socket.send(JSON.stringify({ type: "snapshot-start", scrollback_bytes: 0, scrollback_pos: 0 }));
+    socket.send(Buffer.from("\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h"));
+    socket.send(Buffer.from(`${filler}DEEPROW-ALPHA DEEPROW-BETA DEEPROW-GAMMA\r\n`));
+    socket.send(JSON.stringify({ type: "snapshot-done" }));
+  });
+  await page.goto("/#/t/browser-session");
+  const host = page.locator(".terminal-host").first();
+  await expect(host).toBeVisible();
+  const box = await host.boundingBox();
+  expect(box).not.toBeNull();
+
+  // Match the production cell lookup: the rows layer when the DOM renderer
+  // provides one, otherwise the canvas that is sized to the whole grid.
+  const gridHeight = () =>
+    page.evaluate(() => {
+      const rows = document.querySelector(".xterm-rows");
+      const rowsHeight = rows?.getBoundingClientRect().height ?? 0;
+      if (rowsHeight > 0) return rowsHeight;
+      return document.querySelector(".xterm-screen canvas")?.getBoundingClientRect().height ?? 0;
+    });
+  await expect.poll(gridHeight, { timeout: 8000 }).toBeGreaterThan(0);
+  const geometry = await page.evaluate(() => {
+    const rows = document.querySelector(".xterm-rows");
+    const rowsRect = rows?.getBoundingClientRect();
+    const rowsFirst = rows?.firstElementChild as HTMLElement | null;
+    const rowsRowHeight = rowsFirst?.getBoundingClientRect().height ?? 0;
+    if (rowsRect && rowsRect.height > 0 && rowsRowHeight > 0) {
+      return { top: rowsRect.top, rowHeight: rowsRowHeight };
+    }
+    const canvas = document.querySelector(".xterm-screen canvas")!;
+    const rect = canvas.getBoundingClientRect();
+    const host = document.querySelector(".terminal-host") as HTMLElement;
+    const rowsCount = Number.parseInt(host.dataset.terminalRows ?? "", 10);
+    return { top: rect.top, rowHeight: rect.height / (rowsCount > 0 ? rowsCount : 24) };
+  });
+  const point = {
+    x: Math.round(box!.x + 30),
+    y: Math.round(geometry.top + 10.5 * geometry.rowHeight),
+  };
+  const cdp = await context.newCDPSession(page);
+  await expect.poll(async () => {
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [point] });
+    await page.waitForTimeout(700);
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    return page.locator(".terminal-copy-chip").count();
+  }, { timeout: 8000 }).toBeGreaterThan(0);
+
+  const chip = page.locator(".terminal-copy-chip");
+  await expect(chip).toBeVisible();
+  await chip.tap();
+  await expect
+    .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+    .toBe("DEEPROW-ALPHA");
+});
+
+// Android Chrome fires contextmenu for the long-press the timer just used.
+// Copying there would write the clipboard with no tap, so the chip is the
+// only copy action for a touch selection.
+test("Phone terminal long-press does not auto-copy on contextmenu", async ({
+  page,
+  context,
+}) => {
+  test.skip(test.info().project.name !== "phone", "Touch long-press is the coarse-pointer path");
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await installFixtures(page, {}, [liveSession]);
+  await page.routeWebSocket(/\/api\/sessions\/[^/]+\/attach$/, (socket) => {
+    socket.onMessage(() => undefined);
+    socket.send(JSON.stringify({ type: "snapshot-start", scrollback_bytes: 0, scrollback_pos: 0 }));
+    socket.send(Buffer.from("\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h"));
+    socket.send(Buffer.from("MENU-ALPHA MENU-BETA MENU-GAMMA\r\n"));
+    socket.send(JSON.stringify({ type: "snapshot-done" }));
+  });
+  await page.goto("/#/t/browser-session");
+  const host = page.locator(".terminal-host").first();
+  await expect(host).toBeVisible();
+  const box = await host.boundingBox();
+  expect(box).not.toBeNull();
+  const point = { x: Math.round(box!.x + 30), y: Math.round(box!.y + 8) };
+  const chip = page.locator(".terminal-copy-chip");
+  const cdp = await context.newCDPSession(page);
+
+  await expect.poll(async () => {
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [point] });
+    await page.waitForTimeout(700);
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    return chip.count();
+  }, { timeout: 8000 }).toBeGreaterThan(0);
+
+  await page.evaluate(() => navigator.clipboard.writeText("SENTINEL"));
+  await host.dispatchEvent("contextmenu", {
+    clientX: point.x,
+    clientY: point.y,
+    button: 2,
+    bubbles: true,
+    cancelable: true,
+  });
+  await page.waitForTimeout(150);
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe("SENTINEL");
+  await expect(chip).toBeVisible();
+  await chip.tap();
+  await expect
+    .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+    .toBe("MENU-ALPHA");
+});
+
+// Inline mode streams into scrollback, so the sticky row can later hold
+// different text. Restoring it then would copy the wrong line silently.
+test("Phone terminal drops a sticky selection whose row changed", async ({
+  page,
+  context,
+}) => {
+  test.skip(test.info().project.name !== "phone", "Touch long-press is the coarse-pointer path");
+  await installFixtures(page, {}, [liveSession]);
+  let stream: { send: (data: string | Buffer) => void } | null = null;
+  await page.routeWebSocket(/\/api\/sessions\/[^/]+\/attach$/, (socket) => {
+    stream = socket;
+    socket.onMessage(() => undefined);
+    socket.send(JSON.stringify({ type: "snapshot-start", scrollback_bytes: 0, scrollback_pos: 0 }));
+    socket.send(Buffer.from("\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h"));
+    socket.send(Buffer.from("STALE-ALPHA STALE-BETA STALE-GAMMA\r\n"));
+    socket.send(JSON.stringify({ type: "snapshot-done" }));
+  });
+  await page.goto("/#/t/browser-session");
+  const host = page.locator(".terminal-host").first();
+  await expect(host).toBeVisible();
+  const box = await host.boundingBox();
+  expect(box).not.toBeNull();
+  const point = { x: Math.round(box!.x + 30), y: Math.round(box!.y + 8) };
+  const chip = page.locator(".terminal-copy-chip");
+  const cdp = await context.newCDPSession(page);
+
+  await expect.poll(async () => {
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [point] });
+    await page.waitForTimeout(700);
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    return chip.count();
+  }, { timeout: 8000 }).toBeGreaterThan(0);
+  await expect(chip).toBeVisible();
+
+  stream!.send(Buffer.from("\x1b[2J\x1b[HREPLACED-OMEGA REPLACED-BETA\r\n"));
+
+  // A tap elsewhere clears xterm's selection; the restore handler must notice
+  // the row no longer holds the selected text and drop the range. The
+  // terminal may render to a canvas, which has no DOM text to poll, so retry
+  // the tap until the parsed rewrite makes the restore drop the range.
+  await expect
+    .poll(
+      async () => {
+        await page.mouse.click(box!.x + 200, box!.y + 60);
+        return chip.count();
+      },
+      { timeout: 8000 },
+    )
+    .toBe(0);
+  await page.waitForTimeout(300);
+  await expect(chip).toHaveCount(0);
+});
+
 test("exited session shows a banner and Remove skips the kill confirm", async ({ page }) => {
   const exitedSession = {
     ...liveSession,

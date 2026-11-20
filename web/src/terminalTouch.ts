@@ -89,54 +89,55 @@ export function moveTerminalTouch(
   };
 }
 
+
 /** Hold this long, without moving, to select the word under the finger. */
 export const TERMINAL_LONG_PRESS_MS = 500;
 
-export interface TerminalCell {
-  col: number;
-  row: number;
+/** The DOM boxes a terminal cell lookup needs, in viewport coordinates. */
+export interface TerminalCellBox {
+  /** `term.element`, the container that spans the whole grid. */
+  container: { left: number; top: number; width: number; height: number };
+  /**
+   * `.xterm-screen`, which reports the width without the scrollbar. It can
+   * legitimately have height 0 on the phone layout, so vertical geometry must
+   * come from the container.
+   */
+  screen?: { left: number; top: number; width: number; height: number } | null;
+  /**
+   * `.xterm-rows`: exactly `rows × cell height` high, with none of the
+   * remainder FitAddon can leave below the grid. Preferred for the row.
+   */
+  rows?: { top: number; height: number } | null;
 }
 
 /**
- * Map a touch point to a grid cell. Width comes from the rendered screen and
- * height from the element that holds the rows: `.xterm-screen` is 0-high in
- * the phone layout, so a height read from it selects nothing. Clamped to grid.
+ * The cell under a viewport point, or null when the point is outside the grid.
+ * Width prefers the screen layer (the scrollbar makes the container wider);
+ * the row prefers the rows layer's measured height, since a font-size estimate
+ * is short of xterm's measured cell height and the container can include up
+ * to one cell of FitAddon remainder. The screen layer, then the container, are
+ * the fallbacks (the screen collapses to 0 height on some phone layouts).
  */
 export function terminalCellAt(
-  x: number,
-  y: number,
-  screen: { left: number; width: number },
-  grid: { top: number; height: number },
+  box: TerminalCellBox,
   cols: number,
   rows: number,
-): TerminalCell {
-  const cellWidth = screen.width / Math.max(1, cols);
-  const cellHeight = grid.height / Math.max(1, rows);
-  const col = Math.floor((x - screen.left) / Math.max(1e-6, cellWidth));
-  const row = Math.floor((y - grid.top) / Math.max(1e-6, cellHeight));
-  return {
-    col: Math.min(Math.max(col, 0), Math.max(0, cols - 1)),
-    row: Math.min(Math.max(row, 0), Math.max(0, rows - 1)),
-  };
-}
-
-const WORD_CHAR = /[\p{L}\p{N}_\-./~:@%+=]/u;
-
-/**
- * The run of word characters around `col` in one line of text, as a start
- * column and length. Paths, URLs and identifiers select whole. Null when the
- * cell is blank or punctuation.
- */
-export function wordSpanAt(
-  line: string,
-  col: number,
-): { start: number; length: number } | null {
-  if (col < 0 || col >= line.length || !WORD_CHAR.test(line[col] ?? "")) {
-    return null;
-  }
-  let start = col;
-  while (start > 0 && WORD_CHAR.test(line[start - 1] ?? "")) start -= 1;
-  let end = col;
-  while (end + 1 < line.length && WORD_CHAR.test(line[end + 1] ?? "")) end += 1;
-  return { start, length: end - start + 1 };
+  x: number,
+  y: number,
+): { column: number; row: number } | null {
+  if (cols <= 0 || rows <= 0) return null;
+  const { container, screen, rows: rowsBox } = box;
+  if (container.width <= 0 || container.height <= 0) return null;
+  const left = screen && screen.width > 0 ? screen.left : container.left;
+  const width = screen && screen.width > 0 ? screen.width : container.width;
+  const grid =
+    rowsBox && rowsBox.height > 0
+      ? rowsBox
+      : screen && screen.height > 0
+        ? screen
+        : container;
+  const column = Math.floor(((x - left) / width) * cols);
+  const row = Math.floor((y - grid.top) / (grid.height / rows));
+  if (column < 0 || column >= cols || row < 0 || row >= rows) return null;
+  return { column, row };
 }
