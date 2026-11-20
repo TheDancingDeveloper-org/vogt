@@ -27,7 +27,7 @@ use super::{dispatch, Built};
 
 use crate::adapters::engine::{
     CreateSession, EngineApproval, EngineBlocked, EngineClient, EngineHibernation, EngineResources,
-    EngineScreen, EngineSession, EngineSweepEntry,
+    EngineScreen, EngineSession, EngineSweepEntry, EngineWait,
 };
 use crate::adapters::transcripts;
 use crate::application::brief::{self, ComposedBrief, WhyResult, WorkBrief};
@@ -2310,17 +2310,20 @@ where
             "ready",
             Duration::from_secs(params.wake_timeout_s.max(0) as u64),
         )?;
+        let from_relay = overseer.is_some() || person;
         let ready = waited
             .as_ref()
-            .is_some_and(|waited| waited.outcome == "ready");
+            .is_some_and(|waited| at_prompt_for_input(waited, from_relay));
         if !ready {
             let outcome = waited
-                .map(|waited| waited.outcome)
+                .as_ref()
+                .map(|waited| waited.outcome.clone())
                 .unwrap_or_else(|| "no answer".to_string());
             return Err(VogtError::Conflict(format!(
-                "woke session {}, but it was not ready for input within {}s ({outcome}); nothing was typed. Read session_screen — it may be showing a dialog — then retry",
+                "woke session {}, but it was not ready for input within {}s ({outcome}); nothing was typed. {}",
                 py_repr(&params.id),
-                params.wake_timeout_s
+                params.wake_timeout_s,
+                not_ready_next_step(&outcome)
             )));
         }
         // Freshly woken and at its prompt: nothing was running.
@@ -4393,6 +4396,39 @@ fn send_all(
     Ok(())
 }
 
+/// Whether a wait that ended for a woken session leaves it at its prompt, able
+/// to take input (WI-2232). A reported block is a waiting state, not a busy
+/// one: a session that reported itself blocked and sits idle at its prompt is
+/// ready for the overseer or person who is answering that block. A permission
+/// dialog is never ready here; that answer belongs to a person or an overseer's
+/// `session_answer`.
+fn at_prompt_for_input(waited: &EngineWait, from_relay: bool) -> bool {
+    if waited.outcome == "ready" {
+        return true;
+    }
+    waited.outcome == "blocked"
+        && from_relay
+        && waited.screen.ready == Some(true)
+        && matches!(
+            waited.screen.activity.as_deref(),
+            Some("idle" | "waiting-for-input")
+        )
+}
+
+/// What the caller should do next when a woken session is not ready for input,
+/// by why the wait ended (WI-2232).
+fn not_ready_next_step(outcome: &str) -> &'static str {
+    match outcome {
+        "blocked" => {
+            "It reported itself blocked and is not at an input prompt. Read session_screen, then retry once it is at its prompt, or answer its block with session_input."
+        }
+        "awaiting-approval" => {
+            "It is showing a permission prompt. Answer it with session_answer, then send any steering text with session_input once the prompt is gone."
+        }
+        _ => "Read session_screen — it may be showing a dialog — then retry",
+    }
+}
+
 /// Wake `target` if it is hibernated; its summary either way.
 ///
 /// For a session Vogt started, a new token is minted for the session's own
@@ -5176,7 +5212,8 @@ mod tests {
 
     use serde_json::json;
 
-    use crate::adapters::engine::EngineClient;
+    use super::{at_prompt_for_input, not_ready_next_step};
+    use crate::adapters::engine::{EngineClient, EngineScreen, EngineWait};
     use crate::application::context::{build_context, write_of};
     use crate::application::writes::{audited_write, WriteOutcome};
     use crate::auth;
@@ -5538,6 +5575,55 @@ mod tests {
             ],
             "{calls:?}"
         );
+    }
+
+    fn wait_at(outcome: &str, activity: Option<&str>, ready: Option<bool>) -> EngineWait {
+        EngineWait {
+            outcome: outcome.to_string(),
+            matched: false,
+            waited_ms: 0,
+            screen: EngineScreen {
+                id: "eng-1".to_string(),
+                cols: 80,
+                rows: 24,
+                lines: Vec::new(),
+                cursor_row: None,
+                cursor_col: None,
+                title: None,
+                activity: activity.map(str::to_string),
+                alive: Some(true),
+                ready,
+                scrollback: Vec::new(),
+                turn_started_at: None,
+                last_output_at: None,
+                approval: None,
+                blocked: None,
+            },
+        }
+    }
+
+    #[test]
+    fn a_blocked_session_idle_at_its_prompt_is_ready_for_its_overseer() {
+        // WI-2232: a reported block is a waiting state. Idle at the prompt and
+        // answered by an overseer or a person, the input goes through.
+        let idle = wait_at("blocked", Some("idle"), Some(true));
+        assert!(at_prompt_for_input(&idle, true));
+        // Nobody relaying it (a plain agent caller) keeps the refusal.
+        assert!(!at_prompt_for_input(&idle, false));
+        // A permission dialog is never ready here, whoever asks.
+        let dialog = wait_at("blocked", Some("awaiting-approval"), Some(true));
+        assert!(!at_prompt_for_input(&dialog, true));
+        // Still running, or not at the prompt, stays not ready.
+        let busy = wait_at("blocked", Some("running"), Some(false));
+        assert!(!at_prompt_for_input(&busy, true));
+        assert!(at_prompt_for_input(&wait_at("ready", None, None), false));
+    }
+
+    #[test]
+    fn a_refused_wake_says_why_and_what_to_call() {
+        assert!(not_ready_next_step("blocked").contains("session_screen"));
+        assert!(not_ready_next_step("awaiting-approval").contains("session_answer"));
+        assert!(not_ready_next_step("timeout").contains("session_screen"));
     }
 
     #[test]
