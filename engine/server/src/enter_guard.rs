@@ -43,17 +43,31 @@ pub enum Clearance {
     ReadFailed,
 }
 
+/// Whether any text reached the PTY before a skip. A caller that requeues a
+/// skipped line must drop the parts already written (a steer's cancel byte,
+/// for one), or a retry sends them twice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Typed {
+    /// Nothing was written.
+    Nothing,
+    /// The line was typed, the Enter was held back, and the line was erased
+    /// with Ctrl-U. Every byte written, including any cancel, has gone out.
+    Erased,
+}
+
 /// What became of one automated Enter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnterOutcome {
     /// The Enter went out.
     Sent,
     /// The line did not go out and the composer is clean: nothing was left
-    /// behind, so the caller may requeue the line and try again.
-    Skipped(Clearance),
+    /// behind, so the caller may requeue the line and try again. The [`Typed`]
+    /// part says whether bytes were written first.
+    Skipped(Clearance, Typed),
     /// The text was typed, the Enter was held back, and the composer could
     /// not be cleared (a dialog stayed open). The text is still in the
-    /// composer, so the caller must not retype it.
+    /// composer, so the caller must not retype it. The session is marked
+    /// stranded until the erase goes through.
     Stranded(Clearance),
 }
 
@@ -80,7 +94,7 @@ pub(crate) async fn send_enter(session: &Arc<Session>, what: &str) -> io::Result
     let clear = clearance(session).await;
     if clear != Clearance::Clear {
         skipped(session, what, clear);
-        return Ok(EnterOutcome::Skipped(clear));
+        return Ok(EnterOutcome::Skipped(clear, Typed::Nothing));
     }
     session.write_input(b"\r")?;
     Ok(EnterOutcome::Sent)
@@ -110,15 +124,15 @@ pub(crate) async fn type_bytes_then_enter(
     let clear = clearance(session).await;
     if clear != Clearance::Clear {
         skipped(session, what, clear);
-        return Ok(EnterOutcome::Skipped(clear));
+        return Ok(EnterOutcome::Skipped(clear, Typed::Nothing));
     }
     session.write_input(typed)?;
     tokio::time::sleep(TYPE_TO_ENTER).await;
     match send_enter(session, what).await? {
         EnterOutcome::Sent => Ok(EnterOutcome::Sent),
-        EnterOutcome::Skipped(reason) => {
+        EnterOutcome::Skipped(reason, _) => {
             if erase_line(session, what).await {
-                Ok(EnterOutcome::Skipped(reason))
+                Ok(EnterOutcome::Skipped(reason, Typed::Erased))
             } else {
                 Ok(EnterOutcome::Stranded(reason))
             }
@@ -129,7 +143,9 @@ pub(crate) async fn type_bytes_then_enter(
 
 /// Erase the typed line with Ctrl-U once the screen reads clear. Retries a few
 /// times, [`CLEAR_GAP`] apart, so a dialog that is answered soon does not
-/// strand the text. Returns false if the line could not be erased.
+/// strand the text. Returns false if the line could not be erased, in which
+/// case the session is marked stranded and the erase is retried in the
+/// background until it goes through (WI-4459).
 async fn erase_line(session: &Arc<Session>, what: &str) -> bool {
     for attempt in 0..CLEAR_ATTEMPTS {
         if attempt > 0 {
@@ -148,7 +164,32 @@ async fn erase_line(session: &Arc<Session>, what: &str) -> bool {
         event = "enter.stranded",
         "held back an automatic Enter and could not clear the typed line; it stays in the composer"
     );
+    if session.mark_stranded(what) {
+        tokio::spawn(retry_erase_when_clear(Arc::clone(session)));
+    }
     false
+}
+
+/// Keep trying the Ctrl-U erase of a stranded line until the dialog closes,
+/// then clear the session's stranded mark. Ends early if the session exits.
+async fn retry_erase_when_clear(session: Arc<Session>) {
+    loop {
+        tokio::time::sleep(CLEAR_GAP).await;
+        if !session.is_alive() {
+            return;
+        }
+        if clearance(&session).await == Clearance::Clear {
+            if session.write_input(&[LINE_KILL]).is_ok() {
+                session.clear_stranded();
+                tracing::info!(
+                    session = %session.id,
+                    event = "enter.unstranded",
+                    "the dialog closed; erased the stranded line"
+                );
+            }
+            return;
+        }
+    }
 }
 
 fn skipped(session: &Session, what: &str, clear: Clearance) {
@@ -318,7 +359,10 @@ pub(crate) mod tests {
         output.send(dialog_output()).unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
         let outcome = type_then_enter(&session, "carry on", "test").await.unwrap();
-        assert_eq!(outcome, EnterOutcome::Skipped(Clearance::Dialog));
+        assert_eq!(
+            outcome,
+            EnterOutcome::Skipped(Clearance::Dialog, Typed::Nothing)
+        );
         assert!(writes.lock().unwrap().is_empty());
     }
 
@@ -356,7 +400,41 @@ pub(crate) mod tests {
             std::future::pending::<()>().await;
         });
         let outcome = type_then_enter(&session, "carry on", "test").await.unwrap();
-        assert_eq!(outcome, EnterOutcome::Skipped(Clearance::Dialog));
+        assert_eq!(
+            outcome,
+            EnterOutcome::Skipped(Clearance::Dialog, Typed::Erased)
+        );
+        assert_eq!(*writes.lock().unwrap(), b"carry on\x15");
+        assert!(session.stranded_input().is_none());
+    }
+
+    /// WI-4459: the dialog holds the line through every erase try. The session
+    /// is marked stranded, and the Ctrl-U goes out once the dialog closes.
+    #[tokio::test]
+    async fn a_stranded_line_marks_the_session_until_the_erase_goes_through() {
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let (session, output) = recording_session(Arc::clone(&writes));
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(350)).await;
+            output.send(dialog_output()).unwrap();
+            // Long enough that every erase try (1 s apart) reads the dialog.
+            tokio::time::sleep(Duration::from_secs(6)).await;
+            output.send(b"\x1b[2J\x1b[H".to_vec()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        let outcome = type_then_enter(&session, "carry on", "test").await.unwrap();
+        assert_eq!(outcome, EnterOutcome::Stranded(Clearance::Dialog));
+        assert!(session.stranded_input().is_some());
+        assert_eq!(*writes.lock().unwrap(), b"carry on");
+
+        // The background retry erases the line once the dialog is gone.
+        for _ in 0..200 {
+            if session.stranded_input().is_none() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(session.stranded_input().is_none());
         assert_eq!(*writes.lock().unwrap(), b"carry on\x15");
     }
 

@@ -280,7 +280,7 @@ pub fn spawn_watcher(state: Arc<AppState>) {
                         match crate::autopilot::type_line(&session, &text, "overseer wake").await {
                             // A dialog held the wake back, and the line was
                             // erased: put the batch back for the next tick.
-                            Ok(crate::enter_guard::EnterOutcome::Skipped(_)) => {
+                            Ok(crate::enter_guard::EnterOutcome::Skipped(..)) => {
                                 coalescer.requeue(id, batch);
                             }
                             // The line is stranded in the composer: retyping it

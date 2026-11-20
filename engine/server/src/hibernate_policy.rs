@@ -748,28 +748,7 @@ fn prompt_resumed_overseer(state: &Arc<AppState>, id: Uuid) {
                 // and the line is erased, so it is typed again a little later;
                 // a stranded line is left alone rather than typed on top.
                 let line = resume_prompt(&at);
-                for attempt in 0..RESUME_ATTEMPTS {
-                    if attempt > 0 {
-                        tokio::time::sleep(RESUME_RETRY_GAP).await;
-                        if !session.is_alive() {
-                            break;
-                        }
-                    }
-                    match crate::enter_guard::type_then_enter(&session, &line, "overseer resume")
-                        .await
-                    {
-                        Ok(crate::enter_guard::EnterOutcome::Sent) => {
-                            tracing::info!(session = %id, "told a woken overseer it was resumed");
-                            break;
-                        }
-                        Ok(crate::enter_guard::EnterOutcome::Skipped(_)) => continue,
-                        Ok(crate::enter_guard::EnterOutcome::Stranded(_)) => break,
-                        Err(e) => {
-                            tracing::warn!(session = %id, error = %e, "could not prompt a woken overseer");
-                            break;
-                        }
-                    }
-                }
+                type_resume_prompt(&session, &line, RESUME_ATTEMPTS, RESUME_RETRY_GAP).await;
             }
             Ok(waited) => tracing::info!(
                 session = %id,
@@ -781,6 +760,39 @@ fn prompt_resumed_overseer(state: &Arc<AppState>, id: Uuid) {
             }
         }
     });
+}
+
+/// Type the resume prompt through the guard, up to `attempts` times, `gap`
+/// apart. A dialog holds it back, and the line is typed again a little later;
+/// a stranded line is left alone rather than typed on top (WI-4459). Returns
+/// true once the prompt has gone out.
+async fn type_resume_prompt(
+    session: &Arc<Session>,
+    line: &str,
+    attempts: usize,
+    gap: Duration,
+) -> bool {
+    for attempt in 0..attempts {
+        if attempt > 0 {
+            tokio::time::sleep(gap).await;
+            if !session.is_alive() {
+                break;
+            }
+        }
+        match crate::enter_guard::type_then_enter(session, line, "overseer resume").await {
+            Ok(crate::enter_guard::EnterOutcome::Sent) => {
+                tracing::info!(session = %session.id, "told a woken overseer it was resumed");
+                return true;
+            }
+            Ok(crate::enter_guard::EnterOutcome::Skipped(..)) => continue,
+            Ok(crate::enter_guard::EnterOutcome::Stranded(_)) => return false,
+            Err(e) => {
+                tracing::warn!(session = %session.id, error = %e, "could not prompt a woken overseer");
+                return false;
+            }
+        }
+    }
+    false
 }
 
 async fn wake_through_core(core: &crate::vogt_core::VogtCore, id: Uuid) -> Result<(), String> {
@@ -1067,5 +1079,39 @@ mod live_policy_tests {
             ..Policy::default()
         };
         assert_eq!(LivePolicy::load(boot.clone(), Some(path)).get(), boot);
+    }
+
+    /// WI-4459: a dialog holds the overseer's resume prompt back. The prompt
+    /// is typed again on a later attempt, once the dialog has closed.
+    #[tokio::test]
+    async fn the_overseer_resume_prompt_is_retried_past_a_dialog() {
+        use crate::enter_guard::tests::{dialog_output, recording_session};
+        let writes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (session, output) = recording_session(Arc::clone(&writes));
+        output.send(dialog_output()).unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::spawn(async move {
+            // Clears between the second and third attempts (100 ms apart).
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            output.send(b"\x1b[2J\x1b[H".to_vec()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        let sent = type_resume_prompt(&session, "resumed", 6, Duration::from_millis(100)).await;
+        assert!(sent);
+        assert_eq!(*writes.lock().unwrap(), b"resumed\r");
+    }
+
+    /// A dialog that never closes uses up the attempts and nothing is typed.
+    #[tokio::test]
+    async fn the_overseer_resume_prompt_gives_up_after_its_attempts() {
+        use crate::enter_guard::tests::{dialog_output, recording_session};
+        let writes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (session, output) = recording_session(Arc::clone(&writes));
+        output.send(dialog_output()).unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let sent = type_resume_prompt(&session, "resumed", 3, Duration::from_millis(10)).await;
+        assert!(!sent);
+        assert!(writes.lock().unwrap().is_empty());
+        drop(output);
     }
 }

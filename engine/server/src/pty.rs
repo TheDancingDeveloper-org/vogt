@@ -94,6 +94,12 @@ pub struct Session {
     approval: Mutex<Option<crate::approval::Pending>>,
     /// The agent's own report that it is blocked on a person.
     blocked: Mutex<Option<vogt_engine_contract::BlockedReport>>,
+    /// An automated line the guard could not erase: its text is still in the
+    /// composer (WI-4459). Holds when it was marked, what was being typed, and
+    /// is cleared once the background erase goes through.
+    stranded: Mutex<Option<(time::OffsetDateTime, String)>>,
+    /// Where this session's events go, so the guard can raise its notice.
+    bus: EventBus,
     /// How far the standing blocked report has been addressed (WI-1314):
     /// one of the `UNBLOCK_*` steps. A new report resets it.
     unblock: std::sync::atomic::AtomicU8,
@@ -754,19 +760,22 @@ impl Session {
         // (WI-4119). Reported through the same field, so the screen, digest and
         // oversight table all read `blocked` instead of `idle`.
         let (reported_status, attention_hint) = self.reported_status();
-        let blocked = self.blocked().or_else(|| {
-            matches!(
-                activity,
-                ActivityState::Idle | ActivityState::WaitingForInput
-            )
-            .then(|| crate::provider_error::detect(sb.tail(crate::provider_error::TAIL_BYTES)))
-            .flatten()
-            .map(|reason| vogt_engine_contract::BlockedReport {
-                reason,
-                items: Vec::new(),
-                since: format_rfc3339(*self.activity_changed_at.lock()),
-            })
-        });
+        let blocked = self
+            .blocked()
+            .or_else(|| self.stranded_report())
+            .or_else(|| {
+                matches!(
+                    activity,
+                    ActivityState::Idle | ActivityState::WaitingForInput
+                )
+                .then(|| crate::provider_error::detect(sb.tail(crate::provider_error::TAIL_BYTES)))
+                .flatten()
+                .map(|reason| vogt_engine_contract::BlockedReport {
+                    reason,
+                    items: Vec::new(),
+                    since: format_rfc3339(*self.activity_changed_at.lock()),
+                })
+            });
         SessionSummary {
             id: self.id,
             name: self.name.lock().clone(),
@@ -941,6 +950,52 @@ impl Session {
     /// What the session's agent reported it is blocked on, if anything.
     pub fn blocked(&self) -> Option<vogt_engine_contract::BlockedReport> {
         self.blocked.lock().clone()
+    }
+
+    /// Mark the session stranded: the guard typed `what` and could not erase
+    /// it. Raises one notice on the transition, as a blocked report, so the
+    /// push and the Inbox see it. Returns true when the mark was newly set.
+    pub(crate) fn mark_stranded(&self, what: &str) -> bool {
+        {
+            let mut stranded = self.stranded.lock();
+            if stranded.is_some() {
+                return false;
+            }
+            *stranded = Some((time::OffsetDateTime::now_utc(), what.to_string()));
+        }
+        self.bus.publish(ServerEvent::SessionBlocked {
+            id: self.id,
+            blocked: self.stranded_report(),
+        });
+        true
+    }
+
+    /// The stranded mark is cleared once the erase has gone through.
+    pub(crate) fn clear_stranded(&self) {
+        *self.stranded.lock() = None;
+    }
+
+    /// The stranded mark, if any: when it was set and what was being typed.
+    pub fn stranded_input(&self) -> Option<(time::OffsetDateTime, String)> {
+        self.stranded.lock().clone()
+    }
+
+    /// A stranded line shows as the session's blocked report, so the rail and
+    /// session status read it where they read a blocked agent.
+    fn stranded_report(&self) -> Option<vogt_engine_contract::BlockedReport> {
+        let (since, what) = self.stranded_input()?;
+        Some(vogt_engine_contract::BlockedReport {
+            reason: format!(
+                "stranded input: an automated line ({what}) is in the composer; a dialog \
+                 held back its Enter and could not be erased"
+            ),
+            items: vec![
+                "answer or close the dialog on the session's screen; the line is erased once it is gone"
+                    .to_string(),
+                "if the text is not wanted, clear the composer by hand".to_string(),
+            ],
+            since: format_rfc3339(since),
+        })
     }
 
     /// Put a blocked report back onto a session that was just woken, without
@@ -1701,6 +1756,8 @@ fn assemble_session(
         first_output_at: Mutex::new(None),
         approval: Mutex::new(None),
         blocked: Mutex::new(None),
+        stranded: Mutex::new(None),
+        bus: bus.clone(),
         unblock: std::sync::atomic::AtomicU8::new(UNBLOCK_NONE),
         turn_since_report: AtomicBool::new(false),
         salvage: Mutex::new(None),

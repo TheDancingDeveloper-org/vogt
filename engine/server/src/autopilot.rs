@@ -339,7 +339,7 @@ pub async fn run_once(registry: &SessionRegistry, bus: &crate::events::EventBus,
                     // The guard logged why: a dialog is open, so nothing was
                     // sent and the nudge is not counted. Its line was erased,
                     // so the next pass types it afresh (WI-4459).
-                    Ok(EnterOutcome::Skipped(_)) => continue,
+                    Ok(EnterOutcome::Skipped(..)) => continue,
                     // The line is stuck in the composer: not counted, and logged
                     // by the guard. It is not retyped here.
                     Ok(EnterOutcome::Stranded(_)) => continue,
@@ -548,7 +548,7 @@ mod nudge_tests {
 
     use super::*;
     use crate::enter_guard::tests::{dialog_output, recording_session};
-    use crate::enter_guard::Clearance;
+    use crate::enter_guard::{Clearance, Typed};
 
     /// WI-4459: the nudge's Enter goes out only on a clear screen. The dialog
     /// is drawn after the nudge text is typed, inside the gap before the
@@ -584,7 +584,10 @@ mod nudge_tests {
             std::future::pending::<()>().await;
         });
         let outcome = type_line(&session, NUDGE, "autopilot nudge").await.unwrap();
-        assert_eq!(outcome, EnterOutcome::Skipped(Clearance::Dialog));
+        assert_eq!(
+            outcome,
+            EnterOutcome::Skipped(Clearance::Dialog, Typed::Erased)
+        );
         let mut expected = NUDGE.as_bytes().to_vec();
         expected.push(0x15);
         assert_eq!(*writes.lock().unwrap(), expected);
