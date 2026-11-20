@@ -8,9 +8,9 @@
 //! a person can read — the same sentence the watcher logs.
 //!
 //! `ENGINE_HIBERNATE_DONE_AFTER` (a duration, `10m`) hibernates a session
-//! whose agent declared itself done (WI-1518 `AUTOPILOT: DONE`, or a
-//! `result` report, WI-1520) at least that long ago and has had no input
-//! since (WI-1523), with trigger `done`. An oversight session is never
+//! whose agent declared itself done (WI-1518 `AUTOPILOT: DONE`; a `result`
+//! report, WI-1520, is not ported to this line yet) at least that long ago
+//! and has had no input since (WI-1523), with trigger `done`. An oversight session is never
 //! hibernated this way: it declares a sweep done and is then woken by the
 //! next one. Autopilot does not exempt it — the declaration is the end of
 //! the backlog the exemption protects.
