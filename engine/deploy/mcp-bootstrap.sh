@@ -734,13 +734,22 @@ def _root_value(key: str) -> str | None:
     slots = _root_slots(key)
     if not slots:
         return None
-    return lines[slots[-1]].split("=", 1)[1].strip().strip('"').strip("'")
+    raw = lines[slots[-1]]
+    try:
+        import tomllib
+        value = tomllib.loads(raw).get(key)
+    except ValueError:
+        return raw.split("=", 1)[1].strip().strip('"').strip("'")
+    return value if isinstance(value, str) else None
 
 def _set_root(key: str, value: str, when: set[str | None]) -> None:
     current = _root_value(key)
     if current not in when:
         return
-    rendered = f'{key} = "{value}"\n'
+    # A TOML basic string: json's escapes are a subset TOML reads the same
+    # way, so a slug or path with a quote or backslash stays one value
+    # (WI-2744 N4).
+    rendered = f"{key} = {json.dumps(value)}\n"
     slots = _root_slots(key)
     if slots:
         lines[slots[-1]] = rendered
@@ -1365,6 +1374,88 @@ install_vogt_prod() {
     return 0
 }
 
+# crw, the estate's web scrape and search service (WI-2742): one streamable
+# HTTP server at the Node B tailnet address (ops personal/crw). It needs no
+# token, so the registration is a URL only. VOGT_CRW_MCP_URL moves it, and an
+# empty value removes an entry this script wrote. Each CLI is asked only when
+# the stored URL differs, so a session launch costs one jq or python read.
+# WI-2745: the URL this script last wrote is kept in a marker file beside each
+# CLI's config; an entry with any other URL (one added by hand) is left alone.
+# An unmarked entry at the default URL counts as ours (written before markers).
+CRW_DEFAULT_URL="http://100.92.54.45:18190/mcp"
+CRW_MCP_URL="${VOGT_CRW_MCP_URL-$CRW_DEFAULT_URL}"
+
+# crw_action CURRENT MARKER: CURRENT is the crw URL now in the CLI's
+# config ("" if none). Prints "add", "replace", "remove" or nothing.
+crw_action() {
+    local current="$1" marker="$2" url="$CRW_MCP_URL" owned=""
+    if [[ -n "$current" ]]; then
+        if [[ -f "$marker" ]]; then
+            [[ "$(cat "$marker")" == "$current" ]] && owned=1
+        elif [[ "$current" == "$CRW_DEFAULT_URL" ]]; then
+            owned=1
+        fi
+    fi
+    if [[ -z "$url" ]]; then
+        [[ -n "$owned" ]] && echo remove
+    elif [[ -z "$current" ]]; then
+        echo add
+    elif [[ "$current" != "$url" ]]; then
+        if [[ -n "$owned" ]]; then
+            echo replace
+        else
+            printf 'mcp-bootstrap: crw entry at %s was not written by Vogt; left alone\n' "$current" >&2
+        fi
+    fi
+    return 0
+}
+
+install_crw_server() {
+    local url="$CRW_MCP_URL" config marker current action
+    if command -v claude >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+        config="${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json"
+        marker="${CLAUDE_CONFIG_DIR:-$HOME}/.vogt-crw-url"
+        current="$(jq -r '.mcpServers.crw.url // empty' "$config" 2>/dev/null || true)"
+        action="$(crw_action "$current" "$marker")"
+        [[ "$action" == remove || "$action" == replace ]] \
+            && claude mcp remove --scope user crw >/dev/null 2>&1
+        [[ "$action" == remove ]] && rm -f "$marker"
+        if [[ "$action" == add || "$action" == replace ]]; then
+            if claude mcp add --scope user --transport http crw "$url" >/dev/null; then
+                printf '%s' "$url" >"$marker"
+            else
+                printf 'mcp-bootstrap: claude registration of crw failed\n' >&2
+            fi
+        fi
+    fi
+    if command -v codex >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+        config="${CODEX_HOME:-$HOME/.codex}/config.toml"
+        marker="${CODEX_HOME:-$HOME/.codex}/vogt-crw-url"
+        # Read [mcp_servers.crw].url itself, not a url line anywhere.
+        current="$(python3 -c '
+import sys, tomllib
+try:
+    with open(sys.argv[1], "rb") as fh:
+        url = tomllib.load(fh).get("mcp_servers", {}).get("crw", {}).get("url", "")
+except (OSError, ValueError, AttributeError):
+    url = ""
+print(url if isinstance(url, str) else "")
+' "$config" 2>/dev/null || true)"
+        action="$(crw_action "$current" "$marker")"
+        [[ "$action" == remove || "$action" == replace ]] \
+            && codex mcp remove crw >/dev/null 2>&1
+        [[ "$action" == remove ]] && rm -f "$marker"
+        if [[ "$action" == add || "$action" == replace ]]; then
+            if codex mcp add crw --url "$url" >/dev/null; then
+                printf '%s' "$url" >"$marker"
+            else
+                printf 'mcp-bootstrap: codex registration of crw failed\n' >&2
+            fi
+        fi
+    fi
+    return 0
+}
+
 # Vogt registrations are best-effort: a failure here must not cost an agent its
 # git/gh credentials.
 optional_step "Vogt bridge" install_vogt_bridge
@@ -1384,6 +1475,7 @@ if command -v codex >/dev/null 2>&1; then
         || printf 'mcp-bootstrap: could not write the Codex driven-session bundle\n' >&2
 fi
 install_readonly_servers
+install_crw_server
 
 # stderr, like every other message in this script, because of who calls it.
 #

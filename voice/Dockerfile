@@ -35,6 +35,11 @@ COPY models ./models
 COPY server ./server
 COPY stt ./stt
 COPY tts ./tts
+# whisper.cpp defaults to GGML_NATIVE=ON (-march=native). This layer is shared
+# through the registry build cache, so a native build from one runner's CPU
+# crashed with SIGILL at ggml backend init on another (2026-10-30). Build a
+# portable x86-64-v3 binary instead; whisper-rs-sys forwards GGML_* env vars.
+ENV GGML_NATIVE=OFF GGML_AVX=ON GGML_AVX2=ON GGML_FMA=ON GGML_F16C=ON
 RUN cargo build --locked --release --manifest-path Cargo.toml -p vogt-voice-server
 RUN espeak_data_dir="$(find target/release/build -type d -path '*/out/share/espeak-ng-data' -print -quit)" \
     && test -n "$espeak_data_dir" \
