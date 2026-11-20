@@ -955,3 +955,28 @@ fn forge_onboard_reads_history_and_refuses_an_unsupported_host() {
         "{zero:?}"
     );
 }
+
+/// WI-2691: an inbox read asks the engine for its sessions once (the live half
+/// and the reachability status share that read) and reports the status it saw.
+#[test]
+fn an_inbox_list_reads_the_engine_sessions_once() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let Built::StepSequential(mut ctx) = opened() else {
+        unreachable!("opened() builds a step clock");
+    };
+    let session_reads = std::sync::Arc::new(AtomicUsize::new(0));
+    let seen = session_reads.clone();
+    ctx.engine = Some(crate::adapters::engine::EngineClient::new(
+        "http://engine.test",
+        None,
+        Some(std::sync::Arc::new(move |path, _, _body, _method| {
+            if path.contains("/api/sessions") {
+                seen.fetch_add(1, Ordering::SeqCst);
+            }
+            (200, b"[]".to_vec())
+        })),
+    ));
+    let listed = inbox::inbox_list_op(&Built::StepSequential(ctx), json!({})).unwrap();
+    assert_eq!(session_reads.load(Ordering::SeqCst), 1);
+    assert_eq!(listed["engine_status"], "available");
+}
