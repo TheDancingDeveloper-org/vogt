@@ -5696,14 +5696,15 @@ Empty leaves a knob's volumes unbounded; a malformed quantity stops the engine
 at startup. A session that writes past its cap is evicted by the kubelet, so
 one runaway build cannot fill the node's disk.
 
-The caps are per volume, and the kubelet's `ephemeral-storage` limit is the
-real pod-wide ceiling (`40Gi` by default, `resource_limits` in a template
-policy can raise it). The defaults are not additive: the three small volumes
-at `10Gi` plus two work volumes at `30Gi` can sum past `40Gi`, so the pod-wide
-limit is what stops a session filling the disk, and the per-volume caps
-stop one directory from filling the pod. Keep `ENGINE_POD_WORK_SIZE_LIMIT`
-below the pod's `ephemeral-storage` limit so one work volume at its cap cannot
-on its own push the pod past it.
+The per-volume caps are guards, not a budget. The kubelet's `ephemeral-storage`
+limit is the real pod-wide ceiling (`40Gi` by default, `resource_limits` in a
+template policy can raise it), and the caps are not meant to sum under it. With
+`ENGINE_POD_WORKSPACE=1` there are three work-class volumes (the work tree, the
+private tool cache and the workspace tree), so their caps together can exceed
+the pod limit. The pod-wide limit is what stops a session filling the disk; each
+per-volume cap stops one directory from filling the pod on its own. Keep
+`ENGINE_POD_WORK_SIZE_LIMIT` below the pod's `ephemeral-storage` limit so one
+work volume at its cap cannot on its own push the pod past it.
 
 **Workspace tree (WI-3373, WI-3374; engine-served since WI-4127).** Off by
 default. With `ENGINE_POD_WORKSPACE=1`, the engine adds a `workspace-config`
