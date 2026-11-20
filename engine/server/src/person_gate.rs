@@ -167,6 +167,30 @@ pub fn audit_answer(
     );
 }
 
+/// Refuse an oversight session's typing into a permission prompt (WI-4455).
+/// Typing is not an answer: the overseer answers the prompt by `/answer` and
+/// may send steering text with `/input` once the prompt has gone.
+pub fn refuse_steering(session: &Session, who: &str, dialog: &Detected) -> ApiError {
+    tracing::warn!(
+        target: "vogt::audit",
+        event = "session.permission_answer",
+        outcome = "refused",
+        via = Via::Input.as_str(),
+        session_id = %session.id,
+        principal = %who,
+        kind = dialog.kind,
+        question = %truncate(&dialog.question, 300),
+        "refused an oversight session's typing into an open permission prompt"
+    );
+    ApiError::Forbidden(format!(
+        "person required: session is showing a {} prompt ({:?}) and typing into it \
+         is not an answer. {who} is an oversight session: answer it with session_answer, \
+         then send steering text with session_input once the prompt is gone. Nothing was typed.",
+        dialog.kind,
+        truncate(&dialog.question, 120),
+    ))
+}
+
 /// The refusal an overseer reads. Starts `person required:` so the core can
 /// tell it from any other 403 the engine gives.
 pub fn refusal(who: &str, dialog: &Detected) -> ApiError {
