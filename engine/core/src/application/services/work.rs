@@ -1636,7 +1636,10 @@ where
         .map(|id| view.project_by_id(id))
         .transpose()?
         .flatten();
-    let subject = linked_subject(&view, &item.id)?;
+    let subject = write_back_subject(
+        linked_subject(&view, &item.id)?,
+        item.superseded_by.as_deref(),
+    );
     drop(view);
     let writer = native_writer(ctx, &reference)?;
     // Resolved before the write: the caller's own session row, read from its
@@ -2144,7 +2147,10 @@ where
                     .map(|id| view.project_by_id(id))
                     .transpose()?
                     .flatten();
-                let subject = linked_subject(&view, &current.id)?;
+                let subject = write_back_subject(
+                    linked_subject(&view, &current.id)?,
+                    current.superseded_by.as_deref(),
+                );
                 drop(view);
                 let writer = native_writer(ctx, &reference)?;
                 Some(plan_writeback(
@@ -2717,6 +2723,19 @@ fn linked_subject(txn: &impl ReadView, item_id: &str) -> Result<Option<String>, 
         .work_links_for_subjects_by_item(item_id)?
         .into_keys()
         .next())
+}
+
+/// The forge subject a native item's write-back goes to. An item migrated
+/// upstream by `forge link` keeps no link row of its own; it is retired with
+/// `superseded_by` naming its successor, so that successor is the write-back
+/// target. Without this, a comment or a done transition on a migrated item is
+/// skipped as "not linked to a forge object".
+fn write_back_subject(own_link: Option<String>, superseded_by: Option<&str>) -> Option<String> {
+    own_link.or_else(|| {
+        superseded_by
+            .filter(|subject| !subject.is_empty())
+            .map(str::to_owned)
+    })
 }
 
 /// A ref that must name a declared row. An upstream-truth item is refused
@@ -3570,6 +3589,90 @@ mod tests {
         assert_eq!(fetched["comments"][0]["body"], "noted");
         assert_eq!(fetched["item"]["ref"], "WI-1");
         assert!(fetched["claim_check"].is_null());
+    }
+
+    #[test]
+    fn write_back_subject_prefers_the_items_own_link_then_its_successor() {
+        use super::write_back_subject;
+        assert_eq!(
+            write_back_subject(Some("gh:o/r#1".into()), Some("gh:o/r#2")).as_deref(),
+            Some("gh:o/r#1")
+        );
+        assert_eq!(
+            write_back_subject(None, Some("gh:o/r#22")).as_deref(),
+            Some("gh:o/r#22")
+        );
+        assert_eq!(write_back_subject(None, Some("")), None);
+        assert_eq!(write_back_subject(None, None), None);
+    }
+
+    /// Bug WI-799: a native item migrated upstream by `forge link` keeps no link
+    /// row, so its comment was skipped as "not linked to a forge object" even
+    /// though `superseded_by` names the GitHub issue. The ledger detail is the
+    /// evidence: it must now reach the forge step, not stop at the link gate.
+    #[test]
+    fn a_comment_on_a_migrated_item_reaches_its_successor_not_the_link_gate() {
+        use crate::application::services::forge_ops_test::insert_project;
+        use crate::application::services::forge_writeback::{writeback_list_op, writeback_op};
+        use crate::storage::interface::WorkItemUpdate;
+
+        let built = opened();
+        let Built::StepSequential(ctx) = &built else {
+            unreachable!("opened() builds a step clock");
+        };
+        insert_project(
+            &built,
+            "widget",
+            Some("https://github.com/o/r"),
+            "/tmp",
+            true,
+        );
+        writeback_op(
+            &built,
+            json!({"project": "widget", "policy": "full", "reason": "arm it"}),
+        )
+        .unwrap();
+        create_work(
+            ctx,
+            json!({"kind": "chore", "title": "one", "project": "widget", "reason": "test"}),
+        )
+        .unwrap();
+        {
+            let id = ctx
+                .declared
+                .read()
+                .unwrap()
+                .work_item_by_ref("WI-1")
+                .unwrap()
+                .unwrap()
+                .id;
+            let mut txn = ctx.declared.write().unwrap();
+            txn.update_work_item(
+                &id,
+                &WorkItemUpdate {
+                    superseded_by: Some("gh:o/r#22".into()),
+                    ..WorkItemUpdate::default()
+                },
+                moment(),
+            )
+            .unwrap();
+            txn.commit().unwrap();
+        }
+        comment_work(
+            ctx,
+            json!({"ref": "WI-1", "body": "noted", "reason": "test"}),
+        )
+        .unwrap();
+        let ledger = writeback_list_op(&built, json!({})).unwrap();
+        let comment = ledger["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["action"] == "comment")
+            .expect("the comment wrote a ledger row");
+        let detail = comment["detail"].as_str().unwrap_or_default();
+        assert!(!detail.contains("not linked"), "{detail}");
+        assert_eq!(comment["subject_key"], "gh:o/r#22");
     }
 
     #[test]
