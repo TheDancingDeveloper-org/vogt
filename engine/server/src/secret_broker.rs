@@ -588,8 +588,14 @@ pub enum GrantRefusal {
     Invalid(String),
     /// The name is a manifest entry; a grant never shadows one.
     ShadowsManifest(String),
-    /// The project is not open to grants.
-    ProjectNotGrantable(String),
+    /// The project is not open to grants. Carries the refusing engine's bind
+    /// address and how many projects it counts as grantable, so the 403 says
+    /// which engine refused and what it would have accepted.
+    ProjectNotGrantable {
+        project: String,
+        engine: SocketAddr,
+        grantable: usize,
+    },
     /// Another live grant already lets this session fetch that `var`.
     VarInUse(String),
 }
@@ -607,9 +613,13 @@ impl std::fmt::Display for GrantRefusal {
                 f,
                 "{var} is already an ENGINE_AGENT_AUTH_SECRETS entry; a grant never shadows the manifest — choose another var"
             ),
-            GrantRefusal::ProjectNotGrantable(project) => write!(
+            GrantRefusal::ProjectNotGrantable {
+                project,
+                engine,
+                grantable,
+            } => write!(
                 f,
-                "project {project} is not open to grants: grants may fetch only from projects the manifest names or ENGINE_AGENT_GRANT_PROJECTS lists"
+                "project {project} is not open to grants: grants may fetch only from projects the manifest names or ENGINE_AGENT_GRANT_PROJECTS lists; refused by the engine at {engine}, which counts {grantable} grantable project(s)"
             ),
             GrantRefusal::VarInUse(var) => write!(
                 f,
@@ -840,6 +850,15 @@ impl SecretBroker {
             || self.grant_projects.iter().any(|p| p == project)
     }
 
+    /// How many distinct projects an approved grant may fetch from: the
+    /// manifest's projects plus `ENGINE_AGENT_GRANT_PROJECTS`.
+    pub fn grantable_count(&self) -> usize {
+        let mut projects: std::collections::BTreeSet<String> =
+            self.manifest().into_iter().map(|e| e.project_id).collect();
+        projects.extend(self.grant_projects.iter().cloned());
+        projects.len()
+    }
+
     /// Hold a person-approved grant for `session` (WI-973). The caller has
     /// already checked that vogt-core sent it and that the session is live.
     /// A grant with the same id replaces the earlier one (a retried apply);
@@ -881,7 +900,11 @@ impl SecretBroker {
             return Err(GrantRefusal::ShadowsManifest(grant.var));
         }
         if !self.project_grantable(&grant.project_id) {
-            return Err(GrantRefusal::ProjectNotGrantable(grant.project_id));
+            return Err(GrantRefusal::ProjectNotGrantable {
+                project: grant.project_id,
+                engine: self.bind,
+                grantable: self.grantable_count(),
+            });
         }
         let expires_at = time::OffsetDateTime::parse(
             &grant.expires_at,
