@@ -239,3 +239,43 @@ describe("D: a stream that drops right after each open (WI-1903)", () => {
     expect(wakes).toEqual(["sse-reconnect"]);
   });
 });
+
+describe("WI-1254: a reconnect re-reads the session list only after a gap", () => {
+  async function reopenAfter(dropMs: number) {
+    startEventStream();
+    open();
+    await store.refreshSessions();
+    mocks.listSessions.mockClear();
+    fail();
+    await vi.advanceTimersByTimeAsync(dropMs);
+    open();
+    await vi.advanceTimersByTimeAsync(STREAM_SETTLE_MS + 250);
+  }
+
+  it("leaves a loaded list alone after a short blip", async () => {
+    await reopenAfter(1_000);
+    expect(wakes).toEqual(["sse-reconnect"]);
+    expect(mocks.listSessions).not.toHaveBeenCalled();
+  });
+
+  it("re-reads the list after a drop long enough to hide a change", async () => {
+    await reopenAfter(store.RECONNECT_GAP_MS + 1_000);
+    expect(wakes).toEqual(["sse-reconnect"]);
+    expect(mocks.listSessions).toHaveBeenCalledTimes(1);
+  });
+
+  it("re-reads a list that never landed, even after a blip", async () => {
+    // Failed before the stream opened, and again on the first open's retry.
+    mocks.listSessions.mockRejectedValue(new Error("offline"));
+    await store.refreshSessions();
+    startEventStream();
+    open();
+    await vi.advanceTimersByTimeAsync(0);
+    mocks.listSessions.mockClear();
+    fail();
+    await vi.advanceTimersByTimeAsync(1_000);
+    open();
+    await vi.advanceTimersByTimeAsync(STREAM_SETTLE_MS + 250);
+    expect(mocks.listSessions).toHaveBeenCalled();
+  });
+});

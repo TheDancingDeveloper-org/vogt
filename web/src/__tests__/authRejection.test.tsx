@@ -141,10 +141,12 @@ interface Shell {
  * the session list and the file tree the rail draws. The requirement is what
  * happens to that shell *after* it has booted.
  */
-function mountShell(url: string, vogtRoutes: Routes = {}): Shell {
+function mountShell(url: string, vogtRoutes: Routes = {}, engineRoutes: Routes = {}): Shell {
   setToken("live-token");
   setBase("http://engine.test");
   const vogt = fakeVogt(vogtRoutes, {
+    "GET /api/auth/check": { status: 200, body: { ok: true } },
+    ...engineRoutes,
     "GET /api/status": { body: { ok: true } },
     "GET /api/config": {
       body: {
@@ -174,6 +176,20 @@ function mountShell(url: string, vogtRoutes: Routes = {}): Shell {
   };
 }
 
+
+/** Boot's credential probe must succeed; the later re-check is the refusal. */
+function checkThenRefuse(): Routes {
+  let probes = 0;
+  return {
+    "GET /api/auth/check": () => {
+      probes += 1;
+      return probes === 1
+        ? { status: 200, body: { ok: true } }
+        : refusal(401, "the presented token is not valid");
+    },
+  };
+}
+
 /** The login gate, by the heading only it draws. */
 function loginShown(container: HTMLElement): boolean {
   return container.querySelector(".login-screen") !== null;
@@ -185,12 +201,13 @@ async function signedIn(shell: Shell): Promise<void> {
 }
 
 describe("#195 — a token refused after boot returns the reader to the login screen", () => {
-  it("signs out on the next authenticated read, with no reload and with the 401 copy", async () => {
-    const shell = mountShell("/board");
+  it("signs out on the next authenticated read only after /api/auth/check agrees", async () => {
+    const shell = mountShell("/board", {}, checkThenRefuse());
     await signedIn(shell);
 
     // The rotation happens here: the reader is on a working board, and the
-    // *next* thing they open is refused.
+    // *next* thing they open is refused. A single 401 is not enough — the
+    // shell re-checks /api/auth/check, and only that 401 returns to the gate.
     shell.vogt.route(
       "GET /backlog",
       refusal(401, "the presented token is not valid"),
@@ -203,8 +220,25 @@ describe("#195 — a token refused after boot returns the reader to the login sc
     );
   });
 
-  it("forgets the rejected credential, so a reload does not re-present it", async () => {
+  it("stays signed in when a 401 is transient and the re-check succeeds", async () => {
     const shell = mountShell("/board");
+    await signedIn(shell);
+
+    shell.vogt.route(
+      "GET /backlog",
+      refusal(401, "edge blip"),
+    );
+    shell.go("/backlog");
+
+    await waitFor(() =>
+      expect(shell.vogt.engineCalls.some((call) => call.path === "/api/auth/check")).toBe(true),
+    );
+    expect(loginShown(shell.container)).toBe(false);
+    expect(getToken()).toBe("live-token");
+  });
+
+  it("forgets the rejected credential, so a reload does not re-present it", async () => {
+    const shell = mountShell("/board", {}, checkThenRefuse());
     await signedIn(shell);
 
     shell.vogt.route("GET /backlog", refusal(401, "the presented token is not valid"));
@@ -259,8 +293,9 @@ describe("#195 — a token refused after boot returns the reader to the login sc
   it("signs out when another tab's read was the one refused", async () => {
     // The carrier is the auth channel the stored-credential machinery already
     // uses, so a rotation noticed anywhere is noticed everywhere — this is
-    // what a second tab's 401 looks like arriving here.
-    const shell = mountShell("/board");
+    // what a second tab's 401 looks like arriving here. It is still only a
+    // candidate until /api/auth/check agrees.
+    const shell = mountShell("/board", {}, checkThenRefuse());
     await signedIn(shell);
 
     const otherTab = new BroadcastChannel("vogt.auth");

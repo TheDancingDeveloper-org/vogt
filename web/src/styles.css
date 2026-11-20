@@ -12701,3 +12701,7 @@ a.vogt-projects-tag:hover {
   font-weight: 600;
   color: var(--activity-waiting);
 }
+
+/* Mobile pager hand-off (WI-2706): the slot and its movable host are layout-transparent. */
+.terminal-handoff-slot,
+.terminal-handoff-host { display: contents; }

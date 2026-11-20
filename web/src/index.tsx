@@ -4,7 +4,8 @@ import { APP_ROUTES } from "./routes";
 import "./styles.css";
 import { initializeRuntimeTransport } from "./runtimeTransport";
 import { dialogIsOpen } from "./Dialog";
-import { keyboardInsetFor } from "./viewportInsets";
+import { keyboardInsetFor, viewportScrollChangesRows } from "./viewportInsets";
+import { readTerminalFontSize } from "./terminalFont";
 import { installNativeBackButton } from "./nativeBack";
 
 await initializeRuntimeTransport();
@@ -24,10 +25,12 @@ const [
 ]);
 
 function installVisualViewportSizing() {
+  let appliedHeight: number | null = null;
   const apply = () => {
     const viewport = window.visualViewport;
     const width = viewport?.width ?? window.innerWidth;
     const height = viewport?.height ?? window.innerHeight;
+    appliedHeight = height;
     // Scale-aware: a pinch-zoomed viewport is a crop, not a keyboard
     // (viewportInsets.ts).
     const keyboardInset = keyboardInsetFor(window.innerHeight, viewport);
@@ -45,7 +48,14 @@ function installVisualViewportSizing() {
   window.addEventListener("resize", apply);
   window.addEventListener("orientationchange", apply);
   window.visualViewport?.addEventListener("resize", apply);
-  window.visualViewport?.addEventListener("scroll", apply);
+  // A scroll with the height unchanged by a full row cannot change any
+  // terminal's fitted grid; skip the refit it would trigger (WI-2706).
+  window.visualViewport?.addEventListener("scroll", () => {
+    const height = window.visualViewport?.height ?? window.innerHeight;
+    if (viewportScrollChangesRows(appliedHeight, height, readTerminalFontSize())) {
+      apply();
+    }
+  });
 }
 
 function installNativeInsetsFallback() {

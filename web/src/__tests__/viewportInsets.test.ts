@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { keyboardInsetFor } from "../viewportInsets";
+import { keyboardInsetFor, viewportScrollChangesRows } from "../viewportInsets";
 
 // The phone's bottom bar and the terminal dock sit on `--keyboard-inset`.
 // A reader who pinch-zooms must not get a phantom keyboard (WI-79).
@@ -22,5 +22,19 @@ describe("keyboard inset from the visual viewport", () => {
   });
   it("falls back to zero without a visual viewport", () => {
     expect(keyboardInsetFor(915, null)).toBe(0);
+  });
+});
+
+describe("viewportScrollChangesRows", () => {
+  it("refits on the first event", () => {
+    expect(viewportScrollChangesRows(null, 800, 13)).toBe(true);
+  });
+  it("ignores a scroll that moves the height by less than a row", () => {
+    expect(viewportScrollChangesRows(800, 800, 13)).toBe(false);
+    expect(viewportScrollChangesRows(800, 790, 13)).toBe(false);
+  });
+  it("refits once the height moves by a row", () => {
+    expect(viewportScrollChangesRows(800, 787, 13)).toBe(true);
+    expect(viewportScrollChangesRows(440, 800, 13)).toBe(true);
   });
 });

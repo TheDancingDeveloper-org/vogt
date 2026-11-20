@@ -55,6 +55,7 @@ import { clearStoredAuth, subscribeAuthRejected, subscribeAuthState } from "./ap
 import { signOutAndRevoke } from "./session";
 import { loginWithPassword } from "./authApi";
 import type { AuthRejection } from "./api";
+import { resolveAuthRejection } from "./authRecheck";
 import {
   createSession,
   deleteSession,
@@ -154,6 +155,7 @@ import {
 } from "./sessionRail";
 import { createRailKeys, createRailRowFields } from "./railRowFields";
 import { noteRailSessions, railStarters } from "./railStarters";
+import { railSessions } from "./railSessions";
 import { setExpanded } from "./fileTreeState";
 import { demoManifest, resetDemoData } from "./runtimeTransport";
 import {
@@ -596,9 +598,9 @@ const App: Component = () => {
   // reshuffle mid-interaction slides the row (and its menu) under the pointer,
   // so a click meant for one session's Rename lands on another (#686).
   const railEntries = createMemo<RailEntry[]>((prev) => {
-    const sessions = sessionsStore.order
-      .map((id) => sessionsStore.sessions[id])
-      .filter((s): s is SessionSummary => Boolean(s));
+    // The shared, memoised order (railSessions.ts, WI-2696): it re-sorts only
+    // when a sort input changes, not on every resource or activity tick.
+    const sessions = railSessions();
     const held = openMenuId() !== null && prev.length > 0
       ? prev.flatMap((entry) => (entry.kind === "row" ? [entry.session.id] : []))
       : undefined;
@@ -942,15 +944,30 @@ const App: Component = () => {
     setAuthState("unauthenticated");
   };
 
+  /**
+   * A published 401 is provisional. Confirm it with one shared
+   * `/api/auth/check` (3s) before wiping the token; a transport error or any
+   * other status keeps the session. The event stream never reaches here on
+   * its own — see `subscribeEvents`.
+   */
+  const onAuthRejected = (rejection: AuthRejection) => {
+    if (authState() === "unauthenticated") return;
+    void resolveAuthRejection(rejection, {
+      confirmed: rejection.confirmed === true,
+    }).then((confirmed) => {
+      if (confirmed) endSession(confirmed);
+    });
+  };
+
   onMount(() => {
     const unsubscribeAuthState = subscribeAuthState(() => {
       stopEventStream();
       window.location.reload();
     });
     onCleanup(unsubscribeAuthState);
-    // Every refused credential, wherever it was met — this tab's own reads,
-    // its event stream, or another tab's, which arrives over the same channel.
-    onCleanup(subscribeAuthRejected(endSession));
+    // Confirmed refusals only. A lone 401 from a read, the event stream, or
+    // another tab is re-checked once before this runs `endSession`.
+    onCleanup(subscribeAuthRejected(onAuthRejected));
     apiModule
       .publicConfig()
       .then((c) => setPublicCfg(c))

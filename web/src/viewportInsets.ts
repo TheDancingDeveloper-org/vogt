@@ -25,3 +25,18 @@ export function keyboardInsetFor(
   const scale = viewport.scale > 0 ? viewport.scale : 1;
   return Math.max(0, Math.round(innerHeight - viewport.height * scale));
 }
+
+/**
+ * A visualViewport `scroll` fires on every keyboard nudge and pan, usually
+ * with the height unchanged. Refit the terminal only when the visible height
+ * moved by at least one terminal row; less cannot change the fitted grid
+ * (WI-2706).
+ */
+export function viewportScrollChangesRows(
+  previousHeight: number | null,
+  height: number,
+  rowPx: number,
+): boolean {
+  if (previousHeight === null) return true;
+  return Math.abs(height - previousHeight) >= Math.max(1, rowPx);
+}
