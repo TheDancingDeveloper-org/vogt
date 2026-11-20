@@ -341,6 +341,8 @@ fn summarize_asked<C: Clock, I: IdFactory>(
         resources: None,
         permission_mode: None,
         posture_lost_on_resume: false,
+        account: None,
+        budget: None,
         stopped_by: None,
         stop_reason: None,
         last_reply_excerpt: None,
@@ -408,6 +410,8 @@ fn unlinked_summary<C: Clock, I: IdFactory>(
         resources: None,
         permission_mode: None,
         posture_lost_on_resume: false,
+        account: None,
+        budget: None,
         stopped_by: None,
         stop_reason: None,
         last_reply_excerpt: None,
@@ -423,8 +427,8 @@ fn unlinked_summary<C: Clock, I: IdFactory>(
 /// Copy the engine's live fields onto a summary.
 fn apply_live(summary: &mut SessionSummary, live: &EngineSession) {
     use crate::application::services::sessions::{
-        SessionApproval, SessionApprovalOption, SessionBlocked, SessionHibernation,
-        SessionResources,
+        budget_of_engine, SessionApproval, SessionApprovalOption, SessionBlocked,
+        SessionHibernation, SessionResources,
     };
     summary.activity = Some(live.activity.clone());
     summary.name = Some(live.name.clone());
@@ -470,6 +474,8 @@ fn apply_live(summary: &mut SessionSummary, live: &EngineSession) {
     summary.autopilot = Some(live.autopilot);
     summary.autopilot_nudges = Some(live.autopilot_nudges);
     summary.role = Some(live.role.clone());
+    summary.account = live.account.clone();
+    summary.budget = budget_of_engine(live.budget.as_ref());
     summary.conversation_id = live.conversation_id.clone();
     summary.resources = live.resources.as_ref().map(|resources| SessionResources {
         rss_bytes: resources.rss_bytes,

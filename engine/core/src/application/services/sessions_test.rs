@@ -1093,3 +1093,27 @@ fn a_project_only_worker_start_creates_no_work_item() {
             .collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn an_engine_budget_keeps_only_positive_limits() {
+    use super::sessions::budget_of_engine;
+    use serde_json::json;
+    let row = |value: serde_json::Value| value.as_object().cloned();
+    // Zero, negative, fractional and non-numeric limits are no limit (Python
+    // `_budget_params` keeps positive ints only).
+    let budget = budget_of_engine(
+        row(
+            json!({"turns": 0, "context_tokens": 100000, "wall_clock_minutes": -5,
+                   "session_wall_clock_minutes": 2.5, "unknown": 9}),
+        )
+        .as_ref(),
+    )
+    .expect("one positive limit survives");
+    assert_eq!(budget.context_tokens, Some(100_000));
+    assert_eq!(budget.turns, None);
+    assert_eq!(budget.wall_clock_minutes, None);
+    assert_eq!(budget.session_wall_clock_minutes, None);
+    // A budget that names no positive limit is no budget at all.
+    assert!(budget_of_engine(row(json!({"turns": 0})).as_ref()).is_none());
+    assert!(budget_of_engine(None).is_none());
+}
