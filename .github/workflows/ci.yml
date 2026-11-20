@@ -656,6 +656,19 @@ jobs:
         # was doing; the `list` reporter makes per-test progress legible.
         run: timeout --signal=SIGINT 420 pnpm exec playwright test tests/browser/demo.spec.ts tests/browser/terminalLiveCap.spec.ts --project=desktop --project=phone --reporter=list
 
+      # WI-2709: the `@touch` specs (swipe, long-press, resume, reconnect) on
+      # Android Chrome (Pixel 7) and the iPhone profile. Full runs only (merge
+      # queue, nightly, manual), like the rest of the full suite: a PR gets the
+      # desktop smoke above, and these timing-sensitive lifecycle paths run
+      # before anything lands.
+      - name: touch lifecycle on Android Chrome (full suite)
+        if: always() && !cancelled() && needs.changes.outputs.full == 'true' && needs.changes.outputs.web == 'true'
+        working-directory: web
+        env:
+          CI: "true"
+          PLAYWRIGHT_PORT: "4176"
+        run: timeout --signal=SIGINT 420 pnpm exec playwright test tests/browser/gui.spec.ts --project=phone-android --project=phone --grep @touch --reporter=list
+
       # A screenshot that disagrees with its baseline is undiagnosable from
       # the log alone, and a baseline can only be refreshed from the renderer
       # that took it — this one. Keep the actual/expected/diff images so the
@@ -746,12 +759,12 @@ jobs:
           # `shellcheck` is the lint half of the deploy-script step below:
           # `bigmem` has it, this pool does not promise it, and a required
           # check must not go red over a missing tool (WI-3888).
-          missing=""
-          command -v git >/dev/null || missing="$missing git"
-          command -v rg >/dev/null || missing="$missing ripgrep"
-          command -v shellcheck >/dev/null || missing="$missing shellcheck"
-          if [ -n "$missing" ]; then
-            echo "installing:$missing"
+          missing=()
+          command -v git >/dev/null || missing+=(git)
+          command -v rg >/dev/null || missing+=(ripgrep)
+          command -v shellcheck >/dev/null || missing+=(shellcheck)
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "installing: ${missing[*]}"
             # Runners differ: some execute as root with no sudoers entry
             # (where `sudo apt-get` fails with "root is not in the sudoers
             # file"), others as an unprivileged user that may or may not
@@ -759,12 +772,12 @@ jobs:
             # otherwise, and fail clearly when neither is available.
             if [ "$(id -u)" = "0" ]; then
               apt-get update
-              apt-get install -y --no-install-recommends $missing
+              apt-get install -y --no-install-recommends "${missing[@]}"
             elif command -v sudo >/dev/null; then
               sudo apt-get update
-              sudo apt-get install -y --no-install-recommends $missing
+              sudo apt-get install -y --no-install-recommends "${missing[@]}"
             else
-              echo "cannot install$missing: not root and no sudo." >&2
+              echo "cannot install ${missing[*]}: not root and no sudo." >&2
               echo "The engine's tests shell out to git and rg, and the" >&2
               echo "deploy scripts need shellcheck; a runner image without" >&2
               echo "them cannot run this job." >&2
@@ -929,13 +942,13 @@ jobs:
             && ldconfig -p 2>/dev/null | grep -q libclang; then
             exit 0
           fi
-          missing="clang cmake libclang-dev libopus-dev libssl-dev pkg-config"
+          missing=(clang cmake libclang-dev libopus-dev libssl-dev pkg-config)
           if [ "$(id -u)" = "0" ]; then
             apt-get update
-            apt-get install -y --no-install-recommends $missing
+            apt-get install -y --no-install-recommends "${missing[@]}"
           elif command -v sudo >/dev/null 2>&1; then
             sudo apt-get update
-            sudo apt-get install -y --no-install-recommends $missing
+            sudo apt-get install -y --no-install-recommends "${missing[@]}"
           else
             echo "clang, cmake, libclang-dev, libopus-dev, libssl-dev, and pkg-config are required to build the voice sidecar" >&2
             exit 1
@@ -1018,6 +1031,15 @@ jobs:
           java-version: "21"
 
       - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
+
+      # The wrapper downloads gradle-<ver>-all.zip from services.gradle.org; a
+      # timeout there failed the merge queue (WI-3308). Cache the unpacked
+      # distributions, keyed on the wrapper properties (which pin the version).
+      - name: restore the Gradle wrapper distribution
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.gradle/wrapper/dists
+          key: gradle-wrapper-${{ runner.os }}-${{ hashFiles('mobile/android/gradle/wrapper/gradle-wrapper.properties') }}
 
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
         with:

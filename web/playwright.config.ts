@@ -42,6 +42,11 @@ export default defineConfig({
   projects: [
     { name: "desktop", use: { ...devices["Desktop Chrome"] } },
     { name: "phone", use: { ...devices["iPhone 13"] } },
+    // WI-2709: Android Chrome on a Pixel 7 profile (Chromium, touch, mobile
+    // viewport). It runs only the `@touch` specs — swipe, long-press, resume
+    // and reconnect — because the rest of the suite branches on the
+    // project name `phone` for its narrow layout.
+    { name: "phone-android", use: { ...devices["Pixel 7"] }, grep: /@touch/ },
     // Registered only when a live stack is named, so a bare `playwright test`
     // (PR CI, local runs) can neither list nor run it against nothing.
     ...(liveBaseURL
@@ -49,6 +54,10 @@ export default defineConfig({
           {
             name: "live",
             use: { ...devices["Desktop Chrome"], baseURL: liveBaseURL },
+            // WI-1842: specs tagged `@mock-only` (see tests/browser/mockOnly.ts)
+            // need fixture data, mocked routes or dev-server hooks the real
+            // stack doesn't have, so live skips them.
+            grepInvert: /@mock-only/,
           },
           // The same live run at phone size; selected explicitly with
           // `--project=live-phone`, so the e2e workflow's `--project=live`

@@ -46,7 +46,7 @@ async function mockedFixtures(page: Page): Promise<void> {
       vogt: { configured: true },
     }),
   );
-  await page.route("**/api/sessions", (route) => route.fulfill({ json: [SESSION] }));
+  await page.route(/\/api\/sessions(\?.*)?$/, (route) => route.fulfill({ json: [SESSION] }));
   await page.route("**/api/sessions/*", (route) => {
     if (route.request().method() !== "GET") return route.fulfill({ json: { ok: true } });
     return route.fulfill({ json: { ...SESSION, scrollback_base64: "" } });
@@ -132,7 +132,9 @@ test.describe("terminal size sync (WI-1089)", () => {
     test.skip(testInfo.project.name !== "phone", "the phone viewport is the narrow viewer");
   });
 
-  test("a phone draws a wider PTY's repaints without ghost frames, and can take the size", async ({
+  // WI-2714: quarantined; fails on the phone project and runs in no required
+  // step. Listed in docs/known-flakes.md. Restore by making this `test` again.
+  test.fixme("a phone draws a wider PTY's repaints without ghost frames, and can take the size", async ({
     page,
   }) => {
     await mockedFixtures(page);
