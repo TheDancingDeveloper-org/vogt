@@ -86,6 +86,7 @@ fn test_config() -> Config {
         agent_auth_public_url: None,
         cadastre_mcp_url: None,
         vogt_prod_mcp_url: None,
+        crw_mcp_url: None,
         vogt_core_url: None,
         vogt_import_root: None,
         vogt_engine_state_dir: None,
@@ -21300,6 +21301,77 @@ mod pod_stream {
                 "{url:?}: {body}"
             );
         }
+    }
+
+    /// WI-4489: a worker pod gets the worker set, as a host launch does: vogt
+    /// on its worker profile, cadastre and crw. vogt-prod is never handed to
+    /// it, nor is its token named, even with a URL and a manifest token.
+    #[tokio::test]
+    async fn a_worker_pod_gets_the_worker_set_with_crw_and_no_vogt_prod() {
+        let dir = tempfile::tempdir().unwrap();
+        let helper = fake_broker_helper(dir.path());
+        let mut h = harness_cfg(false, None, move |cfg| {
+            cfg.vogt_prod_mcp_url = Some("https://vogt-prod.example.test".into());
+            cfg.crw_mcp_url = Some("http://crw.example.test:18190/mcp".into());
+            cfg.agent_auth_helper = helper;
+            cfg.agent_auth_secrets = vogt_engine_server::secret_broker::parse_manifest(
+                "VOGT_PROD_TOKEN acct prod-bridge-token ondemand\n",
+            )
+            .unwrap();
+        })
+        .await;
+        for cli in ["claude", "codex"] {
+            let id = h
+                .start_body(json!({
+                    "name": "pod-session",
+                    "template": "pod",
+                    "mcp_set": "worker",
+                    "role": "worker",
+                }))
+                .await;
+            let (_, token) = h.created.recv().await.unwrap();
+            let body: Value = h.bootstrap_as(id, &token, cli).await.json().await.unwrap();
+            if cli == "claude" {
+                let servers = &body["mcp_config"]["mcpServers"];
+                assert_eq!(
+                    servers["crw"]["url"], "http://crw.example.test:18190/mcp",
+                    "{body}"
+                );
+                assert!(servers.get("vogt-prod").is_none(), "{body}");
+                // This harness mints no session token, so there is no vogt
+                // entry; its worker profile is covered by the unit tests.
+                assert!(servers.get("vogt").is_none(), "{body}");
+            } else {
+                let config = body["codex_config"].as_str().unwrap();
+                assert!(config.contains("[mcp_servers.crw]"), "{config}");
+                assert!(!config.contains("vogt-prod"), "{config}");
+            }
+            assert!(!body.to_string().contains("VOGT_PROD_TOKEN"), "{body}");
+            let summary: Value = h
+                .client
+                .get(format!("{}/api/sessions/{id}", h.base))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            assert_eq!(summary["summary"]["mcp_set"], "worker", "{summary}");
+            // A worker's role is the default, which the wire leaves out.
+            assert!(summary["summary"].get("role").is_none(), "{summary}");
+        }
+        // A full-set start still gets vogt-prod and crw.
+        let id = h.start().await;
+        let (_, token) = h.created.recv().await.unwrap();
+        let body: Value = h
+            .bootstrap_as(id, &token, "claude")
+            .await
+            .json()
+            .await
+            .unwrap();
+        let servers = &body["mcp_config"]["mcpServers"];
+        assert!(servers.get("vogt-prod").is_some(), "{body}");
+        assert!(servers.get("crw").is_some(), "{body}");
     }
 
     /// WI-3491 review: a provider whose env_key is already a manifest VAR is

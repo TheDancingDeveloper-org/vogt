@@ -52,6 +52,11 @@ pub struct PodLaunch {
     /// The pod-side working directory (`VOGT_WORK_DIR`), when the caller's
     /// cwd is not the clone root.
     pub work_dir: Option<String>,
+    /// The MCP set the start resolved (WI-4489): the bootstrap hands the pod
+    /// only those servers, as a host launch's trim does.
+    pub mcp_set: crate::mcp_set::McpSet,
+    /// The project's `mcp_extra`, kept on top of the worker set.
+    pub mcp_extra: Vec<String>,
 }
 #[derive(Debug, Clone)]
 struct SessionCredential {
@@ -1320,7 +1325,19 @@ pub async fn bootstrap(
     // is offered only when this engine names one. Its token is never in the
     // pod's environment: the name joins the ondemand breadcrumbs and the
     // session agent fetches it around the agent.
+    let launch = state.agent_auth.take_launch(id).await.unwrap_or_default();
+    // WI-4489: and only to a full-set session; a worker never gets it, so its
+    // token is not fetched around a worker's agent either.
+    if launch.mcp_set != crate::mcp_set::McpSet::Full {
+        breadcrumbs
+            .ondemand
+            .retain(|var| var != crate::session_endpoints::VOGT_PROD_TOKEN_ENV);
+        breadcrumbs
+            .granted
+            .retain(|var| var != crate::session_endpoints::VOGT_PROD_TOKEN_ENV);
+    }
     let vogt_prod_bearer = state.sessions.vogt_prod_configured()
+        && launch.mcp_set == crate::mcp_set::McpSet::Full
         && (broker
             .manifest()
             .iter()
@@ -1354,7 +1371,6 @@ pub async fn bootstrap(
     // entrypoint cannot export it into its own shell: it is handed to the
     // agent at the final `exec`, after the clone that spends the source
     // token, or a caller's `GRAFT_ENDPOINT` would receive that token.
-    let launch = state.agent_auth.take_launch(id).await.unwrap_or_default();
     let mut agent_env = serde_json::Map::new();
     for (name, value) in launch.agent_env {
         agent_env.insert(name, serde_json::Value::String(value));
@@ -1374,9 +1390,12 @@ pub async fn bootstrap(
     let (mut mcp_config, mut codex_config, mut opencode_config) = (None, None, None);
     if matches!(req.cli.as_str(), "claude" | "codex" | "opencode") {
         let token = state.sessions.mint_agent_token(&req.cli, id).await;
-        let endpoints = state
-            .sessions
-            .pod_mcp_endpoints(&engine_endpoint, vogt_prod_bearer);
+        let endpoints = state.sessions.pod_mcp_endpoints(
+            &engine_endpoint,
+            vogt_prod_bearer,
+            launch.mcp_set,
+            &launch.mcp_extra,
+        );
         let has = token.is_some();
         match req.cli.as_str() {
             "claude" => {

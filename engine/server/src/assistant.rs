@@ -3119,6 +3119,7 @@ mod tests {
             agent_auth_public_url: None,
             cadastre_mcp_url: None,
             vogt_prod_mcp_url: None,
+            crw_mcp_url: None,
             ws_query_token_allowed: false,
             ws_ping_interval: std::time::Duration::from_secs(20),
             push_allow_insecure_endpoints: false,

@@ -461,7 +461,7 @@ fn set_worker_profile(entry: &mut serde_json::Value) {
     }
 }
 
-fn with_profile(url: &str) -> String {
+pub(crate) fn with_profile(url: &str) -> String {
     let sep = if url.contains('?') { '&' } else { '?' };
     format!("{url}{sep}profile={WORKER_PROFILE}")
 }
