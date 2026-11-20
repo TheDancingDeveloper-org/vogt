@@ -263,7 +263,8 @@ fn a_review_brief_checks_the_diff_against_the_items_own_criteria() {
     assert!(review.contains("## The diff"));
     assert!(review.contains("wi-1299-review-brief"));
     assert!(review.contains("integrate/vogt-next"));
-    assert!(review.contains("`git diff integrate/vogt-next...abc123`"));
+    assert!(review.contains("`git diff integrate/vogt-next...<tip>`"));
+    assert!(review.contains("names head `abc123`"));
     assert!(!review.contains("<base>") && !review.contains("<head>"));
     assert!(review.contains("I finished the composer"));
     assert!(!review.contains("a remark, not the review"));
@@ -330,9 +331,10 @@ fn a_review_brief_fills_in_the_real_diff_command() {
         None,
         json!({"branch": "wi-9-x", "head_sha": "deadbeef", "base": "b0"}),
     );
-    assert!(pinned.contains("`git diff b0...deadbeef`"), "{pinned}");
-    assert!(pinned.contains("`git rev-parse wi-9-x`"));
-    assert!(pinned.contains("review `deadbeef`"));
+    assert!(pinned.contains("`git diff b0...<tip>`"), "{pinned}");
+    assert!(pinned.contains("`git rev-parse origin/wi-9-x`"));
+    assert!(pinned.contains("names head `deadbeef`"));
+    assert!(pinned.contains("hand-off head deadbeef · reviewed tip <tip>"));
 
     let unpinned = review_of(
         &built,
@@ -340,7 +342,7 @@ fn a_review_brief_fills_in_the_real_diff_command() {
         None,
         json!({"branch": "wi-9-y", "head_sha": null, "base": "b0"}),
     );
-    assert!(unpinned.contains("`git diff b0...wi-9-y`"), "{unpinned}");
+    assert!(unpinned.contains("`git diff b0...<tip>`"), "{unpinned}");
     assert!(unpinned.contains("The hand-off names no head sha"));
 }
 

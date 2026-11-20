@@ -653,6 +653,7 @@ where
             .and_then(|map| serde_json::from_value(Value::Object(map)).ok()),
         worktree: None,
         repo_map: None,
+        mcp_set: None,
         cold_wake_opt_out: false,
         wake_on: Vec::new(),
         explicit_null: Vec::new(),

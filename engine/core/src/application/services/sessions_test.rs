@@ -131,6 +131,7 @@ pub(super) fn start_params(
         budget: None,
         worktree: None,
         repo_map: None,
+        mcp_set: None,
         cold_wake_opt_out: false,
         wake_on: Vec::new(),
         explicit_null: Vec::new(),
@@ -225,6 +226,38 @@ fn a_task_is_folded_into_the_brief_the_engine_receives() {
         asked.contains("check the containers"),
         "the task did not reach the engine: {asked}"
     );
+}
+
+#[test]
+fn an_explicit_mcp_set_full_reaches_the_engine() {
+    let script = script_with(vec![(
+        200,
+        r#"{"id":"eng-11","name":"beta","cwd":"/work/tree"}"#.to_string(),
+    )]);
+    let built = opened(Some(Arc::clone(&script)));
+    insert_project(&built, "beta");
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!("opened() builds a step clock");
+    };
+    let mut params = start_params(Some("beta"), None, "because");
+    params.mcp_set = Some("full".to_string());
+    start_session(ctx, &params).unwrap();
+    let body = engine_create_body(&script);
+    assert!(body.contains(r#""mcp_set":"full""#), "{body}");
+}
+
+#[test]
+fn an_mcp_set_other_than_full_or_worker_is_refused() {
+    let script = script_with(Vec::new());
+    let built = opened(Some(Arc::clone(&script)));
+    insert_project(&built, "beta");
+    let error = super::sessions::start_session_op(
+        &built,
+        serde_json::json!({"project": "beta", "reason": "because", "mcp_set": "everything"}),
+    )
+    .unwrap_err();
+    assert!(matches!(error, VogtError::InvalidRequest(_)), "{error:?}");
+    assert!(script.seen.lock().unwrap().is_empty());
 }
 
 #[test]

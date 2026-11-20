@@ -66,6 +66,9 @@ pub struct Profile {
     /// A hint carried into the brief: the session should read and report,
     /// not change the tree.
     pub read_only: bool,
+    /// The MCP set the agent starts with (WI-2740, WI-2833): `worker` or
+    /// `full`. Unset, the engine picks its agent default.
+    pub mcp_set: Option<String>,
 }
 
 /// One profile as a deployment overrides it: every field optional, and no
@@ -93,6 +96,8 @@ pub struct ProfileOverride {
     pub autopilot: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub read_only: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_set: Option<String>,
 }
 
 /// The deployment's dispatch table with every default filled in.
@@ -240,6 +245,11 @@ fn profile_field_problem(over: &ProfileOverride) -> Option<String> {
     ] {
         if value.as_deref().is_some_and(str::is_empty) {
             return Some(format!("{field}: must not be empty"));
+        }
+    }
+    if let Some(mcp_set) = over.mcp_set.as_deref() {
+        if mcp_set != "full" && mcp_set != "worker" {
+            return Some(format!("mcp_set: must be full or worker, not {mcp_set:?}"));
         }
     }
     for (field, value) in [
@@ -398,6 +408,7 @@ fn default_profiles() -> BTreeMap<String, Profile> {
         repo_map: false,
         autopilot: true,
         read_only: false,
+        mcp_set: None,
     };
     let mut profiles = BTreeMap::new();
     profiles.insert(
@@ -408,6 +419,7 @@ fn default_profiles() -> BTreeMap<String, Profile> {
             budget_wall_clock_minutes: Some(90),
             worktree: true,
             repo_map: true,
+            mcp_set: Some("worker".to_string()),
             ..profile("claude", "sonnet")
         },
     );
@@ -416,6 +428,7 @@ fn default_profiles() -> BTreeMap<String, Profile> {
         Profile {
             effort: Some("low".to_string()),
             budget_turns: Some(150),
+            mcp_set: Some("worker".to_string()),
             ..profile("claude", "opus")
         },
     );
@@ -426,6 +439,7 @@ fn default_profiles() -> BTreeMap<String, Profile> {
             budget_turns: Some(40),
             autopilot: false,
             read_only: true,
+            mcp_set: Some("worker".to_string()),
             ..profile("claude", "opus")
         },
     );
@@ -433,6 +447,7 @@ fn default_profiles() -> BTreeMap<String, Profile> {
         "mechanical".to_string(),
         Profile {
             budget_turns: Some(60),
+            mcp_set: Some("worker".to_string()),
             ..profile("claude", "haiku")
         },
     );
@@ -561,6 +576,9 @@ fn merge(profile: &mut Profile, over: ProfileOverride) {
     }
     if let Some(read_only) = over.read_only {
         profile.read_only = read_only;
+    }
+    if let Some(mcp_set) = over.mcp_set {
+        profile.mcp_set = Some(mcp_set);
     }
 }
 
