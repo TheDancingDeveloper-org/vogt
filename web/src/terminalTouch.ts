@@ -88,3 +88,55 @@ export function moveTerminalTouch(
     scrollLines: applicationWheel ? 0 : lines,
   };
 }
+
+/** Hold this long, without moving, to select the word under the finger. */
+export const TERMINAL_LONG_PRESS_MS = 500;
+
+export interface TerminalCell {
+  col: number;
+  row: number;
+}
+
+/**
+ * Map a touch point to a grid cell. Width comes from the rendered screen and
+ * height from the element that holds the rows: `.xterm-screen` is 0-high in
+ * the phone layout, so a height read from it selects nothing. Clamped to grid.
+ */
+export function terminalCellAt(
+  x: number,
+  y: number,
+  screen: { left: number; width: number },
+  grid: { top: number; height: number },
+  cols: number,
+  rows: number,
+): TerminalCell {
+  const cellWidth = screen.width / Math.max(1, cols);
+  const cellHeight = grid.height / Math.max(1, rows);
+  const col = Math.floor((x - screen.left) / Math.max(1e-6, cellWidth));
+  const row = Math.floor((y - grid.top) / Math.max(1e-6, cellHeight));
+  return {
+    col: Math.min(Math.max(col, 0), Math.max(0, cols - 1)),
+    row: Math.min(Math.max(row, 0), Math.max(0, rows - 1)),
+  };
+}
+
+const WORD_CHAR = /[\p{L}\p{N}_\-./~:@%+=]/u;
+
+/**
+ * The run of word characters around `col` in one line of text, as a start
+ * column and length. Paths, URLs and identifiers select whole. Null when the
+ * cell is blank or punctuation.
+ */
+export function wordSpanAt(
+  line: string,
+  col: number,
+): { start: number; length: number } | null {
+  if (col < 0 || col >= line.length || !WORD_CHAR.test(line[col] ?? "")) {
+    return null;
+  }
+  let start = col;
+  while (start > 0 && WORD_CHAR.test(line[start - 1] ?? "")) start -= 1;
+  let end = col;
+  while (end + 1 < line.length && WORD_CHAR.test(line[end + 1] ?? "")) end += 1;
+  return { start, length: end - start + 1 };
+}

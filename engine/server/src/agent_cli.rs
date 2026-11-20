@@ -742,7 +742,9 @@ mod tests {
                 "-c",
                 "tui.terminal_title=[\"agent-state\"]",
                 "-c",
-                "tui.animations=false"
+                "tui.animations=false",
+                "-c",
+                "tui.alternate_screen=\"never\""
             ])
         );
     }
@@ -793,7 +795,9 @@ mod tests {
                 "-c",
                 "tui.terminal_title=[\"agent-state\"]",
                 "-c",
-                "tui.animations=false"
+                "tui.animations=false",
+                "-c",
+                "tui.alternate_screen=\"never\""
             ])
         );
     }
@@ -1002,7 +1006,9 @@ mod tests {
                     "-c",
                     "tui.terminal_title=[\"agent-state\"]",
                     "-c",
-                    "tui.animations=false"
+                    "tui.animations=false",
+                    "-c",
+                    "tui.alternate_screen=\"never\""
                 ])
             ]
             .concat()
@@ -1028,7 +1034,9 @@ mod tests {
                 "-c",
                 "tui.terminal_title=[\"agent-state\"]",
                 "-c",
-                "tui.animations=false"
+                "tui.animations=false",
+                "-c",
+                "tui.alternate_screen=\"never\""
             ])
         );
         assert_eq!(
@@ -1188,6 +1196,8 @@ mod tests {
                     "tui.terminal_title=[\"agent-state\"]",
                     "-c",
                     "tui.animations=false",
+                    "-c",
+                    "tui.alternate_screen=\"never\"",
                     "--session-id",
                     &sid.to_string()
                 ])
@@ -1227,6 +1237,8 @@ mod tests {
                     "tui.terminal_title=[\"agent-state\"]",
                     "-c",
                     "tui.animations=false",
+                    "-c",
+                    "tui.alternate_screen=\"never\"",
                     "--session-id",
                     &sid.to_string()
                 ])
@@ -1354,6 +1366,8 @@ mod opencode_posture_tests {
                 "tui.terminal_title=[\"agent-state\"]",
                 "-c",
                 "tui.animations=false",
+                "-c",
+                "tui.alternate_screen=\"never\"",
             ]
         );
         assert!(got.env.is_empty(), "codex is not given claude settings");
@@ -1576,7 +1590,9 @@ mod permission_tests {
                 "-c",
                 "tui.terminal_title=[\"agent-state\"]",
                 "-c",
-                "tui.animations=false"
+                "tui.animations=false",
+                "-c",
+                "tui.alternate_screen=\"never\""
             ])
         );
         // `codex exec` rejects `-a`, so neither a default launch nor an
@@ -1611,7 +1627,9 @@ mod permission_tests {
                 "-c",
                 "tui.terminal_title=[\"agent-state\"]",
                 "-c",
-                "tui.animations=false"
+                "tui.animations=false",
+                "-c",
+                "tui.alternate_screen=\"never\""
             ])
         );
     }
