@@ -169,3 +169,171 @@ mod tests {
         assert_eq!(result["revision"], 0);
     }
 }
+
+/// Timing harness for the badge counts (WI-700). Ignored in CI: run with
+/// `cargo test -p vogt-core place_bench -- --ignored --nocapture`.
+#[cfg(test)]
+mod place_bench {
+    use super::*;
+    use crate::application::context::build_context;
+    use crate::application::context::AppContext;
+    use crate::application::services::work::create_op;
+    use crate::core::{ActorKind, Principal};
+    use std::time::Instant;
+
+    const ITEMS: usize = 850;
+
+    fn seed_observed<C: crate::core::Clock, I: crate::core::IdFactory>(ctx: &AppContext<C, I>) {
+        use crate::core::{Moment, SweepOutcome};
+        use crate::storage::interface::ObservedStore;
+        use crate::storage::observed_types::PendingObservation;
+        let at = Moment::from_unix(1_700_000_000, 0);
+        let sweep = ctx
+            .observed
+            .begin_sweep("bench-forge", &["vogt".to_string()], at)
+            .unwrap();
+        let mut findings = Vec::new();
+        for n in 0..1000 {
+            findings.push(PendingObservation {
+                kind: "forge.issue".into(),
+                subject_key: format!("vogt/issues/{n}"),
+                payload: json!({"state": "open", "title": format!("issue {n}"), "number": n, "labels": ["bug"]}),
+                content_digest: format!("issue-{n}"),
+                project_id: None,
+                source_url: None,
+                promoted: false,
+            });
+        }
+        for n in 0..300 {
+            findings.push(PendingObservation {
+                kind: "forge.pull_request".into(),
+                subject_key: format!("vogt/pulls/{n}"),
+                payload: json!({"state": "open", "title": format!("pr {n}"), "number": n, "head": format!("wi-{n}")}),
+                content_digest: format!("pr-{n}"),
+                project_id: None,
+                source_url: None,
+                promoted: false,
+            });
+        }
+        ctx.observed.append(&sweep.id, &findings, at).unwrap();
+        ctx.observed
+            .finish_sweep(&sweep.id, SweepOutcome::Ok, &[], at, None)
+            .unwrap();
+        ctx.observed.rebuild_latest().unwrap();
+    }
+
+    /// The count-only path must answer what the ranked list holds (WI-700).
+    #[test]
+    fn backlog_count_matches_the_ranked_list() {
+        let dir = std::env::temp_dir().join(format!("vogt-place-count-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut clock = None;
+        let mut ids = None;
+        crate::application::instance::init(&dir, &mut clock, &mut ids).unwrap();
+        let built = build_context(
+            crate::config::VogtConfig {
+                data_dir: dir.clone(),
+                ..crate::config::VogtConfig::default()
+            },
+            Some(Principal::new("local:count", ActorKind::Human, "Count").unwrap()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        for n in 0..20 {
+            create_op(
+                &built,
+                json!({"kind": "bug", "title": format!("count item {n}"), "reason": "count"}),
+            )
+            .unwrap();
+        }
+        crate::with_ctx!(&built, |ctx| seed_observed(ctx));
+        let counted = crate::with_ctx!(&built, |ctx| {
+            crate::application::views::backlog_total_considered(ctx)
+        })
+        .unwrap();
+        let full = crate::application::views::backlog_op(&built, json!({"limit": 1})).unwrap();
+        assert_eq!(counted, full["total_considered"].as_i64().unwrap());
+        assert_eq!(counted, 20 + 1000);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[ignore = "timing harness, run on demand"]
+    fn place_bench_seeded_store() {
+        let dir = std::env::temp_dir().join(format!("vogt-place-bench-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut clock = None;
+        let mut ids = None;
+        crate::application::instance::init(&dir, &mut clock, &mut ids).unwrap();
+        let fresh = || {
+            build_context(
+                crate::config::VogtConfig {
+                    data_dir: dir.clone(),
+                    ..crate::config::VogtConfig::default()
+                },
+                Some(Principal::new("local:bench", ActorKind::Human, "Bench").unwrap()),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap()
+        };
+        let built = fresh();
+        for n in 0..ITEMS {
+            create_op(
+                &built,
+                json!({"kind": "bug", "title": format!("bench item {n}"), "reason": "bench"}),
+            )
+            .unwrap();
+        }
+        crate::with_ctx!(&built, |ctx| seed_observed(ctx));
+        let median = |mut v: Vec<u128>| {
+            v.sort_unstable();
+            v[v.len() / 2]
+        };
+        let mut cold = Vec::new();
+        let mut backlog = Vec::new();
+        let mut full_backlog = Vec::new();
+        for _ in 0..5 {
+            clear_metrics_cache(&dir);
+            let built = fresh();
+            let t = Instant::now();
+            let _ = place_metrics_op(&built, Value::Null).unwrap();
+            cold.push(t.elapsed().as_micros());
+            let t = Instant::now();
+            let total = crate::with_ctx!(&built, |ctx| {
+                crate::application::views::backlog_total_considered(ctx)
+            })
+            .unwrap();
+            backlog.push(t.elapsed().as_micros());
+            let t = Instant::now();
+            let full = crate::application::views::backlog_op(&built, json!({"limit": 1})).unwrap();
+            full_backlog.push(t.elapsed().as_micros());
+            assert_eq!(total, full["total_considered"].as_i64().unwrap());
+            println!("BENCH backlog_total_considered={total}");
+        }
+        println!(
+            "BENCH items={ITEMS} place_metrics_cold_median_us={}",
+            median(cold)
+        );
+        println!(
+            "BENCH backlog_total_considered_median_us={}",
+            median(backlog)
+        );
+        println!(
+            "BENCH backlog_op_limit1_full_median_us={}",
+            median(full_backlog)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
