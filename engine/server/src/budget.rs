@@ -465,12 +465,14 @@ fn refusal_notice(already_noted: bool) -> RefusalNotice {
     }
 }
 
-/// Type one line, then Enter on its own: a TUI that reads a burst ending in a
-/// carriage return as a paste would keep the newline as text.
-async fn type_line(session: &Session, line: &str) -> std::io::Result<()> {
-    session.write_input(line.as_bytes())?;
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    session.write_input(b"\r")
+/// Type one line, then Enter on its own, through the shared guard (WI-4459):
+/// a dialog open at either look holds the line back.
+async fn type_line(
+    session: &Arc<Session>,
+    line: &str,
+    what: &str,
+) -> std::io::Result<crate::enter_guard::EnterOutcome> {
+    crate::enter_guard::type_then_enter(session, line, what).await
 }
 
 /// Tell the overseer, once, that a session over its budget cannot be
@@ -533,14 +535,19 @@ async fn compact(session: &Arc<Session>, bus: &EventBus, r: &Reading<'_>, settle
         summary: summary.clone(),
     });
     if let Some(command) = command {
-        if let Err(e) = type_line(session, &command).await {
-            tracing::warn!(
-                session = %session.id,
-                error = %e,
-                event = "session.budget",
-                "could not type the compact command"
-            );
-            return;
+        match type_line(session, &command, "budget compact").await {
+            Ok(crate::enter_guard::EnterOutcome::Sent) => {}
+            // The guard logged the dialog that held it back.
+            Ok(crate::enter_guard::EnterOutcome::Skipped(_)) => return,
+            Err(e) => {
+                tracing::warn!(
+                    session = %session.id,
+                    error = %e,
+                    event = "session.budget",
+                    "could not type the compact command"
+                );
+                return;
+            }
         }
     }
     tracing::info!(
@@ -639,14 +646,18 @@ pub async fn run_once(
                     level: "soft".to_string(),
                     summary: summary.clone(),
                 });
-                if let Err(e) = type_line(&session, &summary).await {
-                    tracing::warn!(
-                        session = %session.id,
-                        error = %e,
-                        event = "session.budget",
-                        "could not type the soft budget warning"
-                    );
-                    continue;
+                match type_line(&session, &summary, "budget warning").await {
+                    Ok(crate::enter_guard::EnterOutcome::Sent) => {}
+                    Ok(crate::enter_guard::EnterOutcome::Skipped(_)) => continue,
+                    Err(e) => {
+                        tracing::warn!(
+                            session = %session.id,
+                            error = %e,
+                            event = "session.budget",
+                            "could not type the soft budget warning"
+                        );
+                        continue;
+                    }
                 }
                 tracing::info!(
                     session = %session.id,

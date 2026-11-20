@@ -29,6 +29,7 @@ pub mod compact_backoff;
 pub mod config;
 pub mod core_auth;
 pub mod economics;
+pub mod enter_guard;
 pub mod error;
 pub mod events;
 pub mod files;
