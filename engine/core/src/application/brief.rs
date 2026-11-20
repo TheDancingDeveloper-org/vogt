@@ -15,6 +15,8 @@ use std::collections::BTreeMap;
 use crate::core::{Comment, Project, Relation, WorkItem};
 use crate::errors::VogtError;
 
+use super::models::views::{VerdictFields, VerdictFieldsVerdict};
+
 /// The deployment's own rules, the same for every project. Said in one line,
 /// because copying them in would drift from the file that enforces them.
 pub const DEPLOYMENT_POLICY: &str = include_str!("brief_golden/text/deployment_policy.md");
@@ -89,6 +91,10 @@ pub struct WorkBrief<'a> {
     pub project: Option<&'a Project>,
     pub comments: &'a [Comment],
     pub related: &'a BTreeMap<String, WorkItem>,
+    /// Whether a note's author decides things (WI-1320): a person, or a
+    /// session whose role is oversight. Worker notes are dropped. The caller's,
+    /// because a session's role is the engine's live state.
+    pub decision_author: &'a dyn Fn(&Comment) -> bool,
 }
 
 /// A brief and the companion written beside it. The companion is empty only
@@ -288,6 +294,137 @@ fn pointer(session_id: &str, work_ref: Option<&str>) -> Vec<String> {
         ),
         String::new(),
     ]
+}
+
+/// How many decision notes a brief carries, and how long each may run.
+const DECISION_NOTES: usize = 5;
+const NOTE_CHARS: usize = 1500;
+
+fn comment_label(comment: &Comment) -> String {
+    let at = comment.created_at.to_iso();
+    format!(
+        "{}, {}",
+        &at[..10.min(at.len())],
+        comment.actor_display_name
+    )
+}
+
+fn capped(body: &str) -> String {
+    let body = body.trim();
+    if body.chars().count() <= NOTE_CHARS {
+        body.to_string()
+    } else {
+        let cut: String = body.chars().take(NOTE_CHARS).collect();
+        format!("{}…", cut.trim_end())
+    }
+}
+
+fn older(count: usize, what: &str) -> Vec<String> {
+    if count == 0 {
+        return Vec::new();
+    }
+    let plural = if count == 1 { "" } else { "s" };
+    vec![
+        format!("{count} earlier {what}{plural} omitted."),
+        String::new(),
+    ]
+}
+
+/// What the thread decided, not the thread (WI-1320): the decision notes,
+/// newest first; then the latest hand-off, a claim rather than evidence; then
+/// the latest verdict. Older hand-offs and verdicts are counted, not pasted,
+/// and worker notes are not rendered at all.
+fn thread_sections(input: &WorkBrief<'_>) -> Vec<String> {
+    let comments = input.comments;
+    let mut lines: Vec<String> = Vec::new();
+    // Newest first, and judging stops once the cap is full: an engine lookup
+    // is only ever made for a note the brief could still show.
+    let mut notes: Vec<&Comment> = Vec::new();
+    for one in comments {
+        if notes.len() == DECISION_NOTES {
+            break;
+        }
+        if one.kind == "note" && (input.decision_author)(one) {
+            notes.push(one);
+        }
+    }
+    if !notes.is_empty() {
+        lines.extend(["## Decisions".to_string(), String::new()]);
+        for note in notes {
+            lines.extend([
+                format!("### Note ({})", comment_label(note)),
+                String::new(),
+                capped(&note.body),
+                String::new(),
+            ]);
+        }
+    }
+
+    let handoffs: Vec<(&Comment, HandoffFields)> = comments
+        .iter()
+        .filter(|one| one.kind == "handoff")
+        .filter_map(|one| handoff_fields(one).map(|fields| (one, fields)))
+        .collect();
+    let latest_handoff_at = handoffs.first().map(|(one, _)| one.created_at);
+    if let Some((comment, fields)) = handoffs.first() {
+        lines.extend([
+            format!(
+                "## Latest hand-off ({}) — a claim, not evidence",
+                comment_label(comment)
+            ),
+            String::new(),
+        ]);
+        lines.extend(handoff_facts(fields));
+        lines.push(String::new());
+        if !comment.body.trim().is_empty() {
+            lines.extend([comment.body.trim().to_string(), String::new()]);
+        }
+        lines.extend(older(handoffs.len() - 1, "hand-off"));
+    }
+
+    let verdicts: Vec<(&Comment, VerdictFields)> = comments
+        .iter()
+        .filter(|one| one.kind == "verdict")
+        .filter_map(|one| {
+            let fields = serde_json::from_value(one.verdict.clone()?).ok()?;
+            Some((one, fields))
+        })
+        .collect();
+    if let Some((comment, fields)) = verdicts.first() {
+        lines.extend([
+            format!(
+                "## Latest review verdict ({}, head {})",
+                comment_label(comment),
+                fields.head_sha
+            ),
+            String::new(),
+        ]);
+        if latest_handoff_at.is_some_and(|at| comment.created_at < at) {
+            // A verdict from before the latest hand-off reviewed an earlier
+            // head; it is still the last word a reviewer gave, so it is shown,
+            // but not as a verdict on the work as it stands now.
+            lines.extend([
+                "This verdict predates the latest hand-off, so it reviewed an earlier head, \
+                 not the work as it stands now."
+                    .to_string(),
+                String::new(),
+            ]);
+        }
+        if fields.verdict == VerdictFieldsVerdict::Blockers {
+            lines.extend(["Blockers:".to_string(), String::new()]);
+            for (n, one) in fields.blockers.iter().enumerate() {
+                lines.push(format!("{}. {one}", n + 1));
+            }
+            lines.push(String::new());
+        } else {
+            lines.extend(["No blockers.".to_string(), String::new()]);
+        }
+        if !comment.body.trim().is_empty() {
+            lines.extend([comment.body.trim().to_string(), String::new()]);
+        }
+        lines.extend(older(verdicts.len() - 1, "verdict"));
+    }
+    lines
 }
 
 /// The newest hand-off comment, or none. `comments` is newest first.
@@ -508,42 +645,7 @@ pub fn brief_for_work_item(input: &WorkBrief<'_>) -> Result<ComposedBrief, VogtE
         lines.push(String::new());
     }
 
-    // The latest hand-off is its own section, ahead of the remarks, so a fresh
-    // session reads where the last one stopped before the thread.
-    let handoff_index = input
-        .comments
-        .iter()
-        .position(|comment| comment.kind == "handoff");
-    if let Some(comment) = handoff_index.map(|index| &input.comments[index]) {
-        if let Some(fields) = handoff_fields(comment) {
-            lines.extend(["## Hand-off".to_string(), String::new()]);
-            lines.extend(handoff_facts(&fields));
-            lines.extend([
-                String::new(),
-                comment.body.trim().to_string(),
-                String::new(),
-            ]);
-        }
-    }
-    // A hand-off supersedes the thread before it, so only the remarks made
-    // since the latest one are pasted. `comments` is newest first, so the ones
-    // ahead of the hand-off are the later ones.
-    let since = match handoff_index {
-        Some(index) => &input.comments[..index],
-        None => input.comments,
-    };
-    let notes: Vec<&Comment> = since
-        .iter()
-        .filter(|comment| comment.kind == "note")
-        .take(20)
-        .collect();
-    if !notes.is_empty() {
-        lines.extend(["## Comments".to_string(), String::new()]);
-        for comment in notes {
-            lines.push(format!("- {}", comment.body.trim()));
-        }
-        lines.push(String::new());
-    }
+    lines.extend(thread_sections(input));
 
     lines.extend(policy_section(input.project));
     if let Some(project) = input.project {
@@ -1007,9 +1109,33 @@ mod tests {
             project: Some(&project),
             comments: &comments,
             related: &related,
+            decision_author: &|_| true,
         })
         .unwrap();
         assert_golden(&brief, "worker_full");
+    }
+
+    #[test]
+    fn only_decision_notes_are_rendered_and_capped_at_five() {
+        let item = plain();
+        let mut comments: Vec<Comment> = (0..7)
+            .map(|n| comment(&format!("p{n}"), &format!("person note {n}"), "note", None))
+            .collect();
+        comments.push(comment("w", "worker chatter", "note", None));
+        let decided = |one: &Comment| one.body.starts_with("person");
+        let brief = brief_for_work_item(&WorkBrief {
+            item: &item,
+            session_id: SESSION,
+            ranking: None,
+            project: None,
+            comments: &comments,
+            related: &BTreeMap::new(),
+            decision_author: &decided,
+        })
+        .unwrap();
+        assert!(!brief.text.contains("worker chatter"));
+        assert_eq!(brief.text.matches("### Note (").count(), 5);
+        assert!(brief.text.contains("person note 4") && !brief.text.contains("person note 5"));
     }
 
     #[test]
@@ -1022,6 +1148,7 @@ mod tests {
             project: None,
             comments: &[],
             related: &BTreeMap::new(),
+            decision_author: &|_| true,
         })
         .unwrap();
         assert_golden(&brief, "worker_plain");
@@ -1040,6 +1167,7 @@ mod tests {
             project: Some(&project),
             comments: &comments,
             related: &related,
+            decision_author: &|_| true,
         });
         assert_golden(&brief, "review_full");
     }
@@ -1054,6 +1182,7 @@ mod tests {
             project: None,
             comments: &[],
             related: &BTreeMap::new(),
+            decision_author: &|_| true,
         });
         assert_golden(&brief, "review_none");
     }
@@ -1074,6 +1203,7 @@ mod tests {
             project: None,
             comments: &comments,
             related: &BTreeMap::new(),
+            decision_author: &|_| true,
         });
         assert_golden(&brief, "review_no_base");
     }
@@ -1095,6 +1225,7 @@ mod tests {
             project: Some(&project),
             comments: &comments,
             related: &BTreeMap::new(),
+            decision_author: &|_| true,
         });
         assert_golden(&brief, "review_no_head");
     }
@@ -1112,6 +1243,7 @@ mod tests {
             project: Some(&project),
             comments: &comments,
             related: &related,
+            decision_author: &|_| true,
         });
         assert!(
             brief

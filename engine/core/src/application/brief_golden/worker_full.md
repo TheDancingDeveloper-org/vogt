@@ -26,7 +26,17 @@ Not yet collected, so absent rather than zero:
 
 - ci_red_boost — arrives with the CI check observations it reads
 
-## Hand-off
+## Decisions
+
+### Note (1970-01-01, Session ses_a)
+
+Remark after the hand-off.
+
+### Note (1970-01-01, Session ses_a)
+
+Remark before the hand-off.
+
+## Latest hand-off (1970-01-01, Session ses_a) — a claim, not evidence
 
 - **branch** wi-1058-brief
 - **head** abc1234
@@ -39,10 +49,6 @@ Not yet collected, so absent rather than zero:
 - **blockers** none yet
 
 Policy section ported; review brief next.
-
-## Comments
-
-- Remark after the hand-off.
 
 ## Project policy — vogt
 
