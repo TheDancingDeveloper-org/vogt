@@ -97,6 +97,9 @@ pub struct AppState {
     /// installer that may move them. Always present; an image without the
     /// installer reports `installer_present: false` and refuses the POST.
     pub agent_clis: Arc<agent_clis::AgentCliRuntime>,
+    /// The hibernation watcher's policy, changeable while the engine runs
+    /// (WI-4457). Seeded from `config.hibernation`, then the saved overrides.
+    pub hibernation: Arc<crate::hibernate_policy::LivePolicy>,
     /// Quick chats (WI-1097), or `None` when they are off or no Codex launch
     /// is configured; their routes then 404.
     pub chats: Option<Arc<ChatRuntime>>,
@@ -244,6 +247,10 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
     }
 
     let agent_clis_paths = cfg.agent_clis.clone();
+    let hibernation = Arc::new(crate::hibernate_policy::LivePolicy::load(
+        cfg.hibernation.clone(),
+        Some(cfg.state_dir.join("hibernation-policy.json")),
+    ));
     let state = Arc::new(AppState {
         agent_auth: agent_stream::global(),
         config: cfg,
@@ -261,6 +268,7 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         vogt_core,
         core_identities: Arc::new(CoreIdentityCache::default()),
         agent_clis: Arc::new(agent_clis::AgentCliRuntime::new(agent_clis_paths)),
+        hibernation,
         chats,
         workspace_sizes: Arc::new(crate::workspaces::WorkspaceSizes::from_env()),
     });
@@ -358,6 +366,12 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         .route("/api/sessions/{id}/blocked", post(api::set_session_blocked))
         .route("/api/sessions/{id}/answer", post(api::answer_session))
         .route("/api/sessions/{id}/hibernate", post(api::hibernate_session))
+        // The hibernation watcher's caps, changeable live (WI-4457). The PUT
+        // needs `sessions`, since it decides which sessions go to sleep.
+        .route(
+            "/api/hibernation/policy",
+            get(crate::hibernate_policy::get_policy).put(crate::hibernate_policy::put_policy),
+        )
         .route("/api/sessions/{id}/wake", post(api::wake_session))
         .route(
             "/api/sessions/{id}/keep-awake",

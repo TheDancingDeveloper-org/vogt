@@ -10886,6 +10886,122 @@ async fn the_idle_policy_hibernates_only_what_no_exemption_covers() {
     }
 }
 
+/// WI-4457: the idle cap is changed on a running engine and takes effect on the
+/// next sweep with no restart; an idle worker over it hibernates, and an
+/// oversight session quiet just as long is spared.
+#[tokio::test]
+async fn an_idle_cap_changed_live_hibernates_workers_and_spares_oversight() {
+    use vogt_engine_server::hibernate_policy::run_once;
+
+    let (tmp, cfg, stub) = hibernation_sandbox();
+    let (base, state, _h) = boot_with_state(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let mut ids = Vec::new();
+    for (name, role) in [("overseer", Some("oversight")), ("a worker", None)] {
+        let mut body = json!({ "name": name, "command": [stub.to_string_lossy()] });
+        if let Some(role) = role {
+            body["role"] = json!(role);
+        }
+        let created: Value = client
+            .post(format!("{base}/api/sessions"))
+            .json(&body)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        ids.push(created["id"].as_str().unwrap().to_string());
+    }
+    for id in &ids {
+        live_output_containing(&client, &base, id, &["helper=["]).await;
+    }
+    let (overseer, worker) = (ids[0].clone(), ids[1].clone());
+    // Quiet for longer than the threshold the test is about to set.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+
+    // The boot policy is off: a sweep hibernates nothing.
+    run_once(&state.sessions, &state.hibernation.get()).await;
+    let activity = |listed: &[Value], id: &str| {
+        listed
+            .iter()
+            .find(|s| s["id"] == id)
+            .map(|s| s["activity"].as_str().unwrap().to_string())
+            .unwrap()
+    };
+    let list = |client: reqwest::Client| {
+        let base = base.clone();
+        async move {
+            let listed: Value = client
+                .get(format!("{base}/api/sessions"))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            serde_json::from_value::<Vec<Value>>(listed["sessions"].clone()).unwrap()
+        }
+    };
+    let listed = list(client.clone()).await;
+    assert_ne!(activity(&listed, &worker), "hibernated");
+
+    // Set the idle cap on the running engine.
+    let put = client
+        .put(format!("{base}/api/hibernation/policy"))
+        .json(&json!({ "idle_after": 1 }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(put.status(), StatusCode::OK);
+    let after: Value = put.json().await.unwrap();
+    assert_eq!(after["idle_after"], 1);
+    let read: Value = client
+        .get(format!("{base}/api/hibernation/policy"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        read["idle_after"], 1,
+        "the change is what the next read sees"
+    );
+    assert!(
+        tmp.path().join("state/hibernation-policy.json").is_file(),
+        "an accepted change is saved, so it survives a restart"
+    );
+
+    // The next sweep reads the new cap: the worker goes, the overseer stays.
+    run_once(&state.sessions, &state.hibernation.get()).await;
+    let listed = list(client.clone()).await;
+    assert_eq!(activity(&listed, &worker), "hibernated");
+    let row = listed.iter().find(|s| s["id"] == worker.as_str()).unwrap();
+    assert_eq!(row["hibernation"]["trigger"], "idle");
+    assert_ne!(
+        activity(&listed, &overseer),
+        "hibernated",
+        "an oversight session is spared the idle trigger"
+    );
+
+    // A cap the watcher cannot take live is refused, and nothing changes.
+    let refused = client
+        .put(format!("{base}/api/hibernation/policy"))
+        .json(&json!({ "live_cap": 3 }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        state.hibernation.get().idle_after,
+        Some(Duration::from_secs(1))
+    );
+}
+
 #[tokio::test]
 async fn a_session_pinned_awake_wakes_by_itself_after_a_restart() {
     let (_tmp, cfg, stub) = hibernation_sandbox();
