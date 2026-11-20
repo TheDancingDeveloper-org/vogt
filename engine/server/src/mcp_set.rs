@@ -52,15 +52,19 @@ impl McpSet {
     }
 
     /// The set a start gets for `agent` (WI-2833). A named set is used as
-    /// named; with none named a Codex session gets [`McpSet::Worker`], since
-    /// Codex loads every server in `~/.codex/config.toml` and the full estate
-    /// set alone is over its auto-compact limit. Other agents keep `full`.
-    pub fn for_agent(raw: Option<&str>, agent: Option<&str>) -> Result<Self> {
+    /// named. With none named, a dispatched start (one another session or
+    /// autopilot started, WI-4489) gets [`McpSet::Worker`], so a worker never
+    /// lands on the full set (and its `vogt-prod`) by leaving the field out;
+    /// a Codex session gets it too, since Codex loads every server in
+    /// `~/.codex/config.toml` and the full estate set alone is over its
+    /// auto-compact limit. Oversight and person-started sessions keep `full`.
+    pub fn for_agent(raw: Option<&str>, agent: Option<&str>, dispatched: bool) -> Result<Self> {
         if raw.map(str::trim).is_some_and(|s| !s.is_empty()) {
             return Self::parse(raw);
         }
         Ok(match agent {
             Some("codex") => Self::Worker,
+            _ if dispatched => Self::Worker,
             _ => Self::Full,
         })
     }
@@ -680,23 +684,35 @@ mod tests {
     #[test]
     fn codex_defaults_to_the_worker_set_and_full_only_when_asked() {
         assert_eq!(
-            McpSet::for_agent(None, Some("codex")).unwrap(),
+            McpSet::for_agent(None, Some("codex"), false).unwrap(),
             McpSet::Worker
         );
         assert_eq!(
-            McpSet::for_agent(Some(" "), Some("codex")).unwrap(),
+            McpSet::for_agent(Some(" "), Some("codex"), false).unwrap(),
             McpSet::Worker
         );
         assert_eq!(
-            McpSet::for_agent(Some("full"), Some("codex")).unwrap(),
+            McpSet::for_agent(Some("full"), Some("codex"), false).unwrap(),
             McpSet::Full
         );
         assert_eq!(
-            McpSet::for_agent(None, Some("claude")).unwrap(),
+            McpSet::for_agent(None, Some("claude"), false).unwrap(),
             McpSet::Full
         );
-        assert_eq!(McpSet::for_agent(None, None).unwrap(), McpSet::Full);
-        assert!(McpSet::for_agent(Some("everything"), Some("codex")).is_err());
+        // WI-4489: a dispatched start with no set named gets the worker set,
+        // whatever the agent; naming `full` still gets it.
+        for agent in [Some("claude"), Some("opencode"), None] {
+            assert_eq!(
+                McpSet::for_agent(None, agent, true).unwrap(),
+                McpSet::Worker
+            );
+        }
+        assert_eq!(
+            McpSet::for_agent(Some("full"), Some("claude"), true).unwrap(),
+            McpSet::Full
+        );
+        assert_eq!(McpSet::for_agent(None, None, false).unwrap(), McpSet::Full);
+        assert!(McpSet::for_agent(Some("everything"), Some("codex"), false).is_err());
         for set in [McpSet::Full, McpSet::Worker] {
             assert_eq!(McpSet::parse(Some(set.name())).unwrap(), set);
         }
@@ -723,7 +739,7 @@ mod tests {
         }
         std::fs::write(home.path().join(".codex").join("config.toml"), toml).unwrap();
         let id = uuid::Uuid::nil();
-        let default = McpSet::for_agent(None, Some("codex")).unwrap();
+        let default = McpSet::for_agent(None, Some("codex"), false).unwrap();
         let trim = prepare(default, &[], Some(home.path()), None, state.path(), id);
         for name in [
             "browser",
@@ -745,7 +761,7 @@ mod tests {
             let off = format!("mcp_servers.{name}.enabled=false");
             assert!(!trim.codex_args.contains(&off));
         }
-        let full = McpSet::for_agent(Some("full"), Some("codex")).unwrap();
+        let full = McpSet::for_agent(Some("full"), Some("codex"), false).unwrap();
         assert_eq!(
             prepare(full, &[], Some(home.path()), None, state.path(), id),
             McpTrim::default()

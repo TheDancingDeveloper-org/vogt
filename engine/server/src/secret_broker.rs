@@ -2291,6 +2291,10 @@ fn digest(token: &str) -> [u8; 32] {
     Sha256::digest(token.as_bytes()).into()
 }
 
+/// Credentials that reach the production lane (WI-4489): never brokered to a
+/// worker-set session.
+const PROD_LANE_VARS: &[&str] = &[crate::session_endpoints::VOGT_PROD_TOKEN_ENV];
+
 /// `POST /api/agent-auth/fetch/{var}` — hand a session one manifest secret.
 ///
 /// The caller is a host session presenting its broker grant or a pod
@@ -2404,6 +2408,25 @@ pub async fn fetch(
             token,
         )
             .into_response();
+    }
+
+    // WI-4489: a prod-lane credential goes only to a session allowed the
+    // remote Vogt (oversight, or the full MCP set), whatever the manifest or a
+    // grant says. A worker's breadcrumbs leave the name out; this is the gate.
+    if PROD_LANE_VARS.contains(&var.as_str()) && !state.sessions.may_fetch_vogt_prod(session) {
+        tracing::warn!(
+            target: "vogt::audit",
+            request_id = %request_id,
+            session_id = %session,
+            var = %var,
+            "secret broker refused: prod-lane credential to a worker-set session"
+        );
+        return refusal(
+            StatusCode::FORBIDDEN,
+            &format!(
+                "{var} is a prod-lane credential and is served only to oversight or full-MCP-set sessions; this session runs on the worker set"
+            ),
+        );
     }
 
     // The manifest first, so a grant can never stand in for what the

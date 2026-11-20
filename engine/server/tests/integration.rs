@@ -7425,6 +7425,60 @@ async fn secret_broker_serves_a_session_its_own_vogt_token_and_names_the_fix_to_
     assert!(broker.vogt_token(a).is_none());
 }
 
+/// WI-4489: the broker refuses a prod-lane credential to a worker-set
+/// session, though the manifest declares it; a full-set session gets it.
+#[tokio::test]
+async fn secret_broker_refuses_vogt_prod_token_to_a_worker_set_session() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = broker_config(&tmp, "VOGT_PROD_TOKEN proj prod-bridge-token ondemand\n");
+    let (base, state, _h) = boot_with_state(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let mut ids = Vec::new();
+    for set in ["worker", "full"] {
+        let id: uuid::Uuid = client
+            .post(format!("{base}/api/sessions"))
+            .json(&json!({ "name": format!("prod-{set}"), "mcp_set": set }))
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        ids.push(id);
+    }
+    let broker = state.sessions.secret_broker();
+    let url = format!("{base}/api/agent-auth/fetch/VOGT_PROD_TOKEN");
+    let plain = reqwest::Client::new();
+
+    let r = plain
+        .post(&url)
+        .bearer_auth(broker.issue(ids[0]))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 403);
+    let error = r.json::<Value>().await.unwrap()["error"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(error.contains("worker set"), "{error}");
+
+    let r = plain
+        .post(&url)
+        .bearer_auth(broker.issue(ids[1]))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+}
+
 /// gh#1441: a plain shell is started with no Vogt credential, and in a
 /// brokered deployment the pod has none either. An agent started by hand in
 /// that shell asks the broker for `VOGT_HTTP_TOKEN`; the engine mints the
@@ -21308,9 +21362,12 @@ mod pod_stream {
     /// it, nor is its token named, even with a URL and a manifest token.
     #[tokio::test]
     async fn a_worker_pod_gets_the_worker_set_with_crw_and_no_vogt_prod() {
+        let core = mock_core().await;
         let dir = tempfile::tempdir().unwrap();
         let helper = fake_broker_helper(dir.path());
         let mut h = harness_cfg(false, None, move |cfg| {
+            cfg.vogt_core_url = Some(core);
+            cfg.vogt_core_token = Some("stack-secret".into());
             cfg.vogt_prod_mcp_url = Some("https://vogt-prod.example.test".into());
             cfg.crw_mcp_url = Some("http://crw.example.test:18190/mcp".into());
             cfg.agent_auth_helper = helper;
@@ -21338,13 +21395,14 @@ mod pod_stream {
                     "{body}"
                 );
                 assert!(servers.get("vogt-prod").is_none(), "{body}");
-                // This harness mints no session token, so there is no vogt
-                // entry; its worker profile is covered by the unit tests.
-                assert!(servers.get("vogt").is_none(), "{body}");
+                // The trim (for_mcp_set) puts vogt on its worker profile.
+                let url = servers["vogt"]["url"].as_str().unwrap_or_default();
+                assert!(url.ends_with("/mcp?profile=worker"), "{body}");
             } else {
                 let config = body["codex_config"].as_str().unwrap();
                 assert!(config.contains("[mcp_servers.crw]"), "{config}");
                 assert!(!config.contains("vogt-prod"), "{config}");
+                assert!(config.contains("/mcp?profile=worker"), "{config}");
             }
             assert!(!body.to_string().contains("VOGT_PROD_TOKEN"), "{body}");
             let summary: Value = h
@@ -21372,6 +21430,94 @@ mod pod_stream {
         let servers = &body["mcp_config"]["mcpServers"];
         assert!(servers.get("vogt-prod").is_some(), "{body}");
         assert!(servers.get("crw").is_some(), "{body}");
+        let url = servers["vogt"]["url"].as_str().unwrap_or_default();
+        assert!(!url.contains("profile="), "{body}");
+    }
+
+    /// WI-4489: a start another session or autopilot made, with no mcp_set
+    /// named, is a worker: its pod gets the worker set and no vogt-prod.
+    /// Oversight keeps the full set.
+    #[tokio::test]
+    async fn a_dispatched_pod_start_defaults_to_the_worker_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let helper = fake_broker_helper(dir.path());
+        let mut h = harness_cfg(false, None, move |cfg| {
+            cfg.vogt_prod_mcp_url = Some("https://vogt-prod.example.test".into());
+            cfg.agent_auth_helper = helper;
+            cfg.agent_auth_secrets = vogt_engine_server::secret_broker::parse_manifest(
+                "VOGT_PROD_TOKEN acct prod-bridge-token ondemand\n",
+            )
+            .unwrap();
+        })
+        .await;
+        let mut supervisor: Option<uuid::Uuid> = None;
+        for (start, want) in [
+            (json!({"autopilot": true, "role": "oversight"}), "full"),
+            (json!({"supervisor": "SUP"}), "worker"),
+            (json!({"autopilot": true}), "worker"),
+        ] {
+            let mut body = json!({"name": "pod-session", "template": "pod"});
+            for (k, v) in start.as_object().unwrap() {
+                let v = if v == "SUP" {
+                    json!(supervisor.unwrap().to_string())
+                } else {
+                    v.clone()
+                };
+                body[k] = v;
+            }
+            let id: Uuid = h.start_body(body).await;
+            supervisor.get_or_insert(id);
+            let (_, token) = h.created.recv().await.unwrap();
+            let boot: Value = h
+                .bootstrap_as(id, &token, "claude")
+                .await
+                .json()
+                .await
+                .unwrap();
+            let has_prod = boot["mcp_config"]["mcpServers"].get("vogt-prod").is_some();
+            assert_eq!(has_prod, want == "full", "{start}: {boot}");
+            let summary: Value = h
+                .client
+                .get(format!("{}/api/sessions/{id}", h.base))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            assert_eq!(summary["summary"]["mcp_set"], want, "{start}: {summary}");
+        }
+    }
+
+    /// WI-4489: a bootstrap whose launch details are gone fails closed, on
+    /// the worker set, even for a full-set start.
+    #[tokio::test]
+    async fn a_bootstrap_without_its_launch_falls_back_to_the_worker_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let helper = fake_broker_helper(dir.path());
+        let mut h = harness_cfg(false, None, move |cfg| {
+            cfg.vogt_prod_mcp_url = Some("https://vogt-prod.example.test".into());
+            cfg.agent_auth_helper = helper;
+            cfg.agent_auth_secrets = vogt_engine_server::secret_broker::parse_manifest(
+                "VOGT_PROD_TOKEN acct prod-bridge-token ondemand\n",
+            )
+            .unwrap();
+        })
+        .await;
+        let id = h.start().await;
+        let (_, token) = h.created.recv().await.unwrap();
+        assert!(h.state.agent_auth.take_launch(id).await.is_some());
+        let body: Value = h
+            .bootstrap_as(id, &token, "claude")
+            .await
+            .json()
+            .await
+            .unwrap();
+        assert!(
+            body["mcp_config"]["mcpServers"].get("vogt-prod").is_none(),
+            "{body}"
+        );
+        assert!(!body.to_string().contains("VOGT_PROD_TOKEN"), "{body}");
     }
 
     /// WI-3491 review: a provider whose env_key is already a manifest VAR is

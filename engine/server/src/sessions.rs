@@ -867,6 +867,17 @@ impl SessionRegistry {
         crate::session_endpoints::for_mcp_set(endpoints, mcp_set, mcp_extra)
     }
 
+    /// Whether `id` may be handed the remote Vogt's token (WI-4489): only an
+    /// oversight session or one started on the full MCP set. A worker, or a
+    /// session whose set is unknown, is refused, so hiding the name from its
+    /// breadcrumbs is not the only thing between a worker and `vogt-prod`.
+    pub fn may_fetch_vogt_prod(&self, id: Uuid) -> bool {
+        self.summary_of(id).is_some_and(|s| {
+            s.role == SessionRole::Oversight
+                || s.mcp_set.as_deref() == Some(crate::mcp_set::McpSet::Full.name())
+        })
+    }
+
     /// Whether a remote Vogt is configured for pod sessions (WI-4289).
     pub fn vogt_prod_configured(&self) -> bool {
         self.cfg.vogt_prod_mcp_url.is_some()
@@ -2194,12 +2205,18 @@ impl SessionRegistry {
             ),
             None => self.cfg.agent_onboarding.settings_file.as_deref(),
         };
+        // WI-4489: a start another session or autopilot made, and that is
+        // not an oversight session, is a worker: with no set named it gets
+        // the worker set, never the full one.
+        let dispatched =
+            spec.role != SessionRole::Oversight && (spec.supervisor.is_some() || spec.autopilot);
         let mcp_set = crate::mcp_set::McpSet::for_agent(
             spec.mcp_set
                 .as_deref()
                 .or_else(|| recorded.and_then(|r| r.mcp_set.as_deref())),
             self.agent_of(&spec.command, spec.template.as_deref())
                 .as_deref(),
+            dispatched,
         )?;
         let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
         let claude_dir = spec

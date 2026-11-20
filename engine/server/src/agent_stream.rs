@@ -1325,7 +1325,16 @@ pub async fn bootstrap(
     // is offered only when this engine names one. Its token is never in the
     // pod's environment: the name joins the ondemand breadcrumbs and the
     // session agent fetches it around the agent.
-    let launch = state.agent_auth.take_launch(id).await.unwrap_or_default();
+    // WI-4489: a bootstrap whose launch details are missing fails closed, on
+    // the worker set, rather than open on the full one.
+    let launch = state
+        .agent_auth
+        .take_launch(id)
+        .await
+        .unwrap_or_else(|| PodLaunch {
+            mcp_set: crate::mcp_set::McpSet::Worker,
+            ..PodLaunch::default()
+        });
     // WI-4489: and only to a full-set session; a worker never gets it, so its
     // token is not fetched around a worker's agent either.
     if launch.mcp_set != crate::mcp_set::McpSet::Full {
