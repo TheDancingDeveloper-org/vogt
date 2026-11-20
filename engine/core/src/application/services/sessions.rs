@@ -4451,7 +4451,7 @@ fn at_prompt_for_input(waited: &EngineWait, from_relay: bool) -> bool {
 fn not_ready_next_step(outcome: &str) -> &'static str {
     match outcome {
         "blocked" => {
-            "It reported itself blocked and is not at an input prompt. Read session_screen, then retry once it is at its prompt, or answer its block with session_input."
+            "It reported itself blocked and is not at an input prompt. Read session_screen, and wait with session_wait (until ready) for it to reach its prompt before sending input again; do not repeat this call until it has."
         }
         "awaiting-approval" => {
             "It is showing a permission prompt. Answer it with session_answer, then send any steering text with session_input once the prompt is gone."
