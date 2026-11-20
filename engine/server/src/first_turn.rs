@@ -128,8 +128,14 @@ pub fn watch(bus: EventBus, session: Arc<Session>, policy: Policy) -> tokio::tas
             if !at_composer(&session) {
                 return;
             }
-            if resubmit(&session).await.is_err() {
-                return;
+            // A dialog drawn since the look above holds the Enter back (WI-4459).
+            // It is a person's, so the watch stops rather than reporting a
+            // first turn that never started.
+            match resubmit(&session).await {
+                Ok(crate::enter_guard::EnterOutcome::Sent) => {}
+                Ok(crate::enter_guard::EnterOutcome::Skipped(_))
+                | Ok(crate::enter_guard::EnterOutcome::Stranded(_))
+                | Err(_) => return,
             }
         }
         if !session.is_alive() {
@@ -160,15 +166,18 @@ pub fn watch(bus: EventBus, session: Arc<Session>, policy: Policy) -> tokio::tas
     })
 }
 
-/// Press Enter once: a queued composer submits, an empty one ignores it.
-async fn resubmit(session: &Arc<Session>) -> std::io::Result<()> {
-    session.write_input(b"\r")?;
-    tracing::info!(
-        session = %session.id,
-        event = "first_turn.retry",
-        "the brief was queued but no turn started; pressed Enter once"
-    );
-    Ok(())
+/// Press Enter once, through the shared guard: a queued composer submits, an
+/// empty one ignores it. Held back when a dialog is on screen (WI-4459).
+async fn resubmit(session: &Arc<Session>) -> std::io::Result<crate::enter_guard::EnterOutcome> {
+    let outcome = crate::enter_guard::send_enter(session, "first-turn resubmit").await?;
+    if outcome == crate::enter_guard::EnterOutcome::Sent {
+        tracing::info!(
+            session = %session.id,
+            event = "first_turn.retry",
+            "the brief was queued but no turn started; pressed Enter once"
+        );
+    }
+    Ok(outcome)
 }
 
 /// What a fresh session was doing when the watch last looked at it.
@@ -292,7 +301,32 @@ fn is_at_composer(session: &Arc<Session>, rendered: &screen::Rendered) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::watches;
+    use super::{resubmit, watches};
+    use crate::enter_guard::{
+        tests::{dialog_output, recording_session},
+        Clearance, EnterOutcome,
+    };
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    /// WI-4459: the first-turn resubmit presses Enter through the shared
+    /// guard. The screen is clean at its first look and a permission dialog
+    /// is drawn after it, so the second read in the stable window sees the
+    /// dialog and no Enter is written. The old code wrote a bare Enter here.
+    #[tokio::test]
+    async fn a_resubmit_is_held_back_when_a_dialog_is_drawn_after_the_first_look() {
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let (session, output) = recording_session(Arc::clone(&writes));
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            output.send(dialog_output()).unwrap();
+            // Keep the pipe open for the session's life.
+            std::future::pending::<()>().await;
+        });
+        let outcome = resubmit(&session).await.unwrap();
+        assert_eq!(outcome, EnterOutcome::Skipped(Clearance::Dialog));
+        assert!(writes.lock().unwrap().is_empty());
+    }
 
     /// WI-4186 review: the gate `sessions.rs` applies. Codex only, fresh and
     /// briefed only; Claude Code (with or without autopilot, host or pod) is
