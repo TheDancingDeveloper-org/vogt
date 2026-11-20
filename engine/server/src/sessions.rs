@@ -798,6 +798,10 @@ impl SessionRegistry {
                 (link, reader, None, false)
             }
         };
+        // Before the reader thread starts: every ack must find its checkpoint.
+        if let Some(history) = &self.history {
+            link.keep_log(history.log_path(id));
+        }
         let backend = Arc::new(crate::pod_backend::PodBackend::new(
             id,
             Arc::clone(&link),
@@ -1165,11 +1169,18 @@ impl SessionRegistry {
             let Some(token) = read_pod_token(&self.cfg.state_dir, id).filter(|_| recovered) else {
                 continue;
             };
-            let cursor = self
-                .history
-                .as_ref()
-                .and_then(|h| std::fs::metadata(h.log_path(id)).ok())
-                .map_or(0, |m| m.len());
+            // The stream offset, not the log length: gap markers and stripped
+            // OSC 7501 queries make the two differ (WI-4453).
+            let cursor = match self.history.as_ref().map(|h| h.log_path(id)) {
+                Some(log) => match crate::agent_stream::restore_resume_point(&log) {
+                    Ok(cursor) => cursor,
+                    Err(e) => {
+                        tracing::warn!(session = %id, error = %e, "could not restore the session log to its checkpoint; not adopting the pod");
+                        continue;
+                    }
+                },
+                None => 0,
+            };
             let uid = pod.metadata.uid.clone();
             match self.adopt_one(record, cursor, token, uid).await {
                 Ok(_link) => {
