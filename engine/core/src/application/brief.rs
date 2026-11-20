@@ -1,7 +1,9 @@
 //! What a session's agent is told it is working on. Ports
 //! `src/vogt/application/services/_brief.py`, and is checked byte for byte
-//! against its output: the goldens under `brief_golden/` are recorded by
-//! `scripts/gen_brief_golden.py`.
+//! against the goldens under `brief_golden/`, which are Rust-native snapshots
+//! (WI-4467 follow-up): after an intended change, regenerate them with
+//! `UPDATE_SNAPSHOTS=1 cargo test -p vogt-core brief` and review the diff.
+//! `scripts/gen_brief_golden.py` is retired.
 //!
 //! The brief is markdown assembled from what Vogt already knows and nothing
 //! else. It says only what is recorded. The session's standing guide (how to
@@ -771,8 +773,7 @@ mod tests {
         Moment::from_unix(0, 0)
     }
 
-    /// The scenarios `scripts/gen_brief_golden.py` records. Keep the two in
-    /// step: a change to one is a change to the goldens.
+    /// The scenarios the goldens record; a change here is a change to them.
     fn item(id: &str, reference: &str, title: &str) -> WorkItem {
         WorkItem {
             id: id.to_string(),
@@ -951,15 +952,22 @@ mod tests {
     const SESSION: &str = "ses_brief01";
 
     fn assert_golden(brief: &ComposedBrief, name: &str) {
+        if std::env::var_os("UPDATE_SNAPSHOTS").is_some() {
+            let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("src/application/brief_golden");
+            std::fs::write(dir.join(format!("{name}.md")), &brief.text).unwrap();
+            std::fs::write(dir.join(format!("{name}.companion.md")), &brief.companion).unwrap();
+            return;
+        }
         assert_eq!(
             brief.text,
             golden(name),
-            "{name}: the brief drifted from Python"
+            "{name}: the brief drifted from its snapshot (UPDATE_SNAPSHOTS=1 regenerates)"
         );
         assert_eq!(
             brief.companion,
             golden(&format!("{name}.companion")),
-            "{name}: the companion drifted from Python"
+            "{name}: the companion drifted from its snapshot (UPDATE_SNAPSHOTS=1 regenerates)"
         );
     }
 
