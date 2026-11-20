@@ -7695,7 +7695,7 @@
                 "title": "At"
               },
               "trigger": {
-                "description": "manual / idle / memory / shutdown (the engine was stopping) / recovered (found at the engine's boot without a process).",
+                "description": "manual / idle / memory / shutdown (the engine was stopping) / recovered (found at the engine's boot without a process) / budget (a hard budget limit) / done (declared done, then quiet).",
                 "title": "Trigger",
                 "type": "string"
               },
@@ -10072,7 +10072,7 @@
                 "title": "At"
               },
               "trigger": {
-                "description": "manual / idle / memory / shutdown (the engine was stopping) / recovered (found at the engine's boot without a process).",
+                "description": "manual / idle / memory / shutdown (the engine was stopping) / recovered (found at the engine's boot without a process) / budget (a hard budget limit) / done (declared done, then quiet).",
                 "title": "Trigger",
                 "type": "string"
               },
@@ -13872,7 +13872,7 @@
                 "title": "At"
               },
               "trigger": {
-                "description": "manual / idle / memory / shutdown (the engine was stopping) / recovered (found at the engine's boot without a process).",
+                "description": "manual / idle / memory / shutdown (the engine was stopping) / recovered (found at the engine's boot without a process) / budget (a hard budget limit) / done (declared done, then quiet).",
                 "title": "Trigger",
                 "type": "string"
               },
@@ -16251,7 +16251,7 @@
                 "title": "At"
               },
               "trigger": {
-                "description": "manual / idle / memory / shutdown (the engine was stopping) / recovered (found at the engine's boot without a process).",
+                "description": "manual / idle / memory / shutdown (the engine was stopping) / recovered (found at the engine's boot without a process) / budget (a hard budget limit) / done (declared done, then quiet).",
                 "title": "Trigger",
                 "type": "string"
               },
@@ -18625,7 +18625,7 @@
                 "title": "At"
               },
               "trigger": {
-                "description": "manual / idle / memory / shutdown (the engine was stopping) / recovered (found at the engine's boot without a process).",
+                "description": "manual / idle / memory / shutdown (the engine was stopping) / recovered (found at the engine's boot without a process) / budget (a hard budget limit) / done (declared done, then quiet).",
                 "title": "Trigger",
                 "type": "string"
               },
@@ -20997,7 +20997,7 @@
                 "title": "At"
               },
               "trigger": {
-                "description": "manual / idle / memory / shutdown (the engine was stopping) / recovered (found at the engine's boot without a process).",
+                "description": "manual / idle / memory / shutdown (the engine was stopping) / recovered (found at the engine's boot without a process) / budget (a hard budget limit) / done (declared done, then quiet).",
                 "title": "Trigger",
                 "type": "string"
               },
@@ -23367,7 +23367,7 @@
                 "title": "At"
               },
               "trigger": {
-                "description": "manual / idle / memory / shutdown (the engine was stopping) / recovered (found at the engine's boot without a process).",
+                "description": "manual / idle / memory / shutdown (the engine was stopping) / recovered (found at the engine's boot without a process) / budget (a hard budget limit) / done (declared done, then quiet).",
                 "title": "Trigger",
                 "type": "string"
               },
@@ -33411,7 +33411,7 @@
                 "title": "At"
               },
               "trigger": {
-                "description": "manual / idle / memory / shutdown (the engine was stopping) / recovered (found at the engine's boot without a process).",
+                "description": "manual / idle / memory / shutdown (the engine was stopping) / recovered (found at the engine's boot without a process) / budget (a hard budget limit) / done (declared done, then quiet).",
                 "title": "Trigger",
                 "type": "string"
               },
@@ -34945,7 +34945,7 @@
                 "title": "At"
               },
               "trigger": {
-                "description": "manual / idle / memory / shutdown (the engine was stopping) / recovered (found at the engine's boot without a process).",
+                "description": "manual / idle / memory / shutdown (the engine was stopping) / recovered (found at the engine's boot without a process) / budget (a hard budget limit) / done (declared done, then quiet).",
                 "title": "Trigger",
                 "type": "string"
               },
@@ -36533,7 +36533,7 @@
                 "title": "At"
               },
               "trigger": {
-                "description": "manual / idle / memory / shutdown (the engine was stopping) / recovered (found at the engine's boot without a process).",
+                "description": "manual / idle / memory / shutdown (the engine was stopping) / recovered (found at the engine's boot without a process) / budget (a hard budget limit) / done (declared done, then quiet).",
                 "title": "Trigger",
                 "type": "string"
               },
@@ -38739,7 +38739,7 @@
                 "title": "At"
               },
               "trigger": {
-                "description": "manual / idle / memory / shutdown (the engine was stopping) / recovered (found at the engine's boot without a process).",
+                "description": "manual / idle / memory / shutdown (the engine was stopping) / recovered (found at the engine's boot without a process) / budget (a hard budget limit) / done (declared done, then quiet).",
                 "title": "Trigger",
                 "type": "string"
               },
@@ -40541,7 +40541,7 @@
                 "title": "At"
               },
               "trigger": {
-                "description": "manual / idle / memory / shutdown (the engine was stopping) / recovered (found at the engine's boot without a process).",
+                "description": "manual / idle / memory / shutdown (the engine was stopping) / recovered (found at the engine's boot without a process) / budget (a hard budget limit) / done (declared done, then quiet).",
                 "title": "Trigger",
                 "type": "string"
               },
@@ -42033,7 +42033,7 @@
                 "title": "At"
               },
               "trigger": {
-                "description": "manual / idle / memory / shutdown (the engine was stopping) / recovered (found at the engine's boot without a process).",
+                "description": "manual / idle / memory / shutdown (the engine was stopping) / recovered (found at the engine's boot without a process) / budget (a hard budget limit) / done (declared done, then quiet).",
                 "title": "Trigger",
                 "type": "string"
               },
@@ -43515,7 +43515,7 @@
                 "title": "At"
               },
               "trigger": {
-                "description": "manual / idle / memory / shutdown (the engine was stopping) / recovered (found at the engine's boot without a process).",
+                "description": "manual / idle / memory / shutdown (the engine was stopping) / recovered (found at the engine's boot without a process) / budget (a hard budget limit) / done (declared done, then quiet).",
                 "title": "Trigger",
                 "type": "string"
               },
@@ -45123,7 +45123,7 @@
                 "title": "At"
               },
               "trigger": {
-                "description": "manual / idle / memory / shutdown (the engine was stopping) / recovered (found at the engine's boot without a process).",
+                "description": "manual / idle / memory / shutdown (the engine was stopping) / recovered (found at the engine's boot without a process) / budget (a hard budget limit) / done (declared done, then quiet).",
                 "title": "Trigger",
                 "type": "string"
               },
@@ -46599,7 +46599,7 @@
                 "title": "At"
               },
               "trigger": {
-                "description": "manual / idle / memory / shutdown (the engine was stopping) / recovered (found at the engine's boot without a process).",
+                "description": "manual / idle / memory / shutdown (the engine was stopping) / recovered (found at the engine's boot without a process) / budget (a hard budget limit) / done (declared done, then quiet).",
                 "title": "Trigger",
                 "type": "string"
               },
@@ -48085,7 +48085,7 @@
                 "title": "At"
               },
               "trigger": {
-                "description": "manual / idle / memory / shutdown (the engine was stopping) / recovered (found at the engine's boot without a process).",
+                "description": "manual / idle / memory / shutdown (the engine was stopping) / recovered (found at the engine's boot without a process) / budget (a hard budget limit) / done (declared done, then quiet).",
                 "title": "Trigger",
                 "type": "string"
               },
@@ -49287,7 +49287,7 @@
                 "title": "At"
               },
               "trigger": {
-                "description": "manual / idle / memory / shutdown (the engine was stopping) / recovered (found at the engine's boot without a process).",
+                "description": "manual / idle / memory / shutdown (the engine was stopping) / recovered (found at the engine's boot without a process) / budget (a hard budget limit) / done (declared done, then quiet).",
                 "title": "Trigger",
                 "type": "string"
               },

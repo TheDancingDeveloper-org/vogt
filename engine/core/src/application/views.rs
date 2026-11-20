@@ -1294,12 +1294,39 @@ mod tests {
         // `place.metrics` counts the backlog without ranking it (WI-4448), but
         // the stepping clock must land where `backlog(limit=1)` leaves it, or
         // every later fake-clock stamp drifts from Python's (WI-4462).
+        // Two observed issues: Python reads the clock once per observed
+        // candidate inside `trust_for`, so the count must step for each.
+        use crate::core::SweepOutcome;
+        use crate::storage::interface::ObservedStore;
+        use crate::storage::observed_types::PendingObservation;
         let now = Moment::from_unix(1_781_000_000, 0);
         with_trust(now, |ctx| {
             ctx.declared.migrate().unwrap();
+            ctx.observed.migrate().unwrap();
             ctx.declared
                 .bootstrap(&Principal::new("local:test-user", ActorKind::Human, "Test").unwrap())
                 .unwrap();
+            let sweep = ctx
+                .observed
+                .begin_sweep("test-forge", &["vogt".to_string()], now)
+                .unwrap();
+            let findings: Vec<PendingObservation> = (0..2)
+                .map(|n| PendingObservation {
+                    kind: "forge.issue".into(),
+                    subject_key: format!("vogt/issues/{n}"),
+                    payload: serde_json::json!({"state": "open", "title": format!("issue {n}"), "number": n}),
+                    content_digest: format!("issue-{n}"),
+                    project_id: None,
+                    source_url: None,
+                    promoted: false,
+                })
+                .collect();
+            ctx.observed.append(&sweep.id, &findings, now).unwrap();
+            ctx.observed
+                .finish_sweep(&sweep.id, SweepOutcome::Ok, &[], now, None)
+                .unwrap();
+            ctx.observed.rebuild_latest().unwrap();
+            assert_eq!(backlog_total_considered(ctx).unwrap(), 2);
             let steps = |run: &dyn Fn()| {
                 let before = now_of(&ctx.clock).unix_seconds();
                 run();
