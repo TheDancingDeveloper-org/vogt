@@ -2208,6 +2208,47 @@ mod tests {
         .unwrap();
     }
 
+    /// A result report stored the way an idempotency-keyed report is: a raw row
+    /// whose `data` JSON carries `idempotency_key`.
+    fn seed_stored_report_with_idempotency_key(built: &Built, work_item_id: &str) {
+        let Built::StepSequential(ctx) = built else {
+            unreachable!("context() builds a step clock");
+        };
+        let db = ctx.config.resolved_data_dir().join("declared.sqlite3");
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        let actor_id: String = conn
+            .query_row(
+                "SELECT id FROM actors WHERE identity_ref = 'local:test-user'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        conn.execute(
+            "INSERT INTO session_reports (id, actor_id, engine_session_id, work_item_id, kind, summary, data, created_at)
+             VALUES ('rpt-keyed', ?1, NULL, ?2, 'result', 'keyed result',
+                     '{\"branch\":\"backlog-1\",\"idempotency_key\":\"rpt-key-1\"}',
+                     '2023-11-14T22:13:20Z')",
+            rusqlite::params![actor_id, work_item_id],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_project_brief_reads_a_stored_report_with_an_idempotency_key() {
+        let ctx = context("local:test-user", None);
+        widget_with_items(&ctx);
+        let item = work_id_of(&ctx, "WI-1");
+        seed_stored_report_with_idempotency_key(&ctx, &item);
+
+        let brief = brief_op(&ctx, json!({"slug": "widget"})).unwrap();
+
+        assert!(brief.get("migration_error").is_none(), "{brief}");
+        assert_eq!(
+            brief["digest"]["recent_results"],
+            json!(["2023-11-14 22:13Z WI-1: keyed result"]),
+        );
+    }
+
     /// The observed store is migrated once per test, before its first sweep.
     fn migrate_observed(built: &Built) {
         crate::with_ctx!(built, |ctx| ctx.observed.migrate().unwrap());
