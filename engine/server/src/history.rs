@@ -2,12 +2,17 @@
 // Logs session metadata and optionally PTY output for replay and search.
 
 use std::{
+    collections::HashMap,
     fs::{File, OpenOptions},
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use serde::{Deserialize, Serialize};
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
+use sqlx::sqlite::{
+    SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions, SqliteSynchronous,
+};
 use sqlx::{AssertSqlSafe, FromRow, Row};
 use time::OffsetDateTime;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -20,7 +25,18 @@ pub struct SessionHistory {
     pub pool: SqlitePool,
     db_path: PathBuf,
     log_dir: PathBuf,
+    /// Economics snapshots waiting for their flush, newest per session
+    /// (WI-2703). A snapshot queued again before the flush replaces the last.
+    economics_pending: Arc<Mutex<HashMap<Uuid, String>>>,
 }
+
+/// How often coalesced economics snapshots reach the database (WI-2703). A
+/// session's economics change every turn; one write per session per interval
+/// keeps the writer off the turn path while the history DB is busy.
+pub const ECONOMICS_FLUSH_INTERVAL: Duration = Duration::from_secs(5);
+
+/// How long a write waits on a locked history DB before it fails (WI-2703).
+const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistoryStorageStats {
@@ -168,9 +184,16 @@ impl SessionHistory {
         std::fs::create_dir_all(&log_dir)
             .map_err(|e| ApiError::Internal(format!("failed to create log dir: {}", e)))?;
 
+        // WAL lets readers (session list, search) run while a write commits;
+        // NORMAL syncs only at checkpoints, which is safe under WAL and makes
+        // each commit cheaper on a busy volume; busy_timeout waits out a
+        // writer instead of failing with "database is locked" (WI-2703).
         let options = SqliteConnectOptions::new()
             .filename(&db_path)
-            .create_if_missing(true);
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .synchronous(SqliteSynchronous::Normal)
+            .busy_timeout(BUSY_TIMEOUT);
 
         let pool = SqlitePoolOptions::new()
             .max_connections(5)
@@ -178,14 +201,48 @@ impl SessionHistory {
             .await
             .map_err(|e| ApiError::Internal(format!("failed to connect to history db: {}", e)))?;
 
+        let economics_pending = Arc::new(Mutex::new(HashMap::new()));
         let history = Self {
             pool,
             db_path,
             log_dir,
+            economics_pending,
         };
         history.init_schema().await?;
 
+        // The writer: one background task flushes coalesced economics on an
+        // interval. Request paths only queue; they never wait on a commit.
+        let pool = history.pool.clone();
+        let pending = Arc::clone(&history.economics_pending);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(ECONOMICS_FLUSH_INTERVAL);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tick.tick().await;
+                flush_pending_economics(&pool, &pending).await;
+            }
+        });
+
         Ok(history)
+    }
+
+    /// Queue a session's economics snapshot for the next flush (WI-2703). Never
+    /// touches the database, so the turn that produced it does not wait.
+    pub fn queue_economics(&self, id: Uuid, economics: String) {
+        match self.economics_pending.lock() {
+            Ok(mut pending) => {
+                pending.insert(id, economics);
+            }
+            Err(_) => {
+                tracing::warn!(session = %id, "economics queue is poisoned; snapshot dropped")
+            }
+        }
+    }
+
+    /// Write every queued economics snapshot now, and return how many landed.
+    /// Called at shutdown so the last turns are not lost with the process.
+    pub async fn flush_economics(&self) -> usize {
+        flush_pending_economics(&self.pool, &self.economics_pending).await
     }
 
     /// Directory where per-session scrollback logs are persisted for replay.
@@ -389,13 +446,7 @@ impl SessionHistory {
     /// Write a session's economics snapshot (WI-1245). A row that is not there
     /// yet — the provisional archive is still on its way — reports `false`.
     pub async fn set_economics(&self, id: Uuid, economics: &str) -> Result<bool> {
-        let done = sqlx::query("UPDATE sessions SET economics = ? WHERE id = ?")
-            .bind(economics)
-            .bind(id.to_string())
-            .execute(&self.pool)
-            .await
-            .map_err(|e| ApiError::Internal(format!("failed to update session economics: {e}")))?;
-        Ok(done.rows_affected() > 0)
+        write_economics(&self.pool, id, economics).await
     }
 
     /// List archived sessions
@@ -843,6 +894,42 @@ pub(crate) fn user_query_to_fts(query: &str) -> Option<String> {
 /// Lowercased alphanumeric/underscore tokens (max 16), the same tokenisation
 /// the FTS query builder uses, for substring-matching live-session scrollback.
 /// Empty when the query carries no usable term.
+async fn write_economics(pool: &SqlitePool, id: Uuid, economics: &str) -> Result<bool> {
+    let done = sqlx::query("UPDATE sessions SET economics = ? WHERE id = ?")
+        .bind(economics)
+        .bind(id.to_string())
+        .execute(pool)
+        .await
+        .map_err(|e| ApiError::Internal(format!("failed to update session economics: {e}")))?;
+    Ok(done.rows_affected() > 0)
+}
+
+/// Take every queued economics snapshot and write it. A snapshot whose write
+/// fails goes back in the queue unless a newer one has replaced it, so the next
+/// flush retries it. Returns how many were written.
+async fn flush_pending_economics(
+    pool: &SqlitePool,
+    pending: &Mutex<HashMap<Uuid, String>>,
+) -> usize {
+    let batch: Vec<(Uuid, String)> = match pending.lock() {
+        Ok(mut pending) => pending.drain().collect(),
+        Err(_) => return 0,
+    };
+    let mut written = 0;
+    for (id, economics) in batch {
+        match write_economics(pool, id, &economics).await {
+            Ok(_) => written += 1,
+            Err(e) => {
+                tracing::warn!(session = %id, error = %e, "failed to persist session economics");
+                if let Ok(mut pending) = pending.lock() {
+                    pending.entry(id).or_insert(economics);
+                }
+            }
+        }
+    }
+    written
+}
+
 pub fn query_tokens(query: &str) -> Vec<String> {
     query
         .split(|c: char| !c.is_alphanumeric() && c != '_')
@@ -959,6 +1046,35 @@ fn summarize_regular_files(path: &Path) -> Result<(usize, u64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn queued_economics_coalesce_into_one_write_per_flush() {
+        // WI-2703: a session's economics change every turn. Three queued
+        // snapshots are one write of the last one, not three commits.
+        let dir = tempfile::tempdir().unwrap();
+        let history = SessionHistory::new(dir.path()).await.unwrap();
+        let id = Uuid::parse_str("00000000-0000-4000-8000-0000000000e1").unwrap();
+        sqlx::query(
+            "INSERT INTO sessions (id, name, created_at, command)
+             VALUES (?, 'econ', '2026-11-20T00:00:00Z', 'bash')",
+        )
+        .bind(id.to_string())
+        .execute(&history.pool)
+        .await
+        .unwrap();
+        history.queue_economics(id, r#"{"turn":1}"#.into());
+        history.queue_economics(id, r#"{"turn":2}"#.into());
+        history.queue_economics(id, r#"{"turn":3}"#.into());
+        assert_eq!(history.flush_economics().await, 1, "three turns, one write");
+        let stored: Option<String> =
+            sqlx::query_scalar("SELECT economics FROM sessions WHERE id = ?")
+                .bind(id.to_string())
+                .fetch_one(&history.pool)
+                .await
+                .unwrap();
+        assert_eq!(stored.as_deref(), Some(r#"{"turn":3}"#));
+        assert_eq!(history.flush_economics().await, 0, "nothing left to write");
+    }
 
     #[test]
     fn query_tokens_lowercases_splits_and_keeps_underscores() {

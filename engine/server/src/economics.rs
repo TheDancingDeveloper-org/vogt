@@ -936,7 +936,7 @@ pub fn spawn_economics_tailer(state: Arc<AppState>, home: PathBuf, tick: Duratio
                 }
                 if persist {
                     if let Some(json) = json {
-                        persist_snapshot(&state, session.id, json).await;
+                        persist_snapshot(&state, session.id, json);
                     }
                 }
             }
@@ -973,13 +973,14 @@ fn report_compaction_loop(
     }
 }
 
-async fn persist_snapshot(state: &AppState, id: uuid::Uuid, json: String) {
+/// Queue the snapshot for the history writer's next flush (WI-2703). It never
+/// waits on the database: a turn's economics change, a locked history DB must
+/// not hold up the session.
+fn persist_snapshot(state: &AppState, id: uuid::Uuid, json: String) {
     let Some(history) = &state.history else {
         return;
     };
-    if let Err(e) = history.set_economics(id, &json).await {
-        tracing::warn!(session = %id, error = %e, "failed to persist session economics");
-    }
+    history.queue_economics(id, json);
 }
 
 #[cfg(test)]
