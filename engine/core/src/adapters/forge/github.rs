@@ -862,6 +862,7 @@ fn runs(repo: &RepoRef, response: &ForgeResponse) -> Vec<ForgeCheck> {
             check.source_url = text(item.get("html_url")).map(str::to_owned);
             check.run_id = item.get("id").and_then(serde_json::Value::as_i64);
             check.run_attempt = item.get("run_attempt").and_then(serde_json::Value::as_i64);
+            check.run_started_at = text(item.get("run_started_at")).map(str::to_owned);
             check
         })
         .collect()

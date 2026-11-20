@@ -273,6 +273,9 @@ pub struct ForgeCheck {
     pub workflow_path: Option<String>,
     pub run_id: Option<i64>,
     pub run_attempt: Option<i64>,
+    /// When the run (this attempt) started, as the forge said — what hung-run
+    /// detection measures from. `None` where the forge does not say.
+    pub run_started_at: Option<String>,
 }
 
 impl ForgeCheck {
@@ -296,6 +299,7 @@ impl ForgeCheck {
             workflow_path: None,
             run_id: None,
             run_attempt: None,
+            run_started_at: None,
         }
     }
 }
