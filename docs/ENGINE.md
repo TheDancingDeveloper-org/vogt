@@ -2419,7 +2419,16 @@ engine id (WI-912; the design is `docs/design/session-hibernation.md`).
   agent declared itself done (`AUTOPILOT: DONE`; a `result` report waits on
   WI-1520) at least that long ago with no input written to it since; an oversight session is
   never taken this way, and autopilot does not exempt it. The change reads
-  `hibernated (done)` in `session_changes`. A blocked report a later turn
+  `hibernated (done)` in `session_changes`.
+  The idle, done and memory caps can be changed on a running engine (WI-4457):
+  `GET /api/hibernation/policy` reads them and `PUT` (needs `sessions`) takes a
+  partial object such as `{"idle_after": "30m", "done_after": null}` (`null`
+  unsets a trigger; a number is seconds or, for memory, bytes). The watcher
+  reads the policy every minute, so a change applies on the next sweep with no
+  restart. Each accepted change is audited (`vogt::audit`, `hibernation.policy`)
+  and saved to `state_dir/hibernation-policy.json`, which overrides the
+  environment at the next boot. `ENGINE_HIBERNATE_LIVE_CAP` is boot-only. An
+  oversight session is spared the idle trigger, as autopilot is. A blocked report a later turn
   dealt with is cleared by the engine without a model turn (WI-1314, see
   Blocked reports). Available memory is the cgroup
   `memory.max` minus `memory.current` when the pod has a limit, otherwise
