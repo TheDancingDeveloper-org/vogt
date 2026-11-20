@@ -1683,6 +1683,7 @@ impl SessionRegistry {
         spec.name = normalize_session_name(&spec.name)?;
         spec.work_item = vogt_engine_contract::normalize_work_item(spec.work_item.as_deref())
             .map_err(ApiError::BadRequest)?;
+        spec.wake_on = crate::oversight_wake::normalize_wake_on(&spec.wake_on)?;
         validate_requested_placement(spec.placement.as_deref(), self.cfg.pod_backends_enabled)?;
         validate_placement_template_requirement(
             spec.placement.as_deref(),
@@ -2595,6 +2596,8 @@ impl SessionRegistry {
         session.set_budget(spec.budget.clone());
         session.set_role(spec.role);
         session.set_work_item(spec.work_item.clone());
+        session.set_supervisor(spec.supervisor);
+        session.set_wake_on(spec.wake_on.clone());
         session.set_workspace(workspace.clone());
         // An oversight session is the one that brings the others back, so it
         // must come back by itself: pinned awake, it is never hibernated by
@@ -2651,6 +2654,8 @@ impl SessionRegistry {
                 record.budget = spec.budget.clone();
                 record.role = spec.role;
                 record.work_item = spec.work_item.clone();
+                record.supervisor = spec.supervisor;
+                record.wake_on = spec.wake_on.clone();
                 record.session_ref = spec.session_ref.clone();
                 record.workspace = workspace.clone();
                 record.keep_awake = session.keep_awake();
@@ -3597,6 +3602,8 @@ impl SessionRegistry {
             policy: record.policy.clone(),
             role: record.role,
             work_item: record.work_item.clone(),
+            supervisor: record.supervisor,
+            wake_on: record.wake_on.clone(),
             session_ref: checked_session_ref(record.id, record.session_ref.as_deref()),
             // A wake returns to the worktree the first start already cut; it
             // does not cut another (WI-1298).
@@ -4930,6 +4937,8 @@ fn hibernated_summary(record: &Record, screen_bytes: u64) -> Option<SessionSumma
         done_at: record.done_at.clone(),
         role: record.role,
         work_item: record.work_item.clone(),
+        supervisor: record.supervisor,
+        wake_on: record.wake_on.clone(),
         workspace: record.workspace.clone(),
         resources: None,
         template: record.template.clone(),
@@ -5902,6 +5911,8 @@ mod tests {
             done_at: None,
             role: vogt_engine_contract::SessionRole::Worker,
             work_item: None,
+            supervisor: None,
+            wake_on: Vec::new(),
             workspace: None,
             resources: None,
             template: None,
@@ -6205,6 +6216,8 @@ mod host_placement_tests {
             policy: None,
             role: Default::default(),
             work_item: None,
+            supervisor: None,
+            wake_on: Vec::new(),
             session_ref: None,
             worktree: None,
             cols: Some(80),
