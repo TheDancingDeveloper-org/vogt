@@ -145,12 +145,19 @@ pub struct PodConfig {
     /// unset; a template policy may override it.
     #[serde(default = "default_session_deadline")]
     pub session_deadline: Duration,
-    /// The size limit on each session pod's own `emptyDir` volumes
-    /// (`ENGINE_POD_TMP_SIZE_LIMIT`, default 10Gi). The kubelet evicts a pod
-    /// that writes past it, so one session cannot fill the node's disk. Empty
-    /// leaves the volumes unbounded.
+    /// The size limit on a session pod's home, `/tmp` and run `emptyDir`
+    /// volumes (`ENGINE_POD_TMP_SIZE_LIMIT`, default 10Gi). The kubelet evicts
+    /// a pod that writes past it, so one session cannot fill the node's disk.
+    /// Empty leaves these volumes unbounded.
     #[serde(default = "default_tmp_size_limit")]
     pub tmp_size_limit: Option<k8s_openapi::apimachinery::pkg::api::resource::Quantity>,
+    /// The size limit on the work tree, the workspace tree and the private
+    /// tool cache `emptyDir`s (`ENGINE_POD_WORK_SIZE_LIMIT`, default 30Gi).
+    /// These hold real build output (a Rust `target/` is tens of GiB), so they
+    /// get a larger cap than the small volumes. Keep it under the pod's
+    /// `ephemeral-storage` limit (40Gi by default). Empty leaves them unbounded.
+    #[serde(default = "default_work_size_limit")]
+    pub work_size_limit: Option<k8s_openapi::apimachinery::pkg::api::resource::Quantity>,
     /// How long an adopted pod's agent has to dial in again after an engine
     /// restart before the pod is given up as lost.
     #[serde(default = "default_reconnect_timeout")]
@@ -625,6 +632,13 @@ fn default_tmp_size_limit() -> Option<k8s_openapi::apimachinery::pkg::api::resou
         "10Gi".into(),
     ))
 }
+/// 30Gi, under the pod's default 40Gi `ephemeral-storage` limit, so one work
+/// volume at its cap cannot on its own push the pod past that limit.
+fn default_work_size_limit() -> Option<k8s_openapi::apimachinery::pkg::api::resource::Quantity> {
+    Some(k8s_openapi::apimachinery::pkg::api::resource::Quantity(
+        "30Gi".into(),
+    ))
+}
 /// A Kubernetes quantity the `emptyDir` `sizeLimit` accepts: a whole or
 /// decimal number with an optional binary (`Ki`..`Ei`) or decimal (`k`, `M`,
 /// `G`, `T`, `P`, `E`) suffix. Anything else is refused at startup rather than
@@ -649,6 +663,31 @@ fn bounded_empty_dir(cfg: &PodConfig) -> EmptyDirVolumeSource {
         size_limit: cfg.tmp_size_limit.clone(),
         ..Default::default()
     }
+}
+/// An `emptyDir` for build output and the workspace tree, bounded by the
+/// deployment's `work_size_limit` instead of the smaller `tmp_size_limit`.
+fn bounded_work_dir(cfg: &PodConfig) -> EmptyDirVolumeSource {
+    EmptyDirVolumeSource {
+        size_limit: cfg.work_size_limit.clone(),
+        ..Default::default()
+    }
+}
+/// Reads one size-limit knob: unset keeps the default, empty disables the
+/// limit, and anything that is not a quantity is a startup error.
+fn parse_size_limit(
+    name: &str,
+    value: Option<String>,
+    default: Option<k8s_openapi::apimachinery::pkg::api::resource::Quantity>,
+) -> Result<Option<k8s_openapi::apimachinery::pkg::api::resource::Quantity>> {
+    let Some(v) = value else {
+        return Ok(default);
+    };
+    if !v.is_empty() && !is_size_quantity(&v) {
+        return Err(ApiError::Config(format!(
+            "{name} must be a quantity such as 10Gi, got {v:?}"
+        )));
+    }
+    Ok((!v.is_empty()).then_some(k8s_openapi::apimachinery::pkg::api::resource::Quantity(v)))
 }
 impl Default for PodConfig {
     fn default() -> Self {
@@ -714,6 +753,7 @@ impl Default for PodConfig {
             unschedulable_timeout: default_unschedulable_timeout(),
             session_deadline: default_session_deadline(),
             tmp_size_limit: default_tmp_size_limit(),
+            work_size_limit: default_work_size_limit(),
             reconnect_timeout: default_reconnect_timeout(),
             orphan_ttl: default_orphan_ttl(),
             workspace: None,
@@ -847,15 +887,16 @@ impl PodConfig {
             })?;
             cfg.session_deadline = Duration::from_secs(secs);
         }
-        if let Some(v) = text("ENGINE_POD_TMP_SIZE_LIMIT") {
-            if !v.is_empty() && !is_size_quantity(&v) {
-                return Err(ApiError::Config(format!(
-                    "ENGINE_POD_TMP_SIZE_LIMIT must be a quantity such as 10Gi, got {v:?}"
-                )));
-            }
-            cfg.tmp_size_limit = (!v.is_empty())
-                .then_some(k8s_openapi::apimachinery::pkg::api::resource::Quantity(v));
-        }
+        cfg.tmp_size_limit = parse_size_limit(
+            "ENGINE_POD_TMP_SIZE_LIMIT",
+            text("ENGINE_POD_TMP_SIZE_LIMIT"),
+            cfg.tmp_size_limit.take(),
+        )?;
+        cfg.work_size_limit = parse_size_limit(
+            "ENGINE_POD_WORK_SIZE_LIMIT",
+            text("ENGINE_POD_WORK_SIZE_LIMIT"),
+            cfg.work_size_limit.take(),
+        )?;
         if let Some(v) = text("ENGINE_POD_ENGINE_ID") {
             cfg.engine_id = sanitize_engine_id(&v);
         }
@@ -1667,7 +1708,7 @@ pub fn pod_template(
         });
         volumes.push(Volume {
             name: WORKSPACE_VOLUME.into(),
-            empty_dir: Some(bounded_empty_dir(cfg)),
+            empty_dir: Some(bounded_work_dir(cfg)),
             ..Default::default()
         });
     }
@@ -1681,7 +1722,7 @@ pub fn pod_template(
     });
     volumes.push(Volume {
         name: PRIVATE_CACHE_VOLUME.into(),
-        empty_dir: Some(bounded_empty_dir(cfg)),
+        empty_dir: Some(bounded_work_dir(cfg)),
         ..Default::default()
     });
     if !cfg.cache_pvc.is_empty() {
@@ -1760,11 +1801,21 @@ pub fn pod_template(
     // entrypoint and the agents need are per-pod emptyDirs, never shared
     // storage. CODEX_HOME, CLAUDE_CONFIG_DIR and XDG_CONFIG_HOME default
     // under HOME, so the home mount covers them too.
-    for (name, dir) in [
-        ("session-home", HOME_MOUNT.to_string()),
-        ("session-tmp", TMP_MOUNT.to_string()),
-        ("session-work", cfg.work_dir()),
-        ("session-run", RUNTIME_MOUNT.to_string()),
+    // The work tree holds build output, so it takes the larger work limit;
+    // home, `/tmp` and the run dir take the tmp limit.
+    for (name, dir, empty_dir) in [
+        (
+            "session-home",
+            HOME_MOUNT.to_string(),
+            bounded_empty_dir(cfg),
+        ),
+        ("session-tmp", TMP_MOUNT.to_string(), bounded_empty_dir(cfg)),
+        ("session-work", cfg.work_dir(), bounded_work_dir(cfg)),
+        (
+            "session-run",
+            RUNTIME_MOUNT.to_string(),
+            bounded_empty_dir(cfg),
+        ),
     ] {
         mounts.push(VolumeMount {
             name: name.into(),
@@ -1773,7 +1824,7 @@ pub fn pod_template(
         });
         volumes.push(Volume {
             name: name.into(),
-            empty_dir: Some(bounded_empty_dir(cfg)),
+            empty_dir: Some(empty_dir),
             ..Default::default()
         });
     }
@@ -4603,6 +4654,12 @@ mod tests {
         let volumes = pod_template_for(&cfg).spec.unwrap().volumes.unwrap();
         let empty: Vec<&Volume> = volumes.iter().filter(|v| v.empty_dir.is_some()).collect();
         assert!(!empty.is_empty());
+        // The small volumes take the tmp limit; the build-output volumes
+        // (work tree, workspace tree, private cache) take the work limit.
+        let expected = |name: &str| match name {
+            "session-work" | "session-cache" | "session-workspace" => "30Gi",
+            _ => "10Gi",
+        };
         for volume in &empty {
             assert_eq!(
                 volume
@@ -4613,8 +4670,8 @@ mod tests {
                     .as_ref()
                     .unwrap()
                     .0,
-                "10Gi",
-                "{} must carry the size limit",
+                expected(&volume.name),
+                "{} must carry its size limit",
                 volume.name
             );
         }
@@ -4624,8 +4681,17 @@ mod tests {
                 "{name} is an emptyDir"
             );
         }
+        assert!(
+            empty.iter().any(|v| v.name == "session-workspace"),
+            "the workspace tree is an emptyDir"
+        );
+        assert!(
+            empty.iter().any(|v| v.name == "session-cache"),
+            "the private cache is an emptyDir"
+        );
         let unbounded = PodConfig {
             tmp_size_limit: None,
+            work_size_limit: None,
             ..cfg
         };
         let volumes = pod_template_for(&unbounded).spec.unwrap().volumes.unwrap();
@@ -4635,6 +4701,33 @@ mod tests {
             .unwrap()
             .size_limit
             .is_none()));
+    }
+
+    #[test]
+    fn the_work_limit_bounds_only_the_build_output_volumes() {
+        let cfg = PodConfig {
+            tmp_size_limit: Some(k8s_openapi::apimachinery::pkg::api::resource::Quantity(
+                "1Gi".into(),
+            )),
+            work_size_limit: Some(k8s_openapi::apimachinery::pkg::api::resource::Quantity(
+                "20Gi".into(),
+            )),
+            ..Default::default()
+        };
+        let volumes = pod_template_for(&cfg).spec.unwrap().volumes.unwrap();
+        let limit = |name: &str| {
+            volumes
+                .iter()
+                .find(|v| v.name == name)
+                .and_then(|v| v.empty_dir.as_ref())
+                .and_then(|d| d.size_limit.as_ref())
+                .map(|q| q.0.clone())
+        };
+        assert_eq!(limit("session-work").as_deref(), Some("20Gi"));
+        assert_eq!(limit("session-cache").as_deref(), Some("20Gi"));
+        assert_eq!(limit("session-home").as_deref(), Some("1Gi"));
+        assert_eq!(limit("session-tmp").as_deref(), Some("1Gi"));
+        assert_eq!(limit("session-run").as_deref(), Some("1Gi"));
     }
 
     #[test]
@@ -4655,6 +4748,25 @@ mod tests {
             );
         }
         assert!(is_size_quantity("1.5Gi") && is_size_quantity("20G") && is_size_quantity("3"));
+    }
+
+    #[test]
+    fn the_work_size_limit_is_read_separately_from_the_tmp_limit() {
+        let default = PodConfig::from_lookup(lookup(&[]), None).unwrap();
+        assert_eq!(default.work_size_limit.as_ref().unwrap().0, "30Gi");
+        assert_eq!(default.tmp_size_limit.as_ref().unwrap().0, "10Gi");
+        let cfg = PodConfig::from_lookup(lookup(&[("ENGINE_POD_WORK_SIZE_LIMIT", "25Gi")]), None)
+            .unwrap();
+        assert_eq!(cfg.work_size_limit.as_ref().unwrap().0, "25Gi");
+        assert_eq!(cfg.tmp_size_limit.as_ref().unwrap().0, "10Gi");
+        let cfg =
+            PodConfig::from_lookup(lookup(&[("ENGINE_POD_WORK_SIZE_LIMIT", "")]), None).unwrap();
+        assert_eq!(cfg.work_size_limit, None);
+        assert_eq!(cfg.tmp_size_limit.as_ref().unwrap().0, "10Gi");
+        let err = PodConfig::from_lookup(lookup(&[("ENGINE_POD_WORK_SIZE_LIMIT", "30GB")]), None)
+            .expect_err("a malformed work limit is refused at startup")
+            .to_string();
+        assert!(err.contains("ENGINE_POD_WORK_SIZE_LIMIT"), "{err}");
     }
 
     #[test]

@@ -5684,13 +5684,26 @@ pod the kubelet stops at that deadline ends its session with the distinct
 reason `hit its active deadline: …` from the reconciler, not the generic
 failure note.
 
-Every `emptyDir` the pod has (the home, `/tmp`, the work tree, the run
-directory, the private tool cache and the workspace tree) carries a
-`sizeLimit` from `ENGINE_POD_TMP_SIZE_LIMIT` (default `10Gi`; empty leaves
-them unbounded, a malformed quantity stops the engine at startup). A session
-that writes past it is evicted by the kubelet, so one runaway build cannot
-fill the node's disk. The container's `ephemeral-storage` limit still applies
-on top.
+Every `emptyDir` the pod has carries a `sizeLimit`, in two classes:
+
+- The home, `/tmp` and the run directory take `ENGINE_POD_TMP_SIZE_LIMIT`
+  (default `10Gi`).
+- The work tree, the private tool cache and the workspace tree take
+  `ENGINE_POD_WORK_SIZE_LIMIT` (default `30Gi`). These hold build output (a
+  Rust `target/` can run to tens of GiB), so they get the larger cap.
+
+Empty leaves a knob's volumes unbounded; a malformed quantity stops the engine
+at startup. A session that writes past its cap is evicted by the kubelet, so
+one runaway build cannot fill the node's disk.
+
+The caps are per volume, and the kubelet's `ephemeral-storage` limit is the
+real pod-wide ceiling (`40Gi` by default, `resource_limits` in a template
+policy can raise it). The defaults are not additive: the three small volumes
+at `10Gi` plus two work volumes at `30Gi` can sum past `40Gi`, so the pod-wide
+limit is what stops a session filling the disk, and the per-volume caps
+stop one directory from filling the pod. Keep `ENGINE_POD_WORK_SIZE_LIMIT`
+below the pod's `ephemeral-storage` limit so one work volume at its cap cannot
+on its own push the pod past it.
 
 **Workspace tree (WI-3373, WI-3374; engine-served since WI-4127).** Off by
 default. With `ENGINE_POD_WORKSPACE=1`, the engine adds a `workspace-config`
