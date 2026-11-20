@@ -121,6 +121,7 @@ import {
   hasUnsavedWork,
   protectDirtyEditorExit,
   shouldMountTab,
+  touchRecentTerminal,
 } from "./tabLifecycle";
 import { discardEditorDraft } from "./editorDrafts";
 import {
@@ -576,6 +577,12 @@ const App: Component = () => {
   // person, with workers nested under the oversight session that started them.
   // Who started whom is Vogt's, read on its own cycle (railStarters.ts).
   createEffect(on(() => sessionsStore.order.join("\n"), noteRailSessions));
+  // The few terminal panes shown most recently stay mounted; the rest unmount,
+  // save their cache, and restore it on revisit (WI-3129).
+  const [liveTerminals, setLiveTerminals] = createSignal<string[]>([]);
+  createEffect(on(() => tabsStore.active, (active) => {
+    setLiveTerminals((recent) => touchRecentTerminal(recent, active, untrack(() => tabsStore.tabs)));
+  }));
   const [railQuery, setRailQuery] = createSignal("");
   const [railFolded, setRailFolded] = createSignal<ReadonlySet<string>>(new Set());
   const toggleRailFolded = (id: string) =>
@@ -2499,6 +2506,7 @@ const App: Component = () => {
                 <For each={tabsStore.tabs.filter((tab) =>
                   tab.kind !== "workitem"
                     && !(isIDEMode && tab.kind === "editor")
+                    && (tab.kind !== "terminal" || liveTerminals().includes(tab.id))
                     && shouldMountTab(
                       tab,
                       sessionWorkspaceActive() ? tabsStore.active : null,

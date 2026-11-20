@@ -2,10 +2,12 @@ import { describe, expect, it } from "vitest";
 import {
   hasDirtyEditor,
   hasUnsavedWork,
+  MAX_LIVE_TERMINALS,
   protectDirtyEditorExit,
   shouldMountTab,
   terminalPaneParked,
   tabRetention,
+  touchRecentTerminal,
 } from "../tabLifecycle";
 import type { Tab } from "../tabs";
 
@@ -79,5 +81,46 @@ describe("dirty editor browser lifecycle", () => {
     protectDirtyEditorExit(event);
     expect(event.defaultPrevented).toBe(true);
     expect(event.returnValue).toBe(false);
+  });
+});
+
+/** WI-3129: an xterm and its WebGL context per visited session leaked without a cap. */
+describe("live terminal cap", () => {
+  const term = (name: string): Tab => ({
+    id: `term:${name}`,
+    kind: "terminal",
+    sessionId: name,
+    label: name,
+  });
+  const tabs: Tab[] = [term("a"), term("b"), term("c"), term("d"), term("e"), editor];
+
+  it("keeps the most recently shown terminals, up to the cap", () => {
+    let live: string[] = [];
+    for (const id of ["term:a", "term:b", "term:c", "term:d", "term:e"]) {
+      live = touchRecentTerminal(live, id, tabs);
+    }
+    expect(live).toEqual(["term:e", "term:d", "term:c", "term:b"]);
+    expect(live).toHaveLength(MAX_LIVE_TERMINALS);
+  });
+
+  it("moves a re-shown terminal to the front without duplicating it", () => {
+    const live = touchRecentTerminal(["term:b", "term:a"], "term:a", tabs);
+    expect(live).toEqual(["term:a", "term:b"]);
+  });
+
+  it("drops the ids of closed terminals", () => {
+    const open = [term("a"), term("b")];
+    expect(touchRecentTerminal(["term:gone", "term:a"], "term:b", open)).toEqual([
+      "term:b",
+      "term:a",
+    ]);
+  });
+
+  it("leaves the set alone when a non-terminal tab is shown", () => {
+    expect(touchRecentTerminal(["term:a"], "edit:src/app.ts", tabs)).toEqual(["term:a"]);
+  });
+
+  it("caps live terminals at the dormant socket budget", () => {
+    expect(MAX_LIVE_TERMINALS).toBe(4);
   });
 });
