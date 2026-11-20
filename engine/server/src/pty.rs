@@ -2112,7 +2112,8 @@ fn spawn_activity_watcher(session: Arc<Session>, bus: EventBus) {
             // byte: an identical repaint is not work (WI-1090).
             let reference = session.last_change().unwrap_or(session.spawned_at);
             let elapsed_ms = reference.elapsed().as_millis() as u64;
-            let wait_ms = if elapsed_ms >= session.idle_after_ms {
+            let collapse_ms = crate::activity::collapse_after_ms(session.idle_after_ms);
+            let wait_ms = if elapsed_ms >= collapse_ms {
                 let new_state = if session.last_output.lock().is_some() {
                     // Settle pending output before classifying.
                     let _ = session.last_change();
@@ -2131,7 +2132,7 @@ fn spawn_activity_watcher(session: Arc<Session>, bus: EventBus) {
                 // it, terminal input included (WI-1644).
                 session.idle_after_ms
             } else {
-                session.idle_after_ms - elapsed_ms
+                collapse_ms - elapsed_ms
             };
 
             let epoch = session.activity_epoch.load(Ordering::Acquire);
