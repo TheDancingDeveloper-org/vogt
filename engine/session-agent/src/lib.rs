@@ -1665,6 +1665,11 @@ pub fn codex_args(args: &CodexArgs<'_>) -> Result<Vec<String>, String> {
         "tui.terminal_title=[\"agent-state\"]".to_string(),
         "-c".to_string(),
         "tui.animations=false".to_string(),
+        // WI-4390/WI-4392: inline mode keeps the transcript in the normal
+        // buffer. Each viewer gets its own xterm scrollback and selection,
+        // and Codex never captures the mouse (no `?1000h`/`?1003h`).
+        "-c".to_string(),
+        "tui.alternate_screen=\"never\"".to_string(),
     ]);
     // One emission per key: the selected provider's limit is the base, and an
     // engine backoff (computed from that base in `sessions`) may only raise
@@ -3911,6 +3916,8 @@ mod tests {
                 r#"tui.terminal_title=["agent-state"]"#,
                 "-c",
                 "tui.animations=false",
+                "-c",
+                "tui.alternate_screen=\"never\"",
             ]
         );
         config.cli = "nope".into();

@@ -7,7 +7,9 @@ import {
   beginTerminalTouch,
   moveTerminalTouch,
   TERMINAL_TOUCH_INTENT_PX,
+  terminalCellAt,
   type TerminalTouchGesture,
+  wordSpanAt,
 } from "../terminalTouch";
 
 const CELL = 20;
@@ -119,4 +121,56 @@ it("routes a normal-buffer mouse-tracking application's swipe to wheel input", (
   const move = moveTerminalTouch(beginTerminalTouch(100, 100), 100, 160, CELL, "normal", true);
   expect(move.wheelLines).toBe(-3);
   expect(move.scrollLines).toBe(0);
+});
+
+// WI-4392: a touch long-press selects the word under the finger. The cell
+// comes from the screen's width and the rows' element's height, because the
+// screen is 0-high in the phone layout.
+describe("terminalCellAt", () => {
+  it("maps a touch to the cell it lands on", () => {
+    // 80 cols x 24 rows, 800px wide, 480px tall, origin at (10, 20).
+    const screen = { left: 10, width: 800 };
+    const grid = { top: 20, height: 480 };
+    expect(terminalCellAt(10 + 5 * 10 + 1, 20 + 3 * 20 + 1, screen, grid, 80, 24)).toEqual({
+      col: 5,
+      row: 3,
+    });
+  });
+
+  it("reads the height from the grid when the screen is 0-high", () => {
+    // The screen element reports no height; only its width is read.
+    const screen = { left: 0, width: 400 };
+    const grid = { top: 0, height: 240 };
+    expect(terminalCellAt(45, 110, screen, grid, 40, 24)).toEqual({
+      col: 4,
+      row: 11,
+    });
+  });
+
+  it("clamps a touch outside the grid to its edge cells", () => {
+    const screen = { left: 0, width: 400 };
+    const grid = { top: 0, height: 240 };
+    expect(terminalCellAt(-30, -5, screen, grid, 40, 24)).toEqual({ col: 0, row: 0 });
+    expect(terminalCellAt(9999, 9999, screen, grid, 40, 24)).toEqual({ col: 39, row: 23 });
+  });
+});
+
+describe("wordSpanAt", () => {
+  it("selects the whole word under the column", () => {
+    const line = "run SELECTME-ALPHA now";
+    expect(wordSpanAt(line, 6)).toEqual({ start: 4, length: 14 });
+  });
+
+  it("keeps path and URL punctuation inside one word", () => {
+    expect(wordSpanAt("see ./src/app.ts:12", 6)).toEqual({ start: 4, length: 15 });
+  });
+
+  it("returns null on blank space and on punctuation alone", () => {
+    expect(wordSpanAt("a  b", 1)).toBeNull();
+    expect(wordSpanAt("a , b", 2)).toBeNull();
+  });
+
+  it("returns null past the end of the line", () => {
+    expect(wordSpanAt("abc", 9)).toBeNull();
+  });
 });
