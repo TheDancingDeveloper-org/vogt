@@ -797,7 +797,7 @@ pub async fn apply_session_grant(
         .apply_grant(id, grant, time::OffsetDateTime::now_utc())
         .map_err(|refusal| match refusal {
             GrantRefusal::Invalid(_) => ApiError::BadRequest(refusal.to_string()),
-            GrantRefusal::ProjectNotGrantable(_) => ApiError::Forbidden(refusal.to_string()),
+            GrantRefusal::ProjectNotGrantable { .. } => ApiError::Forbidden(refusal.to_string()),
             GrantRefusal::NoBroker
             | GrantRefusal::ShadowsManifest(_)
             | GrantRefusal::VarInUse(_) => ApiError::Conflict(refusal.to_string()),
