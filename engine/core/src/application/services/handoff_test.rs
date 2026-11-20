@@ -383,6 +383,7 @@ fn review_of_opens_a_session_on_the_review_brief() {
         unreachable!("opened() builds a step clock");
     };
     let mut params = start_params(None, Some("watch the migration"), WHY);
+    params.template = Some("claude".to_string());
     params.review_of = Some(reference.clone());
     let started = start_session(ctx, &params).unwrap();
     assert_eq!(

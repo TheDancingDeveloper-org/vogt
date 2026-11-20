@@ -137,6 +137,7 @@ fn opened(context: i64) -> (Built, Arc<Script>, PathBuf) {
     ctx.observed.migrate().unwrap();
     insert_project(&built, "vogt");
     let mut params = start_params(Some("vogt"), Some("oversee"), WHY);
+    params.template = Some("claude".to_string());
     params.role = "oversight".to_string();
     start_session(ctx, &params).unwrap();
     (built, script, dir)

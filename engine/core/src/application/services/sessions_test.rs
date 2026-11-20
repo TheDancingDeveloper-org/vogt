@@ -217,16 +217,50 @@ fn a_task_is_folded_into_the_brief_the_engine_receives() {
     let Built::StepSequential(ctx) = &built else {
         unreachable!("opened() builds a step clock");
     };
-    start_session(
-        ctx,
-        &start_params(Some("beta"), Some("check the containers"), "because"),
-    )
-    .unwrap();
+    let mut params = start_params(Some("beta"), Some("check the containers"), "because");
+    params.template = Some("claude".to_string());
+    start_session(ctx, &params).unwrap();
     let asked = script.seen.lock().unwrap().join("\n");
     assert!(
         asked.contains("check the containers"),
         "the task did not reach the engine: {asked}"
     );
+}
+
+#[test]
+fn a_task_without_a_template_is_refused_before_the_engine_is_asked() {
+    let script = script_with(Vec::new());
+    let built = opened(Some(Arc::clone(&script)));
+    insert_project(&built, "beta");
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!("opened() builds a step clock");
+    };
+    let error = start_session(
+        ctx,
+        &start_params(Some("beta"), Some("check the containers"), "because"),
+    )
+    .unwrap_err();
+    assert!(matches!(error, VogtError::InvalidRequest(_)), "{error:?}");
+    assert!(script.seen.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_task_on_a_purpose_that_sets_a_template_is_not_refused() {
+    let script = script_with(vec![(
+        200,
+        r#"{"id":"eng-3","name":"gamma","cwd":"/work/tree"}"#.to_string(),
+    )]);
+    let built = opened(Some(Arc::clone(&script)));
+    insert_project(&built, "beta");
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!("opened() builds a step clock");
+    };
+    let params = with_purpose(
+        start_params(Some("beta"), Some("check the containers"), "because"),
+        "implement",
+    );
+    start_session(ctx, &params).unwrap();
+    assert!(!script.seen.lock().unwrap().is_empty());
 }
 
 #[test]
@@ -1245,6 +1279,7 @@ fn a_project_only_worker_start_creates_no_work_item() {
         unreachable!("opened() builds a step clock");
     };
     let mut params = start_params(Some("beta"), Some("Ship the thing\nsecond line"), "because");
+    params.template = Some("claude".to_string());
     params.autopilot = Some(true);
     let started = start_session(ctx, &params).unwrap();
     let name = started

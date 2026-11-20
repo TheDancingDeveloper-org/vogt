@@ -1181,6 +1181,7 @@ where
     // permission posture, so naming a purpose cannot raise a start past what
     // the caller could ask for directly (WI-1323).
     let (resolved, read_only, overrides) = resolve_purpose(ctx, params)?;
+    refuse_task_without_agent(&resolved)?;
     let params = &resolved;
     let (started_by_session, started_by_kind) = started_by(ctx, engine)?;
     backfill_default_branch(ctx, params)?;
@@ -3533,6 +3534,26 @@ where
     summary.alive = killed.then_some(false);
     summary.stopped_at = Some(stopped_at);
     Ok(SessionResult { session: summary })
+}
+
+/// A `task` needs an agent to read it (WI-1807). Without a template the
+/// engine opens a plain shell, which never reads the brief, so the task would
+/// be dropped while the session sits idle. Checked after the purpose profile
+/// has filled the start, so a profile that names the template still satisfies it.
+fn refuse_task_without_agent(params: &StartSessionParams) -> Result<(), VogtError> {
+    let has_task = params
+        .task
+        .as_deref()
+        .is_some_and(|task| !task.trim().is_empty());
+    if has_task && params.template.is_none() {
+        return Err(VogtError::InvalidRequest(
+            "task given without a template: a plain shell never reads the brief, so the task \
+             would be dropped; name an agent template (e.g. template='claude') or a purpose \
+             that sets one"
+                .to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// Python's `_resolve_purpose`: fill a start's unset fields from its purpose's
