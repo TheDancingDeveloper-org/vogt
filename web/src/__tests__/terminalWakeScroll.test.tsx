@@ -12,7 +12,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render, waitFor } from "@solidjs/testing-library";
 
 import Terminal from "../Terminal";
-import { noteForeground, onWake, type WakeReason } from "../wakeCoordinator";
+import {
+  cancelPendingWakeForTests,
+  noteForeground,
+  onWake,
+  type WakeReason,
+} from "../wakeCoordinator";
 import { fakeVogt } from "./harness";
 
 async function mountTerminal(): Promise<void> {
@@ -33,6 +38,8 @@ describe("a wake leaves the terminal viewport where the reader put it", () => {
       const seen: WakeReason[] = [];
       const stop = onWake((wake) => seen.push(wake.reason));
       try {
+        // Back-to-back lifecycle wakes fold together (WI-2705); start clean.
+        cancelPendingWakeForTests();
         noteForeground(reason);
         await waitFor(() => expect(seen).toEqual([reason]));
         expect(scrollToBottom).not.toHaveBeenCalled();

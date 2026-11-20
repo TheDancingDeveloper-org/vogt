@@ -1,15 +1,36 @@
 import { fireEvent, render, waitFor } from "@solidjs/testing-library";
+import { Show, createEffect, createSignal } from "solid-js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { SessionSummary } from "../api";
 import TerminalWorkspace from "../TerminalWorkspace";
 import { refreshSessions } from "../store";
+import { resetTerminalHandoffs } from "../terminalHandoff";
 import { fakeVogt, settle } from "./harness";
 
+// The mock stands in for xterm + its socket: a mount is a new terminal, and
+// the first moment it is not a preview it "attaches" (openAttach).
+const terminalLog = vi.hoisted(() => ({
+  mounts: [] as string[],
+  openAttach: [] as string[],
+}));
+
 vi.mock("../Terminal", () => ({
-  default: (props: { sessionId: string }) => (
-    <div data-mock-terminal={props.sessionId}>{props.sessionId}</div>
-  ),
+  default: (props: { sessionId: string; preview?: boolean }) => {
+    terminalLog.mounts.push(props.sessionId);
+    let attached = false;
+    createEffect(() => {
+      if (attached || props.preview) return;
+      attached = true;
+      terminalLog.openAttach.push(props.sessionId);
+    });
+    return (
+      <div data-mock-terminal={props.sessionId}>
+        <textarea data-mock-input={props.sessionId} />
+        {props.sessionId}
+      </div>
+    );
+  },
 }));
 
 function session(
@@ -45,7 +66,9 @@ beforeEach(() => {
   vi.stubGlobal(
     "matchMedia",
     ((query: string) => ({
-      matches: query === "(max-width: 768px)",
+      matches:
+        query === "(max-width: 768px)" ||
+        query === "(prefers-reduced-motion: reduce)",
       media: query,
       onchange: null,
       addListener() {},
@@ -57,7 +80,12 @@ beforeEach(() => {
   );
 });
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.unstubAllGlobals();
+  resetTerminalHandoffs();
+  terminalLog.mounts.length = 0;
+  terminalLog.openAttach.length = 0;
+});
 
 describe("the narrow terminal pager", () => {
   it("keeps the routed identity selected when attention order changes", async () => {
@@ -182,5 +210,99 @@ describe("the narrow terminal pager", () => {
 
     await waitFor(() => expect(unavailable).toHaveBeenCalledOnce());
     expect(change).not.toHaveBeenCalled();
+  });
+
+  // Mimics App: a settled swipe routes to a new tab whose workspace mounts a
+  // pane for the destination session.
+  function renderRoutedPager(start: string) {
+    const [current, setCurrent] = createSignal(start);
+    const rendered = render(() => (
+      <Show when={current()} keyed>
+        {(id) => (
+          <TerminalWorkspace
+            tabId={`term:${id}`}
+            sessionId={id}
+            onMobileSessionChange={setCurrent}
+          />
+        )}
+      </Show>
+    ));
+    const stage = () =>
+      rendered.container.querySelector<HTMLElement>(".terminal-mobile-stage")!;
+    return { rendered, current, stage };
+  }
+
+  function swipe(stage: HTMLElement, toX: number) {
+    fireEvent.touchStart(stage, { touches: [{ clientX: 200, clientY: 100 }] });
+    fireEvent.touchMove(stage, { touches: [{ clientX: toX, clientY: 102 }] });
+    fireEvent.touchEnd(stage, { touches: [] });
+  }
+
+  it("hands the dragged terminal to the new tab: one attach per settled swipe", async () => {
+    await seed([WAITING, ALPHA, BETA, EXITED]);
+    const { rendered, current, stage } = renderRoutedPager("alpha");
+    await settle();
+    expect(terminalLog.openAttach).toEqual(["alpha"]);
+
+    swipe(stage(), 100);
+    await waitFor(() => expect(current()).toBe("beta"));
+    await settle();
+
+    // beta's terminal was mounted once (in the slide) and attached once.
+    expect(terminalLog.mounts.filter((id) => id === "beta")).toHaveLength(1);
+    expect(terminalLog.openAttach.filter((id) => id === "beta")).toHaveLength(1);
+    expect(
+      rendered.container.querySelectorAll('[data-mock-terminal="beta"]'),
+    ).toHaveLength(1);
+    expect(
+      rendered.container.querySelector(".terminal-mobile-slide-current [data-mock-terminal]")
+        ?.getAttribute("data-mock-terminal"),
+    ).toBe("beta");
+  });
+
+  it("springs back under the settle distance without attaching", async () => {
+    await seed([WAITING, ALPHA, BETA, EXITED]);
+    const { current, stage } = renderRoutedPager("alpha");
+    await settle();
+
+    swipe(stage(), 170);
+    await settle();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(current()).toBe("alpha");
+    expect(terminalLog.openAttach).toEqual(["alpha"]);
+  });
+
+  it("keeps the soft keyboard up across a swipe", async () => {
+    await seed([WAITING, ALPHA, BETA, EXITED]);
+    const { rendered, current, stage } = renderRoutedPager("alpha");
+    await settle();
+    rendered.container
+      .querySelector<HTMLTextAreaElement>('[data-mock-input="alpha"]')!
+      .focus();
+
+    swipe(stage(), 100);
+    await waitFor(() => expect(current()).toBe("beta"));
+    await settle();
+
+    expect(document.activeElement).toBe(
+      rendered.container.querySelector('[data-mock-input="beta"]'),
+    );
+  });
+
+  it("freezes the pager order while a finger is down", async () => {
+    await seed([WAITING, ALPHA, BETA, EXITED]);
+    const { rendered, stage } = renderRoutedPager("alpha");
+    await settle();
+
+    fireEvent.touchStart(stage(), { touches: [{ clientX: 200, clientY: 100 }] });
+    // beta jumps ahead in attention order mid-gesture.
+    await seed([WAITING, session("beta", "waiting-for-input", null, "2026-08-30T10:09:00Z"), ALPHA, EXITED]);
+    fireEvent.touchMove(stage(), { touches: [{ clientX: 100, clientY: 102 }] });
+
+    expect(
+      rendered.container.querySelector(".terminal-mobile-slide-destination [data-mock-terminal]")
+        ?.getAttribute("data-mock-terminal"),
+    ).toBe("beta");
   });
 });
