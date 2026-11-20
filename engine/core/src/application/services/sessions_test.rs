@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex};
 
 use super::sessions::SessionBudget;
 use super::sessions::{
-    list_session_templates_op, list_sessions, start_session, stop_session, ListSessionsParams,
-    StartSessionParams, StopSessionParams,
+    list_session_templates_op, list_sessions, list_sessions_op, start_session, stop_session,
+    ListSessionsParams, StartSessionParams, StopSessionParams,
 };
 use crate::adapters::engine::EngineClient;
 use crate::application::context::{build_context, Built};
@@ -1116,4 +1116,64 @@ fn an_engine_budget_keeps_only_positive_limits() {
     // A budget that names no positive limit is no budget at all.
     assert!(budget_of_engine(row(json!({"turns": 0})).as_ref()).is_none());
     assert!(budget_of_engine(None).is_none());
+}
+
+#[test]
+fn a_sessions_account_and_budget_come_back_from_the_engine() {
+    // Mirrors Python's test_a_sessions_account_comes_back_from_the_engine,
+    // through the list path: a live row's account and budget reach the
+    // session list in full mode and when `fields` names them.
+    let live_row = r#"{"id":"eng-acct","name":"acct","cwd":"/work/tree","activity":"idle","alive":true,"account":"acct2","budget":{"turns":4}}"#;
+    let script = script_with(vec![(
+        200,
+        r#"{"id":"eng-acct","name":"acct","cwd":"/work/tree","activity":"idle","alive":true}"#
+            .to_string(),
+    )]);
+    let built = opened(Some(Arc::clone(&script)));
+    insert_project(&built, "beta");
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!("opened() builds a step clock");
+    };
+    start_session(ctx, &start_params(Some("beta"), None, "because")).unwrap();
+
+    script
+        .answers
+        .lock()
+        .unwrap()
+        .push((200, format!(r#"{{"sessions":[{live_row}]}}"#)));
+    let full = list_sessions_op(&built, json!({"mode": "full"})).unwrap();
+    let row = &full["sessions"][0];
+    assert_eq!(row["account"], json!("acct2"), "{full}");
+    // The budget keeps all four keys; the three limits not set are null.
+    assert_eq!(
+        row["budget"],
+        json!({
+            "turns": 4,
+            "context_tokens": null,
+            "wall_clock_minutes": null,
+            "session_wall_clock_minutes": null
+        }),
+        "{full}"
+    );
+
+    script
+        .answers
+        .lock()
+        .unwrap()
+        .push((200, format!(r#"{{"sessions":[{live_row}]}}"#)));
+    let slim = list_sessions_op(
+        &built,
+        json!({"mode": "full", "fields": ["account", "budget"]}),
+    )
+    .unwrap();
+    let mut keys: Vec<&str> = slim["sessions"][0]
+        .as_object()
+        .expect("a slimmed row is an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(keys, ["account", "budget", "id"], "{slim}");
+    assert_eq!(slim["sessions"][0]["account"], json!("acct2"), "{slim}");
+    assert_eq!(slim["sessions"][0]["budget"]["turns"], json!(4), "{slim}");
 }
