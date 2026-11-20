@@ -62,8 +62,10 @@ from vogt.application.models import (
     BindSessionWorkParams,
     BindSessionWorkResult,
     CancelWatchParams,
+    CommentParams,
     CommitForSessionParams,
     CommitForSessionResult,
+    CreateWorkParams,
     EffectivePolicy,
     EngineSessionTokenParams,
     EngineSessionTokenResult,
@@ -123,6 +125,7 @@ from vogt.application.models import (
     StartSessionParams,
     StopSessionParams,
     SweepSessionsParams,
+    TransitionWorkParams,
     WakeSessionParams,
     WhyParams,
     WhyResult,
@@ -160,6 +163,7 @@ from vogt.core.entities import (
     WorkOverlay,
 )
 from vogt.core.session_economics import SessionEconomics, meter
+from vogt.core.workflow import WONT_DO
 from vogt.errors import (
     BypassRefused,
     Conflict,
@@ -171,7 +175,7 @@ from vogt.errors import (
     VogtError,
 )
 from vogt.observability import logger
-from vogt.storage.interface import ReadView, WriteTxn
+from vogt.storage.interface import ReadView, WorkFilter, WriteTxn
 
 _LOG = logger("sessions")
 
@@ -296,6 +300,9 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
     # a project's review policy is a rule, and a start that would run a model
     # it forbids is refused rather than spawned (WI-1590).
     _refuse_forbidden_model(ctx, params)
+    # An autopilot worker on a bare project gets a chore first (WI-1338): its
+    # hand-off needs an item, and the brief and env name it before the spawn.
+    params, created_chore = _bind_unbound_worker(ctx, params)
     started_by_session, started_by_kind = _started_by(ctx, engine)
     session_id = ctx.id_factory("ses")
     subject = _subject(ctx, params, session_id)
@@ -368,6 +375,12 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
             int((time.monotonic() - spawn_started) * 1000),
             error.code,
         )
+        if created_chore is not None:
+            _abandon_unbound_chore(ctx, created_chore)
+        raise
+    except Exception:
+        if created_chore is not None:
+            _abandon_unbound_chore(ctx, created_chore)
         raise
     engine_spawn_ms = int((time.monotonic() - spawn_started) * 1000)
     _LOG.info(
@@ -4047,6 +4060,113 @@ def _worktree_base(policy: AgentPolicy) -> str:
     branch when it states one, otherwise `main`."""
     stated = policy.base_branch.strip()
     return stated or "main"
+
+
+#: The body footer that marks a chore `start_session` made for an unbound
+#: autopilot worker (WI-1338).
+UNBOUND_CHORE_MARKER = "_Created by session.start for an unbound autopilot worker._"
+UNBOUND_CHORE_REASON = "created for an unbound autopilot worker"
+#: Purposes that read or judge rather than deliver: they hand nothing off.
+_NO_CHORE_PURPOSES = frozenset({"review", "investigate"})
+
+
+def _wants_unbound_chore(params: StartSessionParams) -> bool:
+    """Whether a start is an autopilot worker on a project with no item."""
+    return (
+        params.project is not None
+        and params.work_item is None
+        and params.from_handoff is None
+        and params.review_of is None
+        and params.role == "worker"
+        and params.purpose not in _NO_CHORE_PURPOSES
+        and _autopilot(params)
+    )
+
+
+def _unbound_chore_title(params: StartSessionParams) -> str:
+    task = (params.task or "").strip()
+    head = (params.name or "").strip() or (task.splitlines()[0] if task else "")
+    return f"Session: {head.strip()[:180] or 'autopilot worker'}"
+
+
+def _bind_unbound_worker(
+    ctx: AppContext, params: StartSessionParams
+) -> tuple[StartSessionParams, str | None]:
+    """Give an autopilot worker started on a bare project an item (WI-1338).
+
+    Without one it has nowhere to post its hand-off. The chore is
+    `local_only` in that project, titled from the name or the task's first
+    line, its body the task. A resume reuses the open chore of the same
+    title rather than making a second. The subject is then the chore,
+    exactly as if the caller had named it.
+
+    Returns the params and the ref of a chore this call made (None when the
+    start was not unbound, or reused one), so a start that fails can close it.
+    """
+    if not _wants_unbound_chore(params):
+        return params, None
+    from vogt.application.services.work import create_work
+
+    title = _unbound_chore_title(params)
+    with ctx.declared.read() as view:
+        project = _resolve.project(view, params.project or "")
+        if params.resume:
+            for item in view.list_work_items(
+                WorkFilter(project_id=project.id, exclude_terminal=True, limit=500)
+            ):
+                if item.title == title and item.body.endswith(UNBOUND_CHORE_MARKER):
+                    return (
+                        params.model_copy(
+                            update={"work_item": item.ref, "project": None}
+                        ),
+                        None,
+                    )
+    task = (params.task or "").strip()
+    created = create_work(
+        ctx,
+        CreateWorkParams(
+            kind="chore",
+            title=title,
+            body=f"{task}\n\n{UNBOUND_CHORE_MARKER}" if task else UNBOUND_CHORE_MARKER,
+            priority="p3",
+            project=project.slug,
+            local_only=True,
+            reason=UNBOUND_CHORE_REASON,
+        ),
+    )
+    bound = params.model_copy(update={"work_item": created.item.ref, "project": None})
+    return bound, created.item.ref
+
+
+def _abandon_unbound_chore(ctx: AppContext, ref: str) -> None:
+    """Close the chore made for a start that never reached the engine (WI-1338).
+
+    The chore is made before the spawn, because the brief and the session's
+    environment name it. When the start then fails, no session runs against
+    it, so it is walked to won't-do with a note saying why. Best effort: the
+    caller needs the start's own error, not a failed cleanup.
+    """
+    from vogt.application.services.work import comment_work, transition_work
+
+    with contextlib.suppress(VogtError):
+        comment_work(
+            ctx,
+            CommentParams(
+                ref=ref,
+                body="The session did not start, so this chore was closed unworked.",
+                reason=UNBOUND_CHORE_REASON,
+            ),
+        )
+    with contextlib.suppress(VogtError):
+        transition_work(
+            ctx,
+            TransitionWorkParams(
+                ref=ref,
+                to_state=WONT_DO,
+                walk=True,
+                reason="the session for this unbound autopilot worker did not start",
+            ),
+        )
 
 
 def _review_subject(ctx: AppContext, params: StartSessionParams) -> StartSessionParams:
