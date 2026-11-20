@@ -156,7 +156,9 @@ if [ "$VOGT_CLI" = codex ] && [ -n "$(jq -r '.codex_config // empty' "$response"
     in_mcp { print }
   ' "$tmp_dir/codex-fragment.toml" >"$tmp_dir/codex-mcp.toml"
   if [ -f "$codex_cfg" ]; then
-    # Drop earlier vogt/cadastre MCP server definitions, keep the rest. A table
+    # Drop earlier definitions of the servers the engine owns (vogt, cadastre,
+    # and since WI-4489 vogt-prod and crw, so a worker set's trim is not undone
+    # by a stale table), keep the rest. A table
     # header is compared with its spaces and quotes removed, so [mcp_servers."vogt"],
     # [ mcp_servers . 'vogt' ] and [mcp_servers.vogt.env] all match, as do
     # single-line dotted keys (mcp_servers.vogt.url = ... at the top level, vogt.url
@@ -164,7 +166,7 @@ if [ "$VOGT_CLI" = codex ] && [ -n "$(jq -r '.codex_config // empty' "$response"
     awk '
       /^[ \t]*\[\[?[^][]*\]\]?[ \t]*(#.*)?$/ {
         h = $0; sub(/[ \t]*#.*$/, "", h); gsub(/[ \t"\047]/, "", h)
-        skip = (h ~ /^\[\[?mcp_servers\.(vogt|cadastre)(\.|\])/)
+        skip = (h ~ /^\[\[?mcp_servers\.(vogt|vogt-prod|cadastre|crw)(\.|\])/)
         root = (h == "[mcp_servers]") ? 2 : 0
         if (skip) next
         print; next
@@ -173,8 +175,8 @@ if [ "$VOGT_CLI" = codex ] && [ -n "$(jq -r '.codex_config // empty' "$response"
       skip { next }
       root && /=/ {
         k = $0; sub(/[ \t]*=.*$/, "", k); gsub(/[ \t"\047]/, "", k)
-        if (root == 1 && k ~ /^mcp_servers\.(vogt|cadastre)(\.|$)/) next
-        if (root == 2 && k ~ /^(vogt|cadastre)(\.|$)/) next
+        if (root == 1 && k ~ /^mcp_servers\.(vogt|vogt-prod|cadastre|crw)(\.|$)/) next
+        if (root == 2 && k ~ /^(vogt|vogt-prod|cadastre|crw)(\.|$)/) next
       }
       { print }
     ' "$codex_cfg" >"$tmp_dir/codex.toml"

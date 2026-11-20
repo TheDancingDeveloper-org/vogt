@@ -159,6 +159,7 @@ pub struct Session {
     /// Woken without the bypass it showed before hibernating (WI-2252).
     posture_lost_on_resume: AtomicBool,
     account: Mutex<Option<String>>,
+    mcp_set: Mutex<Option<String>>,
     /// Who asked this session to stop, and why, when someone did (WI-913).
     stop: Mutex<Option<vogt_engine_contract::StopRequest>>,
     /// What runs first in the session: `agent-auth` when the launch wrapper
@@ -813,6 +814,7 @@ impl Session {
             permission_mode: self.permission_mode.lock().clone(),
             posture_lost_on_resume: self.posture_lost_on_resume(),
             account: self.account.lock().clone(),
+            mcp_set: self.mcp_set.lock().clone(),
             stop: self.stop.lock().clone(),
             economics: self.economics_snapshot.lock().clone(),
             budget: self.budget(),
@@ -885,6 +887,10 @@ impl Session {
 
     pub fn set_account(&self, account: Option<String>) {
         *self.account.lock() = account;
+    }
+
+    pub fn set_mcp_set(&self, mcp_set: Option<String>) {
+        *self.mcp_set.lock() = mcp_set;
     }
 
     pub fn account(&self) -> Option<String> {
@@ -1793,6 +1799,7 @@ fn assemble_session(
         permission_mode: Mutex::new(None),
         posture_lost_on_resume: AtomicBool::new(false),
         account: Mutex::new(None),
+        mcp_set: Mutex::new(None),
         stop: Mutex::new(None),
         launcher,
         first_output_seen: AtomicBool::new(false),

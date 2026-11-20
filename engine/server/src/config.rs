@@ -616,6 +616,10 @@ pub struct Config {
     /// entry is handed out only while the agent-auth manifest declares
     /// `VOGT_PROD_TOKEN` or the session holds a grant for it.
     pub vogt_prod_mcp_url: Option<String>,
+    /// Optional crw MCP URL (path included) for pod sessions (WI-4489). The
+    /// host default is a tailnet address a pod cannot reach, so unset means
+    /// no crw entry in a pod.
+    pub crw_mcp_url: Option<String>,
     /// Base URL of vogt-core on loopback. None disables `/api/vogt` and
     /// `/mcp`: they answer 503 with a named reason rather than
     /// pretending the core is empty. The engine itself keeps
@@ -784,6 +788,7 @@ struct FileConfig {
     agent_auth_public_url: Option<String>,
     cadastre_mcp_url: Option<String>,
     vogt_prod_mcp_url: Option<String>,
+    crw_mcp_url: Option<String>,
     vogt_core_url: Option<String>,
     vogt_core_token: Option<String>,
     vogt_core_token_file: Option<String>,
@@ -1343,6 +1348,12 @@ pub fn load(
                     value.strip_suffix("/mcp").unwrap_or(value).to_string()
                 }),
         )?,
+        crw_mcp_url: validate_mcp_url(
+            "ENGINE_CRW_MCP_URL",
+            from_file
+                .crw_mcp_url
+                .or_else(|| engine_env("ENGINE_CRW_MCP_URL").ok()),
+        )?,
         // Unprefixed on purpose: these are vogt's own variable names, and the
         // same values configure its CLI inside the container. One name for one
         // thing.
@@ -1598,6 +1609,31 @@ fn read_token_file(name: &str) -> Result<Option<String>> {
 /// engine setting is read the same way.
 fn engine_env(name: &str) -> std::result::Result<String, std::env::VarError> {
     std::env::var(name)
+}
+
+/// An http or https URL with a host and no credentials, query or fragment.
+/// crw takes no bearer, so plain http to an in-cluster service is allowed.
+fn validate_mcp_url(name: &str, value: Option<String>) -> Result<Option<String>> {
+    let Some(value) = value
+        .map(|v| v.trim().trim_end_matches('/').to_string())
+        .filter(|v| !v.is_empty())
+    else {
+        return Ok(None);
+    };
+    let ok = url::Url::parse(&value).is_ok_and(|url| {
+        matches!(url.scheme(), "http" | "https")
+            && url.host().is_some()
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.query().is_none()
+            && url.fragment().is_none()
+    });
+    if !ok {
+        return Err(ApiError::Config(format!(
+            "{name} must be an http or https URL with no credentials, query or fragment"
+        )));
+    }
+    Ok(Some(value))
 }
 
 fn validate_https_origin(name: &str, value: Option<String>) -> Result<Option<String>> {

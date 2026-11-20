@@ -465,6 +465,10 @@ pub struct SessionSummary {
     /// The Claude Code account it was started under, when one was named.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
+    /// The MCP set it was started with (`full` or `worker`, WI-4489), as
+    /// resolved at start; absent for a session from before the record kept it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_set: Option<String>,
     /// The session template it was started from, by the name the caller
     /// gave (`claude`, `Codex (protected)`), when one was named (WI-919).
     /// Absent for a session started with an explicit command.

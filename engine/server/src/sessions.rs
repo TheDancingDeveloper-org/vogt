@@ -842,19 +842,29 @@ impl SessionRegistry {
         &self,
         engine_endpoint: &str,
         vogt_prod_bearer: bool,
+        mcp_set: crate::mcp_set::McpSet,
+        mcp_extra: &[String],
     ) -> crate::session_endpoints::SessionEndpoints {
-        let endpoints = crate::session_endpoints::for_backend(
+        let mut endpoints = crate::session_endpoints::for_backend(
             "pod",
             self.cfg.bind,
             Some(engine_endpoint),
             self.cfg.cadastre_mcp_url.as_deref(),
         );
-        match self.cfg.vogt_prod_mcp_url.as_deref() {
-            Some(origin) if vogt_prod_bearer => {
-                crate::session_endpoints::with_vogt_prod(endpoints, origin)
-            }
-            _ => endpoints,
+        if let Some(url) = self.cfg.crw_mcp_url.as_deref() {
+            endpoints = crate::session_endpoints::with_crw(endpoints, url);
         }
+        if let Some(origin) = self
+            .cfg
+            .vogt_prod_mcp_url
+            .as_deref()
+            .filter(|_| vogt_prod_bearer)
+        {
+            endpoints = crate::session_endpoints::with_vogt_prod(endpoints, origin);
+        }
+        // WI-4489: the pod gets the set the start resolved, as a host launch
+        // does through its trim; a worker never sees vogt-prod.
+        crate::session_endpoints::for_mcp_set(endpoints, mcp_set, mcp_extra)
     }
 
     /// Whether a remote Vogt is configured for pod sessions (WI-4289).
@@ -2147,6 +2157,7 @@ impl SessionRegistry {
             Some(crate::agent_stream::PodLaunch {
                 agent_env,
                 work_dir,
+                ..Default::default()
             })
         } else {
             None
@@ -2205,6 +2216,10 @@ impl SessionRegistry {
             .clone()
             .or_else(|| recorded.map(|r| r.mcp_extra.clone()))
             .unwrap_or_default();
+        if let Some(launch) = pod_launch.as_mut() {
+            launch.mcp_set = mcp_set;
+            launch.mcp_extra = mcp_extra.clone();
+        }
         let mcp_trim = crate::mcp_set::prepare(
             mcp_set,
             &mcp_extra,
@@ -2707,6 +2722,7 @@ impl SessionRegistry {
             session.set_posture_lost_on_resume(lost);
         }
         session.set_account(account.clone());
+        session.set_mcp_set(Some(mcp_set.name().to_string()));
         session.set_autopilot(spec.autopilot);
         session.set_policy(spec.policy.clone());
         session.set_budget(spec.budget.clone());
@@ -5140,6 +5156,7 @@ fn hibernated_summary(record: &Record, screen_bytes: u64) -> Option<SessionSumma
         // Hibernated: it has not been resumed yet, so nothing was lost.
         posture_lost_on_resume: false,
         account: record.account.clone(),
+        mcp_set: record.mcp_set.clone(),
         stop: None,
         // The last reading, so a caller can judge the wake (WI-2037).
         economics: record
@@ -6317,6 +6334,7 @@ mod tests {
             permission_mode: None,
             posture_lost_on_resume: false,
             account: None,
+            mcp_set: None,
             stop: None,
             economics: None,
             budget: None,

@@ -296,6 +296,14 @@ cfg="$tmp/codexq/home/.codex/config.toml"
 grep -q 'url = "https://e/mcp"' "$cfg" || fail "codex vogt table missing (quoted case)"
 { grep -q '^model = "x"' "$cfg" && grep -q 'keep.url' "$cfg" && grep -q 'other.one' "$cfg" && grep -q '^  "a",' "$cfg"; } || fail "codex config's own entries lost (quoted case)"
 [ "$(grep -c '^\[mcp_servers.vogt\]' "$cfg")" = 1 ] || fail "duplicate vogt table (quoted case)"
+# WI-4489: a stale vogt-prod or crw table cannot outlive the engine's set, so
+# a worker pod never keeps a production server the bootstrap left out.
+mkdir -p "$tmp/codexp/home/.codex"
+printf '[mcp_servers.vogt-prod]\nurl = "https://stale-prod/mcp"\n\n[mcp_servers.crw]\nurl = "http://stale-crw/mcp"\n\n[mcp_servers.vogtish]\nurl = "https://keep-vogtish"\n' >"$tmp/codexp/home/.codex/config.toml"
+out=$(run_case "$tmp/codexp" VOGT_CLI=codex CODEX_CONFIG="$CODEX_TOML" 2>&1) || fail "codex prod config path: $out"
+cfg="$tmp/codexp/home/.codex/config.toml"
+! grep -q stale "$cfg" || fail "stale vogt-prod/crw table kept: $(grep stale "$cfg")"
+grep -q 'keep-vogtish' "$cfg" || fail "an unrelated server was dropped"
 # WI-3491/WI-3882: a registered LLM provider is an argv override now, so the
 # fragment carries it and the shared config is not rewritten with it. The
 # config's own providers stay where they are.

@@ -65,6 +65,46 @@ pub fn with_vogt_prod(mut endpoints: SessionEndpoints, origin: &str) -> SessionE
     endpoints
 }
 
+/// The MCP server name of crw, the estate's web scrape and search service
+/// (WI-2742). It takes no bearer, so its entry is a URL only.
+pub const CRW_SERVER: &str = "crw";
+
+/// Add the `crw` entry at `url` (its full MCP URL, path included).
+pub fn with_crw(mut endpoints: SessionEndpoints, url: &str) -> SessionEndpoints {
+    if let Some(servers) = endpoints.mcp.as_object_mut() {
+        servers.insert(CRW_SERVER.into(), json!({"url": url}));
+    }
+    endpoints
+}
+
+/// Narrow `endpoints` to the session's MCP set (WI-4489), as a host launch's
+/// trim does: `full` keeps every entry; `worker` keeps the worker servers
+/// and the project's extras, with `vogt` asking for its worker tool profile.
+/// The remote Vogt (`vogt-prod`) is never in a worker set, whatever the
+/// extras say: a worker on a dev lane must not reach production.
+pub fn for_mcp_set(
+    mut endpoints: SessionEndpoints,
+    set: crate::mcp_set::McpSet,
+    extra: &[String],
+) -> SessionEndpoints {
+    if set == crate::mcp_set::McpSet::Full {
+        return endpoints;
+    }
+    let keep = crate::mcp_set::worker_names(extra);
+    if let Some(servers) = endpoints.mcp.as_object_mut() {
+        servers.retain(|name, _| name != VOGT_PROD_SERVER && keep.iter().any(|k| k == name));
+        if let Some(url) = servers
+            .get("vogt")
+            .and_then(|entry| entry.get("url"))
+            .and_then(Value::as_str)
+        {
+            let url = crate::mcp_set::with_profile(url);
+            servers.insert("vogt".into(), json!({"url": url}));
+        }
+    }
+    endpoints
+}
+
 /// The header the pod's Vogt MCP entry sends. Claude Code expands
 /// `${VOGT_HTTP_TOKEN}` from the session's environment when it reads the
 /// file, so the credential is never written to disk.
@@ -395,5 +435,63 @@ mod tests {
                 ["Authorization"],
             "Bearer ${VOGT_HTTP_TOKEN}"
         );
+    }
+
+    fn estate() -> SessionEndpoints {
+        with_crw(
+            with_vogt_prod(
+                for_backend(
+                    "pod",
+                    "0.0.0.0:8910".parse().unwrap(),
+                    Some("https://vogt-dev.example.test"),
+                    Some("https://cadastre.example.test"),
+                ),
+                "https://vogt-prod.example.test",
+            ),
+            "http://crw.example.test:18190/mcp",
+        )
+    }
+
+    #[test]
+    fn a_worker_pod_gets_the_worker_set_and_never_vogt_prod() {
+        let trimmed = for_mcp_set(
+            estate(),
+            crate::mcp_set::McpSet::Worker,
+            &["vogt-prod".to_string()],
+        );
+        assert_eq!(
+            trimmed.mcp,
+            json!({
+                "vogt": {"url": "https://vogt-dev.example.test/mcp?profile=worker"},
+                "cadastre": {"url": "https://cadastre.example.test/mcp"},
+                "crw": {"url": "http://crw.example.test:18190/mcp"},
+            })
+        );
+        let codex = codex_mcp_config(&trimmed, true, true);
+        assert!(codex.contains("[mcp_servers.crw]"), "{codex}");
+        assert!(!codex.contains("vogt-prod"), "{codex}");
+        let claude = claude_mcp_config(&trimmed, true, true);
+        assert!(claude["mcpServers"].get("crw").is_some(), "{claude}");
+        assert!(
+            claude["mcpServers"].get(VOGT_PROD_SERVER).is_none(),
+            "{claude}"
+        );
+    }
+
+    #[test]
+    fn a_full_pod_keeps_every_entry() {
+        let full = for_mcp_set(estate(), crate::mcp_set::McpSet::Full, &[]);
+        assert_eq!(full, estate());
+    }
+
+    #[test]
+    fn a_worker_extra_the_engine_does_not_serve_is_skipped() {
+        let trimmed = for_mcp_set(
+            estate(),
+            crate::mcp_set::McpSet::Worker,
+            &["komodo".to_string()],
+        );
+        let names: Vec<&String> = trimmed.mcp.as_object().unwrap().keys().collect();
+        assert_eq!(names, ["cadastre", "crw", "vogt"]);
     }
 }
