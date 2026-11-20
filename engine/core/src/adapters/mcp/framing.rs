@@ -819,35 +819,17 @@ mod tests {
             .contains("'resources/list'"));
     }
 
+    /// `tools/list` against its Rust-native snapshot
+    /// (`tests/snapshots/mcp-tools.json`, WI-4467). A drift names the tools
+    /// added (+), removed (-) or changed (~), or says the order moved.
     #[test]
-    fn tools_list_matches_the_python_golden() {
-        // Recorded from Python's `McpSurface.list_tools` as `tools/list` wire
-        // objects, by the capture in tests/parity/golden/mcp-tools.json. Names
-        // and order are compared first so a reordered list says so plainly.
-        let golden_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tests/parity/golden/mcp-tools.json");
-        let mut golden: Value =
-            serde_json::from_str(&std::fs::read_to_string(&golden_path).unwrap()).unwrap();
+    fn tools_list_matches_its_snapshot() {
         let response = &responses(&line(json!({
             "jsonrpc": "2.0", "id": "a", "method": "tools/list"
         })))[0];
-        crate::parity_divergence::patch_tools(&mut golden, &response["result"]);
-        let names = |list: &Value| -> Vec<String> {
-            list["tools"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|tool| tool["name"].as_str().unwrap().to_string())
-                .collect()
-        };
-        assert_eq!(
-            names(&response["result"]),
-            names(&golden),
-            "tool names or order drifted"
-        );
-        assert_eq!(
-            response["result"], golden,
-            "tools/list drifted from the Python golden"
-        );
+        let result = &response["result"];
+        crate::snapshot::assert_json_snapshot("mcp-tools", result, |expected| {
+            crate::snapshot::changed_entries(expected, result, "tools", "name")
+        });
     }
 }

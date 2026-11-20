@@ -1137,95 +1137,15 @@ mod tests {
         assert_eq!(shared["cli_path"], serde_json::json!(["work", "get"]));
     }
 
+    /// The whole dump, field order included, against its Rust-native snapshot
+    /// (`tests/snapshots/registry.json`, WI-4467). Any change to an operation's
+    /// name, transports, paths or schemas fails here and names the operation.
     #[test]
-    fn the_dump_matches_the_python_golden() {
-        // Recorded by `scripts/gen_registry.py` from Python's own registry
-        // dump. Compared with no normaliser, so a drift in any field fails.
-        // The golden is unkeyed (tests/parity/golden/registry.json, not under
-        // golden/<sha>/) on purpose: it describes the registry, which changes
-        // with the operation set rather than with the parity script.
-        // `gen_registry.py --check` diffs it against a fresh recording from the
-        // live Python.
-        let golden_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tests/parity/golden/registry.json");
-        let mut golden: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&golden_path).unwrap()).unwrap();
+    fn the_dump_matches_its_snapshot() {
         let dump = dump();
-        crate::parity_divergence::patch_registry(&mut golden, &dump);
-        assert_eq!(dump, golden, "registry dump drifted from the Python golden");
-        // Value equality ignores key order, and the manifest's field order is
-        // part of the contract, so compare the text too.
-        assert_eq!(
-            serde_json::to_string_pretty(&dump).unwrap(),
-            serde_json::to_string_pretty(&golden).unwrap(),
-            "registry field order drifted"
-        );
-    }
-
-    /// The schema normaliser of `tests/parity/normalise.toml` `[schema]`: sort
-    /// `anyOf`, applied only inside a schema object (one that carries
-    /// `$schema` or `properties`). Pydantic's union order is a generator
-    /// accident, not contract. Titles are compared (operator ruling, WI-1046).
-    fn normalise_schema(value: &serde_json::Value) -> serde_json::Value {
-        use serde_json::Value;
-        match value {
-            Value::Object(object) => {
-                let is_schema = object.contains_key("$schema") || object.contains_key("properties");
-                let mut out = serde_json::Map::new();
-                for (key, child) in object {
-                    let child = if is_schema && key == "anyOf" {
-                        let mut options: Vec<Value> = child
-                            .as_array()
-                            .unwrap()
-                            .iter()
-                            .map(normalise_schema)
-                            .collect();
-                        options.sort_by_key(|option| option.to_string());
-                        Value::Array(options)
-                    } else {
-                        normalise_schema(child)
-                    };
-                    out.insert(key.clone(), child);
-                }
-                Value::Object(out)
-            }
-            Value::Array(items) => Value::Array(items.iter().map(normalise_schema).collect()),
-            other => other.clone(),
-        }
-    }
-
-    #[test]
-    fn every_operation_schema_matches_the_python_golden_under_the_normaliser() {
-        // One comparison per operation, so a drift names the operation that
-        // moved. The whole-dump golden test above is stricter; this one is the
-        // contract-level check the normaliser is written for.
-        let golden_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tests/parity/golden/registry.json");
-        let mut golden: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&golden_path).unwrap()).unwrap();
-        let rust = dump();
-        crate::parity_divergence::patch_registry(&mut golden, &rust);
-        let golden_ops = golden["operations"].as_array().unwrap();
-        let rust_ops = rust["operations"].as_array().unwrap();
-        assert_eq!(rust_ops.len(), golden_ops.len(), "operation count drifted");
-
-        let mut drifted = Vec::new();
-        for expected in golden_ops {
-            let name = expected["name"].as_str().unwrap();
-            let Some(actual) = rust_ops.iter().find(|op| op["name"] == name) else {
-                drifted.push(format!("{name}: missing from the Rust dump"));
-                continue;
-            };
-            for field in ["params_schema", "result_schema"] {
-                if normalise_schema(&actual[field]) != normalise_schema(&expected[field]) {
-                    drifted.push(format!("{name}.{field}"));
-                }
-            }
-        }
-        assert!(
-            drifted.is_empty(),
-            "schemas drifted from Python: {drifted:?}"
-        );
+        crate::snapshot::assert_json_snapshot("registry", &dump, |expected| {
+            crate::snapshot::changed_entries(expected, &dump, "operations", "name")
+        });
     }
 
     #[test]

@@ -20,10 +20,10 @@ mod git_story;
 mod glob;
 mod merge;
 mod observability;
-#[cfg(test)]
-mod parity_divergence;
 mod registry;
 mod scripts;
+#[cfg(test)]
+mod snapshot;
 mod storage;
 
 /// The product version. Nothing sets `VOGT_VERSION` today, so this resolves to

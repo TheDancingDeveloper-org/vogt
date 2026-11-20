@@ -1568,15 +1568,17 @@ mod tests {
         restored
     }
 
-    /// Every probe in `tests/parity/validator_corpus.json`, recorded from
-    /// pydantic by `scripts/gen_validator_corpus.py`. An accepted probe must
+    /// Every probe in `engine/core/tests/fixtures/validator_corpus.json`. It was
+    /// recorded from pydantic; since the Python core was frozen (WI-4467) it is
+    /// the validator's own expectation file, edited deliberately with the
+    /// change that moves a verdict. An accepted probe must
     /// resolve to the same parameters; a refused one must say the same thing.
     /// Pydantic's `[type=...]` tag and its documentation link are not part of
     /// the comparison yet.
     #[test]
     fn matches_the_pydantic_corpus() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tests/parity/validator_corpus.json");
+            .join("tests/fixtures/validator_corpus.json");
         let corpus: Vec<serde_json::Value> =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         let mut failures = Vec::new();

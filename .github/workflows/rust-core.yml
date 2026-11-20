@@ -5,9 +5,8 @@ name: rust-core
 # wi-1443-main-sync), because that is where the compose job — including the
 # existing e2e and live Playwright — has to actually execute. Fast jobs have
 # no `if:`, so a pull request into main runs them too; only the live jobs are
-# gated. The parity job checks the committed golden; it never writes one.
-# A golden is recorded only by `record-golden`, dispatched with
-# record_golden=true under the pinned UV_PYTHON (WI-2661). `compose`,
+# gated. Python parity is retired (WI-4467): the Python core is frozen, and
+# the Rust core is checked against its own snapshots in `cargo test`. `compose`,
 # `playwright` and `coverage` run in the merge queue and nightly, not on
 # every push (WI-2677). The 30-minute live Playwright run also starts on the
 # rust-core -> main pull request (the 1.c cutover); other pull requests do
@@ -23,7 +22,7 @@ on:
     # Paths stay narrow for the long-lived integration branches.
     # No `paths:` here and no path classifier (WI-4158, WI-4163). The three
     # jobs branch protection requires (fmt, clippy, test; cargo deny and
-    # cargo audit; parity) run on every pull request, so a batch with no
+    # cargo audit) run on every pull request, so a batch with no
     # Rust change still reports them. The operator accepted the cost of
     # running them on acceptance-only or template-only pull requests.
     branches: [rust-core, rust-2, wi-1443-main-sync]
@@ -32,11 +31,6 @@ on:
   schedule:
     - cron: "17 3 * * *"
   workflow_dispatch:
-    inputs:
-      record_golden:
-        description: "Record the parity golden and open a PR (pinned UV_PYTHON). Workers must not commit goldens."
-        type: boolean
-        default: false
 
 concurrency:
   group: rust-core-${{ github.workflow }}-${{ github.ref }}
@@ -44,12 +38,6 @@ concurrency:
 
 permissions:
   contents: read
-
-# The goldens (CLI help wrapping above all) are recorded under the Python the
-# image ships (Dockerfile pins UV_PYTHON=3.13); left unset, uv picks whatever
-# the runner has.
-env:
-  UV_PYTHON: "3.13"
 
 jobs:
   rust:
@@ -139,7 +127,7 @@ jobs:
 
   supply-chain:
     name: cargo deny and cargo audit
-    # On every push, with rust and parity (WI-2674). cargo-deny reads deny.toml
+    # On every push, with rust (WI-2674). cargo-deny reads deny.toml
     # at the repo root. cargo audit uses the same reasoned ignores as ci.yml.
     runs-on: [self-hosted, bigmem]
     timeout-minutes: 20
@@ -276,114 +264,6 @@ jobs:
             -e PLAYWRIGHT_LIVE_TOKEN="$ENGINE_TOKEN" playwright \
             || echo "advisory: the rest of the live suite failed against the Rust core (tracked as a follow-up)"
 
-  parity:
-    name: parity
-    # Proves the harness against both cores. The Rust binary is built in this
-    # job, because the rust job runs on a different runner and its target
-    # directory is not here. This job only checks committed goldens; it never
-    # writes one. Recording is the record-golden job (WI-2661).
-    runs-on: [self-hosted]
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          fetch-depth: 0
-
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
-        with:
-          version: "0.11.23"
-
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
-        with:
-          toolchain: stable
-          components: rustfmt, clippy
-
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
-        with:
-          workspaces: engine
-          # Shared so a push restores the cache rust-core saved, instead of
-          # starting cold and then writing a per-ref cache nothing reuses.
-          # Only rust-core saves; the save was most of this job (WI-2677).
-          shared-key: rust-core
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/rust-core' }}
-
-      - name: build vogt-core
-        working-directory: engine
-        run: cargo build -p vogt-core
-
-      - name: record then check the Python core
-        run: |
-          set -euo pipefail
-          uv sync --locked --group dev
-          export VOGT_PARITY_PYTHON_BIN="$PWD/.venv/bin/vogt"
-          uv run python scripts/parity.py record --impl python --out "$RUNNER_TEMP/golden"
-          uv run python scripts/parity.py record --impl python --out "$RUNNER_TEMP/again"
-          diff -q "$RUNNER_TEMP/golden/cli.json" "$RUNNER_TEMP/again/cli.json"
-          diff -q "$RUNNER_TEMP/golden/audit.cli.json" "$RUNNER_TEMP/again/audit.cli.json"
-          uv run python scripts/parity.py record --impl python --transport http --out "$RUNNER_TEMP/http"
-          uv run python scripts/parity.py record --impl python --transport http --out "$RUNNER_TEMP/http-again"
-          diff -q "$RUNNER_TEMP/http/http.json" "$RUNNER_TEMP/http-again/http.json"
-          uv run python scripts/parity.py record --impl python --transport mcp --out "$RUNNER_TEMP/mcp"
-          uv run python scripts/parity.py record --impl python --transport mcp --out "$RUNNER_TEMP/mcp-again"
-          diff -q "$RUNNER_TEMP/mcp/mcp.json" "$RUNNER_TEMP/mcp-again/mcp.json"
-          # Against the committed golden, not the recording just made: a
-          # recording that agrees with itself proves nothing about drift.
-          # Prefer the golden named for the main this branch was rebased onto.
-          # A branch whose merge-base has moved past the last recording would
-          # otherwise fail with "no golden" (WI-2662). Fall back to the newest
-          # golden directory whose commit is an ancestor of HEAD, and say so.
-          # Commit time, not directory mtime: a fresh checkout stamps every
-          # golden alike, so ls -1dt is not an order (WI-2662).
-          # shellcheck disable=SC2155  # a failed selection must stop the job
-          golden=$(scripts/select_parity_golden.sh)
-          uv run python scripts/parity.py check --impl python --golden "$golden"
-          uv run python scripts/parity.py check --impl python --transport http --golden "$golden"
-          uv run python scripts/parity.py check --impl python --transport mcp --golden "$golden"
-          VOGT_PARITY_RUST_BIN="$GITHUB_WORKSPACE/engine/target/debug/vogt-core" \
-            uv run python scripts/parity.py check --impl rust --transport http --golden "$golden"
-          VOGT_PARITY_RUST_BIN="$GITHUB_WORKSPACE/engine/target/debug/vogt-core" \
-            uv run python scripts/parity.py check --impl rust --transport mcp --golden "$golden"
-          VOGT_PARITY_RUST_BIN="$GITHUB_WORKSPACE/engine/target/debug/vogt-core" \
-            uv run python scripts/parity.py check --impl rust --golden "$golden" --only dump
-          # WI-2678: exercise the same corpus without deterministic clock/ID
-          # hooks. This is a conformance probe, not a golden check: normal
-          # runtime timestamps and IDs are intentionally not deterministic.
-          # Keep it non-required while the known golden drift is reconciled.
-          VOGT_PARITY_HOOKS=off VOGT_PARITY_RUST_BIN="$GITHUB_WORKSPACE/engine/target/debug/vogt-core" \
-            uv run python scripts/parity.py check --impl rust --golden "$golden" --only actor || \
-            echo "hooks-off parity probe differs from the deterministic golden (non-required)"
-          uv run python scripts/parity.py check --impl python --golden "$golden" --only actor
-          # Both cores migrate from the same SQL: the schema init leaves must
-          # match the golden, and a Python-written store must have nothing
-          # pending when the Rust core opens it (WI-1048).
-          uv run python scripts/parity.py check --impl python --golden "$golden" --only schema
-          VOGT_PARITY_RUST_BIN="$GITHUB_WORKSPACE/engine/target/debug/vogt-core" \
-            uv run python scripts/parity.py check --impl rust --golden "$golden" --only schema
-          VOGT_PARITY_RUST_BIN="$GITHUB_WORKSPACE/engine/target/debug/vogt-core" \
-            uv run python scripts/parity.py crossopen --writer python --reader rust
-          uv run python scripts/parity.py selftest --golden "$golden"
-          # The typed-error table is derived from the goldens, never edited.
-          uv run python scripts/parity.py errors --golden "$golden" --check
-          # The recursive --help tree, CONFIG.md and config.example.toml.
-          uv run python scripts/parity.py contract --impl python
-          VOGT_PARITY_RUST_BIN="$GITHUB_WORKSPACE/engine/target/debug/vogt-core" \
-            uv run python scripts/parity.py contract --impl rust
-
-      - name: registry matches the Python source
-        # The Rust registry and its golden are generated. This fails the
-        # moment operations.py changes without a regeneration, instead of
-        # waiting for the next review to notice the drift.
-        run: uv run python scripts/gen_registry.py --check
-
-      - name: validator corpus matches pydantic
-        # The corpus is pydantic's own verdict on every probe. This fails the
-        # moment a model changes what pydantic accepts or how it refuses,
-        # instead of the Rust test comparing against a stale recording.
-        run: uv run python scripts/gen_validator_corpus.py --check
-
-      - name: drift ledger (report only)
-        run: uv run python scripts/drift_ledger.py
-
   coverage:
     name: line coverage >= 80%
     # An instrumented rebuild, so not part of the per-push set (WI-2677).
@@ -425,84 +305,3 @@ jobs:
       - name: line coverage
         working-directory: engine
         run: cargo llvm-cov -p vogt-core --fail-under-lines 80
-  record-golden:
-    name: record the parity golden
-    # The only place a golden is written (WI-2661). A worker commit that
-    # re-records one is how three sessions wrote three goldens in a day, each
-    # with a different Python. Dispatch with record_golden=true; UV_PYTHON is
-    # pinned at the workflow env to the image's 3.13. contents: write and
-    # pull-requests: write are this job only, and only so it can push the
-    # golden branch and open the PR.
-    if: github.event_name == 'workflow_dispatch' && inputs.record_golden
-    runs-on: [self-hosted]
-    timeout-minutes: 30
-    permissions:
-      contents: write
-      pull-requests: write
-    steps:
-      # The dispatched ref (github.sha), not a hard-coded rust-core. Recording
-      # against rust-core's merge-base with main, then checking that branch
-      # out, deleted every file the dispatched ref had that rust-core did not
-      # (run 40783776513: migration 0007 and the existing goldens).
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          fetch-depth: 0
-          ref: ${{ github.sha }}
-
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
-        with:
-          version: "0.11.23"
-
-      - name: record under the pinned Python and open a PR
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          DISPATCHED_SHA: ${{ github.sha }}
-        run: |
-          set -euo pipefail
-          uv sync --locked --group dev
-          # Record onto the commit that was dispatched, and name the golden
-          # after it. Never branch from a different base.
-          test "$(git rev-parse HEAD)" = "$DISPATCHED_SHA"
-          short=$(git rev-parse --short=7 HEAD)
-          out="tests/parity/golden/${short}"
-          mkdir -p "$out"
-          # Every file the parity job reads: cli, http, mcp, their audits
-          # (written with a full record), and schema.json. Recording only
-          # the default CLI transport is how a golden left the job missing
-          # http.json, mcp.json and schema.json (WI-2662).
-          uv run python scripts/parity.py record --impl python --out "$out"
-          uv run python scripts/parity.py record --impl python --transport http --out "$out"
-          uv run python scripts/parity.py record --impl python --transport mcp --out "$out"
-          uv run python scripts/parity.py record --impl python --only schema --out "$out"
-          for f in cli.json http.json mcp.json schema.json audit.cli.json audit.http.json audit.mcp.json meta.json; do
-            test -f "$out/$f" || { echo "record-golden did not write $f" >&2; exit 1; }
-          done
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          # Only this golden's directory. Adding the whole tree is how the
-          # last run committed deletions of files outside it.
-          git add -- "$out"
-          if git diff --cached --quiet; then
-            echo "golden ${short} already matches this recording"
-            exit 0
-          fi
-          branch="golden/${short}"
-          git checkout -B "$branch"
-          git commit -m "test: record parity golden ${short} (CI, UV_PYTHON=${UV_PYTHON})"
-          git push --force-with-lease origin "$branch"
-          # The self-hosted runner has no gh (exit 127 on run 40783776513).
-          # Open the PR, or print the one already open, through the REST API.
-          api="https://api.github.com/repos/${REPO}"
-          owner="${REPO%%/*}"
-          curl_api() { curl -fsS -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" "$@"; }
-          existing=$(curl_api "${api}/pulls?head=${owner}:${branch}&base=rust-core&state=open" \
-            | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d[0]["html_url"] if d else "")')
-          if [ -n "$existing" ]; then
-            echo "$existing"
-            exit 0
-          fi
-          TITLE="test: record parity golden ${short}" BODY="Recorded by the record-golden job under UV_PYTHON=${UV_PYTHON}. Workers do not commit goldens (WI-2661)." HEAD="$branch" \
-            python3 -c 'import json,os; print(json.dumps({"title":os.environ["TITLE"],"body":os.environ["BODY"],"head":os.environ["HEAD"],"base":"rust-core"}))' \
-            | curl_api -X POST "${api}/pulls" --data @- \
-            | python3 -c 'import json,sys; print(json.load(sys.stdin)["html_url"])'
