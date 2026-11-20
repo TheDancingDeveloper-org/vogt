@@ -918,7 +918,35 @@ def test_a_sweep_records_coverage_and_publishes_an_event(
 
     with instance.declared.read() as view:
         kinds = [event.kind for event in view.list_events(after=0, limit=50)]
-    assert kinds.count("sweep.completed") == 4
+    announced = [r for r in result.reports if r.new or r.outcome != "ok"]
+    assert kinds.count("sweep.completed") == len(announced), (
+        "a clean sweep that appended nothing is not announced"
+    )
+
+
+def test_a_quiet_sweep_publishes_no_sweep_completed_events(
+    instance: AppContext, tmp_path: Path
+) -> None:
+    """A sweep that appends nothing is silent on the event stream.
+
+    The first sweep sees the fixture and announces each collector. The second
+    sees the same inputs, every collector reports `new == 0`, and the feed must
+    not gain a single `sweep.completed` event for it.
+    """
+    _register_fixture(instance, tmp_path)
+    sweep(instance, SweepParams(offline_only=True, reason=WHY))
+
+    with instance.declared.read() as view:
+        before = len(view.list_events(after=0, limit=500))
+    second = sweep(instance, SweepParams(offline_only=True, reason=WHY))
+
+    assert all(report.new == 0 for report in second.reports), (
+        f"fixture changed between sweeps: {[r.new for r in second.reports]}"
+    )
+    with instance.declared.read() as view:
+        events = view.list_events(after=0, limit=500)
+    new_kinds = [event.kind for event in events[before:]]
+    assert "sweep.completed" not in new_kinds, new_kinds
 
 
 def test_a_sweep_writes_no_audit_rows(instance: AppContext, tmp_path: Path) -> None:

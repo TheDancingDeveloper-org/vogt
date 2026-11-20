@@ -217,6 +217,12 @@ fn sweep<C: Clock + 'static, I: IdFactory + 'static>(
     };
 
     for report in &reports {
+        // A clean sweep that appended nothing changed nothing: announcing it
+        // would make every quiet 5-second poll a full batch of no-op events
+        // for every subscriber. Failed and partial sweeps still publish.
+        if report.outcome == "ok" && report.new == 0 {
+            continue;
+        }
         ctx.declared.publish_event(
             SWEEP_COMPLETED_EVENT,
             "sweep",
@@ -1612,7 +1618,13 @@ mod tests {
             .iter()
             .filter(|event| event["kind"] == "sweep.completed")
             .collect();
-        assert_eq!(completed.len(), 4);
+        // A clean collector that appended nothing is not announced (WI-1253).
+        let announced = reports
+            .iter()
+            .filter(|report| report["new"] != 0 || report["outcome"] != "ok")
+            .count();
+        assert!(announced > 0);
+        assert_eq!(completed.len(), announced);
         assert_eq!(completed[0]["entity_kind"], "sweep");
         let marker_event = completed
             .iter()
