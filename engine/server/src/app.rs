@@ -601,6 +601,10 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
 
     let broker_routes = Router::new()
         .route(secret_broker::FETCH_ROUTE, post(secret_broker::fetch))
+        .route(
+            secret_broker::GITHUB_CHECK_ROUTE,
+            post(secret_broker::github_check),
+        )
         .route(secret_broker::STORE_ROUTE, post(secret_broker::store))
         .route(
             secret_broker::BUNDLE_STORE_ROUTE,

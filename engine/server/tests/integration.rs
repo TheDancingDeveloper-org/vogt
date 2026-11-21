@@ -26663,3 +26663,183 @@ async fn a_codex_session_with_an_active_goal_is_not_nudged() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
+
+// ---- gh#1460: brokered GitHub tokens are validated before they are handed out ----
+
+/// A fake `GET /user` that answers `status` and counts its hits.
+async fn fake_github_api(status: u16) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let hits = std::sync::Arc::new(AtomicUsize::new(0));
+    let seen = std::sync::Arc::clone(&hits);
+    let app = axum::Router::new().route(
+        "/user",
+        axum::routing::get(move || {
+            let seen = std::sync::Arc::clone(&seen);
+            async move {
+                seen.fetch_add(1, Ordering::SeqCst);
+                axum::http::StatusCode::from_u16(status).unwrap()
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (format!("http://{addr}"), hits)
+}
+
+async fn github_broker_session(
+    api: &str,
+) -> (
+    String,
+    String,
+    std::sync::Arc<vogt_engine_server::app::AppState>,
+    (tempfile::TempDir, ServerGuard),
+) {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = broker_config(&tmp, "GH_TOKEN vogt-dev-llm GH_TOKEN_SRC ondemand\n");
+    let (base, state, guard) = boot_with_state(cfg).await;
+    state
+        .sessions
+        .secret_broker()
+        .set_github_check(vogt_engine_server::github_token_check::GithubTokenCheck::for_tests(api));
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let id = create_session_id(&client, &base, "github-broker").await;
+    let token = state
+        .sessions
+        .secret_broker()
+        .issue(id.parse::<uuid::Uuid>().unwrap());
+    (base, token, state, (tmp, guard))
+}
+
+#[tokio::test]
+async fn the_fetch_endpoint_refuses_a_stale_github_token_naming_its_source_and_raises_one_item() {
+    let (api, _) = fake_github_api(401).await;
+    let (base, token, state, _tmp) = github_broker_session(&api).await;
+    let raised = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = std::sync::Arc::clone(&raised);
+    state
+        .sessions
+        .secret_broker()
+        .github_check()
+        .set_sink(std::sync::Arc::new(move |s| sink.lock().unwrap().push(s)));
+    let plain = reqwest::Client::new();
+    for _ in 0..2 {
+        let r = plain
+            .post(format!("{base}/api/agent-auth/fetch/GH_TOKEN"))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 424);
+        let text = r.text().await.unwrap();
+        let body: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(body["code"], "credential_stale");
+        assert_eq!(body["source"], "vogt-dev-llm/GH_TOKEN_SRC");
+        assert!(
+            body["error"].as_str().unwrap().contains("needs a person"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("value-of-GH_TOKEN"),
+            "the value never leaks: {text}"
+        );
+    }
+    assert_eq!(raised.lock().unwrap().len(), 1, "one item per stale token");
+}
+
+#[tokio::test]
+async fn the_fetch_endpoint_hands_the_token_out_when_github_is_down_but_the_check_ran() {
+    let (base, token, state, _tmp) = github_broker_session("http://127.0.0.1:1").await;
+    let check = state.sessions.secret_broker().github_check();
+    assert!(check.enabled(), "the check is on");
+    let r = reqwest::Client::new()
+        .post(format!("{base}/api/agent-auth/fetch/GH_TOKEN"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.text().await.unwrap(), "value-of-GH_TOKEN");
+    assert!(
+        check.probe_count() >= 1,
+        "GitHub was probed, then failed open"
+    );
+}
+
+#[tokio::test]
+async fn an_inconclusive_github_answer_is_cached_so_fetches_do_not_wait_each_time() {
+    let (api, hits) = fake_github_api(503).await;
+    let (base, token, _state, _tmp) = github_broker_session(&api).await;
+    for _ in 0..3 {
+        let r = reqwest::Client::new()
+            .post(format!("{base}/api/agent-auth/fetch/GH_TOKEN"))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200, "fail open");
+    }
+    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+/// The launch wrapper's own path: a stale value is not exported and the
+/// session is told why; a valid one is exported. The real `agent-auth.sh`
+/// against the real engine route, with only the Infisical read faked.
+async fn launch_with_github_token(api: &str) -> String {
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../deploy/agent-auth.sh");
+    let (base, _token, _state, tmp) = github_broker_session(api).await;
+    let _keep = tmp;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let launch = format!(
+        "source '{}'; DEGRADE_ON_UNAVAILABLE=1; \
+         resolve_secret() {{ printf -v \"$1\" '%s' ghp_launchvalue; PROJECT_OUTCOME[$3]=ok; }}; \
+         ENGINE_AGENT_AUTH_SECRETS='GH_TOKEN vogt-dev-llm GH_TOKEN_SRC'; \
+         load_manifest_secrets tok 2>/dev/null; \
+         echo \"launch gh=[${{GH_TOKEN:-}}] why=[$AGENT_AUTH_UNAVAILABLE_REASON]\"; sleep 30",
+        script.display()
+    );
+    let id = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({
+            "name": "launch-gh",
+            "command": ["/bin/bash", "-c", launch],
+            "env": [["VOGT_ENGINE_BROKER_URL", base]],
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    live_output_containing(&client, &base, &id, &["launch gh="]).await
+}
+
+#[tokio::test]
+async fn a_launch_exports_nothing_for_a_stale_github_token_and_says_why() {
+    let (api, _) = fake_github_api(401).await;
+    let out = launch_with_github_token(&api).await;
+    assert!(out.contains("launch gh=[] "), "{out}");
+    assert!(
+        out.contains("credential stale: GH_TOKEN_SRC, needs a person"),
+        "{out}"
+    );
+    assert!(!out.contains("ghp_launchvalue"), "{out}");
+}
+
+#[tokio::test]
+async fn a_launch_exports_a_github_token_github_accepts() {
+    let (api, _) = fake_github_api(200).await;
+    let out = launch_with_github_token(&api).await;
+    assert!(out.contains("launch gh=[ghp_launchvalue] why=[]"), "{out}");
+}

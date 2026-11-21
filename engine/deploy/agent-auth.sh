@@ -791,6 +791,35 @@ list_grants() {
     rm -f "$response"
 }
 
+# Ask the engine whether GitHub accepts a GitHub-bound value just resolved for
+# manifest entry $1 (gh#1460): the same cached check the broker runs on fetch,
+# so a stale PAT is refused at launch too. The value goes to curl on stdin,
+# never argv. Prints `stale` when GitHub rejected it; prints nothing for
+# every other outcome (ok, unknown, no broker, engine too old), so the launch
+# fails open exactly like the broker does.
+github_stale() {
+    local var="$1" value="$2" url response status
+    case " GH_TOKEN GITHUB_MCP_TOKEN ${ENGINE_AGENT_AUTH_GH_TOKEN_FROM:-} $(printf %s "${ENGINE_AGENT_AUTH_GITHUB_VARS:-}" | tr "," " ") " in
+        *" $var "*) ;;
+        *)
+            case "$value" in
+                ghp_* | gho_* | ghs_* | github_pat_*) ;;
+                *) return 0 ;;
+            esac
+            ;;
+    esac
+    url="$(broker_url)"
+    if [[ -z "$url" ]] || ! broker_token_available || ! command -v curl >/dev/null 2>&1; then
+        return 0
+    fi
+    response="$(printf '%s' "$value" | broker_curl -sS --max-time 8 \
+        --data-binary @- -X POST \
+        "${url%/}/api/agent-auth/github-check/$var" 2>/dev/null)" || return 0
+    case "$response" in
+        *'"status":"stale"'*) printf 'stale' ;;
+    esac
+}
+
 # Load every secret named in ENGINE_AGENT_AUTH_SECRETS, export it under its
 # manifest variable, and optionally alias one of them to GH_TOKEN.
 #
@@ -839,6 +868,15 @@ load_manifest_secrets() {
         [[ "${PROJECT_OUTCOME[$project]}" != "unreachable" ]] || continue
         if [[ -z "$value" ]] && ! flags_contain "${flag:-}" optional; then
             unavailable "Infisical secret $name is missing or empty"
+            continue
+        fi
+        if [[ -n "$value" && "$(github_stale "$var" "$value")" == "stale" ]]; then
+            # GitHub rejected it: export nothing for this name (and no GH_TOKEN
+            # alias), and say why where the session can read it, so an agent
+            # sees a stale credential and not a bare "Bad credentials".
+            unavailable "credential stale: $name, needs a person"
+            printf 'vogt-agent-auth: credential stale: %s (%s), needs a person to refresh it; not exported\n' \
+                "$name" "$var" >&2
             continue
         fi
         printf -v "$var" '%s' "$value"

@@ -105,6 +105,8 @@ const BROKER_AUTH_FIX: &str = "the secret broker does not know this caller: star
 /// The read route. `POST` only, outside the engine bearer gate (see `app.rs`),
 /// authenticated with the session's own broker token.
 pub const FETCH_ROUTE: &str = "/api/agent-auth/fetch/{var}";
+/// The launch wrapper's GitHub token probe (gh#1460).
+pub const GITHUB_CHECK_ROUTE: &str = "/api/agent-auth/github-check/{var}";
 /// The write route: a session stores one manifest secret it just
 /// produced. Same auth and gate placement as the read route.
 pub const STORE_ROUTE: &str = "/api/agent-auth/store/{var}";
@@ -553,7 +555,7 @@ pub struct SecretBroker {
     /// one extra window of writes).
     credential_writes: DashMap<Uuid, Vec<Instant>>,
     /// Validates GitHub-bound values before they are handed out (gh#1460).
-    github: crate::github_token_check::GithubTokenCheck,
+    github: std::sync::RwLock<Arc<crate::github_token_check::GithubTokenCheck>>,
 }
 
 /// The longest a grant may live.
@@ -681,19 +683,26 @@ impl SecretBroker {
             account_locks: DashMap::new(),
             credential_max_lifetime: credential_max_lifetime_from_env(),
             credential_writes: DashMap::new(),
-            github: crate::github_token_check::GithubTokenCheck::from_env(),
+            github: std::sync::RwLock::new(Arc::new(
+                crate::github_token_check::GithubTokenCheck::from_env(),
+            )),
         }
     }
 
     /// Replace the GitHub token check (tests point it at a fake API).
-    pub fn with_github_check(mut self, check: crate::github_token_check::GithubTokenCheck) -> Self {
-        self.github = check;
+    pub fn with_github_check(self, check: crate::github_token_check::GithubTokenCheck) -> Self {
+        self.set_github_check(check);
         self
     }
 
+    /// Replace the GitHub token check on a live broker (tests).
+    pub fn set_github_check(&self, check: crate::github_token_check::GithubTokenCheck) {
+        *self.github.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(check);
+    }
+
     /// The GitHub token check (gh#1460).
-    pub fn github_check(&self) -> &crate::github_token_check::GithubTokenCheck {
-        &self.github
+    pub fn github_check(&self) -> Arc<crate::github_token_check::GithubTokenCheck> {
+        Arc::clone(&self.github.read().unwrap_or_else(|e| e.into_inner()))
     }
 
     /// Override the ceiling on a written-back credential's expiry.
@@ -2772,6 +2781,60 @@ pub async fn store(
     }
 }
 
+/// `POST /api/agent-auth/github-check/{var}` — the launch wrapper asks whether
+/// a value it just resolved for manifest entry `var` is accepted by GitHub,
+/// through the same cached check the fetch route uses (gh#1460). The value is
+/// the request body; the answer never echoes it. A caller with no verdict
+/// (`unknown`, or `not_github`) exports the value as before.
+pub async fn github_check(
+    State(state): State<Arc<AppState>>,
+    Path(var): Path<String>,
+    request: Request<Body>,
+) -> Response {
+    let broker = state.sessions.secret_broker();
+    let presented = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string);
+    let Some(presented) = presented else {
+        return refusal(StatusCode::UNAUTHORIZED, BROKER_AUTH_FIX);
+    };
+    if presenting_session(&state, &presented).await.is_none() {
+        return refusal(StatusCode::UNAUTHORIZED, BROKER_AUTH_FIX);
+    }
+    let Some(entry) = broker.manifest().into_iter().find(|e| e.var == var) else {
+        return refusal(StatusCode::NOT_FOUND, "not in the manifest");
+    };
+    let body = match axum::body::to_bytes(request.into_body(), 8 * 1024).await {
+        Ok(b) => b,
+        Err(_) => return refusal(StatusCode::PAYLOAD_TOO_LARGE, "value too large"),
+    };
+    let value = String::from_utf8_lossy(&body).trim().to_string();
+    let check = broker.github_check();
+    if value.is_empty() || !check.is_github_bound(&var, &value) {
+        return Json(json!({ "status": "not_github" })).into_response();
+    }
+    use crate::github_token_check::{StaleCredential, TokenVerdict};
+    match check.check(&entry, &value).await {
+        TokenVerdict::Valid => Json(json!({ "status": "ok" })).into_response(),
+        TokenVerdict::Unknown => Json(json!({ "status": "unknown" })).into_response(),
+        TokenVerdict::Stale => {
+            let stale = StaleCredential::of(&entry);
+            Json(json!({
+                "status": "stale",
+                "message": stale.message(),
+                "var": stale.var,
+                "source": stale.source(),
+            }))
+            .into_response()
+        }
+    }
+}
+
 /// The typed `credential_stale` refusal for a GitHub-bound value GitHub
 /// rejected (gh#1460), or `None` to hand the value out. Network errors and
 /// timeouts fail open inside the check.
@@ -4349,20 +4412,6 @@ mod tests {
         assert!(text.contains("credential_stale"), "{text}");
         assert!(text.contains("infra/GH_TOKEN_SRC"), "{text}");
         assert!(!text.contains(secret), "{text}");
-    }
-
-    #[tokio::test]
-    async fn an_unreachable_github_still_hands_the_token_out() {
-        let broker = broker_with("GH_TOKEN infra GH_TOKEN_SRC\n", "127.0.0.1:8910")
-            .with_github_check(crate::github_token_check::GithubTokenCheck::new(
-                "http://127.0.0.1:1",
-            ));
-        let entry = broker.manifest()[0].clone();
-        assert!(
-            refuse_if_stale(&broker, &entry, "ghp_x", "req", Uuid::new_v4())
-                .await
-                .is_none()
-        );
     }
 
     #[tokio::test]
