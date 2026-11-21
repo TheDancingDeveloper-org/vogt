@@ -20,6 +20,7 @@
 //!
 //! Values are never logged or returned: only names and hash prefixes.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -35,15 +36,46 @@ pub const GITHUB_CHECK_ENV: &str = "ENGINE_AGENT_AUTH_GITHUB_CHECK";
 pub const GITHUB_VARS_ENV: &str = "ENGINE_AGENT_AUTH_GITHUB_VARS";
 /// Seconds between background passes; `0` disables the background pass.
 pub const GITHUB_CHECK_INTERVAL_ENV: &str = "ENGINE_AGENT_AUTH_GITHUB_CHECK_INTERVAL_SECS";
-/// The GitHub API base (GitHub Enterprise, or a fake in tests).
+/// The GitHub API base. Must be `https` and `api.github.com` or a host listed
+/// in [`GITHUB_ENTERPRISE_HOSTS_ENV`]; anything else is refused with a warning
+/// and the default is used, so the broker never sends a token to an arbitrary
+/// or cleartext endpoint.
 pub const GITHUB_API_URL_ENV: &str = "ENGINE_AGENT_AUTH_GITHUB_API_URL";
+/// Comma- or space-separated GitHub Enterprise API hosts allowed as the API
+/// base, beyond `api.github.com`.
+pub const GITHUB_ENTERPRISE_HOSTS_ENV: &str = "ENGINE_AGENT_AUTH_GITHUB_ENTERPRISE_HOSTS";
 
 pub const DEFAULT_GITHUB_VARS: &[&str] = &["GH_TOKEN", "GITHUB_MCP_TOKEN"];
 pub const GITHUB_TOKEN_PREFIXES: &[&str] = &["ghp_", "gho_", "ghs_", "github_pat_"];
 pub const DEFAULT_API_URL: &str = "https://api.github.com";
 pub const DEFAULT_TTL: Duration = Duration::from_secs(10 * 60);
+/// How long an inconclusive answer (timeout, 5xx, rate limit) is remembered, so
+/// a GitHub outage costs one probe a minute, not one per fetch.
+pub const DEFAULT_UNKNOWN_TTL: Duration = Duration::from_secs(60);
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
 pub const DEFAULT_INTERVAL: Duration = Duration::from_secs(30 * 60);
+
+/// Why `url` cannot be the GitHub API base, or the normalised base.
+pub fn validate_api_url(url: &str, enterprise_hosts: &[String]) -> Result<String, String> {
+    let parsed = reqwest::Url::parse(url.trim()).map_err(|_| "not a valid URL".to_string())?;
+    if parsed.scheme() != "https" {
+        return Err("must be https".into());
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("must not carry credentials".into());
+    }
+    let host = parsed.host_str().unwrap_or_default().to_ascii_lowercase();
+    if host != "api.github.com"
+        && !enterprise_hosts
+            .iter()
+            .any(|h| h.eq_ignore_ascii_case(&host))
+    {
+        return Err(format!(
+            "host {host} is not api.github.com or listed in {GITHUB_ENTERPRISE_HOSTS_ENV}"
+        ));
+    }
+    Ok(parsed.as_str().trim_end_matches('/').to_string())
+}
 
 /// What GitHub said about one value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,7 +129,10 @@ pub struct GithubTokenCheck {
     client: reqwest::Client,
     /// (var, value hash) → when the verdict was taken and whether it was valid.
     /// Only definite verdicts are cached.
-    cache: DashMap<(String, [u8; 32]), (Instant, bool)>,
+    cache: DashMap<(String, [u8; 32]), (Instant, TokenVerdict)>,
+    unknown_ttl: Duration,
+    /// Probes sent to GitHub (tests assert a probe was attempted).
+    probes: AtomicUsize,
     /// (var, source) already reported and not since seen valid.
     reported: DashMap<(String, String), ()>,
     sink: OnceLock<StaleSink>,
@@ -105,8 +140,16 @@ pub struct GithubTokenCheck {
 
 impl GithubTokenCheck {
     /// A check against `api` with the defaults.
-    pub fn new(api: impl Into<String>) -> Self {
+    pub(crate) fn new(api: impl Into<String>) -> Self {
         Self::build(api.into(), DEFAULT_TIMEOUT)
+    }
+
+    /// A check against an unvalidated `api` (a loopback fake). Not reachable
+    /// from configuration: production builds the base through
+    /// [`validate_api_url`] in [`Self::from_env`].
+    #[doc(hidden)]
+    pub fn for_tests(api: impl Into<String>) -> Self {
+        Self::new(api)
     }
 
     fn build(api: String, timeout: Duration) -> Self {
@@ -123,6 +166,8 @@ impl GithubTokenCheck {
             interval: Some(DEFAULT_INTERVAL),
             client,
             cache: DashMap::new(),
+            unknown_ttl: DEFAULT_UNKNOWN_TTL,
+            probes: AtomicUsize::new(0),
             reported: DashMap::new(),
             sink: OnceLock::new(),
         }
@@ -130,10 +175,26 @@ impl GithubTokenCheck {
 
     /// Configured from the `ENGINE_AGENT_AUTH_GITHUB_*` variables.
     pub fn from_env() -> Self {
-        let api = std::env::var(GITHUB_API_URL_ENV)
+        let hosts: Vec<String> = std::env::var(GITHUB_ENTERPRISE_HOSTS_ENV)
+            .unwrap_or_default()
+            .split([',', ' '])
+            .map(|h| h.trim().to_string())
+            .filter(|h| !h.is_empty())
+            .collect();
+        let api = match std::env::var(GITHUB_API_URL_ENV)
             .ok()
             .filter(|v| !v.trim().is_empty())
-            .unwrap_or_else(|| DEFAULT_API_URL.to_string());
+        {
+            None => DEFAULT_API_URL.to_string(),
+            Some(url) => validate_api_url(&url, &hosts).unwrap_or_else(|why| {
+                tracing::warn!(
+                    env = GITHUB_API_URL_ENV,
+                    reason = %why,
+                    "ignoring the configured GitHub API URL; using {DEFAULT_API_URL}"
+                );
+                DEFAULT_API_URL.to_string()
+            }),
+        };
         let mut check = Self::new(api);
         if let Ok(v) = std::env::var(GITHUB_CHECK_ENV) {
             if matches!(
@@ -171,11 +232,22 @@ impl GithubTokenCheck {
         self
     }
 
+    pub fn with_unknown_ttl(mut self, ttl: Duration) -> Self {
+        self.unknown_ttl = ttl;
+        self
+    }
+
+    /// How many probes have been sent to GitHub.
+    pub fn probe_count(&self) -> usize {
+        self.probes.load(Ordering::SeqCst)
+    }
+
     pub fn with_timeout(self, timeout: Duration) -> Self {
         let mut rebuilt = Self::build(self.api.clone(), timeout);
         rebuilt.enabled = self.enabled;
         rebuilt.vars = self.vars;
         rebuilt.ttl = self.ttl;
+        rebuilt.unknown_ttl = self.unknown_ttl;
         rebuilt.interval = self.interval;
         rebuilt
     }
@@ -221,22 +293,20 @@ impl GithubTokenCheck {
         let cached = self
             .cache
             .get(&key)
-            .filter(|hit| hit.0.elapsed() < self.ttl)
+            .filter(|hit| {
+                let ttl = if hit.1 == TokenVerdict::Unknown {
+                    self.unknown_ttl
+                } else {
+                    self.ttl
+                };
+                hit.0.elapsed() < ttl
+            })
             .map(|hit| hit.1);
         let verdict = match cached {
-            Some(true) => TokenVerdict::Valid,
-            Some(false) => TokenVerdict::Stale,
+            Some(v) => v,
             None => {
                 let verdict = self.ask_github(entry, value, &hash).await;
-                match verdict {
-                    TokenVerdict::Valid => {
-                        self.cache.insert(key, (Instant::now(), true));
-                    }
-                    TokenVerdict::Stale => {
-                        self.cache.insert(key, (Instant::now(), false));
-                    }
-                    TokenVerdict::Unknown => {}
-                }
+                self.cache.insert(key, (Instant::now(), verdict));
                 verdict
             }
         };
@@ -280,6 +350,7 @@ impl GithubTokenCheck {
         hash: &[u8; 32],
     ) -> TokenVerdict {
         let short = hex_prefix(hash);
+        self.probes.fetch_add(1, Ordering::SeqCst);
         let response = self
             .client
             .get(format!("{}/user", self.api))
@@ -519,6 +590,39 @@ mod tests {
         fake.status.store(401, Ordering::SeqCst);
         check.check(&entry(), "ghp_x").await;
         assert_eq!(seen.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn the_api_base_must_be_https_on_an_allowed_host() {
+        let ghe = vec!["ghe.example.com".to_string()];
+        assert_eq!(
+            validate_api_url("https://api.github.com/", &ghe).unwrap(),
+            "https://api.github.com"
+        );
+        assert!(validate_api_url("https://ghe.example.com/api/v3", &ghe).is_ok());
+        assert!(validate_api_url("http://api.github.com", &ghe).is_err());
+        assert!(validate_api_url("http://127.0.0.1:9", &ghe).is_err());
+        assert!(validate_api_url("https://evil.example.com", &ghe).is_err());
+        assert!(validate_api_url("https://api.github.com.evil.com", &ghe).is_err());
+        assert!(validate_api_url("https://user:pw@api.github.com", &ghe).is_err());
+        assert!(validate_api_url("not a url", &ghe).is_err());
+        assert!(validate_api_url("https://ghe.example.com", &[]).is_err());
+    }
+
+    #[tokio::test]
+    async fn an_inconclusive_answer_is_cached_briefly() {
+        let (url, fake) = serve(503, Duration::ZERO).await;
+        let check = GithubTokenCheck::new(url).with_unknown_ttl(Duration::from_millis(80));
+        assert_eq!(check.check(&entry(), "ghp_x").await, TokenVerdict::Unknown);
+        assert_eq!(check.check(&entry(), "ghp_x").await, TokenVerdict::Unknown);
+        assert_eq!(fake.hits.load(Ordering::SeqCst), 1, "not re-probed at once");
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        check.check(&entry(), "ghp_x").await;
+        assert_eq!(
+            fake.hits.load(Ordering::SeqCst),
+            2,
+            "re-probed after the short TTL"
+        );
     }
 
     #[test]

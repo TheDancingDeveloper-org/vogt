@@ -5498,7 +5498,17 @@ asking for it.
 | `ENGINE_AGENT_AUTH_GITHUB_CHECK` | on | `0`/`false`/`off` turns the check (and the background pass) off |
 | `ENGINE_AGENT_AUTH_GITHUB_VARS` | empty | extra GitHub-bound manifest names, comma- or space-separated |
 | `ENGINE_AGENT_AUTH_GITHUB_CHECK_INTERVAL_SECS` | `1800` | background pass interval; `0` disables the pass only |
-| `ENGINE_AGENT_AUTH_GITHUB_API_URL` | `https://api.github.com` | the API base (GitHub Enterprise, or a fake in tests) |
+| `ENGINE_AGENT_AUTH_GITHUB_API_URL` | `https://api.github.com` | the API base; must be `https` on `api.github.com` or a host in `ENGINE_AGENT_AUTH_GITHUB_ENTERPRISE_HOSTS`, otherwise ignored with a warning |
+| `ENGINE_AGENT_AUTH_GITHUB_ENTERPRISE_HOSTS` | none | comma- or space-separated GitHub Enterprise API hosts allowed as the base |
+
+Launch-time check: `agent-auth.sh` sends each GitHub-bound value it resolves
+(`GH_TOKEN`, `GITHUB_MCP_TOKEN`, the `GH_TOKEN_FROM` name, `GITHUB_VARS`, or a
+`ghp_`/`gho_`/`ghs_`/`github_pat_` value) to `POST /api/agent-auth/github-check/{var}`
+on the value's stdin, the same cached check the fetch route uses. On `stale` it
+exports nothing for that name (no `GH_TOKEN` alias either) and records
+`credential stale: <secret name>, needs a person` in `AGENT_AUTH_UNAVAILABLE`
+and on the session's stderr. An engine that is down or too old, or a GitHub
+outage, fails open. Inconclusive answers are cached for 60 seconds.
 
 **Storing a secret from a session: the write broker.** The mirror of the
 fetch, for a session that has just *produced* a secret — minted an API token,
