@@ -11505,6 +11505,81 @@ fn conversation_sandbox() -> (tempfile::TempDir, Config, std::path::PathBuf) {
     (tmp, cfg, stub)
 }
 
+/// WI-1575: a pod Codex rollout (as the write-back stores it, with no
+/// `assistant` lines) is metered by its `token_count` lines. The tailer used
+/// to drop a reading with no turns, so the engine row carried no economics and
+/// `session_economics` fell back to an estimate.
+#[tokio::test]
+async fn the_economics_tailer_meters_a_pod_codex_rollout_by_token_count() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cfg = test_config();
+    cfg.default_cwd = tmp.path().to_path_buf();
+    cfg.workspace_root = tmp.path().canonicalize().unwrap();
+    cfg.state_dir = tmp.path().join("state");
+    cfg.economics_home = Some(tmp.path().to_path_buf());
+    cfg.economics_tick = Duration::from_secs(1);
+
+    let conversation = "6c1f0d2e-5b7a-4e1c-9f3d-2a8b7c6d5e4f";
+    let rollout = tmp
+        .path()
+        .join(".codex/sessions/2026/11/21")
+        .join(format!("rollout-2026-11-21T06-13-20-{conversation}.jsonl"));
+    std::fs::create_dir_all(rollout.parent().unwrap()).unwrap();
+    std::fs::write(
+        &rollout,
+        concat!(
+            r#"{"type":"session_meta","payload":{"id":"6c1f0d2e-5b7a-4e1c-9f3d-2a8b7c6d5e4f","cwd":"/work"}}"#, "\n",
+            r#"{"type":"event_msg","payload":{"type":"task_started"}}"#, "\n",
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hi"}]}}"#, "\n",
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":30000,"output_tokens":20,"total_tokens":30020},"last_token_usage":{"input_tokens":30000,"output_tokens":20,"total_tokens":30020},"model_context_window":272000}}}"#, "\n",
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":65000,"output_tokens":75,"total_tokens":65075},"last_token_usage":{"input_tokens":35000,"output_tokens":55,"total_tokens":35055},"model_context_window":272000}}}"#, "\n",
+            r#"{"type":"event_msg","payload":{"type":"task_complete"}}"#, "\n",
+        ),
+    )
+    .unwrap();
+
+    let (base, _guard) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let created: Value = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({ "name": "metered-codex", "command": ["/bin/cat"] }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+    client
+        .post(format!("{base}/api/sessions/{id}/conversation"))
+        .json(&json!({ "agent": "codex", "id": conversation }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let row = loop {
+        let row = session_row(&client, &base, &id).await;
+        if row["economics"]["usage_measured"] == true {
+            break row;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the tailer never metered the codex rollout: {row}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    assert_eq!(row["economics"]["context_tokens"], 35055);
+    assert_eq!(row["economics"]["peak_context_tokens"], 35055);
+    assert_eq!(row["economics"]["output_tokens"], 75);
+    assert_eq!(row["economics"]["context_window_tokens"], 272000);
+}
+
 /// The economics tailer follows a live session's transcript and the session
 /// row carries the reading; when the session ends, the in-process scrape
 /// shows it. The registry is process-wide, so the assertion is that this

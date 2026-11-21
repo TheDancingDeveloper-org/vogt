@@ -718,7 +718,6 @@ fn read_tail(path: &Path, offset: u64) -> Option<(u64, Vec<u8>)> {
 pub(crate) fn transcript_path(
     home: &Path,
     claude_dirs: &[PathBuf],
-    codex_home: Option<&Path>,
     conversation: &AgentConversation,
 ) -> Option<PathBuf> {
     // The id is the only part of the path the agent chose. Anything that is
@@ -730,14 +729,7 @@ pub(crate) fn transcript_path(
     // it ran in, so each root is tried until one holds it.
     let roots = match conversation.agent.as_str() {
         "claude" => crate::transcripts::claude_roots(home, claude_dirs),
-        // A pod's Codex rollout is streamed to the engine and stored under
-        // the write-back home (WI-3867), not the engine host's `~/.codex`
-        // (WI-1575). Both are tried, the write-back home first.
-        "codex" => codex_home
-            .map(|codex| codex.join("sessions"))
-            .into_iter()
-            .chain([home.join(".codex/sessions")])
-            .collect(),
+        "codex" => vec![home.join(".codex/sessions")],
         _ => return None,
     };
     let (root, found) = roots.into_iter().find_map(|root| {
@@ -800,7 +792,9 @@ pub(crate) fn advance(
     feed_bytes(tail, &bytes);
 
     let snapshot = tail.meter.snapshot();
-    if snapshot.turns == 0 {
+    // A Codex rollout has no `assistant` lines, so it never counts a turn;
+    // its `token_count` lines are what it is metered by (WI-1575).
+    if snapshot.turns == 0 && !snapshot.usage_measured {
         return None;
     }
     let due = match tail.persisted {
@@ -844,7 +838,6 @@ fn feed_bytes(tail: &mut Tail, bytes: &[u8]) {
 /// not spawn this when that is zero.
 pub fn spawn_economics_tailer(state: Arc<AppState>, home: PathBuf, tick: Duration) {
     let claude_dirs = state.config.agent_onboarding.claude_dirs();
-    let codex_home = state.config.codex_transcript_root.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(tick);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -860,7 +853,6 @@ pub fn spawn_economics_tailer(state: Arc<AppState>, home: PathBuf, tick: Duratio
                     .unwrap_or_else(|| Tail::start(&agent));
                 let home = home.clone();
                 let claude_dirs = claude_dirs.clone();
-                let codex_home = codex_home.clone();
                 // One bad transcript must not stall the rest of the tick, so
                 // the blocking work is bounded and a timeout skips the session
                 // until the next tick.
@@ -870,12 +862,7 @@ pub fn spawn_economics_tailer(state: Arc<AppState>, home: PathBuf, tick: Duratio
                         let now = Instant::now();
                         let path = match tail.path.clone() {
                             Some(path) => path,
-                            None => match transcript_path(
-                                &home,
-                                &claude_dirs,
-                                codex_home.as_deref(),
-                                &conversation,
-                            ) {
+                            None => match transcript_path(&home, &claude_dirs, &conversation) {
                                 Some(path) => path,
                                 None => return (tail, None),
                             },
@@ -1496,27 +1483,5 @@ mod tests {
         );
         assert_eq!(reading.turns, 1);
         assert_eq!(reading.output_tokens, 7);
-    }
-
-    /// A pod's Codex rollout is stored under the write-back home, not the
-    /// engine host's `~/.codex` (WI-1575).
-    #[test]
-    fn a_pod_codex_rollout_is_found_under_the_writeback_home() {
-        let host = tempfile::tempdir().unwrap();
-        let codex = tempfile::tempdir().unwrap();
-        let dir = codex.path().join("sessions/2026/11/21");
-        std::fs::create_dir_all(&dir).unwrap();
-        let file = dir.join("rollout-2026-11-21T06-00-00-0199aaaa-bbbb.jsonl");
-        std::fs::write(&file, "{}\n").unwrap();
-        let conversation = AgentConversation {
-            agent: "codex".into(),
-            id: "0199aaaa-bbbb".into(),
-        };
-        assert_eq!(
-            transcript_path(host.path(), &[], Some(codex.path()), &conversation),
-            Some(file.canonicalize().unwrap())
-        );
-        // Without the write-back home the host path is all there is.
-        assert_eq!(transcript_path(host.path(), &[], None, &conversation), None);
     }
 }
