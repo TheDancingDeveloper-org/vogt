@@ -2781,48 +2781,107 @@ pub async fn store(
     }
 }
 
-/// `POST /api/agent-auth/github-check/{var}` — the launch wrapper asks whether
-/// a value it just resolved for manifest entry `var` is accepted by GitHub,
-/// through the same cached check the fetch route uses (gh#1460). The value is
-/// the request body; the answer never echoes it. A caller with no verdict
-/// (`unknown`, or `not_github`) exports the value as before.
+/// `POST /api/agent-auth/github-check/{var}` — is the manifest secret `var`
+/// stale at GitHub? (gh#1460.) The request carries no token: the engine
+/// resolves `var` itself, exactly as it would broker it, and checks its own
+/// copy through the cached check the fetch route uses, so a caller cannot
+/// probe, raise or clear anything with a value of its own. Answers `ok`,
+/// `stale`, `unknown` or `not_github`; never the value. Same session
+/// authentication and rate limit as the fetch route, and audited by session,
+/// name and result.
 pub async fn github_check(
     State(state): State<Arc<AppState>>,
     Path(var): Path<String>,
     request: Request<Body>,
 ) -> Response {
     let broker = state.sessions.secret_broker();
+    let path = request.uri().path().to_string();
+    let request_id = request
+        .extensions()
+        .get::<RequestId>()
+        .map(|id| id.0.clone())
+        .unwrap_or_default();
     let presented = request
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .map(str::trim)
-        .filter(|v| !v.is_empty())
-        .map(str::to_string);
+        .filter(|v| !v.is_empty());
     let Some(presented) = presented else {
+        auth::record_auth_failure(&Method::POST, &path, &request_id, "missing broker token").await;
         return refusal(StatusCode::UNAUTHORIZED, BROKER_AUTH_FIX);
     };
-    if presenting_session(&state, &presented).await.is_none() {
+    let Some(session) = presenting_session(&state, presented).await else {
+        auth::record_auth_failure(&Method::POST, &path, &request_id, "unknown broker token").await;
         return refusal(StatusCode::UNAUTHORIZED, BROKER_AUTH_FIX);
+    };
+    // The fetch route's budget, shared: this route is another way to make the
+    // engine read a manifest secret, so it cannot be used to dodge the limit.
+    if let Some(retry_after) = state
+        .auth
+        .check_mutation_rate_limit(&format!("secret-broker:{session}"), FETCH_LIMIT_PER_MINUTE)
+    {
+        tracing::warn!(
+            target: "vogt::audit",
+            request_id = %request_id,
+            session_id = %session,
+            var = %var,
+            retry_after_ms = retry_after.as_millis() as u64,
+            "secret broker GitHub check rate limit exceeded"
+        );
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            [(
+                header::RETRY_AFTER,
+                retry_after.as_secs().max(1).to_string(),
+            )],
+            Json(json!({ "error": "too many secret fetches from this session" })),
+        )
+            .into_response();
     }
-    let Some(entry) = broker.manifest().into_iter().find(|e| e.var == var) else {
-        return refusal(StatusCode::NOT_FOUND, "not in the manifest");
+    let audit = |result: &str| {
+        tracing::info!(
+            target: "vogt::audit",
+            request_id = %request_id,
+            session_id = %session,
+            var = %var,
+            result = %result,
+            "secret broker GitHub check"
+        );
     };
-    let body = match axum::body::to_bytes(request.into_body(), 8 * 1024).await {
-        Ok(b) => b,
-        Err(_) => return refusal(StatusCode::PAYLOAD_TOO_LARGE, "value too large"),
+    let Some(entry) = broker.permitted(&var) else {
+        audit("not_in_manifest");
+        return refusal(StatusCode::FORBIDDEN, "not in the manifest");
     };
-    let value = String::from_utf8_lossy(&body).trim().to_string();
     let check = broker.github_check();
-    if value.is_empty() || !check.is_github_bound(&var, &value) {
+    if !check.enabled() {
+        audit("disabled");
+        return Json(json!({ "status": "not_github" })).into_response();
+    }
+    let value = match broker.fetch(&entry).await {
+        Ok(v) => v,
+        Err(_) => {
+            audit("unknown");
+            return Json(json!({ "status": "unknown" })).into_response();
+        }
+    };
+    if !check.is_github_bound(&var, &value) {
+        audit("not_github");
         return Json(json!({ "status": "not_github" })).into_response();
     }
     use crate::github_token_check::{StaleCredential, TokenVerdict};
     match check.check(&entry, &value).await {
-        TokenVerdict::Valid => Json(json!({ "status": "ok" })).into_response(),
-        TokenVerdict::Unknown => Json(json!({ "status": "unknown" })).into_response(),
+        TokenVerdict::Valid => {
+            audit("ok");
+            Json(json!({ "status": "ok" })).into_response()
+        }
+        TokenVerdict::Unknown => {
+            audit("unknown");
+            Json(json!({ "status": "unknown" })).into_response()
+        }
         TokenVerdict::Stale => {
+            audit("stale");
             let stale = StaleCredential::of(&entry);
             Json(json!({
                 "status": "stale",
