@@ -26609,6 +26609,68 @@ async fn a_codex_rollout_task_complete_is_one_ready_per_turn_and_its_done_marker
     );
 }
 
+/// WI-4511: with a 15 s economics tick, a prompted turn's `ready` still
+/// follows its `task_complete` within about a second, and the rollout is
+/// read when it grows rather than on the tick.
+#[tokio::test]
+async fn a_codex_ready_follows_task_complete_inside_the_economics_tick() {
+    let conversation = "9f4a3b5c-8e0d-4b4f-8c6a-5d1e0f9a8b72";
+    let (_tmp, mut cfg, rollout) = codex_rollout_sandbox(
+        conversation,
+        vogt_engine_server::autopilot::Policy {
+            nudge_after: Duration::from_secs(600),
+            max_nudges: 10,
+        },
+    );
+    cfg.economics_tick = Duration::from_secs(15);
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let created: Value = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({ "name": "codex-fast-ready", "command": ["/bin/cat"] }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+    client
+        .post(format!("{base}/api/sessions/{id}/conversation"))
+        .json(&json!({ "agent": "codex", "id": conversation }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    // Let the first read settle the rollout; the next 15 s tick is far off.
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    for turn in ["turn-1", "turn-2"] {
+        let before = changes_of(&client, &base, &id, "ready").await.len();
+        append_rollout(
+            &rollout,
+            &[
+                json!({"type": "task_started", "turn_id": turn}),
+                json!({"type": "task_complete", "turn_id": turn, "last_agent_message": "ok"}),
+            ],
+        );
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(1_500);
+        while changes_of(&client, &base, &id, "ready").await.len() <= before {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "ready for {turn} did not follow task_complete within 1.5 s"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+    tokio::time::sleep(Duration::from_millis(1_200)).await;
+    let ready = changes_of(&client, &base, &id, "ready").await;
+    assert_eq!(ready.len(), 2, "one ready per turn: {ready:?}");
+}
+
 /// WI-1576: a Codex session whose `/goal` is active continues idle turns by
 /// itself, so autopilot does not nudge it while it rests at its prompt. Once
 /// the goal completes, the same prompt is nudged.
