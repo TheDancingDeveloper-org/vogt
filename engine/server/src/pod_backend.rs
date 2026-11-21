@@ -1169,6 +1169,17 @@ const RUNTIME_MOUNT: &str = "/run/vogt";
 /// its size limit) and `TMPDIR` points every agent at it.
 const SESSION_TMPDIR: &str = "/tmp/vogt";
 const TMPDIR_INIT_CONTAINER: &str = "session-tmpdir";
+/// The session's writable rustup home (WI-4514). The image bakes its
+/// toolchains under the read-only [`BAKED_RUSTUP_HOME`]; the same init
+/// container makes this directory on the private `/cache` emptyDir with a
+/// symlink to each baked toolchain and a copy of its settings, and the agent
+/// runs with auto-install on. A baked toolchain resolves through its symlink
+/// with nothing downloaded; a version a repo pins that the image lacks installs
+/// here on first use (about 0.6 GB minimal, 1.3 GB default profile, counted
+/// against the `/cache` size limit and gone with the pod). A writable volume
+/// shared between pods would save the download but is refused (WI-3242).
+const SESSION_RUSTUP_HOME: &str = "/cache/rustup";
+const BAKED_RUSTUP_HOME: &str = "/opt/rust/rustup";
 /// The pod-local emptyDir that carries a pod's read-only workspace tree
 /// (WI-3373) and the init container that builds it.
 const WORKSPACE_VOLUME: &str = "session-workspace";
@@ -1651,6 +1662,16 @@ pub fn pod_template(
         value: Some(SESSION_TMPDIR.into()),
         ..Default::default()
     });
+    env.push(EnvVar {
+        name: "RUSTUP_HOME".into(),
+        value: Some(SESSION_RUSTUP_HOME.into()),
+        ..Default::default()
+    });
+    env.push(EnvVar {
+        name: "RUSTUP_AUTO_INSTALL".into(),
+        value: Some("1".into()),
+        ..Default::default()
+    });
     env.extend(PRIVATE_CACHE_ENV.iter().map(|(name, value)| EnvVar {
         name: (*name).into(),
         value: Some((*value).into()),
@@ -1952,20 +1973,33 @@ pub fn pod_template(
 }
 /// Makes [`SESSION_TMPDIR`] on the `/tmp` emptyDir as the session user, mode
 /// 0700 (clearing the setgid bit the directory inherits), before the session
-/// container starts (WI-4513).
+/// container starts (WI-4513). It also layers [`SESSION_RUSTUP_HOME`] over the
+/// image's baked toolchains, when the image has any (WI-4514).
 fn tmpdir_init_container(image: &str) -> Container {
     Container {
         name: TMPDIR_INIT_CONTAINER.into(),
         image: Some(image.into()),
         command: Some(vec!["sh".into(), "-c".into()]),
         args: Some(vec![format!(
-            "mkdir -p {SESSION_TMPDIR} && chmod 0700 {SESSION_TMPDIR}"
+            "mkdir -p {SESSION_TMPDIR} && chmod 0700 {SESSION_TMPDIR} \
+             && if [ -d {BAKED_RUSTUP_HOME}/toolchains ]; then \
+             mkdir -p {SESSION_RUSTUP_HOME}/toolchains \
+             && cp {BAKED_RUSTUP_HOME}/settings.toml {SESSION_RUSTUP_HOME}/ \
+             && for t in {BAKED_RUSTUP_HOME}/toolchains/*; do \
+             ln -sfn \"$t\" \"{SESSION_RUSTUP_HOME}/toolchains/${{t##*/}}\" || exit 1; done; fi"
         )]),
-        volume_mounts: Some(vec![VolumeMount {
-            name: "session-tmp".into(),
-            mount_path: TMP_MOUNT.into(),
-            ..Default::default()
-        }]),
+        volume_mounts: Some(vec![
+            VolumeMount {
+                name: "session-tmp".into(),
+                mount_path: TMP_MOUNT.into(),
+                ..Default::default()
+            },
+            VolumeMount {
+                name: PRIVATE_CACHE_VOLUME.into(),
+                mount_path: PRIVATE_CACHE_DIR.into(),
+                ..Default::default()
+            },
+        ]),
         resources: Some(ResourceRequirements {
             requests: Some(BTreeMap::from([
                 (
@@ -4600,6 +4634,33 @@ mod tests {
         let env = spec.containers[0].env.as_ref().unwrap();
         let tmpdir = env.iter().find(|e| e.name == "TMPDIR").expect("TMPDIR");
         assert_eq!(tmpdir.value.as_deref(), Some("/tmp/vogt"));
+    }
+
+    #[test]
+    fn the_agent_gets_a_writable_rustup_home_over_the_baked_toolchains() {
+        // WI-4514: /opt/rust/rustup is read-only, so a repo that pins an
+        // unbaked toolchain installs it into a private rustup home instead.
+        let pod = pod_template_for(&PodConfig::default());
+        let spec = pod.spec.as_ref().unwrap();
+        let init = spec
+            .init_containers
+            .iter()
+            .flatten()
+            .find(|c| c.name == TMPDIR_INIT_CONTAINER)
+            .expect("tmpdir init container");
+        let script = init.args.as_ref().unwrap().join(" ");
+        assert!(script.contains("mkdir -p /cache/rustup/toolchains"));
+        assert!(script.contains("cp /opt/rust/rustup/settings.toml /cache/rustup/"));
+        assert!(script.contains("ln -sfn \"$t\" \"/cache/rustup/toolchains/${t##*/}\""));
+        let mounts = init.volume_mounts.as_ref().unwrap();
+        assert!(mounts
+            .iter()
+            .any(|m| m.name == PRIVATE_CACHE_VOLUME && m.mount_path == PRIVATE_CACHE_DIR));
+        let env = cache_env(&pod);
+        assert_eq!(env["RUSTUP_HOME"], "/cache/rustup");
+        assert_eq!(env["RUSTUP_AUTO_INSTALL"], "1");
+        // The rustup home sits on the per-pod emptyDir, never a shared claim.
+        assert!(shared_writable_volumes(&pod).is_empty());
     }
 
     #[test]
