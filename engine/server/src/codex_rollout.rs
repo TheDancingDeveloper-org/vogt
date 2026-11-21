@@ -13,7 +13,8 @@
 //! - A final message whose last non-blank line is exactly `AUTOPILOT: DONE`
 //!   takes the done path (WI-1518, source `marker`) without a render.
 //! - `task_started` marks the turn running, so autopilot does not nudge it.
-//! - An active goal drives its own idle turns, so autopilot leaves it alone.
+//! - An active goal drives its own idle turns, so autopilot leaves it alone,
+//!   as it does Klaudia's goal loop.
 
 use serde_json::Value;
 use vogt_engine_contract::DoneSource;
@@ -29,8 +30,15 @@ pub(crate) enum RolloutEvent {
     Complete {
         turn_id: String,
         done: bool,
-        /// Unix seconds the turn ended, when Codex recorded it.
-        completed_at: Option<i64>,
+    },
+    /// The turn ended without a `task_complete`: Codex interrupted or gave up.
+    Aborted {
+        turn_id: Option<String>,
+    },
+    /// `task_complete` carrying the terminal error Codex gave up on (a 429).
+    Failed {
+        turn_id: String,
+        error: String,
     },
     Goal {
         active: bool,
@@ -61,13 +69,24 @@ pub(crate) fn parse_line(line: &str) -> Option<RolloutEvent> {
         "task_started" | "turn_started" => Some(RolloutEvent::Started {
             turn_id: turn_id()?,
         }),
+        "task_complete" | "turn_complete" if payload.get("error").is_some_and(|e| !e.is_null()) => {
+            let error = payload.get("error")?;
+            Some(RolloutEvent::Failed {
+                turn_id: turn_id()?,
+                error: error
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("turn failed")
+                    .to_string(),
+            })
+        }
+        "turn_aborted" => Some(RolloutEvent::Aborted { turn_id: turn_id() }),
         "task_complete" | "turn_complete" => Some(RolloutEvent::Complete {
             turn_id: turn_id()?,
             done: payload
                 .get("last_agent_message")
                 .and_then(Value::as_str)
                 .is_some_and(says_done),
-            completed_at: payload.get("completed_at").and_then(Value::as_i64),
         }),
         "thread_goal_updated" => Some(RolloutEvent::Goal {
             active: payload
@@ -99,9 +118,8 @@ pub(crate) struct RolloutTurns {
     pub running: bool,
     /// The thread's goal is active, so Codex continues idle turns itself.
     pub goal_active: bool,
-    /// The screen path announced a `ready` before any rollout was read; the
-    /// first turn the rollout completes is the one it stood for.
-    screen_ready: bool,
+    /// Why the last turn ended in an error, until a turn starts again.
+    pub last_error: Option<String>,
     last_ready: Option<String>,
     last_done: Option<String>,
 }
@@ -114,65 +132,50 @@ pub(crate) struct Outcome {
 }
 
 impl RolloutTurns {
-    /// Record a screen-path `ready` for a turn whose id is not yet known, unless
-    /// a rollout is already read (it announces instead). True when the caller
-    /// should publish. One lock covers the check and the record, so a rollout
-    /// read cannot slip between them.
-    pub(crate) fn try_screen_ready(&mut self) -> bool {
-        if self.seen {
-            return false;
-        }
-        self.screen_ready = true;
-        true
-    }
-
     /// Fold `events` in. `replay` is the first read of a rollout that already
     /// held turns (an engine restart, a resumed conversation): it settles the
     /// state and may announce the turn it ends on as ready, but never declares
     /// done for a turn that ended before the engine was watching.
-    pub(crate) fn apply(&mut self, events: &[RolloutEvent], replay: bool, since: i64) -> Outcome {
+    pub(crate) fn apply(&mut self, events: &[RolloutEvent], replay: bool) -> Outcome {
         self.seen = true;
         let mut out = Outcome::default();
-        // On the first read, every turn already complete is at or before the
-        // screen's last announcement, so none of them is announced again.
-        let swallow = replay && self.screen_ready;
-        let mut swallowed = false;
         for event in events {
             match event {
                 RolloutEvent::Started { .. } => {
                     self.running = true;
+                    self.last_error = None;
                     out.ready = false;
                 }
-                RolloutEvent::Complete {
-                    turn_id,
-                    done,
-                    completed_at,
-                } => {
+                RolloutEvent::Complete { turn_id, done } => {
                     self.running = false;
                     if self.last_ready.as_deref() != Some(turn_id) {
                         self.last_ready = Some(turn_id.clone());
-                        // The screen already announced this turn: remember its
-                        // id, publish nothing.
-                        if swallow {
-                            swallowed = true;
-                        } else {
-                            out.ready = !std::mem::take(&mut self.screen_ready);
-                        }
+                        out.ready = true;
                     }
                     if *done && self.last_done.as_deref() != Some(turn_id) {
                         self.last_done = Some(turn_id.clone());
-                        // A short turn can end before the first poll reads the
-                        // rollout; that is still this session's turn, not
-                        // history, so only turns that ended before it began
-                        // are held back.
-                        out.done = !replay || completed_at.is_some_and(|t| t >= since);
+                        out.done = !replay;
+                    }
+                }
+                RolloutEvent::Aborted { turn_id } => {
+                    self.running = false;
+                    if let Some(id) = turn_id {
+                        if self.last_ready.as_deref() != Some(id) {
+                            self.last_ready = Some(id.clone());
+                            out.ready = true;
+                        }
+                    }
+                }
+                RolloutEvent::Failed { turn_id, error } => {
+                    self.running = false;
+                    self.last_error = Some(error.clone());
+                    if self.last_ready.as_deref() != Some(turn_id) {
+                        self.last_ready = Some(turn_id.clone());
+                        out.ready = true;
                     }
                 }
                 RolloutEvent::Goal { active } => self.goal_active = *active,
             }
-        }
-        if swallowed {
-            self.screen_ready = false;
         }
         // A later turn that started in the same batch is not at rest.
         if self.running {
@@ -190,8 +193,11 @@ pub(crate) fn apply(
     events: &[RolloutEvent],
     replay: bool,
 ) {
-    let since = session.created_at.unix_timestamp() - 1;
-    let out = session.apply_rollout(events, replay, since);
+    let out = session.apply_rollout(events, replay);
+    if let Some(reason) = session.rollout_error() {
+        tracing::warn!(session = %session.id, event = "codex.turn_failed", %reason,
+            "codex gave up on its turn; reporting the session at rest");
+    }
     if out.ready {
         session.announce_rollout_ready(bus);
     }
@@ -240,8 +246,7 @@ mod tests {
             }))),
             Some(RolloutEvent::Complete {
                 turn_id: "t1".into(),
-                done: true,
-                completed_at: None
+                done: true
             })
         );
         assert_eq!(
@@ -268,6 +273,46 @@ mod tests {
     }
 
     #[test]
+    fn an_error_or_abort_ends_the_turn() {
+        let ev = |p| parse_line(&line(p));
+        assert_eq!(
+            ev(
+                serde_json::json!({"type": "turn_aborted", "turn_id": "t1", "reason": "interrupted"})
+            ),
+            Some(RolloutEvent::Aborted {
+                turn_id: Some("t1".into())
+            })
+        );
+        assert_eq!(
+            ev(serde_json::json!({"type": "task_complete", "turn_id": "t1",
+                "last_agent_message": null, "error": {"message": "429 Too Many Requests"}})),
+            Some(RolloutEvent::Failed {
+                turn_id: "t1".into(),
+                error: "429 Too Many Requests".into()
+            })
+        );
+        let started = RolloutEvent::Started {
+            turn_id: "t1".into(),
+        };
+        let mut turns = RolloutTurns::default();
+        turns.apply(std::slice::from_ref(&started), false);
+        assert!(turns.running);
+        let out = turns.apply(
+            &[RolloutEvent::Failed {
+                turn_id: "t1".into(),
+                error: "429".into(),
+            }],
+            false,
+        );
+        assert!(!turns.running && out.ready && !out.done);
+        assert_eq!(turns.last_error.as_deref(), Some("429"));
+        turns.apply(std::slice::from_ref(&started), false);
+        assert!(turns.running && turns.last_error.is_none());
+        let out = turns.apply(&[RolloutEvent::Aborted { turn_id: None }], false);
+        assert!(!turns.running && !out.ready);
+    }
+
+    #[test]
     fn done_is_the_exact_last_non_blank_line() {
         assert!(says_done("work\nAUTOPILOT: DONE"));
         assert!(says_done("AUTOPILOT: DONE  \n\n"));
@@ -282,13 +327,12 @@ mod tests {
         let complete = |t: &str, done| RolloutEvent::Complete {
             turn_id: t.into(),
             done,
-            completed_at: None,
         };
         let mut turns = RolloutTurns::default();
-        assert_eq!(turns.apply(&[started("a")], false, 0), Outcome::default());
+        assert_eq!(turns.apply(&[started("a")], false), Outcome::default());
         assert!(turns.running);
         assert_eq!(
-            turns.apply(&[complete("a", false)], false, 0),
+            turns.apply(&[complete("a", false)], false),
             Outcome {
                 ready: true,
                 done: false
@@ -296,152 +340,33 @@ mod tests {
         );
         // The same line read again (a reset tail) is not a second turn.
         assert_eq!(
-            turns.apply(&[complete("a", false)], false, 0),
+            turns.apply(&[complete("a", false)], false),
             Outcome::default()
         );
         // A turn that ends and the next that starts, in one read: not at rest.
         assert_eq!(
-            turns.apply(
-                &[started("b"), complete("b", false), started("c")],
-                false,
-                0
-            ),
+            turns.apply(&[started("b"), complete("b", false), started("c")], false),
             Outcome::default()
         );
         assert_eq!(
-            turns.apply(&[complete("c", true)], false, 0),
+            turns.apply(&[complete("c", true)], false),
             Outcome {
                 ready: true,
                 done: true
             }
         );
         assert_eq!(
-            turns.apply(&[complete("c", true)], false, 0),
+            turns.apply(&[complete("c", true)], false),
             Outcome::default()
         );
 
         let mut resumed = RolloutTurns::default();
         assert_eq!(
-            resumed.apply(&[started("x"), complete("x", true)], true, 0),
+            resumed.apply(&[started("x"), complete("x", true)], true),
             Outcome {
                 ready: true,
                 done: false
             }
         );
-    }
-
-    #[test]
-    fn a_turn_finished_since_the_session_began_is_done_even_on_the_first_read() {
-        let complete = |at| RolloutEvent::Complete {
-            turn_id: "t".into(),
-            done: true,
-            completed_at: Some(at),
-        };
-        let mut live = RolloutTurns::default();
-        assert!(live.apply(&[complete(150)], true, 100).done);
-        let mut history = RolloutTurns::default();
-        assert!(!history.apply(&[complete(50)], true, 100).done);
-    }
-
-    #[test]
-    fn a_screen_announced_turn_is_not_announced_again_by_the_rollout() {
-        let mut turns = RolloutTurns::default();
-        assert!(turns.try_screen_ready());
-        let first = [
-            RolloutEvent::Started {
-                turn_id: "1".into(),
-            },
-            RolloutEvent::Complete {
-                turn_id: "1".into(),
-                done: false,
-                completed_at: None,
-            },
-        ];
-        assert_eq!(turns.apply(&first, true, 0), Outcome::default());
-        // The same history read again is still nothing new.
-        assert_eq!(turns.apply(&first[1..], false, 0), Outcome::default());
-    }
-
-    #[test]
-    fn a_new_turn_in_the_first_read_after_a_screen_ready_is_announced() {
-        let mut turns = RolloutTurns::default();
-        assert!(turns.try_screen_ready());
-        let history = [
-            RolloutEvent::Started {
-                turn_id: "1".into(),
-            },
-            RolloutEvent::Complete {
-                turn_id: "1".into(),
-                done: false,
-                completed_at: None,
-            },
-            RolloutEvent::Started {
-                turn_id: "2".into(),
-            },
-        ];
-        assert_eq!(turns.apply(&history, true, 0), Outcome::default());
-        let end = [RolloutEvent::Complete {
-            turn_id: "2".into(),
-            done: false,
-            completed_at: None,
-        }];
-        assert_eq!(
-            turns.apply(&end, false, 0),
-            Outcome {
-                ready: true,
-                done: false
-            }
-        );
-    }
-
-    #[test]
-    fn two_screen_announced_turns_complete_in_the_first_read_are_two_readies_total() {
-        let mut turns = RolloutTurns::default();
-        // The screen announced turn 1, then turn 2: two readies published.
-        assert!(turns.try_screen_ready());
-        assert!(turns.try_screen_ready());
-        let history = [
-            RolloutEvent::Started {
-                turn_id: "1".into(),
-            },
-            RolloutEvent::Complete {
-                turn_id: "1".into(),
-                done: false,
-                completed_at: None,
-            },
-            RolloutEvent::Started {
-                turn_id: "2".into(),
-            },
-            RolloutEvent::Complete {
-                turn_id: "2".into(),
-                done: false,
-                completed_at: None,
-            },
-        ];
-        assert_eq!(turns.apply(&history, true, 0), Outcome::default());
-        let next = [
-            RolloutEvent::Started {
-                turn_id: "3".into(),
-            },
-            RolloutEvent::Complete {
-                turn_id: "3".into(),
-                done: false,
-                completed_at: None,
-            },
-        ];
-        assert!(turns.apply(&next, false, 0).ready);
-    }
-
-    #[test]
-    fn a_screen_ready_is_not_recorded_once_a_rollout_is_read() {
-        let mut turns = RolloutTurns::default();
-        turns.apply(&[], true, 0);
-        assert!(!turns.try_screen_ready());
-        let c = [RolloutEvent::Complete {
-            turn_id: "1".into(),
-            done: false,
-            completed_at: None,
-        }];
-        assert!(turns.apply(&c, false, 0).ready);
     }
 }
