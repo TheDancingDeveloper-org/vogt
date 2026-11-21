@@ -791,14 +791,15 @@ list_grants() {
     rm -f "$response"
 }
 
-# Ask the engine whether GitHub accepts a GitHub-bound value just resolved for
-# manifest entry $1 (gh#1460): the same cached check the broker runs on fetch,
-# so a stale PAT is refused at launch too. The value goes to curl on stdin,
-# never argv. Prints `stale` when GitHub rejected it; prints nothing for
-# every other outcome (ok, unknown, no broker, engine too old), so the launch
-# fails open exactly like the broker does.
+# Ask the engine whether manifest entry $1 is stale at GitHub (gh#1460). The
+# request carries no token: the engine resolves the secret itself and checks its
+# own copy, so nothing here can probe or move Inbox state with a value of its
+# own. Prints `stale` when GitHub rejected it; prints nothing for every other
+# outcome (ok, unknown, no broker, engine too old), so the launch fails open
+# exactly like the broker does. $2 (the resolved value) only decides whether
+# the name is worth asking about; it is never sent.
 github_stale() {
-    local var="$1" value="$2" url response status
+    local var="$1" value="$2" url response
     case " GH_TOKEN GITHUB_MCP_TOKEN ${ENGINE_AGENT_AUTH_GH_TOKEN_FROM:-} $(printf %s "${ENGINE_AGENT_AUTH_GITHUB_VARS:-}" | tr "," " ") " in
         *" $var "*) ;;
         *)
@@ -812,8 +813,7 @@ github_stale() {
     if [[ -z "$url" ]] || ! broker_token_available || ! command -v curl >/dev/null 2>&1; then
         return 0
     fi
-    response="$(printf '%s' "$value" | broker_curl -sS --max-time 8 \
-        --data-binary @- -X POST \
+    response="$(broker_curl -sS --max-time 15 -X POST \
         "${url%/}/api/agent-auth/github-check/$var" 2>/dev/null)" || return 0
     case "$response" in
         *'"status":"stale"'*) printf 'stale' ;;

@@ -26843,3 +26843,128 @@ async fn a_launch_exports_a_github_token_github_accepts() {
     let out = launch_with_github_token(&api).await;
     assert!(out.contains("launch gh=[ghp_launchvalue] why=[]"), "{out}");
 }
+
+/// A fake `GET /user` that rejects exactly the bearer `reject` and accepts
+/// every other.
+async fn fake_github_rejecting(reject: &'static str) -> String {
+    let app = axum::Router::new().route(
+        "/user",
+        axum::routing::get(move |headers: axum::http::HeaderMap| async move {
+            let bearer = headers
+                .get("authorization")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default();
+            if bearer == format!("Bearer {reject}") {
+                axum::http::StatusCode::UNAUTHORIZED
+            } else {
+                axum::http::StatusCode::OK
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    format!("http://{addr}")
+}
+
+async fn ask_check(base: &str, token: &str, body: &'static str) -> Value {
+    let r = reqwest::Client::new()
+        .post(format!("{base}/api/agent-auth/github-check/GH_TOKEN"))
+        .bearer_auth(token)
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    r.json().await.unwrap()
+}
+
+#[tokio::test]
+async fn the_check_route_judges_the_engines_own_copy_never_a_value_the_caller_sends() {
+    // The engine's copy of GH_TOKEN ("value-of-GH_TOKEN") is the stale one.
+    let api = fake_github_rejecting("value-of-GH_TOKEN").await;
+    let (base, token, state, _keep) = github_broker_session(&api).await;
+    let raised = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = std::sync::Arc::clone(&raised);
+    state
+        .sessions
+        .secret_broker()
+        .github_check()
+        .set_sink(std::sync::Arc::new(move |s| sink.lock().unwrap().push(s)));
+    // A caller-supplied "good" value cannot clear a stale token or hide it.
+    let answer = ask_check(&base, &token, "ghp_callers_good_value").await;
+    assert_eq!(answer["status"], "stale", "{answer}");
+    assert_eq!(raised.lock().unwrap().len(), 1);
+    assert!(!answer.to_string().contains("ghp_callers_good_value"));
+}
+
+#[tokio::test]
+async fn a_junk_value_from_the_caller_cannot_raise_an_inbox_item_for_a_good_token() {
+    // The engine's copy is fine; only the caller's junk would be rejected.
+    let api = fake_github_rejecting("ghp_callers_junk_value").await;
+    let (base, token, state, _keep) = github_broker_session(&api).await;
+    let raised = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = std::sync::Arc::clone(&raised);
+    state
+        .sessions
+        .secret_broker()
+        .github_check()
+        .set_sink(std::sync::Arc::new(move |s| sink.lock().unwrap().push(s)));
+    let answer = ask_check(&base, &token, "ghp_callers_junk_value").await;
+    assert_eq!(answer["status"], "ok", "{answer}");
+    assert!(raised.lock().unwrap().is_empty(), "no item for junk");
+}
+
+#[tokio::test]
+async fn the_check_route_is_rate_limited_with_the_fetch_budget_and_audited_without_the_value() {
+    let logs = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    #[derive(Clone)]
+    struct Cap(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for Cap {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Cap {
+        type Writer = Cap;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+    let _guard = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .with_writer(Cap(logs.clone()))
+            .with_ansi(false)
+            .finish(),
+    );
+    let api = fake_github_rejecting("value-of-GH_TOKEN").await;
+    let (base, token, _state, _keep) = github_broker_session(&api).await;
+    let mut limited = false;
+    for _ in 0..70 {
+        let r = reqwest::Client::new()
+            .post(format!("{base}/api/agent-auth/github-check/GH_TOKEN"))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap();
+        if r.status() == 429 {
+            assert!(r.headers().contains_key("retry-after"));
+            limited = true;
+            break;
+        }
+    }
+    assert!(limited, "the check shares the fetch route's rate limit");
+    let text = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
+    assert!(
+        text.contains("secret broker GitHub check") && text.contains("result=stale"),
+        "audited by session, name and result: {text}"
+    );
+    assert!(text.contains("var=GH_TOKEN") && text.contains("session_id="));
+    assert!(!text.contains("value-of-GH_TOKEN"), "never the value");
+}

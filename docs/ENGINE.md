@@ -5501,14 +5501,21 @@ asking for it.
 | `ENGINE_AGENT_AUTH_GITHUB_API_URL` | `https://api.github.com` | the API base; must be `https` on `api.github.com` or a host in `ENGINE_AGENT_AUTH_GITHUB_ENTERPRISE_HOSTS`, otherwise ignored with a warning |
 | `ENGINE_AGENT_AUTH_GITHUB_ENTERPRISE_HOSTS` | none | comma- or space-separated GitHub Enterprise API hosts allowed as the base |
 
-Launch-time check: `agent-auth.sh` sends each GitHub-bound value it resolves
-(`GH_TOKEN`, `GITHUB_MCP_TOKEN`, the `GH_TOKEN_FROM` name, `GITHUB_VARS`, or a
-`ghp_`/`gho_`/`ghs_`/`github_pat_` value) to `POST /api/agent-auth/github-check/{var}`
-on the value's stdin, the same cached check the fetch route uses. On `stale` it
-exports nothing for that name (no `GH_TOKEN` alias either) and records
-`credential stale: <secret name>, needs a person` in `AGENT_AUTH_UNAVAILABLE`
-and on the session's stderr. An engine that is down or too old, or a GitHub
-outage, fails open. Inconclusive answers are cached for 60 seconds.
+Launch-time check: for each GitHub-bound name it resolves (`GH_TOKEN`,
+`GITHUB_MCP_TOKEN`, the `GH_TOKEN_FROM` name, `GITHUB_VARS`, or a
+`ghp_`/`gho_`/`ghs_`/`github_pat_` value), `agent-auth.sh` asks
+`POST /api/agent-auth/github-check/{var}` whether that manifest secret is stale.
+The request carries no token: the engine resolves `{var}` itself, as it would
+broker it, and checks its own copy through the cached check the fetch route
+uses, so a caller cannot probe GitHub with, or raise or clear an Inbox item
+for, a value of its own. The answer is `ok`, `stale`, `unknown` or `not_github`,
+never the value. The route has the fetch route's session authentication and
+rate limit (one shared budget) and is audited by session, name and result. On
+`stale` the wrapper exports nothing for that name (no `GH_TOKEN` alias either)
+and records `credential stale: <secret name>, needs a person` in
+`AGENT_AUTH_UNAVAILABLE` and on the session's stderr. An engine that is down or
+too old, or a GitHub outage, fails open. Inconclusive answers are cached for 60
+seconds.
 
 **Storing a secret from a session: the write broker.** The mirror of the
 fetch, for a session that has just *produced* a secret — minted an API token,
