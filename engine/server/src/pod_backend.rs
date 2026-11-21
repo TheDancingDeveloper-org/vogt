@@ -1161,6 +1161,14 @@ const PRIVATE_CACHE_DIR: &str = "/cache";
 const HOME_MOUNT: &str = "/home/vogt";
 const TMP_MOUNT: &str = "/tmp";
 const RUNTIME_MOUNT: &str = "/run/vogt";
+/// The session's temp directory (WI-4513). With `fsGroup` the kubelet makes
+/// the `/tmp` emptyDir root:1000 mode 2777, world-writable without the sticky
+/// bit, and the non-root pod cannot chmod it. Claude refuses to put its
+/// cross-session messaging socket under such a directory, so an init
+/// container makes this uid-1000 0700 directory on the same emptyDir (keeping
+/// its size limit) and `TMPDIR` points every agent at it.
+const SESSION_TMPDIR: &str = "/tmp/vogt";
+const TMPDIR_INIT_CONTAINER: &str = "session-tmpdir";
 /// The pod-local emptyDir that carries a pod's read-only workspace tree
 /// (WI-3373) and the init container that builds it.
 const WORKSPACE_VOLUME: &str = "session-workspace";
@@ -1638,6 +1646,11 @@ pub fn pod_template(
             ..Default::default()
         });
     }
+    env.push(EnvVar {
+        name: "TMPDIR".into(),
+        value: Some(SESSION_TMPDIR.into()),
+        ..Default::default()
+    });
     env.extend(PRIVATE_CACHE_ENV.iter().map(|(name, value)| EnvVar {
         name: (*name).into(),
         value: Some((*value).into()),
@@ -1866,14 +1879,13 @@ pub fn pod_template(
             ..Default::default()
         },
         spec: Some(PodSpec {
-            init_containers: cfg.workspace.as_ref().map(|workspace| {
-                vec![workspace_init_container(
-                    workspace,
-                    &cfg.engine_endpoint,
-                    id,
-                    image,
-                )]
-            }),
+            init_containers: Some(
+                std::iter::once(tmpdir_init_container(image))
+                    .chain(cfg.workspace.as_ref().map(|workspace| {
+                        workspace_init_container(workspace, &cfg.engine_endpoint, id, image)
+                    }))
+                    .collect(),
+            ),
             containers: vec![Container {
                 name: SESSION_CONTAINER.into(),
                 image: Some(image.into()),
@@ -1938,6 +1950,58 @@ pub fn pod_template(
         ..Default::default()
     }
 }
+/// Makes [`SESSION_TMPDIR`] on the `/tmp` emptyDir as the session user, mode
+/// 0700 (clearing the setgid bit the directory inherits), before the session
+/// container starts (WI-4513).
+fn tmpdir_init_container(image: &str) -> Container {
+    Container {
+        name: TMPDIR_INIT_CONTAINER.into(),
+        image: Some(image.into()),
+        command: Some(vec!["sh".into(), "-c".into()]),
+        args: Some(vec![format!(
+            "mkdir -p {SESSION_TMPDIR} && chmod 0700 {SESSION_TMPDIR}"
+        )]),
+        volume_mounts: Some(vec![VolumeMount {
+            name: "session-tmp".into(),
+            mount_path: TMP_MOUNT.into(),
+            ..Default::default()
+        }]),
+        resources: Some(ResourceRequirements {
+            requests: Some(BTreeMap::from([
+                (
+                    "cpu".into(),
+                    k8s_openapi::apimachinery::pkg::api::resource::Quantity("10m".into()),
+                ),
+                (
+                    "memory".into(),
+                    k8s_openapi::apimachinery::pkg::api::resource::Quantity("16Mi".into()),
+                ),
+            ])),
+            limits: Some(BTreeMap::from([
+                (
+                    "cpu".into(),
+                    k8s_openapi::apimachinery::pkg::api::resource::Quantity("100m".into()),
+                ),
+                (
+                    "memory".into(),
+                    k8s_openapi::apimachinery::pkg::api::resource::Quantity("32Mi".into()),
+                ),
+            ])),
+            claims: None,
+        }),
+        security_context: Some(SecurityContext {
+            allow_privilege_escalation: Some(false),
+            read_only_root_filesystem: Some(true),
+            capabilities: Some(Capabilities {
+                drop: Some(vec!["ALL".into()]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
 /// Fetches the engine's filtered workspace snapshot into the pod-local tree
 /// (WI-3373/WI-3374, redesigned by WI-4127). It runs before the session
 /// container and exits.
@@ -4397,8 +4461,9 @@ mod tests {
         let pod = pod_template_for(&cfg);
         let spec = pod.spec.as_ref().unwrap();
         let init = spec.init_containers.as_ref().unwrap();
-        assert_eq!(init.len(), 1);
-        let workspace_init = &init[0];
+        assert_eq!(init.len(), 2);
+        assert_eq!(init[0].name, TMPDIR_INIT_CONTAINER);
+        let workspace_init = &init[1];
         assert_eq!(workspace_init.name, WORKSPACE_INIT_CONTAINER);
         // The session image and its digest pin, which the namespace's
         // admission policy checks for every container.
@@ -4512,11 +4577,39 @@ mod tests {
     }
 
     #[test]
+    fn the_agent_gets_a_private_tmpdir_on_the_tmp_volume() {
+        // WI-4513: the `/tmp` emptyDir is root:1000 2777 without the sticky
+        // bit, so Claude's messaging socket needs a uid-1000 directory.
+        let pod = pod_template_for(&PodConfig::default());
+        let spec = pod.spec.as_ref().unwrap();
+        let init = spec
+            .init_containers
+            .iter()
+            .flatten()
+            .find(|c| c.name == TMPDIR_INIT_CONTAINER)
+            .expect("tmpdir init container");
+        let script = init.args.as_ref().unwrap().join(" ");
+        assert!(script.contains("mkdir -p /tmp/vogt"));
+        assert!(script.contains("chmod 0700 /tmp/vogt"));
+        let mounts = init.volume_mounts.as_ref().unwrap();
+        assert!(mounts
+            .iter()
+            .any(|m| m.name == "session-tmp" && m.mount_path == TMP_MOUNT));
+        let ctx = init.security_context.as_ref().unwrap();
+        assert_eq!(ctx.allow_privilege_escalation, Some(false));
+        let env = spec.containers[0].env.as_ref().unwrap();
+        let tmpdir = env.iter().find(|e| e.name == "TMPDIR").expect("TMPDIR");
+        assert_eq!(tmpdir.value.as_deref(), Some("/tmp/vogt"));
+    }
+
+    #[test]
     fn a_pod_without_the_workspace_flag_keeps_the_old_spec() {
         let cfg = PodConfig::default();
         let pod = pod_template_for(&cfg);
         let spec = pod.spec.as_ref().unwrap();
-        assert!(spec.init_containers.is_none());
+        let init = spec.init_containers.as_ref().unwrap();
+        assert_eq!(init.len(), 1);
+        assert_eq!(init[0].name, TMPDIR_INIT_CONTAINER);
         let container = &spec.containers[0];
         assert!(!container
             .volume_mounts
