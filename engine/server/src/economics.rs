@@ -678,27 +678,67 @@ const MAX_READ_BYTES: u64 = 8 * 1024 * 1024;
 /// How often a session's snapshot is written back to its archive row.
 const PERSIST_EVERY: Duration = Duration::from_secs(60);
 
-/// How often a Codex rollout is read. Turn boundaries become `ready` and
-/// `done` from the rollout (WI-1576), so it is read well inside the economics
-/// tick rather than once per tick (WI-4511: ready lagged task_complete ~11 s).
+/// How often the tailer loop wakes to look at a Codex rollout. A wake costs
+/// one `stat` per session; the rollout is read only when it has grown, so an
+/// idle session is read on the economics tick alone, and a turn's
+/// `task_complete` becomes `ready` within about this long (WI-4511: it
+/// lagged ~11 s behind the tick).
 const ROLLOUT_TICK: Duration = Duration::from_millis(500);
 
 /// How often the tailer loop wakes: the economics tick, or [`ROLLOUT_TICK`]
-/// when that is shorter, since Codex sessions are read at the faster rate.
+/// when that is shorter.
 fn wake_every(tick: Duration) -> Duration {
     tick.min(ROLLOUT_TICK)
 }
 
-/// Whether a session's transcript is read on this wake. Codex is read every
-/// wake; other agents keep the economics tick.
-fn read_due(agent: &str, last: Option<Instant>, now: Instant, tick: Duration) -> bool {
-    if agent == "codex" {
-        return true;
+/// What the tailer last knew of one session's transcript.
+struct Watch {
+    /// When the transcript was last read on the economics tick.
+    slow_at: Instant,
+    /// The transcript path the last read resolved. `None` when it was not
+    /// found or was lost: a search of the agent's directory then waits for
+    /// the economics tick instead of repeating every wake.
+    path: Option<PathBuf>,
+    /// How far the last read got.
+    offset: u64,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Due {
+    No,
+    /// A Codex rollout grew since the last read.
+    Grown,
+    /// The economics tick is up.
+    Tick,
+}
+
+/// Whether a session's transcript is read on this wake. Every agent is read
+/// on the economics tick. A Codex rollout with a known path is also read
+/// when `file_len` says it differs from where the last read stopped.
+fn read_due(
+    agent: &str,
+    watch: Option<&Watch>,
+    now: Instant,
+    tick: Duration,
+    file_len: impl FnOnce(&Path) -> Option<u64>,
+) -> Due {
+    let Some(watch) = watch else {
+        return Due::Tick;
+    };
+    if now.duration_since(watch.slow_at) >= tick {
+        return Due::Tick;
     }
-    match last {
-        Some(at) => now.duration_since(at) >= tick,
-        None => true,
+    if agent != "codex" {
+        return Due::No;
     }
+    match &watch.path {
+        Some(path) if file_len(path).is_some_and(|len| len != watch.offset) => Due::Grown,
+        _ => Due::No,
+    }
+}
+
+fn file_len(path: &Path) -> Option<u64> {
+    std::fs::symlink_metadata(path).ok().map(|m| m.len())
 }
 
 /// How long one session's read may take before the tick moves on. An open
@@ -864,21 +904,35 @@ pub fn spawn_economics_tailer(state: Arc<AppState>, home: PathBuf, tick: Duratio
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(wake_every(tick));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        let mut last_read: std::collections::HashMap<_, Instant> = Default::default();
+        let mut watches: std::collections::HashMap<_, Watch> = Default::default();
         loop {
             interval.tick().await;
             let live = state.sessions.live_sessions();
-            last_read.retain(|id, _| live.iter().any(|s| s.id == *id));
+            watches.retain(|id, _| live.iter().any(|s| s.id == *id));
             for session in live {
                 let Some(conversation) = session.conversation() else {
                     continue;
                 };
                 let agent = conversation.agent.clone();
                 let started = Instant::now();
-                if !read_due(&agent, last_read.get(&session.id).copied(), started, tick) {
+                let due = read_due(&agent, watches.get(&session.id), started, tick, file_len);
+                if due == Due::No {
                     continue;
                 }
-                last_read.insert(session.id, started);
+                let slow_at = match (due, watches.get(&session.id)) {
+                    (Due::Grown, Some(watch)) => watch.slow_at,
+                    _ => started,
+                };
+                // Until a read says otherwise the path is unknown, so a
+                // timed-out or failed read waits for the economics tick.
+                watches.insert(
+                    session.id,
+                    Watch {
+                        slow_at,
+                        path: None,
+                        offset: 0,
+                    },
+                );
                 let mut tail = session
                     .take_economics_tail()
                     .unwrap_or_else(|| Tail::start(&agent));
@@ -964,6 +1018,10 @@ pub fn spawn_economics_tailer(state: Arc<AppState>, home: PathBuf, tick: Duratio
                     crate::compact_backoff::clear_floor(&state.config.state_dir, session.id);
                     tail.loop_reported = false;
                 }
+                if let Some(watch) = watches.get_mut(&session.id) {
+                    watch.path = tail.path.clone();
+                    watch.offset = tail.offset;
+                }
                 session.store_economics_tail(tail, snapshot.clone());
                 // The hibernation record is what a later removal counts, so it
                 // has to carry the snapshot the session ends with.
@@ -1022,30 +1080,55 @@ fn persist_snapshot(state: &AppState, id: uuid::Uuid, json: String) {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
-    fn codex_rollout_is_read_inside_the_economics_tick() {
-        use super::*;
+    fn a_codex_rollout_is_read_between_ticks_only_when_it_grew() {
         let tick = Duration::from_secs(15);
         let now = Instant::now();
-        // Without the fix the loop woke once per 15 s tick, so a prompted
-        // turn's ready trailed task_complete by up to that long.
+        let watch = |path: Option<&str>| Watch {
+            slow_at: now,
+            path: path.map(PathBuf::from),
+            offset: 100,
+        };
+        let soon = now + Duration::from_secs(1);
         assert!(wake_every(tick) <= Duration::from_secs(1));
         assert_eq!(
             wake_every(Duration::from_millis(100)),
             Duration::from_millis(100)
         );
-        assert!(read_due("codex", Some(now), now, tick));
-        assert!(!read_due(
-            "claude",
-            Some(now),
-            now + Duration::from_secs(1),
-            tick
-        ));
-        assert!(read_due("claude", Some(now), now + tick, tick));
-        assert!(read_due("claude", None, now, tick));
+        // Idle: the file is where the last read left it, so no read.
+        let w = watch(Some("/r"));
+        assert_eq!(
+            read_due("codex", Some(&w), soon, tick, |_| Some(100)),
+            Due::No
+        );
+        // A turn appended lines: read now, not at the tick.
+        assert_eq!(
+            read_due("codex", Some(&w), soon, tick, |_| Some(180)),
+            Due::Grown
+        );
+        // A lost or unfound rollout is searched for on the tick only.
+        let lost = watch(None);
+        assert_eq!(
+            read_due("codex", Some(&lost), soon, tick, |_| Some(180)),
+            Due::No
+        );
+        assert_eq!(
+            read_due("codex", Some(&lost), now + tick, tick, |_| None),
+            Due::Tick
+        );
+        // Other agents never read between ticks.
+        assert_eq!(
+            read_due("claude", Some(&w), soon, tick, |_| Some(180)),
+            Due::No
+        );
+        assert_eq!(
+            read_due("claude", Some(&w), now + tick, tick, |_| Some(100)),
+            Due::Tick
+        );
+        assert_eq!(read_due("codex", None, now, tick, |_| None), Due::Tick);
     }
-
-    use super::*;
 
     fn feed(agent: &str, transcript: &str) -> SessionEconomics {
         let mut meter = Meter::new(agent);
