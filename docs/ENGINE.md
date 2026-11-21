@@ -2090,6 +2090,11 @@ checks decide what it can finish on its own (WI-926; the design is
     under `on-request` the reviewer answers the asks that pin produces. A `codex exec`
     launch omits `-a` (that subcommand rejects it) and keeps the reviewer
     and the sandbox.
+    Codex worker postures keep `-a never` (WI-2028; operator decision
+    2026-11-21, WI-4507). With `never` Codex raises no approvals, so on a
+    worker the reviewer is never asked and writes no assessment. The
+    auto-reviewer (codex #34) applies only to interactive sessions launched
+    with `-a on-request`.
   - **bypass**: `--dangerously-bypass-approvals-and-sandbox` and nothing
     else. A person's grant only, as for Claude Code.
   `--approve-for-me` is not used: it hard-wires workspace-write. Default
