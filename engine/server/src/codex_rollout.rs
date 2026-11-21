@@ -14,6 +14,11 @@
 //!   takes the done path (WI-1518, source `marker`) without a render.
 //! - `task_started` marks the turn running, so autopilot does not nudge it.
 //! - An active goal drives its own idle turns, so autopilot leaves it alone.
+//! - A turn that gives up (`task_complete` with an `error`, such as a 429 the
+//!   client stopped retrying) or is aborted (`turn_aborted`) ends the turn
+//!   like any other, but is never done, and its reason is logged (WI-4506).
+//!   Retryable errors (`error`, `stream_error`) are not written to the
+//!   rollout, so they never end a turn.
 
 use serde_json::Value;
 use vogt_engine_contract::DoneSource;
@@ -34,6 +39,11 @@ pub(crate) enum RolloutEvent {
     },
     Goal {
         active: bool,
+    },
+    /// The turn ended without finishing: it failed or was aborted (WI-4506).
+    Failed {
+        turn_id: Option<String>,
+        reason: String,
     },
 }
 
@@ -61,6 +71,17 @@ pub(crate) fn parse_line(line: &str) -> Option<RolloutEvent> {
         "task_started" | "turn_started" => Some(RolloutEvent::Started {
             turn_id: turn_id()?,
         }),
+        "task_complete" | "turn_complete" if payload.get("error").is_some_and(|e| !e.is_null()) => {
+            Some(RolloutEvent::Failed {
+                turn_id: turn_id(),
+                reason: payload
+                    .get("error")
+                    .and_then(|e| e.get("message"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("turn failed")
+                    .to_string(),
+            })
+        }
         "task_complete" | "turn_complete" => Some(RolloutEvent::Complete {
             turn_id: turn_id()?,
             done: payload
@@ -75,6 +96,16 @@ pub(crate) fn parse_line(line: &str) -> Option<RolloutEvent> {
                 .and_then(|g| g.get("status"))
                 .and_then(Value::as_str)
                 == Some("active"),
+        }),
+        "turn_aborted" => Some(RolloutEvent::Failed {
+            turn_id: turn_id(),
+            reason: format!(
+                "aborted: {}",
+                payload
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown")
+            ),
         }),
         _ => None,
     }
@@ -99,6 +130,10 @@ pub(crate) struct RolloutTurns {
     pub running: bool,
     /// The thread's goal is active, so Codex continues idle turns itself.
     pub goal_active: bool,
+    /// When the rollout last showed the session at rest: a turn ended and no
+    /// other started. A `working` title or report older than this is stale
+    /// (WI-4506).
+    pub rested_at: Option<time::OffsetDateTime>,
     /// The screen path announced a `ready` before any rollout was read; the
     /// first turn the rollout completes is the one it stood for.
     screen_ready: bool,
@@ -111,6 +146,8 @@ pub(crate) struct RolloutTurns {
 pub(crate) struct Outcome {
     pub ready: bool,
     pub done: bool,
+    /// Why the last turn in the batch failed or was aborted, if it did.
+    pub failed: Option<String>,
 }
 
 impl RolloutTurns {
@@ -149,16 +186,8 @@ impl RolloutTurns {
                     completed_at,
                 } => {
                     self.running = false;
-                    if self.last_ready.as_deref() != Some(turn_id) {
-                        self.last_ready = Some(turn_id.clone());
-                        // The screen already announced this turn: remember its
-                        // id, publish nothing.
-                        if swallow {
-                            swallowed = true;
-                        } else {
-                            out.ready = !std::mem::take(&mut self.screen_ready);
-                        }
-                    }
+                    out.failed = None;
+                    self.end_turn(Some(turn_id), swallow, &mut swallowed, &mut out);
                     if *done && self.last_done.as_deref() != Some(turn_id) {
                         self.last_done = Some(turn_id.clone());
                         // A short turn can end before the first poll reads the
@@ -169,6 +198,11 @@ impl RolloutTurns {
                     }
                 }
                 RolloutEvent::Goal { active } => self.goal_active = *active,
+                RolloutEvent::Failed { turn_id, reason } => {
+                    self.running = false;
+                    out.failed = Some(reason.clone());
+                    self.end_turn(turn_id.as_ref(), swallow, &mut swallowed, &mut out);
+                }
             }
         }
         if swallowed {
@@ -177,8 +211,48 @@ impl RolloutTurns {
         // A later turn that started in the same batch is not at rest.
         if self.running {
             out.ready = false;
+            out.failed = None;
+            self.rested_at = None;
+        } else if events.iter().any(|e| {
+            matches!(
+                e,
+                RolloutEvent::Complete { .. } | RolloutEvent::Failed { .. }
+            )
+        }) {
+            self.rested_at = Some(time::OffsetDateTime::now_utc());
         }
         out
+    }
+
+    /// Publish one `ready` per ended turn. The screen may already have
+    /// announced it: then remember its id and publish nothing. A turn with no
+    /// id is announced unless the screen stood for it.
+    fn end_turn(
+        &mut self,
+        turn_id: Option<&String>,
+        swallow: bool,
+        swallowed: &mut bool,
+        out: &mut Outcome,
+    ) {
+        if turn_id.is_some() && self.last_ready.as_ref() == turn_id {
+            return;
+        }
+        if let Some(id) = turn_id {
+            self.last_ready = Some(id.clone());
+        }
+        if swallow {
+            *swallowed = true;
+        } else {
+            out.ready = !std::mem::take(&mut self.screen_ready);
+        }
+    }
+
+    /// The rollout shows the session at rest, since when: no turn under way
+    /// and no active goal driving more.
+    pub(crate) fn at_rest_since(&self) -> Option<time::OffsetDateTime> {
+        (self.seen && !self.running && !self.goal_active)
+            .then_some(self.rested_at)
+            .flatten()
     }
 }
 
@@ -192,6 +266,14 @@ pub(crate) fn apply(
 ) {
     let since = session.created_at.unix_timestamp() - 1;
     let out = session.apply_rollout(events, replay, since);
+    if let Some(reason) = &out.failed {
+        tracing::warn!(
+            session = %session.id,
+            event = "codex.turn_failed",
+            reason = %reason,
+            "codex turn ended without finishing; session at rest"
+        );
+    }
     if out.ready {
         session.announce_rollout_ready(bus);
     }
@@ -291,7 +373,8 @@ mod tests {
             turns.apply(&[complete("a", false)], false, 0),
             Outcome {
                 ready: true,
-                done: false
+                done: false,
+                failed: None
             }
         );
         // The same line read again (a reset tail) is not a second turn.
@@ -312,7 +395,8 @@ mod tests {
             turns.apply(&[complete("c", true)], false, 0),
             Outcome {
                 ready: true,
-                done: true
+                done: true,
+                failed: None
             }
         );
         assert_eq!(
@@ -325,7 +409,8 @@ mod tests {
             resumed.apply(&[started("x"), complete("x", true)], true, 0),
             Outcome {
                 ready: true,
-                done: false
+                done: false,
+                failed: None
             }
         );
     }
@@ -389,7 +474,8 @@ mod tests {
             turns.apply(&end, false, 0),
             Outcome {
                 ready: true,
-                done: false
+                done: false,
+                failed: None
             }
         );
     }
@@ -443,5 +529,56 @@ mod tests {
             completed_at: None,
         }];
         assert!(turns.apply(&c, false, 0).ready);
+    }
+
+    #[test]
+    fn a_turn_that_gives_up_or_is_aborted_ends_the_turn() {
+        // The fork's shapes: a 429 it stopped retrying is `task_complete`
+        // with an `error`; an interrupt is `turn_aborted` with a `reason`.
+        let failed = parse_line(&line(serde_json::json!({
+            "type": "task_complete", "turn_id": "t1",
+            "last_agent_message": "AUTOPILOT: DONE",
+            "error": {"message": "429 Too Many Requests", "codex_error_info": null}
+        })));
+        assert_eq!(
+            failed,
+            Some(RolloutEvent::Failed {
+                turn_id: Some("t1".into()),
+                reason: "429 Too Many Requests".into()
+            })
+        );
+        let aborted = parse_line(&line(serde_json::json!({
+            "type": "turn_aborted", "turn_id": "t2", "reason": "interrupted"
+        })));
+        assert_eq!(
+            aborted,
+            Some(RolloutEvent::Failed {
+                turn_id: Some("t2".into()),
+                reason: "aborted: interrupted".into()
+            })
+        );
+        let started = |t: &str| RolloutEvent::Started { turn_id: t.into() };
+
+        let mut turns = RolloutTurns::default();
+        turns.apply(&[started("t1")], false, 0);
+        assert!(turns.at_rest_since().is_none());
+        let out = turns.apply(&[failed.unwrap()], false, 0);
+        assert!(!turns.running);
+        assert!(turns.at_rest_since().is_some());
+        // At rest and announced once, but a failed turn is never done.
+        assert_eq!(
+            out,
+            Outcome {
+                ready: true,
+                done: false,
+                failed: Some("429 Too Many Requests".into())
+            }
+        );
+
+        turns.apply(&[started("t2")], false, 0);
+        assert!(turns.at_rest_since().is_none());
+        assert!(turns.apply(&[aborted.unwrap()], false, 0).ready);
+        assert!(!turns.running);
+        assert!(turns.at_rest_since().is_some());
     }
 }
