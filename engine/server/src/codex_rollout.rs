@@ -114,9 +114,16 @@ pub(crate) struct Outcome {
 }
 
 impl RolloutTurns {
-    /// The screen path announced a `ready` for a turn whose id is not yet known.
-    pub(crate) fn note_screen_ready(&mut self) {
+    /// Record a screen-path `ready` for a turn whose id is not yet known, unless
+    /// a rollout is already read (it announces instead). True when the caller
+    /// should publish. One lock covers the check and the record, so a rollout
+    /// read cannot slip between them.
+    pub(crate) fn try_screen_ready(&mut self) -> bool {
+        if self.seen {
+            return false;
+        }
         self.screen_ready = true;
+        true
     }
 
     /// Fold `events` in. `replay` is the first read of a rollout that already
@@ -126,6 +133,10 @@ impl RolloutTurns {
     pub(crate) fn apply(&mut self, events: &[RolloutEvent], replay: bool, since: i64) -> Outcome {
         self.seen = true;
         let mut out = Outcome::default();
+        // On the first read, every turn already complete is at or before the
+        // screen's last announcement, so none of them is announced again.
+        let swallow = replay && self.screen_ready;
+        let mut swallowed = false;
         for event in events {
             match event {
                 RolloutEvent::Started { .. } => {
@@ -142,7 +153,11 @@ impl RolloutTurns {
                         self.last_ready = Some(turn_id.clone());
                         // The screen already announced this turn: remember its
                         // id, publish nothing.
-                        out.ready = !std::mem::take(&mut self.screen_ready);
+                        if swallow {
+                            swallowed = true;
+                        } else {
+                            out.ready = !std::mem::take(&mut self.screen_ready);
+                        }
                     }
                     if *done && self.last_done.as_deref() != Some(turn_id) {
                         self.last_done = Some(turn_id.clone());
@@ -155,6 +170,9 @@ impl RolloutTurns {
                 }
                 RolloutEvent::Goal { active } => self.goal_active = *active,
             }
+        }
+        if swallowed {
+            self.screen_ready = false;
         }
         // A later turn that started in the same batch is not at rest.
         if self.running {
@@ -328,7 +346,7 @@ mod tests {
     #[test]
     fn a_screen_announced_turn_is_not_announced_again_by_the_rollout() {
         let mut turns = RolloutTurns::default();
-        turns.note_screen_ready();
+        assert!(turns.try_screen_ready());
         let first = [
             RolloutEvent::Started {
                 turn_id: "1".into(),
@@ -347,7 +365,7 @@ mod tests {
     #[test]
     fn a_new_turn_in_the_first_read_after_a_screen_ready_is_announced() {
         let mut turns = RolloutTurns::default();
-        turns.note_screen_ready();
+        assert!(turns.try_screen_ready());
         let history = [
             RolloutEvent::Started {
                 turn_id: "1".into(),
@@ -374,5 +392,56 @@ mod tests {
                 done: false
             }
         );
+    }
+
+    #[test]
+    fn two_screen_announced_turns_complete_in_the_first_read_are_two_readies_total() {
+        let mut turns = RolloutTurns::default();
+        // The screen announced turn 1, then turn 2: two readies published.
+        assert!(turns.try_screen_ready());
+        assert!(turns.try_screen_ready());
+        let history = [
+            RolloutEvent::Started {
+                turn_id: "1".into(),
+            },
+            RolloutEvent::Complete {
+                turn_id: "1".into(),
+                done: false,
+                completed_at: None,
+            },
+            RolloutEvent::Started {
+                turn_id: "2".into(),
+            },
+            RolloutEvent::Complete {
+                turn_id: "2".into(),
+                done: false,
+                completed_at: None,
+            },
+        ];
+        assert_eq!(turns.apply(&history, true, 0), Outcome::default());
+        let next = [
+            RolloutEvent::Started {
+                turn_id: "3".into(),
+            },
+            RolloutEvent::Complete {
+                turn_id: "3".into(),
+                done: false,
+                completed_at: None,
+            },
+        ];
+        assert!(turns.apply(&next, false, 0).ready);
+    }
+
+    #[test]
+    fn a_screen_ready_is_not_recorded_once_a_rollout_is_read() {
+        let mut turns = RolloutTurns::default();
+        turns.apply(&[], true, 0);
+        assert!(!turns.try_screen_ready());
+        let c = [RolloutEvent::Complete {
+            turn_id: "1".into(),
+            done: false,
+            completed_at: None,
+        }];
+        assert!(turns.apply(&c, false, 0).ready);
     }
 }
