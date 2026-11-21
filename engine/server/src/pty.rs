@@ -2636,10 +2636,7 @@ fn announce_ready_if_at_prompt(session: &Session, resting: ActivityState, bus: &
         )
     });
     if reported_rest {
-        if !session.ready_announced.swap(true, Ordering::AcqRel) {
-            session.rollout.lock().note_screen_ready();
-            bus.publish(ServerEvent::SessionReady { id: session.id });
-        }
+        announce_screen_ready(session, bus);
         return;
     }
     let (rendered, _) = session.render_screen(0);
@@ -2650,8 +2647,19 @@ fn announce_ready_if_at_prompt(session: &Session, resting: ActivityState, bus: &
         session.agent().as_deref(),
         rendered.title.as_deref(),
     );
-    if ready && !session.ready_announced.swap(true, Ordering::AcqRel) {
-        session.rollout.lock().note_screen_ready();
+    if ready {
+        announce_screen_ready(session, bus);
+    }
+}
+
+/// Publish the screen path's `ready` once per turn, unless a rollout has been
+/// read meanwhile. The rollout check and the record of this announcement share
+/// one lock, so the rollout's first read counts it (WI-1576).
+fn announce_screen_ready(session: &Session, bus: &EventBus) {
+    if session.ready_announced.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    if session.rollout.lock().try_screen_ready() {
         bus.publish(ServerEvent::SessionReady { id: session.id });
     }
 }
