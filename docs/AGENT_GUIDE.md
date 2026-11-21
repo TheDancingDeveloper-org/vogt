@@ -72,10 +72,9 @@ the session-driving tools that the worker brief tells it to use (`session_list`,
 of that group), and `session_start` for a child session. Oversight-only tools
 (hibernation, project and forge admin, token and user admin) are absent. The
 list narrows what is shown, not what a call may do: a call still needs the grant.
-A Codex worker reaches this through `/mcp?profile=worker`. A Claude worker sets
-`VOGT_MCP_TOOL_PROFILE=worker` on its `vogt-mcp-remote` entry, but that Python
-bridge does not read the variable yet, so a Claude worker still lists the full
-set until the bridge forwards the profile.
+A Codex worker reaches this through `/mcp?profile=worker`. A Claude worker gets
+it because the engine reads its session's role: a `worker` session lists the
+worker set with no query on its `/mcp` URL.
 
 ### Token scopes
 

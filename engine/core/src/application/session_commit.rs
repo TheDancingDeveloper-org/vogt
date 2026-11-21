@@ -226,6 +226,27 @@ where
         .map(str::to_string))
 }
 
+/// Whether the caller is a worker session, by the engine's role for it
+/// (WI-2833). Any caller the engine cannot place, and an engine that is
+/// unreachable or has no such session, is not a worker: the caller keeps the
+/// full tool list. That costs tokens and narrows no call, so failing open here
+/// is safe.
+pub(crate) fn caller_is_worker_session<C, I>(ctx: &AppContext<C, I>) -> bool
+where
+    C: Clock,
+    I: IdFactory,
+{
+    let Some(engine) = ctx.engine.as_ref() else {
+        return false;
+    };
+    match caller_engine_session_id(ctx) {
+        Ok(Some(id)) => {
+            matches!(engine.get_session(&id), Ok(Some(found)) if found.role == "worker")
+        }
+        _ => false,
+    }
+}
+
 /// Who may commit for a session (C14). A person always may. A session may
 /// commit only for another session, and only when its own engine role is
 /// `oversight`: a worker committing its own tree, or another worker's, is the
@@ -577,6 +598,42 @@ mod tests {
                 "{error:?}"
             );
             assert!(git_ops(&seen).is_empty());
+        }
+    }
+
+    /// WI-2833: the engine's role for the caller decides whether it gets the
+    /// worker tool list. A worker whose bridge sends no query relies on this;
+    /// without the lookup it would get the full list.
+    #[test]
+    fn a_caller_is_a_worker_session_by_its_engine_role() {
+        let cases = [
+            (
+                agent(&format!("agent:engine:{WORKER}")),
+                vec![(WORKER, "worker")],
+                true,
+            ),
+            (
+                agent(&format!("agent:engine:{OVERSEER}")),
+                vec![(OVERSEER, "oversight")],
+                false,
+            ),
+            (
+                agent("agent:engine:eng-unknown"),
+                vec![(WORKER, "worker")],
+                false,
+            ),
+            (person(), vec![(WORKER, "worker")], false),
+        ];
+        for (index, (principal, roles, expected)) in cases.into_iter().enumerate() {
+            let (_dir, built, _seen) = context(
+                &format!("worker-role-{index}"),
+                principal,
+                roles,
+                committed(),
+                vec![],
+            );
+            let worker = crate::with_ctx!(&built, |ctx| super::caller_is_worker_session(ctx));
+            assert_eq!(worker, expected, "case {index}");
         }
     }
 
