@@ -23,9 +23,18 @@ use crate::{events::ServerEvent, pty::Session, sessions::SessionRegistry};
 /// One turn boundary or goal change read from a rollout line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RolloutEvent {
-    Started { turn_id: String },
-    Complete { turn_id: String, done: bool },
-    Goal { active: bool },
+    Started {
+        turn_id: String,
+    },
+    Complete {
+        turn_id: String,
+        done: bool,
+        /// Unix seconds the turn ended, when Codex recorded it.
+        completed_at: Option<i64>,
+    },
+    Goal {
+        active: bool,
+    },
 }
 
 /// The rollout event a JSONL line records, if it records one this module
@@ -58,6 +67,7 @@ pub(crate) fn parse_line(line: &str) -> Option<RolloutEvent> {
                 .get("last_agent_message")
                 .and_then(Value::as_str)
                 .is_some_and(says_done),
+            completed_at: payload.get("completed_at").and_then(Value::as_i64),
         }),
         "thread_goal_updated" => Some(RolloutEvent::Goal {
             active: payload
@@ -105,7 +115,7 @@ impl RolloutTurns {
     /// held turns (an engine restart, a resumed conversation): it settles the
     /// state and may announce the turn it ends on as ready, but never declares
     /// done for a turn that ended before the engine was watching.
-    pub(crate) fn apply(&mut self, events: &[RolloutEvent], replay: bool) -> Outcome {
+    pub(crate) fn apply(&mut self, events: &[RolloutEvent], replay: bool, since: i64) -> Outcome {
         self.seen = true;
         let mut out = Outcome::default();
         for event in events {
@@ -114,7 +124,11 @@ impl RolloutTurns {
                     self.running = true;
                     out.ready = false;
                 }
-                RolloutEvent::Complete { turn_id, done } => {
+                RolloutEvent::Complete {
+                    turn_id,
+                    done,
+                    completed_at,
+                } => {
                     self.running = false;
                     if self.last_ready.as_deref() != Some(turn_id) {
                         self.last_ready = Some(turn_id.clone());
@@ -122,7 +136,11 @@ impl RolloutTurns {
                     }
                     if *done && self.last_done.as_deref() != Some(turn_id) {
                         self.last_done = Some(turn_id.clone());
-                        out.done = !replay;
+                        // A short turn can end before the first poll reads the
+                        // rollout; that is still this session's turn, not
+                        // history, so only turns that ended before it began
+                        // are held back.
+                        out.done = !replay || completed_at.is_some_and(|t| t >= since);
                     }
                 }
                 RolloutEvent::Goal { active } => self.goal_active = *active,
@@ -144,7 +162,8 @@ pub(crate) fn apply(
     events: &[RolloutEvent],
     replay: bool,
 ) {
-    let out = session.apply_rollout(events, replay);
+    let since = session.created_at.unix_timestamp() - 1;
+    let out = session.apply_rollout(events, replay, since);
     if out.ready {
         session.announce_rollout_ready(bus);
     }
@@ -193,7 +212,8 @@ mod tests {
             }))),
             Some(RolloutEvent::Complete {
                 turn_id: "t1".into(),
-                done: true
+                done: true,
+                completed_at: None
             })
         );
         assert_eq!(
@@ -234,12 +254,13 @@ mod tests {
         let complete = |t: &str, done| RolloutEvent::Complete {
             turn_id: t.into(),
             done,
+            completed_at: None,
         };
         let mut turns = RolloutTurns::default();
-        assert_eq!(turns.apply(&[started("a")], false), Outcome::default());
+        assert_eq!(turns.apply(&[started("a")], false, 0), Outcome::default());
         assert!(turns.running);
         assert_eq!(
-            turns.apply(&[complete("a", false)], false),
+            turns.apply(&[complete("a", false)], false, 0),
             Outcome {
                 ready: true,
                 done: false
@@ -247,33 +268,50 @@ mod tests {
         );
         // The same line read again (a reset tail) is not a second turn.
         assert_eq!(
-            turns.apply(&[complete("a", false)], false),
+            turns.apply(&[complete("a", false)], false, 0),
             Outcome::default()
         );
         // A turn that ends and the next that starts, in one read: not at rest.
         assert_eq!(
-            turns.apply(&[started("b"), complete("b", false), started("c")], false),
+            turns.apply(
+                &[started("b"), complete("b", false), started("c")],
+                false,
+                0
+            ),
             Outcome::default()
         );
         assert_eq!(
-            turns.apply(&[complete("c", true)], false),
+            turns.apply(&[complete("c", true)], false, 0),
             Outcome {
                 ready: true,
                 done: true
             }
         );
         assert_eq!(
-            turns.apply(&[complete("c", true)], false),
+            turns.apply(&[complete("c", true)], false, 0),
             Outcome::default()
         );
 
         let mut resumed = RolloutTurns::default();
         assert_eq!(
-            resumed.apply(&[started("x"), complete("x", true)], true),
+            resumed.apply(&[started("x"), complete("x", true)], true, 0),
             Outcome {
                 ready: true,
                 done: false
             }
         );
+    }
+
+    #[test]
+    fn a_turn_finished_since_the_session_began_is_done_even_on_the_first_read() {
+        let complete = |at| RolloutEvent::Complete {
+            turn_id: "t".into(),
+            done: true,
+            completed_at: Some(at),
+        };
+        let mut live = RolloutTurns::default();
+        assert!(live.apply(&[complete(150)], true, 100).done);
+        let mut history = RolloutTurns::default();
+        assert!(!history.apply(&[complete(50)], true, 100).done);
     }
 }

@@ -526,15 +526,27 @@ impl Session {
         &self,
         events: &[crate::codex_rollout::RolloutEvent],
         replay: bool,
+        since: i64,
     ) -> crate::codex_rollout::Outcome {
-        self.rollout.lock().apply(events, replay)
+        // A turn the rollout saw begin is a new turn for the screen path's
+        // once-per-turn flag too.
+        if events
+            .iter()
+            .any(|e| matches!(e, crate::codex_rollout::RolloutEvent::Started { .. }))
+        {
+            self.ready_announced.store(false, Ordering::Release);
+        }
+        self.rollout.lock().apply(events, replay, since)
     }
 
     /// Publish the `ready` a rollout's `task_complete` stands for. The rollout
     /// already deduplicates by turn id; the flag keeps the screen path quiet.
     pub(crate) fn announce_rollout_ready(&self, bus: &EventBus) {
-        self.ready_announced.store(true, Ordering::Release);
-        bus.publish(ServerEvent::SessionReady { id: self.id });
+        // The screen path may already have announced this turn's rest before
+        // the first rollout read; one `ready` per turn.
+        if !self.ready_announced.swap(true, Ordering::AcqRel) {
+            bus.publish(ServerEvent::SessionReady { id: self.id });
+        }
     }
 
     /// A Codex rollout is driving this session's readiness and done (WI-1576).
