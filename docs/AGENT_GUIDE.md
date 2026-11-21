@@ -65,6 +65,18 @@ Your MCP tool list is exactly what your token may do: an operation your token
 cannot reach is **absent from the list**, not present-and-refusing. So if a tool
 you expected is missing, that is a scope answer, not a bug — see below.
 
+A worker session gets a narrower list on purpose. Its MCP `tools/list` names only
+the worker set (WI-2833): the work item, reports and blocks, decisions, grants,
+the session-driving tools that the worker brief tells it to use (`session_list`,
+`session_screen`, `session_input`, `session_wait`, `session_answer`, and the rest
+of that group), and `session_start` for a child session. Oversight-only tools
+(hibernation, project and forge admin, token and user admin) are absent. The
+list narrows what is shown, not what a call may do: a call still needs the grant.
+A Codex worker reaches this through `/mcp?profile=worker`. A Claude worker sets
+`VOGT_MCP_TOOL_PROFILE=worker` on its `vogt-mcp-remote` entry, but that Python
+bridge does not read the variable yet, so a Claude worker still lists the full
+set until the bridge forwards the profile.
+
 ### Token scopes
 
 A core token is issued with `vogt token issue` and carries named scopes. Reading
