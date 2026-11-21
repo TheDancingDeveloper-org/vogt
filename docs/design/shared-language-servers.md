@@ -1,5 +1,9 @@
 # Shared language servers: Python, Rust and Java
 
+> Klaudia (msp-klaudia) was retired and archived in 2026-11. Codex,
+> Claude Code and opencode are the driven agents. Klaudia mentions below
+> are kept as the evidence this design was based on.
+
 Status: **proposal, not current behaviour.** Nothing here ships yet. Adopting it
 changes a recorded decision: `docs/ENGINE.md` §8 says the engine has "no
 editor logic, terminal rendering, or language servers server-side". If the

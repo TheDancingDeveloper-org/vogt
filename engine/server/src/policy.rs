@@ -3952,7 +3952,7 @@ mod tests {
             "git checkout -- src/b.py",
             "git checkout -- docs/other.md",
             "git restore --staged src/a.py",
-            "git checkout -b klaudia/goal-x",
+            "git checkout -b agent/goal-x",
             "git switch main",
             "git reset HEAD~1",
             "git reset --soft HEAD~1",
@@ -4510,8 +4510,8 @@ mod tests {
 
     /// A session with no workspace block (an older record) whose cwd is a
     /// repository with a dirty file: its first checked command settles a
-    /// baseline from that cwd, so the discard guard protects the file once
-    /// Klaudia's gitguard is gone. Every discard verb is refused; a file the
+    /// baseline from that cwd, so the discard guard protects the file on its
+    /// own, with no separate gitguard hook. Every discard verb is refused; a file the
     /// session makes later is its own.
     #[test]
     fn a_recordless_session_in_a_dirty_repo_keeps_its_dirty_files() {

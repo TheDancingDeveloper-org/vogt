@@ -1,5 +1,9 @@
 # Context management for oversight and worker sessions
 
+> Klaudia (msp-klaudia) was retired and archived in 2026-11. Codex,
+> Claude Code and opencode are the driven agents. Klaudia mentions below
+> are kept as the evidence this design was based on.
+
 Status: design, 2026-10-11. No code. Work items are listed at the end.
 Scope: how Vogt keeps an overseer's context window small, keeps workers
 inside a budget, hands work between sessions, applies project policy
