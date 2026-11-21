@@ -678,6 +678,29 @@ const MAX_READ_BYTES: u64 = 8 * 1024 * 1024;
 /// How often a session's snapshot is written back to its archive row.
 const PERSIST_EVERY: Duration = Duration::from_secs(60);
 
+/// How often a Codex rollout is read. Turn boundaries become `ready` and
+/// `done` from the rollout (WI-1576), so it is read well inside the economics
+/// tick rather than once per tick (WI-4511: ready lagged task_complete ~11 s).
+const ROLLOUT_TICK: Duration = Duration::from_millis(500);
+
+/// How often the tailer loop wakes: the economics tick, or [`ROLLOUT_TICK`]
+/// when that is shorter, since Codex sessions are read at the faster rate.
+fn wake_every(tick: Duration) -> Duration {
+    tick.min(ROLLOUT_TICK)
+}
+
+/// Whether a session's transcript is read on this wake. Codex is read every
+/// wake; other agents keep the economics tick.
+fn read_due(agent: &str, last: Option<Instant>, now: Instant, tick: Duration) -> bool {
+    if agent == "codex" {
+        return true;
+    }
+    match last {
+        Some(at) => now.duration_since(at) >= tick,
+        None => true,
+    }
+}
+
 /// How long one session's read may take before the tick moves on. An open
 /// that blocks despite the non-blocking flag costs the tick this much and no
 /// more, and only that session.
@@ -839,15 +862,23 @@ fn feed_bytes(tail: &mut Tail, bytes: &[u8]) {
 pub fn spawn_economics_tailer(state: Arc<AppState>, home: PathBuf, tick: Duration) {
     let claude_dirs = state.config.agent_onboarding.claude_dirs();
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(tick);
+        let mut interval = tokio::time::interval(wake_every(tick));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut last_read: std::collections::HashMap<_, Instant> = Default::default();
         loop {
             interval.tick().await;
-            for session in state.sessions.live_sessions() {
+            let live = state.sessions.live_sessions();
+            last_read.retain(|id, _| live.iter().any(|s| s.id == *id));
+            for session in live {
                 let Some(conversation) = session.conversation() else {
                     continue;
                 };
                 let agent = conversation.agent.clone();
+                let started = Instant::now();
+                if !read_due(&agent, last_read.get(&session.id).copied(), started, tick) {
+                    continue;
+                }
+                last_read.insert(session.id, started);
                 let mut tail = session
                     .take_economics_tail()
                     .unwrap_or_else(|| Tail::start(&agent));
@@ -991,6 +1022,29 @@ fn persist_snapshot(state: &AppState, id: uuid::Uuid, json: String) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn codex_rollout_is_read_inside_the_economics_tick() {
+        use super::*;
+        let tick = Duration::from_secs(15);
+        let now = Instant::now();
+        // Without the fix the loop woke once per 15 s tick, so a prompted
+        // turn's ready trailed task_complete by up to that long.
+        assert!(wake_every(tick) <= Duration::from_secs(1));
+        assert_eq!(
+            wake_every(Duration::from_millis(100)),
+            Duration::from_millis(100)
+        );
+        assert!(read_due("codex", Some(now), now, tick));
+        assert!(!read_due(
+            "claude",
+            Some(now),
+            now + Duration::from_secs(1),
+            tick
+        ));
+        assert!(read_due("claude", Some(now), now + tick, tick));
+        assert!(read_due("claude", None, now, tick));
+    }
+
     use super::*;
 
     fn feed(agent: &str, transcript: &str) -> SessionEconomics {
