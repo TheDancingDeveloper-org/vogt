@@ -1,7 +1,7 @@
 // Terminal size sync across viewers (WI-1089).
 //
 // A desktop pane at 178×32 and a phone at ~50 columns share one PTY. The
-// phone used to draw the stream at its own width; Klaudia (Bubble Tea) repaints
+// phone used to draw the stream at its own width; a Bubble Tea TUI repaints
 // its input box with `ESC[3A` + LF + the 178-column box line, which wraps at
 // the phone's width, so every spinner tick left a ghost copy of the box and
 // the transcript scrolled away. The engine now names the PTY's size on
@@ -11,7 +11,7 @@ import { expect, test, type Page, type WebSocketRoute } from "@playwright/test";
 
 const SESSION = {
   id: "sess-size",
-  name: "klaudia",
+  name: "bubbletea-tui",
   cwd: "/workspace",
   activity: "running",
   exit_code: null,
@@ -60,7 +60,7 @@ async function mockedFixtures(page: Page): Promise<void> {
   );
 }
 
-// Klaudia's frame at `cols` wide: transcript, the bordered input box and the
+// A Bubble Tea TUI's frame at `cols` wide: transcript, the bordered input box and the
 // status line, cursor parked at the start of the status row.
 function initialFrame(cols: number): string {
   const transcript = Array.from({ length: 8 }, (_, i) => `transcript line ${i + 1}`);
@@ -70,7 +70,7 @@ function initialFrame(cols: number): string {
 }
 
 function boxLine(cols: number, cursorOn: boolean): string {
-  const placeholder = cursorOn ? "\x1b[7mA\x1b[0msk Klaudia…" : "Ask Klaudia…";
+  const placeholder = cursorOn ? "\x1b[7mA\x1b[0msk agent…" : "Ask agent…";
   return `│ › ${placeholder}${" ".repeat(cols - 3 - 4 - 12)}│`;
 }
 
@@ -87,7 +87,7 @@ interface Pty {
 
 // The engine side: answers attach with a 178×32 snapshot; on the phone's first
 // resize it announces that size, then the desktop takes the size back and
-// Klaudia repaints for 178 columns.
+// The TUI repaints for 178 columns.
 async function routeAttach(page: Page): Promise<{ ready: Promise<Pty> }> {
   let resolvePty: (pty: Pty) => void = () => {};
   const ready = new Promise<Pty>((r) => (resolvePty = r));
@@ -155,7 +155,7 @@ test.describe("terminal size sync (WI-1089)", () => {
     await expect.poll(() => rowsText(page), { timeout: 10_000 }).toContain("DONE-MARKER");
     const text = await rowsText(page);
     // One input box, not a stack of ghosts, and the transcript still on screen.
-    expect(text.match(/Ask Klaudia/g) ?? []).toHaveLength(0); // the last tick replaced it
+    expect(text.match(/Ask agent/g) ?? []).toHaveLength(0); // the last tick replaced it
     expect(text.match(/DONE-MARKER/g)).toHaveLength(1);
     expect(text).toContain("transcript line 1");
     expect(text).toContain("transcript line 8");

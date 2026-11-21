@@ -97,7 +97,6 @@ and it costs tokens for nothing.
 | Codex CLI (TTY) | `codex -i` at launch only. In the TUI, a pasted path is read by its file tools. Images are viewed with its `view_image` tool. | Text path (same as above) |
 | Chat (Codex app-server) | The `turn/start` input accepts `{type:"localImage", path}` as a real image item. | Text item plus a `localImage` item per image |
 | opencode | `@file` references, and image paths in the prompt are attached. | Text: `@/abs/path.png` (the opencode adapter rewrites a bare path) |
-| Klaudia | Uses the opencode backend. Same as opencode, to be confirmed in item 6 below. | Same as opencode |
 | Assistant (OpenAI-compatible) | `image_url` content parts with a data URI, only when the configured model supports vision. | Path in the text and, if vision is on, a data-URI part. Otherwise the text names the attachment and its path so tools can fetch it. |
 
 The composer keeps the chips separate from the draft text. On send, it appends
@@ -257,7 +256,7 @@ remote emulator by sharing from Photos and from a screenshot.
 5. **Chat: `localImage` items** in `chat_codex::turn_start` and the send
    request (`attachments: [id]`), plus transcript thumbnails. Effort S.
 6. **Agent-CLI reference format** in `agent_cli.rs`: bare path (Claude, Codex)
-   vs `@path` (opencode). Includes verifying opencode/Klaudia image handling
+   vs `@path` (opencode). Includes verifying opencode image handling
    and the assistant vision parts gated by model capability. Effort S.
 7. **Android share target.** Covers the exported trampoline `ShareActivity`
    (copy under the URI grant, `PendingShare` store) and the handoff to

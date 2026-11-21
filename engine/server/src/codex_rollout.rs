@@ -13,8 +13,7 @@
 //! - A final message whose last non-blank line is exactly `AUTOPILOT: DONE`
 //!   takes the done path (WI-1518, source `marker`) without a render.
 //! - `task_started` marks the turn running, so autopilot does not nudge it.
-//! - An active goal drives its own idle turns, so autopilot leaves it alone,
-//!   as it does Klaudia's goal loop.
+//! - An active goal drives its own idle turns, so autopilot leaves it alone.
 
 use serde_json::Value;
 use vogt_engine_contract::DoneSource;
