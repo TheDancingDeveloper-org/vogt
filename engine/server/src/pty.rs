@@ -528,12 +528,10 @@ impl Session {
         replay: bool,
         since: i64,
     ) -> crate::codex_rollout::Outcome {
-        // A turn the rollout saw begin is a new turn for the screen path's
-        // once-per-turn flag too.
-        if events
-            .iter()
-            .any(|e| matches!(e, crate::codex_rollout::RolloutEvent::Started { .. }))
-        {
+        // A turn the rollout saw begin live is a new turn for the screen
+        // path's once-per-turn flag too. A replayed start is history: the
+        // screen path may already have announced that very turn.
+        if crate::codex_rollout::starts_new_turn(events, replay) {
             self.ready_announced.store(false, Ordering::Release);
         }
         self.rollout.lock().apply(events, replay, since)

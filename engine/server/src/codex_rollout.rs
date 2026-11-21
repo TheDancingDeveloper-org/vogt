@@ -89,6 +89,16 @@ fn says_done(message: &str) -> bool {
         .is_some_and(|l| l == crate::autopilot::DONE_MARKER)
 }
 
+/// Whether `events` begin a turn the screen path has not seen. The first read
+/// of a rollout (`replay`) starts at the top of the file, so its `task_started`
+/// lines are history, not new turns (WI-1576).
+pub(crate) fn starts_new_turn(events: &[RolloutEvent], replay: bool) -> bool {
+    !replay
+        && events
+            .iter()
+            .any(|e| matches!(e, RolloutEvent::Started { .. }))
+}
+
 /// What the rollout has said about one session's turns.
 #[derive(Debug, Default)]
 pub(crate) struct RolloutTurns {
@@ -313,5 +323,15 @@ mod tests {
         assert!(live.apply(&[complete(150)], true, 100).done);
         let mut history = RolloutTurns::default();
         assert!(!history.apply(&[complete(50)], true, 100).done);
+    }
+
+    #[test]
+    fn a_replayed_start_does_not_reopen_a_turn_the_screen_announced() {
+        let started = [RolloutEvent::Started {
+            turn_id: "t".into(),
+        }];
+        assert!(!starts_new_turn(&started, true));
+        assert!(starts_new_turn(&started, false));
+        assert!(!starts_new_turn(&[], false));
     }
 }
