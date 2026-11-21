@@ -89,16 +89,6 @@ fn says_done(message: &str) -> bool {
         .is_some_and(|l| l == crate::autopilot::DONE_MARKER)
 }
 
-/// Whether `events` begin a turn the screen path has not seen. The first read
-/// of a rollout (`replay`) starts at the top of the file, so its `task_started`
-/// lines are history, not new turns (WI-1576).
-pub(crate) fn starts_new_turn(events: &[RolloutEvent], replay: bool) -> bool {
-    !replay
-        && events
-            .iter()
-            .any(|e| matches!(e, RolloutEvent::Started { .. }))
-}
-
 /// What the rollout has said about one session's turns.
 #[derive(Debug, Default)]
 pub(crate) struct RolloutTurns {
@@ -109,6 +99,9 @@ pub(crate) struct RolloutTurns {
     pub running: bool,
     /// The thread's goal is active, so Codex continues idle turns itself.
     pub goal_active: bool,
+    /// The screen path announced a `ready` before any rollout was read; the
+    /// first turn the rollout completes is the one it stood for.
+    screen_ready: bool,
     last_ready: Option<String>,
     last_done: Option<String>,
 }
@@ -121,6 +114,11 @@ pub(crate) struct Outcome {
 }
 
 impl RolloutTurns {
+    /// The screen path announced a `ready` for a turn whose id is not yet known.
+    pub(crate) fn note_screen_ready(&mut self) {
+        self.screen_ready = true;
+    }
+
     /// Fold `events` in. `replay` is the first read of a rollout that already
     /// held turns (an engine restart, a resumed conversation): it settles the
     /// state and may announce the turn it ends on as ready, but never declares
@@ -142,7 +140,9 @@ impl RolloutTurns {
                     self.running = false;
                     if self.last_ready.as_deref() != Some(turn_id) {
                         self.last_ready = Some(turn_id.clone());
-                        out.ready = true;
+                        // The screen already announced this turn: remember its
+                        // id, publish nothing.
+                        out.ready = !std::mem::take(&mut self.screen_ready);
                     }
                     if *done && self.last_done.as_deref() != Some(turn_id) {
                         self.last_done = Some(turn_id.clone());
@@ -326,12 +326,53 @@ mod tests {
     }
 
     #[test]
-    fn a_replayed_start_does_not_reopen_a_turn_the_screen_announced() {
-        let started = [RolloutEvent::Started {
-            turn_id: "t".into(),
+    fn a_screen_announced_turn_is_not_announced_again_by_the_rollout() {
+        let mut turns = RolloutTurns::default();
+        turns.note_screen_ready();
+        let first = [
+            RolloutEvent::Started {
+                turn_id: "1".into(),
+            },
+            RolloutEvent::Complete {
+                turn_id: "1".into(),
+                done: false,
+                completed_at: None,
+            },
+        ];
+        assert_eq!(turns.apply(&first, true, 0), Outcome::default());
+        // The same history read again is still nothing new.
+        assert_eq!(turns.apply(&first[1..], false, 0), Outcome::default());
+    }
+
+    #[test]
+    fn a_new_turn_in_the_first_read_after_a_screen_ready_is_announced() {
+        let mut turns = RolloutTurns::default();
+        turns.note_screen_ready();
+        let history = [
+            RolloutEvent::Started {
+                turn_id: "1".into(),
+            },
+            RolloutEvent::Complete {
+                turn_id: "1".into(),
+                done: false,
+                completed_at: None,
+            },
+            RolloutEvent::Started {
+                turn_id: "2".into(),
+            },
+        ];
+        assert_eq!(turns.apply(&history, true, 0), Outcome::default());
+        let end = [RolloutEvent::Complete {
+            turn_id: "2".into(),
+            done: false,
+            completed_at: None,
         }];
-        assert!(!starts_new_turn(&started, true));
-        assert!(starts_new_turn(&started, false));
-        assert!(!starts_new_turn(&[], false));
+        assert_eq!(
+            turns.apply(&end, false, 0),
+            Outcome {
+                ready: true,
+                done: false
+            }
+        );
     }
 }
