@@ -528,23 +528,14 @@ impl Session {
         replay: bool,
         since: i64,
     ) -> crate::codex_rollout::Outcome {
-        // A turn the rollout saw begin live is a new turn for the screen
-        // path's once-per-turn flag too. A replayed start is history: the
-        // screen path may already have announced that very turn.
-        if crate::codex_rollout::starts_new_turn(events, replay) {
-            self.ready_announced.store(false, Ordering::Release);
-        }
         self.rollout.lock().apply(events, replay, since)
     }
 
     /// Publish the `ready` a rollout's `task_complete` stands for. The rollout
-    /// already deduplicates by turn id; the flag keeps the screen path quiet.
+    /// deduplicates by turn id, counting a screen `ready` as the first turn's.
     pub(crate) fn announce_rollout_ready(&self, bus: &EventBus) {
-        // The screen path may already have announced this turn's rest before
-        // the first rollout read; one `ready` per turn.
-        if !self.ready_announced.swap(true, Ordering::AcqRel) {
-            bus.publish(ServerEvent::SessionReady { id: self.id });
-        }
+        self.ready_announced.store(true, Ordering::Release);
+        bus.publish(ServerEvent::SessionReady { id: self.id });
     }
 
     /// A Codex rollout is driving this session's readiness and done (WI-1576).
@@ -2646,6 +2637,7 @@ fn announce_ready_if_at_prompt(session: &Session, resting: ActivityState, bus: &
     });
     if reported_rest {
         if !session.ready_announced.swap(true, Ordering::AcqRel) {
+            session.rollout.lock().note_screen_ready();
             bus.publish(ServerEvent::SessionReady { id: session.id });
         }
         return;
@@ -2659,6 +2651,7 @@ fn announce_ready_if_at_prompt(session: &Session, resting: ActivityState, bus: &
         rendered.title.as_deref(),
     );
     if ready && !session.ready_announced.swap(true, Ordering::AcqRel) {
+        session.rollout.lock().note_screen_ready();
         bus.publish(ServerEvent::SessionReady { id: session.id });
     }
 }
