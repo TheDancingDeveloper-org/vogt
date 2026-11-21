@@ -46,6 +46,7 @@ fi
 cargo fmt --version
 cargo clippy --version
 cargo nextest --version
+gh --version
 
 work=/tmp/scratch
 mkdir -p "$work/src"
