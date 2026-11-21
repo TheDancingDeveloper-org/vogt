@@ -217,11 +217,6 @@ async fn handle<C: Clock + Clone + Send + 'static, I: IdFactory + Send + 'static
     // writing it here is what the line reads when the handler returns. A
     // refusal above never gets here, and stays unattributed.
     crate::observability::set_request_actor(Some(admitted.principal.identity_ref.clone()));
-    if worker_profile {
-        if let Some(refused) = worker_profile_refusal(&admitted.message) {
-            return refused;
-        }
-    }
     let outcome =
         tokio::task::spawn_blocking(move || dispatch(admitted, build, worker_profile)).await;
     match outcome {
@@ -402,6 +397,20 @@ fn dispatch<C: Clock + Clone, I: IdFactory>(
         build,
         operation_clock,
     );
+    // The profile is the query's, or the role the engine gives the caller
+    // (WI-2833). A Claude worker's bridge posts to `/mcp` with no query, so
+    // its session's role is what makes its list the worker list.
+    let worker_profile = worker_profile
+        || built.as_ref().is_some_and(|built| {
+            crate::with_ctx!(built, |ctx| {
+                crate::application::session_commit::caller_is_worker_session(ctx)
+            })
+        });
+    if worker_profile {
+        if let Some(refused) = worker_profile_refusal(&message) {
+            return refused;
+        }
+    }
     let mut dispatcher = Dispatcher::new(&registry, &permitted, McpTransport::Http)
         .with_worker_profile(worker_profile);
     if let Some(context) = built.as_ref() {

@@ -380,14 +380,18 @@ about 61 KB of schema against about 170 KB for the full list (measured
 2026-11-21). The profile is asked for three ways:
 
 - HTTP: `/mcp?profile=worker`. The engine puts this on a Codex worker's vogt URL
-  (`mcp_set.rs`, `codex_worker_args`). It also refuses a `session.start` naming
-  `role=oversight` or `mcp_set=full` from this profile (WI-4489).
+  (`mcp_set.rs`, `codex_worker_args`).
+- By role: an HTTP caller whose session the engine reports as `role=worker` gets
+  the worker profile with no query. This is how a Claude worker gets it, because
+  its bridge (`vogt-mcp-remote`, Python) posts to `/mcp` with no profile. The
+  lookup is `caller_is_worker_session` (`application/session_commit.rs`): the
+  caller's identity to its engine session, then the engine's `role`. An engine
+  that is unreachable or does not know the caller leaves the full list.
 - Rust stdio server (`mcp.stdio`): `VOGT_MCP_TOOL_PROFILE=worker` in its
   environment. Any other value, or none, serves the full list.
-- The Claude stdio bridge, `vogt-mcp-remote` (Python, `src/vogt/adapters/mcp/bridge.py`),
-  is what a Claude worker runs. It does not read `VOGT_MCP_TOOL_PROFILE` and
-  does not forward a profile on its `/mcp` POST, so a Claude worker still lists
-  all tools until the bridge is changed to forward it.
+
+The worker profile also refuses a `session.start` naming `role=oversight` or
+`mcp_set=full` (WI-4489), whichever way the profile was asked for.
 
 The profile narrows the list only. Calls are not narrowed; the grant still decides.
 
