@@ -7480,6 +7480,47 @@ async fn secret_broker_refuses_vogt_prod_token_to_a_worker_set_session() {
     assert_eq!(r.status(), 200);
 }
 
+/// WI-4510: the GitHub check route applies the same prod-lane gate as fetch:
+/// it makes the engine resolve the secret, so a worker-set session is refused
+/// with a 403 rather than learning anything ("not_github") about it.
+#[tokio::test]
+async fn github_check_refuses_vogt_prod_token_to_a_worker_set_session() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = broker_config(&tmp, "VOGT_PROD_TOKEN proj prod-bridge-token ondemand\n");
+    let (base, state, _h) = boot_with_state(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let id: uuid::Uuid = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({ "name": "prod-check-worker", "mcp_set": "worker" }))
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let r = reqwest::Client::new()
+        .post(format!(
+            "{base}/api/agent-auth/github-check/VOGT_PROD_TOKEN"
+        ))
+        .bearer_auth(state.sessions.secret_broker().issue(id))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 403);
+    let error = r.json::<Value>().await.unwrap()["error"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(error.contains("worker set"), "{error}");
+}
+
 /// gh#1441: a plain shell is started with no Vogt credential, and in a
 /// brokered deployment the pod has none either. An agent started by hand in
 /// that shell asks the broker for `VOGT_HTTP_TOKEN`; the engine mints the

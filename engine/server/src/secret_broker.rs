@@ -2318,6 +2318,33 @@ fn digest(token: &str) -> [u8; 32] {
 /// worker-set session.
 const PROD_LANE_VARS: &[&str] = &[crate::session_endpoints::VOGT_PROD_TOKEN_ENV];
 
+/// The prod-lane gate (WI-4489, WI-4510), shared by every route that makes the
+/// engine resolve a manifest secret: a 403 for a prod-lane name asked by a
+/// worker-set session, else `None`.
+fn refuse_prod_lane(
+    state: &AppState,
+    var: &str,
+    session: Uuid,
+    request_id: &str,
+) -> Option<Response> {
+    if !PROD_LANE_VARS.contains(&var) || state.sessions.may_fetch_vogt_prod(session) {
+        return None;
+    }
+    tracing::warn!(
+        target: "vogt::audit",
+        request_id = %request_id,
+        session_id = %session,
+        var = %var,
+        "secret broker refused: prod-lane credential to a worker-set session"
+    );
+    Some(refusal(
+        StatusCode::FORBIDDEN,
+        &format!(
+            "{var} is a prod-lane credential and is served only to oversight or full-MCP-set sessions; this session runs on the worker set"
+        ),
+    ))
+}
+
 /// `POST /api/agent-auth/fetch/{var}` — hand a session one manifest secret.
 ///
 /// The caller is a host session presenting its broker grant or a pod
@@ -2436,20 +2463,8 @@ pub async fn fetch(
     // WI-4489: a prod-lane credential goes only to a session allowed the
     // remote Vogt (oversight, or the full MCP set), whatever the manifest or a
     // grant says. A worker's breadcrumbs leave the name out; this is the gate.
-    if PROD_LANE_VARS.contains(&var.as_str()) && !state.sessions.may_fetch_vogt_prod(session) {
-        tracing::warn!(
-            target: "vogt::audit",
-            request_id = %request_id,
-            session_id = %session,
-            var = %var,
-            "secret broker refused: prod-lane credential to a worker-set session"
-        );
-        return refusal(
-            StatusCode::FORBIDDEN,
-            &format!(
-                "{var} is a prod-lane credential and is served only to oversight or full-MCP-set sessions; this session runs on the worker set"
-            ),
-        );
+    if let Some(refused) = refuse_prod_lane(&state, &var, session, &request_id) {
+        return refused;
     }
 
     // The manifest first, so a grant can never stand in for what the
@@ -2850,6 +2865,10 @@ pub async fn github_check(
             "secret broker GitHub check"
         );
     };
+    if let Some(refused) = refuse_prod_lane(&state, &var, session, &request_id) {
+        audit("prod_lane_refused");
+        return refused;
+    }
     let Some(entry) = broker.permitted(&var) else {
         audit("not_in_manifest");
         return refusal(StatusCode::FORBIDDEN, "not in the manifest");
