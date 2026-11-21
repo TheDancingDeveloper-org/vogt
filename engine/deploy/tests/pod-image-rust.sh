@@ -6,6 +6,8 @@
 # checks that way and fails on the first one that cannot pass:
 #
 #   - cargo fmt, clippy and nextest are installed and report a version
+#   - both baked toolchains (1.100.0, the default, and 1.94.0) carry clippy and
+#     rustfmt, and the default and `stable` resolve to 1.100.0
 #   - a scratch crate whose rust-toolchain.toml says `channel = "stable"` with
 #     rustfmt and clippy resolves to the installed toolchain and passes clippy
 #   - a toolchain file that names a version the image does not have fails with
@@ -46,6 +48,20 @@ fi
 cargo fmt --version
 cargo clippy --version
 cargo nextest --version
+
+# Both baked toolchains, with 1.100.0 as the default (engine/Dockerfile.pod).
+for v in 1.100.0 1.94.0; do
+    cargo +"$v" clippy --version
+    rustfmt +"$v" --version
+done
+case "$(rustc --version)" in
+    "rustc 1.100.0 "*) ;;
+    *) echo "FAIL: default toolchain is not 1.100.0: $(rustc --version)" >&2; exit 1 ;;
+esac
+case "$(rustc +stable --version)" in
+    "rustc 1.100.0 "*) ;;
+    *) echo "FAIL: stable does not resolve to 1.100.0: $(rustc +stable --version)" >&2; exit 1 ;;
+esac
 gh --version
 
 work=/tmp/scratch
