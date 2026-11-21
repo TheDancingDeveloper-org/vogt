@@ -134,11 +134,17 @@ pub struct Dispatcher<'a, G: ToolGrant> {
 /// The tools a worker session's `tools/list` names under the worker profile.
 ///
 /// Each worker is a single work item: it reads and writes its item, reports
-/// and blocks, asks for decisions, and asks for a grant. The rest of the
-/// surface (session starts and hibernation, project and forge admin, token and
-/// user admin, the contract, inbox and chat) is oversight's, and it made up
-/// most of the ~170 KB of schema a worker was handed on every turn. Names are
-/// MCP names (`work_get`, not `work.get`).
+/// and blocks, asks for decisions, asks for a grant, and drives the terminals
+/// its worker briefs tell it to drive (`session_screen`, `session_input`,
+/// `session_wait`, and the rest of that group). A worker may start a child
+/// session; starting an oversight session or one on the full MCP set is still
+/// refused at the door (WI-4489). Hibernation, project and forge admin, token
+/// and user admin, the contract, inbox and chat stay oversight's, and they made
+/// up most of the ~170 KB of schema a worker was handed on every turn. Names
+/// are MCP names (`work_get`, not `work.get`).
+///
+/// A worker brief that names a tool must find it here; a test keeps the
+/// session-driving group in step with the brief text.
 pub const WORKER_TOOLS: &[&str] = &[
     "auth_whoami",
     "charter_get",
@@ -146,11 +152,21 @@ pub const WORKER_TOOLS: &[&str] = &[
     "decision_list",
     "project_brief",
     "project_get",
+    "session_answer",
     "session_bind_work",
     "session_grant_request",
+    "session_input",
+    "session_list",
+    "session_log_tail",
+    "session_remove",
+    "session_rename",
     "session_report",
     "session_report_blocked",
     "session_report_unblocked",
+    "session_screen",
+    "session_start",
+    "session_sweep",
+    "session_wait",
     "status",
     "why",
     "work_bind_branch",
@@ -664,7 +680,9 @@ pub fn serve_stdio_streams_with<G: ToolGrant>(
     context: Option<&crate::application::context::Built>,
 ) -> Result<ServeReport, std::io::Error> {
     use std::io::{BufRead, Write};
-    let mut dispatcher = Dispatcher::new(registry, grant, McpTransport::Stdio);
+    let worker_profile = worker_profile_from_env(std::env::var(TOOL_PROFILE_ENV).ok().as_deref());
+    let mut dispatcher =
+        Dispatcher::new(registry, grant, McpTransport::Stdio).with_worker_profile(worker_profile);
     if let Some(context) = context {
         dispatcher = dispatcher.with_context(context);
     }
@@ -681,6 +699,17 @@ pub fn serve_stdio_streams_with<G: ToolGrant>(
         }
     }
     Ok(report_of(&dispatcher))
+}
+
+/// The environment variable that asks the stdio server for the worker tool
+/// profile. `engine/server/src/mcp_set.rs` writes the same name into a worker
+/// session's MCP entry.
+pub const TOOL_PROFILE_ENV: &str = "VOGT_MCP_TOOL_PROFILE";
+
+/// Whether the stdio server should serve [`WORKER_TOOLS`]. Only the exact value
+/// `worker` turns it on; anything else, or no value, serves the full list.
+fn worker_profile_from_env(value: Option<&str>) -> bool {
+    value == Some("worker")
 }
 
 fn feed_lines<'a, G: ToolGrant>(
@@ -768,17 +797,80 @@ mod tests {
         let mut expected = WORKER_TOOLS.to_vec();
         expected.sort_unstable();
         assert_eq!(names, expected, "every worker tool must be served");
-        assert!(!names.contains(&"session_start"), "{names:?}");
+        // A worker may start a child session; oversight's own tools stay out.
+        assert!(names.contains(&"session_start"), "{names:?}");
+        for oversight_only in ["session_hibernate", "project_update"] {
+            assert!(!names.contains(&oversight_only), "{names:?}");
+        }
         assert!(full_tools
             .iter()
-            .any(|tool| tool["name"] == "session_start"));
+            .any(|tool| tool["name"] == "session_hibernate"));
 
         let full_bytes = serde_json::to_vec(full_tools).unwrap().len();
         let worker_bytes = serde_json::to_vec(worker_tools).unwrap().len();
         assert!(
-            worker_bytes * 4 < full_bytes,
+            worker_bytes * 2 < full_bytes,
             "worker tools/list is {worker_bytes} bytes against {full_bytes} for the full set"
         );
+    }
+
+    /// WI-2833: every tool a worker brief names in backticks is in the worker
+    /// list. A worker told to drive `session_screen` must be able to see it.
+    #[test]
+    fn every_tool_a_worker_brief_names_is_a_worker_tool() {
+        let briefs = [
+            include_str!("../../application/brief_golden/text/driving_other_sessions.md"),
+            include_str!("../../application/brief_golden/worker_plain.companion.md"),
+            include_str!("../../application/brief_golden/worker_full.companion.md"),
+        ];
+        let registry = registry();
+        let mcp_names: Vec<String> = registry
+            .iter()
+            .map(|operation| operation.mcp_tool_name())
+            .collect();
+        let mut named = Vec::new();
+        for brief in briefs {
+            for span in brief.split('`').skip(1).step_by(2) {
+                if mcp_names.iter().any(|name| name == span) {
+                    named.push(span);
+                }
+            }
+        }
+        assert!(named.contains(&"session_screen"), "{named:?}");
+        for name in named {
+            assert!(
+                WORKER_TOOLS.contains(&name),
+                "a worker brief names `{name}`, which the worker list does not carry"
+            );
+        }
+    }
+
+    #[test]
+    fn the_stdio_server_reads_the_worker_profile_from_its_environment() {
+        assert!(worker_profile_from_env(Some("worker")));
+        assert!(!worker_profile_from_env(Some("full")));
+        assert!(!worker_profile_from_env(Some("Worker")));
+        assert!(!worker_profile_from_env(None));
+        assert_eq!(TOOL_PROFILE_ENV, "VOGT_MCP_TOOL_PROFILE");
+    }
+
+    #[test]
+    fn the_stdio_transport_lists_the_worker_tools_under_the_worker_profile() {
+        let registry = registry();
+        let list = json!({"jsonrpc": "2.0", "id": "a", "method": "tools/list"});
+        let mut worker =
+            Dispatcher::new(&registry, &FullGrant, McpTransport::Stdio).with_worker_profile(true);
+        let response = worker.handle_line(&line(list)).unwrap();
+        let mut names: Vec<&str> = response["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect();
+        names.sort_unstable();
+        let mut expected = WORKER_TOOLS.to_vec();
+        expected.sort_unstable();
+        assert_eq!(names, expected);
     }
 
     #[test]

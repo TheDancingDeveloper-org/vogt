@@ -374,6 +374,23 @@ Gitea/Forgejo forge, read-only.
 Everything in this section is about the *image*; a from-source engine has
 none of it and loses nothing the engine's own routes provide.
 
+**Worker tool profile (WI-2833).** A worker session's `tools/list` names only
+`WORKER_TOOLS` (`engine/core/src/adapters/mcp/framing.rs`): 32 of 151 tools,
+about 61 KB of schema against about 170 KB for the full list (measured
+2026-11-21). The profile is asked for three ways:
+
+- HTTP: `/mcp?profile=worker`. The engine puts this on a Codex worker's vogt URL
+  (`mcp_set.rs`, `codex_worker_args`). It also refuses a `session.start` naming
+  `role=oversight` or `mcp_set=full` from this profile (WI-4489).
+- Rust stdio server (`mcp.stdio`): `VOGT_MCP_TOOL_PROFILE=worker` in its
+  environment. Any other value, or none, serves the full list.
+- The Claude stdio bridge, `vogt-mcp-remote` (Python, `src/vogt/adapters/mcp/bridge.py`),
+  is what a Claude worker runs. It does not read `VOGT_MCP_TOOL_PROFILE` and
+  does not forward a profile on its `/mcp` POST, so a Claude worker still lists
+  all tools until the bridge is changed to forward it.
+
+The profile narrows the list only. Calls are not narrowed; the grant still decides.
+
 **Rust LSP.** `vogt-rust-analyzer-mcp` wraps `rust-analyzer-mcp` and
 starts it from the nearest parent directory containing a `Cargo.toml`, which
 keeps the analyzer anchored to the active workspace when an agent launches it
