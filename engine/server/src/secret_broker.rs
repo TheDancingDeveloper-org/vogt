@@ -552,6 +552,8 @@ pub struct SecretBroker {
     /// it, so the allowance starts afresh (a restart grants a session at most
     /// one extra window of writes).
     credential_writes: DashMap<Uuid, Vec<Instant>>,
+    /// Validates GitHub-bound values before they are handed out (gh#1460).
+    github: crate::github_token_check::GithubTokenCheck,
 }
 
 /// The longest a grant may live.
@@ -679,7 +681,19 @@ impl SecretBroker {
             account_locks: DashMap::new(),
             credential_max_lifetime: credential_max_lifetime_from_env(),
             credential_writes: DashMap::new(),
+            github: crate::github_token_check::GithubTokenCheck::from_env(),
         }
+    }
+
+    /// Replace the GitHub token check (tests point it at a fake API).
+    pub fn with_github_check(mut self, check: crate::github_token_check::GithubTokenCheck) -> Self {
+        self.github = check;
+        self
+    }
+
+    /// The GitHub token check (gh#1460).
+    pub fn github_check(&self) -> &crate::github_token_check::GithubTokenCheck {
+        &self.github
     }
 
     /// Override the ceiling on a written-back credential's expiry.
@@ -2478,6 +2492,12 @@ pub async fn fetch(
         .unwrap_or_default();
     match fetched {
         Ok(value) => {
+            // gh#1460: never hand out a GitHub token GitHub has rejected.
+            if let Some(response) =
+                refuse_if_stale(broker, &entry, &value, &request_id, session).await
+            {
+                return response;
+            }
             // The whole audit trail of the fetch: who, what, never the value.
             tracing::info!(
                 target: "vogt::audit",
@@ -2750,6 +2770,47 @@ pub async fn store(
             ApiError::BadGateway(failure.to_string()).into_response()
         }
     }
+}
+
+/// The typed `credential_stale` refusal for a GitHub-bound value GitHub
+/// rejected (gh#1460), or `None` to hand the value out. Network errors and
+/// timeouts fail open inside the check.
+async fn refuse_if_stale(
+    broker: &SecretBroker,
+    entry: &ManifestSecret,
+    value: &str,
+    request_id: &str,
+    session: Uuid,
+) -> Option<Response> {
+    use crate::github_token_check::{StaleCredential, TokenVerdict};
+    let check = broker.github_check();
+    if !check.is_github_bound(&entry.var, value) {
+        return None;
+    }
+    if check.check(entry, value).await != TokenVerdict::Stale {
+        return None;
+    }
+    let stale = StaleCredential::of(entry);
+    tracing::warn!(
+        target: "vogt::audit",
+        request_id = %request_id,
+        session_id = %session,
+        var = %entry.var,
+        source = %stale.source(),
+        "secret broker refused: GitHub rejected the credential (stale)"
+    );
+    Some(
+        (
+            StatusCode::FAILED_DEPENDENCY,
+            Json(json!({
+                "error": stale.message(),
+                "code": "credential_stale",
+                "var": stale.var,
+                "source": stale.source(),
+            })),
+        )
+            .into_response(),
+    )
 }
 
 fn refusal(status: StatusCode, reason: &str) -> Response {

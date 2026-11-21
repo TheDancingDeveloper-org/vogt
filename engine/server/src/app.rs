@@ -291,6 +291,9 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
     // way a session watcher gets an activity change. No-ops when no core or
     // no core token is configured.
     vogt_core::spawn_event_follower(Arc::clone(&state));
+    // gh#1460: report stale GitHub-bound brokered tokens to the Inbox and
+    // re-check them in the background.
+    crate::github_token_check::spawn(Arc::clone(&state));
     // Background task: turn the drift among those republished events into a
     // push. Reads the bus, never the core — see the watcher's own
     // comment for what that costs across a restart, which is a decision
