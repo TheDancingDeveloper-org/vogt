@@ -222,7 +222,8 @@ async fn handle<C: Clock + Clone + Send + 'static, I: IdFactory + Send + 'static
             return refused;
         }
     }
-    let outcome = tokio::task::spawn_blocking(move || dispatch(admitted, build)).await;
+    let outcome =
+        tokio::task::spawn_blocking(move || dispatch(admitted, build, worker_profile)).await;
     match outcome {
         Ok(response) => response,
         Err(_) => plain_internal(),
@@ -377,6 +378,7 @@ fn authenticate_message<C: Clock + Clone, I: IdFactory>(
 fn dispatch<C: Clock + Clone, I: IdFactory>(
     admitted: Authenticated<C, I>,
     build: ContextBuild<C, I>,
+    worker_profile: bool,
 ) -> Response {
     let registry = crate::registry::default_registry();
     let Authenticated {
@@ -400,7 +402,8 @@ fn dispatch<C: Clock + Clone, I: IdFactory>(
         build,
         operation_clock,
     );
-    let mut dispatcher = Dispatcher::new(&registry, &permitted, McpTransport::Http);
+    let mut dispatcher = Dispatcher::new(&registry, &permitted, McpTransport::Http)
+        .with_worker_profile(worker_profile);
     if let Some(context) = built.as_ref() {
         dispatcher = dispatcher.with_context(context);
     }

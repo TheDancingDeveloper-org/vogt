@@ -126,7 +126,43 @@ pub struct Dispatcher<'a, G: ToolGrant> {
     /// command was invoked with. Absent, a ported service says so rather than
     /// running against a guessed one.
     context: Option<&'a crate::application::context::Built>,
+    /// The worker tool profile (WI-4489, WI-2833): `tools/list` names only
+    /// [`WORKER_TOOLS`]. Calls are not narrowed here; the grant still decides.
+    worker_profile: bool,
 }
+
+/// The tools a worker session's `tools/list` names under the worker profile.
+///
+/// Each worker is a single work item: it reads and writes its item, reports
+/// and blocks, asks for decisions, and asks for a grant. The rest of the
+/// surface (session starts and hibernation, project and forge admin, token and
+/// user admin, the contract, inbox and chat) is oversight's, and it made up
+/// most of the ~170 KB of schema a worker was handed on every turn. Names are
+/// MCP names (`work_get`, not `work.get`).
+pub const WORKER_TOOLS: &[&str] = &[
+    "auth_whoami",
+    "charter_get",
+    "decision_ask",
+    "decision_list",
+    "project_brief",
+    "project_get",
+    "session_bind_work",
+    "session_grant_request",
+    "session_report",
+    "session_report_blocked",
+    "session_report_unblocked",
+    "status",
+    "why",
+    "work_bind_branch",
+    "work_comment",
+    "work_create",
+    "work_get",
+    "work_get_many",
+    "work_list",
+    "work_relate",
+    "work_transition",
+    "work_update",
+];
 
 impl<'a, G: ToolGrant> Dispatcher<'a, G> {
     pub fn new(registry: &'a OperationRegistry, grant: &'a G, transport: McpTransport) -> Self {
@@ -136,7 +172,14 @@ impl<'a, G: ToolGrant> Dispatcher<'a, G> {
             transport,
             report: ServeReport::default(),
             context: None,
+            worker_profile: false,
         }
+    }
+
+    /// Serve the worker tool profile: `tools/list` names only [`WORKER_TOOLS`].
+    pub fn with_worker_profile(mut self, on: bool) -> Self {
+        self.worker_profile = on;
+        self
     }
 
     /// The context a tool call runs against. Both transports set it.
@@ -271,6 +314,12 @@ impl<'a, G: ToolGrant> Dispatcher<'a, G> {
             .iter()
             .filter(|operation| exposed_over_mcp(self.registry, operation))
             .filter(|operation| self.grant.allows(self.registry, operation))
+            .filter(|operation| {
+                !self.worker_profile
+                    || WORKER_TOOLS
+                        .iter()
+                        .any(|name| *name == operation.mcp_tool_name())
+            })
             .map(tool_wire)
             .collect()
     }
@@ -693,6 +742,42 @@ mod tests {
         assert_eq!(
             response["result"]["capabilities"]["tools"]["listChanged"],
             false
+        );
+    }
+
+    /// WI-2833: under the worker profile `tools/list` names exactly
+    /// [`WORKER_TOOLS`], every one of which the registry serves, and the list
+    /// is a fraction of the full one. The full profile is unchanged.
+    #[test]
+    fn the_worker_profile_lists_only_the_worker_tools() {
+        let registry = registry();
+        let list = json!({"jsonrpc": "2.0", "id": "a", "method": "tools/list"});
+        let mut full = Dispatcher::new(&registry, &FullGrant, McpTransport::Http);
+        let full_list = full.handle_line(&line(list.clone())).unwrap();
+        let mut worker =
+            Dispatcher::new(&registry, &FullGrant, McpTransport::Http).with_worker_profile(true);
+        let worker_list = worker.handle_line(&line(list)).unwrap();
+
+        let full_tools = full_list["result"]["tools"].as_array().unwrap();
+        let worker_tools = worker_list["result"]["tools"].as_array().unwrap();
+        let mut names: Vec<&str> = worker_tools
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect();
+        names.sort_unstable();
+        let mut expected = WORKER_TOOLS.to_vec();
+        expected.sort_unstable();
+        assert_eq!(names, expected, "every worker tool must be served");
+        assert!(!names.contains(&"session_start"), "{names:?}");
+        assert!(full_tools
+            .iter()
+            .any(|tool| tool["name"] == "session_start"));
+
+        let full_bytes = serde_json::to_vec(full_tools).unwrap().len();
+        let worker_bytes = serde_json::to_vec(worker_tools).unwrap().len();
+        assert!(
+            worker_bytes * 4 < full_bytes,
+            "worker tools/list is {worker_bytes} bytes against {full_bytes} for the full set"
         );
     }
 
