@@ -450,6 +450,12 @@ pub struct ClaudeLaunch {
     /// has something in it: the first prompt points Claude Code at it, as the
     /// host launcher's does (WI-3355).
     pub brief: Option<PathBuf>,
+    /// `VOGT_CLAUDE_MESSAGING_SOCKET`, passed as `--messaging-socket-path`
+    /// (WI-4513). Claude refuses a default socket directory under a
+    /// world-writable ancestor without the sticky bit, which every fsGroup
+    /// emptyDir in a pod is; an explicit path in a 0700 directory it owns
+    /// is accepted.
+    pub messaging_socket: Option<PathBuf>,
 }
 
 /// The first prompt of a session started with a brief.
@@ -475,6 +481,12 @@ impl ClaudeLaunch {
             std::env::var_os("VOGT_CLAUDE_MCP_CONFIG"),
         )
         .with_brief(std::env::var_os("VOGT_SESSION_BRIEF_FILE"))
+        .with_messaging_socket(std::env::var_os("VOGT_CLAUDE_MESSAGING_SOCKET"))
+    }
+
+    fn with_messaging_socket(mut self, socket: Option<std::ffi::OsString>) -> Self {
+        self.messaging_socket = socket.filter(|p| !p.is_empty()).map(PathBuf::from);
+        self
     }
 
     /// Keep `brief` only when the file holds text: an empty brief is no
@@ -501,6 +513,7 @@ impl ClaudeLaunch {
             settings,
             mcp_config: mcp_config.filter(|p| !p.is_empty()).map(PathBuf::from),
             brief: None,
+            messaging_socket: None,
         }
     }
 }
@@ -1926,7 +1939,7 @@ pub fn command_line(config: &Config) -> Result<String, AgentError> {
                 .as_deref()
                 .filter(|_| !config.resume)
                 .map(brief_instruction);
-            let args = claude_args(&ClaudeArgs {
+            let mut args = claude_args(&ClaudeArgs {
                 model: config.model.as_deref(),
                 effort: config.effort.as_deref(),
                 conversation: conversation.map(|id| (id, config.resume)),
@@ -1937,6 +1950,18 @@ pub fn command_line(config: &Config) -> Result<String, AgentError> {
                 prompt: prompt.as_deref(),
             })
             .map_err(AgentError::Pty)?;
+            // Pod-only (WI-4513), so it stays out of the shared builder; it
+            // goes before the positional prompt.
+            if let Some(socket) = &config.claude.messaging_socket {
+                let at = args.len() - usize::from(prompt.is_some());
+                args.splice(
+                    at..at,
+                    [
+                        "--messaging-socket-path".to_string(),
+                        socket.display().to_string(),
+                    ],
+                );
+            }
             // Claude's MCP config names brokered bearers by environment
             // reference, just like Codex's `bearer_token_env_var`.  Fetch
             // them around the child rather than exporting them into the
@@ -3675,6 +3700,7 @@ mod tests {
                 settings: Some(IMAGE_SETTINGS_FILE.into()),
                 mcp_config: Some("/run/vogt/mcp.json".into()),
                 brief: None,
+                messaging_socket: None,
             },
             codex: CodexLaunch::default(),
             opencode_mcp_config: None,
@@ -3801,6 +3827,27 @@ mod tests {
     /// for an agent template, and the pod rebuilt the line with `prompt:
     /// None`, so a task session opened at an empty composer. With autopilot
     /// off nothing ever typed into it and the session sat at 0 turns.
+    /// WI-4513: a pod's fsGroup emptyDirs are 2777 with no sticky bit, so
+    /// Claude only starts cross-session messaging on an explicit socket path.
+    #[test]
+    fn a_pod_claude_gets_its_messaging_socket_before_the_prompt() {
+        let brief = PathBuf::from("/work/.vogt/brief.md");
+        let claude = ClaudeLaunch {
+            brief: Some(brief.clone()),
+            messaging_socket: Some("/tmp/vogt/claude.sock".into()),
+            ..ClaudeLaunch::default()
+        };
+        let argv = argv_of(&command_line(&claude_config(claude, false)).unwrap());
+        let at = argv
+            .windows(2)
+            .position(|w| w == ["--messaging-socket-path", "/tmp/vogt/claude.sock"])
+            .expect("messaging socket flag");
+        assert_eq!(argv.last().unwrap(), &brief_instruction(&brief));
+        assert_eq!(at + 2, argv.len() - 1, "{argv:?}");
+        let plain = argv_of(&command_line(&claude_config(ClaudeLaunch::default(), false)).unwrap());
+        assert!(!plain.contains(&"--messaging-socket-path".to_string()));
+    }
+
     #[test]
     fn a_fresh_codex_is_given_its_brief_as_the_prompt() {
         let brief = PathBuf::from("/work/.vogt/brief.md");
@@ -4202,6 +4249,7 @@ mod tests {
                 settings: Some("/a b/it's; touch /tmp/x.json".into()),
                 mcp_config: None,
                 brief: None,
+                messaging_socket: None,
             },
             codex: CodexLaunch::default(),
             opencode_mcp_config: None,

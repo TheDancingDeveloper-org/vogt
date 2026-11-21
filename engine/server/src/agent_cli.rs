@@ -1727,6 +1727,7 @@ mod permission_tests {
                 settings: Some(settings),
                 mcp_config: None,
                 brief: Some(brief),
+                messaging_socket: None,
             },
             codex: vogt_session_agent::CodexLaunch::default(),
             opencode_mcp_config: None,

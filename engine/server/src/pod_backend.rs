@@ -1169,6 +1169,10 @@ const RUNTIME_MOUNT: &str = "/run/vogt";
 /// its size limit) and `TMPDIR` points every agent at it.
 const SESSION_TMPDIR: &str = "/tmp/vogt";
 const TMPDIR_INIT_CONTAINER: &str = "session-tmpdir";
+/// Claude Code also refuses a socket directory with any such ancestor, even
+/// under `TMPDIR`, but accepts an explicit `--messaging-socket-path` in a 0700
+/// directory it owns; the session agent passes this one (WI-4513).
+const CLAUDE_MESSAGING_SOCKET: &str = "/tmp/vogt/claude.sock";
 /// The session's writable rustup home (WI-4514). The image bakes its
 /// toolchains under the read-only [`BAKED_RUSTUP_HOME`]; the same init
 /// container makes this directory on the private `/cache` emptyDir with a
@@ -1660,6 +1664,11 @@ pub fn pod_template(
     env.push(EnvVar {
         name: "TMPDIR".into(),
         value: Some(SESSION_TMPDIR.into()),
+        ..Default::default()
+    });
+    env.push(EnvVar {
+        name: "VOGT_CLAUDE_MESSAGING_SOCKET".into(),
+        value: Some(CLAUDE_MESSAGING_SOCKET.into()),
         ..Default::default()
     });
     env.push(EnvVar {
@@ -4634,6 +4643,11 @@ mod tests {
         let env = spec.containers[0].env.as_ref().unwrap();
         let tmpdir = env.iter().find(|e| e.name == "TMPDIR").expect("TMPDIR");
         assert_eq!(tmpdir.value.as_deref(), Some("/tmp/vogt"));
+        let socket = env
+            .iter()
+            .find(|e| e.name == "VOGT_CLAUDE_MESSAGING_SOCKET")
+            .expect("VOGT_CLAUDE_MESSAGING_SOCKET");
+        assert_eq!(socket.value.as_deref(), Some("/tmp/vogt/claude.sock"));
     }
 
     #[test]
