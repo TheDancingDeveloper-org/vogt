@@ -102,16 +102,17 @@ the git routes.
 The merged image is built from the **repository root**, not from `engine/`:
 
 ```bash
-docker build -f engine/Dockerfile \
-  --build-arg CORE_IMAGE=ghcr.io/thedancingdeveloper-org/vogt:latest \
-  -t vogt-engine .
+docker build -f engine/Dockerfile -t vogt-engine .
 ```
 
 The Dockerfile's stages are the PWA bundle, the Rust binary with that bundle
-embedded, the published core image (lifted whole, so the merged image runs
-*the* public core rather than a second build of it — `CORE_IMAGE` defaults to
-the public `:latest` tag as a placeholder for a local build, and CI overrides
-it with a digest), and the runtime. The runtime stage starts `FROM` a
+embedded, `vogt-core` built beside it from the same source, and the Python
+core installed under `/opt/vogt/.venv` (there is no `CORE_IMAGE` argument; the
+Python stage builds from this checkout). `VOGT_CORE_IMPL` (`python` or
+`rust`, default `python`) chooses which core the entrypoint supervises and
+which binaries `/opt/vogt/bin/vogt` and `vogt-mcp-remote` point at (that directory is first on `PATH`; `/usr/local/bin` is not written at runtime). The
+runtime follows. The
+runtime stage starts `FROM` a
 **dev-pod base** (`engine/Dockerfile.pod`, published as
 `ghcr.io/thedancingdeveloper-org/vogt-pod-base:lean-*`): an Ubuntu image
 carrying the toolchains an agent working *inside* a session is likely to want
@@ -124,9 +125,25 @@ built on it as `vogt-stack-workbench`; nothing in this repository deploys
 that image. It is a
 development pod rather than a hardened service image — it runs as a named
 user with `sudo`, with a writable home — which is why the core image at the
-repository root is a separate build rather than a stage of this one: it is
-the hardened input this image lifts its core from, not something to deploy on
-its own (`DEPLOYMENT.md`).
+repository root is a separate build rather than a stage of this one: it is the
+hardened core-only image, not something to deploy on its own (`DEPLOYMENT.md`).
+The merged image no longer takes its core from it; that image is retired at I7.
+
+**The `rust-2` dev images.** `vogt-dev` runs two images built from the
+`rust-2` graft line: `vogt-dev-pod` from `engine/Dockerfile.pod` and
+`vogt-dev-engine` from `engine/Dockerfile`. `rust-2` is a graft line, not a
+branch in this repository, so nothing pushes it and a workflow watching it
+never runs (WI-3947). What does exist on GitHub is the batch pull request
+that `graft-mirror pr-batch` exports the line into: `graft/batch-<n>`, based
+on `rust-core`, one commit per land, each with a `Graft-Changeset:` trailer.
+`.github/workflows/rust2-images.yml` therefore triggers on a push to
+`graft/batch-*`, refuses a ref without that trailer, and builds
+`VOGT_SOURCE_SHA` from the trailer, so a running engine names the changeset
+it came from instead of an unlookupable squashed sha. The practical
+consequence: dev images move when a batch is cut, not on every land, so a
+land that is not yet in a batch is not in an image. Both images are pushed by
+digest with provenance and an SBOM, the run summary prints the pair to pin,
+and nothing in this repository deploys them.
 
 Build arguments worth knowing: `INSTALL_AI_CLIENTS=true` bakes in the `claude`
 and `opencode` CLIs at the Renovate-pinned versions in
@@ -136,20 +153,25 @@ asset `codex-<target>.tar.gz`, checked against the sha256 recorded beside the
 pin). The release is x86_64 only, so `VOGT_CODEX_SHA256_LINUX_ARM64` is empty
 and an arm64 image build leaves the Codex copy unset instead of failing. It
 also bakes `codex-acp` (WI-1595), the upstream `@agentclientprotocol/codex-acp`
-adapter pinned there as `VOGT_CODEX_ACP_VERSION`, and `klaudia` (WI-950), a Go coding agent no
-registry publishes, built with the image's Go from the commit pinned there
-(`VOGT_KLAUDIA_VERSION`, a full commit id of `VOGT_KLAUDIA_SOURCE`); it is off by default for a local build and on in
-the published image. The adapter is not a Codex of its own: it starts
+adapter pinned there as `VOGT_CODEX_ACP_VERSION`. The adapter is not a Codex
+of its own: it starts
 `codex app-server` and translates ACP into it, and the entrypoint exports
 `CODEX_PATH` at the baked fork binary (the runtime pin's `codex/current` when
 one is flipped, else `/usr/local/libexec/codex-real`) so it never falls back to
 the older `@openai/codex` its package bundles. An explicit `CODEX_PATH` wins.
+`/usr/local/share/vogt/agent-versions.resolved` records only the tools the
+build actually put on disk: it is written after the installs and guarded per
+binary, so an image built without `INSTALL_AI_CLIENTS=true` (or an arm64 build
+with no Codex release) declares no CLI rather than naming one it lacks. The
+runtime installer treats a declared version as an image copy it can switch
+back to without a download; an image that over-claimed made a host session
+skip the install and die on a missing `codex` (WI-3761).
 That baked copy is the baseline, and the version a
 running pod uses can be moved without a rebuild by the runtime pin described
 in [`DEPLOYMENT.md`](DEPLOYMENT.md) §3 (`VOGT_CLAUDE_CODE_VERSION` and
 friends, applied by `vogt-agent-cli-install` at container start). Stock npm
-Codex is not a runtime option (WI-1146): it has no managed hooks, so the
-gitguard hook would not run under it. `VOGT_CODEX_VERSION` still names
+Codex is not a runtime option (WI-1146): it has no managed hooks and is not
+the fork the wrapper requires. `VOGT_CODEX_VERSION` still names
 `@openai/codex` in the `codex-npm` row (kind `npm`), but the installer refuses
 a pin of it (exit 64) and drops any `current` an older image left, and the
 wrapper refuses a runtime copy whose prefix has no fork `source` line. Codex's row is kind `github-release`: a runtime
@@ -160,6 +182,9 @@ the binary with `--no-daemon`, and bootstrap writes
 is installed — merging the key into an existing `[features]` table and
 forcing a `true` already there to `false` — so a client that does not go
 through the wrapper still does not copy the binary out from under the pin.
+Every Vogt-launched Codex also carries `-c features.daemon_auto_start=false`
+on its argv (WI-3882), so a launch that does not read that config says the
+same thing.
 The image also carries a Go toolchain (WI-951), unconditionally: the release
 `engine/agent-versions.env` pins as `VOGT_GO_VERSION`, checked against the
 sha256s recorded beside it, unpacked to `/usr/local/go` and linked as
@@ -167,17 +192,14 @@ sha256s recorded beside it, unpacked to `/usr/local/go` and linked as
 for a newer toolchain fails by name rather than fetching one. It is a row of
 the same runtime-pin table (kind `go-dist`), so `VOGT_GO_VERSION` in the
 environment moves it at the next start without a rebuild, checked against
-the Go mirror's own release index. Klaudia's row is kind `go-src`: a runtime
-`VOGT_KLAUDIA_VERSION` is another full commit, fetched alone and built into
-the volume at start (`./cmd/klaudia`, CGO off), its `source` recorded in the
-prefix. `GO_VERSION` as a build argument must
+the Go mirror's own release index. `GO_VERSION` as a build argument must
 equal the pin: a build cannot verify a version it has no recorded checksum
 for.
 `POD_BASE_IMAGE` selects the pod base; CI passes it by digest.
 
 The image's entrypoint (`engine/deploy/entrypoint.sh`) supervises the
 container: it optionally starts a headless compositor for the GUI surface
-(`START_SWAY=1`), starts the Python core on loopback when `VOGT_CORE_URL`
+(`START_SWAY=1`), starts the core selected by `VOGT_CORE_IMPL` (default the Python core) on loopback when `VOGT_CORE_URL`
 names a loopback address, then execs the engine as PID 1's child. With
 `VOGT_CORE_URL` unset the container runs the engine alone. The published
 image runs with `deploy/stack.compose.yml`; `deploy/engine.overlay.yml`
@@ -196,10 +218,9 @@ The helper scripts the image installs under `/usr/local/bin/vogt-*`:
 | `vogt-mcp` | `deploy/vogt-mcp-auth.sh` | stdio bridge to Vogt's `/mcp` for clients that cannot take a bearer directly; uses the session's own token | optional |
 | `vogt-rust-analyzer-mcp` | `deploy/rust-analyzer-mcp.sh` | starts `rust-analyzer-mcp` anchored to the nearest `Cargo.toml` | optional |
 | `vogt-readonly-mcp` | `deploy/readonly-mcp.sh` | starts the GitHub, Grafana or Gitea/Forgejo MCP server in read-only mode with the session's token (§4) | optional — registered only when its token is present |
-| `vogt-klaudia-mcp` | `deploy/klaudia-mcp.sh` | `set [-e KEY=VALUE]…`/`remove` a stdio server in Klaudia's `.mcp.json` (`~/.klaudia`, or `KLAUDIA_CONFIG_DIR`), which Klaudia has no `mcp` command to write; `vogt-mcp-bootstrap` uses it, and a derivative image's bootstrap may (§4) | only with `klaudia` present |
 | `git-forgejo` | `deploy/git-forgejo.sh` | git with a Gitea/Forgejo token header that cannot be word-split (§4) | optional |
 | `vogt-git-askpass` | `deploy/git-askpass.sh` | `GIT_ASKPASS` shim for brokered credentials | optional |
-| `codex` wrapper | `deploy/codex-full-access.sh` | runs the pinned Codex with `--no-daemon` (`daemon_auto_start` off), because the daemon would copy the binary out of the pin. It does **not** pass `--dangerously-bypass-approvals-and-sandbox` (WI-1143): the engine's posture flags name the sandbox (`-s danger-full-access` for default and accept-edits; bypass is the only posture that skips approvals and the sandbox, and only when a person asked). `--approve-for-me` is not used — it hard-wires workspace-write. The fork reads `/etc/codex/requirements.toml` with no flag (TUI, `exec` and app-server alike); the image copies `deploy/driven-session-codex-requirements.toml` there, root-owned `0644` in a root-owned `0755` directory, and a reference copy to `/usr/local/share/vogt/`. That file pins `[features] hooks = true` and runs `/usr/local/bin/klaudia hook gitguard` (the image's root-owned build, by absolute path) fail-closed on `SessionStart` (baseline capture) and `PreToolUse` (matcher `Bash`, `shell`, `exec_command`, `write_stdin`, `apply_patch`; timeout 30 s), so a hook that fails, or a session with no baseline, blocks the tool call (WI-1146, WI-1356). A runtime copy under `codex/current` runs only when its prefix records a fork release `source`; anything else exits 78 rather than run without the hook. That `source` file sits in the session-owned agent-CLI tree, so this check is an accident guard against a stale or mistaken pin, not a security boundary | only with `INSTALL_AI_CLIENTS` |
+| `codex` wrapper | `deploy/codex-full-access.sh` | runs the pinned Codex with `--no-daemon` (`daemon_auto_start` off), because the daemon would copy the binary out of the pin. It does **not** pass `--dangerously-bypass-approvals-and-sandbox` (WI-1143): the engine's posture flags name the sandbox (`-s danger-full-access` for default and accept-edits; bypass is the only posture that skips approvals and the sandbox, and only when a person asked). `--approve-for-me` is not used — it hard-wires workspace-write. The fork reads `/etc/codex/requirements.toml` with no flag (TUI, `exec` and app-server alike); the image copies `deploy/driven-session-codex-requirements.toml` there, root-owned `0644` in a root-owned `0755` directory, and a reference copy to `/usr/local/share/vogt/`. That file turns `[features] hooks` on and wires the fork's `SessionStart` and `PreToolUse` managed hooks to `/usr/local/bin/vogt-policy-hook codex` (WI-3755), the same project-policy check a Claude session installs as its `PreToolUse` hook. A runtime copy under `codex/current` runs only when its prefix records a fork release `source`; anything else exits 78 rather than run an unverified pin. That `source` file sits in the session-owned agent-CLI tree, so this check is an accident guard against a stale or mistaken pin, not a security boundary | only with `INSTALL_AI_CLIENTS` |
 | `vogt-agent-auth` | `deploy/agent-auth.sh` | reference `ENGINE_AGENT_AUTH_HELPER`: brokers service credentials from a secrets manager into a session (`check`, `run -- <cmd>`, `shell`, `fetch`, `store`), driven entirely by an env manifest with no baked addresses or secret names | **optional and pluggable** — one example helper; see §9 |
 
 Nothing in the engine itself depends on `agent-auth`: with
@@ -353,6 +374,27 @@ Gitea/Forgejo forge, read-only.
 Everything in this section is about the *image*; a from-source engine has
 none of it and loses nothing the engine's own routes provide.
 
+**Worker tool profile (WI-2833).** A worker session's `tools/list` names only
+`WORKER_TOOLS` (`engine/core/src/adapters/mcp/framing.rs`): 32 of 151 tools,
+about 61 KB of schema against about 170 KB for the full list (measured
+2026-11-21). The profile is asked for three ways:
+
+- HTTP: `/mcp?profile=worker`. The engine puts this on a Codex worker's vogt URL
+  (`mcp_set.rs`, `codex_worker_args`).
+- By role: an HTTP caller whose session the engine reports as `role=worker` gets
+  the worker profile with no query. This is how a Claude worker gets it, because
+  its bridge (`vogt-mcp-remote`, Python) posts to `/mcp` with no profile. The
+  lookup is `caller_is_worker_session` (`application/session_commit.rs`): the
+  caller's identity to its engine session, then the engine's `role`. An engine
+  that is unreachable or does not know the caller leaves the full list.
+- Rust stdio server (`mcp.stdio`): `VOGT_MCP_TOOL_PROFILE=worker` in its
+  environment. Any other value, or none, serves the full list.
+
+The worker profile also refuses a `session.start` naming `role=oversight` or
+`mcp_set=full` (WI-4489), whichever way the profile was asked for.
+
+The profile narrows the list only. Calls are not narrowed; the grant still decides.
+
 **Rust LSP.** `vogt-rust-analyzer-mcp` wraps `rust-analyzer-mcp` and
 starts it from the nearest parent directory containing a `Cargo.toml`, which
 keeps the analyzer anchored to the active workspace when an agent launches it
@@ -370,23 +412,26 @@ it from a non-Rust directory.
 three third-party MCP servers at exact versions, each tarball checked against a
 sha256 recorded in `engine/Dockerfile` (a bump is an edit there):
 `github-mcp-server` 1.14.0, `mcp-grafana` 2.0.0 and `gitea-mcp` 1.8.0.
-`vogt-mcp-bootstrap` registers each one with Claude Code, Codex, opencode
-and Klaudia **only while the session holds its token**, and removes the
+`vogt-mcp-bootstrap` registers each one with Claude Code, Codex and opencode
+**only while the session holds its token**, and removes the
 registration when it does not (opencode excepted: it has no `mcp remove`, so
 its entry stays and the wrapper, finding no token, refuses to start), so a deployment turns one on by adding its token to the session's
 environment (normally a launch-time line in `ENGINE_AGENT_AUTH_SECRETS`, §9 —
 an `ondemand` line is not in the environment when the bootstrap runs, so it
 does not register anything) and off by removing it.
 
+A host opencode session or plain shell whose `HOME` is not writable by the engine user (vogt-dev) is launched with per-session `XDG_DATA_HOME`, `XDG_STATE_HOME` and `XDG_CACHE_HOME` under `<state_dir>/opencode-xdg/<id>/` (mode 0700; WI-4284, WI-4298), so the bootstrap registers opencode and a hand-started `opencode` works. If a data directory still cannot be created, the bootstrap warns once per directory and skips opencode.
+
 | Registered as | Turned on by | Read-only because |
 |---|---|---|
 | `github-ro` | `GITHUB_MCP_TOKEN` — a fine-grained, read-only PAT; `VOGT_GITHUB_MCP_TOOLSETS` overrides the toolsets (default `actions,pull_requests,repos,code_security,dependabot`) | `--read-only` and `GITHUB_READ_ONLY=1` (write tools are not offered), plus the token's scope |
 | `grafana-ro` | `GRAFANA_URL` + `GRAFANA_SERVICE_ACCOUNT_TOKEN` — a Viewer-role service account | `--disable-write` (create/update tools and raw-SQL query tools are not offered), plus the Viewer role; `--usage-stats=disabled` |
 | `forgejo-ro` | `GITEA_HOST` + `GITEA_MCP_TOKEN` — a read-scoped token; works against Forgejo's Gitea-compatible API | `-r` and `GITEA_READONLY=true` (only read tools are offered), plus the token's scope |
-| `k8s-ro` | `K8S_AGENT_READONLY_KUBECONFIG` — the kubeconfig of a read-only service account (no Secrets, no writes); raw or base64 | `--read-only` (write tools are not offered), plus the account's RBAC; the kubeconfig is written to a 0600 file for the run and never appears in argv |
+
+Note: `forgejo-ro` `get_file_contents` returns the file base64-encoded unless line ranges are requested; pass a line range to get plain text.
 
 The registration stores `vogt-readonly-mcp <server>` and nothing else: no
-token value (Claude Code, opencode and Klaudia pass a stdio server the
+token value (Claude Code and opencode pass a stdio server the
 session's environment; Codex is told which variables to pass with `env_vars`) and no flag a session
 could edit. `vogt-readonly-mcp` (`deploy/readonly-mcp.sh`) renames the token
 to the variable the upstream server reads and sets the read-only switches on
@@ -406,6 +451,49 @@ Cloudflare is not among them. Cloudflare's official MCP servers are hosted
 (`*.mcp.cloudflare.com`), so there is no version to pin, and none has a
 read-only mode — only the API token's scopes would make one read-only.
 
+**`vogt-prod` — a second Vogt, optional (WI-4289).** A deployment can let its
+sessions reach another Vogt — a dev deployment reaching prod — as an MCP
+server named `vogt-prod`, with a token scoped for that and nothing more. It
+is off unless the deployment sets both halves:
+
+- `VOGT_PROD_MCP_URL`, the remote server's MCP endpoint
+  (`https://vogt.example/mcp`). The engine reads the same value for pod
+  sessions (its `/mcp` dropped; `ENGINE_VOGT_PROD_MCP_URL` takes an origin and
+  wins), and it must be an https origin.
+- `VOGT_PROD_TOKEN`, normally an `ondemand` agent-auth manifest line (§9):
+  `VOGT_PROD_TOKEN <project> <secret name> ondemand`. A session may instead
+  hold it in its environment or in a file named by `VOGT_PROD_TOKEN_FILE`.
+
+On the host, `vogt-mcp-bootstrap` registers `vogt-prod` with Claude Code,
+Codex and opencode while both are present (the token counts as present when
+it is set, its file is named, or `AGENT_AUTH_ONDEMAND` lists it), and removes
+its own registration when they are not (opencode keeps a stale entry, which
+refuses to start). Every client runs `vogt-prod-mcp` (`deploy/vogt-prod-mcp.sh`)
+and nothing else: an `ondemand` token is not in the environment when the
+bootstrap runs, so a header naming the variable would never connect. The
+wrapper resolves the token at spawn — the variable, then the file, then
+`vogt-agent-auth fetch VOGT_PROD_TOKEN` — into its own environment (never argv
+or a file), drops the local session's `VOGT_SESSION_ID`, `VOGT_TOKEN_FILE` and
+`VOGT_ENGINE_SESSION_ID` so the bridge presents the remote token and not the
+local one, and execs `vogt-mcp-remote` against the remote origin. In a pod the
+engine adds a `vogt-prod` HTTP entry to the Claude, Codex and opencode configs
+whose bearer names `VOGT_PROD_TOKEN` by reference, only when the manifest
+declares it or the session holds a grant for it, and lists the name among the
+ondemand breadcrumbs, so the session agent fetches it around the agent like
+Cadastre's.
+
+The token is the boundary. Issue it on the remote Vogt to a dedicated actor
+(for example `agent:vogt-dev-bridge`) with `vogt token issue --scopes
+read,work.write --expires-in-days N`: `read` covers `session.list`,
+`session.screen`, `session.last_reply`, `session.log_tail`, `work.get` and
+`work.list`; `work.write` covers `session.input`, `session.answer`,
+`work.comment`, `work.create` and `work.transition`. Never `admin` (token and
+actor management), `project.write` or `writeback`. An agent's input to a
+permission prompt is refused there as it is here (`person_required`).
+Rotation is a new token for the same actor stored under the same secret name,
+then `token.revoke` of the old one; sessions pick it up at their next spawn of
+the server.
+
 **`git-forgejo`.** For git itself against a Gitea/Forgejo host, the image
 installs `git-forgejo` on PATH (so `git forgejo …` works too). It reads
 `FORGEJO_TOKEN` and `FORGEJO_URL` (falling back to `GITEA_HOST`), and hands git
@@ -416,40 +504,40 @@ handed the token, and never on git's command line where `/proc/<pid>/cmdline`
 shows it. The hand-written `git -c http.extraheader="Authorization: token
 $TOKEN"` breaks the moment a layer of shell drops its quotes.
 
-**Graft.** Every engine session has the graft wrapper `g` at `/usr/local/bin/g`.
-It resolves the graft endpoint from `GRAFT_ENDPOINT` or `VOGT_GRAFT_ENDPOINT`,
-and reads the session's token from `~/.config/graft/sessions/<session id>/`,
-so an agent can `g clone`, `g sync` and `g land` without a hand-set token. The
-wrapper never prints the token.
-The stack sets `VOGT_GRAFT_ENDPOINT` to the graft-dev server.
-
 **Vogt.** A session started for a project or work item registers Vogt's own MCP
 server automatically, carrying a per-session actor-scoped token, so an agent's
 writes are attributed to that session's actor rather than to a shared
 identity. The session exports the endpoint as `VOGT_URL` and
 `mcp-bootstrap.sh` registers it with every agent CLI in the image — Claude
 Code (`~/.claude.json`), Codex (`~/.codex/config.toml`), opencode (its user
-`opencode.json[c]`) and Klaudia (`~/.klaudia/.mcp.json`, through
-`vogt-klaudia-mcp`); `VOGT_MCP_URL` overrides the endpoint, and
+`opencode.json[c]`); `VOGT_MCP_URL` overrides the endpoint, and
 with neither set the bootstrap falls back to the front door on loopback.
 
-**Codex's browser and isolated sub-agent** (WI-1358). Codex has neither a
-browser nor a way to hand `spawn_agent` a working directory — that tool takes
-`message`, `output_schema`, `fork_turns` and a model, and nothing else, in the
-fork this image ships (`codex-cli 0.162.0+fork.86a742cdc`). When `klaudia` is on
-`PATH`, `vogt-mcp-bootstrap` writes two stdio servers into Codex's config:
-`[mcp_servers.browser]` runs `klaudia mcp browser` (WI-1137) with
-`tool_timeout_sec = 60`, and `[mcp_servers.codex-subagent]` runs
-`klaudia mcp codex-subagent` (WI-1138). The sub-agent's `--codex` is
-`/usr/local/libexec/codex-real` (`CODEX_REAL` overrides it), never `codex` on
-`PATH`, because that name is the full-access wrapper and a child spawned
-through it would run unsandboxed. `--root` is the session's own working
-directory, which is the confinement the server applies. The tables carry a
-command and arguments only — no token, no environment — and are replaced in
-place on the next launch. Claude and Klaudia keep their own browser and
-sub-agent, so nothing is registered for them. A fork change that adds a
-working directory to `spawn_agent` is what would retire the sub-agent server;
-it is not something this repository can do.
+**Cadastre in pod sessions.** `ENGINE_CADASTRE_MCP_URL` is the HTTPS origin a
+session pod can reach (no `/mcp`; the engine appends it). A URL alone is not
+enough: the live agent-auth manifest, or a grant held by the session, must also
+declare `CADASTRE_HTTP_TOKEN`. The bootstrap then emits the Cadastre entry for
+Codex, Claude Code and opencode with only that environment-variable reference
+and names it in `AGENT_AUTH_ONDEMAND`. The pod-side session agent resolves the
+value through `vogt-agent-auth fetch` immediately around the final CLI child;
+the bearer value is never serialized into an MCP config, bootstrap response,
+argv, or the pod's long-lived environment. With no URL or no declared/granted
+token the Cadastre entry is omitted rather than installed as an endpoint that
+can only answer 401. `CADASTRE_MCP_URL` remains the host-side
+`mcp-bootstrap.sh` setting; it does not configure a pod endpoint by itself.
+
+On a host, or in a shell started by `vogt-agent-auth shell` (WI-4288),
+`mcp-bootstrap.sh` registers `cadastre` with Claude Code, Codex and opencode
+while `CADASTRE_MCP_URL` is set and the token is present (`CADASTRE_HTTP_TOKEN`
+or `CADASTRE_HTTP_TOKEN_FILE` in the environment, or `CADASTRE_HTTP_TOKEN` in
+`AGENT_AUTH_ONDEMAND`), and removes its own registration, the earlier HTTP form
+included, when it is not. Every client runs `cadastre-mcp`
+(`deploy/cadastre-mcp.sh`), which resolves the token at spawn (the variable,
+then the file, then `vogt-agent-auth fetch CADASTRE_HTTP_TOKEN`) into its own
+environment, never argv or a stored config, drops the local session's Vogt
+credentials, and execs `vogt-mcp-remote` against the endpoint. A header naming
+`${CADASTRE_HTTP_TOKEN}` never connected for an `ondemand` token, which is not
+exported at launch.
 
 **Codex's driven-session bundle** (WI-1149). The same bootstrap writes the keys
 a session the engine starts needs and an interactive CLI does not.
@@ -474,48 +562,28 @@ A driven Codex on a stack that sets `ENGINE_CODEX_APPROVAL_POLICY=on-request`
 stop at a permission prompt only a person may answer (WI-1634). The bundle
 therefore gives the estate's trusted servers `default_tools_approval_mode =
 "approve"`, the fork's per-server key that skips the prompt for that server
-only: `vogt`, `cadastre`, `codex-subagent`, `browser`, `github-ro`,
-`forgejo-ro` and `grafana-ro` (operator-approved 2026-10-15). This mirrors
+only: `vogt`, `cadastre`, `github-ro`, `forgejo-ro` and `grafana-ro`
+(operator-approved 2026-10-15). This mirrors
 what the Claude driven-session policy lets a Claude session call without a
 person. `komodo` is deliberately not on the list, since its `deploy_stack` and
 `write_stack_file` change running stacks, and neither is any other server:
 those keep the person gate. A table that already names a mode keeps it, and a
-server nobody registered is not created. The read-only, browser and sub-agent
+server nobody registered is not created. A Vogt launch also passes
+`-c mcp_servers.<name>.default_tools_approval_mode="approve"` for those five
+servers when they are in the launch's MCP set, host and pod alike (WI-3882),
+so a launch that does not read this config still skips the prompt for them.
+The read-only, browser and sub-agent
 writers emit the same row in the tables they own, so a restart does not
 rewrite them, and they carry over a mode an operator already set there. The
 key lives in the session's own `~/.codex/config.toml`, which the session can
 edit, so it is a convenience for autonomous work and not a security boundary;
 the engine's person gate (WI-1355) is the boundary.
 `/etc/codex/requirements.toml` cannot carry the setting (its
-`[mcp_servers]` is an identity allowlist), and it is unchanged: gitguard
-stays pinned and the bypass posture stays person-only.
+`[mcp_servers]` is an identity allowlist). The bypass posture stays
+person-only.
 
 Any further MCP server an agent should reach is registered by hand inside the
 session, the way the Rust LSP entry above shows.
-
-### Per-session MCP sets (WI-2740)
-
-Every tool definition rides on every request, and the full estate set
-(vogt, cadastre, komodo, grafana-ro, github-ro, forgejo-ro) is about 85k
-tokens of schema. A start names `mcp_set` on its `SessionSpec`:
-
-- `full` (or absent): the user's own registrations, unchanged.
-- `worker`: `vogt` on its worker tool profile (18 tools: work items,
-  `session_report*`, `decision_ask`, `project_brief`, …) and `cadastre`.
-
-The engine never edits the shared home configs. Claude Code gets
-`--strict-mcp-config --mcp-config=<state>/agent-task-prompts/sessions/<id>.mcp.json`,
-a 0600 copy of the kept `~/.claude.json` entries with
-`VOGT_MCP_TOOL_PROFILE=worker` on vogt's bridge. Codex gets `-c` overrides:
-`mcp_servers.<name>.enabled=false` for every other entry of
-`~/.codex/config.toml`, and vogt's URL with `?profile=worker`. OpenCode and
-Klaudia are left as they are. A wake replays the recorded set. The core sets
-`mcp_set` from the dispatch profile: `worker` for implement,
-implement-careful, mechanical and review; `full` for investigate and design.
-
-The vogt tool profile trims `tools/list` only (header `X-Vogt-Tool-Profile`
-or `?profile=` on `/mcp`); `tools/call` still checks the grant alone, so a
-worker that needs another tool can still call it by name.
 
 ---
 
@@ -759,7 +827,7 @@ than these routes.
   those rows as well. A session is hidden only when all of these hold: it is
   not oversight and not pinned with `keep_awake`; it is not running a turn,
   awaiting approval, blocked, or waiting for input; its state is exited,
-  stopped, hibernated, or idle-and-not-alive; `now - last_event_at` is at
+  stopped, hibernated, or idle (alive or not); `now - last_event_at` is at
   least `ENGINE_SESSION_LIST_RETAIN_AFTER` (default `6h`; `off` or `0`
   disables hiding); and no person typed in that window. Agent input does not
   count as a person typing. Hiding is a list filter: `GET /api/sessions/:id`
@@ -784,15 +852,6 @@ than these routes.
   at most 600) passes; answers with the `outcome` (`ready`,
   `awaiting-approval`, `blocked`, `exited`, `changed`, `timeout`), whether
   it `matched`, `waited_ms` and the `screen` then. Requires `sessions`.
-- `POST /api/sessions/:id/report` `ReportSession` -> `SessionSummary` —
-  announce a session's own typed report (WI-1520): `{"kind", "summary"}`,
-  kind `progress`, `result`, `question` or `blocker`, summary at most 2000
-  bytes. Publishes a `session-reported` event, read as a `reported` change
-  (first 120 characters of the summary) that `wait-any?until=reported`
-  wakes on; a `result` also declares the session done (`session-done`,
-  source `report`) and turns its autopilot off, as the `AUTOPILOT: DONE`
-  marker does. vogt-core's `session.report` stores the report, checks the
-  caller is the session itself and calls this. Requires `sessions`.
 - `POST /api/sessions/:id/blocked` `SetBlocked` -> `SessionSummary` — set
   (`{"blocked": true, "reason", "items"}`) or clear (`{"blocked": false}`)
   the agent's "blocked on a person" report, which rides on the summary and
@@ -806,9 +865,22 @@ than these routes.
   the report that ends with `AUTOPILOT: DONE` on screen. The engine's own
   writes (autopilot nudge, budget warning, hibernate resume, task steering)
   never count, and output nobody asked for leaves the report standing.
+  A resting session whose own recent output names a provider refusal — an
+  `Insufficient Balance` / `insufficient_quota` message, a `402`, `429` or
+  `5xx` provider error, `Reconnecting N/5`, `exceeded retry limit`, or
+  `No deployments available` — is reported `blocked` even when the agent
+  wrote no report of its own (WI-4119). That keeps the screen, digest and
+  oversight table from reading `idle` for a worker that died on its provider.
+  The reason is the matched line, credential-redacted and clipped to 200
+  characters. The match is case-insensitive and limited to the last dozen
+  non-blank lines; ordinary output that merely mentions a status code or
+  "reconnecting" is not one.
 - `PATCH /api/sessions/:id` `{"name": "..."}` -> `OkResponse` (requires the
   `sessions` capability). MCP: `session_rename`.
-- `POST /api/sessions/:id/kill` `{"reason"?, "by"?}` -> `OkResponse`
+- `POST /api/sessions/:id/kill` `{"reason"?, "by"?}` -> `StopResponse`
+  (`{"ok": true, "salvage"?}`); a pod session's uncommitted work is archived
+  first and named in `salvage` (`path`, `files`, `bytes`, `repos`, or a
+  `salvage_failed` reason). The stop happens whether or not the salvage did.
   (SIGKILL to the child; the session stays in the registry so its
   scrollback is still readable, which is what makes this different from
   `DELETE`. The optional body is recorded before the kill, and the exit then
@@ -845,16 +917,6 @@ than these routes.
   vogt-core's own credential. Answers and refusals are both audited
   (`vogt::audit`, `event=session.permission_answer`, `via=answer|input`,
   with the overseer, question and command excerpt).
-- `SessionSpec.supervisor` (an engine session id) and `SessionSpec.wake_on`
-  (WI-1521): vogt-core names the session that called `session.start` as the
-  new session's supervisor; both are kept in the record and on the summary,
-  so a wake keeps them. An oversight session whose `wake_on` names a kind
-  (`done`, `reported`, `blocked`, `approval`, `errored`, `budget`) is typed
-  one line when sessions it supervises change that way:
-  `[vogt] 2 workers changed (done: a; blocked: b) — session_changes(since=N)`.
-  Changes coalesce for 60 s; at most one wake a minute; never while the
-  overseer is mid-turn, blocked, hibernated or had input within 30 s. Logged
-  as `event=oversight.wake`. Empty `wake_on` (the default) types nothing.
 - `GET /api/sessions/changes[?since=N&ids=&limit=]` and
   `GET /api/sessions/wait-any[?ids=&until=&cursor=&timeout_s=]` — the overseer
   delta (WI-1246, WI-1672). `cursor` is a sequence number, or `now` to skip
@@ -888,10 +950,7 @@ than these routes.
   `origin/main`, or the repo's stash holds an entry made on the branch. A
   forced removal keeps the branch. A main checkout is never removed (400).
   `force` is accepted from a person, break-glass or vogt-core only (403
-  otherwise; vogt-core has already refused a force from an agent). Either
-  mode is refused (403) unless the path, symlinks resolved, is inside
-  `workspace_root` or is exactly a workspace a session recorded. Every
-  outcome logs `event=workspace.clean` (path, mode, actor,
+  otherwise). Every outcome logs `event=workspace.clean` (path, mode, actor,
   outcome, bytes freed; never a file list). Requires `sessions`.
 - `GET /api/sessions/sweep[?screen_lines=N&include_exited=true]` ->
   `SessionSweepEntry[]` — every live and hibernated session (exited ones
@@ -932,27 +991,27 @@ than these routes.
   one the GUI started the label is the binding. An agent task run carries its
   task's `vogt_work_item` as the label. The PWA's Places rail shows it as a
   `✦ WI-n` chip. Requires `sessions`. This is an additive field on
-  `SessionSpec`/`SessionSummary`, the same shape as `role`; WI-956 slice 2's
-  `supervisor` is to be added beside it the same way.
-- `SessionSummary.workspace` (WI-1324): the git tree the session runs in,
-  for every session whose directory is inside a repo; `null` otherwise.
-  `{kind: "worktree" | "checkout", path, repo_root, branch, base_ref?,
-  base_sha?, created_at, baseline_dirty: [path], build_dirs: [name],
-  cleaned_at?}`. `kind` is `worktree` for a linked worktree (an engine-cut
-  one or any other) and `checkout` for a main checkout; `path` is the
-  toplevel, `repo_root` the main checkout (`== path` for a checkout),
-  `branch` the symbolic ref or `detached`. `base_ref`/`base_sha` are set only
-  for a worktree the engine cut (`SessionSpec.worktree`). `baseline_dirty` is
-  every repo-relative path `git status --porcelain=v1 -z
-  --untracked-files=normal` named before the session started, rename and copy
-  sources included; `build_dirs` the directory names a worktree cleanup
-  removes (none for a checkout). The block is taken once, at the first start,
-  kept in the hibernation record, and reused by a wake, so the baseline never
-  grows to include what the session itself changed. The session's
-  environment carries `VOGT_ENGINE_WORKSPACE=<kind>` and
-  `VOGT_ENGINE_WORKSPACE_PATH=<path>` exactly when the block exists, at start
-  and at wake. vogt-core shows `workspace_kind` and `workspace_path` on the
-  full `session.list` summary.
+  `SessionSpec`/`SessionSummary`, the same shape as `role`.
+- `SessionSpec.supervisor` (WI-1521) is the engine session id of the oversight
+  session that started this one; vogt-core sets it when an oversight session
+  calls `session.start`, and a person's or a worker's start sends none. It is
+  kept in the record, shown on the summary (absent when none), and is who a
+  wake line is typed into. Only vogt-core (the stack secret) or a person may
+  name one, and only an oversight session may be named: any other session token
+  is refused `403`, and a worker, shell or missing id is `400`. The engine cannot
+  see which session core acts for; it relies on core naming only the oversight
+  session that made the call, the same trust as `session_ref`.
+- `SessionSpec.wake_on` (WI-1521): the change kinds (`done`, `reported`,
+  `blocked`, `approval`, `errored`, `budget`) an oversight session wants a
+  wake line for. Empty (the default) types nothing; an unknown kind is `400`.
+  A supervised session's change in one of those kinds is coalesced over a 60 s
+  window into one line typed into the supervisor, naming each worker by the
+  first eight characters of its id and never by its name, e.g.
+  `[vogt] 2 workers changed (done: 3f9a1c0e, blocked: 7b2d44aa) — session_changes(since=41)`.
+  The wake is read from the overseer's own record when a change arrives, so it
+  fires only if the overseer was started with `wake_on`. A running overseer's
+  `wake_on` cannot be changed; there is no route or op to set it after start
+  (a follow-up), so an overseer that needs it must be started with it.
 - `SessionSpec.worktree` `{"branch": "...", "base_ref": "..."}` (WI-1298),
   sent by vogt-core when `session.start` is called with `worktree: true`.
   The engine creates a git worktree of `cwd` as a sibling directory named
@@ -1047,9 +1106,22 @@ engine turns them into that CLI's own flags (`agent_cli.rs`):
 | `claude` | `--model <id>` | `--effort <level>` |
 | `codex` | `-m <id>` | `-c model_reasoning_effort=<level>` |
 
+When the provider registry (§9) lists known models, a requested `model` must
+be one of them — except on the `claude` template, where Claude Code's own
+names are always accepted: the aliases `opus`, `sonnet`, `haiku` and `fable`,
+and any `claude-…` id, each with an optional trailing `[1m]` (Claude Code's
+1M-context suffix). Claude Code resolves those names itself and no registry
+entry lists them; every other model on either template is routed through a
+provider and must be listed. A model no entry lists is refused before any
+worktree or pod exists, with `400` and a stable code:
+`{"error": "unknown model: ...", "code": "unknown_model"}`. The message names
+the requested model only — never a provider, a secret, or a value.
+`ENGINE_LLM_MODEL_ALLOWLIST` admits a model the registry does not list. A
+launch with no `model`, and an instance whose registry lists no models at all,
+are not checked.
+
 **Codex's default model is the estate LiteLLM router** (WI-1147). The estate Codex fork speaks the Chat Completions wire as well as Responses (WI-1286), and grok returns tool calls only over chat, so `vogt-mcp-bootstrap` writes `[model_providers.litellm]` into `~/.codex/config.toml` (`${CODEX_HOME}` when set) with `base_url = "http://100.92.54.45:4000/v1"`, `wire_api = "chat"` and `env_key = "HOMELAB_LITELLM_SESSION_KEY"`. The key is that environment variable, exported by the agent-auth manifest (§9); the config never contains it. When `model` and `model_provider` are absent, or already name this bundle (`litellm`, or `theclawbay` with model `grok` / `grok-4.7`), bootstrap sets `model_provider = "litellm"` and `model = "grok"` — the router's `grok` group, not a pinned model id. grok has no entry in Codex's bundled model catalog, whose fallback metadata offers no apply_patch tool, so bootstrap also writes `vogt-model-catalog.json` beside the config — one entry per LiteLLM group that answers a chat completion with the session key (WI-1592): `grok`, `code`, `small`, `reasoning`, `vision`, `or-deepseek-flash`, `or-gemini-flash`, `or-glm-5-3`, and the DLab models whose plan serves them (`dlab-deepseek-v4-pro`, `dlab-deepseek-v4-1-flash`, `dlab-grok-4-5`, `dlab-grok-4-6`, `dlab-grok-4-7`, `dlab-gemini-3-8-flash`, `dlab-glm-5-3`, `dlab-glm-5-3-flash`, `dlab-glm-5-3-flashx`, `dlab-kimi-k3`), plus `premium` hidden from the picker. Each entry has `apply_patch_tool_type` `freeform` and omits `tool_mode` so code mode stays off. Priority is that order, so the fork's ascending sort keeps `grok` as the default. Not listed, because a completion does not succeed: `or-deepseek` (blocked on OpenRouter), `qwen3-coder`, `qwen3-8-27b` and `gpt-oss-120b` (they fail inside LiteLLM — a 408 or a hang; re-adding them is WI-1631), Bedrock (the router has no bedrock model — it needs a LiteLLM provider entry before Codex can offer it, and no credentials are added here), `dlab-gemini-3-1-pro-preview` and `dlab-gemini-3-6-flash` (not on the DLab plan), `dlab-claude-haiku-4-5` (unavailable), and the `gpt-6-*-free` aliases (auth error). Bootstrap sets `model_catalog_json` to that file. That key is set only when absent or when it already names this file; a catalog an operator chose is left alone, and so is the file. A session that passes `-m <id>` still overrides `model` for that process. `[model_providers.theclawbay]` is written as a fallback profile with no bearer token; a profile an operator already wrote under that name (one carrying `experimental_bearer_token`) is left untouched, as is any other provider and model an operator set. The rewrite uses the same flock and atomic rename as the read-only server tables, and a config that does not parse is left alone. The manifest line that exports `HOMELAB_LITELLM_SESSION_KEY` is an ops overlay change (Forgejo `indexarr/ops` pull 52), not part of this repository.
 | `opencode` | `--model <provider/id>` | *refused — it has no effort control* |
-| `klaudia` | `--model <id>` | *refused — it has no effort control* |
 
 Three rules, each written against a specific failure:
 
@@ -1083,7 +1155,6 @@ previous conversation to continue instead of starting a new one:
 | `claude` | `--resume <id>` |
 | `codex` | `resume <id>` — a subcommand, so inserted straight after the binary, ahead of the template's own arguments and the model flags |
 | `opencode` | `--session <id>` |
-| `klaudia` | `--resume <id>` |
 
 It follows the same rules as `model`: refused (`400`) for a command with no
 mapping or the default shell, and validated before it becomes argv — letters,
@@ -1099,15 +1170,7 @@ already show. A session lost to a redeploy is resumed with
 the id it resumed (no `--session-id` is added), and a command that carries
 arguments of its own after `claude` is not pinned, because Claude Code refuses
 `--session-id` next to a `--continue` or `--session-id` it already has.
-Klaudia (WI-950) is pinned the same way: a bare launch gets `--session-id
-<engine session id>` and a wake `--resume <id>`; with no engine id to give
-it, a fresh launch gets `--new-session`, because Klaudia's TUI otherwise
-resumes the newest conversation in its directory. Its brief pointer goes in with
-`--prompt-interactive=<text>`, never as a positional prompt: Klaudia reads a
-positional prompt as `-p` (answer once, then exit), so the session would end
-after its first turn. The pinned Klaudia must have that flag (msp-klaudia
-WI-953); a runtime pin to an older commit starts and refuses it. A bare
-Codex launch is pinned the same way — `--session-id <engine session id>` —
+A bare Codex launch is pinned the same way — `--session-id <engine session id>` —
 by default, because the image bakes the WI-1126 fork that accepts the flag
 (WI-1142, WI-1354). Set `VOGT_CODEX_SESSION_ID=false` only when the binary is
 stock npm Codex, which refuses an unknown flag and would not start; with the
@@ -1158,7 +1221,7 @@ the end of the old one is then ignored, because an `ended` report unlinks only
 the session's current conversation. A session that is hibernating ignores
 reports, so an agent's exit as the engine stops it cannot change what the
 record resumes. Verified on vogt-dev on 2026-10-07: the hook fires for a
-`claude` (2.1.289) typed into an engine shell and sees
+`claude` typed into an engine shell and sees
 `VOGT_ENGINE_SESSION_ID`, the broker URL and token. It does not see
 `VOGT_SESSION_ID`, which only a session vogt-core started has.
 
@@ -1167,8 +1230,7 @@ conversation to the directory it ran in, and `claude --resume <id>` finds it
 only from there — often not a registered project root (a parent folder, a
 worktree). For `claude` and `codex`, the engine looks the id up in the
 transcript under `$HOME` (`~/.claude/projects/*/<id>.jsonl`,
-`~/.codex/sessions/**/rollout-*-<id>.jsonl`, or Klaudia's
-`~/.klaudia/sessions/*/<id>.jsonl`), reads the `cwd` it records, and
+`~/.codex/sessions/**/rollout-*-<id>.jsonl`), reads the `cwd` it records, and
 starts the session there instead of the requested `cwd` — but only when that
 directory exists inside `workspace_root`; otherwise the requested `cwd` is kept
 (`engine/server/src/transcripts.rs`). The session summary's `cwd` reports
@@ -1196,6 +1258,39 @@ in `ps` for every process in the pod to read. vogt-core folds a `session.start`
 `task` into the brief as its `## Task` section. A plain shell, or any command
 the engine does not recognise, gets no first prompt and keeps only the
 variable.
+
+The engine also confirms that the first turn actually began (WI-4068). After a
+fresh **Codex** session with a brief is spawned, `first_turn.rs` waits for the
+TUI to reach a prompt — the same readiness check `/wait` uses, not a fixed sleep
+— then looks for a running turn. A turn that already started is left alone: a
+briefed agent given its pointer at launch often begins working before it ever
+rests at the composer, so `codex: working` or a turn start recorded by the
+activity watcher is reported as `event=first_turn.started` with no Enter and no
+blocked report, even if that first turn finishes inside the readiness window. A
+prompt still queued at the composer is pressed with one Enter; a session that
+still has no turn is reported blocked with "the first prompt never started a
+turn", so it appears in the session list as needing a person instead of idling
+at zero turns. It never presses Enter into a dialog, and it logs
+`event=first_turn.started`, `first_turn.retry` and `first_turn.failed` with the
+elapsed time. Claude is not watched: it submits its own launch prompt and
+announces no turn-state title, so a queued prompt and a live turn cannot be told
+apart safely.
+
+For a pod session, `first_turn_ms` is the end-to-end clock from the engine's
+`session.start`, not from the first model byte. Diagnose a slow first turn by
+pairing that event with `kubectl logs --timestamps` for the session pod: the
+entrypoint's step markers split pod readiness through `bootstrap`, source
+`clone`, `handoff`, PTY spawn and `launch.first_output`; `first_turn.started`
+then proves that Codex accepted the launch prompt, before the model answers.
+Fresh pod Codex sessions are expected to start that turn within 20 seconds of
+the pod becoming Ready. The old 65–79 second shape was not model or MCP warm-up:
+the pod launch omitted the brief pointer and autopilot's 60-second nudge was the
+first thing that submitted it. The positional prompt in
+`vogt-session-agent::command_line` removes that timer from the launch path, and
+the first-turn watchdog is a fallback for a prompt already queued at the
+composer. `a_fresh_codex_is_given_its_brief_as_the_prompt` and the
+`a_queued_first_prompt_*` integration tests assert those behaviours without a
+wall-clock timing assertion.
 
 **The companion guide.** When the start request carries a non-empty
 `companion`, the engine writes it beside the brief as
@@ -1226,8 +1321,7 @@ starts (WI-1590), against the model the start will actually run — the
 purpose's dispatch profile, or the model the caller named — and a start on a
 forbidden model is refused with `policy_refused` rather than spawned. The
 rest stays unenforced: refusing `forbidden_text` and an agent's merge onto a
-production branch is still a follow-up, and Klaudia has no per-session
-settings flag to carry such a hook.
+production branch is still a follow-up.
 
 **Quiet defaults for Claude Code.** Engine sessions are often driven by
 another agent through `POST /api/sessions/:id/input`, and Claude Code's
@@ -1322,13 +1416,25 @@ of the policy — commit identity, the test recipe, free-text rules — is
 guidance the brief carries and nothing enforces. A project with nothing to
 refuse sends no policy, so its session spec is unchanged.
 
-The pod entrypoint installs `vogt-policy-hook`
+The merged image's entrypoint installs `vogt-policy-hook`
 (`engine/deploy/policy-hook.sh`) as a `PreToolUse` hook for `Bash` into Claude
-Code's user settings and, as a marked block, into `~/.klaudia/config.toml`.
-`ENGINE_AGENT_POLICY_HOOK=0` skips both. Before a shell command runs, the hook
-asks `POST /api/agent-auth/policy-check` with the session's broker token,
-which names the session, so a session is only ever checked against its own
-policy. A command with no `git` or `gh` word is allowed without a request.
+Code's user settings. `ENGINE_AGENT_POLICY_HOOK=0` skips it. A session pod's entrypoint installs
+it for a Claude session too (below). Before a shell command runs, the hook
+asks `POST /api/agent-auth/policy-check` with the session's broker token (a
+pod session, which has none, presents its stream credential), which names the
+session, so a session is only ever checked against its own policy. The hook
+decodes the command first, so a newline or tab (`\n` in the JSON) is a word
+boundary, removes line continuations (backslash-newline), and also reads it
+with backslash escapes decoded, so `r\<newline>m` and `$'\x72m'` read as
+`rm`. A command naming none of `git`, `gh`, `rm`, `unlink`, git's
+discarding verbs, a shell, `eval`, `xargs` or `source`, none of the
+environment programs (`env`, `printenv`, `set`, `export`, `readonly`,
+`declare`, `typeset`, `local`, `ps`), no `environ`, no credential-named
+expansion and no `os.environ`/`process.env`/`%ENV`, with no program that is
+an expansion (`$R a.txt`) and no `. script`, is allowed without a request;
+a payload it cannot decode is asked. (`mv`, `shred` and `truncate` are asked
+about too, but the engine judges them only inside opaque text or a variable's
+line, not as discards of their own.)
 
 What is refused, and only for an agent session that carries a policy:
 
@@ -1337,7 +1443,18 @@ What is refused, and only for an agent session that carries a policy:
 - any `gh pr merge`;
 - a `git push` whose destination refspec, or whose current branch when it
   names none, is a protected branch (`main_branches`, or `main` when that list
-  is empty).
+  is empty);
+- for a **worker** (a session whose role is `worker`) on a work item, when the
+  project states a `landing` rule (WI-1327): a `git push` that force-pushes
+  (`--force`, `--force-with-lease`, `-f`, a `+` refspec), deletes (`--delete`,
+  `:<dst>`), mirrors or pushes in bulk (`--mirror`, `--all`, `--tags`), or
+  names a ref other than its own branch — one the `branch_pattern` does not
+  match, with `{n}` the item's number, or one of the `landing_mains` (the base
+  and the main branches); and a `gh pr create` when the project lands by push
+  (`worker_lands_by`). An oversight session, and a session with no work
+  item, is not judged by these. The role is read from the live session at
+  each check, so `session.set_role` takes effect without a restart. A
+  pattern that does not compile refuses the push.
 
 Two more rules read the session's workspace (WI-1326). The engine copies
 the session's workspace block (above) into its policy before the child runs:
@@ -1345,60 +1462,189 @@ the session's workspace block (above) into its policy before the child runs:
 toplevel) and `discard_baseline` from `baseline_dirty`. A wake copies the
 record's block, so it judges against the first start's baseline and never
 recaptures. A session with no block (one from before the workspace record,
-or a cwd outside any repository) gets neither rule; the agent's own guard
-(Klaudia's gitguard) still judges its discards. vogt-core adds `protected_checkouts`, every registered project's
+or a cwd outside any repository) is settled at its first policy check
+(WI-4056), once, and the result is kept on the session and in its record:
+when its cwd is now inside a git repository, that tree is captured as its
+workspace block would have been, and the paths dirty in it then become its
+baseline; otherwise its policy records `discard_live_changes`, and the
+discard guard judges each discarding git call or `rm` against the repository
+it acts on, with every path that repository has uncommitted *at that moment*
+as the baseline — a session with no tree of its own owns no one's changes.
+A clean repository (a fresh clone) is never refused; a discard whose
+repository the line hides (`GIT_DIR`, `--git-dir`, an unfollowed `cd`), whose
+repository's changes cannot be read in time, or that this check cannot read
+outside every repository, is refused. A pod session's cwd is on the pod's
+filesystem, so it is not settled by the engine. vogt-core adds `protected_checkouts`, every registered project's
 root, on a `worktree` or `cwd` start. A repo is resolved with `git rev-parse
 --show-toplevel` from the command's `-C` or the cwd:
 
 - **discard guard** — any session with a baseline: `git checkout [<ref>] --
-  <paths>`, `git checkout <path>`, `git restore`, `git rm -f`, `git clean -f`,
-  `git stash [push]`, `git reset --hard`, `git checkout -f` and `git switch
-  --discard-changes` in the session's own repo, when a path they reach is in
-  the baseline. `reset --hard`, `clean`, `stash` with no paths, and a command
-  whose paths cannot be read (a glob, an expansion, `xargs`, `eval`, a
-  relative or expanded `cd` earlier on the line, a program spelled `$GIT`,
-  `$(which git)` or `` `which git` ``) reach every one. A literal absolute
-  `cd /path` is followed, so the paths after it resolve from there. A line
-  that defines a git alias inline (`git -c alias.x=…`, or `include.path` /
-  `includeIf.*.path`) or from the environment (`GIT_CONFIG_COUNT`,
-  `GIT_CONFIG_KEY_n`, `GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_GLOBAL`) reaches
-  every path and counts as a write. A subcommand git does not ship (`git x`
-  after `git config alias.x …`) may be an alias and reaches every path; the
-  common external ones (`lfs`, `flow`, `filter-repo`, `subtree`) are read as
-  git's own. Commands inside `$( … )`, backticks and `coproc` are read too. A
-  program spelled `$VAR` is git only when the name says git (`$GIT`,
-  `${GIT_BIN}`). Long options match by any prefix git accepts (`--ha` is
-  `--hard`), short ones inside a cluster (`-qf`), and an attached value is
-  not read as flags (`-sSTABLE` is not `-S`). Which options take a value is
-  per subcommand: `checkout -m` is `--merge` and reaches its paths, `stash -m`
-  takes a message, and `switch -cf` creates a branch named `f`. A repo that cannot be resolved
-  counts as the session's own. `git restore --staged` only unstages and is
-  allowed, as in gitguard (pending an operator call).
+  <paths>`, `git checkout <path>`, `git restore`, `git rm` (not `--cached`),
+  `git clean -f`, `git stash [push]`, `git reset --hard`, `git checkout -f`,
+  `git switch --discard-changes`, `git checkout-index -f` (`-a` reaches
+  every path), `git mv -f` (its operands), `git checkout -m <path>`, `git
+  read-tree -u` with `-m`, `--reset` or `--prefix` (every path), any of these
+  with `--pathspec-from-file` (every path), and a plain `rm`/`unlink`, when a
+  path they reach is in the baseline. Options are read as git reads them: a
+  long option by any unique prefix (`reset --har`, `switch --discard`), a
+  short one anywhere in a cluster (`checkout -qf`, `-fb x`). A git command counts in the session's own repo; an
+  `rm` is judged per operand — `~/` expanded, made absolute, its parent
+  canonicalised so a symlinked spelling of the tree is the tree — wherever it
+  was typed, and an operand naming the tree or a directory above it reaches
+  every path. `reset --hard`, `clean`, `stash` with no paths, and a command
+  whose paths cannot be read (a glob, an expansion, brace expansion, `xargs`,
+  `eval`, a `cd` earlier on the line) reach every one, so with a dirty
+  baseline `rm *.log` (even in a scratch directory) and `cd X && rm f` are
+  refused; `rm -rf build`, `rm /tmp/scratch/x` and `rm` of the session's own
+  new files pass. A repo that cannot be resolved counts as the session's own.
+  `git restore --staged` only unstages and is allowed.
 - **protected checkout** — only a `worktree` session: a git write (`commit`,
   `push`, `merge`, `rebase`, `reset`, `checkout`, `switch`, `restore`, `clean`,
   `stash`, `add`, `rm`, `mv`, `cherry-pick`, `revert`, `am`, `branch
   -d/-D/-m`, `worktree remove/move/prune`) whose repo is a protected checkout
-  and not the session's own worktree. Reads are never refused, and a repo
-  that cannot be resolved is not protected. A `checkout` session (oversight, a
-  shell on the project root) is never held to it.
+  and not the session's own worktree, or whose repo the line hides
+  (`GIT_DIR=`, `GIT_WORK_TREE=`, `--git-dir`, `--work-tree`, `core.worktree`,
+  `-C "$X"`, a `cd` to a target that is not a literal path). Reads are never
+  refused, and a repo lookup that fails is not protected. A `checkout`
+  session (oversight, a shell on the project root) is never held to it.
+
+The line is read as a shell would run it: `;`, `&`, `&&`, `|`, `||`, `|&`
+and newlines separate commands, and `( … )`, `{ …; }`, `if`/`for`/`while`
+bodies, `$(…)`, backticks and `<(…)` are read as the commands they hold
+(a `cd` inside a subshell does not outlive it). Leading `!`, `time`, `env
+-u NAME`, `sudo -u USER`, `bash -c -- '…'` and the other wrappers are
+stepped over. What it cannot parse with certainty — an `alias` or function
+definition, `case`, a program that is an expansion (`$G checkout`), a shell
+reading a piped script, `env -C`/`-S`, an unbalanced quote or paren, nesting
+past its bounds — fails closed: if that part names git, rm or another
+deleting verb the discard guard counts every baseline path as reached, and
+if the line names a git write the protected-checkout rule refuses it.
+Line continuations are removed and ANSI-C strings (`$'\x72m'`) decoded
+before words are read. `trap '…' SIG` actions are read as a payload that runs after the line's
+`cd`s, and `su -c`, `runuser -c`, `script -c`, `env -S` and `busybox
+<applet>` as the command they run, the value attached (`env -S'…'`, `su
+-c'…'`, `script -qc'…'`) or not.
+
+**Variable programs.** A program word this reading cannot spell reaches
+every baseline path whatever the line says, since what it holds can be
+spelled any way: a variable (`$R a.txt`, `${R}m`, the `$CMD` of `eval
+"$CMD"` or `bash -c "$CMD"`, also after a wrapper such as `timeout 5 $R`),
+a command substitution (`$(printf %s%s r m) a.txt`, backticks, `eval
+"$(…)"`, `bash -c "$(cat f)"`) and a brace expansion (`{rm,a.txt}`,
+`{git,restore,a.txt}`). The one substitution read as safe is `eval` of a
+single literal `ssh-agent` call with only flags (`eval "$(ssh-agent -s)"`).
+A shell or `source`/`.` reading its script from stdin, a heredoc, a
+process substitution, `/dev/stdin`, `/dev/fd/*` or a here-string reaches
+every path too (`echo … | base64 -d | bash`). A git subcommand that is not a
+plain word (`git restore${IFS}a.txt`, `git $SUB`), or that may be an alias
+(`git -c alias.r=restore r`, `--config-env`, `include.path`, `GIT_CONFIG_*`
+on the line, or a `git config` that sets an alias or include), is treated
+as a discard of every path and as a write, and so is a git call that may run
+a command of the caller's choosing or change what reaches the working tree.
+
+Git configuration is read against an allowlist, not a list of dangerous
+keys. A key set with `-c`, `--config-env` or `git config [set] <key> <value>`
+is allowed only when it is a literal word and one of: `advice.*`, `color.*`,
+`column.*`, `user.*`, `author.*`, `committer.*`, `status.*`, `log.*`,
+`blame.*`, `i18n.*`, `safe.directory`, `init.defaultBranch`,
+`core.quotepath`, `core.abbrev`, `core.commentChar`/`commentString`,
+`commit.gpgsign`/`verbose`/`status`/`cleanup`, `tag.gpgsign`/`sort`,
+`branch.sort`, `pull.rebase`/`ff`, `push.default`/`autoSetupRemote`/
+`followTags`, `fetch.prune`/`pruneTags`/`parallel`, `format.pretty`,
+`grep.lineNumber`/`column`/`patternType`/`extendedRegexp`/`fullName`, the
+diff display keys (`diff.noprefix`, `mnemonicPrefix`, `relative`, `renames`,
+`renameLimit`, `algorithm`, `colorMoved`, `colorMovedWS`, `context`,
+`interHunkContext`, `indentHeuristic`, `statGraphWidth`, `statNameWidth`,
+`submodule`, `ignoreSubmodules`, `suppressBlankEmpty`, `wsErrorHighlight`),
+`merge.conflictStyle`/`stat`/`log`, `rebase.autoSquash`/`stat`/
+`missingCommitsCheck`, `rerere.enabled`, `gc.auto`/`autoDetach`,
+`maintenance.auto`, `credential.username`, an `alias.*` (judged as an
+alias above), or a command setting (`core.pager`, `pager.*`, `core.editor`,
+`sequence.editor`, `core.sshCommand`, `core.hooksPath`, `credential.helper`)
+whose value is harmless. Every other key is refused with a non-empty
+baseline, as is a key that is not a literal word (`git -c $K=…`) and any
+command setting given through `--config-env` (its value is not on the line).
+A value is harmless when it is empty, `cat`, `true`, `false` or `:`,
+`less`/`more` with flag clusters that hold no `o`, `O` or `k` and no
+`--log-file`/`--lesskey-*` (`less -Oa.txt` writes a.txt), `ssh` with flags
+naming no command or `-F`/`-E` file for an ssh setting, `/dev/null` for
+the hooks path, and `store` or `cache` for a credential helper.
+
+Also refused: `--exec-path=`, `grep -O`/`--open-files-in-pager`, `difftool
+-x`/`--extcmd`, `rebase -x`/`--exec` (any unique prefix, so `--ex=`), `bisect
+run` and `submodule foreach`. The environment is read from the words of each
+simple command after quote removal, not from the text: an assignment before
+the program or after `env` (`NAME=v` or `NAME+=v`), and the operands of
+`export`, `declare`, `typeset`, `local`, `readonly` (including a nameref `-n`
+pointing at one of these names), `read`/`mapfile` and `printf -v`. Refused
+are any `GIT_CONFIG`/`GIT_CONFIG_*` variable, and `GIT_EXTERNAL_DIFF`,
+`GIT_PAGER`, `PAGER`, `GIT_EDITOR`, `GIT_SEQUENCE_EDITOR`, `EDITOR`, `VISUAL`,
+`GIT_SSH`, `GIT_SSH_COMMAND`, `GIT_ASKPASS`, `SSH_ASKPASS`,
+`GIT_PROXY_COMMAND`, `LESS`, `MORE` (with the pager-flag rule above),
+`GIT_EXEC_PATH`, `GIT_TEMPLATE_DIR`, `LESSOPEN`, `LESSCLOSE`, `LESSEDIT`,
+`LESSKEY*` (only empty) and `LESSHISTFILE` (only empty, `-` or
+`/dev/null`) given anything but a harmless value; and a declared name that is
+not a literal word (`export $X=…`). A name in a quoted argument or heredoc
+body (`git commit -m "mention EDITOR=vim"`) sets nothing and is allowed. A
+redirection (`>`, `>>`) to `.git/config`, `.git/info` or `.git/hooks/*`, or
+`tee`, `sed`, `truncate`, `dd of=`, or `cp`/`mv`/`install`/`ln`/`rsync` with
+one of them as the destination, is refused too. For the safe flags of
+`clean -n`/`--dry-run`, `read-tree -n`, `restore -S`/`--staged` and `rm
+--cached`, the last of an option and its `--no-` form wins, so `clean -fn
+--no-dry-run` deletes. A brace pattern in a pathspec is unreadable. With an
+empty baseline (a fresh clone) the discard guard does not apply at all.
+
+Known false positives with a non-empty baseline, accepted because the
+alternative is reading what the shell will expand: `$EDITOR f`, `${CARGO:-cargo}
+test`, `"$(command -v cargo)" test`, and `git restore src/{a,b}.rs` (a brace
+pathspec) are refused, and so are `GIT_EDITOR=vim git commit`, `git -c
+core.pager=delta log` (a command setting whose program is not harmless),
+and `git -c <key>` for any key off the allowlist. Run the literal program, or name the files one by one.
+The hook forwards a variable or substitution after a wrapper (`timeout`,
+`nice`, `stdbuf`, `setsid`, `ionice`, `doas`, `chronic`, …) and a braced
+program word, and a payload attached to `env -S`/`su -c`/`script -c`
+(`env -S'rm a.txt'`), to the engine rather than allowing them unasked.
 
 Reasons name the rule and a path count, never a path's contents.
 
-Neither rule, nor the core's verification gate (WI-1330, `agent_policy.
-verification.required_for_done`), covers everything: the verification gate
-applies to native items only. An agent's `work.transition` to `done` of a
-forge-hosted item (a GitHub or Forgejo issue the overlay tracks) is not
-refused for a missing verification.
+A denial exits 2 with the reason on stderr and the command does not run. The
+environment guard (WI-4046, WI-4061) rides the same check: it refuses a
+command whose purpose is to print the session's environment or a
+credential-named variable — bare `env`/`printenv`/`set`/`export -p`/
+`declare -p`, a read of `/proc/<pid>/environ`, `ps auxe`, a credential
+expansion printed or piped to a display program (`| cat`, `| tee`, `| xxd`,
+`> /dev/tty`), a here-string a reader prints, and an inline Python, Node,
+Perl, Ruby, awk or jq program that reads the environment. The credential
+name is matched on whole words, so `$MONKEY`, `$KEY_COUNT` and `$SORT_KEYS`
+pass. It refuses even a session with no project policy, because the
+environment holds the session's own tokens.
 
-A denial exits 2 with the reason on stderr and the command does not run. When
-the engine cannot be reached, or answers anything but 2xx, the hook fails
-closed for that `git` or `gh` command (`vogt policy check unavailable;
-refusing git/gh write`) and allows everything else. opencode and codex have no
-equivalent hook, so for them the policy stays guidance in the brief.
+When the engine cannot be reached, or answers anything but 2xx, the hook
+fails closed for any command it would have asked about (`vogt policy check
+unavailable; refusing a command the policy may cover`), a read such as `git
+status` included, and allows everything else. One narrow exception (WI-4061)
+keeps an engine outage from blocking ordinary shell setup: when the only
+reason the hook asked is an ambiguous environment word, an offline allowlist
+lets a harmless form through — `set -euo pipefail`, `set -- a b`,
+`export NAME=value`, `local x=1`, `declare -A name`, `ps aux`, and
+`env NAME=value cmd` that runs a program. A real dump (`env`, `printenv`,
+bare `set`, `export -p`, `declare -p`, `ps auxe`), a credential expansion,
+another language reading the environment, and any git/gh/destructive command
+stay refused. The allowlist is deliberately strict; a form it does not
+recognise keeps the fail-closed refusal, and a segment that runs an
+interpreter (`python*`, `node`, `perl`, `ruby`, `awk`/`gawk`/`mawk`/`nawk`,
+`jq`, and the like) is refused outright: its own program can read the
+environment without any expansion on the line. The same script is the
+Codex session's managed `SessionStart` and `PreToolUse` hook, run as
+`vogt-policy-hook codex`: that argument translates Codex's `tool_input` — a
+`command`, a `cmd`, or a `shell` argv array — into the engine's request before
+asking, and adds or relaxes no rule. opencode has no equivalent hook, so for it
+the policy stays guidance in the brief.
 
 This is a guardrail, not a boundary. The session runs as the same uid that
-owns the hook, so it can edit its own hook, and wrappers the parser does not
-see — `bash -c`, `eval`, `xargs`, `gh api` — pass unchecked.
+owns the hook, so it can edit its own hook, run a script file (`bash
+x.sh`), use `find -delete`, or overwrite a file with a non-shell tool; `gh
+api` passes unchecked.
 
 #### Activity states
 
@@ -1490,14 +1736,33 @@ stripped. This route instead answers with what the terminal shows now:
 - `ready` — the program is waiting for input: the session is alive and
   either `activity` is `waiting-for-input`, or it is `idle` and one of the
   lowest ten non-blank lines, box border stripped, starts with a prompt glyph
-  (`>`, `❯`, `›`, `>>>`) — Claude Code's input box, Codex's composer, a REPL.
-  `running` is never ready, because those TUIs keep drawing their input box
-  while they work; nor is `awaiting-approval`, where typing answers a dialog.
+  (`>`, `❯`, `›`, `>>>`) — Claude Code's input box, Codex's composer, a REPL —
+  or its last non-blank line ends with a shell's prompt sigil (`$`, `#`, `%`),
+  which is how bash, sh, zsh and fish show they are listening. The shell form
+  is deliberately narrow: `%` must be set off by a space (`~/src %`, not
+  `100%`) and a sigil after a label (`cost: $`, `SHELL=$`) is output, not a
+  prompt. `running` is never ready, because those TUIs keep drawing their
+  input box while they work; nor is `awaiting-approval`, where typing answers
+  a dialog.
 - `scrollback` — with `?scrollback_lines=N`, up to N lines that scrolled off
   the top of the screen, oldest first (bounded by the replayed 1 MiB). Absent
   otherwise.
 - `turn_started_at`, `last_output_at`, `approval` — as in `SessionSummary`
   (below).
+
+The text this route serves is a transcript, so credential-shaped values are
+masked before it is returned: private-key blocks, JWT and provider-token
+shapes, auth headers, URL userinfo and credential-named assignments (whole
+underscore words, so `WIN_SSH_KEY=…` is masked and `KEY_COUNT=…` is not) in
+`lines`, `scrollback`, `title` and an approval's `question`/`command_excerpt`
+(WI-3988). Masking is a guardrail over shapes, not a boundary; the raw
+byte-stream routes (`GET /api/sessions/:id`, attach
+and `/api/history/:id/download`) still carry exactly what the program wrote.
+The guardrail has two more limits worth stating: search matches the unmasked
+bytes, both in the archived index and in a live session's scrollback tail, so a
+query can confirm that a credential-shaped value is present even though the
+returned snippet is masked; and the live terminal stream and those raw routes
+are not masked at all.
 
 **Turn timing.** `SessionSummary`, the screen and the `activity` event carry
 `turn_started_at` — when the session last went `running` from `idle` or
@@ -1597,7 +1862,8 @@ ready → read → answer → stop.** Over MCP (the core's tools, preferred):
    and current, from its own Claude Code / Codex transcript (redacted), and
    is the best read of what an agent *said*; `session_screen.lines` is what
    the terminal shows now (`scrollback_lines` for more); `session_log_tail`
-   is the raw history of what it printed. `session_list` carries a
+   is the history of what it printed, with credential-shaped values masked.
+   `session_list` carries a
    `last_reply_excerpt` for each live agent session.
 4. **Answer.** `session_input` with `text` to type a follow-up (Enter is
    pressed by default; `draft: true` types without sending); `keys: ["esc"]`
@@ -1616,9 +1882,20 @@ Enter. Enter is pressed by default; `draft: true` (or an explicit
 (`\u001b`), `tab`,
 `up`/`down`/`right`/`left` (`\u001b[A`/`B`/`C`/`D`), `ctrl-c` (`\u0003`),
 `ctrl-d` (`\u0004`) and `backspace` (`\u007f`). At most 64 KiB of text per
-call. The raw `POST /api/sessions/:id/input` is one write of `text` (escape
-sequences included, JSON-escaped) plus `\r` when `submit` is true; an empty
-`text` with `submit: true` is a bare Enter.
+call. The raw `POST /api/sessions/:id/input` is one write: `text`
+(JSON-escaped) plus `\r` when `submit` is true; an empty `text` with
+`submit: true` is a bare Enter. When the program has bracketed paste on, a
+non-empty `text` is sent inside one paste (`ESC[200~` … `ESC[201~`), so the
+TUI that receives it treats it as pasted text and the Enter after it submits
+rather than joining a "paste burst" as a newline (WI-4068). Keys are not
+pasted: a one-character `text` (a dialog answer such as `1` or `y`, or a
+named key such as `\r` or `\t`), text made only of tabs and line breaks, and
+single-line text carrying another control byte or escape sequence are written
+as typed. So each named key vogt-core sends as its own write reaches the PTY
+as that key. An Esc inside a multi-line paste is removed, and either paste
+marker inside the text is dropped, so the body can neither lose the paste to
+a key classification nor close the paste early; line breaks in a paste are
+normalised to `\n`.
 
 **Safety rules.**
 
@@ -1712,30 +1989,6 @@ curl -s -H "$AUTH" -H 'content-type: application/json' \
 curl -s -H "$AUTH" -X POST "$VOGT_ENGINE_URL/api/sessions/$ID/kill"
 ```
 
-##### The escalation fallback ladder
-
-An escalation a live session holds open (a blocked report, or a permission
-dialog) climbs a ladder while nobody resolves it (WI-996 E3,
-`escalation_ladder.rs`). The engine polls every 30 s:
-
-- `needs: overseer` is promoted to the person after
-  `ENGINE_ESCALATION_PROMOTE_AFTER_SECS` (default 600): a push under the
-  `waiting_for_input` preference, `data.kind: escalation-promoted`.
-- A person-facing escalation still open after
-  `ENGINE_ESCALATION_PAGE_AFTER_SECS` (default 900) is posted to
-  `ENGINE_ESCALATION_WEBHOOK_URL`, then again every
-  `ENGINE_ESCALATION_REMIND_EVERY_SECS` (default 21600), at most
-  `ENGINE_ESCALATION_MAX_REMINDERS` (default 4) more times.
-- When a paged escalation closes, a resolved post (with `endsAt`) follows.
-
-The post is an Alertmanager v2 alert list (`POST /api/v2/alerts`): one alert,
-`alertname: VogtEscalation`, labelled by session, boundary, needs and the
-content `key`, with the clipped ask as `description`. Point the URL at
-Alertmanager and its routes and silences apply. With no URL the ladder still
-promotes. "Unacknowledged" means still open: the engine does not see the Inbox
-archive. The clocks start when the ladder first sees an escalation, so an
-engine restart restarts them.
-
 #### Permission posture
 
 A driven session usually has no person watching it, so its permission
@@ -1746,7 +1999,8 @@ checks decide what it can finish on its own (WI-926; the design is
   default mode. On a pod that has accepted auto mode, that is **auto**: a
   classifier judges each action against built-in rules, and a block is a
   denial, with no dialog. Every engine-launched Claude session also gets the
-  deployment's **driven-session policy** with `--settings=<file>`. This is an
+  deployment's **driven-session policy** with `--settings=<file>`; a session
+  in a pod gets it too, from the pod image's copy (see *Session pod boot*). This is an
   `autoMode` section whose `environment` and `allow` lists start with
   `"$defaults"`, so they add to Claude Code's rules and replace none. The
   image ships `/usr/local/share/vogt/driven-session-settings.json`:
@@ -1792,11 +2046,7 @@ checks decide what it can finish on its own (WI-926; the design is
 - **`account` on `POST /api/sessions`**: see [Claude accounts](#claude-accounts).
 - **`permission_mode` on `POST /api/sessions`**: `accept-edits` maps to
   `--permission-mode acceptEdits` (edits accepted, everything else asks).
-  `bypass` maps to `--dangerously-skip-permissions` (no checks). Klaudia
-  takes `bypass` the same way; its default posture is its own `autonomous`
-  mode (finish the task, ask before changing the machine) behind its host
-  guardrail, and `accept-edits` is `400` for it: Klaudia's `acceptEdits` is
-  only an alias for `autonomous`, so it would not mean what was asked. A
+  `bypass` maps to `--dangerously-skip-permissions` (no checks). A
   posture on a plain shell is `400`. The posture shows on the summary
   (`permission_mode`, absent for the default), is kept in the hibernation
   record, and is reapplied on wake. vogt-core grants `bypass` only to a
@@ -1840,11 +2090,6 @@ checks decide what it can finish on its own (WI-926; the design is
     under `on-request` the reviewer answers the asks that pin produces. A `codex exec`
     launch omits `-a` (that subcommand rejects it) and keeps the reviewer
     and the sandbox.
-  - **Worker postures keep `-a never`** (operator decision, 2026-11-21,
-    WI-4507; WI-2028). The codex #34 auto-reviewer
-    (`approvals_reviewer="auto_review"`) applies only to interactive Codex
-    sessions launched with `-a on-request`; a driven worker under `never`
-    has no approval asks for it to answer.
   - **bypass**: `--dangerously-bypass-approvals-and-sandbox` and nothing
     else. A person's grant only, as for Claude Code.
   `--approve-for-me` is not used: it hard-wires workspace-write. Default
@@ -1857,81 +2102,43 @@ checks decide what it can finish on its own (WI-926; the design is
   a reference copy to
   `/usr/local/share/vogt/driven-session-codex-requirements.toml`. The engine
   judges the file Codex loads (WI-1146): `/etc/codex/requirements.toml` must
-  exist, be non-empty and wire the gitguard hook, and it and its directory
-  must be owned by root and not group- or world-writable, or a session could
-  rewrite it. `ENGINE_AGENT_CODEX_POLICY` names a deployment's own file; it is
-  checked the same way, and so is `/etc/codex/requirements.toml`, which a
-  deployment that points elsewhere still has to install. Empty checks
-  `/etc/codex/requirements.toml`; the image copy present without it is a
-  refusal, and neither present means the session starts with no policy (a
-  checkout, or a pod built before the file existed). The check runs once, at
-  engine start. `off` is the only way a deployment that has the file starts
-  Codex without that check. A failing check is `400` on every Codex launch,
-  and the session does not fall through to bypass. The shipped file (WI-1356) wires
-  the gitguard managed hook for the fork: `[[hooks.SessionStart]]` and
-  `[[hooks.PreToolUse]]` (matcher `Bash`, `shell`, `exec_command`,
-  `write_stdin`, `apply_patch`) run `/usr/local/bin/klaudia hook gitguard`
-  with `failClosed = true` (WI-1129), so a hook that fails blocks the tool
-  call. The program is named by absolute path, and the engine requires
-  exactly that command (WI-1146): a bare `klaudia` resolves through PATH,
-  whose first entry `/opt/vogt/agent-clis/bin` the session user owns, so a
-  session could put an `exit 0` stub there and pass every call. The engine
-  also requires `/usr/local/bin/klaudia` to be a root-owned regular file
-  (not a symlink) in a root-owned directory, with no group or world write;
-  the Dockerfile builds it root `0755` and asserts that. A runtime
-  `VOGT_KLAUDIA_VERSION` pin installs under the session-owned
-  `/opt/vogt/agent-clis` and changes the `klaudia` a session runs, never
-  the hook: gitguard always runs the image's build, from the commit
-  `engine/agent-versions.env` names, so moving gitguard to another Klaudia
-  is an image build.
-  On the fork `failClosed` acts only on `PreToolUse`: a `SessionStart` hook
-  that fails lets the session start with no baseline. That is still safe,
-  because gitguard's `PreToolUse` refuses every `Bash` and `apply_patch` call
-  for a session it holds no baseline for, so the session can run nothing
-  until a baseline exists.
-  The file also pins `[features] hooks = true`: the fork runs managed hooks
-  only while that feature is on, and the pin beats `-c features.hooks=false`,
-  `--disable hooks` and any `[features]` in `$CODEX_HOME` or a project
-  `.codex/config.toml`. The engine refuses a policy without the pin.
-  A table Codex cannot parse stops Codex at start-up; it does not run
-  unguarded. `server/tests/codex_gitguard_e2e.rs` runs the real fork against
-  the shipped file and a scripted model and proves `git stash`,
-  `git checkout -- .`, `git clean -f`, `git reset --hard` and
-  `git -C <other repo> restore` are refused while the session's own commit
-  lands, with no override and under each of those feature overrides; it
-  runs where `/etc/codex/requirements.toml` is the shipped file (set
-  `VOGT_CODEX_GITGUARD_E2E=1` to make a missing prerequisite fail). CI runs
-  it inside the stack image candidate (`build.yml`, `stack-image`, the
-  `codex-gitguard-e2e` Dockerfile target) before the image is pushed.
-  **gitguard is an accident guard, not a sandbox** (operator decision,
-  2026-10-15). It guarantees that an agent running destructive git by
-  mistake (`git stash`, `git checkout -- .`, `git reset --hard`,
-  `git clean -f`, `git restore`, including `git -C <other repo>`) cannot
-  discard work it did not make, and that a session without root cannot
-  switch the guard off: not by editing the requirements file or its
-  directory, not by shadowing `klaudia` on its PATH, not by turning the
-  hooks feature off. It does not stop a determined session. The session
-  user has passwordless sudo in the pod and the operator has kept it, so a
-  session can rewrite `/etc/codex/requirements.toml`,
-  `/usr/local/bin/klaudia` or the Codex binary as root. The ownership
-  checks above are correctness checks, not a security boundary.
-  The test also runs once with an `exit 0` `klaudia` stub first on PATH,
-  and the refusals still hold.
-  Destructive-git execpolicy prefix rules stay out: they are Starlark
-  (`prefix_rule`), not a requirements table. Claude and opencode launches
-  are not blocked by a Codex policy error.
+  be non-empty and parse as TOML. `ENGINE_AGENT_CODEX_POLICY` names a
+  deployment's own file; it is checked the same way, and so is
+  `/etc/codex/requirements.toml`, which a deployment that points elsewhere
+  still has to install. Empty checks `/etc/codex/requirements.toml`; the image
+  copy present without it is a refusal, and neither present means the session
+  starts with no policy (a checkout, or a pod built before the file existed).
+  The check runs once, at engine start. `off` is the only way a deployment
+  that has the file starts Codex without that check. A failing check is `400`
+  on every Codex launch, and the session does not fall through to bypass. The
+  shipped file pins `[features] hooks = true` and wires the fork's
+  `[[hooks.SessionStart]]` and `[[hooks.PreToolUse]]` managed hooks to
+  `/usr/local/bin/vogt-policy-hook codex` (WI-3755). That is the same
+  project-policy check a Claude session runs as its `PreToolUse` hook; the
+  `codex` argument only translates Codex's `tool_input` into the engine's
+  request and adds or relaxes no rule. The check also requires the exact
+  command, `failClosed = true` on both events, a matcher selecting `Bash` and
+  `apply_patch`, and a root-owned hook program at an absolute path, so a
+  missing, rewritten or PATH-shadowed guard refuses the Codex launch instead
+  of running unguarded. Like the Claude hook this is a guardrail against
+  running a forbidden `git` or `gh` command by mistake, not a sandbox.
+  Changing the file needs the engine image rebuilt: the entrypoint bakes the
+  repository copy into `/etc/codex/requirements.toml`. Claude and opencode
+  launches are not blocked by a Codex policy error.
   **Workspace guidance (WI-1357).** Codex reads no `CLAUDE.md`,
   `.claude/rules` or `.claude/skills`, and no `AGENTS.md` above its git
   root, so the engine (`server/src/codex_guidance.rs`) gathers the set
   Claude Code would load and inserts it after the binary as one
   `-c developer_instructions="…"` (a TOML basic string). Inside `$HOME` the
   walk climbs from the working directory to `$HOME`, past the git root, so
-  `~/Working/AGENTS.md`, `CLAUDE.md` and `.claude/rules/*.md` arrive;
+  it finds `~/Working/AGENTS.md`, `CLAUDE.md` and `.claude/rules/*.md`;
   outside `$HOME` it stops at the git root. `~/.claude/CLAUDE.md` and
   `~/.claude/rules` come first; the `AGENTS.md` files Codex already reads
-  (git root to working directory) are skipped. Skills from each
-  `.claude/skills` and `~/.claude/skills` go in as an index of name,
-  description and `SKILL.md` path. Every file is resolved through symlinks
+  (git root to working directory) are skipped. Only the checkout's own
+  guidance is inlined: the workspace files and the skills from each
+  `.claude/skills` and `~/.claude/skills` are named by a one-line pointer
+  to their root directories (WI-3870), so the body does not grow with the
+  number of rules or skills. Every file is resolved through symlinks
   and kept only if it is a `.md` file inside the walk's top or `$HOME`,
   outside `.codex`, `.ssh`, `.git`, `.config`, `.local` and the other
   credential directories, and at most 32 KiB; the body is capped at 96 KiB,
@@ -1969,6 +2176,18 @@ checks decide what it can finish on its own (WI-926; the design is
 
 #### Claude accounts
 
+The engine assigns each Claude session one sticky account at launch. Configure
+the names and bundle directories with `ENGINE_AGENT_CLAUDE_ACCOUNTS` and the
+per-account live-session limit with `ENGINE_AGENT_CLAUDE_ACCOUNT_CAP` (default
+8). When no account is requested, the engine reserves the least-loaded
+configured account; a template may pin one with `account`. A start that would
+exceed every cap is refused with HTTP 429 and the per-account counts. The
+assignment is retained in the session record and survives hibernate/wake; a
+running session is never moved to another account. Bundle files are served by
+the authenticated session broker and are scoped to the assigned account and
+conversation. Credentials are never configuration values; they remain in the
+engine-held bundle and broker audit records contain names and byte lengths only.
+
 One deployment can run Claude Code under more than one subscription login. An
 account is a Claude Code config directory (`CLAUDE_CONFIG_DIR`) holding that
 login's credentials, `.claude.json` and transcripts. The operator names them:
@@ -1981,27 +2200,21 @@ Entries are `name=/absolute/dir`, comma-separated; a name is
 `[a-z0-9][a-z0-9_-]{0,31}`. A malformed or duplicate entry is skipped with a
 warning and the rest are kept.
 
-Accounts are also discovered, so adding one needs no redeploy or restart
-(WI-2734). A name not in `ENGINE_AGENT_CLAUDE_ACCOUNTS` is looked up, on every
-session start, under `ENGINE_AGENT_CLAUDE_ACCOUNTS_ROOT` (default
-`$HOME/.claude-accounts`; `off` turns discovery off; a relative path is
-ignored with a warning). `<root>/<name>` is account `<name>` when:
+**Discovered accounts (no redeploy).** An account can also be a directory under
+`ENGINE_AGENT_CLAUDE_ACCOUNTS_ROOT` (default `$HOME/.claude-accounts`; `off`
+turns discovery off). `<root>/<name>` is account `<name>` when it holds a
+profile marker, `.vogt-claude-profile` (written by `claude-profile prepare`) or
+`.claude.json`, as a regular file. The engine reads the root on every session
+start, so a profile made after the engine started works at once, with no
+restart. The name rule applies. A symlink entry, a directory whose real path
+leaves the root, or a missing marker is refused with the same `400` as an
+unknown name, and nothing outside the root is probed. The directory the engine
+sets as `CLAUDE_CONFIG_DIR` is the resolved real path. Configured accounts win
+over a discovered one of the same name.
 
-- the name passes the rule above, so a caller can never pass a path;
-- its real path, symlinks resolved, is a directory inside the root's real
-  path. A link out of the root is refused, and the session gets the resolved
-  directory as `CLAUDE_CONFIG_DIR`;
-- it holds `.vogt-claude-profile` (the marker `claude-profile prepare`
-  writes) or `.claude.json`, as a regular file, not a symlink.
-
-Anything else is the same `400` as an unknown name. A listed account wins over
-a discovered one of the same name. Discovered accounts' `projects/` are
-searched for transcripts like listed ones.
-
-The usage board's `VOGT_USAGE_ACCOUNTS` is not filled from discovery: it is
-core configuration, read by the core, which can run in another container from
-the engine and does not see the engine's home. List a discovered account there
-too to have the board report it.
+The usage board (`VOGT_USAGE_ACCOUNTS`) is core configuration and does not
+read the engine's home, so a discovered account is not on it automatically.
+List the account there as well when the board should show it.
 
 - **`account` on `POST /api/sessions`** (and `session.start`) names one. The
   engine looks the name up itself and sets `CLAUDE_CONFIG_DIR` for the session,
@@ -2031,16 +2244,19 @@ too to have the board report it.
   auto-mode flag, and registers the MCP servers there by running
   `vogt-mcp-bootstrap` with `CLAUDE_CONFIG_DIR` set. Then log in once with
   `CLAUDE_CONFIG_DIR=<dir> claude` and `/login`.
-  A profile that signs in with an API key (`apiKeyHelper`) instead needs API
-  credit that covers interactive Claude Code: the API can accept the key for
-  `claude -p` and plain calls yet refuse every interactive session, which is
-  what the engine runs, with "Credit balance too low" (WI-2741). Run
-  `claude-profile check <name>` before using such a profile; it sends one
-  interactive-shaped request and says whether the key is accepted.
 - Logins are never copied between accounts. Claude Code's OAuth refresh token
   rotates on use, so a copied credentials file signs one of the two copies out.
 
 #### Hibernation
+
+**Pod sessions:** the engine requests account/transcript write-back before
+teardown. An attached agent's unconfirmed flush refuses hibernation; an
+unattached agent retains only its last successful write-back. The engine
+keeps the record and screen; wake creates a new pod seeded with the saved
+conversation. This does not checkpoint `/work`: land code before hibernating.
+An explicit hibernate is one of the two lifecycle actions allowed to delete a
+pod; an engine restart never does, and re-adopts the running pod instead
+(WI-3205).
 
 An idle agent session holds a few hundred MiB in its CLI and its MCP
 servers. Its conversation is already on disk in the agent CLI's own
@@ -2098,7 +2314,7 @@ engine id (WI-912; the design is `docs/design/session-hibernation.md`).
   the original brief (capped at 32 KiB), all written to the brief file.
   After that, the record resumes the new conversation. vogt-core decides
   when to send it: `cold_wake_compaction` is on (it is off by default), the
-  session has not set `cold_wake_opt_out`, its agent is Claude, Klaudia or
+  session has not set `cold_wake_opt_out`, its agent is Claude or
   Codex, the session was hibernated longer than its provider's
   `cold_wake_ttl_seconds`, and the last `economics.context_tokens` reading
   is at least `cold_wake_threshold_tokens`. vogt-core builds the summary
@@ -2118,6 +2334,104 @@ engine id (WI-912; the design is `docs/design/session-hibernation.md`).
   listed (WI-962). A shell whose agent reported its conversation (see
   [A conversation reported from inside the session](#a-conversation-reported-from-inside-the-session))
   is resumable and comes back like any agent session.
+- **Pod sessions (WI-3158, WI-3205).** A session whose template has a pod
+  backend hibernates and wakes under the same rules and events; the `409`
+  refusals and the `hibernated` attach frame are unchanged. What differs is
+  where the state lives:
+  - *Hibernate* sends the agent a `flush` frame, and the agent writes its
+    account bundle (login, global config and the conversation's transcript)
+    back through the broker's bundle-file path. The engine waits for the
+    agent's `flushed` reply (20 s), then writes the usual record and 256 KiB
+    snapshot, stops the agent and deletes the pod (by the uid it was created
+    with, 5 s grace) and waits, up to 20 s, until the pod has left the
+    cluster, so a wake can reuse the pod's name. An agent
+    that is attached but reports failure or stays silent makes the
+    hibernation a `409` (a wake would resume a conversation missing its
+    newest turns); an agent that is not attached hibernates with the
+    transcript as last written back (the agent writes back every second).
+  - *Wake* creates a new pod from the recorded template on the same account
+    (the record keeps the account name, so the lease is sticky). The bootstrap
+    response carries the engine-held bundle, including the transcript, and
+    `VOGT_SESSION_RESUME=1`, `VOGT_SESSION_ACCOUNT` and
+    `VOGT_SESSION_CONVERSATION_ID`; the agent starts `claude --resume <id>` or
+    `codex resume <id>` (a fresh pod starts `claude --session-id <id>` or
+    `codex --session-id <id>`), and the entrypoint runs `g clone` as for any
+    pod. The resume flag is set from either layout the bundle may hold:
+    Claude's `<conversation>.jsonl` or a Codex
+    `sessions/<date>/rollout-<stamp>-<conversation>.jsonl`, so a woken Codex
+    pod continues its conversation instead of starting fresh (WI-3873).
+  - **Uncommitted work is salvaged before the pod goes (WI-4132).** An
+    explicit stop and a hibernation both ask the pod's agent to save the
+    checkout's uncommitted changes first: a patch per repository
+    (`git diff --binary`, or `graft diff` for a graft working copy), the
+    untracked file list with each file's content, and a `manifest.json`,
+    written under `state_dir/pod-salvage/<session_id>/<timestamp>/`
+    (directories `0700`, files `0600`). It never lands, commits or pushes;
+    recovery is a person's or a worker's choice. Credential-looking paths and
+    anything the provider reports as ignored are left out, and a size cap
+    bounds each archive. In particular, salvage uses `lstat` plus a
+    no-following open and never follows symlinks, so a link into the Kubernetes
+    service-account mount (`/var/run/secrets/kubernetes.io/serviceaccount`) or
+    the per-session graft token path
+    (`$XDG_CONFIG_HOME/graft/sessions/<session>/trial-1.token`) is not archived.
+    An untracked file with more than one hard link is skipped as `Secret`,
+    because its other name may be a token; the session agent logs each
+    skipped symlink and hardlink. Both `git diff` and `graft diff` read the
+    work tree (and `graft diff --path` does not narrow a working-copy diff), so
+    when any tracked, staged or graft-changed path is a symlink, sits below
+    one, or has more than one link, that path is skipped and the repository
+    keeps no patch (marked truncated). Credential names and stores such as `*.token`, `.ssh/`, `.aws/`, `.kube/`,
+    `credentials`, and dotenv files are excluded even when they are ordinary
+    files in the checkout. The stop result carries the `salvage` report
+    (`path`, `files`, `bytes`, `repos`), the session summary keeps it, and
+    the PWA shows it on the session row. A salvage that cannot be taken —
+    no attached agent, an upload failure — records `salvage_failed` with the
+    reason and never blocks the stop. An engine restart takes no salvage and
+    deletes no pod (WI-4126). `ENGINE_POD_SALVAGE` (on by default) turns it
+    off; `ENGINE_POD_SALVAGE_KEEP` (default 5) and
+    `ENGINE_POD_SALVAGE_MAX_BYTES` (default 128 MiB) bound what one session
+    keeps. Still only in the archive: work that was neither landed nor
+    untracked at the time of the stop. Graft-landed changes are on the line,
+    and the transcript and account bundle survive as before.
+  - *Engine restart.* On SIGTERM pod sessions are not hibernated: their
+    records (without a hibernation marker) and screens are written, and their
+    pods keep running. The stream credential each pod holds is kept in
+    `state_dir/pod-tokens/<id>` (mode 0600; the hibernation record never holds
+    a secret). At boot the engine lists the session pods, and for each one
+    whose record was left running it rebuilds the session over a stream link
+    whose cursor is the length of the session's output log, so the agent's
+    resume replays exactly the output the engine missed. An agent that is
+    ahead of the log (output acknowledged but not yet logged when the engine
+    died) is skipped forward rather than refused. An agent that has not
+    dialled back after `ENGINE_POD_RECONNECT_TIMEOUT` (120 s) is reported by
+    the reconciler, not given up: the session stays live and the pod stays
+    running, so a late agent can still take the link over. A pod with no kept
+    credential, or with no session record at all, is likewise reported and
+    left running. Deletion belongs to the session's own teardown (an explicit
+    stop or hibernate, or an agent that has already exited), because a running
+    pod is the only copy of its workspace (WI-3405, WI-4126). The one other
+    deleter is the reconciler: it reaps a pod only after `ENGINE_POD_ORPHAN_TTL`
+    has passed since a sweep first found the pod unowned (an engine restart
+    restarts that clock), and only when a completed salvage archive is
+    covering the pod (latest report, not failed, at least 60 s newer than the
+    pod) is on disk, or a fresh `nothing-to-save.json` marker for this pod
+    (WI-4237; written atomically by a clean stop that had nothing to archive,
+    holding session, pod uid and time). Otherwise it keeps the pod and logs a
+    warning once, then every 10 minutes. An unsalvageable orphan (salvage
+    failed and its session record is gone) is always in that case: it is kept
+    and warned about, never deleted by the engine and never given a marker, so
+    an operator decides.
+- **Project memory (WI-3371).** With `ENGINE_POD_PERSIST_MEMORY` on (off by
+  default), a Claude pod also writes `CLAUDE_CONFIG_DIR/projects/*/memory`
+  back to the engine, keyed by the project's source identity rather than by
+  the account or the pod's `/work` path, under `state_dir/pod-memory/<project>/`
+  (`0700`/`0600`). The next session on the same project, under any leased
+  account, receives those files at bootstrap as bundle entries under
+  `projects/<project-dir>/memory/`; the entrypoint writes them before the CLI
+  starts. The pod's copy is what the next flush replaces, so the engine's
+  archive is read-only in effect: a restore happens only at launch. Turning
+  the setting off leaves existing files on the volume and stops both the
+  restore and the write-back.
 - **`keep_awake`** pins a session. The pin is kept in its record and shown
   on its summary. A pinned session is never hibernated by policy, and if the
   engine finds it hibernated at boot (after a shutdown or a crash), it wakes
@@ -2142,10 +2456,19 @@ engine id (WI-912; the design is `docs/design/session-hibernation.md`).
   hibernates the quietest eligible session while the pod's available memory
   is below it, one session per minute. `ENGINE_HIBERNATE_DONE_AFTER` (off by
   default; `10m` recommended) hibernates a session, trigger `done`, whose
-  agent declared itself done (`AUTOPILOT: DONE` or a `result` report) at least
-  that long ago with no input written to it since; an oversight session is
+  agent declared itself done (`AUTOPILOT: DONE`; a `result` report waits on
+  WI-1520) at least that long ago with no input written to it since; an oversight session is
   never taken this way, and autopilot does not exempt it. The change reads
-  `hibernated (done)` in `session_changes`. A blocked report a later turn
+  `hibernated (done)` in `session_changes`.
+  The idle, done and memory caps can be changed on a running engine (WI-4457):
+  `GET /api/hibernation/policy` reads them and `PUT` (needs `sessions`) takes a
+  partial object such as `{"idle_after": "30m", "done_after": null}` (`null`
+  unsets a trigger; a number is seconds or, for memory, bytes). The watcher
+  reads the policy every minute, so a change applies on the next sweep with no
+  restart. Each accepted change is audited (`vogt::audit`, `hibernation.policy`)
+  and saved to `state_dir/hibernation-policy.json`, which overrides the
+  environment at the next boot. `ENGINE_HIBERNATE_LIVE_CAP` is boot-only. An
+  oversight session is spared the idle trigger, as autopilot is. A blocked report a later turn
   dealt with is cleared by the engine without a model turn (WI-1314, see
   Blocked reports). Available memory is the cgroup
   `memory.max` minus `memory.current` when the pod has a limit, otherwise
@@ -2180,13 +2503,11 @@ stop: opencode ends a *run* at every natural stop of the model, and any
 agent may stop to announce its next step. So the engine re-drives it
 (`autopilot.rs`):
 
-- a Claude Code, Codex, opencode or Klaudia session on autopilot that is at
+- a Claude Code, Codex or opencode session on autopilot that is at
   its prompt (`ready`, below), not blocked on a person, and quiet for
   `ENGINE_AUTOPILOT_NUDGE_AFTER` (default `60s`) is sent a one-line "carry
   on" and Enter, logged as `event=autopilot.nudge`, and counted on the
-  summary as `autopilot_nudges`. A Klaudia session whose own goal loop is
-  driving it (`klaudia: goal-loop` in its title, or its status bar on older
-  builds) is left alone, since two drivers of one loop would interleave;
+  summary as `autopilot_nudges`.
 - a line reading `AUTOPILOT: DONE` among the last lines of its screen turns
   its autopilot off for good (`event=autopilot.done`), as does reaching
   `ENGINE_AUTOPILOT_MAX_NUDGES` (default 100; `event=autopilot.capped`).
@@ -2216,7 +2537,9 @@ waiting for it to be (`GET /wait?until=ready`) only ever timed out.
 A session may carry a `budget` (`SessionSpec`; vogt-core sets one by default
 for an agent template given a task and the worker role: 120 turns and 90
 minutes per turn, no context limit, and no whole-session clock unless the
-project's `agent_policy.session_wall_clock_minutes` names one). An explicit
+project's `agent_policy.session_wall_clock_minutes` names one; and, for the
+oversight role, a context limit of `ENGINE_OVERSIGHT_CONTEXT_TOKENS` (default
+200000) with no turn or clock limit, WI-1522). An explicit
 budget object is used exactly as given; an explicit empty object sets no
 limits and declines that default. Zero is not a limit. The budget is kept on the summary
 and in the hibernation record, so a wake brings the same limits back
@@ -2237,7 +2560,7 @@ nothing) and acts at two levels:
   must not be blocked, its agent must be one the engine re-drives, and the
   prompt must have been quiet for the nudge settle time. A turn or context
   limit, soft and hard, therefore acts only for the agents the engine re-drives
-  (claude, codex, opencode, klaudia); the wall clock acts for every session.
+  (claude, codex, opencode); the wall clock acts for every session.
 - **hard**, once, at the limit: the same change, then the session is hibernated
   with trigger `budget`. A turn, context or whole-session clock limit waits for
   the prompt first, so the stop lands at a turn boundary and never in the
@@ -2260,7 +2583,7 @@ before the tailer has published anything.
 **Holding autopilot for a due action (WI-1281).** Waiting for the prompt only
 works if the session is let reach it. An autopilot worker is re-prompted as
 soon as it settles there, so a turn limit that merely waited landed many turns
-late, or never (Klaudia workers ran 186–482 turns against a 120-turn budget).
+late, or never.
 While a soft warning or a waiting hard stop is due and the session is not at
 its prompt, the watcher holds it: autopilot does not nudge a held session, the
 turn in progress finishes, the session rests at its prompt, and the next tick
@@ -2287,10 +2610,25 @@ the watcher will not hibernate it again. Boot wake never does this on its
 own — a session hibernated with trigger `budget` is left hibernated, pinned
 or not.
 
+An oversight session is never hibernated for its context limit (WI-1522). At
+the soft line, once per climb and only at the prompt, the watcher types the
+agent's compact command and publishes a `budget` change at level `compact`:
+for Claude, `/compact Keep: open workers and their items, pending operator
+decisions, follow-ups, merge gates`. An agent with no compact command the
+engine types (Codex, WI-1575) gets
+the change at level `soft` and nothing typed. The latch re-arms when the
+economics show context under half the limit. A turn or clock limit on an
+overseer still hibernates it. `dispatch.context_budget` rotation (WI-3132) is
+separate and opt-in.
+
 Auto-split is not implemented. The overseer that reads the `budget` change
 starts the successor itself with `session_start(from_handoff=WI-n)`.
 
 #### Resource use
+
+This `/proc` sampler measures local PTY trees, not processes in another pod.
+Absent pod samples are not zero usage. Kubernetes enforces pod requests and
+limits; use cluster metrics for consumption rather than engine-host RSS.
 
 Every 10 s the engine reads `/proc/*/stat` once and sums, for each live
 session, the subtree below its PTY child. The figures are resident memory,
@@ -2306,6 +2644,10 @@ sets `resources.over_threshold` on any session at or over it. The core's
 `session.list` takes `order: "rss"` to put the heaviest first.
 
 #### Worktree build output
+
+These settings clean local linked Git worktrees, not the pod's independent
+graft clone. Pod-private build/cache files disappear with the pod; read-only
+shared seeds do not preserve unfinished work.
 
 A finished worker's build output is what fills the host disk: `target/`,
 `node_modules` and `.venv` in a worktree nobody is using. Stopping or
@@ -2337,20 +2679,48 @@ what is free, the percent used, and `needs_attention` once that passes
 `ENGINE_DISK_WARN_PERCENT` (`85`). A deployment with no engine reports no row,
 which is a different fact from a volume that is fine.
 
+While `disk.needs_attention` is true, `sweep.disk_candidates` suggests up to
+five stopped, merged worktrees, largest first, with a `workspace_clean`
+call for each. Unknown merge state and ordinary checkouts are excluded.
+An unavailable workspace listing leaves the suggestions empty; the sweep
+never removes anything.
 
-With `ENGINE_WORKTREE_REMOVE_ON_STOP=true` (off by default, WI-1774), a
-stop goes on to remove the worktree itself after the cleanup, through the
-same checks as `POST /api/workspaces/clean` with `mode: "remove"` and no
-`force`: the tree must be clean (untracked files count; git-ignored ones are
-regenerable and do not), `HEAD` must be in its base ref, upstream,
-`origin/HEAD` or `origin/main`, the branch must have no stash entries, and
-no other running or hibernated session may work there. Then
-`git worktree remove` runs from the main checkout and the merged branch is
-deleted. Only a worktree the engine cut itself (one with a recorded
-`base_ref`) is removed, and only when the tree is that recorded workspace
-and inside `workspace_root` or the recorded path; a worktree a session was
-merely started in is kept. Any doubt keeps the tree. A hibernation never
-removes one.
+#### Removing a stopped worktree
+
+With `ENGINE_WORKTREE_REMOVE_ON_STOP=true` (off by default, WI-1774), a stop
+goes on past the build-output cleanup and removes the linked worktree itself.
+It is planned only when all of these hold (WI-4486):
+
+- the session runs on this host. A pod session, which is the default for a
+  pod-capable template, is never removed; its checkout is not this host's.
+  A live session counts as a pod session while it has a pod link, and a
+  hibernated one by the placement and template it spawned with;
+- the engine cut the worktree itself: the workspace block it recorded names
+  the base ref it was cut from. A worktree a person or another tool made has
+  no such record and is kept;
+- at removal time the folder is the one the engine recorded, and it sits
+  inside the engine's workspace root. A recorded path that does not match, or a
+  folder outside the root, keeps the tree.
+
+Then the same checks as `POST /api/workspaces/clean` with `mode: "remove"` and
+no `force` apply: the tree must be clean (untracked files count, git-ignored
+ones do not), `HEAD` must be in its base ref, upstream, `origin/HEAD` or
+`origin/main`, and the branch must have no stash entries. `git worktree remove`
+then runs from the main checkout and the merged branch is deleted. Any doubt
+keeps the tree, and a hibernation never removes one.
+
+#### Terminal attach keepalive
+
+The engine pings each attached terminal socket every
+`ENGINE_WS_PING_INTERVAL_MS` (default 20 s, WI-2704). Any frame from the client
+counts as an answer, so a client that is typing is never closed for not
+echoing a ping. A socket that sends nothing for two intervals is closed
+`4000 idle`, so a half-open phone socket is noticed in well under a minute.
+An attach whose bearer the core could not verify is closed `4503`, which tells
+the client to retry; a refused bearer still gets `4401`. The attach metrics
+`vogt_ws_attach_total`, `vogt_ws_close_total` (by close code) and
+`vogt_ws_idle_close_total` count the outcomes.
+
 
 #### Session scratch, background processes and free space
 
@@ -2494,22 +2864,14 @@ file cache, use cAdvisor's `container_memory_rss` and `container_memory_cache`.
 A live session that has reported a conversation is metered from its own
 transcript (WI-1245). Every `ENGINE_ECONOMICS_TICK_SECS` (15 s; `0` turns it
 off) the engine reads the new bytes of that transcript — Claude under
-`~/.claude/projects`, Klaudia under `~/.klaudia/sessions`, Codex under
-`~/.codex/sessions` — and folds them into the meter from
+`~/.claude/projects` and Codex under `~/.codex/sessions` — and folds them
+into the meter from
 [`session economics`](ARCHITECTURE.md). The running totals ride on the session
 summary as `economics` (turns, context, peak context, compactions, and whether
 token usage was measured), and the core's `session.list` digest prints them as
 its `budget` line. A session with no reported conversation, or an agent whose
 transcript the engine cannot find, simply has no `economics`; the core then
 falls back to reading the transcript itself.
-
-Compaction loop guard (WI-2834): the meter also keeps `compaction_streak`,
-the compactions in a row with fewer than two tool calls between them (two
-calls reset it to zero). When the streak reaches
-`ENGINE_COMPACTION_LOOP_THRESHOLD` (default 3, `0` off) the tailer marks the
-session blocked with `compaction loop: N compactions without progress; likely
-oversized fixed prompt`, once per loop, unless it is already blocked. The Python
-reader computes the same streak.
 
 The same snapshot is what the scrape records. The engine observes three
 histograms once, at the session's real end — when its process exits, or when
@@ -2649,29 +3011,8 @@ this never applies to the other half of a split.
 
 A text frame that does not parse as a control message is treated as raw input,
 because some tools send keystrokes as text. Snapshot chunks are capped at
-64 KiB each.
-
-The server keeps every attached socket alive with WebSocket-level Ping frames,
-one every `ENGINE_WS_PING_INTERVAL_MS` (default 20 s). Any frame from the
-client — the Pong a WebSocket stack sends on its own, input, a resize, a
-`ping` control frame — counts as an answer. A socket that has sent nothing for
-two intervals is closed `4000 idle`, so a half-open phone socket is closed
-within about 45 s at the default, and its server-side tasks (and broadcast
-receiver) are dropped with it. Counters on the metrics listener:
-`vogt_ws_attach_total`, `vogt_ws_close_total{code}` (`none` when the client
-closed first or the transport failed) and `vogt_ws_idle_close_total`.
-
-Close codes a client should recognize:
-
-- `1000` the session is hibernated (after its kept screen is replayed).
-- `4000` idle: no frame from the client for two keepalive intervals.
-  Reattach.
-- `4401` bad or missing auth frame. Counted and slowed as an auth failure.
-- `4404` no such session.
-- `4408` no auth frame within five seconds.
-- `4503` the core could not be reached to check the credential. Not an auth
-  failure and not counted as one: retry after a short wait, and do not sign
-  out.
+64 KiB each. Close codes a client should recognize: `4408` no auth frame
+within five seconds, `4401` bad or missing auth frame, `4404` no such session.
 
 ### Events and status
 
@@ -3004,36 +3345,45 @@ WAV file and no microphone.
 
 ### Quick chat APIs
 
-A **quick chat** (WI-1097) is a persistent text conversation with an agent
-CLI, run without a terminal. The default agent is Klaudia, driven over its
-stream-json protocol (msp-klaudia `docs/embedding.md`): each message is a
-`user` line on its stdin, and its replies, tool calls and the `result` that
-ends a turn come back on stdout. `ENGINE_CHAT_DRIVER=codex` (WI-1148) uses
-the Codex app-server instead: JSON-RPC lines (`initialize`, then
-`thread/start` or `thread/resume` with the chat id as `threadId`, then
-`turn/start`). Codex approvals arrive as JSON-RPC requests and are answered
-on stdin; they do not use the Klaudia hook gate. A Codex chat writes a
-per-chat `CODEX_HOME` under `state_dir/chats/<id>/codex-home` (that process
-only; `CODEX_HOME` is not on the shared allowlist). Promotion of a Codex chat
-starts a terminal with `codex resume <chat id>` and no app-server flags.
-Klaudia stays the default and the fallback. The engine picks the conversation
-id, which is the chat's own id: `--session-id` on the first Klaudia launch
-and `--resume` on every later one. A
-chat's process is therefore disposable. It is stopped after
-`ENGINE_CHAT_IDLE_AFTER`, and on the next message it is relaunched with the
-whole conversation. Chats are kept for good in `state_dir/chats.db`. There is
-no retention sweep, and archiving only hides a chat from the default list.
+A **quick chat** (WI-1097) is a persistent text conversation with Codex, run
+without a terminal. Codex is the only chat driver (WI-3754 removed Klaudia):
+the engine launches `codex app-server --stdio` and speaks JSON-RPC on its
+stdin and stdout — `initialize`, then `thread/start` or `thread/resume` with
+the chat id as `threadId`, then `turn/start`; `turn/interrupt` stops a turn
+and `thread/settings/update` changes the model. Codex runs with
+`approvalPolicy = "on-request"`. Each approval request it sends
+(`item/commandExecution/requestApproval`, `item/fileChange/requestApproval`,
+`item/tool/requestUserInput`) becomes an approval card that only a person may
+answer, and is answered on stdin; an unanswered card is denied when
+`ENGINE_CHAT_APPROVAL_TIMEOUT` passes. The engine never auto-allows one. A
+chat writes a per-chat `CODEX_HOME` under
+`state_dir/chats/<id>/codex-home` (that process only; `CODEX_HOME` is not on
+the shared allowlist), whose `config.toml` points Codex at the estate
+LiteLLM provider and whose `vogt-model-catalog.json` is the model list the
+picker offers.
+
+The engine picks the conversation id, which is the chat's own id, so a
+chat's process is disposable. It is stopped after
+`ENGINE_CHAT_IDLE_AFTER`, and on the next message it is relaunched with
+`thread/resume` and the whole conversation. Promotion starts a terminal
+session from the chat's template with `resume: <chat id>` — `codex resume
+<chat id>` — and the session continues that conversation with its own
+credentials. Chats are kept for good in `state_dir/chats.db`. There is no
+retention sweep, and archiving only hides a chat from the default list.
 
 Every route needs the `sessions` capability, because a chat starts an agent
 and its transcript is a shared record. They all answer 404 when chats are off
-(`ENGINE_CHAT_ENABLED=0`, or no Klaudia launch configured), and `/api/config`
-advertises `chat: {drivers: [{name, label, models}]}` only when they are on.
-The core's `chat.*` operations are the MCP/CLI/REST counterparts.
+(`ENGINE_CHAT_ENABLED=0`, or no Codex launch configured), and `/api/config`
+advertises `chat: {drivers: [{name: "codex", label: "Codex", models}]}` only
+when they are on. The core's `chat.*` operations are the MCP/CLI/REST
+counterparts.
 
 - `GET /api/chats?q=&archived=false|true|all&limit=` -> `ChatSummary[]`, newest
   first. `q` is full-text search over titles and over what people and the
   agent said. Tool inputs and results are not indexed.
-- `POST /api/chats` `{title?, model?, message?, work_item?}` -> `ChatSendResult`.
+- `POST /api/chats` `{title?, driver?, model?, message?, work_item?}` ->
+  `ChatSendResult`. `driver` may only be `codex` (the default); any other
+  name is `400`.
 - `GET /api/chats/:id?tail=` -> `ChatDetail`, i.e. the summary plus `entries`
   (`user`, `assistant`, `tool-call`, `tool-result`, `notice`, `error`,
   `approval`) and `approvals` still pending.
@@ -3057,49 +3407,31 @@ The core's `chat.*` operations are the MCP/CLI/REST counterparts.
 - `GET /api/chats/:id/events`: an SSE stream of `ChatEvent` (`entry`,
   `progress`, `approval`, `chat`, `lagged`). `/api/events` also carries a
   thin `chat-changed {id}`.
-- `POST /api/chats/:id/gate` is **outside the bearer gate**. Only the chat's own
-  agent calls it (below), with the per-process token the engine gave that
-  agent.
-
 **What a chat's agent can do.** A chat reads pages and documents nobody
 vetted, so the engine assumes its agent can be talked into anything:
 
 - **Its environment holds no secrets.** The agent starts from a cleared
   environment plus an allowlist (`PATH`, `HOME`, locale, `TZ`, proxy and CA
-  variables), its gate's URL and token, and the one provider key that
-  `ENGINE_CHAT_PROVIDER_KEY` names. The engine resolves that key through the
-  agent-auth manifest's `get` when the deployment brokers it, or else from its
-  own environment. The template's credential wrapper is dropped, so a chat has
-  no Vogt token, no brokered service tokens and no secrets-manager identity.
-  **Its MCP servers therefore start without credentials. The POC has no MCP
-  in chats (decision D1 on WI-1097).**
-- **Only its own directory is free.** Each chat runs in
-  `state_dir/chats/<id>/`, whose `.klaudia/config.toml` (loaded with
-  `--trusted-project-config`) declares a `PreToolUse` hook. The hook posts
-  every tool call to the gate. The free path is an allowlist, and it fails
-  closed. A call runs at once only in two cases: it is a tool that touches
-  nothing outside the agent (`ToolSearch`, `TodoWrite` and the like), or it is
-  a read tool the engine knows argument by argument (`Read`, `Glob`, `Grep`
-  and the LSP tools, from Klaudia's own schemas) whose every argument is one
-  it knows and whose every path resolves, lexically and through symlinks,
-  inside that directory. An unknown tool, an unknown argument, or a missing
-  or non-string path is a card. **Everything else waits on an approval card
-  that a person answers.** That includes any read elsewhere (`/proc/self/environ`, the
-  engine's state, `~`), every web, browser and MCP call (**decision D2:
-  every web call is carded**), every command and every edit. A prompt
-  injection therefore cannot read something and send it out in one unseen
-  step, because each half is a card naming what it would do. Klaudia's own
-  `can_use_tool` asks (host changes) become cards too. `ask_user` and
-  `exit_plan` are answered "not supported in a chat".
-- **The gate fails closed where it can.** On any failure to get an answer, the
-  hook exits 2, which is Klaudia's "block". The engine denies a card at
-  `ENGINE_CHAT_APPROVAL_TIMEOUT`, which is before curl gives up and before the
-  hook's own timeout, after which Klaudia would let the call through. When
-  Klaudia asks whether the chat's hooks may run, the engine allows that only
-  for its own file, byte for byte as it wrote it. If a gated call succeeds
-  without the gate having seen exactly that call, the chat's agent is stopped
-  with an error. The gate is a driver's gate, not a sandbox. A command a person
-  allows runs unconfined, which is what WI-982's uid separation is for.
+  variables), and the one provider key that `ENGINE_CHAT_PROVIDER_KEY`
+  names. The engine resolves that key through the agent-auth manifest's
+  `get` when the deployment brokers it, or else from its own environment.
+  The template's credential wrapper is dropped, so a chat has no Vogt token,
+  no brokered service tokens and no secrets-manager identity. **Its MCP
+  servers therefore start without credentials. The POC has no MCP in chats
+  (decision D1 on WI-1097).**
+- **The approval card is Codex's own request.** The engine has no per-call
+  hook into the app-server: a tool call Codex runs without asking — a read
+  inside the chat's directory, or something its config allows — leaves no
+  card, and one it asks about waits on a person (decision D2). The card is
+  not a sandbox: a command a person allows runs unconfined, which is what
+  WI-982's uid separation is for. That uid separation, not this card, is the
+  boundary against an agent a person has let run.
+- **Failing to answer means no.** Nothing but a person's answer allows a
+  card: an unauthenticated caller gets `403 person required`, an unanswered
+  card is denied at `ENGINE_CHAT_APPROVAL_TIMEOUT`, and a chat stopped or
+  interrupted with cards pending drops them as denied. An agent that exits
+  with a card still pending is stopped with an error entry the sender can
+  retry.
 - **It is bounded.** Limits on chat processes:
   - at most `ENGINE_CHAT_MAX_PROCESSES` (4) at once, and
     `ENGINE_CHAT_MAX_PER_CREATOR` (2) per person; a launch first stops the least
@@ -3115,15 +3447,14 @@ vetted, so the engine assumes its agent can be talked into anything:
   they appear in no session list and never hibernate.
 - **What is kept** is text: what was said, tool calls (600 characters), tool
   results (4 000), approvals, notices and errors, with what looks like a
-  credential redacted. Klaudia's own JSONL transcript under
-  `~/.klaudia/sessions` is what `--resume` continues from.
+  credential redacted. Codex's own transcript under that chat's `CODEX_HOME`
+  is what `thread/resume` continues from.
 
 | Setting | Default | Meaning |
 |---|---|---|
 | `ENGINE_CHAT_ENABLED` | `1` | `0` turns chats off |
-| `ENGINE_CHAT_DRIVER` | `klaudia` | `klaudia` (stream-json) or `codex` (app-server JSON-RPC). Anything else fails startup |
-| `ENGINE_CHAT_TEMPLATE` | first Klaudia template | the session template whose driver a chat runs, and that promotion uses |
-| `ENGINE_CHAT_COMMAND` | — | the driver command instead (words, or a JSON array) |
+| `ENGINE_CHAT_TEMPLATE` | the first template that runs Codex | the session template whose command launches a chat (only its binary is used: a chat always runs `codex app-server --stdio`), and that promotion uses. Unset, the first configured template that runs Codex |
+| `ENGINE_CHAT_COMMAND` | — | the Codex command instead (words, or a JSON array). A command that does not run Codex turns chats off, and is never replaced by a template |
 | `ENGINE_CHAT_MODELS_JSON` | `[]` | `[{"id","label"}]` for the model picker; the first is a new chat's default; empty offers only the driver's own default |
 | `ENGINE_CHAT_PROVIDER_KEY` | — | the name of the provider-key variable the driver reads (its `apiKeyEnv`) |
 | `ENGINE_CHAT_IDLE_AFTER` | `10m` | stop an idle chat's process |
@@ -3133,6 +3464,9 @@ vetted, so the engine assumes its agent can be talked into anything:
 | `ENGINE_CHAT_MAX_RSS` | `2GiB` | kill a chat's process tree past this |
 
 ### File APIs
+
+These routes address the engine's `workspace_root`, even when the engine
+runs in Kubernetes. They do not browse the session pod's separate `/work`.
 
 Every path is relative to `workspace_root` and resolved against it by
 `workspace_path.rs`, which every filesystem route funnels through: `..`, an
@@ -3187,12 +3521,16 @@ contains `$HOME`, or contains `state_dir`.
 - `GET /api/search?q=&path=&max=` -> `SearchHit[]` — ripgrep, `max` defaults
   to 200 and is capped at 500. An empty `q` is `400`. `rg` must be on `$PATH`;
   its absence is `500`, deliberately loud, because a silent empty result would
-  read as "no matches".
+  read as "no matches". `rg` matches the unmasked file bytes; a hit's excerpt
+  is subject to the file-read masking above, not to a pre-search mask.
 - `GET /api/search/files?q=&path=&max=` -> `FileSearchResult[]` — substring
   match on name and relative path, case-insensitive, `max` defaults to 100 and
   is capped at 500. Ordered by name-prefix match first, then shorter paths.
 
 ### Git APIs
+
+These routes address engine-workspace repositories, not pod clones. Pod boot
+builds a best-effort inspection-only Git view with no remote; land with graft.
 
 `repo` is a workspace-relative path; the handler walks upward from it to the
 nearest `.git`, stopping at `workspace_root` so it cannot adopt a repository
@@ -3527,6 +3865,165 @@ Notifications the engine sends carry `{kind, session_id, url}` in their data,
 where `url` is a PWA route (`/#/t/<session-id>`), so a tap lands on the
 terminal that raised it.
 
+### Pod-backed sessions
+
+With `ENGINE_POD_BACKENDS_ENABLED` on, a template whose backend is `pod` runs
+its process in a Kubernetes pod (namespace `vogt-sessions`) that dials back to
+the engine. A reconciler sweeps the namespace every
+`ENGINE_POD_RECONCILE_TIMEOUT` (15 s): it ends a live session whose pod failed,
+vanished, sat Pending too long, or whose attached agent stopped sending
+heartbeats, and deletes a pod that no live or hibernated session owns once
+`ENGINE_POD_ORPHAN_TTL` (3600 s, 0 disables; WI-4233) has passed since a sweep
+first found it unowned, and only if the session's latest salvage report did not
+fail, is at least 60 s newer than the pod, and has its `manifest.json` on disk (or a fresh nothing-to-save marker for the pod exists). A stop
+whose pod delete failed logs a warning and leaves the pod for this reaper; a pod
+the reaper keeps is warned about once, then every 10 minutes.
+
+Pod lifecycle timing is configurable in whole seconds through
+`ENGINE_POD_CONNECT_TIMEOUT` (30), `ENGINE_POD_PENDING_TIMEOUT` (600),
+`ENGINE_POD_RECONNECT_TIMEOUT` (120), `ENGINE_POD_RECONCILE_TIMEOUT` (15), and
+`ENGINE_POD_HEARTBEAT_TIMEOUT` (60), and `ENGINE_POD_ORPHAN_TTL` (3600); a value that is not a whole number of
+seconds refuses engine start. `ENGINE_POD_RECONCILE_TIMEOUT` is the sweep
+interval. The heartbeat timer applies only while an agent is attached: it
+starts when the agent completes its hello and is refreshed by each heartbeat,
+and a silent running pod is ended with a distinct heartbeat-timeout reason.
+When the agent's socket drops, the heartbeat deadline stops and
+`ENGINE_POD_RECONNECT_TIMEOUT` governs how long it may stay away before the
+session is ended as unreconnected. Hibernating a pod whose agent is not
+attached returns `409` unless the request explicitly sets `force=true`;
+`force` does not bypass the separate no-pinned-conversation refusal
+(`allow_shell`). Internal lifecycle paths (restart readoption, shutdown, idle
+policy and budget) hibernate or mark such a pod lost without the person-facing
+`409`.
+
+The built-in templates (used when the config file lists none) run on
+`ENGINE_SESSION_BACKEND` (or `VOGT_ENGINE_SESSION_BACKEND`): `local`
+(default) or `pod`, which needs `ENGINE_POD_BACKENDS_ENABLED`. Any other value
+refuses to start the engine. A template's own `backend` in the config file is
+kept as written. The built-in `Claude Code (protected)` template supports
+`placement=pod` even when its default and the deployment default remain
+`host`; this moves only the requested Claude session into a pod.
+
+The built-in agent templates state both placements: `Claude Code (protected)`
+and `OpenCode (protected)` keep `local` as their default backend and are
+pod-capable, so `placement=pod` starts them in a pod without moving an
+existing start off the host; `Codex (protected)` stays pod-only. The pod image
+carries both CLIs at the pins in `engine/agent-versions.env`, and the
+entrypoint seeds the Claude account bundle, the account's onboarding state and
+the Vogt/Cadastre MCP registrations it receives from the bootstrap response.
+A pod with no account bundle still starts: the entrypoint names the missing
+login and the CLI shows its own signed-out state rather than the pod failing.
+
+`session_start` (and `POST /api/sessions`) takes `placement=host|pod|auto`.
+`auto` is the default and follows the template's own backend; an explicit
+placement the template or deployment cannot provide is refused with a `400`
+naming it. Codex's pod-only rule is a refusal, not a default that silently
+moves: `placement=host` for Codex is `400`.
+
+### Host placement (WI-4428)
+
+The host is a capped exception. Pods are the default for work that runs on
+behalf of a worker, and the host is kept for oversight, a person's own shell,
+agent tasks and the assistant.
+
+- **Role policy.** A Vogt-started worker or review (an API start that is not
+  oversight and carries a work item or its `VOGT_SESSION_ID`) asking for
+  `placement=host` is refused with `409`, the reason naming the policy.
+  `ENGINE_HOST_PLACEMENT_ALLOW_WORKERS=1` lifts the refusal during the
+  transition. It is off by default. A wake is not refused: a worker already
+  placed on the host wakes there and counts against the cap.
+- **Default pod.** On a deployment whose default backend is `pod`, a Vogt
+  worker or review that names no template and no placement starts in the
+  default agent pod template, and the record keeps that template name.
+  Oversight, agent tasks, a person's own shell and template-less starts stay
+  on the host, and count against the cap.
+- **No silent host.** A named template that does not resolve is a `400`. A
+  wake whose recorded template is no longer configured is a `400` that names
+  the template; it is not started without it.
+- **Cap.** `ENGINE_HOST_SESSION_CAP` (default `0`, unlimited) caps the live
+  host sessions, counting shells, agent tasks, assistant starts and wakes. A
+  start over the cap is refused with `429` and a body of
+  `{"error", "cap", "counts": {"live", "by_origin"}}`. A host session's slot is
+  freed when its process exits, so stopping one lets the next start in.
+- **Scratch.** Each host session gets its own `TMPDIR`,
+  `CARGO_TARGET_DIR` and `XDG_CACHE_HOME` under
+  `<ENGINE_HOST_SESSION_SCRATCH_ROOT>/<session-id>/` (default root
+  `<state_dir>/host-scratch`). The directory is removed when the session
+  ends. A hibernated session keeps it for its wake.
+
+A pod template whose command names an agent CLI (`claude`, `codex` or
+`opencode`, bare or behind `vogt-agent-auth run --`) sets the pod's
+`VOGT_CLI` to that CLI and passes no argv. The session agent builds the
+command line, with the driven-session policy, the MCP set and the
+conversation. For Claude Code it applies the model, effort and posture through
+the same `claude_args`/`claude_permission_flags` a host launch uses (WI-3881),
+so the two argv cannot drift. For Codex it also applies the posture the engine carries in
+`VOGT_PERMISSION_MODE` and `VOGT_CODEX_APPROVAL_POLICY` through the same
+`codex_permission_flags` a host launch uses: every posture names
+`-s danger-full-access`, because a pod cannot create the user namespace
+`workspace-write` needs, and the default posture pins `-a never` so a driven
+worker does not stop at an approval menu (WI-3864). Everything else a Codex
+launch carries is built by `vogt_session_agent::codex_args`, the same function
+the host launcher calls (WI-3882): the selected provider and its
+`model_providers.<name>` table (read from the bootstrap fragment in a pod), the
+workspace guidance and scope charter, `default_tools_approval_mode="approve"`
+for the approved MCP servers, the compact limit and
+`features.daemon_auto_start=false`, in one canonical order. The engine sends
+the pod the pieces it gathered itself — guidance, charter, compact limit and
+the template's own argv — as base64 JSON in `VOGT_CODEX_LAUNCH_B64`, applied
+at the final `exec`; the entrypoint writes the bootstrap's full Codex fragment
+to `$CODEX_HOME/vogt-codex.toml` and exports `VOGT_CODEX_CONFIG_FILE` naming
+it. Only the fragment's `[mcp_servers.*]` tables are merged into the shared
+`$CODEX_HOME/config.toml`, so provider and model selection stay per-launch
+instead of being written into a person's config. Any other command runs as
+given (`VOGT_SESSION_COMMAND`), and no command uses `ENGINE_POD_CLI` (default
+`codex`).
+
+**A pod start carries the caller's `cwd` and extra `env` (WI-3883).** A pod
+clones the project's checkout itself, so a requested `cwd` is only meaningful
+as a path inside that clone: the engine resolves it against the checkout's git
+top level and sends the pod-side path as `VOGT_WORK_DIR` in the bootstrap
+response. A `cwd` outside any checkout is refused with a 400 naming `cwd`, and
+so is a `worktree`, which the pod would have to cut itself. The caller's extra
+environment travels in the same bootstrap response, never in the pod spec, but
+in its own `agent_env` object rather than `env`: the entrypoint exports `env`
+before it clones, and a caller's `GRAFT_ENDPOINT` there would receive the
+minted source token. `agent_env` is applied only at the agent's final `exec`,
+after the clone and the git view, and a name the engine already set keeps the
+engine's value. A name the agent must not take from a caller is refused with a
+400 naming it: `VOGT_*`, `GRAFT_*`, `GIT_*`, `LD_*`, `BASH_ENV`, `ENV`,
+`NODE_OPTIONS`, `PYTHON*`, `PERL5*`, `RUBYOPT`, `*_PROXY`/`*_proxy`, `PATH`,
+`HOME`, `SHELL`, `IFS`, `CDPATH`, `PS4`, `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, and
+every credential-shaped name. So is a name that is not `[A-Z_][A-Z0-9_]*` and
+a value carrying NUL, newline or tab (the entrypoint reads one TSV row per
+variable). Vogt's own session-contract names (`VOGT_HTTP_TOKEN`,
+`VOGT_SESSION_ID`, `VOGT_WORK_ITEM`, `VOGT_URL`, `VOGT_ENGINE_URL`,
+`CLAUDE_CONFIG_DIR`, `VOGT_SESSION_IMAGE`) are skipped, not refused: vogt-core
+sends them on every start, and the engine sets its own value where the pod
+needs one rather than carrying a caller's. A wake, or an engine restart
+adopting a running pod, replays a record validated when its session started,
+so a field that no longer passes (a checkout since removed, say) is left out
+instead of refusing the wake.
+
+Engines can share the namespace (dev and prod, or an old process during a
+rollout), so ownership is explicit:
+
+- every pod carries `vogt.engine=<engine id>`, set from
+  `ENGINE_POD_ENGINE_ID` (default `vogt-engine`; sanitised to a label value).
+  Give each deployment its own id and keep it stable across restarts;
+- the sweep lists only `vogt.session,vogt.engine=<id>`, and ignores any pod
+  without its own label (pods made before the label existed are not deleted;
+  remove them by hand);
+- a pod with no live session is reported, never deleted: its workspace exists
+  only inside it, and only an explicit stop or hibernate may delete a pod. A
+  delete that does run names the pod's uid, so a decision about one pod cannot
+  delete its replacement (the API server answers 409).
+
+**An engine restart re-adopts the running pods.** Boot restores the session
+records from `state_dir`, rebuilds each surviving pod's stream link over the
+kept credential (WI-3205), and leaves the pods that cannot be adopted running
+for the operator to recover. Reporting is rate-limited to one warning per pod.
+
 ### Session history APIs
 
 Archived scrollback for sessions. Every route requires history to be enabled —
@@ -3587,7 +4084,9 @@ empty on older rows.
   default. `truncated` is how a client knows it is not looking at the whole
   run. `strip_ansi` (default false) removes the escape sequences a terminal
   consumes without printing, so `text` is readable plain text; the byte
-  counters still describe the raw tail window that was read.
+  counters still describe the raw tail window that was read. `text` is
+  redacted like `/screen`: a log tail is a transcript (WI-3988). Search
+  snippets are redacted the same way.
 - `GET /api/history/:id/download` -> the whole log, streamed, as an attachment
   named for the session.
 - `DELETE /api/history/:id` -> `{"ok": true}`, `404` if it was already gone
@@ -3729,6 +4228,9 @@ Avoid anonymous `serde_json::json!` blobs for stable routes when a named typed
 response will do. Current standard small shapes:
 
 - `OkResponse` -> `{"ok": true|false}`
+- `StopResponse` -> `{"ok": true, "salvage"?: SalvageReport}`; the salvage
+  report is `{"state": "saved"|"salvage_failed", "path"?, "files", "bytes",
+  "repos"?, "reason"?, "at"}` (WI-4132).
 - `WriteFileResponse` -> `{"ok": true, "bytes": <n>}`
 
 Several routes return `serde_json::Value` rather than a named type — the push
@@ -4168,7 +4670,7 @@ can affect the forge; the same approval gate and core writeback policy apply.
 | `project.create` | Operator-only | Unavailable: Creates host directories and files; use project setup outside the assistant. |
 | `project.import` | Operator-only | Unavailable: Clones into host paths and performs bulk import; use project setup. |
 | `project.get` | Voice-readable | Available: Fetch one project by slug. |
-| `project.list` | Voice-readable | Available: List registered projects, each with whether work.create lands there now. |
+| `project.list` | Voice-readable | Available: List registered projects, each with whether an upstream work.create lands there now. |
 | `project.brief` | Voice-readable | Available: The per-repo view: state, work, bugs, version, compliance. |
 | `project.update` | Confirmation-gated | Available after approval: Correct a project's declared repo URL or exclusions. |
 | `project.transition` | Confirmation-gated | Available after approval: Move a project through its lifecycle states. |
@@ -4183,7 +4685,9 @@ can affect the forge; the same approval gate and core writeback policy apply.
 | `work.unrelate` | Confirmation-gated | Available after approval: Remove a typed relation between two work items. |
 | `work.bind_branch` | Confirmation-gated | Available after approval: Declare the git branch a work item is worked on. |
 | `work.comment` | Confirmation-gated | Available after approval: Comment on a work item, attributed to the acting actor. |
-| `work.land` | Operator-only | Unavailable: Pushes a reviewed branch onto the base branch; a person or oversight lands it from the CLI, GUI or MCP. |
+| `work.land` | Operator-only | Unavailable: Lands a changeset on its line, which is the operator's call after reviewing the batch. For agents over MCP/CLI/REST, not a voice action. |
+| `workspace.list` | Operator-only | Unavailable: Workspace bookkeeping for the GUI and agents; not curated for the assistant. Read it over MCP, REST or the CLI. |
+| `workspace.clean` | Operator-only | Unavailable: Removes a workspace's directories or worktrees; destructive, and never a voice action. |
 | `backlog` | Voice-readable | Available: The ranked backlog, globally or for one project. |
 | `bugs` | Voice-readable | Available: Open bugs across every project, ranked. |
 | `why` | Voice-readable | Available: Per-input score contributions for one ranked item. |
@@ -4219,12 +4723,14 @@ can affect the forge; the same approval gate and core writeback policy apply.
 | `serve` | Operator-only | Unavailable: Local server process management; no remote MCP tool. |
 | `session.start` | Confirmation-gated | Available after approval: Open a coding session for a work item or a project. |
 | `session.list` | Voice-readable | Available: List coding sessions with their live activity state. |
+| `session.template_list` | Operator-only | Unavailable: The launch templates a session may start from; the assistant starts sessions against a work item or project, not a template. For agents over MCP/CLI/REST. |
 | `session.stop` | Confirmation-gated | Available after approval: Stop a coding session and revoke the token it ran with (either id form). |
 | `agent_cli.list` | Voice-readable | Available: Report the pod's agent CLIs: active, baked and upstream versions. |
 | `agent_cli.update` | Operator-only | Unavailable: Installs executable tooling on the host. |
+| `llm_provider.list` | Operator-only | Unavailable: Admin model-provider configuration; provider endpoints and keys are operator setup, not a spoken answer. |
+| `llm_provider.set` | Operator-only | Unavailable: Changes model-provider configuration; operator setup, never a voice turn. |
+| `llm_provider.remove` | Operator-only | Unavailable: Removes model-provider configuration; operator setup, never a voice turn. |
 | `session.history_list` | Voice-readable | Available: List archived sessions (history), newest first. |
-| `workspace.list` | Voice-readable | Available: List live and hibernated sessions' working trees (path, branch, size, merged state), read-only. |
-| `workspace.clean` | Operator-only | Unavailable: Deletes build output or a whole worktree; run from the GUI, CLI or MCP, not by voice. |
 | `agent_activity.search` | Operator-only | Unavailable: Agent transcript activity is not curated for the voice assistant; read it over MCP, REST or the CLI. |
 | `agent_activity.summary` | Operator-only | Unavailable: Agent transcript activity is not curated for the voice assistant; read it over MCP, REST or the CLI. |
 | `session.search_output` | Voice-readable | Available: Search session output (live sessions included). |
@@ -4299,7 +4805,7 @@ can affect the forge; the same approval gate and core writeback policy apply.
 | `inbox.restore` | Confirmation-gated | Available after approval: Restore one archived or snoozed Inbox occurrence. |
 | `preference.get` | Operator-only | Unavailable: Per-person UI settings (saved filters); the assistant has no use for them. |
 | `preference.set` | Operator-only | Unavailable: Changes a person's saved UI settings; set them in the surface they belong to. |
-| `chat.list` | Operator-only | Unavailable: Quick chats are a separate agent (Klaudia) with its own transcript; the assistant is not a client of them. For the Chat panel and agents over MCP/CLI/REST. |
+| `chat.list` | Operator-only | Unavailable: Quick chats are a separate agent (Codex) with its own transcript; the assistant is not a client of them. For the Chat panel and agents over MCP/CLI/REST. |
 | `chat.get` | Operator-only | Unavailable: Reads a quick chat's transcript; for the Chat panel and agents over MCP/CLI/REST. |
 | `chat.create` | Operator-only | Unavailable: Starts another agent; the assistant starts sessions instead. |
 | `chat.send` | Operator-only | Unavailable: Talks to another agent; for the Chat panel and agents over MCP/CLI/REST. |
@@ -4454,6 +4960,10 @@ deployment.
 ---
 
 ## 7. Agent tasks
+
+Scheduling state stays in the engine. Each run uses its selected template:
+pod templates create pods; local templates start beside the engine. Durable
+task records do not persist a pod's workspace or live stream over restart.
 
 The engine's scheduler for long-lived or recurring agents — price monitors,
 recurring workspace checks, anything a person wants run on a clock rather
@@ -4619,7 +5129,7 @@ service behind it is not there, and exactly which setting turns it on.
 | **Vogt core** | the front door, credential checks, the assistant's Vogt tools, the event follower | `VOGT_CORE_URL` + the stack secret, `VOGT_CORE_TOKEN` / `VOGT_CORE_TOKEN_FILE` — §3, §5 | The engine is bootable alone with a break-glass `ENGINE_TOKEN` (with neither it refuses to start): sessions work, `/readyz` stays ready, the Vogt routes answer `503` with a named reason. |
 | **FCM** (native push) | push to the Android shell | `ENGINE_FCM_SERVICE_ACCOUNT_FILE` (a path to the Firebase service-account JSON; `ENGINE_FCM_SERVICE_ACCOUNT_JSON`, the document inline, is also accepted but carries a private key in the environment and is warned about) | The FCM transport is disabled; browser web-push still works for any subscription. VAPID keys are generated and persisted under `state_dir`. |
 | **GUI streaming** | the GUI tab's live stream of launched processes | `GUI_STREAM_URL` (+ `START_SWAY=1`, and `GUI_STREAM_VERIFIED=1` once an operator has watched it work) | `/readyz` reports `gui: disabled` and the GUI surface's affordances are withdrawn with a stated reason. |
-| **Agent CLIs** (`codex`, `claude`, `opencode`, `klaudia`) | agents inside sessions | `INSTALL_AI_CLIENTS=true` at image build (on in the published image), or a user-managed install in the pod's home | Sessions are ordinary shells; the "(protected)" templates cannot start. |
+| **Agent CLIs** (`codex`, `claude`, `opencode`) | agents inside sessions | `INSTALL_AI_CLIENTS=true` at image build (on in the published stack image; a dev image built from a checkout must pass it too — `vogt-dev` did not, WI-3761), or a user-managed install in the pod's home | Sessions are ordinary shells; the "(protected)" templates cannot start. A resolved-manifest row whose copy is missing fails the boot check instead of starting sessions that die. |
 | **Agent service auth** | brokering third-party service credentials (GitHub and others) into a session from a secrets manager | `ENGINE_AUTO_AGENT_AUTH=1` + `ENGINE_AGENT_AUTH_HELPER` naming a helper (the bundled reference helper is auto-selected when its secrets manager's machine identity is present in the environment), configured through the env vars in `agent-auth.sh`'s header | Sessions run without those credentials pre-loaded; nothing in the engine depends on it. **The shipped helper is one pluggable example** — a data-driven reference implementation against one secrets manager; it bakes in no address, project or secret name and is driven by `ENGINE_AGENT_AUTH_SECRETS`/`_PROBES`. A deployment points the variable at a helper of its own that speaks the same subcommands (`check`, `run`, `shell`, `get`, `set`, `fetch`, `store`), or leaves it off. When it *is* on, a session gets exactly the manifest and never the machine identity — see the credential contract below. |
 
 **The agent-auth session credential contract.** A session launched under this
@@ -4683,22 +5193,92 @@ wire_api = "chat"                        # or "responses"
 env_key = "HOMELAB_LITELLM_DEEPSEEK_KEY" # the variable Codex reads the key from
 secret_project = "<secrets-manager project id>"
 secret_name = "HOMELAB_LITELLM_DEEPSEEK_KEY"
-models = ["deepseek-chat"]               # informational
+context_window = 1000000                 # optional Codex model_context_window
+auto_compact_token_limit = 500000        # optional Codex auto-compact threshold
+models = ["deepseek-chat"]               # the models this entry serves
 ```
 
-At each launch the registry does two things, and nothing else:
+At each launch the registry does three things, and nothing else:
 
 - Each provider's `env_key` joins the agent-auth manifest as an `optional`
-  line (`env_key secret_project secret_name`). The helper resolves it into the
-  session, and the broker's policy covers it. A name in no manifest and no
+  line (`env_key secret_project secret_name`). A host launch resolves it
+  through the helper, so Codex gets the value. A pod launch does not: the
+  bootstrap names the key among the `AGENT_AUTH_ONDEMAND` breadcrumbs and
+  carries no value, and the session agent fetches each key into the Codex
+  child's environment through `vogt-agent-auth fetch` immediately before it
+  starts (WI-3886), so the value never joins the pod's long-lived process
+  tree. The broker's policy covers either path. A name in no manifest and no
   registry is still refused. A provider whose `env_key` is already a VAR in
   `ENGINE_AGENT_AUTH_SECRETS` or the manifest file is dropped whole: it gets
   no Codex table and no key fetch, and is logged by provider and VAR name.
   Otherwise its table would point that VAR, which holds the manifest's
-  secret, at the registry's `base_url`.
-- A Codex session gets one `model_providers.<name>` table per provider, as
-  `-c` overrides on its argv, so the shared `~/.codex/config.toml` is never
-  rewritten.
+  secret, at the registry's `base_url`, and the pod fetch would bypass the
+  manifest line's `ondemand` or `writable` policy. A pod fetches a provider
+  key only when the live entry names the registry's own project and secret.
+  The API may register a provider against any exact `project_id`/`secret_name`
+  pair already approved by the manifest, even when the provider's `env_key` is
+  different from that manifest VAR. The secret reference remains exclusive to
+  one provider, and an `env_key` that collides with a manifest VAR is refused;
+  this permits separate approved secrets to back separate temporary providers
+  without letting a provider shadow deployment-owned environment variables. A
+  reference that no manifest line or grant project approves is refused with
+  the provider name and the exact `project_id`/`secret_name` it rejected: the
+  project id must be the one in this instance's mounted manifest, which can
+  differ from the id another deployment or secret-store listing records for
+  the same secret name.
+- An opencode pod (WI-4296) gets each provider as an OpenAI-compatible
+  `provider.<name>` block in the bootstrap's `opencode_config`, with
+  `options.baseURL` the entry's `base_url` and `options.apiKey` the reference
+  `{env:<env_key>}`; the session agent fetches that name around the opencode
+  child, as it does an MCP bearer. Its models are `<name>/<model>`. A start
+  asking for a model is resolved against them: a registered `<name>/<model>`
+  runs as it is, a bare registered model is qualified with its provider (the
+  `litellm` entry first), and anything else is refused with `unknown_model`
+  before the pod exists, rather than left to fall back to opencode's own free
+  default. The entrypoint logs the providers and the model.
+- A Codex session gets one `model_providers.<name>` table per provider. A
+  host launch gets them as `-c` overrides on its argv, so the shared
+  `~/.codex/config.toml` is never rewritten. A pod gets them in the
+  bootstrap's `codex_config`, where they replace any table of the same name;
+  the entrypoint writes that full fragment to `$CODEX_HOME/vogt-codex.toml`
+  and names it as `VOGT_CODEX_CONFIG_FILE`, and the session agent reads the
+  provider, model selection and MCP server names from it. Both launches then
+  pass the same `-c` overrides through `vogt_session_agent::codex_args`
+  (WI-3882), so a provider cannot reach one and not the other. The selected
+  provider's `context_window` and `auto_compact_token_limit` are the base for
+  the compact backoff (WI-2832): a recorded floor can only raise the limit
+  from the provider's value, never from the deployment's 272k/200k defaults,
+  and each key is emitted once so no later `-c` can replace it with a lower
+  one. Only the
+  `[mcp_servers.*]` tables are merged into the shared `config.toml`, for a
+  person's own CLI. The engine resolves each key through the helper when the
+  pod boots, logging each resolution by name.
+- A Haiku-class Codex launch (a model name containing `haiku`, such as
+  `claude-org-haiku`) gets `model_context_window=200000` and
+  `model_auto_compact_token_limit=170000` (total scope) from
+  `vogt_session_agent::codex_args` (WI-3998, the WI-3976 override). It
+  replaces the provider's and the deployment's window for that launch, because
+  the global `model_context_window` in `~/.codex/config.toml` (850k) would let
+  Haiku reach its provider limit without compacting. Other models keep the
+  provider's or global values. The constants are `HAIKU_CONTEXT_WINDOW` and
+  `HAIKU_COMPACT_LIMIT` in `engine/session-agent/src/lib.rs`, so a change to
+  Haiku's window is a code change, not a config edit that a regenerated config
+  would undo.
+
+- A registered model that the catalog Codex would otherwise load does not list
+  gets a real catalog entry, so Codex does not synthesize fallback metadata for
+  it. Fallback metadata leaves apply_patch on code mode and prints "Model
+  metadata for <model> not found" at startup. On a host launch the engine
+  writes `<state_dir>/session-catalogs/<session-id>.json` — the effective
+  catalog (the file the shared config's `model_catalog_json` names, plus an
+  entry for every registered model) — and passes it as
+  `-c model_catalog_json=...`. The shared catalog is read, never rewritten, so
+  an operator's file and a running session are untouched. An entry uses the
+  provider's `context_window` when it names one. A model already listed needs
+  no override, and a shared config that names a catalog it cannot read is left
+  alone rather than replaced. Pod launches draw their catalog from the
+  bootstrap, which lists the router's groups only, so a pod launch of a
+  provider-registered model still needs its own entry there.
 
 Running sessions keep the providers and keys they launched with. Remove an
 entry and the next launch has neither. Every field is validated: a provider
@@ -4708,6 +5288,73 @@ providers with one name or one `env_key`, or a field that would add a second
 manifest line all make the whole registry invalid. An invalid registry
 registers nothing and is logged. The file holds names and addresses, never a
 key. To add a provider live:
+
+**Choosing an entry.** The requested model selects its provider: a session
+started with `grok-4.7` uses the entry whose `models` list names
+`grok-4.7`, not whichever entry happens to be first. When two entries list
+the same model the entry named `litellm` wins. A requested model that no
+entry lists is refused before the session starts (`400`, code
+`unknown_model`), naming the model only and creating no pod. A `claude`
+template launch is the exception above: Claude Code's own aliases and
+`claude-…` ids never need an entry.
+`ENGINE_LLM_MODEL_ALLOWLIST` admits a model the registry does not list; an
+allowlisted model keeps the previous fallback when selecting an entry (the
+`litellm` entry, else the first). A launch with no `model` is unchanged. A
+registry whose entries list no models at all states no known models, so the
+launch is not checked. Selection happens on each launch from the registry as
+it stands then, so modifying the file takes effect for the next session
+without restarting the engine.
+
+**A missing secret refuses the launch.** Before a Codex session starts, the
+engine resolves the selected provider's secret through the live agent-auth
+manifest (or a live grant for that variable) and discards the value. If the
+secret is not declared, or the helper cannot read it, the start is refused
+with `400` and a message naming the secret — never its value — and no pod is
+created. A session therefore fails at the launch that has the wrong key,
+rather than at its first turn.
+
+**Recommended entries.** The estate's working routes all go through the
+LiteLLM router, so the registry holds addresses and secret *names*; the key
+values stay in the secrets manager and never appear in this file.
+
+```toml
+[[provider]]
+name = "litellm-deepseek"
+base_url = "http://litellm:4000/v1"
+wire_api = "chat"
+env_key = "HOMELAB_LITELLM_DEEPSEEK_KEY"
+secret_project = "<project id from this deployment's manifest>"
+secret_name = "HOMELAB_LITELLM_DEEPSEEK_KEY"
+models = ["deepseek/deepseek-v4-flash"]
+
+[[provider]]
+name = "litellm-grok"
+base_url = "http://litellm:4000/v1"
+wire_api = "chat"
+env_key = "HOMELAB_LITELLM_CLAWBAY_KEY"
+secret_project = "<project id from this deployment's manifest>"
+secret_name = "HOMELAB_LITELLM_CLAWBAY_KEY"
+models = ["grok-4.7", "grok-4.6"]
+
+[[provider]]
+name = "litellm-claude"
+base_url = "http://litellm:4000/v1"
+wire_api = "chat"
+env_key = "HOMELAB_LITELLM_CLAUDE_ORG_KEY"
+secret_project = "<project id from this deployment's manifest>"
+secret_name = "HOMELAB_LITELLM_CLAUDE_ORG_KEY"
+models = ["claude-org-haiku", "claude-org-sonnet", "claude-org-opus"]
+```
+
+Each `secret_name` must be an exact `project_id`/`secret_name` pair the live
+manifest already approves (or a project opened by
+`ENGINE_AGENT_GRANT_PROJECTS`). The Claude entry names its own LiteLLM
+virtual key because one secret reference is exclusive to one provider; the
+router still holds the Anthropic credential, and the exact key name depends
+on what the operator issued. Fallback between those model groups is
+LiteLLM router configuration in the ops repository, not an engine concern:
+the engine selects one registered entry per launch and does not retry a
+different provider when that one refuses a turn.
 
 1. Create the key, for example a LiteLLM virtual key, and store it in the
    secrets manager.
@@ -4794,22 +5441,81 @@ may carry a third flag, `ondemand` — `VAR PROJECT_ID SECRET_NAME ondemand` —
 which declares `VAR` for sessions but does **not** resolve it at launch. It is
 never sitting in the session's environment for the whole session; it exists
 there only at the moment it is asked for. The session's environment lists
-those names in `AGENT_AUTH_ONDEMAND`, beside `AGENT_AUTH_GRANTED`. A session
+those names in `AGENT_AUTH_ONDEMAND`, beside `AGENT_AUTH_GRANTED`; a Codex
+pod's provider keys are listed there too, because the launch wrapper fetches
+them on demand rather than receiving them in the bootstrap (WI-3886). A session
 asks with `vogt-agent-auth fetch VAR`, which calls the engine's
 `POST /api/agent-auth/fetch/{var}` on loopback (`VOGT_ENGINE_BROKER_URL`) with a
 per-session broker token the engine minted at spawn (`VOGT_ENGINE_BROKER_TOKEN`)
-and revokes when the session is forgotten. The engine — not the helper —
+and revokes when the session is forgotten. A pod session has neither of those:
+it reaches the same route at `VOGT_ENGINE_URL` with its stream credential in
+`VOGT_SESSION_TOKEN_FILE`, the same pair `vogt-policy-hook` already presents,
+so `fetch`, `store` and `grants` work from a pod without the engine-side broker
+pair. The engine — not the helper —
 enforces that `VAR` is in `ENGINE_AGENT_AUTH_SECRETS` (any entry, not only
 `ondemand`; an undeclared name is refused with the manifest line to add),
 rate-limits per session, then runs the configured helper's `get VAR` with the
 same re-granted environment a launch gets and returns the value. **Every fetch
 is audited** on `vogt::audit` by session id, variable and secret name —
-never value. The engine bearer does not open this route, and the broker token
+never value. **One name is not a manifest secret:** `fetch VOGT_HTTP_TOKEN`
+returns the session's own core credential — the token the engine minted when it
+launched the session, or the one the core put in the session's environment —
+to that session and no other. It needs no manifest line. That is the path a
+hand-typed `claude` or `codex` uses when it lost its environment: the
+credential it brings back still belongs to this session, so its writes are
+attributed to the session rather than to the pod.
+The engine bearer does not open this route, and the broker token
 opens nothing else. The engine reads the manifest itself at startup, with the
 helper's grammar; a malformed line is a startup error. Same honest caveat as
 above: at the same uid this narrows *ambient* exposure and adds an audit
 trail; it becomes an enforced boundary only once sessions run as a separate
 uid, and the design does not change when that lands.
+
+An `ondemand` token that an MCP server needs is resolved by the server's own
+launch, not by the bootstrap: `vogt-prod` (§4) runs a wrapper that fetches
+`VOGT_PROD_TOKEN` at spawn, and a pod's session agent fetches every bearer its
+MCP config names around the agent.
+
+**Stale GitHub credentials are refused, not handed out (gh#1460).** Before
+the broker returns a GitHub-bound value it checks it against
+`GET {api}/user` (5 s timeout). A value is GitHub-bound when its manifest name
+is `GH_TOKEN`, `GITHUB_MCP_TOKEN` or listed in
+`ENGINE_AGENT_AUTH_GITHUB_VARS`, or when it starts with `ghp_`, `gho_`, `ghs_`
+or `github_pat_`. A 200 hands it out; the verdict is cached per (name, SHA-256
+of the value) for 10 minutes. A 401 refuses the fetch with HTTP 424 and
+`{"code": "credential_stale", "var", "source", "error": "credential stale: VAR
+(source PROJECT/SECRET) was rejected by GitHub (401); it needs a person to
+refresh it"}`, and raises one Inbox decision (once per name and source, until
+the value is seen valid again) naming the manifest line and the source secret.
+Anything else (a timeout, a network error, a 5xx or rate limit) **fails open**:
+the value is handed out and a warning logged. Values are never logged; only
+names and hash prefixes. A background pass re-checks the named GitHub-bound
+entries on an interval, so a dead token reaches the Inbox without a session
+asking for it.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `ENGINE_AGENT_AUTH_GITHUB_CHECK` | on | `0`/`false`/`off` turns the check (and the background pass) off |
+| `ENGINE_AGENT_AUTH_GITHUB_VARS` | empty | extra GitHub-bound manifest names, comma- or space-separated |
+| `ENGINE_AGENT_AUTH_GITHUB_CHECK_INTERVAL_SECS` | `1800` | background pass interval; `0` disables the pass only |
+| `ENGINE_AGENT_AUTH_GITHUB_API_URL` | `https://api.github.com` | the API base; must be `https` on `api.github.com` or a host in `ENGINE_AGENT_AUTH_GITHUB_ENTERPRISE_HOSTS`, otherwise ignored with a warning |
+| `ENGINE_AGENT_AUTH_GITHUB_ENTERPRISE_HOSTS` | none | comma- or space-separated GitHub Enterprise API hosts allowed as the base |
+
+Launch-time check: for each GitHub-bound name it resolves (`GH_TOKEN`,
+`GITHUB_MCP_TOKEN`, the `GH_TOKEN_FROM` name, `GITHUB_VARS`, or a
+`ghp_`/`gho_`/`ghs_`/`github_pat_` value), `agent-auth.sh` asks
+`POST /api/agent-auth/github-check/{var}` whether that manifest secret is stale.
+The request carries no token: the engine resolves `{var}` itself, as it would
+broker it, and checks its own copy through the cached check the fetch route
+uses, so a caller cannot probe GitHub with, or raise or clear an Inbox item
+for, a value of its own. The answer is `ok`, `stale`, `unknown` or `not_github`,
+never the value. The route has the fetch route's session authentication and
+rate limit (one shared budget) and is audited by session, name and result. On
+`stale` the wrapper exports nothing for that name (no `GH_TOKEN` alias either)
+and records `credential stale: <secret name>, needs a person` in
+`AGENT_AUTH_UNAVAILABLE` and on the session's stderr. An engine that is down or
+too old, or a GitHub outage, fails open. Inconclusive answers are cached for 60
+seconds.
 
 **Storing a secret from a session: the write broker.** The mirror of the
 fetch, for a session that has just *produced* a secret — minted an API token,
@@ -4836,6 +5542,62 @@ is audited** on `vogt::audit` by session id, variable and secret name and
 byte length — never value. `writable` widens blast radius only to the entries an
 operator pre-authorised, and every overwrite is in the audit log. The same
 honest caveat applies.
+
+**Bundle write-back (WI-3160).** A pod's agent pushes its account bundle to
+`POST /api/agent-auth/store/{var}/bundle-file` with the same broker token. The
+route is limited to the session's own account and conversation, is
+rate-limited per session (120 a minute), and refuses a body over the bound
+(one MiB of payload as base64, plus envelope) from its `Content-Length`
+before reading it. Credentials are whole-file, newer-only, and a write is
+accepted only if it parses and holds a non-empty access token and refresh token
+and an `expiresAt` no further ahead than
+`ENGINE_AGENT_CREDENTIAL_MAX_LIFETIME_SECS` (default nine hours); without that
+ceiling one session could set a far-future expiry and refuse every genuine
+refresh on the account. `.claude.json` writes must carry a `version` (the
+file's mtime in ms, no more than ten minutes ahead of the engine's clock) that
+is newer than the last accepted one, which is persisted beside the file
+(`.claude.json.version`) so the check survives a restart. Transcripts are
+append-only deltas at an expected offset. Claude keeps its account path
+(`projects/…`); a Codex rollout is the contract path
+`sessions/<YYYY>/<MM>/<DD>/rollout-…-<conversation>.jsonl` under
+`ENGINE_CODEX_TRANSCRIPT_ROOT` — which defaults to the parent of
+`VOGT_SESSION_TRANSCRIPT_ROOTS["codex"]` when that root is set, so the writer
+always lands where `session.last_reply` reads, then `$CODEX_HOME`, then
+`$HOME/.codex` — and its write-back may name an empty account because the
+rollout belongs to the conversation. Every refusal is audited on
+`vogt::audit` by session id, account, file and reason, and an accepted write by
+name and byte length. Never a value.
+A deployment that serves `session.last_reply` for a pod Codex points
+`VOGT_SESSION_TRANSCRIPT_ROOTS["codex"]` at that `$CODEX_HOME/sessions` — the
+engine's own root, where the write-back lands, not any one pod's.
+
+**Dev admin token for oversight (WI-4279).** An oversight session gets a
+vogt-dev admin token by minting it, not by `fetch`: the driven-session policy's
+*Dev Admin Token Lifecycle* exception lets it run `vogt token issue` and
+`vogt token revoke` inside the vogt-dev pod, **dev lane only**. Every Claude
+launch gets the same settings file, workers included, so the exception holds
+only once the session has proved its role with engine output run in its own
+transcript: an `auth_whoami` result naming `agent:session:<id>` or
+`agent:engine:<id>` (the engine reads it from the per-session credential it
+issued) and a `session_list` row for that same id with `role` `oversight` (ask `session_list` for `mode: full`: the default digest
+rows leave `role` out). A
+worker has neither, so it can't use the exception. The `agent:engine:<id>` form
+(WI-4282) is how an operator-started oversight proves its role: an agent
+session a person opens from the GUI gets an engine-minted credential
+(`session.token`), no Vogt record, and an unlinked `session_list` row whose
+`id` is the engine UUID; once the person makes it oversight, that row carries
+`role` `oversight`. A `claude` typed into a plain shell runs with the pod's
+shared token (`agent:pod:…`) and can't prove a role; open oversight as an
+agent session instead. A session's credential is fixed when its agent starts,
+so making a shell oversight later can't hand it one.
+An issue needs `--expires-in-days 1` (the TTL is never longer), scopes from
+`read`, `work.write`, `project.write`, `admin`, and `--actor
+agent:oversight-<name>`. Capture the token without printing it: create a 0600
+file `$f`, run `vogt --json token issue ... | jq -r .secret > "$f"`, and set
+`VOGT_TOKEN_FILE="$f"`. Revoke the token with `vogt token revoke` once
+`tests/acceptance` has run, then delete the file. Prod token issue stays
+person-only; no manifest line or prod path is added. See
+`docs/design/driven-session-permissions.md`.
 
 **Approved actions (WI-2331, design only).** A proposed extension of the
 grant pattern from credentials to engine-executed, person-approved
@@ -4906,3 +5668,369 @@ Operator-local notes about a particular deployment belong in the git-ignored
 The core product's own optional integrations — GitHub collection, MCP, remote
 MCP, and the session engine itself — are in
 [`CUSTOMISATION.md`](CUSTOMISATION.md), which points here for the engine's.
+
+#### Session pod boot
+
+`engine/Dockerfile.pod` installs the same Codex fork release as the stack
+image, from `engine/agent-versions.env`, rather than stock npm Codex. The fork
+and its companion binaries are checksum-checked. The shared managed
+requirements are installed at `/etc/codex/requirements.toml`, with
+root ownership and permissions checked at build time. The session agent
+checks the policy inside the pod before launching Codex. Architectures without
+a published fork checksum cannot run Codex; no stock fallback is installed.
+
+The engine creates one pod per session from the `vogt-session-base` image,
+whose command is `deploy/session-entrypoint.sh`. The pod spec carries no
+token at all. The single-use bootstrap credential lives in a per-session
+Secret, `vogt-session-<id>-<random8>-bootstrap` (key `token`, immutable,
+labelled with the session and engine; the random part is fresh for every pod), which the pod mounts read-only at
+`/run/vogt-bootstrap` with mode `0400`; the spec's `VOGT_BOOTSTRAP_TOKEN_FILE`
+holds only the file's path. The engine creates the pod first and then the
+Secret, with an `ownerReference` to the pod, so the cluster deletes the Secret
+when the pod goes; the pod waits in `ContainerCreating` until the Secret
+exists. If the Secret cannot be created the pod is deleted and the session
+ends with the error. The name is unique per pod, so it never collides with a
+Secret an earlier pod of the session has not yet had collected, and the
+engine never deletes a Secret. Its Role in the sessions namespace therefore
+needs only `create` on `secrets` (no `get`, `list`, `watch`, `update` or
+`delete`). The pod spec also sets
+`VOGT_ENGINE_URL`, `VOGT_SESSION_ID`,
+`VOGT_SOURCE_JSON` (the session's source descriptor), `VOGT_CLI` (`claude`
+or `codex`), `VOGT_CLONE_DIR` (the clone root, `/work` or
+`<workspace>/session`) and `VOGT_WORK_DIR` (the work directory, replaced
+through the bootstrap response
+when the caller's `cwd` is inside the checkout), the source provider's env
+(for graft, `GRAFT_ENDPOINT` when known) and, when configured,
+`VOGT_EXTRA_CA_FILE`, and a requested model and effort as `VOGT_MODEL` and
+`VOGT_EFFORT` (WI-3881). Every pod also gets
+`VOGT_CODEX_APPROVAL_POLICY` (the engine's validated
+`ENGINE_CODEX_APPROVAL_POLICY`, `never` by default) and, for a posture other
+than the default, `VOGT_PERMISSION_MODE`; the session agent feeds both to the
+same `codex_permission_flags` the host launch uses (WI-3864), and the model,
+effort and posture to the shared `claude_args` (WI-3881). The bootstrap
+response's `env` also carries the four names-only agent-auth breadcrumbs
+`AGENT_AUTH_MODE` (`brokered`), `AGENT_AUTH_GRANTED`, `AGENT_AUTH_ONDEMAND` and
+`AGENT_AUTH_WRITABLE` (WI-3884), so in-pod `vogt-agent-auth fetch`, `store` and
+`grants` see the same contract as a host session without a value entering the
+bootstrap response. A Codex pod's registered provider keys appear in
+`AGENT_AUTH_ONDEMAND` by name and nowhere else in the response; the session
+agent fetches each one into the Codex child through `vogt-agent-auth fetch`
+just before the CLI starts (WI-3886). The entrypoint refuses a bootstrap that
+also carries a value for an ondemand name, so a regression fails the boot
+instead of exporting a provider key into the pod's whole process tree. A Codex
+pod also gets `VOGT_CODEX_LAUNCH_B64`, one base64
+JSON value carrying the guidance, charter, compact limit and template argv the
+pod cannot derive, and the entrypoint exports `VOGT_CODEX_CONFIG_FILE`;
+`codex_args` combines both with the fragment, so a host and a pod launch build
+the same Codex argv (WI-3882).
+
+The same child-only rule applies to pod MCP bearers (WI-4114): Codex reads
+`bearer_token_env_var` from its engine-owned fragment, while Claude Code and
+opencode read the variable reference in their engine-owned Authorization
+header. For all three, the session agent extracts only a valid environment
+name, fetches it through the per-session broker, and exports the value only in
+the final CLI launch shell. `VOGT_OPENCODE_MCP_CONFIG` names opencode's
+engine-owned file for that purpose; it carries no bearer value.
+
+The container's root filesystem is read-only (`readOnlyRootFilesystem: true`)
+on top of the existing uid/gid 1000, no-privilege-escalation and dropped
+capabilities. Every path the entrypoint or an agent writes to is a per-pod
+`emptyDir`, never shared storage: `/home/vogt` (and with it the default
+`CODEX_HOME`, `CLAUDE_CONFIG_DIR` and `XDG_CONFIG_HOME`), `/tmp`, `/work` (the
+clone and work tree) and `/run/vogt` (the runtime token and MCP files). The
+tool caches keep their own private `emptyDir` at `/cache` (WI-3242). The spec
+also sets `activeDeadlineSeconds`: a template's
+`active_deadline_seconds` policy wins, else the deployment's
+`ENGINE_POD_SESSION_DEADLINE_SECONDS` (default 12 h; `0` leaves it unset). A
+pod the kubelet stops at that deadline ends its session with the distinct
+reason `hit its active deadline: …` from the reconciler, not the generic
+failure note.
+
+Every `emptyDir` the pod has carries a `sizeLimit`, in two classes:
+
+- The home, `/tmp` and the run directory take `ENGINE_POD_TMP_SIZE_LIMIT`
+  (default `10Gi`).
+- The work tree, the private tool cache and the workspace tree take
+  `ENGINE_POD_WORK_SIZE_LIMIT` (default `30Gi`). These hold build output (a
+  Rust `target/` can run to tens of GiB), so they get the larger cap.
+
+Empty leaves a knob's volumes unbounded; a malformed quantity stops the engine
+at startup. A session that writes past its cap is evicted by the kubelet, so
+one runaway build cannot fill the node's disk.
+
+The per-volume caps are guards, not a budget. The kubelet's `ephemeral-storage`
+limit is the real pod-wide ceiling (`40Gi` by default, `resource_limits` in a
+template policy can raise it), and the caps are not meant to sum under it. With
+`ENGINE_POD_WORKSPACE=1` there are three work-class volumes (the work tree, the
+private tool cache and the workspace tree), so their caps together can exceed
+the pod limit. The pod-wide limit is what stops a session filling the disk; each
+per-volume cap stops one directory from filling the pod on its own. Keep
+`ENGINE_POD_WORK_SIZE_LIMIT` below the pod's `ephemeral-storage` limit so one
+work volume at its cap cannot on its own push the pod past it.
+
+**Workspace tree (WI-3373, WI-3374; engine-served since WI-4127).** Off by
+default. With `ENGINE_POD_WORKSPACE=1`, the engine adds a `workspace-config`
+init container and a pod-local `emptyDir`, and mounts that volume read-only at
+`ENGINE_POD_WORKSPACE_DIR` (default `/home/vogt/Working`) in the session
+container. The tree is the engine's own installed workspace —
+`ENGINE_POD_WORKSPACE_SOURCE`, the directory the engine's
+`agent-workspace-config` init container fills in the shared `agent-config`
+`emptyDir` — not a pod-side clone. The init container fetches
+`GET /api/agent-auth/sessions/{id}/workspace` from
+`ENGINE_POD_ENGINE_ENDPOINT` with the pod's existing one-use bootstrap
+credential, read from the same per-pod Secret into a `0600` curl config file
+rather than a command line, and unpacks the gzipped tarball into the volume.
+The route checks that credential without consuming it, so the session
+container's `bootstrap` still spends it. No new Secret, deploy key, Forgejo
+token or Infisical identity is added: the private configuration repository is
+never read by a pod, and none of its credentials exist there.
+
+The snapshot is allowlisted by path, not by top-level name: `AGENTS.md`,
+`CLAUDE.md`, `.claude/{rules,skills,agents}`, `.codex/skills` and
+`.agent-tools/{bin,lib,etc}` — the paths `agent-workspace-config`'s
+`bootstrap/install.sh` actually installs. A whole dot-directory is never
+served: `.claude/settings.json` and the local permission list
+`.claude/settings.local.json` record exact commands (and can contain inline
+tokens), and `.codex/auth.json` is a credential. `UsefulClaudeSkills` is a
+checkout of the configuration repository, not an installed asset, and is
+excluded along with other checkouts and dotfiles such as `.local`, `.config`
+and `.ssh`. At every depth `.git`, SSH keys, credential-helper and token files,
+`*.lock` files, `.pytest_cache`, `.ruff_cache` and `__pycache__` are excluded
+as a second line of defence; in-tree symlinks are skipped, and a symlink that
+resolves outside the source fails the build instead of escaping.
+`ENGINE_POD_WORKSPACE_MAX_BYTES` (default 64 MiB, hard maximum 512 MiB) caps
+the uncompressed tree. The response is deterministic gzip with an `ETag`, so
+an unchanged tree has a stable identity. The built tarball is cached against a
+content fingerprint (not an mtime key, because `copy2` preserves timestamps),
+and builds are serialised one at a time, so concurrent pod starts do not each
+hold a copy. A missing source, a failed fetch or an unpack failure logs and
+leaves the session with the pre-workspace tree rather than failing the boot.
+
+The tree is never writable from the session container; the session's clone
+keeps its own writable `emptyDir` at `<dir>/session` (a nested mount), so
+`AGENTS.md`, `CLAUDE.md`, `.claude/rules`, `.claude/skills` and
+`.codex/skills` are ancestors of the session's cwd as they are for a host
+session. `VOGT_CLONE_DIR` and `VOGT_WORK_DIR` move to `<dir>/session`, the
+caller's `cwd` is re-rooted under it, and the Claude project-trust entry
+follows it. The session agent sets `VOGT_WORKSPACE_ROOT` and, for Codex,
+gathers `developer_instructions` from the mounted tree itself (the engine
+cannot read a per-pod `emptyDir`): the checkout's own guidance is inlined and
+the workspace files and skill roots are named, as on a host. `.agent-tools` is
+served when the engine's tree has it (an estate host does); a tree installed
+without it leaves the pod without `.agent-tools/bin`.
+
+**Engine configuration** (`pod_backend.rs`; the graft rows are the graft source provider's, `graft_provider.rs`):
+
+| Variable | Effect |
+| --- | --- |
+| `ENGINE_SOURCE_GRAFT_REPO` (alias `ENGINE_POD_GRAFT_REPO`) | graft repository the session clones |
+| `ENGINE_SOURCE_GRAFT_LINE` (alias `ENGINE_POD_GRAFT_LINE`) | line it clones (default `rust-2`); the entrypoint runs `g clone <repo> <workdir> --line <line>`, so the working copy starts on that line |
+| `ENGINE_SOURCE_GRAFT_ENDPOINT` (alias `ENGINE_POD_GRAFT_ENDPOINT`) | graft server URL, passed to the pod as `GRAFT_ENDPOINT`; it must be reachable from the session namespace |
+| `ENGINE_SOURCE_GRAFT_MINT_TOKEN_FILE` (alias `ENGINE_GRAFT_MINT_TOKEN_FILE`) | file (a mounted secret, `0400`) holding the engine's graft *mint* token: a service-kind graft token (subject `vogt-engine`, scopes `repo:<repo>:read`, `:write`, `:drafts` and `:land:<line>`). Needs `ENGINE_SOURCE_GRAFT_ENDPOINT` (alias `ENGINE_POD_GRAFT_ENDPOINT`)`. When set — together with `ENGINE_SOURCE_GRAFT_MINT=1` — the engine mints a graft token per session pod (below) and never hands the mint token, or the shared token, to a pod. Read on every mint, so a rotation (the token expires; rotation is a re-mint) needs no restart |
+| `ENGINE_SOURCE_GRAFT_MINT` (alias `ENGINE_POD_GRAFT_MINT`) | `1`/`true`/`yes`/`on` enables per-session graft minting; unset or any other value leaves it off, so an upgrade does not change how pod sessions authenticate. Needs the mint token file below and `ENGINE_SOURCE_GRAFT_ENDPOINT` |
+| `ENGINE_SOURCE_GRAFT_TOKEN_FILE` (alias `ENGINE_POD_GRAFT_TOKEN_FILE`) | **fallback** when no mint token is configured: a file (a mounted secret) holding one graft token shared by every pod. The engine reads it when it answers the bootstrap request and returns it as `source_token`, and logs a warning at each pod create. The value is never in config or the pod spec. Unset too, the entrypoint clones with the session token |
+
+**Per-session graft token** (`graft_mint.rs`). When
+`ENGINE_SOURCE_GRAFT_MINT` is on and the session's project names a graft source,
+the engine calls graft's `AdminService.MintToken` (gRPC,
+`graft-protocol` 0.1, the mint token as the bearer) for a token with subject
+`vogt-session-<session id>`, that session id and the session's work item (when
+graft accepts the label: short, no whitespace) stamped on it, and exactly four
+scopes: the repo's `read`, `write` and `drafts`, and `land` on the session's
+line only. The session id is the core's `ses_...` id when the start carried one
+(`session_ref`) and the engine's UUID otherwise: graft compares it with
+`agent.session` on every write, so it must be the id the worker's brief and
+commits use. Only a project source earns a token — the deployment's
+`ENGINE_SOURCE_GRAFT_REPO`/`LINE` say what to clone, not a mapping that grants
+landing rights — so a session whose project names no source starts with no
+token and a note. Graft refuses any scope the
+mint token does not hold, so the engine cannot hand out more than it has. The
+TTL is the session's whole-session clock budget (`session_wall_clock_minutes`)
+plus 30 minutes, capped at graft's 12 h `max_token_ttl_s`; a session with no such
+budget gets the 12 h cap. A woken session gets a new pod and a new token. The
+token travels like the session token: held in memory until the pod's single
+bootstrap request, returned as `graft_token` with `graft_session` naming the
+core id, and written by the entrypoint where `g` reads it:
+`$XDG_CONFIG_HOME/graft/sessions/<graft_session>/trial-1.token` (`0600`, its
+directories `0700`), beside a `config.toml` naming a `vogt-session` server with
+the endpoint and that token file. The entrypoint also exports
+`GRAFT_SESSION_ID` (the same id) and `GRAFT_ENDPOINT`, so a worker runs plain
+`g clone`/`g land` without naming a credential path. `VOGT_GRAFT_TOKEN_FILE`
+names the same file. The token is never a pod env value, an argument, a Secret
+or a log field. If the mint fails (graft unreachable, mint token refused or
+unreadable) the pod is still created, without a token; the session continues
+and prints `session graft token unavailable: <reason>` (never a token value),
+and clone or land then fails loudly rather than widening to a shared token. When the session's pod is torn down (stop, kill, exit, remove, hibernate, or a
+pod that could not be created) the engine calls graft's `AdminService.RevokeToken`
+with its mint credential for that token (WI-3235), after the teardown is marked
+complete: graft then refuses the token for writes from that moment. A revoke
+that fails (graft down, token already expired, mint token refused) is logged
+at `warn` and audited (`target=vogt::audit`, naming the session, never a token)
+and never holds up or fails the stop; the TTL is the backstop. The engine keeps
+the minted token in `<state_dir>/pod-graft-tokens/<session>` (`0600`, directory
+`0700`, like the pod stream tokens in `pod-tokens/`) from mint until the revoke
+attempt, so a pod an engine restart adopts is still revoked when it ends. A
+session hibernated or removed with no pod running has nothing left to revoke.
+
+For a **host-backed** session with the same graft source, the provider
+still keeps its private copy under `state_dir`, then atomically delivers a
+second `0600` copy at
+`$XDG_CONFIG_HOME/graft/sessions/<session_ref>/trial-1.token` (or
+`$HOME/.config/...` when `XDG_CONFIG_HOME` is unset). `session_ref` is the
+core's `ses_...` id from the worker brief, so graft's write-time binding and
+the path the worker is told to use name the same session. Only the token-file
+path and `GRAFT_SESSION_ID` enter the child's environment, never the value.
+Any graft-kind source qualifies, as for pods: a source whose `landing` is left
+out (it reads as `push_branch`) still lands on its line, and its token carries
+`land:<line>` (WI-3986). A failed mint (graft down, a scope gap) does not stop the session: it starts
+without `VOGT_GRAFT_TOKEN_FILE`, with the reason in `VOGT_GRAFT_TOKEN_UNAVAILABLE`,
+as a pod does. Normal process exit or stop removes that copy at once and calls
+`RevokeToken` in the background; TTL is
+again the backstop after an engine crash or an unavailable graft server. This
+uses the same `ENGINE_SOURCE_GRAFT_ENDPOINT`,
+`ENGINE_SOURCE_GRAFT_MINT_TOKEN_FILE` and `ENGINE_SOURCE_GRAFT_MINT=1`
+deployment settings as pods; the mint token remains an engine-only mounted
+secret and is never copied into a session. The deployment therefore needs a
+service-kind token whose scopes cover the repositories and lines it may grant.
+
+**Per-session kache key (WI-3242).** The shared Secret `ENGINE_POD_CACHE_SECRET`
+(default `kache-s3`, read through `envFrom`) must hold only a **read-only** key
+for the shared `kache` bucket; only CI on `main` writes it. When
+`ENGINE_POD_CACHE_PROVISIONER_URL` is set, the engine also gives each pod a
+bucket and write key of its own, through the trusted provisioner of ops
+`apps/vogt-sessions/docs/kache-per-session-keys.md` (the engine never holds
+the Garage admin token). Before creating the pod it sends
+`POST <url>/internal/cache/sessions` with only `expires_at` (now + 36 h, which
+the provisioner clamps), the bearer read on every call from
+`ENGINE_POD_CACHE_PROVISIONER_TOKEN_FILE`. The provisioner mints the
+`allocation_id`; the engine refuses a reply whose id is not a 16–52 character
+lowercase token or whose bucket is not `vogt-session-<id>`. The id is stamped
+on the pod as label `vogt.dev/session-cache-id`, and the pod's last `envFrom`
+names the Secret `vogt-session-cache-<id>` (keys `KACHE_SESSION_ACCESS_KEY_ID`,
+`KACHE_SESSION_SECRET_KEY`, `KACHE_SESSION_BUCKET`), which the engine creates
+after the bootstrap Secret, immutable and owned by the pod. A `429` (the
+provisioner at its allocation cap) starts the pod with the shared read-only key
+only; any other refusal or a timeout fails the pod create before anything
+exists. If the pod cannot be created the allocation is released; if either
+Secret cannot be created the pod is deleted, then the allocation released.
+Teardown releases it with `DELETE <url>/internal/cache/sessions/<id>` after the
+pod delete (a `404` is done); the engine also learns the allocation of a pod it
+adopts after a restart from the label. A failed release is logged and audited
+and left to the provisioner's sweep. Unset, pods get the shared read-only key
+alone. The URL must be `https` unless `ENGINE_POD_ALLOW_INSECURE_ENDPOINT=true`.
+Mapping the `KACHE_SESSION_*` values into kache's write remote is the
+session image's and `kache-config`'s job (ops).
+
+**Claude Code's posture in a pod (WI-3243).** A pod Claude session is
+started with the same posture as a host one. The image ships the
+driven-session policy, root-owned, at
+`/usr/local/share/vogt/driven-session-settings.json`, and `vogt-session-agent`
+runs `claude --session-id <id> --settings=<file> --strict-mcp-config
+--mcp-config=<file> --add-dir "$VOGT_SESSION_CWD"` (`--resume` for a wake), the
+host launcher's flags in its order. `VOGT_CLAUDE_SETTINGS_FILE` in the pod
+names another policy file and `off` turns the policy off, like
+`ENGINE_AGENT_CLAUDE_SETTINGS`; a pod built from an image without the file
+starts without `--settings`. The MCP file comes from the bootstrap response
+(`mcp_config`): the Vogt MCP endpoint (`<ENGINE_POD_ENGINE_ENDPOINT>/mcp`) and,
+when `ENGINE_CADASTRE_MCP_URL` is set, Cadastre, as streamable-HTTP servers. The
+Vogt entry's `Authorization` header is `Bearer ${VOGT_HTTP_TOKEN}` and
+Cadastre's is `Bearer ${CADASTRE_HTTP_TOKEN}`, so the file holds no credential.
+Cadastre is registered only when the agent-auth manifest declares
+`CADASTRE_HTTP_TOKEN` (any policy, `ondemand` included) or the session holds an
+approved grant for it; with no bearer it is left out rather than registered to
+answer 401. Because a pod does not run the CLI under `vogt-agent-auth run`, a
+Codex session gets that bearer fetched through the broker around the Codex
+child, beside its provider keys (WI-4121). The engine mints the session's own core credential
+(`agent:engine:<id>`, as for a host agent session, revoked when the session
+ends) and returns it as `VOGT_HTTP_TOKEN` in the bootstrap `env`, with
+`VOGT_ENGINE_SESSION_ID`. When the core is absent or refuses, the file is empty
+of servers and `--strict-mcp-config` keeps the account's own MCP set out. The
+entrypoint writes the file `0600` beside the session token, installs the
+conversation and policy hooks into `$CLAUDE_CONFIG_DIR/settings.json` and, when
+`VOGT_EXTRA_CA_FILE` is set, gives Claude Code the same CA as
+`NODE_EXTRA_CA_CERTS`. Codex gets none of this. The pod does not run the CLI
+under `vogt-agent-auth run`: a pod holds no Infisical identity, and its
+credentials arrive in the bootstrap response.
+
+A requested session argv is passed as `VOGT_SESSION_COMMAND`, a JSON array of
+strings. `vogt-session-agent` runs it in the PTY instead of the agent CLI; the
+container command stays the entrypoint.
+
+**Boot steps.** Each step prints `session-entrypoint: step <name>` to stderr
+as it starts; a failure prints `session-entrypoint: <step> failed: <reason>`
+and exits non-zero. A reason never contains a token or a response body (the
+bootstrap refusal quotes the engine's one-line reason only). In order:
+
+1. `validate` — required variables (including `VOGT_BOOTSTRAP_TOKEN_FILE`) are present and `VOGT_CLI` is valid.
+2. `bootstrap` — `POST /api/agent-auth/bootstrap` with the bearer in a `0600`
+   curl config file, never on a command line; the token is read from
+   `VOGT_BOOTSTRAP_TOKEN_FILE` (a missing, unreadable or empty file is
+   refused before any request), and the variable and the in-memory copy are
+   then unset. The mounted file stays for the life of the pod, but the
+   credential is single-use and already spent. A new pod's IP reaches the engine's allow-set one to three seconds
+   after start, so a refused or timed-out connection (curl exits 6, 7, 28, 35,
+   52, 55, 56) is retried with backoff (250 ms doubling to a 2 s cap) for up to
+   `VOGT_BOOTSTRAP_RETRY_MS` (default 15000). An HTTP error such as 401 is
+   final and is not retried.
+3. `session-token` — the session token is written `0600` to
+   `VOGT_SESSION_TOKEN_FILE` (default `/run/vogt/session-token`).
+4. `account-bundle` — the assigned account bundle is written into
+   `CLAUDE_CONFIG_DIR` (directories `0700`, files `0600`); unsafe paths are
+   refused. When it carries a Claude login, the engine also supplies
+   `.claude.json` with first-run onboarding complete and `/work` trusted,
+   including approval and warning acknowledgement for external `CLAUDE.md`
+   imports. This pod-specific seed is necessary because `/work` does not exist
+   on the engine host where ordinary quiet onboarding runs.
+5. `brokered-env` — the response's `env` map is exported to the session,
+   except the bootstrap token names.
+6. `claude-config` — the agent's own config files. For `VOGT_CLI=claude`, the
+   response's `mcp_config` is written `0600` beside the session token
+   (`mcp.json`) and named to the session agent as `VOGT_CLAUDE_MCP_CONFIG`;
+   `NODE_EXTRA_CA_CERTS` is set from `VOGT_EXTRA_CA_FILE`; the conversation and
+   policy hooks are installed into `$CLAUDE_CONFIG_DIR/settings.json` (best
+   effort). It then prints `session-entrypoint: claude posture: <parts>`,
+   naming which of `settings`, `mcp-config`, `policy-hook` and `session-hook`
+   are in place. The pod smoke's boot marker requires all four. For
+   `VOGT_CLI=codex`, the response's full `codex_config` is written `0600` to
+   `$CODEX_HOME/vogt-codex.toml` and named as `VOGT_CODEX_CONFIG_FILE`, while
+   only its `[mcp_servers.*]` tables are merged into `$CODEX_HOME/config.toml`;
+   it prints `session-entrypoint: codex posture: mcp-config`. For
+   `VOGT_CLI=opencode`, `opencode_config` is written to
+   `$XDG_CONFIG_HOME/opencode/opencode.json` (WI-3882).
+7. `source-token` — a returned `source_token`/`graft_token` (the one minted
+   for this pod) is written `0600` where `g`: under
+   `$XDG_CONFIG_HOME/graft/sessions/<graft_session>/trial-1.token`, with a
+   `config.toml` naming the `vogt-session` server, or beside the session token
+   for a non-graft source. `GRAFT_SESSION_ID` and `VOGT_GRAFT_TOKEN_FILE` are
+   exported as ids and paths only.
+8. `clone` — `graft --token-file <file> clone ...` into `VOGT_CLONE_DIR`
+   (default `/work`). The agent's work directory is `VOGT_WORK_DIR`, which is
+   the clone root unless the bootstrap response carried a `cwd` inside the
+   checkout. A failure names the endpoint and graft's last stderr lines.
+   Afterwards `/work` is given a read-only git view (WI-3356; step
+   `git-view`, best effort): a baseline commit of the line's tree before its
+   tip changeset and the tip on top, with no remote, so `git log -1 -p`,
+   `git diff` and `git status` work. Commits and lands still go through `g`.
+9. `brief` — the brief is written to `<clone root>/.vogt/brief.md`
+   (`VOGT_ADD_DIR`), and `VOGT_SESSION_CWD` (the work directory) and
+   `VOGT_SESSION_BRIEF_FILE` are exported.
+10. `handoff` — the entrypoint prints `session-entrypoint: boot completed in
+   <n>s` and the metric line `vogt_session_boot_seconds <n>` (for pod log
+   collection), removes its scratch directory and execs `vogt-session-agent`.
+
+`engine/deploy/tests/session-entrypoint.sh` is the contract test: fake curl,
+graft and agent, covering the markers, the token files, the retry, the
+`VOGT_SESSION_COMMAND` passthrough and the Claude config. `pod_stream::real_entrypoint_*` in
+`engine/server/tests/integration.rs` runs the same script against a real engine.
+
+The agent WebSocket accepts messages up to 4 MiB + 64 KiB, enough for an
+`output` frame carrying the full 1 MiB data cap in its worst-case JSON
+encoding. The agent replays held output in 64 KiB `output` frames. Engine
+ingest holds at most 16 output chunks, each capped at the default 1 MiB agent
+replay limit. A full
+queue refuses the chunk without advancing or acknowledging its cursor and
+requests replay with `resync`; the agent can report trimmed output with `gap`,
+which may exceed the replay buffer after a long disconnect.
+Gap claims above 2^48 bytes or overflowing offsets receive `invalid_gap` and close
+the connection without changing the cursor. These engine limits are fixed;
+changing the pod's `VOGT_AGENT_BUFFER_BYTES` does not increase them.

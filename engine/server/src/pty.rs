@@ -22,6 +22,7 @@ use crate::{
     events::{EventBus, ServerEvent},
     history::{ArchiveRecord, SessionHistory},
     scrollback::Scrollback,
+    session_backend::SessionBackend,
 };
 
 /// One chunk of PTY output. `pos` is the byte offset (in the lifetime stream)
@@ -31,25 +32,6 @@ use crate::{
 pub struct OutputChunk {
     pub pos: u64,
     pub data: Bytes,
-}
-
-/// The one-shot attach hook: the sampled `pos`, the session's PTY writer and
-/// a reader of the ring's live `total_written`.
-#[cfg(any(test, feature = "integration-test-hook"))]
-pub type FrameRenderHook = Box<dyn FnOnce(u64, &mut dyn Write, &dyn Fn() -> u64) + Send>;
-
-#[cfg(any(test, feature = "integration-test-hook"))]
-pub(crate) fn frame_render_hook_cell() -> &'static Mutex<Option<FrameRenderHook>> {
-    static HOOK: std::sync::OnceLock<Mutex<Option<FrameRenderHook>>> = std::sync::OnceLock::new();
-    HOOK.get_or_init(|| Mutex::new(None))
-}
-
-/// Arm a one-shot hook on the next grid frame render. Available in unit-test
-/// builds and to the integration tests via the `integration-test-hook`
-/// feature, which shipped builds never enable.
-#[cfg(any(test, feature = "integration-test-hook"))]
-pub fn arm_frame_render_hook(hook: FrameRenderHook) {
-    *frame_render_hook_cell().lock() = Some(hook);
 }
 
 pub struct Session {
@@ -65,16 +47,15 @@ pub struct Session {
     scrollback: Mutex<Scrollback>,
     /// The terminal the PTY output is parsed into, so the screen is read from
     /// a grid that has seen every byte rather than replayed from a tail of the
-    /// ring (WI-990). Fed by the reader while the `scrollback` lock is held,
-    /// so it never describes bytes past the ring's `total_written`; attach
-    /// copies its cells under that same lock and renders the copy after it
-    /// drops (WI-2699). `None` for a session
-    /// restored from hibernation, which has only the tail it kept and renders
-    /// by replaying that.
+    /// ring (WI-990). `None` for a session restored from hibernation, which
+    /// has only the tail it kept and renders by replaying that.
     terminal: Mutex<Option<crate::screen::Terminal>>,
-    writer: Mutex<Box<dyn Write + Send>>,
-    master: Mutex<Box<dyn portable_pty::MasterPty + Send>>,
-    child: Mutex<Option<Box<dyn portable_pty::Child + Send>>>,
+    /// The screen a stopped session showed when its grid was shed
+    /// (WI-4290): the text the screen route reads, with no grid behind it.
+    settled: Mutex<Option<SettledScreen>>,
+    /// The grid and ring of this stopped session have been shed.
+    shed: AtomicBool,
+    backend: Arc<dyn SessionBackend>,
     /// Cached child PID — `child` is taken by the wait task, so SIGKILL needs
     /// its own handle on Unix.
     pid: Option<u32>,
@@ -104,10 +85,21 @@ pub struct Session {
     turn_started_at: Mutex<Option<time::OffsetDateTime>>,
     /// Wall-clock time of the last PTY output.
     last_output_at: Mutex<Option<time::OffsetDateTime>>,
+    /// When the child first wrote anything. A pod session is silent from spawn
+    /// until its CLI draws, so its first output moves it from `idle` to
+    /// `running` and stamps `turn_started_at`; only a stamp a full quiet
+    /// window after this one can be a turn (WI-4186).
+    first_output_at: Mutex<Option<time::OffsetDateTime>>,
     /// The permission dialog on screen, while `awaiting-approval`.
     approval: Mutex<Option<crate::approval::Pending>>,
     /// The agent's own report that it is blocked on a person.
     blocked: Mutex<Option<vogt_engine_contract::BlockedReport>>,
+    /// An automated line the guard could not erase: its text is still in the
+    /// composer (WI-4459). Holds when it was marked, what was being typed, and
+    /// is cleared once the background erase goes through.
+    stranded: Mutex<Option<(time::OffsetDateTime, String)>>,
+    /// Where this session's events go, so the guard can raise its notice.
+    bus: EventBus,
     /// How far the standing blocked report has been addressed (WI-1314):
     /// one of the `UNBLOCK_*` steps. A new report resets it.
     unblock: std::sync::atomic::AtomicU8,
@@ -115,6 +107,10 @@ pub struct Session {
     /// `AUTOPILOT: DONE` at the end of a turn is new, not the reporting
     /// reply's own sign-off (WI-1314).
     turn_since_report: AtomicBool,
+    /// What the engine kept of this pod's uncommitted work before deleting
+    /// it (WI-4132). Survives the stop so the list and the stop result can
+    /// show the path.
+    salvage: Mutex<Option<vogt_engine_contract::salvage::SalvageReport>>,
     /// The agent conversation this session runs, when its id is known
     /// (set by the registry right after spawn).
     conversation: Mutex<Option<vogt_engine_contract::AgentConversation>>,
@@ -163,6 +159,7 @@ pub struct Session {
     /// Woken without the bypass it showed before hibernating (WI-2252).
     posture_lost_on_resume: AtomicBool,
     account: Mutex<Option<String>>,
+    mcp_set: Mutex<Option<String>>,
     /// Who asked this session to stop, and why, when someone did (WI-913).
     stop: Mutex<Option<vogt_engine_contract::StopRequest>>,
     /// What runs first in the session: `agent-auth` when the launch wrapper
@@ -172,6 +169,9 @@ pub struct Session {
     first_output_seen: AtomicBool,
     /// The launch wrapper's report was accepted; a second is refused.
     launch_reported: AtomicBool,
+    /// The OSC 7501 capability query has been answered once (WI-4321). A
+    /// respawn builds a new `Session`, so the latch resets with it.
+    status_query_answered: AtomicBool,
     /// Set when the launch wrapper reported `degraded`: the session started
     /// without its brokered credentials (WI-1812). Lives and dies with it.
     agent_auth_degraded: parking_lot::Mutex<Option<crate::launch::DegradedLaunch>>,
@@ -217,6 +217,47 @@ pub struct Session {
     /// What a Codex rollout said about this session's turns (WI-1576). Once
     /// a rollout is read, readiness and done come from it, not the screen.
     rollout: Mutex<crate::codex_rollout::RolloutTurns>,
+}
+
+/// What a stopped session keeps of its grid once it is shed (WI-4290): the
+/// screen and the history above it as text, a few KiB where the grid held
+/// cells for every history line.
+struct SettledScreen {
+    rendered: crate::screen::Rendered,
+    history: Vec<String>,
+}
+
+impl SettledScreen {
+    /// Keep the newest history lines whose text, with the screen's, fits in
+    /// `keep_bytes`. The screen itself is always kept.
+    fn new(rendered: crate::screen::Rendered, mut history: Vec<String>, keep_bytes: usize) -> Self {
+        let mut total: usize = rendered.lines.iter().map(|l| l.len() + 1).sum();
+        let keep_from = history
+            .iter()
+            .rposition(|line| {
+                total += line.len() + 1;
+                total > keep_bytes
+            })
+            .map_or(0, |i| i + 1);
+        history.drain(..keep_from);
+        history.shrink_to_fit();
+        Self { rendered, history }
+    }
+
+    fn bytes(&self) -> usize {
+        let lines = |v: &[String]| v.iter().map(|l| l.len()).sum::<usize>();
+        lines(&self.rendered.lines)
+            + lines(&self.history)
+            + self.rendered.title.as_ref().map_or(0, String::len)
+    }
+
+    /// Up to `scrollback_lines` of history, newest last, as a replay of the
+    /// same bytes with that many lines of history would give.
+    fn render(&self, scrollback_lines: usize) -> (crate::screen::Rendered, Vec<String>) {
+        let keep = scrollback_lines.min(crate::screen::MAX_SCROLLBACK_LINES);
+        let from = self.history.len().saturating_sub(keep);
+        (self.rendered.clone(), self.history[from..].to_vec())
+    }
 }
 
 impl Session {
@@ -271,11 +312,125 @@ impl Session {
         }
     }
 
+    /// Answer an OSC 7501 capability query the grid has just seen (WI-4321).
+    /// Claude Code asks once at startup and reports no state until it gets a
+    /// reply. Written straight to the PTY: it is the engine talking, not
+    /// input, so it must not move the input clocks. Call it outside the
+    /// scrollback lock.
+    pub fn answer_status_query(&self) {
+        let owed = self
+            .terminal
+            .lock()
+            .as_mut()
+            .is_some_and(crate::screen::Terminal::take_query);
+        // Once per process, and only to a Claude Code or Codex session: any
+        // other program (a shell that cats a file) must not get engine bytes
+        // injected into its input.
+        if !owed
+            || !matches!(self.agent().as_deref(), Some("claude" | "codex"))
+            || self.status_query_answered.swap(true, Ordering::AcqRel)
+        {
+            return;
+        }
+        if let Err(e) = self.backend.write_input(crate::osc7501::QUERY_REPLY) {
+            tracing::debug!(session = %self.id, error = %e, "OSC 7501 query reply failed");
+        }
+    }
+
+    /// The program's own status report and its bell / notification hint, as
+    /// the summary shows them. Neither survives the process: an exited
+    /// session reports nothing.
+    fn reported_status(
+        &self,
+    ) -> (
+        Option<vogt_engine_contract::ReportedStatus>,
+        Option<vogt_engine_contract::AttentionHint>,
+    ) {
+        if !self.is_alive() {
+            return (None, None);
+        }
+        let guard = self.terminal.lock();
+        let Some(term) = guard.as_ref() else {
+            return (None, None);
+        };
+        let status = term
+            .reported()
+            .map(|r| vogt_engine_contract::ReportedStatus {
+                state: r.state,
+                kind: r.kind,
+                progress: r.progress,
+                msg: r.msg,
+                title: r.title,
+                app: r.app,
+                id: r.id,
+                set_at: format_rfc3339(r.set_at),
+            });
+        let hint = term
+            .attention_hint()
+            .map(|h| vogt_engine_contract::AttentionHint {
+                source: h.source.to_string(),
+                at: format_rfc3339(h.at),
+            });
+        (status, hint)
+    }
+
+    /// The program's own report, when it is current: the process is alive, the
+    /// report was not cleared, and it is younger than `REPORT_STALE_AFTER`.
+    fn live_report(&self) -> Option<crate::screen::Reported> {
+        let report = self.terminal.lock().as_ref().and_then(|t| t.reported());
+        current_report(self.is_alive(), report, time::OffsetDateTime::now_utc())
+    }
+
     /// Reflow the live grid to the PTY's new size.
     pub fn resize_terminal(&self, rows: u16, cols: u16) {
         if let Some(terminal) = self.terminal.lock().as_mut() {
             terminal.resize(rows, cols);
         }
+    }
+
+    /// When the child exited, once it has.
+    pub fn ended_at(&self) -> Option<time::OffsetDateTime> {
+        *self.ended_at.lock()
+    }
+
+    /// Give back what a stopped session no longer needs (WI-4290): render
+    /// the live grid once to text and drop it, cut the output ring to its
+    /// last `keep_bytes`, and drop the economics tailer. The screen route and
+    /// the session detail still answer, from what is kept. Does nothing for a
+    /// live session, one being hibernated (its whole `Session` goes), or one
+    /// already shed. True when it shed.
+    pub fn shed_after_exit(&self, keep_bytes: usize) -> bool {
+        if self.is_alive() || self.is_hibernating() {
+            return false;
+        }
+        if self.shed.swap(true, Ordering::AcqRel) {
+            return false;
+        }
+        // Lock order is scrollback, then terminal, as in the reader thread.
+        let mut sb = self.scrollback.lock();
+        let grid = self.terminal.lock().take();
+        if let Some(mut grid) = grid {
+            let (rendered, history) = grid.render(crate::screen::MAX_SCROLLBACK_LINES);
+            *self.settled.lock() = Some(SettledScreen::new(rendered, history, keep_bytes));
+        }
+        sb.shed(keep_bytes);
+        drop(sb);
+        self.economics.lock().take();
+        true
+    }
+
+    /// Whether the session still holds its live vt100 grid.
+    pub fn has_live_grid(&self) -> bool {
+        self.terminal.lock().is_some()
+    }
+
+    /// The output bytes this session holds in memory: its ring's allocation
+    /// and the text of a shed screen. The live grid is not counted; see
+    /// [`Self::has_live_grid`].
+    pub fn retained_bytes(&self) -> usize {
+        let ring = self.scrollback.lock().allocated();
+        let screen = self.settled.lock().as_ref().map_or(0, SettledScreen::bytes);
+        ring + screen
     }
 
     /// The current screen and the scrollback above it. From the live grid
@@ -287,6 +442,9 @@ impl Session {
         if let Some(terminal) = self.terminal.lock().as_mut() {
             return terminal.render(scrollback_lines);
         }
+        if let Some(settled) = self.settled.lock().as_ref() {
+            return settled.render(scrollback_lines);
+        }
         let (bytes, rows, cols) = self.screen_source(crate::screen::SCREEN_REPLAY_BYTES);
         crate::screen::render_with_scrollback(&bytes, rows, cols, scrollback_lines)
     }
@@ -295,8 +453,8 @@ impl Session {
     /// `limit` bytes of the same scrollback ring attach replays (aligned to a
     /// ground-state boundary), and the PTY's current rows and cols.
     pub fn screen_source(&self, limit: usize) -> (Bytes, u16, u16) {
-        let (rows, cols) = match self.master.lock().get_size() {
-            Ok(size) => (size.rows, size.cols),
+        let (rows, cols) = match self.backend.current_size() {
+            Ok((rows, cols)) => (rows, cols),
             Err(_) => (24, 80),
         };
         let bytes = self.scrollback.lock().snapshot_tail(limit);
@@ -357,17 +515,24 @@ impl Session {
         true
     }
 
+    /// Put a done declaration back onto a session that was just woken, without
+    /// announcing it (WI-1518).
+    pub fn restore_done_at(&self, at: Option<String>) {
+        *self.done_at.lock() = at;
+    }
+
     /// Fold rollout events into this session's turn state (WI-1576).
     pub(crate) fn apply_rollout(
         &self,
         events: &[crate::codex_rollout::RolloutEvent],
         replay: bool,
+        since: i64,
     ) -> crate::codex_rollout::Outcome {
-        self.rollout.lock().apply(events, replay)
+        self.rollout.lock().apply(events, replay, since)
     }
 
     /// Publish the `ready` a rollout's `task_complete` stands for. The rollout
-    /// already deduplicates by turn id; the flag keeps the screen path quiet.
+    /// deduplicates by turn id, counting a screen `ready` as the first turn's.
     pub(crate) fn announce_rollout_ready(&self, bus: &EventBus) {
         self.ready_announced.store(true, Ordering::Release);
         bus.publish(ServerEvent::SessionReady { id: self.id });
@@ -378,29 +543,11 @@ impl Session {
         self.rollout.lock().seen
     }
 
-    /// Why the last Codex turn ended in an error, if it did (WI-4506).
-    pub(crate) fn rollout_error(&self) -> Option<String> {
-        self.rollout.lock().last_error.clone()
-    }
-
-    /// The rollout has been read and says no turn is under way and no goal
-    /// continues one, so a `working` title is stale (WI-4506).
-    fn rollout_at_rest(&self) -> bool {
-        let turns = self.rollout.lock();
-        turns.seen && !turns.running && !turns.goal_active
-    }
-
     /// The rollout says a turn is under way, or a goal continues idle turns
     /// on its own: either way autopilot must not nudge (WI-1576).
     pub fn rollout_own_loop(&self) -> bool {
         let turns = self.rollout.lock();
         turns.seen && (turns.running || turns.goal_active)
-    }
-
-    /// Put a done declaration back onto a session that was just woken, without
-    /// announcing it (WI-1518).
-    pub fn restore_done_at(&self, at: Option<String>) {
-        *self.done_at.lock() = at;
     }
 
     /// The project policy this session enforces, when it has one (WI-1243).
@@ -539,9 +686,16 @@ impl Session {
             .settle(|| self.terminal.lock().as_ref().map(|t| t.fingerprint()))
     }
 
-    /// The window title the program last set, from the live grid.
+    /// The window title the program last set, from the live grid, or from
+    /// the screen a stopped session kept.
     pub fn title(&self) -> Option<String> {
-        self.terminal.lock().as_ref().and_then(|t| t.title())
+        if let Some(terminal) = self.terminal.lock().as_ref() {
+            return terminal.title();
+        }
+        self.settled
+            .lock()
+            .as_ref()
+            .and_then(|s| s.rendered.title.clone())
     }
 
     /// The agent CLI the session runs, from its conversation or its command.
@@ -598,15 +752,37 @@ impl Session {
         // would deadlock (parking_lot mutexes are not re-entrant).
         let exit_code = self.exit_code();
         let sb = self.scrollback.lock();
+        // An exited child is terminal whatever the cached state says: the
+        // exit waiter stores the code a moment before it moves the activity,
+        // and a summary read in between said `idle` beside an exit code.
+        let activity = crate::activity::terminal_state(exit_code, self.stop_requested())
+            .unwrap_or_else(|| *self.activity.lock());
+        // A provider refused the turn and the CLI came back to its prompt: the
+        // report the agent wrote is absent, so the screen is the only witness
+        // (WI-4119). Reported through the same field, so the screen, digest and
+        // oversight table all read `blocked` instead of `idle`.
+        let (reported_status, attention_hint) = self.reported_status();
+        let blocked = self
+            .blocked()
+            .or_else(|| self.stranded_report())
+            .or_else(|| {
+                matches!(
+                    activity,
+                    ActivityState::Idle | ActivityState::WaitingForInput
+                )
+                .then(|| crate::provider_error::detect(sb.tail(crate::provider_error::TAIL_BYTES)))
+                .flatten()
+                .map(|reason| vogt_engine_contract::BlockedReport {
+                    reason,
+                    items: Vec::new(),
+                    since: format_rfc3339(*self.activity_changed_at.lock()),
+                    ..Default::default()
+                })
+            });
         SessionSummary {
             id: self.id,
             name: self.name.lock().clone(),
-            // An exited child is terminal whatever the cached state says:
-            // the exit waiter stores the code a moment before it moves the
-            // activity, and a summary read in between said `idle` beside an
-            // exit code.
-            activity: crate::activity::terminal_state(exit_code, self.stop_requested())
-                .unwrap_or_else(|| *self.activity.lock()),
+            activity,
             exit_code,
             alive: exit_code.is_none(),
             scrollback_bytes: sb.total_written(),
@@ -619,9 +795,12 @@ impl Session {
             last_event_at: None,
             last_person_input_at: self.last_person_input_at.lock().map(format_rfc3339),
             approval: self.approval_prompt(),
-            blocked: self.blocked(),
+            blocked,
+            reported_status,
+            attention_hint,
             conversation: self.conversation(),
             hibernation: None,
+            salvage: self.salvage.lock().clone(),
             keep_awake: self.keep_awake(),
             autopilot: self.autopilot(),
             autopilot_nudges: self.autopilot_nudges(),
@@ -636,6 +815,7 @@ impl Session {
             permission_mode: self.permission_mode.lock().clone(),
             posture_lost_on_resume: self.posture_lost_on_resume(),
             account: self.account.lock().clone(),
+            mcp_set: self.mcp_set.lock().clone(),
             stop: self.stop.lock().clone(),
             economics: self.economics_snapshot.lock().clone(),
             budget: self.budget(),
@@ -710,6 +890,14 @@ impl Session {
         *self.account.lock() = account;
     }
 
+    pub fn set_mcp_set(&self, mcp_set: Option<String>) {
+        *self.mcp_set.lock() = mcp_set;
+    }
+
+    pub fn account(&self) -> Option<String> {
+        self.account.lock().clone()
+    }
+
     pub fn set_template(&self, template: Option<String>) {
         *self.template.lock() = template;
     }
@@ -772,6 +960,63 @@ impl Session {
         self.blocked.lock().clone()
     }
 
+    /// Mark the session stranded: the guard typed `what` and could not erase
+    /// it. Raises one notice on the transition, as a blocked report, so the
+    /// push and the Inbox see it. Returns true when the mark was newly set.
+    pub(crate) fn mark_stranded(&self, what: &str) -> bool {
+        {
+            let mut stranded = self.stranded.lock();
+            if stranded.is_some() {
+                return false;
+            }
+            *stranded = Some((time::OffsetDateTime::now_utc(), what.to_string()));
+        }
+        self.bus.publish(ServerEvent::SessionBlocked {
+            id: self.id,
+            blocked: self.stranded_report(),
+        });
+        true
+    }
+
+    /// The stranded mark is cleared once the erase has gone through. Publishes
+    /// the session's state after the clear, so the feed, the Inbox and waiters
+    /// stop reading it as blocked: the agent's own report if it has one, else
+    /// none. Returns true when a mark was cleared.
+    pub(crate) fn clear_stranded(&self) -> bool {
+        if self.stranded.lock().take().is_none() {
+            return false;
+        }
+        self.bus.publish(ServerEvent::SessionBlocked {
+            id: self.id,
+            blocked: self.blocked(),
+        });
+        true
+    }
+
+    /// The stranded mark, if any: when it was set and what was being typed.
+    pub fn stranded_input(&self) -> Option<(time::OffsetDateTime, String)> {
+        self.stranded.lock().clone()
+    }
+
+    /// A stranded line shows as the session's blocked report, so the rail and
+    /// session status read it where they read a blocked agent.
+    fn stranded_report(&self) -> Option<vogt_engine_contract::BlockedReport> {
+        let (since, what) = self.stranded_input()?;
+        Some(vogt_engine_contract::BlockedReport {
+            reason: format!(
+                "stranded input: an automated line ({what}) is in the composer; a dialog \
+                 held back its Enter and could not be erased"
+            ),
+            items: vec![
+                "answer or close the dialog on the session's screen; the line is erased once it is gone"
+                    .to_string(),
+                "if the text is not wanted, clear the composer by hand".to_string(),
+            ],
+            since: format_rfc3339(since),
+            ..Default::default()
+        })
+    }
+
     /// Put a blocked report back onto a session that was just woken, without
     /// announcing it. `set_blocked` publishes, and a publish becomes a push, so
     /// restoring through it would page the operator again for a block they were
@@ -810,6 +1055,17 @@ impl Session {
     /// Record (or, with `None`, clear) the agent's blocked report and
     /// announce the change. Refused for a session whose child has exited:
     /// nothing is left to unblock.
+    /// Record the archive made of this pod's uncommitted work (WI-4132).
+    /// The session is usually already stopping; this is state for the list
+    /// and the stop result, not a lifecycle change.
+    pub fn set_salvage(&self, report: vogt_engine_contract::salvage::SalvageReport) {
+        *self.salvage.lock() = Some(report);
+    }
+
+    pub fn salvage(&self) -> Option<vogt_engine_contract::salvage::SalvageReport> {
+        self.salvage.lock().clone()
+    }
+
     pub fn set_blocked(
         &self,
         report: Option<vogt_engine_contract::BlockedReport>,
@@ -846,9 +1102,9 @@ impl Session {
     ///
     /// When the rendered screen shows no dialog but the window title says the
     /// agent is awaiting approval, a synthetic permission dialog stands in
-    /// (WI-1145, and WI-1279 for Klaudia). It carries no options, so an answer
-    /// refuses before any key is written: the guard only needs to know a
-    /// person must decide, not which choice to press.
+    /// (WI-1145). It carries no options, so an answer refuses before any key
+    /// is written: the guard only needs to know a person must decide, not
+    /// which choice to press.
     pub fn current_dialog(&self) -> Option<crate::approval::Detected> {
         let (rendered, scrollback) = self.render_screen(crate::approval::SCROLLBACK_CONTEXT_LINES);
         crate::approval::detect(&rendered.lines, &scrollback)
@@ -858,6 +1114,11 @@ impl Session {
     /// When the current turn began.
     pub fn turn_started_at(&self) -> Option<time::OffsetDateTime> {
         *self.turn_started_at.lock()
+    }
+
+    /// When the child first wrote output, if it has.
+    pub fn first_output_at(&self) -> Option<time::OffsetDateTime> {
+        *self.first_output_at.lock()
     }
 
     /// Snapshot scrollback plus the byte position immediately after the
@@ -902,60 +1163,49 @@ impl Session {
         resume_from: Option<u64>,
         tail_bytes: Option<usize>,
     ) -> (Bytes, u64, bool) {
-        // The reader thread pushes to the ring and feeds the grid under this
-        // lock, so `pos`, the ring tail and the grid all describe one instant
-        // while it is held. Reading `pos` and then rendering the live grid
-        // under a later acquisition let the reader land output in between:
-        // the frame carried bytes past `pos`, the live stream resumed from
-        // `pos`, and the client got those bytes twice (WI-891). Rendering
-        // under the lock instead stalls the reader for the whole render
-        // (WI-2699). So the lock is held only to sample `pos` and copy what
-        // the payload is built from — the delta, the raw tail, or a copy of
-        // the grid's cells — and the frame is rendered from that copy after
-        // the lock drops. The copy describes exactly the bytes up to `pos`.
-        // The socket subscribed to the live stream before calling this, and
-        // every live chunk carries its own offset, so the stream forwards
-        // only bytes at or past `pos` (`ws::coalesce`): that offset handshake
-        // makes snapshot and subscribe one boundary, with nothing sent twice
-        // and nothing dropped.
-        let grid = {
-            let sb = self.scrollback.lock();
-            let pos = sb.total_written();
-            if let Some(cursor) = resume_from {
-                if let Some(delta) = sb.snapshot_since(cursor) {
-                    if tail_bytes.is_none_or(|limit| delta.len() <= limit) {
-                        // A retained delta within budget is byte-exact and
-                        // appends (reset:false), so a switch-away that
-                        // produced little still catches up without repainting.
-                        return (delta, pos, false);
-                    }
+        // One guard for the whole snapshot. The reader thread pushes to the
+        // ring and feeds the grid under this lock, so `pos` and the payload
+        // describe the same instant. Reading `pos` and then building the
+        // payload under a second acquisition let the reader land output in
+        // between: the payload carried bytes past `pos`, the live stream
+        // resumed from `pos`, and the client got those bytes twice (WI-891).
+        let sb = self.scrollback.lock();
+        let pos = sb.total_written();
+        if let Some(cursor) = resume_from {
+            if let Some(delta) = sb.snapshot_since(cursor) {
+                // A retained delta within budget is byte-exact and appends
+                // (reset:false), so a switch-away that produced little still
+                // catches up without repainting the screen.
+                let over = match tail_bytes {
+                    Some(limit) => delta.len() > limit,
+                    None => false,
+                };
+                if !over {
+                    return (delta, pos, false);
                 }
-                // Aged out, or a delta over budget: the live grid's frame,
-                // not a tail of the raw ring (WI-121).
             }
-            // Lock order stays scrollback, then terminal, as in the reader.
-            match self.terminal.lock().as_ref() {
-                Some(t) => (t.grid(), pos),
-                // A session restored from hibernation has no live grid:
-                // replay the raw tail, as a hibernated attach does.
-                None => return (raw_tail(&sb, tail_bytes), pos, true),
-            }
-        };
-        let (mut grid, pos) = grid;
-        // The attach-boundary hook (WI-2699): `pos` is sampled, the grid
-        // copied and the lock dropped, so a test can write to the PTY here,
-        // watch the reader land it, and then check the frame still stops at
-        // `pos`. Production never arms the hook.
-        #[cfg(any(test, feature = "integration-test-hook"))]
-        {
-            let hook = frame_render_hook_cell().lock().take();
-            if let Some(hook) = hook {
-                let written = || self.scrollback.lock().total_written();
-                hook(pos, &mut **self.writer.lock(), &written);
-            }
+            // Cold attach, an aged-out cursor, or a delta over budget: the
+            // live grid's frame, not a tail of the raw ring (WI-121). The
+            // frame is the current screen plus the scrollback the grid holds,
+            // a few KiB where the raw tail was up to the whole budget.
         }
-        let frame = crate::screen::frame_of(&mut grid);
-        (self.bounded_frame(frame, tail_bytes), pos, true)
+        // Lock order is scrollback, then terminal, as in the reader thread.
+        if let Some(frame) = self.grid_frame() {
+            drop(sb);
+            return (self.bounded_frame(frame, tail_bytes), pos, true);
+        }
+        // No live grid (a session restored without one): the bounded tail
+        // replay, exactly as a hibernated attach does.
+        let snapshot = match tail_bytes {
+            Some(limit) => sb.snapshot_tail(limit),
+            None => sb.snapshot(),
+        };
+        (snapshot, pos, true)
+    }
+
+    /// The live grid's frame, when this session has one.
+    fn grid_frame(&self) -> Option<Vec<u8>> {
+        self.terminal.lock().as_mut().map(|t| t.frame())
     }
 
     /// The frame, cut to `tail_bytes` when one was given and the frame is
@@ -979,6 +1229,28 @@ impl Session {
         self.output_tx.subscribe()
     }
 
+    /// Append bytes received from a remote session backend.  The offset is
+    /// checked so reconnects may safely resend the tail which was not
+    /// acknowledged by the engine, without duplicating bytes already stored.
+    pub fn accept_remote_output(&self, offset: u64, data: &[u8]) -> Result<u64> {
+        let mut sb = self.scrollback.lock();
+        let next = sb.total_written();
+        if offset > next {
+            return Err(ApiError::BadRequest("agent output has a gap".into()));
+        }
+        let skip = (next - offset) as usize;
+        if skip < data.len() {
+            let fresh = Bytes::copy_from_slice(&data[skip..]);
+            let pos = {
+                sb.push(&fresh);
+                self.feed_terminal(&fresh);
+                sb.total_written() - fresh.len() as u64
+            };
+            let _ = self.output_tx.send(OutputChunk { pos, data: fresh });
+        }
+        Ok(sb.total_written())
+    }
+
     /// Current absolute output position, used by the WebSocket liveness probe
     /// to detect a socket that is open but no longer delivering output.
     pub fn scrollback_position(&self) -> u64 {
@@ -996,9 +1268,7 @@ impl Session {
 
     pub fn write_input(&self, data: &[u8]) -> std::io::Result<()> {
         *self.last_input.lock() = Some(Instant::now());
-        let mut w = self.writer.lock();
-        w.write_all(data)?;
-        w.flush()
+        self.backend.write_input(data)
     }
 
     /// Stamp that a person typed. Called only by the paths that already
@@ -1006,6 +1276,9 @@ impl Session {
     /// `person_gate::is_person`). Agent writes go through `write_input`
     /// alone and leave this clock where it is.
     pub fn note_person_input(&self) {
+        if let Some(term) = self.terminal.lock().as_mut() {
+            term.clear_attention_hint();
+        }
         *self.last_person_input_at.lock() = Some(time::OffsetDateTime::now_utc());
     }
 
@@ -1017,28 +1290,8 @@ impl Session {
     pub fn last_person_input_at(&self) -> Option<time::OffsetDateTime> {
         *self.last_person_input_at.lock()
     }
-
-    /// When the current activity began. The rail's hidden filter reads this
-    /// instead of building a full summary (WI-2692).
-    pub fn activity_changed_at_stamp(&self) -> time::OffsetDateTime {
-        *self.activity_changed_at.lock()
-    }
-
-    pub fn last_output_at_stamp(&self) -> Option<time::OffsetDateTime> {
-        *self.last_output_at.lock()
-    }
-
     pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
-        let master = self.master.lock();
-        master
-            .resize(PtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .map_err(|e| ApiError::Pty(format!("resize: {e}")))?;
-        drop(master);
+        self.backend.resize(cols, rows)?;
         // Reflow the grid to match, so a screen read before the program's own
         // repaint arrives is already the new size.
         self.resize_terminal(rows, cols);
@@ -1063,36 +1316,7 @@ impl Session {
     pub fn kill(&self) -> Result<()> {
         // Prefer signalling by pid: the wait task has typically already taken
         // ownership of the `Child` to call `wait()`, leaving the Mutex empty.
-        #[cfg(unix)]
-        if let Some(pid) = self.pid {
-            // SIGKILL — same semantics as portable_pty::Child::kill on unix.
-            // Ignore ESRCH (child already reaped).
-            unsafe {
-                let rc = libc::kill(pid as libc::pid_t, libc::SIGKILL);
-                if rc != 0 {
-                    let err = std::io::Error::last_os_error();
-                    if err.raw_os_error() != Some(libc::ESRCH) {
-                        return Err(ApiError::Pty(format!("kill({pid}): {err}")));
-                    }
-                }
-            }
-            return Ok(());
-        }
-        if let Some(child) = self.child.lock().as_mut() {
-            child
-                .kill()
-                .map_err(|e| ApiError::Pty(format!("kill: {e}")))?;
-        }
-        Ok(())
-    }
-}
-
-/// The bounded raw tail of a ring, taken while its lock is held. A session
-/// restored without a live grid replays this, exactly as a hibernated attach.
-fn raw_tail(sb: &crate::scrollback::Scrollback, tail_bytes: Option<usize>) -> Bytes {
-    match tail_bytes {
-        Some(limit) => sb.snapshot_tail(limit),
-        None => sb.snapshot(),
+        self.backend.signal_stop()
     }
 }
 
@@ -1180,12 +1404,37 @@ pub(crate) fn is_secret_env(key: &str) -> bool {
         || k.contains("API_KEY")
 }
 
-/// The engine's own environment with the secrets stripped — the base a child
-/// process should start from before its session/task variables are added.
+/// Whether an environment variable names one specific child's prompt or task
+/// artifact. The engine sets these per child (a session brief, a scheduled
+/// task run); they must never be copied from the engine's own environment,
+/// or a child that was given no brief inherits another run's brief path.
+pub(crate) fn is_per_child_engine_env(key: &str) -> bool {
+    matches!(
+        key,
+        "VOGT_ENGINE_AGENT_TASK_PROMPT_FILE"
+            | "VOGT_ENGINE_AGENT_TASK_CONTEXT_FILE"
+            | "VOGT_ENGINE_AGENT_TASK_ID"
+            | "VOGT_ENGINE_AGENT_TASK_RUN_ID"
+    )
+}
+
+/// The engine's own environment with the secrets and per-child artifact
+/// variables stripped — the base a child process should start from before its
+/// session/task variables are added.
 pub(crate) fn sanitized_child_env() -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
-    std::env::vars_os()
+    sanitized_from(std::env::vars_os())
+}
+
+/// [`sanitized_child_env`] over an explicit environment. The spawn builder
+/// copies exactly this list, so a test can prove the whole base a child is
+/// given, not only the name predicate.
+fn sanitized_from<I>(vars: I) -> Vec<(std::ffi::OsString, std::ffi::OsString)>
+where
+    I: IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+{
+    vars.into_iter()
         .filter(|(k, _)| match k.to_str() {
-            Some(s) => !is_secret_env(s),
+            Some(s) => !is_secret_env(s) && !is_per_child_engine_env(s),
             // A non-UTF-8 key cannot be one of our (ASCII-named) secrets.
             None => true,
         })
@@ -1409,15 +1658,75 @@ pub fn spawn(
     let pid = child.process_id();
     drop(pair.slave);
 
-    let reader = pair
-        .master
-        .try_clone_reader()
-        .map_err(|e| ApiError::Pty(format!("clone_reader: {e}")))?;
-    let writer = pair
-        .master
-        .take_writer()
-        .map_err(|e| ApiError::Pty(format!("take_writer: {e}")))?;
+    let (backend, reader) = crate::session_backend::local(pair.master, child)?;
+    let launcher = if spawning_agent_auth_helper {
+        "agent-auth"
+    } else {
+        "direct"
+    };
 
+    assemble_session(
+        id,
+        spec,
+        defaults,
+        bus,
+        history,
+        (size.rows, size.cols),
+        cwd_display,
+        Arc::new(backend),
+        reader,
+        pid,
+        launcher,
+    )
+}
+
+/// A session whose process runs elsewhere: `backend` forwards input, resize
+/// and stop to a remote agent, and `reader` yields the agent's output. The
+/// reader thread, exit waiter and activity watcher are the local session's,
+/// so a pod session raises the same events and history as a local one.
+pub fn spawn_remote(
+    id: Uuid,
+    spec: &SessionSpec,
+    defaults: SpawnDefaults<'_>,
+    bus: EventBus,
+    history: Option<Arc<SessionHistory>>,
+    backend: Arc<dyn SessionBackend>,
+    reader: Box<dyn Read + Send>,
+) -> Result<SpawnedSession> {
+    let cwd = spec
+        .cwd
+        .as_deref()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| defaults.default_cwd.to_path_buf());
+    assemble_session(
+        id,
+        spec,
+        defaults,
+        bus,
+        history,
+        (spec.rows.unwrap_or(24), spec.cols.unwrap_or(80)),
+        cwd.to_string_lossy().into_owned(),
+        backend,
+        reader,
+        None,
+        "pod",
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn assemble_session(
+    id: Uuid,
+    spec: &SessionSpec,
+    defaults: SpawnDefaults<'_>,
+    bus: EventBus,
+    history: Option<Arc<SessionHistory>>,
+    (rows, cols): (u16, u16),
+    cwd_display: String,
+    backend: Arc<dyn SessionBackend>,
+    reader: Box<dyn Read + Send>,
+    pid: Option<u32>,
+    launcher: &'static str,
+) -> Result<SpawnedSession> {
     let (tx, _rx) = broadcast::channel::<OutputChunk>(1024);
     let command = Some(command_display(spec, &defaults));
     let runtime = tokio::runtime::Handle::current();
@@ -1443,13 +1752,13 @@ pub fn spawn(
         scrollback: Mutex::new(Scrollback::new(
             spec.scrollback_bytes.unwrap_or(defaults.scrollback_bytes),
         )),
-        terminal: Mutex::new(Some(crate::screen::Terminal::new(size.rows, size.cols))),
-        writer: Mutex::new(writer),
-        master: Mutex::new(pair.master),
-        child: Mutex::new(Some(child)),
+        terminal: Mutex::new(Some(crate::screen::Terminal::new(rows, cols))),
+        settled: Mutex::new(None),
+        shed: AtomicBool::new(false),
+        backend,
         pid,
         output_tx: tx.clone(),
-        size_tx: watch::Sender::new((size.cols, size.rows)),
+        size_tx: watch::Sender::new((cols, rows)),
         spawned_at: Instant::now(),
         last_output: Mutex::new(None),
         screen_change: Mutex::new(crate::activity::ChangeClock::default()),
@@ -1464,10 +1773,14 @@ pub fn spawn(
         // A session starts running, so its first turn starts with it.
         turn_started_at: Mutex::new(Some(created_at)),
         last_output_at: Mutex::new(None),
+        first_output_at: Mutex::new(None),
         approval: Mutex::new(None),
         blocked: Mutex::new(None),
+        stranded: Mutex::new(None),
+        bus: bus.clone(),
         unblock: std::sync::atomic::AtomicU8::new(UNBLOCK_NONE),
         turn_since_report: AtomicBool::new(false),
+        salvage: Mutex::new(None),
         conversation: Mutex::new(None),
         keep_awake: AtomicBool::new(false),
         autopilot: AtomicBool::new(false),
@@ -1487,14 +1800,12 @@ pub fn spawn(
         permission_mode: Mutex::new(None),
         posture_lost_on_resume: AtomicBool::new(false),
         account: Mutex::new(None),
+        mcp_set: Mutex::new(None),
         stop: Mutex::new(None),
-        launcher: if spawning_agent_auth_helper {
-            "agent-auth"
-        } else {
-            "direct"
-        },
+        launcher,
         first_output_seen: AtomicBool::new(false),
         launch_reported: AtomicBool::new(false),
+        status_query_answered: AtomicBool::new(false),
         agent_auth_degraded: parking_lot::Mutex::new(None),
         economics: parking_lot::Mutex::new(None),
         economics_snapshot: parking_lot::Mutex::new(None),
@@ -1550,20 +1861,33 @@ fn spawn_reader_thread(
                 match reader.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
-                        let data = Bytes::copy_from_slice(&buf[..n]);
+                        // The grid sees every byte, the OSC 7501 capability
+                        // query included, so the engine can answer it. The
+                        // ring and clients do not: a client must not answer
+                        // it too (WI-4321, WI-991).
+                        let raw = &buf[..n];
+                        let kept = crate::osc7501::strip_queries(raw);
+                        let data = Bytes::copy_from_slice(&kept);
+                        let n = data.len();
                         // Ring and grid advance together under the ring's
                         // lock, so an attach snapshot (which takes the same
                         // lock) never sees a grid ahead of `total_written`.
                         let pos_after = {
                             let mut sb = session.scrollback.lock();
                             sb.push(&data);
-                            session.feed_terminal(&data);
+                            session.feed_terminal(raw);
                             sb.total_written()
                         };
+                        session.answer_status_query();
+                        if n == 0 {
+                            continue;
+                        }
                         let pos = pos_after - n as u64;
                         let now = Instant::now();
                         *session.last_output.lock() = Some(now);
-                        *session.last_output_at.lock() = Some(time::OffsetDateTime::now_utc());
+                        let wall = time::OffsetDateTime::now_utc();
+                        *session.last_output_at.lock() = Some(wall);
+                        session.first_output_at.lock().get_or_insert(wall);
                         session.note_output(now);
                         if !session.first_output_seen.swap(true, Ordering::AcqRel) {
                             crate::launch::record_first_output(
@@ -1688,11 +2012,7 @@ fn spawn_exit_waiter(
     on_exit: Option<ExitHook>,
 ) {
     tokio::task::spawn_blocking(move || {
-        let mut child = match session.child.lock().take() {
-            Some(c) => c,
-            None => return,
-        };
-        let status = match child.wait() {
+        let status = match session.backend.wait() {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!(session = %session.id, error = %e, "child wait failed");
@@ -1702,6 +2022,9 @@ fn spawn_exit_waiter(
         let code = status.exit_code() as i32;
         *session.ended_at.lock() = Some(time::OffsetDateTime::now_utc());
         *session.exit_code.lock() = Some(code);
+        if let Some(term) = session.terminal.lock().as_mut() {
+            term.clear_reported();
+        }
         let new_state = compute_activity(&session);
         update_activity_if_changed(&session, new_state, &bus);
         wake_activity_watcher(&session);
@@ -1896,7 +2219,8 @@ fn spawn_activity_watcher(session: Arc<Session>, bus: EventBus) {
             // byte: an identical repaint is not work (WI-1090).
             let reference = session.last_change().unwrap_or(session.spawned_at);
             let elapsed_ms = reference.elapsed().as_millis() as u64;
-            let wait_ms = if elapsed_ms >= session.idle_after_ms {
+            let collapse_ms = crate::activity::collapse_after_ms(session.idle_after_ms);
+            let wait_ms = if elapsed_ms >= collapse_ms {
                 let new_state = if session.last_output.lock().is_some() {
                     // Settle pending output before classifying.
                     let _ = session.last_change();
@@ -1915,7 +2239,7 @@ fn spawn_activity_watcher(session: Arc<Session>, bus: EventBus) {
                 // it, terminal input included (WI-1644).
                 session.idle_after_ms
             } else {
-                session.idle_after_ms - elapsed_ms
+                collapse_ms - elapsed_ms
             };
 
             let epoch = session.activity_epoch.load(Ordering::Acquire);
@@ -1955,10 +2279,10 @@ fn wake_activity_watcher(session: &Session) {
 /// redraw of them is always recent output.
 const APPROVAL_SCAN_BYTES: usize = 4096;
 
-/// Whether the window title announces exactly this state, for either agent
-/// whose title this engine reads.
+/// Whether the window title announces exactly this state, for the agent whose
+/// title this engine reads.
 fn title_says(title: Option<&str>, state: crate::screen::AgentTitle) -> bool {
-    crate::screen::agent_title(title).is_some_and(|(_, found)| found == state)
+    crate::screen::agent_title(title).is_some_and(|found| found == state)
 }
 
 /// How an agent's window title revises the state the quiet window computed.
@@ -1994,11 +2318,11 @@ fn titled_activity(
 /// A permission dialog inferred from the window title alone, when the rendered
 /// screen showed none.
 ///
-/// The WI-1127 fork's `agent-state` title and Klaudia's `awaiting approval`
-/// both name a dialog the screen parser does not always see (WI-1145,
-/// WI-1279). It is a `permission`, which is what the person gate refuses an
-/// agent for, and it offers no options: answering it fails before any key is
-/// written into the PTY, so a title cannot be used to press a choice.
+/// The WI-1127 fork's `agent-state` title names a dialog the screen parser
+/// does not always see (WI-1145, WI-1279). It is a `permission`, which is what
+/// the person gate refuses an agent for, and it offers no options: answering
+/// it fails before any key is written into the PTY, so a title cannot be used
+/// to press a choice.
 fn title_approval_dialog(title: Option<&str>) -> Option<crate::approval::Detected> {
     title_says(title, crate::screen::AgentTitle::AwaitingApproval).then(|| {
         crate::approval::Detected {
@@ -2010,6 +2334,132 @@ fn title_approval_dialog(title: Option<&str>) -> Option<crate::approval::Detecte
             horizontal: false,
         }
     })
+}
+
+/// How long an OSC 7501 report stays authoritative. A program that reported
+/// `working` and then died silently, or an emitter that stopped, must not pin
+/// the session forever: past this the heuristics take over again.
+const REPORT_STALE_AFTER: time::Duration = time::Duration::minutes(30);
+
+/// `report` when it is current at `now`: the process is alive, the report was
+/// not cleared, and it is younger than `REPORT_STALE_AFTER`.
+fn current_report(
+    alive: bool,
+    report: Option<crate::screen::Reported>,
+    now: time::OffsetDateTime,
+) -> Option<crate::screen::Reported> {
+    report.filter(|r| alive && now - r.set_at < REPORT_STALE_AFTER)
+}
+
+/// The activity a current report maps to (WI-4322). `inferred` is what the
+/// quiet window said, used only to choose `waiting-for-input` over `idle` for
+/// a report of rest. Never called for a terminal state.
+fn mapped_activity(
+    state: vogt_engine_contract::ReportedState,
+    inferred: ActivityState,
+) -> ActivityState {
+    use vogt_engine_contract::ReportedState as R;
+    match state {
+        R::Working => ActivityState::Running,
+        R::Idle | R::Done if inferred == ActivityState::WaitingForInput => {
+            ActivityState::WaitingForInput
+        }
+        R::Idle | R::Done => ActivityState::Idle,
+        R::Blocked => ActivityState::AwaitingApproval,
+        // Decided in the design note: a live agent's own `error` is `errored`.
+        // It is not sticky: the next report, or `clear`, moves the session on.
+        R::Error => ActivityState::Errored,
+    }
+}
+
+/// The dialog to show for a reported `blocked`: the menu the screen parser
+/// found, else a dialog with no options carrying the reported message. With no
+/// options an answer fails before a key is written, so a report (which anything
+/// in the PTY can forge) never presses a choice.
+fn blocked_dialog(
+    report: &crate::screen::Reported,
+    detected: Option<crate::approval::Detected>,
+) -> crate::approval::Detected {
+    detected.unwrap_or_else(|| crate::approval::Detected {
+        question: report
+            .msg
+            .as_deref()
+            .map(|m| m.chars().take(200).collect::<String>())
+            .filter(|m| !m.trim().is_empty())
+            .unwrap_or_else(|| "awaiting approval".to_string()),
+        command_excerpt: String::new(),
+        deadline_seconds: None,
+        kind: match report.kind.as_deref() {
+            Some("question") => "question",
+            Some("auth") => "auth",
+            _ => "permission",
+        },
+        options: Vec::new(),
+        horizontal: false,
+    })
+}
+
+/// A line for the debug log when the report and the heuristic disagree. Names
+/// the two states only: the report's message and title are untrusted text and
+/// may hold a secret, so they never reach a log.
+fn disagreement(
+    reported: vogt_engine_contract::ReportedState,
+    mapped: ActivityState,
+    inferred: ActivityState,
+) -> Option<String> {
+    (mapped != inferred)
+        .then(|| format!("reported {reported:?} maps to {mapped:?}, heuristic says {inferred:?}"))
+}
+
+/// Log, at debug, that the report and the heuristic disagree.
+fn log_disagreement(
+    id: Uuid,
+    agent: Option<&str>,
+    reported: vogt_engine_contract::ReportedState,
+    mapped: ActivityState,
+    inferred: ActivityState,
+) {
+    if let Some(line) = disagreement(reported, mapped, inferred) {
+        tracing::debug!(session = %id, agent = agent.unwrap_or("-"), "OSC 7501 {line}");
+    }
+}
+
+fn reported_activity(
+    session: &Arc<Session>,
+    report: &crate::screen::Reported,
+    inferred: ActivityState,
+) -> ActivityState {
+    let mapped = mapped_activity(report.state, inferred);
+    log_disagreement(
+        session.id,
+        session.agent().as_deref(),
+        report.state,
+        mapped,
+        inferred,
+    );
+    let mut pending = session.approval.lock();
+    if mapped != ActivityState::AwaitingApproval {
+        *pending = None;
+        return mapped;
+    }
+    // Render and read the menu: the report says a dialog is up, only the
+    // screen says what it offers.
+    drop(pending);
+    let (rendered, scrollback) = session.render_screen(crate::approval::SCROLLBACK_CONTEXT_LINES);
+    let found = blocked_dialog(
+        report,
+        crate::approval::detect(&rendered.lines, &scrollback),
+    );
+    let mut pending = session.approval.lock();
+    let now = time::OffsetDateTime::now_utc();
+    match pending.as_mut() {
+        Some(p) if p.is_same(&found) => {
+            p.detected.options = found.options;
+            p.detected.kind = found.kind;
+        }
+        _ => *pending = Some(crate::approval::Pending::new(found, now)),
+    }
+    ActivityState::AwaitingApproval
 }
 
 fn compute_activity(session: &Arc<Session>) -> ActivityState {
@@ -2034,6 +2484,13 @@ fn compute_activity(session: &Arc<Session>) -> ActivityState {
         *session.approval.lock() = None;
         return session.terminal_state().unwrap_or(state);
     }
+    // The agent's own OSC 7501 report is the first input (WI-4322): when one
+    // is current it decides the state and the heuristics below only read the
+    // menu of a `blocked` dialog. An agent that reports nothing, or whose
+    // report was cleared or went stale, falls through unchanged.
+    if let Some(report) = session.live_report() {
+        return reported_activity(session, &report, state);
+    }
     // The title outranks the quiet window in both directions (WI-1598). A
     // `ready` title collapses a still-drawing TUI to rest, and a `working`
     // title keeps the turn running while the TUI has gone quiet: the fork's
@@ -2041,17 +2498,9 @@ fn compute_activity(session: &Arc<Session>) -> ActivityState {
     // before the screen has changed enough to move the change clock, so the
     // quiet window alone reads `idle` while the title says working. Only for
     // an agent whose title this engine reads, and never over a terminal state.
-    let titled = matches!(session.agent().as_deref(), Some("klaudia" | "codex"));
-    let screen_busy = crate::screen::klaudia_busy(&session.render_screen(0).0.lines);
-    let title = session.title();
-    // Codex leaves its title on `working` when it gives up on a turn (a 429);
-    // the rollout's turn end outranks that (WI-4506).
-    let title = if session.agent().as_deref() == Some("codex") && session.rollout_at_rest() {
-        None
-    } else {
-        title
-    };
-    let state = titled_activity(state, titled, title.as_deref(), screen_busy);
+    let titled = matches!(session.agent().as_deref(), Some("codex"));
+    let screen_busy = crate::screen::screen_busy(&session.render_screen(0).0.lines);
+    let state = titled_activity(state, titled, session.title().as_deref(), screen_busy);
     // A permission dialog overrides whatever the tail heuristics said: its
     // countdown keeps redrawing (so it reads `running`) and its menu ends in
     // `❯ 1.` (so it reads `waiting-for-input`), and either way a driver must
@@ -2060,8 +2509,7 @@ fn compute_activity(session: &Arc<Session>) -> ActivityState {
     // answered and redrawn over is not reported from text lingering in the
     // tail. When the screen shows nothing but the title says the agent is
     // awaiting approval, the title stands in: the fork's `agent-state` title
-    // and Klaudia's `awaiting approval` both name dialogs the screen parser
-    // does not always recognise.
+    // names a dialog the screen parser does not always recognise.
     let detected = if crate::approval::mentions_approval(&strip_ansi(&tail)) {
         let (rendered, scrollback) =
             session.render_screen(crate::approval::SCROLLBACK_CONTEXT_LINES);
@@ -2159,8 +2607,8 @@ fn update_activity_if_changed(session: &Arc<Session>, new: ActivityState, bus: &
     }
     // A worker that finished a turn and rests at its prompt is ready, even
     // when the activity reads `idle` rather than `waiting-for-input`: Claude
-    // Code's boxed prompt rarely matches the waiting patterns, and Klaudia and
-    // Codex are forced to `idle` by their window title (WI-1519). `idle` itself
+    // Code's boxed prompt rarely matches the waiting patterns, and Codex is
+    // forced to `idle` by its window title (WI-1519). `idle` itself
     // stays out of the change feed — a session that went quiet mid-turn is not
     // ready — so readiness is its own event, and at most one of them per turn.
     // The render happens after the activity lock is dropped: reading the grid
@@ -2180,6 +2628,17 @@ fn announce_ready_if_at_prompt(session: &Session, resting: ActivityState, bus: &
     if session.ready_announced.load(Ordering::Acquire) || session.rollout_seen() {
         return;
     }
+    // An agent that reported rest has said its turn ended: no prompt to find.
+    let reported_rest = session.live_report().is_some_and(|r| {
+        matches!(
+            r.state,
+            vogt_engine_contract::ReportedState::Idle | vogt_engine_contract::ReportedState::Done
+        )
+    });
+    if reported_rest {
+        announce_screen_ready(session, bus);
+        return;
+    }
     let (rendered, _) = session.render_screen(0);
     let ready = crate::screen::is_ready(
         resting,
@@ -2188,7 +2647,19 @@ fn announce_ready_if_at_prompt(session: &Session, resting: ActivityState, bus: &
         session.agent().as_deref(),
         rendered.title.as_deref(),
     );
-    if ready && !session.ready_announced.swap(true, Ordering::AcqRel) {
+    if ready {
+        announce_screen_ready(session, bus);
+    }
+}
+
+/// Publish the screen path's `ready` once per turn, unless a rollout has been
+/// read meanwhile. The rollout check and the record of this announcement share
+/// one lock, so the rollout's first read counts it (WI-1576).
+fn announce_screen_ready(session: &Session, bus: &EventBus) {
+    if session.ready_announced.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    if session.rollout.lock().try_screen_ready() {
         bus.publish(ServerEvent::SessionReady { id: session.id });
     }
 }
@@ -2400,7 +2871,67 @@ mod turn_tests {
 
 #[cfg(test)]
 mod secret_env_tests {
-    use super::{is_agent_auth_helper_env, is_secret_env};
+    use super::{is_agent_auth_helper_env, is_per_child_engine_env, is_secret_env};
+
+    #[test]
+    fn per_child_artifact_vars_are_never_inherited() {
+        // The engine sets these for one child (a brief or a task run). A
+        // child started without one must not receive another run's path,
+        // whichever way the engine itself was started.
+        for key in [
+            "VOGT_ENGINE_AGENT_TASK_PROMPT_FILE",
+            "VOGT_ENGINE_AGENT_TASK_CONTEXT_FILE",
+            "VOGT_ENGINE_AGENT_TASK_ID",
+            "VOGT_ENGINE_AGENT_TASK_RUN_ID",
+        ] {
+            assert!(is_per_child_engine_env(key), "{key} must be stripped");
+        }
+        // Ordinary variables, and the session identity the engine sets
+        // itself, still pass through.
+        for key in [
+            "PATH",
+            "HOME",
+            "VOGT_ENGINE_SESSION",
+            "VOGT_ENGINE_SESSION_ID",
+        ] {
+            assert!(!is_per_child_engine_env(key), "{key} should pass through");
+        }
+    }
+
+    #[test]
+    fn the_child_environment_is_built_without_any_secret() {
+        use super::sanitized_from;
+        use std::ffi::OsString;
+
+        // A synthetic engine environment with one variable of every secret
+        // family, a per-child artifact, and the ordinary variables a shell
+        // needs. The builder must keep only the ordinary ones.
+        let var = |k: &str, v: &str| (OsString::from(k), OsString::from(v));
+        let engine = vec![
+            var("PATH", "/usr/bin"),
+            var("HOME", "/home/agent"),
+            var("LANG", "C.UTF-8"),
+            var("ENGINE_TOKEN", "engine-secret"),
+            var("ENGINE_EXTRA_TOKENS_JSON", "scoped-secrets"),
+            var("VOGT_CORE_TOKEN", "core-secret"),
+            var("GITHUB_TOKEN", "gh-secret"),
+            var("INFISICAL_CLIENT_SECRET", "infisical-secret"),
+            var("TAILSCALE_AUTH_KEY", "tailscale-secret"),
+            var("VOGT_ENGINE_AGENT_TASK_PROMPT_FILE", "/tmp/another-brief"),
+        ];
+        let kept: Vec<(String, String)> = sanitized_from(engine)
+            .into_iter()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.to_string_lossy().into_owned(),
+                )
+            })
+            .collect();
+        let mut names: Vec<&str> = kept.iter().map(|(k, _)| k.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["HOME", "LANG", "PATH"]);
+    }
 
     #[test]
     fn agent_auth_helper_regains_only_the_brokering_inputs() {
@@ -2567,6 +3098,234 @@ mod secret_env_tests {
             "/opt/other/vogt-agent-auth",
             helper
         ));
+    }
+}
+
+#[cfg(test)]
+mod reported_status_tests {
+    use super::*;
+    use vogt_engine_contract::ReportedState as R;
+
+    fn report(state: R, kind: Option<&str>, msg: Option<&str>) -> crate::screen::Reported {
+        crate::screen::Reported {
+            state,
+            kind: kind.map(str::to_string),
+            progress: None,
+            msg: msg.map(str::to_string),
+            title: None,
+            app: None,
+            id: None,
+            set_at: time::OffsetDateTime::now_utc(),
+        }
+    }
+
+    #[test]
+    fn each_reported_state_maps_per_the_table() {
+        use ActivityState::*;
+        // Whatever the quiet window said, the report decides.
+        for inferred in [Running, Idle, WaitingForInput] {
+            assert_eq!(mapped_activity(R::Working, inferred), Running);
+            assert_eq!(mapped_activity(R::Blocked, inferred), AwaitingApproval);
+            assert_eq!(mapped_activity(R::Error, inferred), Errored);
+        }
+        // Rest is `waiting-for-input` at a prompt, else `idle`.
+        for r in [R::Idle, R::Done] {
+            assert_eq!(mapped_activity(r, WaitingForInput), WaitingForInput);
+            assert_eq!(mapped_activity(r, Running), Idle);
+            assert_eq!(mapped_activity(r, Idle), Idle);
+        }
+    }
+
+    #[test]
+    fn the_change_feed_kind_follows_the_mapped_state() {
+        use crate::changes::change_of;
+        use ActivityState::*;
+        // `approval` and `errored` come from the activity event; `working`
+        // is no change. (`ready` for idle/done is the SessionReady event.)
+        let kind = |s: ActivityState| {
+            let ev = ServerEvent::Activity {
+                id: uuid::Uuid::nil(),
+                state: s,
+                activity_changed_at: String::new(),
+                approval: None,
+                turn_started_at: None,
+            };
+            change_of(&crate::events::Sequenced {
+                seq: 1,
+                at: String::new(),
+                event: ev,
+            })
+            .map(|c| c.kind)
+        };
+        assert_eq!(kind(mapped_activity(R::Working, Idle)), None);
+        assert_eq!(
+            kind(mapped_activity(R::Blocked, Idle)).as_deref(),
+            Some("approval")
+        );
+        assert_eq!(
+            kind(mapped_activity(R::Error, Idle)).as_deref(),
+            Some("errored")
+        );
+        assert_eq!(
+            kind(mapped_activity(R::Done, WaitingForInput)).as_deref(),
+            Some("ready")
+        );
+    }
+
+    /// A spoofed `blocked` with no menu on the screen yields a dialog with no
+    /// options, which cannot be answered by choice.
+    #[test]
+    fn a_blocked_report_with_no_menu_offers_no_choice() {
+        let r = report(R::Blocked, Some("permission"), Some("approve rm -rf /"));
+        let d = blocked_dialog(&r, None);
+        assert!(d.options.is_empty());
+        assert_eq!(d.question, "approve rm -rf /");
+        assert_eq!(d.kind, "permission");
+        // No kind and no message still shows a dialog.
+        let d = blocked_dialog(&report(R::Blocked, None, None), None);
+        assert!(d.options.is_empty());
+        assert_eq!(d.question, "awaiting approval");
+        // A menu the parser found wins over the report.
+        let found = crate::approval::Detected {
+            question: "Do you want to proceed?".into(),
+            command_excerpt: String::new(),
+            deadline_seconds: None,
+            kind: "permission",
+            options: vec![],
+            horizontal: false,
+        };
+        assert_eq!(
+            blocked_dialog(&r, Some(found)).question,
+            "Do you want to proceed?"
+        );
+    }
+
+    /// A report is current only for a live process, uncleared and younger
+    /// than `REPORT_STALE_AFTER`; anything else leaves the heuristics alone.
+    #[test]
+    fn only_a_live_fresh_report_is_current() {
+        let now = time::OffsetDateTime::now_utc();
+        let fresh = report(R::Working, None, None);
+        assert!(current_report(true, Some(fresh.clone()), now).is_some());
+        // No report, or one the program cleared.
+        assert!(current_report(true, None, now).is_none());
+        // An exited process holds no live report.
+        assert!(current_report(false, Some(fresh.clone()), now).is_none());
+        // Older than the staleness window.
+        let mut old = fresh;
+        old.set_at = now - REPORT_STALE_AFTER - time::Duration::seconds(1);
+        assert!(current_report(true, Some(old.clone()), now).is_none());
+        old.set_at = now - REPORT_STALE_AFTER + time::Duration::seconds(1);
+        assert!(current_report(true, Some(old), now).is_some());
+    }
+
+    #[derive(Clone, Default)]
+    struct LogCapture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for LogCapture {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogCapture {
+        type Writer = LogCapture;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    fn captured(level: tracing::Level, f: impl FnOnce()) -> String {
+        let cap = LogCapture::default();
+        let sub = tracing_subscriber::fmt()
+            .with_writer(cap.clone())
+            .with_ansi(false)
+            .with_max_level(level)
+            .finish();
+        tracing::subscriber::with_default(sub, f);
+        let bytes = cap.0.lock().unwrap().clone();
+        String::from_utf8(bytes).unwrap()
+    }
+
+    /// The disagreement reaches the log at debug level, naming session and
+    /// agent, and carries none of the report's text.
+    #[test]
+    fn a_disagreement_is_logged_at_debug_with_session_and_agent() {
+        use ActivityState::*;
+        let id = Uuid::new_v4();
+        let secret = report(R::Blocked, None, Some("sk-SECRET-TOKEN"));
+        let log = |level| {
+            captured(level, || {
+                log_disagreement(id, Some("claude"), secret.state, AwaitingApproval, Running)
+            })
+        };
+        let line = log(tracing::Level::DEBUG);
+        assert!(line.contains("DEBUG"), "{line}");
+        assert!(line.contains(&id.to_string()), "{line}");
+        assert!(line.contains("claude"), "{line}");
+        assert!(!line.contains("SECRET"), "{line}");
+        // Debug only: an info-level subscriber sees nothing.
+        assert!(log(tracing::Level::INFO).is_empty());
+        // Agreement logs nothing.
+        let quiet = captured(tracing::Level::DEBUG, || {
+            log_disagreement(id, None, R::Working, Running, Running)
+        });
+        assert!(quiet.is_empty(), "{quiet}");
+    }
+
+    #[test]
+    fn a_disagreement_is_described_without_the_message() {
+        use ActivityState::*;
+        assert_eq!(disagreement(R::Working, Running, Running), None);
+        let line = disagreement(R::Working, Running, Idle).expect("differ");
+        assert!(line.contains("Working") && line.contains("Idle"));
+        // The text a report carries is not an input to the line at all.
+        let r = report(R::Blocked, None, Some("sk-SECRET-TOKEN"));
+        let line = disagreement(r.state, AwaitingApproval, Running).unwrap();
+        assert!(!line.contains("SECRET"));
+    }
+}
+
+/// WI-4459 re-review: clearing a stranded mark publishes the unblock, so the
+/// feed, the Inbox and waiters stop reading the session as blocked.
+#[cfg(test)]
+mod stranded_mark_tests {
+    use std::sync::Arc;
+
+    use crate::enter_guard::tests::recording_session;
+    use crate::events::ServerEvent;
+
+    #[tokio::test]
+    async fn clearing_a_stranded_mark_publishes_the_unblock() {
+        let writes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (session, _output) = recording_session(writes);
+        let mut events = session.bus.subscribe();
+        assert!(session.mark_stranded("carry on"));
+        assert!(session.clear_stranded());
+        assert!(
+            !session.clear_stranded(),
+            "a second clear has nothing to clear"
+        );
+
+        let mut blocked = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if let ServerEvent::SessionBlocked {
+                blocked: report, ..
+            } = event
+            {
+                blocked.push(report);
+            }
+        }
+        // One notice when marked, then the state after the clear: not blocked.
+        assert_eq!(
+            blocked.len(),
+            2,
+            "expected the mark and the unblock: {blocked:?}"
+        );
+        assert!(blocked[0].is_some());
+        assert!(blocked[1].is_none());
     }
 }
 
