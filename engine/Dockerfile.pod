@@ -18,7 +18,11 @@ ARG GRAFT_VERSION=0.1.0
 # stack image reads (renovate may pass either name as a build arg override).
 ARG CLAUDE_CODE_VERSION
 ARG OPENCODE_VERSION
-ARG RUST_VERSION=1.94.0
+# RUST_VERSION is the default toolchain (and the one `stable` resolves to);
+# RUST_EXTRA_VERSIONS are baked beside it, comma-separated, for repos that pin
+# an older release.
+ARG RUST_VERSION=1.100.0
+ARG RUST_EXTRA_VERSIONS=1.94.0
 ARG RUST_TARGETS="x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu"
 ARG FLUTTER_VERSION=3.35.3
 ARG ANDROID_CMDLINE_TOOLS_VERSION=13114758
@@ -280,6 +284,7 @@ ENTRYPOINT ["/usr/local/bin/vogt-session-entrypoint"]
 
 FROM base AS rust
 ARG RUST_VERSION
+ARG RUST_EXTRA_VERSIONS
 ARG RUST_TARGETS
 ARG TARGETARCH
 ARG RUSTUP_VERSION
@@ -314,6 +319,7 @@ RUN install -d -o vogt -g vogt /opt/rust /opt/rust/cargo /opt/rust/rustup /cache
     && su - vogt -c "RUSTUP_HOME=/opt/rust/rustup CARGO_HOME=/opt/rust/cargo rustup component add rust-src" \
     && ln -s "${RUST_VERSION}-${rustup_arch}-unknown-linux-gnu" "/opt/rust/rustup/toolchains/stable-${rustup_arch}-unknown-linux-gnu" \
     && su - vogt -c "RUSTUP_HOME=/opt/rust/rustup CARGO_HOME=/opt/rust/cargo rustup target add $(printf '%s' "${RUST_TARGETS}" | tr ',' ' ')" \
+    && for v in $(printf '%s' "${RUST_EXTRA_VERSIONS}" | tr ',' ' '); do su - vogt -c "RUSTUP_HOME=/opt/rust/rustup CARGO_HOME=/opt/rust/cargo rustup toolchain install $v --profile default --component rust-src --target $(printf '%s' "${RUST_TARGETS}")" || exit 1; done \
     && apt-get update \
     && apt-get install -y --no-install-recommends clang lld cmake protobuf-compiler \
     && find /var/lib/apt/lists -type f -delete \
