@@ -550,6 +550,12 @@ impl Session {
         turns.seen && (turns.running || turns.goal_active)
     }
 
+    /// Since when the rollout has shown this session at rest, if it does
+    /// (WI-4506).
+    fn rollout_at_rest_since(&self) -> Option<time::OffsetDateTime> {
+        self.rollout.lock().at_rest_since()
+    }
+
     /// The project policy this session enforces, when it has one (WI-1243).
     pub fn policy(&self) -> Option<vogt_engine_contract::SessionPolicy> {
         self.policy.lock().clone()
@@ -2315,6 +2321,17 @@ fn titled_activity(
     }
 }
 
+/// A `working` report set before the rollout last showed the session at rest
+/// describes a turn that has ended (WI-4506). A report set after it is a new
+/// turn the rollout has not recorded yet, and stands.
+fn outlived_by_rest(
+    state: vogt_engine_contract::ReportedState,
+    set_at: time::OffsetDateTime,
+    rested: Option<time::OffsetDateTime>,
+) -> bool {
+    state == vogt_engine_contract::ReportedState::Working && rested.is_some_and(|t| set_at <= t)
+}
+
 /// A permission dialog inferred from the window title alone, when the rendered
 /// screen showed none.
 ///
@@ -2488,7 +2505,14 @@ fn compute_activity(session: &Arc<Session>) -> ActivityState {
     // is current it decides the state and the heuristics below only read the
     // menu of a `blocked` dialog. An agent that reports nothing, or whose
     // report was cleared or went stale, falls through unchanged.
-    if let Some(report) = session.live_report() {
+    // A `working` the rollout has since seen end is stale (WI-4506): a Codex
+    // turn that gave up (a 429 it stopped retrying, an abort) can leave both
+    // its report and its title saying working.
+    let rested = session.rollout_at_rest_since();
+    if let Some(report) = session
+        .live_report()
+        .filter(|r| !outlived_by_rest(r.state, r.set_at, rested))
+    {
         return reported_activity(session, &report, state);
     }
     // The title outranks the quiet window in both directions (WI-1598). A
@@ -2500,7 +2524,11 @@ fn compute_activity(session: &Arc<Session>) -> ActivityState {
     // an agent whose title this engine reads, and never over a terminal state.
     let titled = matches!(session.agent().as_deref(), Some("codex"));
     let screen_busy = crate::screen::screen_busy(&session.render_screen(0).0.lines);
-    let state = titled_activity(state, titled, session.title().as_deref(), screen_busy);
+    let title = session.title();
+    let title = title
+        .as_deref()
+        .filter(|t| rested.is_none() || !title_says(Some(t), crate::screen::AgentTitle::Working));
+    let state = titled_activity(state, titled, title, screen_busy);
     // A permission dialog overrides whatever the tail heuristics said: its
     // countdown keeps redrawing (so it reads `running`) and its menu ends in
     // `❯ 1.` (so it reads `waiting-for-input`), and either way a driver must
@@ -2799,6 +2827,17 @@ mod turn_tests {
     /// so the quiet window still says idle — then `codex: awaiting approval`
     /// for an MCP elicitation, then `codex: ready` again. The title has to
     /// carry the activity through that, not only demote a busy screen to idle.
+    #[test]
+    fn a_working_report_older_than_the_rollouts_rest_is_stale() {
+        use vogt_engine_contract::ReportedState::{Blocked, Working};
+        let t = time::OffsetDateTime::UNIX_EPOCH + time::Duration::hours(1);
+        let later = t + time::Duration::seconds(5);
+        assert!(super::outlived_by_rest(Working, t, Some(later)));
+        assert!(!super::outlived_by_rest(Working, later, Some(t)));
+        assert!(!super::outlived_by_rest(Working, t, None));
+        assert!(!super::outlived_by_rest(Blocked, t, Some(later)));
+    }
+
     #[test]
     fn a_working_title_is_running_while_the_quiet_window_says_idle() {
         use crate::activity::classify;
