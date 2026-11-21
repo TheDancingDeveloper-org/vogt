@@ -187,6 +187,27 @@ RUN set -eu; \
     && { /usr/local/bin/opencode --version | grep -qF "$opencode_version" \
          || { echo "opencode is not $opencode_version — the platform binary did not install" >&2; exit 1; }; }
 
+# The GitHub CLI (WI-4512), pinned and checksummed exactly as the stack image
+# does (engine/Dockerfile, WI-4325) from the same manifest. gh reads GH_TOKEN
+# from the environment; no credential or `gh auth` state is baked in. The
+# version check is the build-time smoke check: a pod without a working `gh`
+# does not ship.
+RUN set -eu; \
+    . /usr/local/share/vogt/agent-versions.env; \
+    gh_version="$VOGT_GH_VERSION"; \
+    case "$TARGETARCH" in \
+        amd64) gh_arch=amd64; gh_sum="$VOGT_GH_SHA256_LINUX_AMD64" ;; \
+        arm64) gh_arch=arm64; gh_sum="$VOGT_GH_SHA256_LINUX_ARM64" ;; \
+        *) echo "unsupported architecture: $TARGETARCH" >&2; exit 1 ;; \
+    esac; \
+    gh_dir="gh_${gh_version}_linux_${gh_arch}"; \
+    curl -fsSL "https://github.com/cli/cli/releases/download/v${gh_version}/${gh_dir}.tar.gz" -o /tmp/gh.tar.gz; \
+    echo "$gh_sum  /tmp/gh.tar.gz" | sha256sum -c -; \
+    tar -xzf /tmp/gh.tar.gz -C /tmp; \
+    install -m 0755 "/tmp/${gh_dir}/bin/gh" /usr/local/bin/gh; \
+    rm -rf /tmp/gh.tar.gz "/tmp/${gh_dir}"; \
+    gh --version | grep -qF "gh version ${gh_version} "
+
 COPY --chmod=0755 deploy/codex-full-access.sh /usr/local/bin/codex
 COPY --chown=root:root --chmod=0644 deploy/driven-session-codex-requirements.toml /etc/codex/requirements.toml
 RUN set -eu; \
