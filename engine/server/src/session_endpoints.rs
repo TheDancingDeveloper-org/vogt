@@ -491,7 +491,10 @@ mod tests {
             crate::mcp_set::McpSet::Worker,
             &["komodo".to_string()],
         );
-        let names: Vec<&String> = trimmed.mcp.as_object().unwrap().keys().collect();
+        // Sorted: with vogt-core in the build, serde_json's preserve_order
+        // feature is unified in and the map keeps insertion order.
+        let mut names: Vec<&String> = trimmed.mcp.as_object().unwrap().keys().collect();
+        names.sort();
         assert_eq!(names, ["cadastre", "crw", "vogt"]);
     }
 }
