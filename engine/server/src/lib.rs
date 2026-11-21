@@ -37,6 +37,7 @@ pub mod files;
 pub mod first_turn;
 pub mod gates;
 pub mod git;
+pub mod github_token_check;
 pub mod graft_mint;
 pub mod graft_provider;
 pub mod gui;

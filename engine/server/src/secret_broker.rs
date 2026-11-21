@@ -552,6 +552,8 @@ pub struct SecretBroker {
     /// it, so the allowance starts afresh (a restart grants a session at most
     /// one extra window of writes).
     credential_writes: DashMap<Uuid, Vec<Instant>>,
+    /// Validates GitHub-bound values before they are handed out (gh#1460).
+    github: crate::github_token_check::GithubTokenCheck,
 }
 
 /// The longest a grant may live.
@@ -679,7 +681,19 @@ impl SecretBroker {
             account_locks: DashMap::new(),
             credential_max_lifetime: credential_max_lifetime_from_env(),
             credential_writes: DashMap::new(),
+            github: crate::github_token_check::GithubTokenCheck::from_env(),
         }
+    }
+
+    /// Replace the GitHub token check (tests point it at a fake API).
+    pub fn with_github_check(mut self, check: crate::github_token_check::GithubTokenCheck) -> Self {
+        self.github = check;
+        self
+    }
+
+    /// The GitHub token check (gh#1460).
+    pub fn github_check(&self) -> &crate::github_token_check::GithubTokenCheck {
+        &self.github
     }
 
     /// Override the ceiling on a written-back credential's expiry.
@@ -2478,6 +2492,12 @@ pub async fn fetch(
         .unwrap_or_default();
     match fetched {
         Ok(value) => {
+            // gh#1460: never hand out a GitHub token GitHub has rejected.
+            if let Some(response) =
+                refuse_if_stale(broker, &entry, &value, &request_id, session).await
+            {
+                return response;
+            }
             // The whole audit trail of the fetch: who, what, never the value.
             tracing::info!(
                 target: "vogt::audit",
@@ -2750,6 +2770,47 @@ pub async fn store(
             ApiError::BadGateway(failure.to_string()).into_response()
         }
     }
+}
+
+/// The typed `credential_stale` refusal for a GitHub-bound value GitHub
+/// rejected (gh#1460), or `None` to hand the value out. Network errors and
+/// timeouts fail open inside the check.
+async fn refuse_if_stale(
+    broker: &SecretBroker,
+    entry: &ManifestSecret,
+    value: &str,
+    request_id: &str,
+    session: Uuid,
+) -> Option<Response> {
+    use crate::github_token_check::{StaleCredential, TokenVerdict};
+    let check = broker.github_check();
+    if !check.is_github_bound(&entry.var, value) {
+        return None;
+    }
+    if check.check(entry, value).await != TokenVerdict::Stale {
+        return None;
+    }
+    let stale = StaleCredential::of(entry);
+    tracing::warn!(
+        target: "vogt::audit",
+        request_id = %request_id,
+        session_id = %session,
+        var = %entry.var,
+        source = %stale.source(),
+        "secret broker refused: GitHub rejected the credential (stale)"
+    );
+    Some(
+        (
+            StatusCode::FAILED_DEPENDENCY,
+            Json(json!({
+                "error": stale.message(),
+                "code": "credential_stale",
+                "var": stale.var,
+                "source": stale.source(),
+            })),
+        )
+            .into_response(),
+    )
 }
 
 fn refusal(status: StatusCode, reason: &str) -> Response {
@@ -4253,6 +4314,55 @@ mod tests {
             "{text}"
         );
         assert!(!text.contains("projectId"), "{text}");
+    }
+
+    async fn fake_github(status: u16) -> String {
+        let app = axum::Router::new().route(
+            "/user",
+            axum::routing::get(
+                move || async move { axum::http::StatusCode::from_u16(status).unwrap() },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn a_github_401_refuses_the_fetch_naming_the_source_without_the_value() {
+        let api = fake_github(401).await;
+        let broker = broker_with("GH_TOKEN infra GH_TOKEN_SRC\n", "127.0.0.1:8910")
+            .with_github_check(crate::github_token_check::GithubTokenCheck::new(api));
+        let entry = broker.manifest()[0].clone();
+        let secret = "ghp_supersecretvalue123";
+        let response = refuse_if_stale(&broker, &entry, secret, "req", Uuid::new_v4())
+            .await
+            .expect("a 401 must refuse");
+        assert_eq!(response.status(), StatusCode::FAILED_DEPENDENCY);
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(text.contains("credential_stale"), "{text}");
+        assert!(text.contains("infra/GH_TOKEN_SRC"), "{text}");
+        assert!(!text.contains(secret), "{text}");
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_github_still_hands_the_token_out() {
+        let broker = broker_with("GH_TOKEN infra GH_TOKEN_SRC\n", "127.0.0.1:8910")
+            .with_github_check(crate::github_token_check::GithubTokenCheck::new(
+                "http://127.0.0.1:1",
+            ));
+        let entry = broker.manifest()[0].clone();
+        assert!(
+            refuse_if_stale(&broker, &entry, "ghp_x", "req", Uuid::new_v4())
+                .await
+                .is_none()
+        );
     }
 
     #[tokio::test]

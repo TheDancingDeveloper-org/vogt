@@ -5476,6 +5476,30 @@ launch, not by the bootstrap: `vogt-prod` (§4) runs a wrapper that fetches
 `VOGT_PROD_TOKEN` at spawn, and a pod's session agent fetches every bearer its
 MCP config names around the agent.
 
+**Stale GitHub credentials are refused, not handed out (gh#1460).** Before
+the broker returns a GitHub-bound value it checks it against
+`GET {api}/user` (5 s timeout). A value is GitHub-bound when its manifest name
+is `GH_TOKEN`, `GITHUB_MCP_TOKEN` or listed in
+`ENGINE_AGENT_AUTH_GITHUB_VARS`, or when it starts with `ghp_`, `gho_`, `ghs_`
+or `github_pat_`. A 200 hands it out; the verdict is cached per (name, SHA-256
+of the value) for 10 minutes. A 401 refuses the fetch with HTTP 424 and
+`{"code": "credential_stale", "var", "source", "error": "credential stale: VAR
+(source PROJECT/SECRET) was rejected by GitHub (401); it needs a person to
+refresh it"}`, and raises one Inbox decision (once per name and source, until
+the value is seen valid again) naming the manifest line and the source secret.
+Anything else (a timeout, a network error, a 5xx or rate limit) **fails open**:
+the value is handed out and a warning logged. Values are never logged; only
+names and hash prefixes. A background pass re-checks the named GitHub-bound
+entries on an interval, so a dead token reaches the Inbox without a session
+asking for it.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `ENGINE_AGENT_AUTH_GITHUB_CHECK` | on | `0`/`false`/`off` turns the check (and the background pass) off |
+| `ENGINE_AGENT_AUTH_GITHUB_VARS` | empty | extra GitHub-bound manifest names, comma- or space-separated |
+| `ENGINE_AGENT_AUTH_GITHUB_CHECK_INTERVAL_SECS` | `1800` | background pass interval; `0` disables the pass only |
+| `ENGINE_AGENT_AUTH_GITHUB_API_URL` | `https://api.github.com` | the API base (GitHub Enterprise, or a fake in tests) |
+
 **Storing a secret from a session: the write broker.** The mirror of the
 fetch, for a session that has just *produced* a secret — minted an API token,
 generated a keypair, rotated a password it was asked to rotate. Without it the
