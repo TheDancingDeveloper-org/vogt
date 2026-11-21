@@ -1692,6 +1692,36 @@ mod tests {
     }
 
     #[test]
+    fn a_policy_with_the_legacy_graft_key_is_written_without_it() {
+        // gh#1461: accepted on write, never stored.
+        let policy: crate::application::models::AgentPolicy = serde_json::from_value(json!({
+            "landing": {
+                "base_branch": "main",
+                "worker_lands_by": "push_branch",
+                "merge_by": "oversight",
+                "merge_mode": "rebase",
+                "graft": {"line": "backlog-1", "mirror": "m", "endpoint": "graft-dev:17888"},
+            }
+        }))
+        .unwrap();
+        let stored = checked_agent_policy(&policy).unwrap();
+        let landing = stored.landing.expect("landing kept");
+        assert!(landing.get("graft").is_none(), "{landing}");
+        assert_eq!(landing["base_branch"], "main");
+        let other: Result<crate::application::models::AgentPolicy, _> =
+            serde_json::from_value(json!({
+                "landing": {
+                    "base_branch": "main",
+                    "worker_lands_by": "push_branch",
+                    "merge_by": "oversight",
+                    "merge_mode": "rebase",
+                    "grafted": true,
+                }
+            }));
+        assert!(other.is_err(), "other unknown keys stay refused");
+    }
+
+    #[test]
     fn a_duplicate_slug_is_a_conflict() {
         let ctx = context("local:test-user", None);
         register_op(&ctx, registration("Widget", "/srv/widget")).unwrap();
