@@ -466,6 +466,13 @@ pub struct LandingPolicy {
     #[serde(default, deserialize_with = "checked_source")]
     #[schemars(schema_with = "optional_open_object", extend("x-keep-default" = true))]
     pub source: Option<serde_json::Value>,
+    /// The Python-era `graft` landing key (`null`, or `{line, mirror,
+    /// endpoint}`), still in stored policies (gh#1461). Graft settings now live
+    /// server-side (mirror rows, the session token mint), so it is accepted on
+    /// read, ignored, and never written back.
+    #[serde(default, skip_serializing)]
+    #[schemars(skip)]
+    pub graft: Option<serde_json::Value>,
 }
 
 /// A source is stored as the object it arrived as; it must read as a
@@ -605,6 +612,23 @@ mod landing_source_tests {
         });
         let policy: LandingPolicy = serde_json::from_value(landing(source.clone())).unwrap();
         assert_eq!(policy.source, Some(source));
+    }
+
+    #[test]
+    fn the_legacy_graft_key_is_read_and_never_written() {
+        for graft in [
+            Value::Null,
+            json!({"line": "backlog-1", "mirror": "m", "endpoint": "graft-dev:17888"}),
+        ] {
+            let mut value = landing(Value::Null);
+            value["graft"] = graft;
+            let policy: LandingPolicy = serde_json::from_value(value).unwrap();
+            let written = serde_json::to_value(&policy).unwrap();
+            assert!(written.get("graft").is_none(), "{written}");
+        }
+        let mut other = landing(Value::Null);
+        other["grafted"] = json!(1);
+        assert!(serde_json::from_value::<LandingPolicy>(other).is_err());
     }
 
     #[test]

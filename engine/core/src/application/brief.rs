@@ -161,6 +161,34 @@ fn policy_section(project: Option<&Project>) -> Vec<String> {
     lines
 }
 
+/// [`landing_section`], or — when the stored rule does not read — a note
+/// saying so and why, so an unreadable rule never blocks a session start
+/// (gh#1461).
+fn landing_or_note(project: &Project, reference: &str) -> Vec<String> {
+    match landing_section(project, reference) {
+        Ok(lines) => lines,
+        Err(error) => {
+            tracing::warn!(project = %project.slug, %error, "brief rendered without the landing rule");
+            vec![
+                "## Landing rule for this repo".to_string(),
+                String::new(),
+                format!(
+                    "- **Warning** the landing rule could not be read, so it is left out of this brief: {}. Ask oversight for the landing route.",
+                    error_text(&error)
+                ),
+                String::new(),
+            ]
+        }
+    }
+}
+
+fn error_text(error: &VogtError) -> String {
+    match error {
+        VogtError::InvalidRequest(message) => message.clone(),
+        other => other.to_string(),
+    }
+}
+
 /// The landing rule as the brief states it (`agent_policy.landing`), with
 /// `{n}` filled from the item's number. A project with no landing rule renders
 /// nothing.
@@ -226,6 +254,10 @@ struct LandingFields {
     #[serde(default)]
     #[allow(dead_code)]
     source: Option<serde_json::Value>,
+    // The Python-era `graft` key (gh#1461): accepted and ignored.
+    #[serde(default)]
+    #[allow(dead_code)]
+    graft: Option<serde_json::Value>,
 }
 
 fn default_branch_pattern() -> String {
@@ -649,7 +681,7 @@ pub fn brief_for_work_item(input: &WorkBrief<'_>) -> Result<ComposedBrief, VogtE
 
     lines.extend(policy_section(input.project));
     if let Some(project) = input.project {
-        lines.extend(landing_section(project, &item.reference)?);
+        lines.extend(landing_or_note(project, &item.reference));
     }
     lines.extend([
         "## Deployment policy".to_string(),
@@ -1344,6 +1376,48 @@ mod tests {
                 if message.contains("unreadable landing rule")
                     && message.contains("not_a_policy_field")),
             "unexpected error: {error:?}"
+        );
+    }
+
+    #[test]
+    fn a_landing_rule_with_the_legacy_graft_key_renders() {
+        // gh#1461: Python-era policies carry `graft`, null or an object.
+        for graft in [
+            json!(null),
+            json!({"line": "backlog-1", "mirror": "spotmycar", "endpoint": "http://graft-dev:17888"}),
+        ] {
+            let project = project_with(AgentPolicy {
+                landing: Some(landing_rule(json!({ "graft": graft }))),
+                ..AgentPolicy::default()
+            });
+            let lines = landing_section(&project, "WI-4420").expect("graft is accepted");
+            assert!(lines.contains(&"- **Base** `main`".to_string()));
+        }
+    }
+
+    #[test]
+    fn an_unreadable_landing_rule_leaves_a_note_and_does_not_fail_the_brief() {
+        let item = plain();
+        let project = project_with(AgentPolicy {
+            landing: Some(landing_rule(json!({"not_a_policy_field": true}))),
+            ..AgentPolicy::default()
+        });
+        let brief = brief_for_work_item(&WorkBrief {
+            item: &item,
+            session_id: SESSION,
+            ranking: None,
+            project: Some(&project),
+            comments: &[],
+            related: &BTreeMap::new(),
+            decision_author: &|_| true,
+        })
+        .expect("an unreadable landing rule does not block the brief");
+        assert!(!brief.text.contains("- **Base**"), "{}", brief.text);
+        assert!(
+            brief.text.contains("the landing rule could not be read")
+                && brief.text.contains("not_a_policy_field"),
+            "{}",
+            brief.text
         );
     }
 
