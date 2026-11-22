@@ -684,6 +684,12 @@ pub(crate) struct AuthBreadcrumbs {
     pub ondemand: Vec<String>,
     /// Manifest entries flagged `writable`: storable through the broker.
     pub writable: Vec<String>,
+    /// Launch-time manifest entries (WI-4517): the pod entrypoint fetches
+    /// each through the broker before the agent starts, as `vogt-agent-auth
+    /// run` resolves them on a host. A required one that fails stops the
+    /// launch; an optional one is skipped with a warning.
+    pub launch_required: Vec<String>,
+    pub launch_optional: Vec<String>,
 }
 
 impl AuthBreadcrumbs {
@@ -706,8 +712,49 @@ impl AuthBreadcrumbs {
                 .filter(|entry| entry.writable)
                 .map(|entry| entry.var.clone())
                 .collect(),
+            // The deployment's own lines only: a provider key is fetched
+            // around its CLI (WI-3886), never exported at launch.
+            launch_required: launch_names(
+                &broker.base_manifest(),
+                crate::secret_broker::ManifestPolicy::Required,
+            ),
+            launch_optional: launch_names(
+                &broker.base_manifest(),
+                crate::secret_broker::ManifestPolicy::Optional,
+            ),
         }
     }
+
+    /// Drop `var` from every list: a name the session may not fetch.
+    fn forget(&mut self, var: &str) {
+        for list in [
+            &mut self.granted,
+            &mut self.ondemand,
+            &mut self.launch_required,
+            &mut self.launch_optional,
+        ] {
+            list.retain(|name| name != var);
+        }
+    }
+
+    /// A name fetched around one child (`ondemand`) is never also exported
+    /// into the pod's whole environment at launch.
+    fn keep_ondemand_out_of_launch(&mut self) {
+        let ondemand = &self.ondemand;
+        self.launch_required.retain(|var| !ondemand.contains(var));
+        self.launch_optional.retain(|var| !ondemand.contains(var));
+    }
+}
+
+fn launch_names(
+    manifest: &[crate::secret_broker::ManifestSecret],
+    policy: crate::secret_broker::ManifestPolicy,
+) -> Vec<String> {
+    manifest
+        .iter()
+        .filter(|entry| entry.policy == policy)
+        .map(|entry| entry.var.clone())
+        .collect()
 }
 
 /// The contract env the bootstrap response carries (the same fields as the
@@ -741,6 +788,14 @@ fn bootstrap_env(
         ("AGENT_AUTH_GRANTED", breadcrumbs.granted.join(" ")),
         ("AGENT_AUTH_ONDEMAND", breadcrumbs.ondemand.join(" ")),
         ("AGENT_AUTH_WRITABLE", breadcrumbs.writable.join(" ")),
+        (
+            "AGENT_AUTH_LAUNCH_REQUIRED",
+            breadcrumbs.launch_required.join(" "),
+        ),
+        (
+            "AGENT_AUTH_LAUNCH_OPTIONAL",
+            breadcrumbs.launch_optional.join(" "),
+        ),
     ] {
         env.insert(name.into(), serde_json::Value::String(value));
     }
@@ -1339,12 +1394,7 @@ pub async fn bootstrap(
     // token is not fetched around a worker's agent either. A dev lane hands
     // it to nobody.
     if launch.mcp_set != crate::mcp_set::McpSet::Full || state.sessions.is_dev_lane() {
-        breadcrumbs
-            .ondemand
-            .retain(|var| var != crate::session_endpoints::VOGT_PROD_TOKEN_ENV);
-        breadcrumbs
-            .granted
-            .retain(|var| var != crate::session_endpoints::VOGT_PROD_TOKEN_ENV);
+        breadcrumbs.forget(crate::session_endpoints::VOGT_PROD_TOKEN_ENV);
     }
     let vogt_prod_bearer = state.sessions.vogt_prod_configured()
         && launch.mcp_set == crate::mcp_set::McpSet::Full
@@ -1366,6 +1416,7 @@ pub async fn bootstrap(
             .ondemand
             .push(crate::session_endpoints::VOGT_PROD_TOKEN_ENV.to_string());
     }
+    breadcrumbs.keep_ondemand_out_of_launch();
     let mut env = bootstrap_env(
         cfg.engine_endpoint,
         id,
@@ -2328,6 +2379,8 @@ mod tests {
             granted: vec!["GRANTED_ONE".into(), "GRANTED_TWO".into()],
             ondemand: vec!["ONDEMAND_ONE".into()],
             writable: vec!["WRITABLE_ONE".into(), "WRITABLE_TWO".into()],
+            launch_required: vec!["FORGEJO_TOKEN".into()],
+            launch_optional: vec!["GH_TOKEN".into(), "GITHUB_MCP_TOKEN".into()],
         };
         let env = bootstrap_env(
             "http://engine".into(),
@@ -2342,6 +2395,11 @@ mod tests {
         assert_eq!(env["AGENT_AUTH_GRANTED"], "GRANTED_ONE GRANTED_TWO");
         assert_eq!(env["AGENT_AUTH_ONDEMAND"], "ONDEMAND_ONE");
         assert_eq!(env["AGENT_AUTH_WRITABLE"], "WRITABLE_ONE WRITABLE_TWO");
+        assert_eq!(env["AGENT_AUTH_LAUNCH_REQUIRED"], "FORGEJO_TOKEN");
+        assert_eq!(
+            env["AGENT_AUTH_LAUNCH_OPTIONAL"],
+            "GH_TOKEN GITHUB_MCP_TOKEN"
+        );
         // The empty case is present and empty, not absent: a session can tell
         // "nothing declared" from an older bootstrap that never set it.
         let empty = bootstrap_env(
@@ -2364,6 +2422,36 @@ mod tests {
         assert_eq!(empty["AGENT_AUTH_GRANTED"], "");
         assert_eq!(empty["AGENT_AUTH_ONDEMAND"], "");
         assert_eq!(empty["AGENT_AUTH_WRITABLE"], "");
+    }
+
+    /// WI-4517: a pod is told the launch-time names (required and optional
+    /// apart) to fetch through the broker; never an ondemand name, which is
+    /// fetched around its child only, and never one the session may not have.
+    #[test]
+    fn launch_names_are_the_manifests_launch_time_entries_only() {
+        let manifest = crate::secret_broker::parse_manifest(
+            "FORGEJO_TOKEN p forgejo\nGH_TOKEN p gh optional\nDB p db ondemand\nCADASTRE p c optional\nVOGT_PROD_TOKEN p v optional\n",
+        )
+        .unwrap();
+        use crate::secret_broker::ManifestPolicy;
+        let mut crumbs = AuthBreadcrumbs {
+            granted: vec!["VOGT_PROD_TOKEN".into()],
+            ondemand: vec!["DB".into(), "CADASTRE".into()],
+            writable: Vec::new(),
+            launch_required: launch_names(&manifest, ManifestPolicy::Required),
+            launch_optional: launch_names(&manifest, ManifestPolicy::Optional),
+        };
+        assert_eq!(crumbs.launch_required, ["FORGEJO_TOKEN"]);
+        assert_eq!(
+            crumbs.launch_optional,
+            ["GH_TOKEN", "CADASTRE", "VOGT_PROD_TOKEN"]
+        );
+        crumbs.forget("VOGT_PROD_TOKEN");
+        crumbs.keep_ondemand_out_of_launch();
+        assert_eq!(crumbs.launch_required, ["FORGEJO_TOKEN"]);
+        assert_eq!(crumbs.launch_optional, ["GH_TOKEN"]);
+        assert!(crumbs.granted.is_empty());
+        assert_eq!(crumbs.ondemand, ["DB", "CADASTRE"]);
     }
 
     #[test]
