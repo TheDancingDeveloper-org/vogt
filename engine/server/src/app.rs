@@ -294,6 +294,22 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
     // gh#1460: report stale GitHub-bound brokered tokens to the Inbox and
     // re-check them in the background.
     crate::github_token_check::spawn(Arc::clone(&state));
+    // GH #1466: a wake that lost its conversation raises an Inbox item.
+    if let Some(core) = state.vogt_core.clone() {
+        state
+            .sessions
+            .set_conversation_lost_sink(Arc::new(move |lost: crate::sessions::ConversationLost| {
+                let core = Arc::clone(&core);
+                if let Ok(rt) = tokio::runtime::Handle::try_current() {
+                    rt.spawn(async move {
+                        let body = crate::sessions::conversation_lost_decision(&lost);
+                        if let Err(e) = core.post_json("/decisions", &body).await {
+                            tracing::warn!(session = %lost.session, error = %e, "could not raise the lost-conversation Inbox item");
+                        }
+                    });
+                }
+            }));
+    }
     // Background task: turn the drift among those republished events into a
     // push. Reads the bus, never the core — see the watcher's own
     // comment for what that costs across a restart, which is a decision

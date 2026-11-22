@@ -205,6 +205,11 @@ pub struct Record {
     /// it replaces. Never written.
     #[serde(skip)]
     pub fresh_conversation: Option<Uuid>,
+    /// The conversation a wake could not resume because its transcript was
+    /// gone (GH #1466). The session started a new conversation instead, said
+    /// so on its screen, and raised an Inbox item.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_lost: Option<vogt_engine_contract::AgentConversation>,
 }
 
 /// Whether a woken session lost the bypass it showed before it slept
@@ -281,6 +286,7 @@ impl Record {
             cols: None,
             blocked: None,
             fresh_conversation: None,
+            conversation_lost: None,
         }
     }
 }

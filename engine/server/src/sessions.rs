@@ -464,6 +464,9 @@ pub struct SessionRegistry {
     /// outcome, so the launching call can refuse a start the cluster refused
     /// (WI-4232). Taken by `create_launched`; empty for adopted pods.
     pod_create_waits: DashMap<Uuid, tokio::sync::oneshot::Receiver<Result<()>>>,
+    /// Where a wake that lost its conversation is reported: the Inbox, in the
+    /// engine (GH #1466). Unset in tests and without a core.
+    conversation_lost_sink: std::sync::OnceLock<ConversationLostSink>,
     /// The source providers pod sessions are served from. Built from the
     /// deployment's settings on first use; tests install providers.
     source_registry: parking_lot::Mutex<Option<crate::source_provider::SourceRegistry>>,
@@ -733,10 +736,16 @@ impl SessionRegistry {
             host_slot_gate: std::sync::Mutex::new(()),
             pod_launcher: parking_lot::Mutex::new(None),
             pod_create_waits: DashMap::new(),
+            conversation_lost_sink: std::sync::OnceLock::new(),
             source_registry: parking_lot::Mutex::new(None),
             host_graft_credentials: Arc::new(DashMap::new()),
             adopting: parking_lot::Mutex::new(std::collections::HashMap::new()),
         }
+    }
+
+    /// Report each wake that lost its conversation through `sink` (GH #1466).
+    pub fn set_conversation_lost_sink(&self, sink: ConversationLostSink) {
+        let _ = self.conversation_lost_sink.set(sink);
     }
 
     /// Replace the pod launcher (tests run the agent in-process).
@@ -3037,7 +3046,8 @@ impl SessionRegistry {
     /// One the budget watcher hibernated stays hibernated too (WI-1245): its
     /// hard flag persists, so a boot wake would bring it back unenforced.
     pub fn hibernated_keep_awake(&self) -> Vec<Uuid> {
-        self.records
+        let pinned = self
+            .records
             .iter()
             .filter(|r| {
                 r.keep_awake
@@ -3052,8 +3062,9 @@ impl SessionRegistry {
                     && r.conversation.is_some()
                     && !self.sessions.contains_key(r.key())
             })
-            .map(|r| *r.key())
-            .collect()
+            .map(|r| (*r.key(), r.created_at.clone(), r.conversation.clone()))
+            .collect::<Vec<_>>();
+        newest_per_conversation(pinned)
     }
 
     /// Whether the engine knows this session at all, live or hibernated.
@@ -3614,6 +3625,100 @@ impl SessionRegistry {
         Ok(())
     }
 
+    /// The conversation a host wake of `spec` would resume when its
+    /// transcript is gone from every place the agent keeps them (GH #1466),
+    /// else `None`. Only Claude Code and Codex keep transcripts the engine can
+    /// look for; a pod session's transcript lives in its pod.
+    fn missing_transcript(
+        &self,
+        spec: &SessionSpec,
+        conversation: Option<&AgentConversation>,
+    ) -> Option<AgentConversation> {
+        if !self.cfg.host_placement.wake_transcript_check {
+            return None;
+        }
+        let id = spec.resume.as_deref().map(str::trim)?;
+        if !agent_cli::is_conversation_id(id)
+            || self.runs_in_pod(spec.template.as_deref(), spec.placement.as_deref())
+        {
+            return None;
+        }
+        let agent = self.agent_of(&spec.command, spec.template.as_deref())?;
+        let env = |name: &str| {
+            spec.env
+                .iter()
+                .flatten()
+                .rev()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| std::path::PathBuf::from(v))
+        };
+        let home = env("HOME").or_else(|| std::env::var_os("HOME").map(Into::into))?;
+        let found = match agent.as_str() {
+            "claude" => {
+                let mut dirs = self.cfg.agent_onboarding.claude_dirs();
+                dirs.extend(env("CLAUDE_CONFIG_DIR"));
+                crate::transcripts::claude_roots(&home, &dirs)
+                    .iter()
+                    .any(|root| crate::transcripts::claude_transcript(root, id).is_some())
+            }
+            "codex" => [
+                env("CODEX_HOME"),
+                Some(home.join(".codex")),
+                self.cfg.codex_transcript_root.clone(),
+            ]
+            .into_iter()
+            .flatten()
+            .any(|root| crate::transcripts::codex_transcript(&root.join("sessions"), id).is_some()),
+            _ => return None,
+        };
+        (!found).then(|| {
+            conversation.cloned().unwrap_or(AgentConversation {
+                agent,
+                id: id.to_string(),
+            })
+        })
+    }
+
+    /// Tell the person a woken session started a new conversation because its
+    /// own was lost (GH #1466): a notice on its screen, an audit line, and an
+    /// Inbox item through the sink.
+    fn report_conversation_lost(&self, session: &Session, conversation: AgentConversation) {
+        tracing::warn!(
+            target: "vogt::audit",
+            event = "session.wake.conversation_lost",
+            session = %session.id,
+            name = %session.name(),
+            agent = %conversation.agent,
+            conversation = %conversation.id,
+            "a woken session's transcript is missing; it started a new conversation"
+        );
+        session.print_notice(&format!(
+            "Conversation lost: the {} transcript for {} is missing, so this session \
+             started a new conversation. The earlier context is not loaded.",
+            conversation.agent, conversation.id
+        ));
+        if let Some(sink) = self.conversation_lost_sink.get() {
+            sink(ConversationLost {
+                session: session.id,
+                name: session.name(),
+                conversation,
+            });
+        }
+    }
+
+    /// A live session other than `id` that runs `record`'s conversation
+    /// (GH #1466). Two agents on one conversation would interleave one
+    /// transcript, so a renamed or superseded record never wakes beside it.
+    fn conversation_holder(&self, id: Uuid, record: &Record) -> Option<Uuid> {
+        let conversation = record.conversation.as_ref()?;
+        self.live_sessions().into_iter().find_map(|session| {
+            (session.id != id
+                && session.is_alive()
+                && session.conversation().as_ref() == Some(conversation))
+            .then_some(session.id)
+        })
+    }
+
     /// Whether `successor` still exists: live, or still hibernated. A session
     /// that was removed leaves no record, and a handoff to it must not block
     /// the wake forever.
@@ -3693,6 +3798,11 @@ impl SessionRegistry {
                 )));
             }
         }
+        if let Some(holder) = self.conversation_holder(id, &record) {
+            return Err(ApiError::Conflict(format!(
+                "session {id} cannot wake: its conversation is already running in session {holder}"
+            )));
+        }
         if !req.force {
             self.refuse_contested_wake(id, &record)?;
         } else if record.superseded_by.is_some() || self.same_work_contender(id, &record).is_some()
@@ -3740,6 +3850,14 @@ impl SessionRegistry {
         );
         self.check_provider_secret(id, &spec).await?;
         let mut spec = spec;
+        // A conversation whose transcript is gone cannot be resumed; the agent
+        // would start blank or exit. Start a new one and say so (GH #1466).
+        let lost = self.missing_transcript(&spec, record.conversation.as_ref());
+        if let Some(conversation) = lost.as_ref() {
+            spec.resume = None;
+            record.conversation = None;
+            record.conversation_lost = Some(conversation.clone());
+        }
         self.prepare_host_graft(id, &mut spec).await?;
         let created = self.create_inner(spec, Creating::Wake(Box::new(record)), None);
         self.pod_create_waits.remove(&id);
@@ -3751,6 +3869,9 @@ impl SessionRegistry {
             }
         };
         self.bus.publish(ServerEvent::SessionWoken { id });
+        if let Some(conversation) = lost {
+            self.report_conversation_lost(&session, conversation);
+        }
         if fresh.is_some() {
             tracing::info!(
                 target: "vogt::audit",
@@ -3777,11 +3898,12 @@ impl SessionRegistry {
         cols: Option<u16>,
         rows: Option<u16>,
     ) -> SessionSpec {
+        let placement = self.wake_placement(record, template.as_deref());
         SessionSpec {
             name: record.name.clone(),
             command,
             template,
-            placement: record.placement.clone(),
+            placement,
             // A record from before the line above names the default
             // directory itself; that too means "the default".
             cwd: record
@@ -3838,10 +3960,44 @@ impl SessionRegistry {
         {
             return (record.command.clone(), record.template.clone());
         }
-        match self.resume_template(record.template.as_deref(), &conversation.agent) {
+        // A host session stays on the host (GH #1466): a resume template that
+        // cannot run there is passed over for the agent's bare name.
+        let on_host = self.ran_on_host(record);
+        match self
+            .resume_template(record.template.as_deref(), &conversation.agent)
+            .filter(|t| {
+                !on_host
+                    || self
+                        .resolve_template(t)
+                        .is_ok_and(|template| template.supports_host())
+            }) {
             Some(template) => (None, Some(template)),
             None => (Some(vec![conversation.agent.clone()]), None),
         }
+    }
+
+    /// Whether `record` ran on the host: placed there, or started with no
+    /// placement from a command or template that does not run in a pod.
+    fn ran_on_host(&self, record: &Record) -> bool {
+        match record.placement.as_deref() {
+            Some("host") => true,
+            Some("pod") => false,
+            _ => !self.runs_in_pod(record.template.as_deref(), record.placement.as_deref()),
+        }
+    }
+
+    /// The placement a wake of `record` asks for: its own, or `host` when it ran
+    /// on the host and the wake's template would otherwise put it in a pod. A
+    /// wake never moves a host session into a pod (GH #1466); only a person
+    /// starting it again elsewhere does.
+    fn wake_placement(&self, record: &Record, template: Option<&str>) -> Option<String> {
+        if record.placement.is_none()
+            && self.ran_on_host(record)
+            && self.runs_in_pod(template, None)
+        {
+            return Some("host".into());
+        }
+        record.placement.clone()
     }
 
     /// The template that resumes a conversation of `agent` (WI-962): `template`
@@ -5231,6 +5387,54 @@ fn hibernated_summary(record: &Record, screen_bytes: u64) -> Option<SessionSumma
             .and_then(|json| serde_json::from_str(json).ok()),
         budget: record.budget.clone(),
     })
+}
+
+/// A woken session whose conversation could not be resumed (GH #1466).
+#[derive(Debug, Clone)]
+pub struct ConversationLost {
+    pub session: Uuid,
+    pub name: String,
+    pub conversation: AgentConversation,
+}
+
+/// Where a lost conversation is reported (the Inbox, in the engine).
+pub type ConversationLostSink = Arc<dyn Fn(ConversationLost) + Send + Sync>;
+
+/// The Inbox item for a lost conversation: a pending decision for a person.
+pub fn conversation_lost_decision(lost: &ConversationLost) -> serde_json::Value {
+    serde_json::json!({
+        "reason": format!("gh#1466: session {} lost its conversation on wake", lost.name),
+        "question": format!(
+            "Session {} ({}) woke without its {} conversation {}: the transcript is missing. Recover it?",
+            lost.name, lost.session, lost.conversation.agent, lost.conversation.id
+        ),
+        "context": "The engine woke the session after a restart, but the agent's transcript for the \
+            recorded conversation was not found, so it started a new conversation and printed a notice. \
+            Restore the transcript and resume it by hand, or carry on in the new conversation.",
+        "options": [
+            {"label": "Carry on", "description": "Keep the new conversation.", "recommended": true},
+            {"label": "Restore", "description": format!("Restore the transcript, then resume {} by hand.", lost.conversation.id), "recommended": false},
+        ],
+        "ttl_seconds": 7 * 24 * 60 * 60,
+    })
+}
+
+/// One session per conversation, the newest first (GH #1466). Records that
+/// share a conversation (a renamed session, or a second record started on the
+/// same `--resume`) are woken once, as the most recently created record.
+fn newest_per_conversation(
+    mut pinned: Vec<(Uuid, String, Option<AgentConversation>)>,
+) -> Vec<Uuid> {
+    pinned.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    let mut seen = std::collections::HashSet::new();
+    pinned
+        .into_iter()
+        .filter(|(_, _, conversation)| match conversation {
+            Some(c) => seen.insert((c.agent.clone(), c.id.clone())),
+            None => true,
+        })
+        .map(|(id, _, _)| id)
+        .collect()
 }
 
 /// The account slot a wake takes (WI-4423). A hibernated session holds no slot,
@@ -7104,6 +7308,185 @@ mod host_placement_tests {
             }
             other => panic!("expected a bad request, got {other:?}"),
         }
+    }
+
+    const PLEX_CONVERSATION: &str = "b4fa8ed9-99cc-4179-934d-c33e259d31a8";
+
+    /// A host shell a person ran `claude` in by hand: no template, no
+    /// placement, and the conversation its hook reported (GH #1466, `plex2`).
+    fn host_shell_record(id: Uuid, name: &str, created_at: &str) -> crate::hibernation::Record {
+        let mut record = crate::hibernation::Record::new(id, name.into(), created_at.into());
+        record.command = Some(vec!["bash".into()]);
+        record.conversation = Some(AgentConversation {
+            agent: "claude".into(),
+            id: PLEX_CONVERSATION.into(),
+        });
+        record.keep_awake = true;
+        record.hibernation = Some(Hibernation {
+            at: created_at.into(),
+            trigger: HibernateTrigger::Recovered,
+            reason: None,
+            resumable: true,
+            superseded_by: None,
+        });
+        record
+    }
+
+    #[test]
+    fn a_woken_host_shell_resumes_its_conversation_on_the_host() {
+        // GH #1466: the wake swapped the shell for the pod-default Claude
+        // template and, with no placement recorded, started it in a pod.
+        let dir = tempfile::tempdir().unwrap();
+        for host_capable in [true, false] {
+            let sessions = registry(dir.path().to_path_buf(), |cfg| {
+                cfg.pod_backends_enabled = true;
+                cfg.session_default_backend = "pod".into();
+                cfg.session_templates = SessionTemplate::default_templates_on("pod");
+                for template in &mut cfg.session_templates {
+                    if template.tags.iter().any(|t| t == "claude") {
+                        template.host_capable = host_capable;
+                    }
+                }
+            });
+            let record = host_shell_record(Uuid::new_v4(), "plex2", "2026-11-21T07:00:00Z");
+            let (command, template) = sessions.wake_launch(&record);
+            let spec = sessions.wake_spec(&record, vec![], command, template, None, None, None);
+            assert!(
+                !sessions.runs_in_pod(spec.template.as_deref(), spec.placement.as_deref()),
+                "host_capable={host_capable}: a host session wakes on the host, got {:?} {:?}",
+                spec.template,
+                spec.placement
+            );
+            assert_eq!(
+                sessions
+                    .agent_of(&spec.command, spec.template.as_deref())
+                    .as_deref(),
+                Some("claude")
+            );
+            assert_eq!(spec.resume.as_deref(), Some(PLEX_CONVERSATION));
+        }
+    }
+
+    #[test]
+    fn a_pod_session_still_wakes_in_its_pod() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = pod_default(dir.path());
+        let mut record = host_shell_record(Uuid::new_v4(), "w", "2026-11-21T07:00:00Z");
+        record.command = None;
+        record.template = Some("Claude Code (protected)".into());
+        let (command, template) = sessions.wake_launch(&record);
+        let spec = sessions.wake_spec(&record, vec![], command, template, None, None, None);
+        assert!(sessions.runs_in_pod(spec.template.as_deref(), spec.placement.as_deref()));
+    }
+
+    #[test]
+    fn records_sharing_a_conversation_wake_once_as_the_newest() {
+        // GH #1466: the old `plex` and the renamed `plex2` both held the
+        // conversation, and the boot wake started both.
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = registry(dir.path().to_path_buf(), |_| {});
+        let old = Uuid::new_v4();
+        let new = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        sessions
+            .records
+            .insert(old, host_shell_record(old, "plex", "2026-11-20T07:00:00Z"));
+        sessions
+            .records
+            .insert(new, host_shell_record(new, "plex2", "2026-11-21T07:00:00Z"));
+        let mut unrelated = host_shell_record(other, "other", "2026-11-19T07:00:00Z");
+        unrelated.conversation = Some(AgentConversation {
+            agent: "claude".into(),
+            id: Uuid::new_v4().to_string(),
+        });
+        sessions.records.insert(other, unrelated);
+        let mut pinned = sessions.hibernated_keep_awake();
+        pinned.sort();
+        let mut expected = vec![new, other];
+        expected.sort();
+        assert_eq!(pinned, expected);
+    }
+
+    #[tokio::test]
+    async fn a_wake_is_refused_while_its_conversation_runs_in_another_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = registry(dir.path().to_path_buf(), |_| {});
+        let live = sessions.create(spec("plex2", None)).unwrap();
+        live.set_conversation(Some(AgentConversation {
+            agent: "claude".into(),
+            id: PLEX_CONVERSATION.into(),
+        }));
+        let id = Uuid::new_v4();
+        let record = host_shell_record(id, "plex", "2026-11-20T07:00:00Z");
+        let holder = sessions.conversation_holder(id, &record);
+        let own = sessions.conversation_holder(live.id, &record);
+        let _ = sessions.remove(live.id);
+        assert_eq!(
+            holder,
+            Some(live.id),
+            "the old record must not wake beside plex2"
+        );
+        assert_eq!(own, None, "a session does not contend with itself");
+    }
+
+    #[test]
+    fn a_host_wake_whose_transcript_is_gone_is_a_lost_conversation() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = registry(dir.path().join("state"), |cfg| {
+            cfg.host_placement.wake_transcript_check = true;
+        });
+        let home = dir.path().join("home");
+        let mut wake = spec("plex2", None);
+        wake.command = Some(vec!["claude".into()]);
+        wake.resume = Some(PLEX_CONVERSATION.into());
+        wake.env = Some(vec![("HOME".into(), home.to_string_lossy().into_owned())]);
+        let lost = sessions
+            .missing_transcript(&wake, None)
+            .expect("no transcript: the conversation is lost");
+        assert_eq!(lost.agent, "claude");
+        assert_eq!(lost.id, PLEX_CONVERSATION);
+        let unchecked = registry(dir.path().join("state2"), |_| {});
+        assert!(
+            unchecked.missing_transcript(&wake, None).is_none(),
+            "ENGINE_HOST_WAKE_TRANSCRIPT_CHECK=0 resumes without looking"
+        );
+        let key = home.join(".claude/projects/-home-sprooty-Working");
+        std::fs::create_dir_all(&key).unwrap();
+        std::fs::write(key.join(format!("{PLEX_CONVERSATION}.jsonl")), "{}\n").unwrap();
+        assert!(
+            sessions.missing_transcript(&wake, None).is_none(),
+            "a transcript on disk resumes"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_lost_conversation_prints_a_notice_and_raises_an_inbox_item() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = registry(dir.path().to_path_buf(), |_| {});
+        let raised = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let sink = Arc::clone(&raised);
+        sessions.set_conversation_lost_sink(Arc::new(move |lost| sink.lock().push(lost)));
+        let session = sessions.create(spec("plex2", None)).unwrap();
+        let conversation = AgentConversation {
+            agent: "claude".into(),
+            id: PLEX_CONVERSATION.into(),
+        };
+        sessions.report_conversation_lost(&session, conversation.clone());
+        let (rendered, _) = session.render_screen(0);
+        let screen = rendered.lines.join("");
+        // Removed before asserting, so a failure does not leave the PTY open.
+        let _ = sessions.remove(session.id);
+        assert!(screen.contains("Conversation lost"), "{screen}");
+        assert!(screen.contains(PLEX_CONVERSATION), "{screen}");
+        let raised = raised.lock();
+        assert_eq!(raised.len(), 1);
+        assert_eq!(raised[0].session, session.id);
+        assert_eq!(raised[0].conversation, conversation);
+        let body = conversation_lost_decision(&raised[0]);
+        assert!(body["question"]
+            .as_str()
+            .unwrap()
+            .contains(PLEX_CONVERSATION));
     }
 
     /// A registry whose ephemeral quota is `limit` bytes and whose writable

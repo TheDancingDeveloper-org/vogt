@@ -1257,6 +1257,18 @@ impl Session {
         Ok(sb.total_written())
     }
 
+    /// Print an engine notice on the session's screen, as output, so every
+    /// viewer and the scrollback see it (GH #1466). For host sessions only:
+    /// a pod session's output offsets are the pod's.
+    pub fn print_notice(&self, text: &str) {
+        let notice = Bytes::from(format!("\r\n\x1b[1;33m[vogt] {text}\x1b[0m\r\n"));
+        let mut sb = self.scrollback.lock();
+        sb.push(&notice);
+        self.feed_terminal(&notice);
+        let pos = sb.total_written() - notice.len() as u64;
+        let _ = self.output_tx.send(OutputChunk { pos, data: notice });
+    }
+
     /// Current absolute output position, used by the WebSocket liveness probe
     /// to detect a socket that is open but no longer delivering output.
     pub fn scrollback_position(&self) -> u64 {
