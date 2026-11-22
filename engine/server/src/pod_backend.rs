@@ -1168,6 +1168,12 @@ const RUNTIME_MOUNT: &str = "/run/vogt";
 /// container makes this uid-1000 0700 directory on the same emptyDir (keeping
 /// its size limit) and `TMPDIR` points every agent at it.
 const SESSION_TMPDIR: &str = "/tmp/vogt";
+/// Where the init container mounts the `/tmp` emptyDir's root (GH #1466). The
+/// containers mount its [`TMP_SUBPATH`] directory at `/tmp` instead of the root,
+/// because the kubelet makes the root 2777 and only root could chmod it; the
+/// init container owns the subdirectory it makes, so it can set it 1777.
+const TMP_VOLUME_ROOT: &str = "/run/session-tmp";
+const TMP_SUBPATH: &str = "tmp";
 const TMPDIR_INIT_CONTAINER: &str = "session-tmpdir";
 /// Claude Code also refuses a socket directory with any such ancestor, even
 /// under `TMPDIR`, but accepts an explicit `--messaging-socket-path` in a 0700
@@ -1862,6 +1868,7 @@ pub fn pod_template(
     ] {
         mounts.push(VolumeMount {
             name: name.into(),
+            sub_path: (name == "session-tmp").then(|| TMP_SUBPATH.into()),
             mount_path: dir,
             ..Default::default()
         });
@@ -1980,17 +1987,27 @@ pub fn pod_template(
         ..Default::default()
     }
 }
-/// Makes [`SESSION_TMPDIR`] on the `/tmp` emptyDir as the session user, mode
-/// 0700 (clearing the setgid bit the directory inherits), before the session
+/// Makes the `/tmp` directory, mode 1777, on the `/tmp` emptyDir (GH #1466),
+/// and [`SESSION_TMPDIR`] in it as the session user, mode 0700 (clearing the
+/// setgid bit the directory inherits), before the session
 /// container starts (WI-4513). It also layers [`SESSION_RUSTUP_HOME`] over the
 /// image's baked toolchains, when the image has any (WI-4514).
 fn tmpdir_init_container(image: &str) -> Container {
+    // The paths the session container sees as `/tmp` and `SESSION_TMPDIR`.
+    let tmp = format!("{TMP_VOLUME_ROOT}/{TMP_SUBPATH}");
+    let session_tmpdir = format!(
+        "{tmp}{}",
+        SESSION_TMPDIR
+            .strip_prefix(TMP_MOUNT)
+            .unwrap_or(SESSION_TMPDIR)
+    );
     Container {
         name: TMPDIR_INIT_CONTAINER.into(),
         image: Some(image.into()),
         command: Some(vec!["sh".into(), "-c".into()]),
         args: Some(vec![format!(
-            "mkdir -p {SESSION_TMPDIR} && chmod 0700 {SESSION_TMPDIR} \
+            "mkdir -p {tmp} && chmod 1777 {tmp} && chmod g-s {tmp} \
+             && mkdir -p {session_tmpdir} && chmod 0700 {session_tmpdir} \
              && if [ -d {BAKED_RUSTUP_HOME}/toolchains ]; then \
              mkdir -p {SESSION_RUSTUP_HOME}/toolchains \
              && cp {BAKED_RUSTUP_HOME}/settings.toml {SESSION_RUSTUP_HOME}/ \
@@ -2000,7 +2017,7 @@ fn tmpdir_init_container(image: &str) -> Container {
         volume_mounts: Some(vec![
             VolumeMount {
                 name: "session-tmp".into(),
-                mount_path: TMP_MOUNT.into(),
+                mount_path: TMP_VOLUME_ROOT.into(),
                 ..Default::default()
             },
             VolumeMount {
@@ -2157,6 +2174,7 @@ fn workspace_init_container(
             VolumeMount {
                 name: "session-tmp".into(),
                 mount_path: TMP_MOUNT.into(),
+                sub_path: Some(TMP_SUBPATH.into()),
                 ..Default::default()
             },
         ]),
@@ -4632,12 +4650,12 @@ mod tests {
             .find(|c| c.name == TMPDIR_INIT_CONTAINER)
             .expect("tmpdir init container");
         let script = init.args.as_ref().unwrap().join(" ");
-        assert!(script.contains("mkdir -p /tmp/vogt"));
-        assert!(script.contains("chmod 0700 /tmp/vogt"));
+        assert!(script.contains("mkdir -p /run/session-tmp/tmp/vogt"));
+        assert!(script.contains("chmod 0700 /run/session-tmp/tmp/vogt"));
         let mounts = init.volume_mounts.as_ref().unwrap();
         assert!(mounts
             .iter()
-            .any(|m| m.name == "session-tmp" && m.mount_path == TMP_MOUNT));
+            .any(|m| m.name == "session-tmp" && m.mount_path == TMP_VOLUME_ROOT));
         let ctx = init.security_context.as_ref().unwrap();
         assert_eq!(ctx.allow_privilege_escalation, Some(false));
         let env = spec.containers[0].env.as_ref().unwrap();
@@ -4648,6 +4666,49 @@ mod tests {
             .find(|e| e.name == "VOGT_CLAUDE_MESSAGING_SOCKET")
             .expect("VOGT_CLAUDE_MESSAGING_SOCKET");
         assert_eq!(socket.value.as_deref(), Some("/tmp/vogt/claude.sock"));
+    }
+
+    #[test]
+    fn the_session_tmp_is_mode_1777() {
+        // GH #1466: the kubelet makes the `/tmp` emptyDir root 2777 (setgid,
+        // no sticky bit), which Claude refuses for its messaging socket. The
+        // init container makes a 1777 directory on the volume, and every
+        // container mounts that directory, not the root, at `/tmp`.
+        let cfg = PodConfig {
+            workspace: Some(PodWorkspace {
+                dir: "/work-tree".into(),
+                source: "/srv/workspace".into(),
+                max_bytes: 1024,
+            }),
+            ..PodConfig::default()
+        };
+        let pod = pod_template_for(&cfg);
+        let spec = pod.spec.as_ref().unwrap();
+        let inits = spec.init_containers.as_ref().unwrap();
+        assert_eq!(
+            inits[0].name, TMPDIR_INIT_CONTAINER,
+            "the tmp directory is made first"
+        );
+        let script = inits[0].args.as_ref().unwrap().join(" ");
+        assert!(script.starts_with(
+            "mkdir -p /run/session-tmp/tmp && chmod 1777 /run/session-tmp/tmp \
+             && chmod g-s /run/session-tmp/tmp && "
+        ));
+        let tmp_mounts: Vec<&VolumeMount> = spec
+            .containers
+            .iter()
+            .chain(inits.iter().skip(1))
+            .flat_map(|c| c.volume_mounts.iter().flatten())
+            .filter(|m| m.name == "session-tmp")
+            .collect();
+        assert!(
+            tmp_mounts.len() >= 2,
+            "the session and workspace containers mount /tmp"
+        );
+        for mount in tmp_mounts {
+            assert_eq!(mount.mount_path, TMP_MOUNT);
+            assert_eq!(mount.sub_path.as_deref(), Some("tmp"));
+        }
     }
 
     #[test]

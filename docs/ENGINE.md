@@ -3955,6 +3955,21 @@ agent tasks and the assistant.
   `<ENGINE_HOST_SESSION_SCRATCH_ROOT>/<session-id>/` (default root
   `<state_dir>/host-scratch`). The directory is removed when the session
   ends. A hibernated session keeps it for its wake.
+- **Wake keeps the host (GH #1466).** A host session wakes on the host. A
+  shell a person ran `claude` or `codex` in by hand wakes into that agent with
+  `placement=host`, or as the bare agent when its template cannot run on the
+  host; it never moves into a pod on a wake.
+- **One wake per conversation.** A wake is refused with `409` while another
+  live session runs the same conversation. At boot, records pinned awake that
+  share a conversation (a renamed session, a second record on the same
+  `--resume`) wake once, as the newest record.
+- **Lost conversation.** Before a host wake resumes a Claude Code or Codex
+  conversation, the engine looks for its transcript under `$HOME` (and each
+  `CLAUDE_CONFIG_DIR`, `CODEX_HOME` and the Codex transcript root). When it is
+  gone, the session starts a new conversation, prints a `[vogt] Conversation
+  lost` notice on its screen, records `conversation_lost` on its record, logs
+  `session.wake.conversation_lost` and raises an Inbox item.
+  `ENGINE_HOST_WAKE_TRANSCRIPT_CHECK=0` turns the check off.
 
 A pod template whose command names an agent CLI (`claude`, `codex` or
 `opencode`, bare or behind `vogt-agent-auth run --`) sets the pod's
