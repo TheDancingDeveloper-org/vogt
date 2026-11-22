@@ -5778,17 +5778,21 @@ capabilities. Every path the entrypoint or an agent writes to is a per-pod
 `emptyDir`, never shared storage: `/home/vogt` (and with it the default
 `CODEX_HOME`, `CLAUDE_CONFIG_DIR` and `XDG_CONFIG_HOME`), `/tmp`, `/work` (the
 clone and work tree) and `/run/vogt` (the runtime token and MCP files). The
-tool caches keep their own private `emptyDir` at `/cache` (WI-3242). The spec
-also sets `activeDeadlineSeconds`: a template's
-`active_deadline_seconds` policy wins, else the deployment's
-`ENGINE_POD_SESSION_DEADLINE_SECONDS` (default 12 h; `0` leaves it unset).
-Oversight, pinned-awake (`keep_awake`) and person-started sessions get no
-deadline; only Vogt workers and agent tasks keep it (WI-4519). Every deadline
-end writes a `session.pod.deadline_ended` audit line and raises an Inbox
-decision naming the session. A
-pod the kubelet stops at that deadline ends its session with the distinct
-reason `hit its active deadline: …` from the reconciler, not the generic
-failure note.
+tool caches keep their own private `emptyDir` at `/cache` (WI-3242). A session
+pod also has an age limit: a template's `active_deadline_seconds` policy wins,
+else the deployment's `ENGINE_POD_SESSION_DEADLINE_SECONDS` (default 12 h; `0`
+leaves it unset). The limit is the pod annotation
+`vogt.session-deadline-seconds`, not `activeDeadlineSeconds`, because
+Kubernetes cannot lift a deadline from a running pod (WI-4519). Oversight,
+pinned-awake (`keep_awake`) and person-started sessions get no limit; Vogt
+workers and agent tasks do. The pod reconciler finds a live pod past its
+limit and the engine stops the session, unless by then it is oversight or
+pinned awake (promoted or pinned after start), in which case it keeps running.
+Every deadline end writes a `session.pod.deadline_ended` audit line and raises
+an Inbox decision naming the session. A pod an older engine made with
+`activeDeadlineSeconds` and that the kubelet stops at it ends its session with
+the distinct reason `hit its active deadline: …` from the reconciler, not the
+generic failure note.
 
 Every `emptyDir` the pod has carries a `sizeLimit`, in two classes:
 
