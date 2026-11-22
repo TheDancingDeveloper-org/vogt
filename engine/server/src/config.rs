@@ -332,6 +332,12 @@ pub struct HostPlacement {
     /// `CARGO_TARGET_DIR` and `XDG_CACHE_HOME` live. `None` puts them under
     /// `<state_dir>/host-scratch`.
     pub scratch_root: Option<std::path::PathBuf>,
+    /// `ENGINE_HOST_WAKE_TRANSCRIPT_CHECK` (on unless set false): before a host
+    /// wake resumes a Claude Code or Codex conversation, look for its
+    /// transcript, and when it is gone start a new conversation and report it
+    /// as lost (GH #1466). Off in a bare `Default`, for test agents that keep
+    /// no transcripts.
+    pub wake_transcript_check: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1009,6 +1015,15 @@ pub fn load(
             }
         },
         session_cap: parse_usize_env("ENGINE_HOST_SESSION_CAP")?.unwrap_or(0),
+        wake_transcript_check: match engine_env("ENGINE_HOST_WAKE_TRANSCRIPT_CHECK") {
+            Ok(v) => parse_bool_env("ENGINE_HOST_WAKE_TRANSCRIPT_CHECK", &v)?,
+            Err(std::env::VarError::NotPresent) => true,
+            Err(e) => {
+                return Err(ApiError::Config(format!(
+                    "reading ENGINE_HOST_WAKE_TRANSCRIPT_CHECK: {e}"
+                )))
+            }
+        },
         scratch_root: engine_env("ENGINE_HOST_SESSION_SCRATCH_ROOT")
             .ok()
             .map(|v| v.trim().to_string())
