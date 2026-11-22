@@ -142,6 +142,22 @@ fn default_pod_template(
         .find(|t| t.backend == "pod" && template_agent(t).is_some())
 }
 
+/// The deployment's default shell pod template: a pod-backed template that
+/// runs no agent CLI, preferring one tagged `shell` (WI-4516). A person's
+/// shell or a raw command starts in it, with its own argv.
+fn default_shell_pod_template(
+    templates: &[crate::config::SessionTemplate],
+) -> Option<&crate::config::SessionTemplate> {
+    let shells = || {
+        templates
+            .iter()
+            .filter(|t| t.backend == "pod" && template_agent(t).is_none())
+    };
+    shells()
+        .find(|t| t.tags.iter().any(|tag| tag == "shell"))
+        .or_else(|| shells().next())
+}
+
 /// Removes a host session's scratch dirs once the session has ended (WI-4428).
 fn remove_host_scratch(root: &std::path::Path, id: Uuid) {
     let dir = root.join(id.to_string());
@@ -1495,7 +1511,7 @@ impl SessionRegistry {
         self.check_parent_standing(&spec)?;
         // Before the host graft preparation below, which asks the same
         // placement question (WI-4428).
-        self.default_worker_pod_template(&mut spec, &Creating::Fresh(Origin::Api));
+        self.default_start_pod_template(&mut spec, &Creating::Fresh(Origin::Api))?;
         spec.model = normalize_requested_model(spec.model);
         self.check_requested_model(
             spec.model.as_deref(),
@@ -1873,7 +1889,7 @@ impl SessionRegistry {
             spec.template.as_deref(),
         )?;
         validate_host_placement_role(&spec, &creating, self.cfg.host_placement.allow_workers)?;
-        self.default_worker_pod_template(&mut spec, &creating);
+        self.default_start_pod_template(&mut spec, &creating)?;
         // A named template must resolve. An unknown name is refused here and
         // never read as "no template", which would quietly start on the host
         // (WI-4428).
@@ -4594,12 +4610,19 @@ impl SessionRegistry {
         }
     }
 
-    /// A Vogt worker or review that names no template and no placement starts
-    /// in the deployment's default agent pod template, when the default backend
-    /// is pod (WI-4428). The template is written into the spec, so the record
-    /// and any wake carry it. Oversight, agent tasks, wakes and a person's shell
-    /// keep the host.
-    fn default_worker_pod_template(&self, spec: &mut SessionSpec, origin: &Creating) {
+    /// A fresh API start that names no template and no placement runs in a
+    /// pod when the deployment's default backend is pod (WI-4428, WI-4516):
+    /// a Vogt worker or review, oversight, an agent a person starts by hand,
+    /// and a person's shell (`vogt-agent-auth shell` or any other command).
+    /// An agent command, or a worker, takes the pod template that runs the
+    /// same agent, else the default agent pod template; anything else takes
+    /// the default shell pod template. The template is written into the spec,
+    /// so the record and any wake carry it. Host placement is an explicit
+    /// `placement=host`. Agent tasks and wakes keep their own placement.
+    ///
+    /// When no pod template fits, the start is refused rather than quietly
+    /// placed on the host (WI-4516).
+    fn default_start_pod_template(&self, spec: &mut SessionSpec, origin: &Creating) -> Result<()> {
         let named = spec
             .template
             .as_deref()
@@ -4609,13 +4632,34 @@ impl SessionRegistry {
             || !matches!(spec.placement.as_deref(), None | Some("auto"))
             || !self.cfg.pod_backends_enabled
             || self.cfg.session_default_backend != "pod"
-            || !is_vogt_worker(spec, origin)
+            || !matches!(origin, Creating::Fresh(Origin::Api))
         {
-            return;
+            return Ok(());
         }
-        if let Some(template) = default_pod_template(&self.cfg.session_templates) {
-            spec.template = Some(template.name.clone());
-        }
+        let templates = &self.cfg.session_templates;
+        let agent = spec
+            .command
+            .as_deref()
+            .and_then(crate::agent_cli::agent_name);
+        let template = match agent {
+            Some(agent) => templates
+                .iter()
+                .find(|t| t.backend == "pod" && template_agent(t).as_deref() == Some(&agent))
+                .or_else(|| default_pod_template(templates)),
+            None if spec.command.is_none() && is_vogt_worker(spec, origin) => {
+                default_pod_template(templates)
+            }
+            None => default_shell_pod_template(templates),
+        };
+        let Some(template) = template else {
+            return Err(ApiError::Conflict(
+                "no pod template fits this start and the session backend is pod; \
+                 configure a pod template or ask for placement=host"
+                    .into(),
+            ));
+        };
+        spec.template = Some(template.name.clone());
+        Ok(())
     }
 
     /// Takes a host slot for `id`, or refuses with `ENGINE_HOST_SESSION_CAP`
@@ -7218,8 +7262,13 @@ mod host_placement_tests {
     fn a_vogt_worker_with_no_template_takes_the_default_agent_pod() {
         let dir = tempfile::tempdir().unwrap();
         let sessions = pod_default(dir.path());
-        let mut worker = worker_spec("w", None);
-        sessions.default_worker_pod_template(&mut worker, &api());
+        let mut worker = SessionSpec {
+            command: None,
+            ..worker_spec("w", None)
+        };
+        sessions
+            .default_start_pod_template(&mut worker, &api())
+            .unwrap();
         let name = worker
             .template
             .clone()
@@ -7230,34 +7279,105 @@ mod host_placement_tests {
             template_agent(template).is_some(),
             "the default runs an agent"
         );
-        // The name is written into the spec, so the record and a wake keep it.
-        let mut shell = spec("shell", None);
-        sessions.default_worker_pod_template(&mut shell, &api());
-        assert!(shell.template.is_none(), "a person's shell keeps the host");
-        let mut oversight = SessionSpec {
-            role: SessionRole::Oversight,
-            ..worker_spec("o", None)
-        };
-        sessions.default_worker_pod_template(&mut oversight, &api());
-        assert!(oversight.template.is_none(), "oversight keeps the host");
         let mut task = worker_spec("t", None);
-        sessions.default_worker_pod_template(&mut task, &Creating::Fresh(Origin::AgentTask));
+        sessions
+            .default_start_pod_template(&mut task, &Creating::Fresh(Origin::AgentTask))
+            .unwrap();
         assert!(task.template.is_none(), "an agent task keeps the host");
     }
 
+    /// WI-4516: on a pod deployment a person's shell, `vogt-agent-auth
+    /// shell` and oversight start in a pod; the host is an explicit opt-in.
+    #[test]
+    fn interactive_and_oversight_starts_take_a_pod_on_a_pod_deployment() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = pod_default(dir.path());
+        let placed = |mut spec: SessionSpec| {
+            sessions
+                .default_start_pod_template(&mut spec, &api())
+                .unwrap();
+            let name = spec.template.expect("the start takes a pod template");
+            let template = sessions.resolve_template(&name).unwrap().clone();
+            assert!(
+                sessions.runs_in_pod(Some(&name), None),
+                "{name} runs in a pod"
+            );
+            template
+        };
+        let shell = placed(spec("shell", None));
+        assert!(template_agent(&shell).is_none(), "a shell is no agent");
+        let agent_auth_shell = placed(SessionSpec {
+            command: Some(vec!["vogt-agent-auth".into(), "shell".into()]),
+            ..spec("aa", None)
+        });
+        assert!(template_agent(&agent_auth_shell).is_none());
+        let bare = placed(SessionSpec {
+            command: None,
+            ..spec("bare", None)
+        });
+        assert!(template_agent(&bare).is_none());
+        let oversight = placed(SessionSpec {
+            command: Some(vec!["claude".into()]),
+            ..oversight_spec("o")
+        });
+        assert_eq!(template_agent(&oversight).as_deref(), Some("claude"));
+        let codex = placed(SessionSpec {
+            command: Some(vec!["codex".into()]),
+            ..spec("c", None)
+        });
+        assert_eq!(template_agent(&codex).as_deref(), Some("codex"));
+        // `placement=host` is the opt-in, and keeps the host.
+        let mut host = spec("host", Some("host"));
+        sessions
+            .default_start_pod_template(&mut host, &api())
+            .unwrap();
+        assert!(host.template.is_none());
+        assert!(!sessions.runs_in_pod(None, Some("host")));
+    }
+
+    /// WI-4516: with no pod template that fits, a start on a pod deployment
+    /// is refused and says why; it never falls back to the host.
     #[tokio::test]
-    async fn a_bare_shell_oversight_or_agent_task_start_stays_on_the_host() {
+    async fn a_start_with_no_fitting_pod_template_is_refused_not_hosted() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = registry(dir.path().to_path_buf(), |cfg| {
+            cfg.pod_backends_enabled = true;
+            cfg.session_default_backend = "pod".into();
+            cfg.session_templates = SessionTemplate::default_templates_on("pod")
+                .into_iter()
+                .filter(|t| template_agent(t).is_some())
+                .collect();
+        });
+        let refused = refusal(sessions.create(spec("shell", None)));
+        assert!(
+            matches!(&refused, ApiError::Conflict(m) if m.contains("no pod template") && m.contains("placement=host")),
+            "{refused:?}"
+        );
+        assert_eq!(
+            sessions.host_slot_counts()["live"],
+            0,
+            "nothing on the host"
+        );
+        let host = sessions
+            .create(spec("host", Some("host")))
+            .expect("placement=host is the explicit opt-in");
+        assert_eq!(sessions.host_slot_counts()["live"], 1);
+        let _ = sessions.remove(host.id);
+    }
+
+    #[tokio::test]
+    async fn an_explicit_host_start_or_agent_task_stays_on_the_host() {
         let dir = tempfile::tempdir().unwrap();
         let sessions = pod_default(dir.path());
         let shell = sessions
-            .create(spec("shell", None))
-            .expect("a bare shell stays on the host");
+            .create(spec("shell", Some("host")))
+            .expect("an explicit host shell stays on the host");
         let oversight = sessions
             .create(SessionSpec {
                 role: SessionRole::Oversight,
-                ..spec("oversight", None)
+                ..spec("oversight", Some("host"))
             })
-            .expect("oversight stays on the host");
+            .expect("an explicit host oversight stays on the host");
         let task = sessions
             .create_for_task(spec("task", None))
             .await
@@ -7267,6 +7387,28 @@ mod host_placement_tests {
         for id in [shell.id, oversight.id, task.id] {
             let _ = sessions.remove(id);
         }
+    }
+
+    /// WI-4516: a pod interactive session's record keeps its pod template, so
+    /// a wake after an engine redeploy goes back to a pod (the WI-4515 wake
+    /// and resume path), never to the host.
+    #[test]
+    fn a_pod_interactive_records_template_wakes_it_in_a_pod() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = pod_default(dir.path());
+        let mut shell = spec("shell", None);
+        sessions
+            .default_start_pod_template(&mut shell, &api())
+            .unwrap();
+        let name = shell.template.clone().unwrap();
+        let record = hibernated_record(Uuid::new_v4(), Some(&name), None);
+        let (command, template) = sessions.wake_launch(&record);
+        let mut woken = sessions.wake_spec(&record, vec![], command, template, None, None, None);
+        sessions
+            .default_start_pod_template(&mut woken, &Creating::Wake(Box::new(record)))
+            .unwrap();
+        assert_eq!(woken.template.as_deref(), Some(name.as_str()));
+        assert!(sessions.runs_in_pod(woken.template.as_deref(), woken.placement.as_deref()));
     }
 
     #[tokio::test]
