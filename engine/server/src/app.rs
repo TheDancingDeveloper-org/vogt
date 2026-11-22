@@ -310,6 +310,22 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
                 }
             }));
     }
+    // GH #1459: a session pod ended at its deadline raises an Inbox item.
+    if let Some(core) = state.vogt_core.clone() {
+        state
+            .sessions
+            .set_deadline_ended_sink(Arc::new(move |ended: crate::sessions::DeadlineEnded| {
+                let core = Arc::clone(&core);
+                if let Ok(rt) = tokio::runtime::Handle::try_current() {
+                    rt.spawn(async move {
+                        let body = crate::sessions::deadline_ended_decision(&ended);
+                        if let Err(e) = core.post_json("/decisions", &body).await {
+                            tracing::warn!(session = %ended.session, error = %e, "could not raise the deadline-end Inbox item");
+                        }
+                    });
+                }
+            }));
+    }
     // Background task: turn the drift among those republished events into a
     // push. Reads the bus, never the core — see the watcher's own
     // comment for what that costs across a restart, which is a decision

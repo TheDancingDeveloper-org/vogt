@@ -112,6 +112,25 @@ fn is_vogt_worker(spec: &SessionSpec, origin: &Creating) -> bool {
                 .any(|(k, _)| k == "VOGT_SESSION_ID"))
 }
 
+/// A pod session that runs without `activeDeadlineSeconds` (WI-4519, GH
+/// #1459): oversight, a pinned-awake session, or one a person started rather
+/// than a Vogt worker or an agent task. The 12 h deadline is for workers; it
+/// must not end a person's own session silently.
+fn long_lived_pod(spec: &SessionSpec, creating: &Creating) -> bool {
+    let person_started = spec.work_item.is_none()
+        && !spec
+            .env
+            .iter()
+            .flatten()
+            .any(|(k, _)| k == "VOGT_SESSION_ID");
+    spec.role == SessionRole::Oversight
+        || match creating {
+            Creating::Fresh(Origin::AgentTask) => false,
+            Creating::Fresh(Origin::Api) => person_started,
+            Creating::Wake(record) => record.keep_awake || person_started,
+        }
+}
+
 /// A Vogt worker or review may not ask for the host (WI-4428 Q2).
 /// `ENGINE_HOST_PLACEMENT_ALLOW_WORKERS` lifts the refusal during the
 /// transition. A wake is grandfathered: a session already placed on the host
@@ -483,6 +502,7 @@ pub struct SessionRegistry {
     /// Where a wake that lost its conversation is reported: the Inbox, in the
     /// engine (GH #1466). Unset in tests and without a core.
     conversation_lost_sink: std::sync::OnceLock<ConversationLostSink>,
+    deadline_ended_sink: std::sync::OnceLock<DeadlineEndedSink>,
     /// The source providers pod sessions are served from. Built from the
     /// deployment's settings on first use; tests install providers.
     source_registry: parking_lot::Mutex<Option<crate::source_provider::SourceRegistry>>,
@@ -756,6 +776,7 @@ impl SessionRegistry {
             pod_launcher: parking_lot::Mutex::new(None),
             pod_create_waits: DashMap::new(),
             conversation_lost_sink: std::sync::OnceLock::new(),
+            deadline_ended_sink: std::sync::OnceLock::new(),
             source_registry: parking_lot::Mutex::new(None),
             host_graft_credentials: Arc::new(DashMap::new()),
             adopting: parking_lot::Mutex::new(std::collections::HashMap::new()),
@@ -766,6 +787,32 @@ impl SessionRegistry {
     /// Report each wake that lost its conversation through `sink` (GH #1466).
     pub fn set_conversation_lost_sink(&self, sink: ConversationLostSink) {
         let _ = self.conversation_lost_sink.set(sink);
+    }
+
+    pub fn set_deadline_ended_sink(&self, sink: DeadlineEndedSink) {
+        let _ = self.deadline_ended_sink.set(sink);
+    }
+
+    /// A session pod stopped at its `activeDeadlineSeconds` (WI-4519, GH
+    /// #1459): never silent. An audit line, and an Inbox item through the
+    /// sink naming the session.
+    pub fn report_deadline_ended(&self, id: Uuid) {
+        let name = self
+            .sessions
+            .get(&id)
+            .map(|s| s.name())
+            .or_else(|| self.records.get(&id).map(|r| r.name.clone()))
+            .unwrap_or_default();
+        tracing::warn!(
+            target: "vogt::audit",
+            event = "session.pod.deadline_ended",
+            session = %id,
+            name = %name,
+            "a session pod was stopped at its active deadline"
+        );
+        if let Some(sink) = self.deadline_ended_sink.get() {
+            sink(DeadlineEnded { session: id, name });
+        }
     }
 
     /// Replace the pod launcher (tests run the agent in-process).
@@ -836,6 +883,14 @@ impl SessionRegistry {
                     let state_dir = self.cfg.state_dir.clone();
                     Arc::new(move |id, created, uid: Option<&str>| {
                         crate::pod_salvage::covers_pod(&state_dir, id, created, uid)
+                    })
+                },
+                {
+                    let weak = Arc::downgrade(self);
+                    Arc::new(move |id| {
+                        if let Some(m) = weak.upgrade() {
+                            m.report_deadline_ended(id);
+                        }
                     })
                 },
             )),
@@ -969,6 +1024,7 @@ impl SessionRegistry {
         spec: &SessionSpec,
         template: &crate::config::SessionTemplate,
         launch: crate::agent_stream::PodLaunch,
+        long_lived: bool,
     ) -> Result<crate::pty::SpawnedSession> {
         let auth = crate::agent_stream::global();
         let pod_config = self.pod_config()?;
@@ -1048,6 +1104,12 @@ impl SessionRegistry {
                 self.cfg.codex_approval_policy.as_str(),
                 spec.command.as_deref().unwrap_or_default(),
             )
+        });
+        let pod = pod.map(|mut pod| {
+            if long_lived {
+                crate::pod_backend::clear_active_deadline(&mut pod);
+            }
+            pod
         });
         let request = crate::source_provider::CredentialRequest {
             session: id,
@@ -2766,7 +2828,13 @@ impl SessionRegistry {
             self.secret_broker.remember_vogt_token(id, token);
         }
         let spawned = if let Some(template) = pod_template {
-            self.spawn_pod_session(id, &spec, template, pod_launch.unwrap_or_default())
+            self.spawn_pod_session(
+                id,
+                &spec,
+                template,
+                pod_launch.unwrap_or_default(),
+                long_lived_pod(&spec, &creating),
+            )
         } else {
             pty::spawn(
                 id,
@@ -5463,6 +5531,35 @@ fn hibernated_summary(record: &Record, screen_bytes: u64) -> Option<SessionSumma
     })
 }
 
+/// A session whose pod was stopped at its active deadline (WI-4519).
+#[derive(Debug, Clone)]
+pub struct DeadlineEnded {
+    pub session: Uuid,
+    pub name: String,
+}
+
+/// Where a deadline end is reported (the Inbox, in the engine).
+pub type DeadlineEndedSink = Arc<dyn Fn(DeadlineEnded) + Send + Sync>;
+
+/// The Inbox item for a deadline end: a pending decision for a person.
+pub fn deadline_ended_decision(ended: &DeadlineEnded) -> serde_json::Value {
+    serde_json::json!({
+        "reason": format!("gh#1459: session {} ended at its pod deadline", ended.name),
+        "question": format!(
+            "Session {} ({}) was stopped at its pod's active deadline. Wake or restart it?",
+            ended.name, ended.session
+        ),
+        "context": "The kubelet ended the session pod at its activeDeadlineSeconds \
+            (ENGINE_POD_SESSION_DEADLINE_SECONDS or the template policy). Its work in the pod \
+            is gone unless it was landed or salvaged.",
+        "options": [
+            {"label": "Leave it", "description": "The session's work was finished.", "recommended": true},
+            {"label": "Restart", "description": "Start the session again, resuming its conversation.", "recommended": false},
+        ],
+        "ttl_seconds": 7 * 24 * 60 * 60,
+    })
+}
+
 /// A woken session whose conversation could not be resumed (GH #1466).
 #[derive(Debug, Clone)]
 pub struct ConversationLost {
@@ -6883,6 +6980,58 @@ mod account_lease_tests {
 
     /// A record the engine had live when it stopped: a conversation to resume,
     /// an account, and no hibernation (recovery turns it into one).
+    /// WI-4519: oversight, pinned-awake and person-started pods run with no
+    /// deadline; Vogt workers and agent tasks keep it.
+    #[test]
+    fn only_workers_and_agent_tasks_keep_the_pod_deadline() {
+        let api = Creating::Fresh(Origin::Api);
+        let person = super::host_placement_tests::spec("me", None);
+        assert!(long_lived_pod(&person, &api));
+        let mut worker = super::host_placement_tests::spec("w", None);
+        worker.work_item = Some("WI-7".into());
+        assert!(!long_lived_pod(&worker, &api));
+        let mut core_started = super::host_placement_tests::spec("c", None);
+        core_started.env = Some(vec![("VOGT_SESSION_ID".into(), "ses_1".into())]);
+        assert!(!long_lived_pod(&core_started, &api));
+        assert!(!long_lived_pod(
+            &person,
+            &Creating::Fresh(Origin::AgentTask)
+        ));
+        let mut oversight = worker.clone();
+        oversight.role = SessionRole::Oversight;
+        assert!(long_lived_pod(&oversight, &api));
+        let id = Uuid::new_v4();
+        let pinned = Creating::Wake(Box::new(live_record(id, "a", true)));
+        assert!(long_lived_pod(&worker, &pinned));
+        let unpinned = Creating::Wake(Box::new(live_record(id, "a", false)));
+        assert!(!long_lived_pod(&worker, &unpinned));
+    }
+
+    #[test]
+    fn a_long_lived_pod_has_no_active_deadline() {
+        let mut pod = k8s_openapi::api::core::v1::Pod {
+            spec: Some(k8s_openapi::api::core::v1::PodSpec {
+                active_deadline_seconds: Some(43200),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        crate::pod_backend::clear_active_deadline(&mut pod);
+        assert_eq!(pod.spec.unwrap().active_deadline_seconds, None);
+    }
+
+    #[test]
+    fn a_deadline_end_is_raised_with_the_session_named() {
+        let ended = DeadlineEnded {
+            session: Uuid::new_v4(),
+            name: "oversight-1".into(),
+        };
+        let body = deadline_ended_decision(&ended);
+        let question = body["question"].as_str().unwrap();
+        assert!(question.contains("oversight-1"), "{question}");
+        assert!(question.contains(&ended.session.to_string()), "{question}");
+    }
+
     fn live_record(id: Uuid, account: &str, keep_awake: bool) -> crate::hibernation::Record {
         let mut record = crate::hibernation::Record::new(
             id,
@@ -6978,7 +7127,7 @@ mod host_placement_tests {
     use super::*;
     use crate::config::SessionTemplate;
 
-    fn spec(name: &str, placement: Option<&str>) -> SessionSpec {
+    pub(super) fn spec(name: &str, placement: Option<&str>) -> SessionSpec {
         SessionSpec {
             name: name.into(),
             command: Some(vec!["cat".into()]),
