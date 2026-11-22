@@ -1610,12 +1610,31 @@ pub fn session_source(
     Ok(source)
 }
 
-/// Drop the pod's `activeDeadlineSeconds`, for a session that must not be
-/// ended at a fixed age (WI-4519).
+/// The pod annotation that carries a session's age limit in seconds. The
+/// limit is never `activeDeadlineSeconds`: Kubernetes cannot lift that from a
+/// running pod, and a worker promoted to oversight or pinned awake must not
+/// be ended at it (WI-4519). The reconciler enforces this one and checks the
+/// session's role and pin at that moment.
+pub const DEADLINE_ANNOTATION: &str = "vogt.session-deadline-seconds";
+
+/// Drop the pod's age limit, for a session that must not be ended at a fixed
+/// age (WI-4519).
 pub fn clear_active_deadline(pod: &mut Pod) {
-    if let Some(spec) = pod.spec.as_mut() {
-        spec.active_deadline_seconds = None;
+    if let Some(annotations) = pod.metadata.annotations.as_mut() {
+        annotations.remove(DEADLINE_ANNOTATION);
     }
+}
+
+/// The pod's age limit from [`DEADLINE_ANNOTATION`], if it has one.
+pub fn pod_deadline(pod: &Pod) -> Option<Duration> {
+    let secs: u64 = pod
+        .metadata
+        .annotations
+        .as_ref()?
+        .get(DEADLINE_ANNOTATION)?
+        .parse()
+        .ok()?;
+    (secs > 0).then(|| Duration::from_secs(secs))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1905,9 +1924,11 @@ pub fn pod_template(
         }),
         ..Default::default()
     });
-    // A session pod is bounded: the kubelet terminates it at its template's
-    // policy or the deployment default, so a wedged agent cannot hold a node
-    // until an operator notices. Zero in the deployment config leaves it unset.
+    // A session pod is bounded by its template's policy or the deployment
+    // default, so a wedged agent cannot hold a node until an operator
+    // notices. Zero in the deployment config leaves it unset. The engine's
+    // reconciler enforces it from an annotation, not the kubelet from
+    // `activeDeadlineSeconds` (WI-4519).
     let active_deadline_seconds = policy.and_then(|p| p.active_deadline_seconds).or_else(|| {
         (!cfg.session_deadline.is_zero())
             .then(|| i64::try_from(cfg.session_deadline.as_secs()).unwrap_or(i64::MAX))
@@ -1917,10 +1938,17 @@ pub fn pod_template(
             name: Some(pod_name(id)),
             namespace: Some(cfg.namespace.clone()),
             labels: Some(labels),
-            annotations: Some(BTreeMap::from([(
-                "vogt.project-url".into(),
-                source_url(source).into(),
-            )])),
+            annotations: Some(
+                std::iter::once((
+                    "vogt.project-url".to_string(),
+                    source_url(source).to_string(),
+                ))
+                .chain(
+                    active_deadline_seconds
+                        .map(|s| (DEADLINE_ANNOTATION.to_string(), s.to_string())),
+                )
+                .collect(),
+            ),
             ..Default::default()
         },
         spec: Some(PodSpec {
@@ -1988,7 +2016,6 @@ pub fn pod_template(
             }),
             volumes: Some(volumes),
             priority_class_name: cfg.priority_class.clone(),
-            active_deadline_seconds,
             restart_policy: Some("Never".into()),
             ..Default::default()
         }),
@@ -3089,7 +3116,7 @@ mod tests {
             vogt_session_agent::CODEX_APPROVAL_DEFAULT,
             &["bash".into()],
         );
-        let labels = pod.metadata.labels.unwrap();
+        let labels = pod.metadata.labels.clone().unwrap();
         assert_eq!(labels.get("vogt.session"), Some(&id.to_string()));
         assert_eq!(labels.get("vogt.account"), Some(&"acct".into()));
         let spec = pod.spec.as_ref().unwrap();
@@ -3215,7 +3242,8 @@ mod tests {
         // The root filesystem is read-only (F5b); every writable path the
         // entrypoint and the agents use is a per-pod emptyDir.
         assert_eq!(security.read_only_root_filesystem, Some(true));
-        assert_eq!(spec.active_deadline_seconds, Some(12 * 60 * 60));
+        assert_eq!(spec.active_deadline_seconds, None);
+        assert_eq!(pod_deadline(&pod), Some(Duration::from_secs(12 * 60 * 60)));
         for (name, path) in [
             ("session-home", "/home/vogt"),
             ("session-tmp", "/tmp"),
@@ -4827,8 +4855,8 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            pod_template_for(&cfg).spec.unwrap().active_deadline_seconds,
-            Some(3600)
+            pod_deadline(&pod_template_for(&cfg)),
+            Some(Duration::from_secs(3600))
         );
         cfg.template_policies.insert(
             "Pod".into(),
@@ -4838,15 +4866,12 @@ mod tests {
             },
         );
         assert_eq!(
-            pod_template_for(&cfg).spec.unwrap().active_deadline_seconds,
-            Some(900)
+            pod_deadline(&pod_template_for(&cfg)),
+            Some(Duration::from_secs(900))
         );
         cfg.template_policies.clear();
         cfg.session_deadline = Duration::ZERO;
-        assert_eq!(
-            pod_template_for(&cfg).spec.unwrap().active_deadline_seconds,
-            None
-        );
+        assert_eq!(pod_deadline(&pod_template_for(&cfg)), None);
     }
 
     #[test]

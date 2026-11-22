@@ -131,6 +131,12 @@ fn long_lived_pod(spec: &SessionSpec, creating: &Creating) -> bool {
         }
 }
 
+/// Whether a session past its pod age limit is left running: oversight or
+/// pinned awake now, whatever it was when its pod was made (WI-4519).
+fn spared_by_deadline(role: SessionRole, keep_awake: bool) -> bool {
+    role == SessionRole::Oversight || keep_awake
+}
+
 /// A Vogt worker or review may not ask for the host (WI-4428 Q2).
 /// `ENGINE_HOST_PLACEMENT_ALLOW_WORKERS` lifts the refusal during the
 /// transition. A wake is grandfathered: a session already placed on the host
@@ -815,6 +821,33 @@ impl SessionRegistry {
         }
     }
 
+    /// A worker's pod past its age limit (WI-4519). The engine, not the
+    /// kubelet, ends it, so a session promoted to oversight or pinned awake
+    /// since it started is spared; any other is stopped, audited and raised in
+    /// the Inbox like a deadline end.
+    pub fn end_overdue(&self, id: Uuid) {
+        let Some(session) = self.sessions.get(&id).map(|s| Arc::clone(s.value())) else {
+            return;
+        };
+        if !session.is_alive() {
+            return;
+        }
+        if spared_by_deadline(session.role(), session.keep_awake()) {
+            tracing::debug!(session = %id, "past its pod age limit but oversight or pinned awake; left running");
+            return;
+        }
+        let request = vogt_engine_contract::StopRequest {
+            by: Some("engine".into()),
+            reason: Some("reached its session pod deadline".into()),
+            ..Default::default()
+        };
+        if let Err(e) = self.stop(id, request) {
+            tracing::warn!(session = %id, error = %e, "could not stop a session past its pod deadline");
+            return;
+        }
+        self.report_deadline_ended(id);
+    }
+
     /// Replace the pod launcher (tests run the agent in-process).
     pub fn set_pod_launcher(&self, launcher: Arc<dyn crate::pod_backend::PodLauncher>) {
         *self.pod_launcher.lock() = Some(launcher);
@@ -890,6 +923,14 @@ impl SessionRegistry {
                     Arc::new(move |id| {
                         if let Some(m) = weak.upgrade() {
                             m.report_deadline_ended(id);
+                        }
+                    })
+                },
+                {
+                    let weak = Arc::downgrade(self);
+                    Arc::new(move |id| {
+                        if let Some(m) = weak.upgrade() {
+                            m.end_overdue(id);
                         }
                     })
                 },
@@ -6978,8 +7019,6 @@ mod account_lease_tests {
     use super::*;
     use crate::account_pool::AccountPool;
 
-    /// A record the engine had live when it stopped: a conversation to resume,
-    /// an account, and no hibernation (recovery turns it into one).
     /// WI-4519: oversight, pinned-awake and person-started pods run with no
     /// deadline; Vogt workers and agent tasks keep it.
     #[test]
@@ -7008,16 +7047,15 @@ mod account_lease_tests {
     }
 
     #[test]
-    fn a_long_lived_pod_has_no_active_deadline() {
-        let mut pod = k8s_openapi::api::core::v1::Pod {
-            spec: Some(k8s_openapi::api::core::v1::PodSpec {
-                active_deadline_seconds: Some(43200),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
+    fn a_long_lived_pod_has_no_age_limit() {
+        let mut pod = k8s_openapi::api::core::v1::Pod::default();
+        pod.metadata.annotations = Some(std::collections::BTreeMap::from([(
+            crate::pod_backend::DEADLINE_ANNOTATION.to_string(),
+            "43200".to_string(),
+        )]));
+        assert!(crate::pod_backend::pod_deadline(&pod).is_some());
         crate::pod_backend::clear_active_deadline(&mut pod);
-        assert_eq!(pod.spec.unwrap().active_deadline_seconds, None);
+        assert_eq!(crate::pod_backend::pod_deadline(&pod), None);
     }
 
     #[test]
@@ -7032,6 +7070,8 @@ mod account_lease_tests {
         assert!(question.contains(&ended.session.to_string()), "{question}");
     }
 
+    /// A record the engine had live when it stopped: a conversation to resume,
+    /// an account, and no hibernation (recovery turns it into one).
     fn live_record(id: Uuid, account: &str, keep_awake: bool) -> crate::hibernation::Record {
         let mut record = crate::hibernation::Record::new(
             id,
@@ -7283,6 +7323,38 @@ mod host_placement_tests {
         assert!(coalescer
             .due(t0 + WINDOW + MIN_GAP * 3, |_| Overseer::Ready)
             .is_empty());
+        stop_all(&sessions);
+    }
+
+    /// WI-4519 (review blocker): the deadline is judged when it is reached,
+    /// not when the pod was made. A worker promoted to oversight or pinned
+    /// awake since it started is left running; a plain worker is stopped and
+    /// raised.
+    #[tokio::test]
+    async fn a_session_promoted_or_pinned_after_start_outlives_its_deadline() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = registry(dir.path().to_path_buf(), |_| {});
+        let raised = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        sessions.set_deadline_ended_sink({
+            let raised = Arc::clone(&raised);
+            Arc::new(move |ended: DeadlineEnded| raised.lock().push(ended.session))
+        });
+        let promoted = sessions.create(spec("promoted", None)).unwrap();
+        let pinned = sessions.create(spec("pinned", None)).unwrap();
+        let worker = sessions.create(spec("worker", None)).unwrap();
+        sessions
+            .set_role(promoted.id, SessionRole::Oversight)
+            .unwrap();
+        sessions.set_keep_awake(pinned.id, true).unwrap();
+
+        for id in [promoted.id, pinned.id, worker.id] {
+            sessions.end_overdue(id);
+        }
+
+        assert!(promoted.is_alive());
+        assert!(pinned.is_alive());
+        assert!(!worker.is_alive());
+        assert_eq!(*raised.lock(), vec![worker.id]);
         stop_all(&sessions);
     }
 

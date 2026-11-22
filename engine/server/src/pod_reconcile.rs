@@ -26,9 +26,9 @@ use crate::{
     chats::redact,
     error::Result,
     pod_backend::{
-        pod_exit_code, pod_fatal_waiting_reason, pod_hit_active_deadline, pod_is_ours, pod_phase,
-        pod_reason, pod_unschedulable_message, session_id_from_pod, PodConfig, PodLauncher,
-        LOG_TAIL_LINES,
+        pod_deadline, pod_exit_code, pod_fatal_waiting_reason, pod_hit_active_deadline,
+        pod_is_ours, pod_phase, pod_reason, pod_unschedulable_message, session_id_from_pod,
+        PodConfig, PodLauncher, LOG_TAIL_LINES,
     },
 };
 use k8s_openapi::api::core::v1::Pod;
@@ -229,6 +229,11 @@ pub struct Sweep {
     /// Of `ended`, the sessions whose pod the kubelet stopped at its
     /// `activeDeadlineSeconds` (WI-4519): audited and raised in the Inbox.
     pub deadline: Vec<Uuid>,
+    /// Live sessions whose pod is past its age limit
+    /// ([`crate::pod_backend::DEADLINE_ANNOTATION`]). The sweep does not end
+    /// them: the engine does, unless the session is oversight or pinned awake
+    /// by then (WI-4519).
+    pub overdue: Vec<Uuid>,
     /// Pods left running because no live session owns them, with the reason.
     /// Reconciliation never deletes them.
     pub reported: Vec<(Uuid, String)>,
@@ -303,7 +308,15 @@ pub async fn sweep_with(
         seen.insert(id);
         let link = auth.pod(id);
         match judge(pod, link.as_deref(), cfg, pod_age(pod)) {
-            Verdict::Keep => {}
+            Verdict::Keep => {
+                let live = link.as_deref().is_some_and(|l| !l.is_finished());
+                let past = pod_deadline(pod)
+                    .zip(pod_age(pod))
+                    .is_some_and(|(limit, age)| age >= limit);
+                if live && past {
+                    report.overdue.push(id);
+                }
+            }
             Verdict::End { code, note } => {
                 if let Some(link) = link.as_deref() {
                     tracing::warn!(session = %id, code, %note, "ending a session whose pod died");
@@ -396,6 +409,7 @@ pub fn spawn(
     owned: Arc<dyn Fn(Uuid) -> bool + Send + Sync>,
     salvaged: SalvagedFn,
     on_deadline: Arc<dyn Fn(Uuid) + Send + Sync>,
+    on_overdue: Arc<dyn Fn(Uuid) + Send + Sync>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut failing = false;
@@ -418,6 +432,9 @@ pub fn spawn(
                     failing = false;
                     for id in &report.deadline {
                         on_deadline(*id);
+                    }
+                    for id in &report.overdue {
+                        on_overdue(*id);
                     }
                     let current: HashSet<Uuid> =
                         report.reported.iter().map(|(id, _)| *id).collect();
@@ -682,6 +699,36 @@ mod tests {
         let report = sweep(&kube, &auth, &cfg(), &|_| false).await.unwrap();
         assert_eq!(report.ended.len(), 2);
         assert_eq!(report.deadline, vec![id]);
+    }
+
+    /// WI-4519: a live pod past its annotated age limit is reported overdue,
+    /// not ended by the sweep; one within it, or with no limit, is not.
+    #[tokio::test]
+    async fn a_live_pod_past_its_age_limit_is_reported_overdue_not_ended() {
+        let auth = AgentAuth::default();
+        let (old, young, unbounded) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let _links = (
+            auth.register_pod(old),
+            auth.register_pod(young),
+            auth.register_pod(unbounded),
+        );
+        let limited = |id, age| {
+            let mut p = aged(pod(id, phase("Running")), age);
+            p.metadata.annotations = Some(BTreeMap::from([(
+                crate::pod_backend::DEADLINE_ANNOTATION.into(),
+                "3600".into(),
+            )]));
+            p
+        };
+        let kube = MockKube::with(vec![
+            limited(old, 3601),
+            limited(young, 60),
+            aged(pod(unbounded, phase("Running")), 100_000),
+        ]);
+        let report = sweep(&kube, &auth, &cfg(), &|_| false).await.unwrap();
+        assert_eq!(report.overdue, vec![old]);
+        assert!(report.ended.is_empty());
+        assert!(!auth.pod(old).unwrap().is_finished());
     }
 
     #[test]
