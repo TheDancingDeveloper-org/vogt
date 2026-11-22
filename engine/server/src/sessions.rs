@@ -1039,7 +1039,7 @@ impl SessionRegistry {
                 template,
                 id,
                 &source,
-                &provider.pod_env(&source),
+                &registry.pod_env(provider.as_ref(), &source),
                 "session",
                 spec.account.as_deref(),
                 spec.model.as_deref(),

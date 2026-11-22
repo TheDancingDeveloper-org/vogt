@@ -1311,11 +1311,13 @@ pub async fn bootstrap(
     let Some(source) = state.agent_auth.take_source(id).await else {
         return (StatusCode::BAD_REQUEST, "session source is unavailable").into_response();
     };
-    let provider = match state.sessions.source_registry().and_then(|r| {
-        r.for_source(&source)
-            .map_err(|e| crate::error::ApiError::Config(e.to_string()))
+    let (registry, provider) = match state.sessions.source_registry().and_then(|r| {
+        let p = r
+            .for_source(&source)
+            .map_err(|e| crate::error::ApiError::Config(e.to_string()))?;
+        Ok((r, p))
     }) {
-        Ok(p) => p,
+        Ok(rp) => rp,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
     let minted = state.agent_auth.take_source_credential(id).await;
@@ -1422,7 +1424,7 @@ pub async fn bootstrap(
         id,
         &req.cli,
         req.model.as_deref(),
-        &provider.pod_env(&source),
+        &registry.pod_env(provider.as_ref(), &source),
         req.extra_ca_file.as_deref(),
         &breadcrumbs,
     );
