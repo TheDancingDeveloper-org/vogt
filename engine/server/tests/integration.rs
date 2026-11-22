@@ -25023,6 +25023,93 @@ sleep 2
         assert_eq!(String::from_utf8_lossy(&bytes), "XYZ!!");
     }
 
+    /// WI-4499 / WI-4497: the agent's last OSC 7501 report survives an engine
+    /// restart that adopts its pod, and boot never writes the pod's record as
+    /// hibernated on its way to adopting it.
+    #[tokio::test]
+    async fn a_restarted_engine_keeps_the_adopted_pods_reported_status() {
+        let (mut h, _accounts) = claude_harness().await;
+        let id = h.start().await;
+        let token = h.session_token(id).await;
+        let mut agent = h.dial(id, &token, 0).await;
+        assert_eq!(take(&mut agent).await, Frame::Ack { offset: 0 });
+        let report = b"\x1b]7501;state=done:app=claude-code\x1b\\".to_vec();
+        let len = report.len() as u64;
+        put(
+            &mut agent,
+            Frame::Output {
+                offset: 0,
+                data: report,
+            },
+        )
+        .await;
+        assert_eq!(take(&mut agent).await, Frame::Ack { offset: len });
+        log_len(&h, id, len).await;
+        let before = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let Some(status) = h.state.sessions.summary_of(id).unwrap().reported_status {
+                    return status;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the report reaches the summary");
+        assert_eq!(before.app.as_deref(), Some("claude-code"));
+
+        let old_link = h.state.agent_auth.pod(id).unwrap();
+        h.state.agent_auth.forget_pod(id);
+        drop(agent);
+        let launcher = fake_launcher(vec![running_pod(id)]);
+        let registry = restarted(&h, launcher.clone());
+        let record_path = h
+            .state
+            .config
+            .state_dir
+            .join("sessions")
+            .join(format!("{id}.json"));
+        let record: Value =
+            serde_json::from_str(&std::fs::read_to_string(&record_path).unwrap()).unwrap();
+        assert!(
+            record["hibernation"].is_null(),
+            "boot must not write an adoptable pod's record as hibernated: {record}"
+        );
+        let adopted = registry.readopt_pods().await;
+        old_link.finish(137);
+        assert_eq!(adopted, vec![id]);
+        let after = registry.summary_of(id).unwrap().reported_status;
+
+        let mut agent = h.dial(id, &token, len).await;
+        assert_eq!(take(&mut agent).await, Frame::Ack { offset: len });
+        put(&mut agent, Frame::Exited { status: Some(0) }).await;
+        ended(&registry, id).await;
+        assert_eq!(after, Some(before), "the report survives the restart");
+    }
+
+    /// WI-4497: a recovered record boot held back for adoption whose pod is
+    /// gone is written as hibernated once the readopt finds nothing.
+    #[tokio::test]
+    async fn a_held_record_whose_pod_is_gone_is_kept_as_hibernated() {
+        let mut h = harness(false).await;
+        let id = h.start().await;
+        let _token = h.session_token(id).await;
+        let old_link = h.state.agent_auth.pod(id).unwrap();
+        h.state.agent_auth.forget_pod(id);
+        let registry = restarted(&h, fake_launcher(Vec::new()));
+        assert!(registry.readopt_pods().await.is_empty());
+        old_link.finish(137);
+        let record_path = h
+            .state
+            .config
+            .state_dir
+            .join("sessions")
+            .join(format!("{id}.json"));
+        let record: Value =
+            serde_json::from_str(&std::fs::read_to_string(&record_path).unwrap()).unwrap();
+        assert_eq!(record["hibernation"]["trigger"], "recovered", "{record}");
+        assert!(registry.is_hibernated(id));
+    }
+
     /// WI-4442: the engine dies with no shutdown hook while the agent is
     /// mid-output. The dead engine took a chunk from the agent and never
     /// wrote it, and never acknowledged it. The next engine adopts the pod at

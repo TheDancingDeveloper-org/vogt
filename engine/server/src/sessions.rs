@@ -492,6 +492,9 @@ pub struct SessionRegistry {
     /// Stream halves rebuilt for pods an engine restart is adopting, taken by
     /// `spawn_pod_session` when the session over them is built.
     adopting: parking_lot::Mutex<std::collections::HashMap<Uuid, AdoptedPod>>,
+    /// Recovered records boot kept off disk while `readopt_pods` tries their
+    /// pods (WI-4497).
+    held_for_adoption: parking_lot::Mutex<Vec<Uuid>>,
 }
 
 const MAX_SESSION_NAME_BYTES: usize = 256;
@@ -728,7 +731,7 @@ impl SessionRegistry {
             cfg.agent_onboarding.account_concurrency_cap,
         ));
         let records = Arc::new(DashMap::new());
-        recover_records(&cfg.state_dir, history.as_deref(), &records);
+        let held_for_adoption = recover_records(&cfg.state_dir, history.as_deref(), &records);
         let account_leases = Arc::new(DashMap::new());
         let host_slots = Arc::new(DashMap::new());
         Self {
@@ -756,6 +759,7 @@ impl SessionRegistry {
             source_registry: parking_lot::Mutex::new(None),
             host_graft_credentials: Arc::new(DashMap::new()),
             adopting: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            held_for_adoption: parking_lot::Mutex::new(held_for_adoption),
         }
     }
 
@@ -1310,6 +1314,27 @@ impl SessionRegistry {
     /// reconciler reports such a pod instead of deleting it. Returns the
     /// adopted ids.
     pub async fn readopt_pods(self: &Arc<Self>) -> Vec<Uuid> {
+        let adopted = self.adopt_surviving_pods().await;
+        self.settle_unadopted();
+        adopted
+    }
+
+    /// Boot held every recovered record with a pod credential back from
+    /// disk for adoption; one still not live after `readopt_pods` was not
+    /// adopted, so it is kept as hibernated now (WI-4497).
+    fn settle_unadopted(&self) {
+        let held = std::mem::take(&mut *self.held_for_adoption.lock());
+        for id in held
+            .into_iter()
+            .filter(|id| !self.sessions.contains_key(id))
+        {
+            if let Some(mut record) = self.records.get_mut(&id) {
+                persist_recovered(&self.cfg.state_dir, self.history.as_deref(), &mut record);
+            }
+        }
+    }
+
+    async fn adopt_surviving_pods(self: &Arc<Self>) -> Vec<Uuid> {
         if !self.cfg.pod_backends_enabled {
             return Vec::new();
         }
@@ -1966,6 +1991,10 @@ impl SessionRegistry {
             Creating::Wake(record) => record.id,
             Creating::Fresh(_) => preassigned.unwrap_or_else(Uuid::new_v4),
         };
+        // An engine restart adopting a running pod: the process is the same
+        // one, so its last OSC 7501 report still holds (WI-4499). Read before
+        // the spawn takes the adoption entry.
+        let adopting = self.adopting.lock().contains_key(&id);
 
         // A named Claude Code account becomes that account's config directory,
         // which the engine looked up itself: the caller never supplies a path.
@@ -2924,6 +2953,7 @@ impl SessionRegistry {
             }
             self.records.insert(id, record);
         }
+        session.keep_reports_in(&self.cfg.state_dir, adopting);
         self.sessions.insert(session.id, Arc::clone(&session));
         // A fresh Codex session given a brief must actually start its first
         // turn (WI-4068). Start the confirmation before the caller's request
@@ -5515,8 +5545,9 @@ fn recover_records(
     state_dir: &std::path::Path,
     history: Option<&SessionHistory>,
     records: &DashMap<Uuid, Record>,
-) {
+) -> Vec<Uuid> {
     let mut loaded = 0usize;
+    let mut held = Vec::new();
     for mut record in hibernation::load_all(state_dir) {
         let id = record.id;
         if record.hibernation.is_none() {
@@ -5543,19 +5574,15 @@ fn recover_records(
                 resumable,
                 superseded_by: record.superseded_by.clone(),
             });
-            if record.screen_len.unwrap_or(0) == 0
-                && hibernation::screen_metadata_len(state_dir, id) == 0
-            {
-                if let Some(tail) = history.and_then(|h| log_tail(&h.log_path(id))) {
-                    if hibernation::write_screen(state_dir, id, &tail).is_ok() {
-                        record.screen_len = Some(tail.len() as u64);
-                    }
-                }
+            // A session pod may still be running: readopt_pods takes it back
+            // as the same live session. Only one it does not adopt is
+            // written and logged as hibernated (WI-4497).
+            if read_pod_token(state_dir, id).is_some() {
+                tracing::debug!(session = %id, name = %record.name, "holding a session pod record for adoption");
+                held.push(id);
+            } else {
+                persist_recovered(state_dir, history, &mut record);
             }
-            if let Err(e) = hibernation::write(state_dir, &record) {
-                tracing::warn!(session = %id, error = %e, "could not update a recovered session record");
-            }
-            tracing::info!(session = %id, name = %record.name, "recovered a session as hibernated");
         }
         records.insert(id, record);
         loaded += 1;
@@ -5565,6 +5592,28 @@ fn recover_records(
         loaded,
         "loaded session records from the state directory"
     );
+    held
+}
+
+/// Keep a session the engine lost as hibernated: its screen from the
+/// history log when it has none, and its record written.
+fn persist_recovered(
+    state_dir: &std::path::Path,
+    history: Option<&SessionHistory>,
+    record: &mut Record,
+) {
+    let id = record.id;
+    if record.screen_len.unwrap_or(0) == 0 && hibernation::screen_metadata_len(state_dir, id) == 0 {
+        if let Some(tail) = history.and_then(|h| log_tail(&h.log_path(id))) {
+            if hibernation::write_screen(state_dir, id, &tail).is_ok() {
+                record.screen_len = Some(tail.len() as u64);
+            }
+        }
+    }
+    if let Err(e) = hibernation::write(state_dir, record) {
+        tracing::warn!(session = %id, error = %e, "could not update a recovered session record");
+    }
+    tracing::info!(session = %id, name = %record.name, "recovered a session as hibernated");
 }
 
 /// Write the per-launch model catalog when the launch model is registered by
