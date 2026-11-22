@@ -869,7 +869,7 @@ impl SecretBroker {
     /// The deploy-time entries plus the manifest file's, without the
     /// registry. A file that cannot be used contributes nothing and is logged
     /// (path and parse error, which carry names, never values).
-    fn base_manifest(&self) -> Vec<ManifestSecret> {
+    pub(crate) fn base_manifest(&self) -> Vec<ManifestSecret> {
         compose_manifest(&self.manifest, self.manifest_file.as_deref()).unwrap_or_else(|error| {
             tracing::warn!(%error, "agent-auth manifest file ignored");
             self.manifest.clone()

@@ -89,6 +89,31 @@ while IFS="$(printf '\t')" read -r name value; do
   case "$name" in VOGT_BOOTSTRAP_TOKEN|VOGT_BOOTSTRAP_TOKEN_FILE|VOGT_AGENT_BOOTSTRAP_TOKEN) continue ;; esac
   export "$name=$value"
 done <"$tmp_dir/env.tsv"
+step=launch-secrets; say launch-secrets
+# WI-4517: the manifest's launch-time names, as `vogt-agent-auth run` resolves
+# them on a host. The bootstrap carries names only; each value comes through
+# the engine broker (which audits the name) straight into this shell's
+# environment, never the pod spec, a Secret or an argument. A required name
+# that fails stops the launch; an optional one is skipped with a warning.
+launch_granted=""
+fetch_launch() {
+  case "$1" in ''|[!A-Za-z_]*|*[!A-Za-z0-9_]*) fail "bootstrap returned an invalid launch-time name: $1" ;; esac
+  if value=$(vogt-agent-auth fetch "$1" 2>"$tmp_dir/fetch.err") && [ -n "$value" ]; then
+    export "$1=$value"; launch_granted="$launch_granted${launch_granted:+ }$1"; return 0
+  fi
+  unset value; return 1
+}
+for name in ${AGENT_AUTH_LAUNCH_REQUIRED:-}; do
+  fetch_launch "$name" || fail "required agent-auth secret $name could not be fetched through the broker: $(tail -n1 "$tmp_dir/fetch.err" 2>/dev/null | cut -c1-300)"
+done
+for name in ${AGENT_AUTH_LAUNCH_OPTIONAL:-}; do
+  fetch_launch "$name" || printf 'session-entrypoint: WARNING: optional agent-auth secret %s was not delivered; skipped: %s\n' \
+    "$name" "$(tail -n1 "$tmp_dir/fetch.err" 2>/dev/null | cut -c1-300)" >&2
+done
+unset value AGENT_AUTH_LAUNCH_REQUIRED AGENT_AUTH_LAUNCH_OPTIONAL
+rm -f "$tmp_dir/fetch.err"
+AGENT_AUTH_GRANTED="$launch_granted${launch_granted:+${AGENT_AUTH_GRANTED:+ }}${AGENT_AUTH_GRANTED:-}"; export AGENT_AUTH_GRANTED
+[ -z "$launch_granted" ] || printf 'session-entrypoint: launch-time secrets: %s\n' "$launch_granted" >&2
 step=claude-config; say claude-config
 # A Claude session gets what a host-launched one does (WI-3243): the engine's
 # MCP endpoints as a --mcp-config file, and the conversation and policy hooks

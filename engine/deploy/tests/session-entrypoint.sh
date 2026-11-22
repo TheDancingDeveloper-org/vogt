@@ -85,6 +85,16 @@ SH
 env >"$CASE_DIR/agent.env"
 printf 'agent:%s:%s\n' "$VOGT_SESSION_CWD" "$(cat "$VOGT_SESSION_BRIEF_FILE")"
 SH
+  # The broker helper (WI-4517): answers `fetch NAME` from $CASE_DIR/secrets,
+  # refuses like the engine for a name it has none for, and records each call.
+  cat >"$dir/bin/vogt-agent-auth" <<'SH'
+#!/bin/sh
+printf '%s\n' "$*" >>"$CASE_DIR/agent-auth.calls"
+[ "$1" = fetch ] || exit 2
+[ -r "$VOGT_SESSION_TOKEN_FILE" ] || { echo "vogt-agent-auth: no broker credential" >&2; exit 1; }
+[ -r "$CASE_DIR/secrets/$2" ] || { echo "vogt-agent-auth: secret broker refused $2 (HTTP 403): not in the manifest" >&2; exit 1; }
+cat "$CASE_DIR/secrets/$2"
+SH
   # The two hook scripts the image installs: record how the entrypoint ran them.
   for hook in vogt-claude-session-hook vogt-policy-hook; do
     # shellcheck disable=SC2016 # the stub's own $-expressions stay literal
@@ -392,6 +402,32 @@ if run_case "$tmp/ondemand-leak" VOGT_CLI=codex ENV_JSON="$LEAK_ENV" >"$tmp/onde
 grep -q 'bootstrap returned a value for ondemand variable DEEPSEEK_KEY' "$tmp/ondemand-leak.out" || fail "ondemand value refusal: $(cat "$tmp/ondemand-leak.out")"
 [ ! -e "$tmp/ondemand-leak/agent.env" ] || fail "agent started with an exported ondemand value"
 ! grep -q 'provider-key-value' "$tmp/ondemand-leak.out" || fail "ondemand value appeared in output"
+# WI-4517: launch-time names arrive as names and are fetched through the
+# broker before the agent starts; the values reach the agent's environment,
+# never an argument, and AGENT_AUTH_GRANTED lists them ahead of any grant.
+LAUNCH_ENV='{"VOGT_SESSION_ID":"s1","AGENT_AUTH_MODE":"brokered","AGENT_AUTH_GRANTED":"GRANTED_X","AGENT_AUTH_LAUNCH_REQUIRED":"FORGEJO_TOKEN","AGENT_AUTH_LAUNCH_OPTIONAL":"GH_TOKEN MISSING_OPT"}'
+mkdir -p "$tmp/launch/secrets"
+printf forgejo-launch-value >"$tmp/launch/secrets/FORGEJO_TOKEN"
+printf gh-launch-value >"$tmp/launch/secrets/GH_TOKEN"
+run_case "$tmp/launch" ENV_JSON="$LAUNCH_ENV" VOGT_CLAUDE_SETTINGS_FILE=off >"$tmp/launch.out" 2>&1 || fail "launch-time secrets: $(cat "$tmp/launch.out")"
+grep -qx 'FORGEJO_TOKEN=forgejo-launch-value' "$tmp/launch/agent.env" || fail "required launch secret not exported"
+grep -qx 'GH_TOKEN=gh-launch-value' "$tmp/launch/agent.env" || fail "optional launch secret not exported"
+! grep -q '^MISSING_OPT=' "$tmp/launch/agent.env" || fail "an undelivered optional secret was exported"
+grep -qx 'AGENT_AUTH_GRANTED=FORGEJO_TOKEN GH_TOKEN GRANTED_X' "$tmp/launch/agent.env" || fail "granted breadcrumb: $(grep AGENT_AUTH_GRANTED "$tmp/launch/agent.env")"
+! grep -q '^AGENT_AUTH_LAUNCH_' "$tmp/launch/agent.env" || fail "launch name lists left in the agent environment"
+grep -q 'optional agent-auth secret MISSING_OPT was not delivered; skipped: .*HTTP 403' "$tmp/launch.out" || fail "optional skip not warned"
+[[ $(cat "$tmp/launch/agent-auth.calls") == $'fetch FORGEJO_TOKEN\nfetch GH_TOKEN\nfetch MISSING_OPT' ]] || fail "broker calls: $(cat "$tmp/launch/agent-auth.calls")"
+! grep -Eq 'forgejo-launch-value|gh-launch-value' "$tmp/launch.out" "$tmp/launch/agent-auth.calls" || fail "launch secret value appeared in output or argv"
+# A required name the broker refuses stops the launch, naming it and why.
+mkdir -p "$tmp/launch-required/secrets"
+if run_case "$tmp/launch-required" ENV_JSON="$LAUNCH_ENV" >"$tmp/launch-required.out" 2>&1; then fail "launch went on without a required secret"; fi
+grep -q 'launch-secrets failed: required agent-auth secret FORGEJO_TOKEN could not be fetched through the broker: .*HTTP 403' "$tmp/launch-required.out" || fail "required failure unclear: $(cat "$tmp/launch-required.out")"
+[ ! -e "$tmp/launch-required/agent.env" ] || fail "agent started without a required secret"
+# A name that is not a shell name is refused rather than exported.
+BAD_ENV='{"VOGT_SESSION_ID":"s1","AGENT_AUTH_LAUNCH_OPTIONAL":"BAD-NAME"}'
+if run_case "$tmp/launch-bad" ENV_JSON="$BAD_ENV" >"$tmp/launch-bad.out" 2>&1; then fail "invalid launch name accepted"; fi
+grep -q 'invalid launch-time name: BAD-NAME' "$tmp/launch-bad.out" || fail "invalid launch name refusal"
+[ ! -e "$tmp/launch-bad/agent-auth.calls" ] || fail "broker asked for an invalid name"
 for output in "$tmp/missing.out" "$tmp/401.out" "$tmp/clone.out" "$tmp/skip.out" "$tmp/unavail.out"; do
   ! grep -Eq "$BOOT|$SESSION|graft-secret-value|default-graft-token-value" "$output" || fail "secret appeared in output"
 done
