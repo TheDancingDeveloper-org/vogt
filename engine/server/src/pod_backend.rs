@@ -1326,6 +1326,15 @@ pub fn bootstrap_secret(
     }
 }
 
+/// The argv a pod runs for a shell template with no command (WI-4521).
+pub const POD_LOGIN_SHELL: [&str; 2] = ["bash", "-l"];
+
+/// Whether `template` is a person's shell: tagged `shell`, as the built-in
+/// Shell template and the deployment's default shell pod template are.
+pub fn is_shell_template(template: &SessionTemplate) -> bool {
+    template.tags.iter().any(|tag| tag == "shell")
+}
+
 fn pod_env(
     cfg: &PodConfig,
     source: &SourceDescriptor,
@@ -1719,6 +1728,17 @@ pub fn pod_template(
         value: Some((*value).into()),
         ..Default::default()
     }));
+    // A shell template with no command is a person's interactive shell
+    // (WI-4521): the pod runs a login shell, never the deployment's agent CLI.
+    // Left empty, the session agent would boot `cfg.cli` (Codex on vogt-dev)
+    // in its driven posture. A tagless no-command template (the built-in Pod)
+    // still boots the CLI.
+    let login_shell = POD_LOGIN_SHELL.map(String::from);
+    let command = if command.is_empty() && is_shell_template(template) {
+        &login_shell[..]
+    } else {
+        command
+    };
     // An agent template (`vogt-agent-auth run -- claude`) names the pod's CLI
     // instead of its argv (WI-3169): the session agent builds that CLI's
     // command line itself, with the driven-session policy, the MCP set and
@@ -3739,6 +3759,76 @@ mod tests {
         let env = env_of(&argv(&["bash", "-l"]));
         assert_eq!(env["VOGT_CLI"], cfg.cli);
         assert_eq!(env["VOGT_SESSION_COMMAND"], r#"["bash","-l"]"#);
+    }
+
+    /// The pod env a built-in template gets on a pod deployment, as a start
+    /// with no command of its own and the given posture builds it.
+    fn builtin_pod_env(name: &str, permission_mode: Option<&str>) -> BTreeMap<String, String> {
+        let cfg = PodConfig::default();
+        let templates = SessionTemplate::default_templates_on("pod");
+        let template = templates.iter().find(|t| t.name == name).unwrap();
+        let pod = pod_template(
+            &cfg,
+            template,
+            Uuid::nil(),
+            &default_source(&cfg),
+            &[],
+            "session",
+            None,
+            None,
+            None,
+            permission_mode,
+            vogt_session_agent::CODEX_APPROVAL_DEFAULT,
+            template.command.as_deref().unwrap_or(&[]),
+        );
+        pod.spec.unwrap().containers[0]
+            .env
+            .clone()
+            .unwrap()
+            .into_iter()
+            .map(|e| (e.name, e.value.unwrap_or_default()))
+            .collect()
+    }
+
+    /// WI-4521: the built-in Shell template on a pod deployment opens a login
+    /// shell in the pod. Before the fix its empty command left the session
+    /// agent to boot the deployment's CLI (Codex on vogt-dev).
+    #[test]
+    fn a_shell_template_pod_runs_a_login_shell_not_the_agent() {
+        let env = builtin_pod_env("Shell", None);
+        assert_eq!(env["VOGT_SESSION_COMMAND"], r#"["bash","-l"]"#);
+        assert!(!env.contains_key("VOGT_PERMISSION_MODE"), "{env:?}");
+        // The built-in Pod template, tagged `pod`, still boots the CLI.
+        let env = builtin_pod_env("Pod", None);
+        assert!(!env.contains_key("VOGT_SESSION_COMMAND"), "{env:?}");
+    }
+
+    /// WI-4521: raw-command templates run their own argv in the pod.
+    #[test]
+    fn raw_command_templates_run_their_own_argv_in_the_pod() {
+        for name in ["Node Dev", "Rust Build"] {
+            let env = builtin_pod_env(name, None);
+            assert_eq!(env["VOGT_SESSION_COMMAND"], r#"["bash"]"#, "{name}");
+        }
+    }
+
+    /// WI-4521 guard: a pod carries the bypass posture only when the start
+    /// asked for it; no other posture, and no template, turns into bypass.
+    #[test]
+    fn a_pod_carries_bypass_only_when_the_start_asked_for_it() {
+        for template in SessionTemplate::default_templates_on("pod") {
+            for mode in [None, Some("default"), Some("accept-edits")] {
+                let env = builtin_pod_env(&template.name, mode);
+                assert_ne!(
+                    env.get("VOGT_PERMISSION_MODE").map(String::as_str),
+                    Some("bypass"),
+                    "{} {mode:?}",
+                    template.name
+                );
+            }
+        }
+        let env = builtin_pod_env("Shell", Some("bypass"));
+        assert_eq!(env["VOGT_PERMISSION_MODE"], "bypass");
     }
 
     /// WI-4130: the shipped Claude Code and opencode templates build a pod
