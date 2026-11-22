@@ -1610,6 +1610,14 @@ pub fn session_source(
     Ok(source)
 }
 
+/// Drop the pod's `activeDeadlineSeconds`, for a session that must not be
+/// ended at a fixed age (WI-4519).
+pub fn clear_active_deadline(pod: &mut Pod) {
+    if let Some(spec) = pod.spec.as_mut() {
+        spec.active_deadline_seconds = None;
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn pod_template(
     cfg: &PodConfig,

@@ -226,6 +226,9 @@ const KEEP_WARN_EVERY: Duration = Duration::from_secs(600);
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Sweep {
     pub ended: Vec<Uuid>,
+    /// Of `ended`, the sessions whose pod the kubelet stopped at its
+    /// `activeDeadlineSeconds` (WI-4519): audited and raised in the Inbox.
+    pub deadline: Vec<Uuid>,
     /// Pods left running because no live session owns them, with the reason.
     /// Reconciliation never deletes them.
     pub reported: Vec<(Uuid, String)>,
@@ -316,6 +319,9 @@ pub async fn sweep_with(
                     };
                     end_session(link, code, &note);
                     report.ended.push(id);
+                    if pod_hit_active_deadline(pod) {
+                        report.deadline.push(id);
+                    }
                 }
             }
             Verdict::Report { note } => {
@@ -389,6 +395,7 @@ pub fn spawn(
     cfg: PodConfig,
     owned: Arc<dyn Fn(Uuid) -> bool + Send + Sync>,
     salvaged: SalvagedFn,
+    on_deadline: Arc<dyn Fn(Uuid) + Send + Sync>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut failing = false;
@@ -409,6 +416,9 @@ pub fn spawn(
             {
                 Ok(report) => {
                     failing = false;
+                    for id in &report.deadline {
+                        on_deadline(*id);
+                    }
                     let current: HashSet<Uuid> =
                         report.reported.iter().map(|(id, _)| *id).collect();
                     for (id, note) in &report.reported {
@@ -653,6 +663,25 @@ mod tests {
             }
             other => panic!("unexpected verdict: {other:?}"),
         }
+    }
+
+    /// WI-4519: a sweep that ends a session at its active deadline says so,
+    /// so the engine audits it and raises an Inbox item; any other end does
+    /// not.
+    #[tokio::test]
+    async fn a_sweep_reports_a_session_ended_at_its_deadline() {
+        let auth = AgentAuth::default();
+        let (id, other) = (Uuid::new_v4(), Uuid::new_v4());
+        let _links = (auth.register_pod(id), auth.register_pod(other));
+        let mut status = terminated("Failed", 137, "");
+        status.reason = Some("DeadlineExceeded".into());
+        let kube = MockKube::with(vec![
+            pod(id, status),
+            pod(other, terminated("Failed", 137, "OOMKilled")),
+        ]);
+        let report = sweep(&kube, &auth, &cfg(), &|_| false).await.unwrap();
+        assert_eq!(report.ended.len(), 2);
+        assert_eq!(report.deadline, vec![id]);
     }
 
     #[test]

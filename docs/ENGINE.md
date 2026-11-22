@@ -5781,7 +5781,11 @@ clone and work tree) and `/run/vogt` (the runtime token and MCP files). The
 tool caches keep their own private `emptyDir` at `/cache` (WI-3242). The spec
 also sets `activeDeadlineSeconds`: a template's
 `active_deadline_seconds` policy wins, else the deployment's
-`ENGINE_POD_SESSION_DEADLINE_SECONDS` (default 12 h; `0` leaves it unset). A
+`ENGINE_POD_SESSION_DEADLINE_SECONDS` (default 12 h; `0` leaves it unset).
+Oversight, pinned-awake (`keep_awake`) and person-started sessions get no
+deadline; only Vogt workers and agent tasks keep it (WI-4519). Every deadline
+end writes a `session.pod.deadline_ended` audit line and raises an Inbox
+decision naming the session. A
 pod the kubelet stops at that deadline ends its session with the distinct
 reason `hit its active deadline: …` from the reconciler, not the generic
 failure note.
