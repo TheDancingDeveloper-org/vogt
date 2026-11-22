@@ -108,6 +108,13 @@ pub trait SourceProvider: Send + Sync {
         Vec::new()
     }
 
+    /// Environment every pod session gets from this provider, whatever its
+    /// project's source (no secrets). A worker on a git project still runs
+    /// graft against the deployment's server (WI-4518).
+    fn session_env(&self) -> Vec<(String, String)> {
+        Vec::new()
+    }
+
     /// Whether this provider mints a credential per session. When it does, a
     /// missing mint never falls back to the shared credential.
     fn mints_credentials(&self) -> bool {
@@ -207,6 +214,27 @@ impl SourceRegistry {
         kinds
             .into_iter()
             .find_map(|k| self.providers[&k].default_source())
+    }
+
+    /// The environment a pod checking out `source` gets: its provider's
+    /// `pod_env`, then every provider's `session_env` for names it left
+    /// unset, so the source's own value wins.
+    pub fn pod_env(
+        &self,
+        provider: &dyn SourceProvider,
+        source: &SourceDescriptor,
+    ) -> Vec<(String, String)> {
+        let mut env = provider.pod_env(source);
+        let mut kinds: Vec<_> = self.providers.keys().copied().collect();
+        kinds.sort_by_key(|k| format!("{k:?}"));
+        for kind in kinds {
+            for (name, value) in self.providers[&kind].session_env() {
+                if !env.iter().any(|(n, _)| *n == name) {
+                    env.push((name, value));
+                }
+            }
+        }
+        env
     }
 
     pub fn for_source(
