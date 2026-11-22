@@ -335,6 +335,15 @@ impl SourceProvider for GraftProvider {
             .unwrap_or_default()
     }
 
+    /// `GRAFT_ENDPOINT` for every pod session, git projects included.
+    fn session_env(&self) -> Vec<(String, String)> {
+        self.settings
+            .endpoint
+            .clone()
+            .map(|e| vec![("GRAFT_ENDPOINT".to_string(), e)])
+            .unwrap_or_default()
+    }
+
     fn mints_credentials(&self) -> bool {
         self.settings.mint_enabled && self.minter.is_some()
     }
@@ -967,6 +976,34 @@ mod tests {
         assert_eq!(
             env(&deployment(Some("http://dep:1")), &s),
             vec![("GRAFT_ENDPOINT".into(), "http://dep:1".into())]
+        );
+    }
+
+    /// WI-4518: a pod session on a git project still gets the deployment's
+    /// `GRAFT_ENDPOINT`, so a worker never falls back to a bare host name.
+    #[test]
+    fn every_pod_session_gets_the_deployment_graft_endpoint() {
+        let mut registry = crate::source_provider::SourceRegistry::with_defaults();
+        registry.register(Arc::new(deployment(Some("http://dep:1"))));
+        let git = SourceDescriptor {
+            location: SourceLocation::Git {
+                url: "https://example.test/r.git".into(),
+                repo: "r".into(),
+            },
+            reference: "main".into(),
+            landing: LandingMode::PushBranch,
+        };
+        let provider = registry.for_source(&git).unwrap();
+        assert_eq!(
+            registry.pod_env(provider.as_ref(), &git),
+            vec![("GRAFT_ENDPOINT".into(), "http://dep:1".into())]
+        );
+        // A graft source's own server still wins.
+        let graft = source();
+        let provider = registry.for_source(&graft).unwrap();
+        assert_eq!(
+            registry.pod_env(provider.as_ref(), &graft),
+            vec![("GRAFT_ENDPOINT".into(), "http://graft.test:17888".into())]
         );
     }
 

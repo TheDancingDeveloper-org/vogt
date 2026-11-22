@@ -5737,7 +5737,10 @@ or `codex`), `VOGT_CLONE_DIR` (the clone root, `/work` or
 `<workspace>/session`) and `VOGT_WORK_DIR` (the work directory, replaced
 through the bootstrap response
 when the caller's `cwd` is inside the checkout), the source provider's env
-(for graft, `GRAFT_ENDPOINT` when known) and, when configured,
+(for graft, the source's `GRAFT_ENDPOINT` when known), `GRAFT_ENDPOINT` set to
+`ENGINE_SOURCE_GRAFT_ENDPOINT` for every other pod session whatever its
+project's source (WI-4518; briefs say `$GRAFT_ENDPOINT`, never a host name)
+and, when configured,
 `VOGT_EXTRA_CA_FILE`, and a requested model and effort as `VOGT_MODEL` and
 `VOGT_EFFORT` (WI-3881). Every pod also gets
 `VOGT_CODEX_APPROVAL_POLICY` (the engine's validated
