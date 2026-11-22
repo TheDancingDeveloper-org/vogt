@@ -323,6 +323,12 @@ fn replies_path(state_dir: &Path, id: Uuid) -> PathBuf {
     dir(state_dir).join(format!("{id}.replies"))
 }
 
+/// The program's last OSC 7501 report, kept while its process runs so an
+/// engine restart that adopts the process can restore it (WI-4499).
+fn reported_path(state_dir: &Path, id: Uuid) -> PathBuf {
+    dir(state_dir).join(format!("{id}.reported"))
+}
+
 /// Replace `path` with `bytes`: written to a sibling temp file (0600) and
 /// renamed over it, so a reader sees the old or the new, never a torn one.
 fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
@@ -390,11 +396,31 @@ pub fn read_replies(state_dir: &Path, id: Uuid) -> Option<Vec<u8>> {
     std::fs::read(replies_path(state_dir, id)).ok()
 }
 
-/// Forget a session: its record, its kept screen and its kept replies.
+pub fn write_reported(
+    state_dir: &Path,
+    id: Uuid,
+    status: &vogt_engine_contract::ReportedStatus,
+) -> std::io::Result<()> {
+    let json = serde_json::to_vec(status).map_err(std::io::Error::other)?;
+    write_atomic(&reported_path(state_dir, id), &json)
+}
+
+/// The kept OSC 7501 report, when there is a readable one.
+pub fn read_reported(state_dir: &Path, id: Uuid) -> Option<vogt_engine_contract::ReportedStatus> {
+    let bytes = std::fs::read(reported_path(state_dir, id)).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+pub fn remove_reported(state_dir: &Path, id: Uuid) {
+    let _ = std::fs::remove_file(reported_path(state_dir, id));
+}
+
+/// Forget a session: its record, its kept screen, replies and report.
 pub fn remove(state_dir: &Path, id: Uuid) {
     let _ = std::fs::remove_file(record_path(state_dir, id));
     remove_screen(state_dir, id);
     let _ = std::fs::remove_file(replies_path(state_dir, id));
+    remove_reported(state_dir, id);
 }
 
 /// Every readable record. One that cannot be parsed is logged and left in

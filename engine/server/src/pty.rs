@@ -172,6 +172,10 @@ pub struct Session {
     /// The OSC 7501 capability query has been answered once (WI-4321). A
     /// respawn builds a new `Session`, so the latch resets with it.
     status_query_answered: AtomicBool,
+    /// Where the program's OSC 7501 report is kept while it runs, and the
+    /// report last written there (WI-4499). `None` until the registry sets
+    /// the state directory.
+    report_store: Mutex<Option<ReportStore>>,
     /// Set when the launch wrapper reported `degraded`: the session started
     /// without its brokered credentials (WI-1812). Lives and dies with it.
     agent_auth_degraded: parking_lot::Mutex<Option<crate::launch::DegradedLaunch>>,
@@ -307,9 +311,88 @@ impl Session {
     /// Parse `bytes` of PTY output into the live grid. A session without one
     /// (restored from hibernation) has nothing to update.
     pub fn feed_terminal(&self, bytes: &[u8]) {
-        if let Some(terminal) = self.terminal.lock().as_mut() {
-            terminal.process(bytes);
+        let reported = match self.terminal.lock().as_mut() {
+            Some(terminal) => {
+                terminal.process(bytes);
+                terminal.reported()
+            }
+            None => return,
+        };
+        self.persist_report(reported);
+    }
+
+    /// Keep the program's OSC 7501 report in `state_dir` from now on, so an
+    /// engine restart that adopts this process can restore it (WI-4499). A
+    /// report kept by an earlier process is dropped unless `restore`, when it
+    /// is put back on the grid (an adopted pod is the same process).
+    pub fn keep_reports_in(&self, state_dir: &std::path::Path, restore: bool) {
+        let kept = restore
+            .then(|| crate::hibernation::read_reported(state_dir, self.id))
+            .flatten();
+        let mut last = None;
+        if let Some(status) = kept {
+            let parsed = time::OffsetDateTime::parse(
+                &status.set_at,
+                &time::format_description::well_known::Rfc3339,
+            );
+            if let (Ok(set_at), Some(term)) = (parsed, self.terminal.lock().as_mut()) {
+                let report = crate::screen::Reported {
+                    state: status.state,
+                    kind: status.kind,
+                    progress: status.progress,
+                    msg: status.msg,
+                    title: status.title,
+                    app: status.app,
+                    id: status.id,
+                    set_at,
+                };
+                // A report the adopted process already sent again is newer.
+                if term.reported().is_none() {
+                    term.restore_reported(report.clone());
+                }
+                last = term.reported();
+            }
+        } else {
+            crate::hibernation::remove_reported(state_dir, self.id);
         }
+        *self.report_store.lock() = Some(ReportStore {
+            state_dir: state_dir.to_path_buf(),
+            last,
+        });
+        let current = self.terminal.lock().as_ref().and_then(|t| t.reported());
+        self.persist_report(current);
+    }
+
+    /// Write the report when it differs from the one last kept.
+    fn persist_report(&self, reported: Option<crate::screen::Reported>) {
+        let mut guard = self.report_store.lock();
+        let Some(store) = guard.as_mut() else {
+            return;
+        };
+        if store.last == reported {
+            return;
+        }
+        match &reported {
+            Some(r) => {
+                let status = vogt_engine_contract::ReportedStatus {
+                    state: r.state,
+                    kind: r.kind.clone(),
+                    progress: r.progress,
+                    msg: r.msg.clone(),
+                    title: r.title.clone(),
+                    app: r.app.clone(),
+                    id: r.id.clone(),
+                    set_at: format_rfc3339(r.set_at),
+                };
+                if let Err(e) =
+                    crate::hibernation::write_reported(&store.state_dir, self.id, &status)
+                {
+                    tracing::debug!(session = %self.id, error = %e, "could not keep the OSC 7501 report");
+                }
+            }
+            None => crate::hibernation::remove_reported(&store.state_dir, self.id),
+        }
+        store.last = reported;
     }
 
     /// Answer an OSC 7501 capability query the grid has just seen (WI-4321).
@@ -1343,6 +1426,12 @@ fn format_rfc3339(ts: time::OffsetDateTime) -> String {
         .unwrap_or_else(|_| ts.to_string())
 }
 
+/// See `Session::report_store`.
+struct ReportStore {
+    state_dir: PathBuf,
+    last: Option<crate::screen::Reported>,
+}
+
 pub struct SpawnedSession {
     pub session: Arc<Session>,
 }
@@ -1824,6 +1913,7 @@ fn assemble_session(
         first_output_seen: AtomicBool::new(false),
         launch_reported: AtomicBool::new(false),
         status_query_answered: AtomicBool::new(false),
+        report_store: Mutex::new(None),
         agent_auth_degraded: parking_lot::Mutex::new(None),
         economics: parking_lot::Mutex::new(None),
         economics_snapshot: parking_lot::Mutex::new(None),

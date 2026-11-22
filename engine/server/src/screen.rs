@@ -166,6 +166,11 @@ impl Terminal {
         cb.hint = None;
     }
 
+    /// Put back a report an earlier engine process kept (WI-4499).
+    pub fn restore_reported(&mut self, report: Reported) {
+        self.parser.callbacks_mut().reported = Some(report);
+    }
+
     /// Forget the attention hint (a person has looked).
     pub fn clear_attention_hint(&mut self) {
         self.parser.callbacks_mut().hint = None;
