@@ -3953,6 +3953,19 @@ exists.
   default shell pod template (pod-backed, no agent CLI, preferring the one
   tagged `shell`) and runs its own argv there. Agent tasks and wakes keep
   their own placement.
+- **A shell is a shell (WI-4521).** A pod started from a template tagged
+  `shell` with no command (the built-in Shell template) runs `bash -l` in the
+  session's cwd, through `VOGT_SESSION_COMMAND`; no agent CLI starts. The
+  entrypoint still writes the session's Claude Code and Codex config, so
+  `claude` or `codex` typed in that shell works as on the host. Only a
+  no-command template without the `shell` tag (the built-in Pod template)
+  boots the deployment's CLI. Raw-command templates (Node Dev, Rust Build)
+  run their own argv. No pod agent gets the bypass flags
+  (`--dangerously-skip-permissions`,
+  `--dangerously-bypass-approvals-and-sandbox`) unless the start asked for
+  `permission_mode=bypass`, which only a person grants. Codex's banner calls
+  the pod's default posture (`-s danger-full-access -a never`) "YOLO mode"
+  too; that is the driven default, not bypass.
 - **Refused, never hosted.** When no pod template fits such a start, it is
   refused with `409` naming the missing template and `placement=host`; it is
   not placed on the host. A pod the cluster cannot take is refused the same

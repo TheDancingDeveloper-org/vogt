@@ -4015,6 +4015,34 @@ mod tests {
         );
     }
 
+    /// WI-4521 guard: no pod agent launch carries a bypass flag unless the
+    /// start asked for `permission_mode=bypass`, which only a person grants.
+    /// The absent, default and accept-edits postures must never reach it.
+    #[test]
+    fn no_pod_agent_launch_bypasses_unless_bypass_was_asked_for() {
+        const BYPASS_FLAGS: [&str; 2] = [
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--dangerously-skip-permissions",
+        ];
+        for cli in ["claude", "codex"] {
+            let mut config = claude_config(ClaudeLaunch::default(), false);
+            config.cli = cli.into();
+            for mode in [None, Some("default"), Some("accept-edits")] {
+                config.permission_mode = mode.map(String::from);
+                let line = command_line(&config).unwrap();
+                for flag in BYPASS_FLAGS {
+                    assert!(!line.contains(flag), "{cli} {mode:?}: {line}");
+                }
+            }
+            config.permission_mode = Some("bypass".into());
+            let line = command_line(&config).unwrap();
+            assert!(
+                BYPASS_FLAGS.iter().any(|flag| line.contains(flag)),
+                "{cli} bypass: {line}"
+            );
+        }
+    }
+
     /// WI-3864: a pod Codex gets the same posture flags as a host Codex. The
     /// pod cannot create the user namespace `workspace-write` needs, so every
     /// posture names `danger-full-access`; a bypass drops the sandbox and the
