@@ -3927,9 +3927,14 @@ moves: `placement=host` for Codex is `400`.
 
 ### Host placement (WI-4428)
 
-The host is a capped exception. Pods are the default for work that runs on
-behalf of a worker, and the host is kept for oversight, a person's own shell,
-agent tasks and the assistant.
+The host is a capped exception. On a deployment whose default backend is
+`pod` (`VOGT_ENGINE_SESSION_BACKEND=pod`), every session started from the GUI,
+the API or `vogt-agent-auth shell` runs in a pod: workers, reviews, oversight
+and a person's own interactive sessions (WI-4516). The host is an explicit
+opt-in (`placement=host`), and is otherwise kept for agent tasks and the
+assistant. Host sessions run inside the engine pod itself, so its CPU and
+memory, not the cluster, bound them; that is why `ENGINE_HOST_SESSION_CAP`
+exists.
 
 - **Role policy.** A Vogt-started worker or review (an API start that is not
   oversight and carries a work item or its `VOGT_SESSION_ID`) asking for
@@ -3937,11 +3942,23 @@ agent tasks and the assistant.
   `ENGINE_HOST_PLACEMENT_ALLOW_WORKERS=1` lifts the refusal during the
   transition. It is off by default. A wake is not refused: a worker already
   placed on the host wakes there and counts against the cap.
-- **Default pod.** On a deployment whose default backend is `pod`, a Vogt
-  worker or review that names no template and no placement starts in the
-  default agent pod template, and the record keeps that template name.
-  Oversight, agent tasks, a person's own shell and template-less starts stay
-  on the host, and count against the cap.
+- **Default pod.** On a deployment whose default backend is `pod`, a fresh
+  API start that names no template and no placement takes a pod template, and
+  the record keeps that template name, so a wake after an engine redeploy
+  goes back to a pod (re-adopted, or woken once with `--resume`, as for any
+  pod session). An agent command (`claude`, `codex`, `opencode`) takes the
+  pod template that runs that agent, else the default agent pod template; a
+  Vogt worker or review with no command takes the default agent pod
+  template; a shell or any other command (`vogt-agent-auth shell`) takes the
+  default shell pod template (pod-backed, no agent CLI, preferring the one
+  tagged `shell`) and runs its own argv there. Agent tasks and wakes keep
+  their own placement.
+- **Refused, never hosted.** When no pod template fits such a start, it is
+  refused with `409` naming the missing template and `placement=host`; it is
+  not placed on the host. A pod the cluster cannot take is refused the same
+  way: a quota refusal is a `409` naming the quota, and a pod the scheduler
+  reports `Unschedulable` ends its session with the scheduler's reason
+  (`ENGINE_POD_UNSCHEDULABLE_TIMEOUT`).
 - **No silent host.** A named template that does not resolve is a `400`. A
   wake whose recorded template is no longer configured is a `400` that names
   the template; it is not started without it.
