@@ -19,6 +19,10 @@ case "$VOGT_CLI" in claude|codex|opencode) ;; *) fail 'VOGT_CLI must be claude, 
 for dir in "${XDG_CACHE_HOME:-}" "${NPM_CONFIG_CACHE:-}" "${PNPM_HOME:-}" "${PIP_CACHE_DIR:-}" "${UV_CACHE_DIR:-}" "${CARGO_HOME:-}"; do
   case "$dir" in /cache/*) mkdir -p "$dir" 2>/dev/null || true ;; esac
 done
+# A pod that runs its own argv (a person's login shell, a raw command) starts
+# no agent (WI-4521): it asks for every agent's config so a hand-typed
+# `claude` or `codex` gets the engine's MCP servers and Codex its providers.
+shell_pod=false; [ -z "${VOGT_SESSION_COMMAND:-}" ] || shell_pod=true
 step=bootstrap; say bootstrap
 auth="$tmp_dir/auth"; response="$tmp_dir/response"; request="$tmp_dir/request.json"
 umask 077
@@ -29,8 +33,9 @@ bootstrap_token=$(cat "$VOGT_BOOTSTRAP_TOKEN_FILE")
 [ -n "$bootstrap_token" ] || fail "bootstrap token file $VOGT_BOOTSTRAP_TOKEN_FILE is empty"
 printf 'header = "Authorization: Bearer %s"\n' "$bootstrap_token" >"$auth"
 # shellcheck disable=SC2153 # VOGT_SESSION_ID is validated by need() above
-jq -n --arg session_id "$VOGT_SESSION_ID" --arg cli "$VOGT_CLI" --arg model "${VOGT_MODEL:-}" --argjson source "$VOGT_SOURCE_JSON" --arg extra_ca_file "${VOGT_EXTRA_CA_FILE:-}" \
+jq -n --arg session_id "$VOGT_SESSION_ID" --arg cli "$VOGT_CLI" --arg model "${VOGT_MODEL:-}" --argjson source "$VOGT_SOURCE_JSON" --arg extra_ca_file "${VOGT_EXTRA_CA_FILE:-}" --argjson shell "$shell_pod" \
   '{session_id: $session_id, source: $source, cli: $cli}
+   + (if $shell then {shell: true} else {} end)
    + (if $model == "" then {} else {model: $model} end)
    + (if $extra_ca_file == "" then {} else {extra_ca_file: $extra_ca_file} end)' >"$request"
 unset bootstrap_token VOGT_BOOTSTRAP_TOKEN_FILE
@@ -120,7 +125,7 @@ step=claude-config; say claude-config
 # in the account's settings. The file names the bearer by reference to
 # VOGT_HTTP_TOKEN, so it holds no credential. The session agent adds the
 # --settings and --mcp-config flags when it starts claude.
-if [ "$VOGT_CLI" = claude ]; then
+if [ "$VOGT_CLI" = claude ] || [ "$shell_pod" = true ]; then
   mcp_file="$(dirname "$token_file")/mcp.json"
   if jq -e '.mcp_config | type == "object"' "$response" >/dev/null 2>&1; then
     jq '.mcp_config' "$response" >"$mcp_file"; chmod 600 "$mcp_file"; export VOGT_CLAUDE_MCP_CONFIG="$mcp_file"
@@ -143,6 +148,8 @@ if [ "$VOGT_CLI" = claude ]; then
   if [ -n "${VOGT_EXTRA_CA_FILE:-}" ] && [ -z "${NODE_EXTRA_CA_CERTS:-}" ]; then
     NODE_EXTRA_CA_CERTS=$VOGT_EXTRA_CA_FILE; export NODE_EXTRA_CA_CERTS
   fi
+fi
+if [ "$VOGT_CLI" = claude ]; then
   # Best effort, as in the merged image's entrypoint: a hook that cannot be
   # installed must not stop the session from starting.
   if command -v vogt-claude-session-hook >/dev/null 2>&1; then
@@ -168,7 +175,7 @@ fi
 # The bootstrap response carries the file's content; the bearer is named by
 # environment variable, so no credential is written. An existing config keeps
 # its own settings: the engine's servers replace only the tables it owns.
-if [ "$VOGT_CLI" = codex ] && [ -n "$(jq -r '.codex_config // empty' "$response")" ]; then
+if { [ "$VOGT_CLI" = codex ] || [ "$shell_pod" = true ]; } && [ -n "$(jq -r '.codex_config // empty' "$response")" ]; then
   mkdir -p "$codex_home"; chmod 700 "$codex_home"
   codex_cfg="$codex_home/config.toml"
   codex_fragment="$codex_home/vogt-codex.toml"
@@ -180,6 +187,16 @@ if [ "$VOGT_CLI" = codex ] && [ -n "$(jq -r '.codex_config // empty' "$response"
     /^[ \t]*\[/ { in_mcp = ($0 ~ /^[ \t]*\[\[?[ \t]*mcp_servers\./) }
     in_mcp { print }
   ' "$tmp_dir/codex-fragment.toml" >"$tmp_dir/codex-mcp.toml"
+  # A shell pod has no session agent to pass the providers as `-c` overrides
+  # (WI-4521): its shared config takes the whole fragment, root keys first.
+  owned='vogt|vogt-prod|cadastre|crw'; : >"$tmp_dir/codex-root.toml"
+  if [ "$shell_pod" = true ]; then
+    awk '/^[ \t]*\[/ { exit } { print }' "$tmp_dir/codex-fragment.toml" >"$tmp_dir/codex-root.toml"
+    awk '/^[ \t]*\[/ { seen = 1; in_mcp = ($0 ~ /^[ \t]*\[\[?[ \t]*mcp_servers\./) } seen && !in_mcp { print }' \
+      "$tmp_dir/codex-fragment.toml" >>"$tmp_dir/codex-mcp.toml"
+    providers=$(sed -n 's/^[ \t]*\[model_providers\.\([A-Za-z0-9_-]*\)\].*/\1/p' "$tmp_dir/codex-fragment.toml" | paste -sd'|' -)
+    [ -z "$providers" ] || owned="$owned|$providers"
+  fi
   if [ -f "$codex_cfg" ]; then
     # Drop earlier definitions of the servers the engine owns (vogt, cadastre,
     # and since WI-4489 vogt-prod and crw, so a worker set's trim is not undone
@@ -188,10 +205,10 @@ if [ "$VOGT_CLI" = codex ] && [ -n "$(jq -r '.codex_config // empty' "$response"
     # [ mcp_servers . 'vogt' ] and [mcp_servers.vogt.env] all match, as do
     # single-line dotted keys (mcp_servers.vogt.url = ... at the top level, vogt.url
     # = ... under [mcp_servers]). A multi-line value on such a dotted key is not split.
-    awk '
+    awk -v owned="$owned" -v shell="$shell_pod" '
       /^[ \t]*\[\[?[^][]*\]\]?[ \t]*(#.*)?$/ {
         h = $0; sub(/[ \t]*#.*$/, "", h); gsub(/[ \t"\047]/, "", h)
-        skip = (h ~ /^\[\[?mcp_servers\.(vogt|vogt-prod|cadastre|crw)(\.|\])/)
+        skip = (h ~ ("^\\[\\[?(mcp_servers|model_providers)\\.(" owned ")(\\.|\\])"))
         root = (h == "[mcp_servers]") ? 2 : 0
         if (skip) next
         print; next
@@ -200,17 +217,59 @@ if [ "$VOGT_CLI" = codex ] && [ -n "$(jq -r '.codex_config // empty' "$response"
       skip { next }
       root && /=/ {
         k = $0; sub(/[ \t]*=.*$/, "", k); gsub(/[ \t"\047]/, "", k)
+        if (root == 1 && shell == "true" && (k == "model" || k == "model_provider")) next
         if (root == 1 && k ~ /^mcp_servers\.(vogt|vogt-prod|cadastre|crw)(\.|$)/) next
         if (root == 2 && k ~ /^(vogt|vogt-prod|cadastre|crw)(\.|$)/) next
       }
       { print }
     ' "$codex_cfg" >"$tmp_dir/codex.toml"
   else : >"$tmp_dir/codex.toml"; fi
+  cat "$tmp_dir/codex-root.toml" "$tmp_dir/codex.toml" >"$tmp_dir/codex-merged.toml"
+  mv "$tmp_dir/codex-merged.toml" "$tmp_dir/codex.toml"
   cat "$tmp_dir/codex-mcp.toml" >>"$tmp_dir/codex.toml"
   cat "$tmp_dir/codex.toml" >"$codex_cfg"; chmod 600 "$codex_cfg"
   cat "$tmp_dir/codex-fragment.toml" >"$codex_fragment"; chmod 600 "$codex_fragment"
   export VOGT_CODEX_CONFIG_FILE="$codex_fragment"
   printf 'session-entrypoint: codex posture: mcp-config\n' >&2
+fi
+# WI-4521: in a shell pod a hand-typed `claude` or `codex` fetches the
+# brokered keys its config names (provider `env_key`s, MCP bearers) through
+# the broker as it starts, as the session agent does for a driven launch. The
+# functions run in a subshell, so a key lives only in that CLI's environment,
+# never in the login shell's. They are sourced by the login shell.
+if [ "$shell_pod" = true ]; then
+  keys=$( { sed -n 's/^[ \t]*\(env_key\|bearer_token_env_var\)[ \t]*=[ \t]*"\([A-Za-z_][A-Za-z0-9_]*\)".*/\2/p' "${codex_fragment:-/dev/null}" 2>/dev/null
+    grep -o '[$][{][A-Za-z_][A-Za-z0-9_]*[}]' "${VOGT_CLAUDE_MCP_CONFIG:-/dev/null}" 2>/dev/null | tr -d '{}$'; } | sort -u | tr '\n' ' ')
+  agents_rc="${XDG_CONFIG_HOME:-$HOME/.config}/vogt/shell-agents.sh"
+  mkdir -p "$(dirname "$agents_rc")"
+  {
+    printf '# Written by session-entrypoint (WI-4521). Brokered keys, fetched per launch.\n'
+    printf '__vogt_key_names="%s"\n' "$keys"
+    cat <<'RC'
+__vogt_keys() {
+  for __k in $__vogt_key_names; do
+    eval "[ -n \"\${$__k:-}\" ]" && continue
+    if __v=$(vogt-agent-auth fetch "$__k"); then export "$__k=$__v"
+    else printf 'vogt: brokered key %s was not delivered\n' "$__k" >&2; fi
+  done
+  unset __k __v
+}
+claude() ( __vogt_keys; exec claude "$@" )
+codex() ( __vogt_keys; exec codex "$@" )
+RC
+  } >"$agents_rc"
+  chmod 600 "$agents_rc"
+  line=". \"$agents_rc\""
+  # A login shell reads ~/.bash_profile (which then shadows ~/.profile, so it
+  # sources that first); a nested shell reads ~/.bashrc.
+  if [ ! -e "$HOME/.bash_profile" ]; then
+    # shellcheck disable=SC2016 # expanded by the login shell
+    printf '[ -f "$HOME/.profile" ] && . "$HOME/.profile"\n' >"$HOME/.bash_profile"
+  fi
+  for rc in "$HOME/.bash_profile" "$HOME/.bashrc"; do
+    grep -qxF "$line" "$rc" 2>/dev/null || printf '%s\n' "$line" >>"$rc"
+  done
+  printf 'session-entrypoint: shell posture: claude and codex config, brokered keys:%s\n' "${keys:+ $keys}" >&2
 fi
 # WI-3374: a workspace pod's shared Codex skills live in the read-only tree,
 # while CODEX_HOME is the pod's own writable home. Copy them in when the home

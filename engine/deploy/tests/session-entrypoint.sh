@@ -428,6 +428,46 @@ BAD_ENV='{"VOGT_SESSION_ID":"s1","AGENT_AUTH_LAUNCH_OPTIONAL":"BAD-NAME"}'
 if run_case "$tmp/launch-bad" ENV_JSON="$BAD_ENV" >"$tmp/launch-bad.out" 2>&1; then fail "invalid launch name accepted"; fi
 grep -q 'invalid launch-time name: BAD-NAME' "$tmp/launch-bad.out" || fail "invalid launch name refusal"
 [ ! -e "$tmp/launch-bad/agent-auth.calls" ] || fail "broker asked for an invalid name"
+# WI-4521: a shell pod (VOGT_SESSION_COMMAND set, no agent) asks for every
+# agent's config. A hand-typed `claude` finds the engine's MCP servers at user
+# scope; a hand-typed `codex` finds MCP and the providers in its shared config,
+# root keys first; both fetch their brokered keys per launch from functions the
+# login shell sources, so no key is in the shell's own environment.
+# shellcheck disable=SC2016 # ${...} are the CLIs' own references
+SHELL_MCP='{"mcpServers":{"vogt":{"type":"http","url":"https://e/mcp","headers":{"Authorization":"Bearer ${VOGT_HTTP_TOKEN}"}},"cadastre":{"type":"http","url":"https://c/mcp","headers":{"Authorization":"Bearer ${CADASTRE_TOKEN}"}}}}'
+SHELL_CODEX=$'model_provider = "ds"\nmodel = "m1"\n\n[model_providers.ds]\nname = "ds"\nbase_url = "http://litellm/v1"\nwire_api = "chat"\nenv_key = "DS_KEY"\nrequires_openai_auth = false\n\n[mcp_servers.vogt]\nurl = "https://e/mcp"\nbearer_token_env_var = "VOGT_HTTP_TOKEN"\n\n'
+mkdir -p "$tmp/shellpod/home/.codex"
+printf 'model = "old"\n[model_providers.ds]\nbase_url = "http://stale"\n[mcp_servers.other]\nurl = "https://o"\n' >"$tmp/shellpod/home/.codex/config.toml"
+out=$(run_case "$tmp/shellpod" VOGT_CLI=codex VOGT_SESSION_COMMAND='["bash","-l"]' MCP_CONFIG="$SHELL_MCP" CODEX_CONFIG="$SHELL_CODEX" 2>&1) || fail "shell pod path: $out"
+jq -e '.shell == true and .cli == "codex"' "$tmp/shellpod/request.json" >/dev/null || fail "shell pod did not ask for every config"
+jq -e '.mcpServers.vogt.url == "https://e/mcp" and .mcpServers.cadastre.url == "https://c/mcp"' "$tmp/shellpod/claude/.claude.json" >/dev/null ||
+  fail "a hand-typed claude has no MCP servers in a codex shell pod"
+[ ! -e "$tmp/shellpod/vogt-policy-hook.calls" ] || fail "driven claude hooks installed in a shell pod"
+cfg="$tmp/shellpod/home/.codex/config.toml"
+[[ $(head -n2 "$cfg") == $'model_provider = "ds"\nmodel = "m1"' ]] || fail "codex root keys not first: $(cat "$cfg")"
+[ "$(grep -c '^model = ' "$cfg")" = 1 ] || fail "duplicate codex model key"
+{ grep -q '^\[model_providers.ds\]' "$cfg" && grep -q 'env_key = "DS_KEY"' "$cfg"; } || fail "codex providers missing from the shared config"
+! grep -q 'http://stale' "$cfg" || fail "stale provider table kept"
+[ "$(grep -c '^\[model_providers.ds\]' "$cfg")" = 1 ] || fail "duplicate provider table"
+{ grep -q 'mcp_servers.vogt' "$cfg" && grep -q 'mcp_servers.other' "$cfg"; } || fail "codex MCP tables"
+rc="$tmp/shellpod/home/.config/vogt/shell-agents.sh"
+[[ $(stat -c %a "$rc") == 600 ]] || fail "shell agents file mode"
+grep -qxF ". \"$rc\"" "$tmp/shellpod/home/.bash_profile" || fail "login shell does not source the agents file"
+grep -qxF ". \"$rc\"" "$tmp/shellpod/home/.bashrc" || fail "nested shell does not source the agents file"
+grep -qx '__vogt_key_names="CADASTRE_TOKEN DS_KEY VOGT_HTTP_TOKEN "' "$rc" || fail "brokered key names: $(grep key_names "$rc")"
+! grep -q '^DS_KEY=' "$tmp/shellpod/agent.env" || fail "a provider key was exported into the shell pod"
+# Run the functions as the login shell would, against stub CLIs that print
+# the keys they see: the key reaches the CLI, not the shell.
+mkdir -p "$tmp/shellpod/secrets" "$tmp/shellpod/cli"
+printf ds-secret >"$tmp/shellpod/secrets/DS_KEY"; printf cad-secret >"$tmp/shellpod/secrets/CADASTRE_TOKEN"
+# shellcheck disable=SC2016 # the stub's own $-expressions stay literal
+for cli in claude codex; do printf '#!/bin/sh\necho "%s:${DS_KEY:-}:${CADASTRE_TOKEN:-}:${VOGT_HTTP_TOKEN:-}"\n' "$cli" >"$tmp/shellpod/cli/$cli"; done
+chmod +x "$tmp/shellpod/cli/"*
+# shellcheck disable=SC2016 # expanded by the inner shell
+ran=$(env -i PATH="$tmp/shellpod/cli:$tmp/shellpod/bin:/usr/bin:/bin" CASE_DIR="$tmp/shellpod" VOGT_SESSION_TOKEN_FILE="$tmp/shellpod/run/session-token" VOGT_HTTP_TOKEN=held \
+  bash -c '. "$1"; codex; claude; echo "shell:${DS_KEY:-}"' _ "$rc" 2>&1) || fail "shell agents: $ran"
+[[ $ran == $'codex:ds-secret:cad-secret:held\nclaude:ds-secret:cad-secret:held\nshell:' ]] || fail "hand-typed CLIs: $ran"
+! grep -q 'fetch VOGT_HTTP_TOKEN' "$tmp/shellpod/agent-auth.calls" || fail "a held key was fetched again"
 for output in "$tmp/missing.out" "$tmp/401.out" "$tmp/clone.out" "$tmp/skip.out" "$tmp/unavail.out"; do
   ! grep -Eq "$BOOT|$SESSION|graft-secret-value|default-graft-token-value" "$output" || fail "secret appeared in output"
 done

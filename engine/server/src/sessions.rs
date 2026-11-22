@@ -4788,7 +4788,20 @@ impl SessionRegistry {
             None if spec.command.is_none() && is_vogt_worker(spec, origin) => {
                 default_pod_template(templates)
             }
-            None => default_shell_pod_template(templates),
+            None => {
+                // A person's shell runs a login shell in the pod whatever the
+                // template's tags (WI-4521). Left without a command, a
+                // tagless no-command template (the built-in Pod) would boot
+                // the deployment's agent CLI instead.
+                if spec.command.is_none() {
+                    spec.command = Some(
+                        crate::pod_backend::POD_LOGIN_SHELL
+                            .map(String::from)
+                            .to_vec(),
+                    );
+                }
+                default_shell_pod_template(templates)
+            }
         };
         let Some(template) = template else {
             return Err(ApiError::Conflict(
@@ -7554,6 +7567,46 @@ mod host_placement_tests {
             .default_start_pod_template(&mut task, &Creating::Fresh(Origin::AgentTask))
             .unwrap();
         assert!(task.template.is_none(), "an agent task keeps the host");
+    }
+
+    /// WI-4521: a person's no-command start on a pod deployment whose only
+    /// no-agent pod template is untagged (no `shell` tag) still runs a login
+    /// shell, never the deployment's agent CLI.
+    #[test]
+    fn a_shell_start_runs_a_login_shell_whatever_the_template_tags() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = registry(dir.path().to_path_buf(), |cfg| {
+            cfg.pod_backends_enabled = true;
+            cfg.session_default_backend = "pod".into();
+            cfg.session_templates = SessionTemplate::default_templates_on("pod")
+                .into_iter()
+                .filter(|t| t.backend == "pod")
+                .map(|mut t| {
+                    t.tags.retain(|tag| tag != "shell");
+                    t
+                })
+                .collect();
+        });
+        let mut bare = SessionSpec {
+            command: None,
+            ..spec("bare", None)
+        };
+        sessions
+            .default_start_pod_template(&mut bare, &api())
+            .unwrap();
+        let name = bare.template.clone().expect("a pod template");
+        let template = sessions.resolve_template(&name).unwrap().clone();
+        assert!(!crate::pod_backend::is_shell_template(&template), "{name}");
+        assert_eq!(
+            bare.command.as_deref(),
+            Some(&["bash".to_string(), "-l".to_string()][..]),
+            "a person's shell runs a login shell"
+        );
+        assert_ne!(
+            bare.permission_mode.as_deref(),
+            Some("bypass"),
+            "never bypass"
+        );
     }
 
     /// WI-4516: on a pod deployment a person's shell, `vogt-agent-auth

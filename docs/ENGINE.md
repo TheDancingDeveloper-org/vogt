@@ -3953,14 +3953,28 @@ exists.
   default shell pod template (pod-backed, no agent CLI, preferring the one
   tagged `shell`) and runs its own argv there. Agent tasks and wakes keep
   their own placement.
-- **A shell is a shell (WI-4521).** A pod started from a template tagged
-  `shell` with no command (the built-in Shell template) runs `bash -l` in the
-  session's cwd, through `VOGT_SESSION_COMMAND`; no agent CLI starts. The
-  entrypoint still writes the session's Claude Code and Codex config, so
-  `claude` or `codex` typed in that shell works as on the host. Only a
-  no-command template without the `shell` tag (the built-in Pod template)
-  boots the deployment's CLI. Raw-command templates (Node Dev, Rust Build)
-  run their own argv. No pod agent gets the bypass flags
+- **A shell is a shell (WI-4521).** A person's start with no command on a
+  pod deployment runs `bash -l` in the session's cwd, through
+  `VOGT_SESSION_COMMAND`, whatever the chosen template's tags: the engine
+  writes the login shell into the start itself, so a tagless no-command
+  template cannot boot an agent. A named template tagged `shell` with no
+  command (the built-in Shell template) does the same. No agent CLI starts.
+  Only the built-in Pod template, named explicitly, boots the deployment's
+  CLI. Raw-command templates (Node Dev, Rust Build) run their own argv.
+- **Agents typed in a shell pod.** A pod that runs its own argv (a login
+  shell or a raw command) asks the bootstrap for every agent's config
+  (`"shell": true`), whatever `VOGT_CLI` is. The entrypoint then merges the
+  engine's MCP servers into Claude Code's user scope
+  (`$CLAUDE_CONFIG_DIR/.claude.json`), and writes Codex's MCP tables, its
+  registered `model_providers` and the `model_provider`/`model` selection
+  into `$CODEX_HOME/config.toml`. It does not install the driven-session
+  hooks or policy. Provider keys and MCP bearers stay names: the login shell
+  (and any nested `bash`) sources `~/.config/vogt/shell-agents.sh`, whose
+  `claude` and `codex` functions fetch each named key through
+  `vogt-agent-auth fetch` in a subshell just before the CLI starts, so a key
+  is in that CLI's environment and never in the shell's. opencode is not
+  configured in a shell pod.
+- **No bypass by default.** No pod agent gets the bypass flags
   (`--dangerously-skip-permissions`,
   `--dangerously-bypass-approvals-and-sandbox`) unless the start asked for
   `permission_mode=bypass`, which only a person grants. Codex's banner calls
