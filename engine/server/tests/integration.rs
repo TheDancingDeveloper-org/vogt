@@ -20489,6 +20489,16 @@ mod pod_stream {
         }
 
         async fn bootstrap_as(&self, id: Uuid, bearer: &[u8], cli: &str) -> reqwest::Response {
+            self.bootstrap_with(id, bearer, cli, false).await
+        }
+
+        async fn bootstrap_with(
+            &self,
+            id: Uuid,
+            bearer: &[u8],
+            cli: &str,
+            shell: bool,
+        ) -> reqwest::Response {
             // The route sits outside the engine's own gate: the caller is the
             // pod, which holds only the one-shot token.
             reqwest::Client::new()
@@ -20499,6 +20509,7 @@ mod pod_stream {
                     "graft_repo": "vogt",
                     "graft_line": "rust-2",
                     "cli": cli,
+                    "shell": shell,
                 }))
                 .send()
                 .await
@@ -21244,6 +21255,61 @@ mod pod_stream {
             .as_str()
             .unwrap_or_default()
             .contains("model_providers"));
+    }
+
+    /// WI-4521: a shell pod (a person's shell or a raw command, no agent)
+    /// gets every agent's config whatever the deployment's CLI, so a
+    /// hand-typed `claude` has the engine's MCP servers and a hand-typed
+    /// `codex` has them and the providers. A provider key stays a name.
+    #[tokio::test]
+    async fn a_shell_bootstrap_carries_claude_and_codex_config() {
+        let core = mock_core().await;
+        let dir = tempfile::tempdir().unwrap();
+        let registry = dir.path().join("llm-providers.toml");
+        let helper = fake_broker_helper(dir.path());
+        let reg = registry.clone();
+        let mut h = harness_cfg(false, None, move |cfg| {
+            cfg.vogt_core_url = Some(core);
+            cfg.vogt_core_token = Some("stack-secret".into());
+            cfg.agent_auth_helper = helper;
+            cfg.llm_providers_file = Some(reg);
+        })
+        .await;
+        std::fs::write(
+            &registry,
+            "[[provider]]\nname = \"ds\"\nbase_url = \"http://litellm/v1\"\nwire_api = \"chat\"\nenv_key = \"DS_KEY\"\nsecret_project = \"p\"\nsecret_name = \"s\"\n",
+        )
+        .unwrap();
+        let id = h.start().await;
+        let (_, token) = h.created.recv().await.unwrap();
+        let body: Value = h
+            .bootstrap_with(id, &token, "codex", true)
+            .await
+            .json()
+            .await
+            .unwrap();
+        assert!(
+            body["mcp_config"]["mcpServers"].is_object(),
+            "a shell pod's claude gets MCP: {body}"
+        );
+        let config: toml::Table = toml::from_str(body["codex_config"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            config["model_providers"]["ds"]["env_key"].as_str(),
+            Some("DS_KEY")
+        );
+        assert!(config.contains_key("mcp_servers"), "{body}");
+        assert!(!body.to_string().contains("value-of-DS_KEY"), "{body}");
+
+        // An agent pod still gets only its own CLI's config.
+        let next = h.start().await;
+        let (_, token) = h.created.recv().await.unwrap();
+        let body: Value = h
+            .bootstrap_as(next, &token, "codex")
+            .await
+            .json()
+            .await
+            .unwrap();
+        assert!(body.get("mcp_config").is_none_or(Value::is_null), "{body}");
     }
 
     /// WI-4296: an opencode pod runs a model only through a registered

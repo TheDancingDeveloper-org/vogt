@@ -630,6 +630,11 @@ pub struct BootstrapRequest {
     pub model: Option<String>,
     #[serde(default)]
     pub extra_ca_file: Option<String>,
+    /// The pod runs a person's shell or a raw command, not the agent
+    /// (WI-4521): every agent's config comes back, so a hand-typed `claude`
+    /// or `codex` gets the engine's MCP servers (and Codex its providers).
+    #[serde(default)]
+    pub shell: bool,
 }
 #[derive(Debug, Serialize)]
 pub struct BootstrapResponse {
@@ -1460,28 +1465,27 @@ pub async fn bootstrap(
             &launch.mcp_extra,
         );
         let has = token.is_some();
-        match req.cli.as_str() {
-            "claude" => {
-                mcp_config = Some(crate::session_endpoints::claude_mcp_config(
-                    &endpoints,
-                    has,
-                    cadastre_bearer,
-                ))
-            }
-            "codex" => {
-                codex_config = Some(crate::session_endpoints::codex_mcp_config(
-                    &endpoints,
-                    has,
-                    cadastre_bearer,
-                ))
-            }
-            _ => {
-                opencode_config = Some(crate::session_endpoints::opencode_mcp_config(
-                    &endpoints,
-                    has,
-                    cadastre_bearer,
-                ))
-            }
+        let wants = |cli: &str| req.cli == cli || (req.shell && cli != "opencode");
+        if wants("claude") {
+            mcp_config = Some(crate::session_endpoints::claude_mcp_config(
+                &endpoints,
+                has,
+                cadastre_bearer,
+            ));
+        }
+        if wants("codex") {
+            codex_config = Some(crate::session_endpoints::codex_mcp_config(
+                &endpoints,
+                has,
+                cadastre_bearer,
+            ));
+        }
+        if req.cli == "opencode" {
+            opencode_config = Some(crate::session_endpoints::opencode_mcp_config(
+                &endpoints,
+                has,
+                cadastre_bearer,
+            ));
         }
         if let Some(token) = token {
             for (name, value) in [
@@ -1497,7 +1501,7 @@ pub async fn bootstrap(
     // config, and their `env_key` names among the ondemand breadcrumbs above.
     // The session agent fetches each key around the Codex child; resolving it
     // here would put the value in the whole pod's environment.
-    if req.cli == "codex" && !providers.is_empty() {
+    if (req.cli == "codex" || req.shell) && !providers.is_empty() {
         codex_config = Some(
             crate::llm_providers::codex_config(req.model.as_deref(), &providers)
                 + "\n"
