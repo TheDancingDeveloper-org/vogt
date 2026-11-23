@@ -52,15 +52,23 @@ describe("a terminal says which work item it was opened for", () => {
     expect(link.textContent).toContain("WI-7");
   });
 
-  it("asks Vogt including stopped sessions, because a finished run still had a subject", async () => {
+  it("asks for live sessions only when the PTY is among them (WI-4532)", async () => {
     const vogt = fakeVogt({
       "GET /sessions": { body: { sessions: [SESSION], engine: null } },
     });
-    terminal();
-    await waitFor(() => expect(vogt.matching("GET /sessions").length).toBe(1));
-    expect(vogt.matching("GET /sessions")[0]!.query.get("include_stopped")).toBe(
-      "true",
-    );
+    const { container } = terminal();
+    await waitFor(() => expect(container.querySelector(".terminal-work-link")).toBeTruthy());
+    expect(vogt.matching("GET /sessions").length).toBe(1);
+    expect(vogt.matching("GET /sessions")[0]!.query.get("include_stopped")).toBeNull();
+  });
+
+  it("asks again with stopped sessions for a PTY the live list lacks, because a finished run still had a subject", async () => {
+    const vogt = fakeVogt({
+      "GET /sessions": { body: { sessions: [SESSION], engine: null } },
+    });
+    terminal("eng-other");
+    await waitFor(() => expect(vogt.matching("GET /sessions").length).toBe(2));
+    expect(vogt.matching("GET /sessions")[1]!.query.get("include_stopped")).toBe("true");
   });
 
   it("says nothing for a PTY Vogt did not start", async () => {

@@ -863,7 +863,7 @@ const WorkItemDetail: Component<Props> = (props) => {
   // the difference between "no sessions" and "we could not look".
   const [sessions, { refetch: refetchSessions }] = createResource(
     () => props.itemRef,
-    (ref) => attempt(() => listSessions({ work_item: ref, include_stopped: true })),
+    (ref) => attempt(() => listSessions({ mode: "full", work_item: ref, include_stopped: true })),
   );
 
   const [evidence, { refetch: refetchEvidence }] = createResource(

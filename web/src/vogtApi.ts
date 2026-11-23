@@ -1106,8 +1106,10 @@ export const listEvents = (
   params: { after?: number; limit?: number; entity_id?: string } = {},
 ) => call<EventListResult>("events.list", params);
 
+/** Each caller names its `mode`: `full` costs transcript reads per row, and the
+ *  starters read (railStarters.ts) asks for two fields only (WI-4532). */
 export const listSessions = (
-  params: Record<string, unknown> = {},
+  params: { mode: "full" | "digest" } & Record<string, unknown>,
   signal?: AbortSignal,
 ) =>
   call<{
@@ -1119,7 +1121,7 @@ export const listSessions = (
     hidden_count?: number;
   }>(
     "session.list",
-    { mode: "full", ...params },
+    params,
     "GET",
     signal,
   );
