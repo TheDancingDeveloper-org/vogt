@@ -425,6 +425,10 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
             get(api::list_session_grants).post(api::apply_session_grant),
         )
         .route(
+            "/api/sessions/{id}/grant-check",
+            get(api::check_session_grant),
+        )
+        .route(
             "/api/sessions/{id}/grants/{grant_id}",
             axum::routing::delete(api::revoke_session_grant),
         )

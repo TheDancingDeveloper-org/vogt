@@ -908,6 +908,22 @@ impl SecretBroker {
             || self.grant_projects.iter().any(|p| p == project)
     }
 
+    /// Why an approved grant could not fetch from `project`, or `None` when it
+    /// could: no broker, or a project not open to grants (WI-4523). The same
+    /// refusal `apply_grant` gives, so a request is refused before a person
+    /// is asked to approve what the engine would refuse.
+    pub fn project_refusal(&self, project: &str) -> Option<GrantRefusal> {
+        if !self.enabled() {
+            return Some(GrantRefusal::NoBroker);
+        }
+        (!self.project_grantable(project)).then(|| GrantRefusal::ProjectNotGrantable {
+            project: project.to_string(),
+            engine: self.engine.clone(),
+            grantable: self.grantable_count(),
+            manifest_file: self.manifest_file_error(),
+        })
+    }
+
     /// Name this engine for a grant refusal (the pod engine id).
     pub fn with_engine_identity(mut self, engine: String) -> Self {
         self.engine = engine;
@@ -970,13 +986,8 @@ impl SecretBroker {
         if self.permitted(&grant.var).is_some() {
             return Err(GrantRefusal::ShadowsManifest(grant.var));
         }
-        if !self.project_grantable(&grant.project_id) {
-            return Err(GrantRefusal::ProjectNotGrantable {
-                project: grant.project_id,
-                engine: self.engine.clone(),
-                grantable: self.grantable_count(),
-                manifest_file: self.manifest_file_error(),
-            });
+        if let Some(refusal) = self.project_refusal(&grant.project_id) {
+            return Err(refusal);
         }
         let expires_at = time::OffsetDateTime::parse(
             &grant.expires_at,
@@ -3181,6 +3192,10 @@ mod tests {
             text.contains("ENGINE_AGENT_AUTH_SECRETS_FILE is ignored: "),
             "{text}"
         );
+        // Asked before a person approves, the engine gives the same refusal
+        // (WI-4523), and none for a project the manifest names.
+        assert_eq!(broker.project_refusal("unlisted"), Some(refusal));
+        assert_eq!(broker.project_refusal("proj"), None);
     }
 
     #[test]

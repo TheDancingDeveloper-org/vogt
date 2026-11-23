@@ -350,6 +350,10 @@ export interface InboxEntry {
     subject_key?: string;
     /** A pending grant a person approves or denies (WI-973). */
     grant_id?: string;
+    /** False when the engine would refuse the grant (WI-4523): no Approve. */
+    approvable?: boolean;
+    /** Why the engine would refuse it, when `approvable` is false. */
+    refusal?: string;
   };
   /** Who caused the occurrence (resolved at collect time). Drift, CI and
    *  agent entries are the instance itself: a bot inside the org. */

@@ -1011,7 +1011,22 @@ where
         // clock advances once here even though a stored `pending` never expires.
         let _state = grant.effective_state(now_of(&ctx.clock));
         if grant.state == crate::core::GrantState::Pending {
-            entries.push(grant_entry(view, &grant, projects, &live_by_id)?);
+            // Ask the engine whether it could hold this grant at all
+            // (WI-4523); an engine that cannot say leaves the entry as it was.
+            let refusal = match (&ctx.engine, grant.project_id.as_deref()) {
+                (Some(engine), Some(project)) if probe.0 == "available" => engine
+                    .grant_refusal(&grant.target_engine_session_id, project)
+                    .ok()
+                    .flatten(),
+                _ => None,
+            };
+            entries.push(grant_entry(
+                view,
+                &grant,
+                projects,
+                &live_by_id,
+                refusal.as_deref(),
+            )?);
         }
     }
 
@@ -1496,6 +1511,7 @@ fn grant_entry(
     grant: &crate::core::SessionGrant,
     projects: &BTreeMap<String, Project>,
     live: &BTreeMap<&str, &crate::adapters::engine::EngineSession>,
+    refusal: Option<&str>,
 ) -> Result<Value, VogtError> {
     let target = live.get(grant.target_engine_session_id.as_str()).copied();
     let declared = view.session_by_engine_id(&grant.target_engine_session_id)?;
@@ -1551,12 +1567,23 @@ fn grant_entry(
     } else {
         "any number of fetches"
     };
+    let asked = format!(
+        "{requested_by} asks for {item} for {who}: {uses}, for {} min once approved. Reason: {}",
+        grant.ttl_seconds / 60,
+        grant.reason
+    );
+    // A grant the engine would refuse says so first, with the fix, since
+    // approving it can only fail (WI-4523). Deny still clears it.
     let summary = truncate(
-        &format!(
-            "{requested_by} asks for {item} for {who}: {uses}, for {} min once approved. Reason: {}",
-            grant.ttl_seconds / 60,
-            grant.reason
-        ),
+        &match refusal {
+            Some(refusal) => format!(
+                "Not approvable: {refusal}. To fix, add project {} to ENGINE_AGENT_GRANT_PROJECTS \
+                 (or name it in the ENGINE_AGENT_AUTH_SECRETS manifest) on that engine's \
+                 deployment, or deny this request. {asked}",
+                py_none(grant.project_id.as_deref())
+            ),
+            None => asked,
+        },
         1000,
     );
     let actor = ActorClass {
@@ -1574,7 +1601,12 @@ fn grant_entry(
         occurred_at: Some(grant.requested_at),
         observed_at: None,
         title: &format!(
-            "Grant request: {} for session {label}",
+            "{}Grant request: {} for session {label}",
+            if refusal.is_some() {
+                "Not approvable — "
+            } else {
+                ""
+            },
             py_none(grant.secret_name.as_deref())
         ),
         summary: &summary,
@@ -1584,10 +1616,17 @@ fn grant_entry(
         source_url: None,
         trust_state: "unverified".to_string(),
         freshness: "live",
-        action: action_of(
-            "grant",
-            json!({"grant_id": grant.id, "session_id": grant.target_engine_session_id}),
-        ),
+        action: action_of("grant", {
+            let mut fields =
+                json!({"grant_id": grant.id, "session_id": grant.target_engine_session_id});
+            // Only a refused grant carries these, so every other entry keeps
+            // its shape.
+            if let Some(refusal) = refusal {
+                fields["approvable"] = json!(false);
+                fields["refusal"] = json!(refusal);
+            }
+            fields
+        }),
         actor: &actor,
         extra: json!({
             "session_id": grant.target_engine_session_id,
