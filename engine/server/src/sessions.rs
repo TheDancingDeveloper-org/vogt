@@ -2113,23 +2113,31 @@ impl SessionRegistry {
             .map(str::to_string);
         let agent = base_command.as_deref().and_then(agent_cli::agent_name);
         let is_claude = agent.as_deref() == Some("claude");
-        // A shell runs no agent, but whoever types `claude` in it expects to
-        // be signed in (WI-4522): it takes the default account below, without
-        // a slot. Naming an account is still for Claude Code only.
-        let is_shell = agent.is_none();
-        if account.is_some() && !is_claude {
+        // A shell pod runs no agent, but whoever types `claude` in it expects
+        // to be signed in (WI-4522). Only a pod is seeded (a host shell keeps
+        // the user's own login), and only a shell template (tagged `shell`) or a shell that
+        // names its account, not any raw command. It holds an account slot
+        // like a Claude pod: one refresh token in many pods signs them out.
+        let pod_template = (agent.is_none())
+            .then(|| self.pod_template_for(spec.template.as_deref(), spec.placement.as_deref()))
+            .flatten();
+        let shell_pod = pod_template.is_some();
+        let shell_template = pod_template.is_some_and(crate::pod_backend::is_shell_template);
+        if account.is_some() && !is_claude && !shell_pod {
             return Err(ApiError::BadRequest(
-                "account is applied to Claude Code only; the command is not `claude`".into(),
+                "account is applied to Claude Code and shell pods only; the command is not `claude`"
+                    .into(),
             ));
         }
         // A fresh session that names no account takes the deployment's
         // default, when it resolves (WI-4522). An explicit account wins.
         let account = match (account, &creating) {
-            (None, Creating::Fresh(_)) if is_claude || is_shell => {
+            (None, Creating::Fresh(_)) if is_claude || shell_template => {
                 default_account(&self.cfg.agent_onboarding)
             }
             (account, _) => account,
         };
+        let holds_account = is_claude || (shell_pod && account.is_some());
         // Validate a named account before taking its slot: an unknown name is
         // the caller's mistake (400), not a full pool (429).
         if let (Some(name), Creating::Fresh(_)) = (account.as_deref(), &creating) {
@@ -2141,7 +2149,7 @@ impl SessionRegistry {
             // (WI-2734): once it is a real account, it takes the default cap.
             self.account_pool.register(name);
         }
-        let account_lease = if is_claude {
+        let account_lease = if holds_account {
             let should_reserve =
                 matches!(creating, Creating::Fresh(_)) || matches!(creating, Creating::Wake(_));
             if matches!(creating, Creating::Wake(_)) {
