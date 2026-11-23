@@ -2111,16 +2111,25 @@ impl SessionRegistry {
             .map(str::trim)
             .filter(|a| !a.is_empty())
             .map(str::to_string);
-        let is_claude = base_command
-            .as_deref()
-            .and_then(agent_cli::agent_name)
-            .as_deref()
-            == Some("claude");
+        let agent = base_command.as_deref().and_then(agent_cli::agent_name);
+        let is_claude = agent.as_deref() == Some("claude");
+        // A shell runs no agent, but whoever types `claude` in it expects to
+        // be signed in (WI-4522): it takes the default account below, without
+        // a slot. Naming an account is still for Claude Code only.
+        let is_shell = agent.is_none();
         if account.is_some() && !is_claude {
             return Err(ApiError::BadRequest(
                 "account is applied to Claude Code only; the command is not `claude`".into(),
             ));
         }
+        // A fresh session that names no account takes the deployment's
+        // default, when it resolves (WI-4522). An explicit account wins.
+        let account = match (account, &creating) {
+            (None, Creating::Fresh(_)) if is_claude || is_shell => {
+                default_account(&self.cfg.agent_onboarding)
+            }
+            (account, _) => account,
+        };
         // Validate a named account before taking its slot: an unknown name is
         // the caller's mistake (400), not a full pool (429).
         if let (Some(name), Creating::Fresh(_)) = (account.as_deref(), &creating) {
@@ -2171,17 +2180,9 @@ impl SessionRegistry {
             .as_ref()
             .and_then(|l| l.account().map(str::to_string))
             .or(account);
+        // The pod is labelled with the account it was seeded with.
+        spec.account = account.clone();
         if let (Some(name), Creating::Fresh(_)) = (account.as_deref(), &creating) {
-            if base_command
-                .as_deref()
-                .and_then(agent_cli::agent_name)
-                .as_deref()
-                != Some("claude")
-            {
-                return Err(ApiError::BadRequest(
-                    "account is applied to Claude Code only; the command is not `claude`".into(),
-                ));
-            }
             let dir = self
                 .cfg
                 .agent_onboarding
@@ -5337,6 +5338,20 @@ fn latest_event_at(summary: &SessionSummary) -> String {
 /// the wake record: a session with an account but no conversation yet (an
 /// agent-task `claude`, OpenCode, stock Codex) must still be signed in
 /// (WI-3334), while a woken session resumes its conversation (WI-3158).
+/// The deployment's default account, when one is set and still resolves. A
+/// default that does not resolve is a configuration fault: the session starts
+/// without an account rather than being refused.
+fn default_account(onboarding: &crate::claude_config::Onboarding) -> Option<String> {
+    let name = onboarding.default_account.as_deref()?;
+    match onboarding.account_dir(name) {
+        Ok(_) => Some(name.to_string()),
+        Err(why) => {
+            tracing::warn!(%why, "ENGINE_AGENT_CLAUDE_DEFAULT_ACCOUNT does not resolve; ignored");
+            None
+        }
+    }
+}
+
 fn pod_account_conversation_from(
     live: Option<&SessionSummary>,
     record: Option<&Record>,

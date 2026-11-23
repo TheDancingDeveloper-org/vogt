@@ -64,6 +64,11 @@ pub struct Onboarding {
     pub accounts_root: Option<PathBuf>,
     /// Maximum number of live Claude sessions assigned to one account.
     pub account_concurrency_cap: usize,
+    /// The account a session runs under when it names none
+    /// (`ENGINE_AGENT_CLAUDE_DEFAULT_ACCOUNT`, WI-4522): a Claude Code session
+    /// takes it instead of the least-used account, and a shell session takes
+    /// it so `claude` run inside opens signed in. An explicit account wins.
+    pub default_account: Option<String>,
     /// The Codex half (WI-1143 / WI-1146): the managed requirements file Codex
     /// reads from `/etc/codex/requirements.toml`, or a deployment's own path.
     /// Unlike the opencode policy, a named file that is missing or unreadable
@@ -364,11 +369,26 @@ impl Default for Onboarding {
             // the real home directory's accounts.
             accounts_root: None,
             account_concurrency_cap: 8,
+            default_account: None,
             // A hand-built config has no policy. A named missing file is the
             // error; "not configured" is not.
             codex_policy: Ok(None),
         }
     }
+}
+
+/// `ENGINE_AGENT_CLAUDE_DEFAULT_ACCOUNT`, read: an account name, or nothing
+/// when unset, empty or not a name (with a warning).
+pub fn default_account_from(value: Option<&str>) -> Option<String> {
+    let name = value.map(str::trim).filter(|v| !v.is_empty())?;
+    if !is_account_name(name) {
+        tracing::warn!(
+            name,
+            "ENGINE_AGENT_CLAUDE_DEFAULT_ACCOUNT is not [a-z0-9][a-z0-9_-]{{0,31}}; ignored"
+        );
+        return None;
+    }
+    Some(name.to_string())
 }
 
 impl Onboarding {
@@ -406,6 +426,11 @@ impl Onboarding {
                 .and_then(|v| v.trim().parse().ok())
                 .filter(|v| *v > 0)
                 .unwrap_or(8),
+            default_account: default_account_from(
+                std::env::var("ENGINE_AGENT_CLAUDE_DEFAULT_ACCOUNT")
+                    .ok()
+                    .as_deref(),
+            ),
             codex_policy: codex_policy_from(
                 std::env::var("ENGINE_AGENT_CODEX_POLICY").ok().as_deref(),
             ),
@@ -1077,6 +1102,7 @@ mod tests {
             accounts: Vec::new(),
             accounts_root: None,
             account_concurrency_cap: 8,
+            default_account: None,
             codex_policy: Ok(None),
         };
         let env = vec![("CLAUDE_CONFIG_DIR".to_string(), "/cfg".to_string())];

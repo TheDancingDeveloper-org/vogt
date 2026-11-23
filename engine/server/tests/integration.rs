@@ -12199,6 +12199,7 @@ async fn a_claude_session_starts_with_its_directory_trusted_and_its_brief_readab
         accounts_root: None,
         accounts: Vec::new(),
         account_concurrency_cap: 8,
+        default_account: None,
         codex_policy: Ok(None),
     };
     let state_dir = cfg.state_dir.clone();
@@ -12273,6 +12274,7 @@ fn one_slot_sandbox() -> (tempfile::TempDir, Config, std::path::PathBuf) {
         settings_file: None,
         opencode_config: None,
         account_concurrency_cap: 1,
+        default_account: None,
         accounts_root: None,
         accounts: vogt_engine_server::claude_config::parse_accounts(Some(&format!(
             "a={}",
@@ -12555,6 +12557,7 @@ async fn a_named_claude_account_runs_the_session_in_its_own_config_dir() {
         settings_file: None,
         opencode_config: None,
         account_concurrency_cap: 8,
+        default_account: None,
         accounts_root: None,
         accounts: vogt_engine_server::claude_config::parse_accounts(Some(&format!(
             "acct2={}",
@@ -12726,6 +12729,7 @@ async fn a_discovered_account_starts_a_session_alongside_configured_accounts() {
         settings_file: None,
         opencode_config: None,
         account_concurrency_cap: 8,
+        default_account: None,
         accounts_root: Some(root.clone()),
         accounts: vogt_engine_server::claude_config::parse_accounts(Some(&format!(
             "acct2={}",
@@ -21948,6 +21952,7 @@ mod pod_stream {
                     settings_file: None,
                     opencode_config: None,
                     account_concurrency_cap: 8,
+                    default_account: None,
                     accounts_root: None,
                     accounts: vogt_engine_server::claude_config::parse_accounts(Some(&format!(
                         "acct2={}",
@@ -22055,6 +22060,114 @@ mod pod_stream {
         assert!(std::fs::read_to_string(acct.join(".claude.json"))
             .unwrap()
             .contains("light"));
+    }
+
+    /// Two signed-in accounts, `acct1` the deployment default (WI-4522).
+    fn default_account_onboarding(
+        root: &std::path::Path,
+    ) -> vogt_engine_server::claude_config::Onboarding {
+        let mut accounts = Vec::new();
+        for name in ["acct1", "acct2"] {
+            let dir = root.join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join(".credentials.json"),
+                format!(r#"{{"claudeAiOauth":{{"who":"{name}"}}}}"#),
+            )
+            .unwrap();
+            accounts.push(format!("{name}={}", dir.display()));
+        }
+        vogt_engine_server::claude_config::Onboarding {
+            enabled: true,
+            default_dir: None,
+            settings_file: None,
+            opencode_config: None,
+            account_concurrency_cap: 8,
+            default_account: Some("acct1".into()),
+            accounts_root: None,
+            accounts: vogt_engine_server::claude_config::parse_accounts(Some(&accounts.join(","))),
+            codex_policy: Ok(None),
+        }
+    }
+
+    /// The bootstrap body's account and the login its bundle carries.
+    fn seeded_login(body: &Value) -> (String, String) {
+        let account = body["env"]["VOGT_SESSION_ACCOUNT"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        let login = body["bundle"]
+            .get(".credentials.json")
+            .and_then(Value::as_str)
+            .map(|b| {
+                let bytes =
+                    base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b).unwrap();
+                String::from_utf8(bytes).unwrap()
+            })
+            .unwrap_or_default();
+        (account, login)
+    }
+
+    /// WI-4522: a pod running no agent (a shell) is seeded with the default
+    /// account's login, so `claude` typed in it opens signed in.
+    #[tokio::test]
+    async fn a_shell_pod_is_seeded_with_the_default_account() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let mut h = harness_cfg(false, None, move |cfg| {
+            cfg.agent_onboarding = default_account_onboarding(&root);
+        })
+        .await;
+
+        let id = h.start().await;
+        let (_, token) = h.created.recv().await.unwrap();
+        let body: Value = h
+            .bootstrap_with(id, &token, "claude", true)
+            .await
+            .json()
+            .await
+            .unwrap();
+        let (account, login) = seeded_login(&body);
+        assert_eq!(account, "acct1", "{body}");
+        assert!(login.contains("acct1"), "{body}");
+        assert!(body["bundle"].get(".claude.json").is_some(), "{body}");
+    }
+
+    /// WI-4522: a Claude pod that names no account takes the default, not the
+    /// least-used one; a named account still wins.
+    #[tokio::test]
+    async fn a_claude_pod_without_an_account_takes_the_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let mut h = harness_cfg(
+            false,
+            Some(SessionTemplate::default_templates()),
+            move |cfg| {
+                cfg.agent_onboarding = default_account_onboarding(&root);
+            },
+        )
+        .await;
+        for (named, want) in [(None, "acct1"), (None, "acct1"), (Some("acct2"), "acct2")] {
+            let mut body = json!({
+                "name": "claude-pod",
+                "template": "Claude Code (protected)",
+                "placement": "pod",
+            });
+            if let Some(named) = named {
+                body["account"] = json!(named);
+            }
+            let id = h.start_body(body).await;
+            let (_, token) = h.created.recv().await.unwrap();
+            let body: Value = h
+                .bootstrap_as(id, &token, "claude")
+                .await
+                .json()
+                .await
+                .unwrap();
+            let (account, login) = seeded_login(&body);
+            assert_eq!(account, want, "{body}");
+            assert!(login.contains(want), "{body}");
+        }
     }
 
     /// The core token this test's own `vogt-core` adopts at `init`.
