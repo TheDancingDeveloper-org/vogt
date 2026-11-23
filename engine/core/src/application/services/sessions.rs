@@ -330,12 +330,104 @@ where
         include_hidden: optional_bool(&params, "include_hidden")?.unwrap_or(false),
         fields: optional_string_list(&params, "fields")?,
     };
+    if starters_only(&parsed, &params) {
+        return list_starters(ctx, &parsed);
+    }
     let mut listed =
         serde_json::to_value(list_sessions(ctx, &parsed)?).expect("a session result serialises");
     if parsed.mode == "full" {
         slim_full_rows(&mut listed, parsed.fields.as_deref());
     }
     Ok(listed)
+}
+
+/// The columns a starter read may name: the GUI rail nests a session under
+/// the one that started it and needs nothing else (WI-4531).
+const STARTER_FIELDS: [&str; 2] = ["engine_session_id", "started_by_session"];
+
+/// A `mode=full` list whose `fields` name only starter columns, with no
+/// filter that needs the engine's state, is answered from the declared table.
+fn starters_only(parsed: &ListSessionsParams, raw: &Value) -> bool {
+    let Some(fields) = parsed.fields.as_deref() else {
+        return false;
+    };
+    parsed.mode == "full"
+        && !fields.is_empty()
+        && fields
+            .iter()
+            .all(|field| STARTER_FIELDS.contains(&field.as_str()))
+        && parsed.order == "started"
+        && parsed.states.is_none()
+        && !parsed.include_hidden
+        && raw
+            .get("started_by_session")
+            .is_none_or(serde_json::Value::is_null)
+}
+
+/// Each Vogt session's `id` plus the named starter columns, read from the
+/// declared table only: no engine call and no transcript read (WI-4531).
+/// Unlinked engine sessions have no starter and are not listed. The page is
+/// cut in the query; `total` is one past the page when more rows follow.
+fn list_starters<C, I>(
+    ctx: &AppContext<C, I>,
+    params: &ListSessionsParams,
+) -> Result<Value, VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let view = ctx.declared.read()?;
+    let project_id = match &params.project {
+        Some(slug) => Some(resolve::project(&view, slug)?.id),
+        None => None,
+    };
+    let work_item_id = match &params.work_item {
+        Some(reference) => Some(resolve::work_item(&view, reference)?.id),
+        None => None,
+    };
+    let limit = params.limit.max(0);
+    let offset = params.offset.max(0);
+    let mut rows = view.list_sessions(
+        project_id.as_deref(),
+        work_item_id.as_deref(),
+        params.include_stopped,
+        limit.saturating_add(1),
+        offset,
+    )?;
+    drop(view);
+    let truncated = rows.len() as i64 > limit;
+    rows.truncate(limit as usize);
+    let fields = params.fields.as_deref().unwrap_or_default();
+    let sessions: Vec<Value> = rows
+        .iter()
+        .map(|session| {
+            let mut row = serde_json::Map::new();
+            row.insert("id".to_string(), Value::String(session.id.clone()));
+            for field in STARTER_FIELDS {
+                if !fields.iter().any(|wanted| wanted == field) {
+                    continue;
+                }
+                let value = match field {
+                    "engine_session_id" => Value::String(session.engine_session_id.clone()),
+                    _ => session
+                        .started_by_session
+                        .clone()
+                        .map_or(Value::Null, Value::String),
+                };
+                row.insert(field.to_string(), value);
+            }
+            Value::Object(row)
+        })
+        .collect();
+    let total = offset + sessions.len() as i64 + i64::from(truncated);
+    Ok(serde_json::json!({
+        "sessions": sessions,
+        "digests": [],
+        "engine": null,
+        "total": total,
+        "truncated": truncated,
+        "hidden_count": 0,
+    }))
 }
 
 /// Slim `mode=full` rows to `id` plus the named `fields` (WI-3130). A full page
@@ -1769,8 +1861,15 @@ where
     // answers or does not, and before the rows are assembled. The value is
     // the attention reference.
     let now = super::now_of(&ctx.clock);
-    let (mut joined, declared_overflow) = rows_of(ctx, params, &live, detail.as_deref())?;
     let full = params.mode == "full";
+    // Full mode keeps every joined row, and rss order reads only the engine's
+    // sample, so the page can be cut before any transcript is read (WI-4531).
+    // Digest mode filters on `running`, which the transcript decides.
+    let (mut joined, declared_overflow) = if full {
+        joined_rows(ctx, params, &live, detail.as_deref())?
+    } else {
+        rows_of(ctx, params, &live, detail.as_deref())?
+    };
     let stall_after = params.stall_after_minutes.saturating_mul(60);
     let mut kept = Vec::new();
     for summary in joined.drain(..) {
@@ -1800,7 +1899,10 @@ where
     let total = kept.len() as i64;
     let offset = params.offset.max(0) as usize;
     let limit = params.limit.max(0) as usize;
-    let page: Vec<SessionSummary> = kept.into_iter().skip(offset).take(limit).collect();
+    let mut page: Vec<SessionSummary> = kept.into_iter().skip(offset).take(limit).collect();
+    if full {
+        read_transcripts(ctx, &mut page, &live);
+    }
     // When the declared fetch hits its ceiling, more links match than were
     // joined, so `total` is a floor and the list stays truncated.
     let mut reported = total;
@@ -2142,11 +2244,12 @@ fn report_line(kind: &str, summary: &str, data: &str) -> String {
     }
 }
 
-/// The rows `session.list` and `session.sweep` share.
+/// The rows `session.list` and `session.sweep` share, before any transcript
+/// is read.
 ///
 /// The second value is true when more declared links match than
 /// `DECLARED_FETCH` read, so the caller's `total` is a floor.
-fn rows_of<C, I>(
+fn joined_rows<C, I>(
     ctx: &AppContext<C, I>,
     params: &ListSessionsParams,
     live: &[EngineSession],
@@ -2232,10 +2335,47 @@ where
             summary.latest_report = Some(line.clone());
         }
     }
+    Ok((summaries, declared_overflow))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The engine sessions `read_transcripts` looked up, in order (WI-4531).
+    pub(super) static TRANSCRIPT_READS: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The joined rows with their transcript-derived fields filled in.
+fn rows_of<C, I>(
+    ctx: &AppContext<C, I>,
+    params: &ListSessionsParams,
+    live: &[EngineSession],
+    detail: Option<&str>,
+) -> Result<(Vec<SessionSummary>, bool), VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let (mut summaries, declared_overflow) = joined_rows(ctx, params, live, detail)?;
+    read_transcripts(ctx, &mut summaries, live);
+    Ok((summaries, declared_overflow))
+}
+
+/// Fills `running`, the engine's template and `last_reply_excerpt` from each
+/// live session's transcript. Callers run it on as few rows as they can: it
+/// is file I/O per live session (WI-4531).
+fn read_transcripts<C, I>(
+    ctx: &AppContext<C, I>,
+    summaries: &mut [SessionSummary],
+    live: &[EngineSession],
+) where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
     // Outside the read transaction: this is file I/O, and an excerpt that
     // cannot be had is a null, never an error. Only a session the engine
     // still has alive or asleep gets a transcript read.
-    for summary in &mut summaries {
+    for summary in summaries.iter_mut() {
         let Some(live_session) = live.iter().find(|row| row.id == summary.engine_session_id) else {
             continue;
         };
@@ -2247,6 +2387,8 @@ where
             .clone()
             .filter(|template| !template.is_empty())
             .or_else(|| live_session.template.clone());
+        #[cfg(test)]
+        TRANSCRIPT_READS.with(|reads| reads.borrow_mut().push(summary.engine_session_id.clone()));
         let found = transcript_for(ctx, live_session, template.as_deref());
         summary.running = running_of(summary, live_session, found.as_ref());
         if summary.template.is_none()
@@ -2268,7 +2410,6 @@ where
             }
         }
     }
-    Ok((summaries, declared_overflow))
 }
 
 fn page_len(shown: usize, _unlinked: i64) -> i64 {
