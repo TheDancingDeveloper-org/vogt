@@ -1917,3 +1917,102 @@ fn seed_work_item_with_blockers(built: &Built, blockers: usize) {
     }
     txn.commit().unwrap();
 }
+
+fn transcript_reads() -> Vec<String> {
+    super::sessions::TRANSCRIPT_READS.with(|reads| std::mem::take(&mut *reads.borrow_mut()))
+}
+
+/// A full page reads transcripts for its own rows only, and a page past the
+/// last row reads none (WI-4531).
+#[test]
+fn a_full_page_reads_transcripts_only_for_its_own_rows() {
+    let body = r#"{
+        "sessions": [
+            {"id":"eng-a","name":"a","cwd":"/w","activity":"idle","alive":true},
+            {"id":"eng-b","name":"b","cwd":"/w","activity":"idle","alive":true},
+            {"id":"eng-c","name":"c","cwd":"/w","activity":"idle","alive":true}
+        ]
+    }"#;
+    let script = script_with(vec![(200, body.to_string()), (200, body.to_string())]);
+    let built = opened(Some(Arc::clone(&script)));
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!("opened() builds a step clock");
+    };
+    let mut params = digest_params();
+    params.mode = "full".to_string();
+    params.limit = 1;
+    params.offset = 1;
+    transcript_reads();
+    let listed = list_sessions(ctx, &params).unwrap();
+    assert_eq!(listed.total, 3, "{listed:?}");
+    assert_eq!(listed.sessions.len(), 1, "{listed:?}");
+    assert_eq!(listed.sessions[0].engine_session_id, "eng-b");
+    assert_eq!(transcript_reads(), vec!["eng-b".to_string()]);
+    params.offset = 500;
+    let past = list_sessions(ctx, &params).unwrap();
+    assert!(past.sessions.is_empty(), "{past:?}");
+    assert!(transcript_reads().is_empty());
+}
+
+/// A full list that names only starter columns is read from the declared
+/// table: no engine call and no transcript read, stopped sessions included
+/// (WI-4531).
+#[test]
+fn a_starters_read_asks_neither_the_engine_nor_a_transcript() {
+    let script = script_with(Vec::new());
+    let built = opened(Some(Arc::clone(&script)));
+    insert_project(&built, "beta");
+    seed_child_session(&built, "eng-parent", None, None);
+    seed_child_session(&built, "eng-child", Some("oversight"), Some("eng-parent"));
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!("opened() builds a step clock");
+    };
+    let db = ctx.config.resolved_data_dir().join("declared.sqlite3");
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute(
+            "UPDATE coding_sessions SET stopped_at = '2026-11-23T00:00:00Z' WHERE engine_session_id = 'eng-parent'",
+            [],
+        )
+        .unwrap();
+    transcript_reads();
+    let listed = list_sessions_op(
+        &built,
+        json!({
+            "mode": "full",
+            "include_stopped": true,
+            "limit": 500,
+            "fields": ["engine_session_id", "started_by_session"],
+        }),
+    )
+    .unwrap();
+    assert!(script.seen.lock().unwrap().is_empty(), "engine was asked");
+    assert!(transcript_reads().is_empty());
+    let rows = listed["sessions"].as_array().unwrap();
+    assert_eq!(rows.len(), 2, "{listed}");
+    let child = rows
+        .iter()
+        .find(|row| row["engine_session_id"] == "eng-child")
+        .unwrap();
+    assert_eq!(child["started_by_session"], "eng-parent");
+    assert_eq!(child["id"], "ses_eng-child");
+    assert!(rows
+        .iter()
+        .any(|row| row["engine_session_id"] == "eng-parent"));
+    assert_eq!(listed["total"], 2);
+    assert_eq!(listed["truncated"], false);
+
+    let paged = list_sessions_op(
+        &built,
+        json!({
+            "mode": "full",
+            "include_stopped": true,
+            "limit": 1,
+            "fields": ["engine_session_id", "started_by_session"],
+        }),
+    )
+    .unwrap();
+    assert_eq!(paged["sessions"].as_array().unwrap().len(), 1, "{paged}");
+    assert_eq!(paged["truncated"], true);
+    assert!(script.seen.lock().unwrap().is_empty(), "engine was asked");
+}
