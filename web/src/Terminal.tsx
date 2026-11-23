@@ -57,30 +57,49 @@ import { acquireInitialAttach } from "./initialAttachSlots";
 
 /** How long one `session.list` answer serves every terminal that mounts. */
 const WORK_ITEM_LINKS_TTL_MS = 5000;
-let workItemLinksRead: { at: number; answer: ReturnType<typeof listSessions> } | null = null;
+type LinksRead = { at: number; answer: ReturnType<typeof listSessions> };
+const workItemLinksRead: { live: LinksRead | null; stopped: LinksRead | null } = { live: null, stopped: null };
 
-/**
- * The full session list, read once for every terminal mounting together.
- * Each mount used to read it for itself, so warming ~70 terminals fired ~70
- * full lists in under a second (WI-1413). A failed read is not kept.
- */
-/** Drop the shared read, so the next mount asks again (tests). */
+/** Drop the shared reads, so the next mount asks again (tests). */
 export function forgetWorkItemLinks(): void {
-  workItemLinksRead = null;
+  workItemLinksRead.live = null;
+  workItemLinksRead.stopped = null;
 }
 
-export function workItemLinks(): ReturnType<typeof listSessions> {
+/**
+ * One shared read for every terminal mounting together. Each mount used to
+ * read it for itself, so warming ~70 terminals fired ~70 full lists in under a
+ * second (WI-1413). A failed read is not kept.
+ */
+function sharedLinksRead(which: "live" | "stopped"): ReturnType<typeof listSessions> {
   const now = Date.now();
-  if (workItemLinksRead && now - workItemLinksRead.at < WORK_ITEM_LINKS_TTL_MS) {
-    return workItemLinksRead.answer;
-  }
-  const answer = listSessions({ include_stopped: true });
+  const held = workItemLinksRead[which];
+  if (held && now - held.at < WORK_ITEM_LINKS_TTL_MS) return held.answer;
+  const answer = listSessions(
+    which === "live"
+      ? { mode: "full", limit: 500 }
+      : { mode: "full", include_stopped: true, limit: 500 },
+  );
   const read = { at: now, answer };
-  workItemLinksRead = read;
+  workItemLinksRead[which] = read;
   answer.catch(() => {
-    if (workItemLinksRead === read) workItemLinksRead = null;
+    if (workItemLinksRead[which] === read) workItemLinksRead[which] = null;
   });
   return answer;
+}
+
+/**
+ * The work item a terminal's session was opened for, or null. The live
+ * sessions are asked first: a terminal mostly shows a running PTY, and that
+ * list is short. Only a PTY the live list does not hold (a finished run still
+ * had a subject) asks again with the stopped ones (WI-4532).
+ */
+export async function workItemLinkFor(sessionId: string): Promise<string | null> {
+  const find = (answer: Awaited<ReturnType<typeof listSessions>>) =>
+    (answer.sessions ?? []).find((row) => row.engine_session_id === sessionId);
+  const live = find(await sharedLinksRead("live"));
+  if (live) return live.work_item ?? null;
+  return find(await sharedLinksRead("stopped"))?.work_item ?? null;
 }
 
 
@@ -991,13 +1010,8 @@ const TerminalView: Component<Props> = (props) => {
     // Ask Vogt whether this PTY belongs to a work item. One read, at mount,
     // and silence on any failure: the badge is worth having and worth
     // nothing at all if it costs the terminal.
-    void workItemLinks()
-      .then((answer) => {
-        const link = (answer.sessions ?? []).find(
-          (row) => row.engine_session_id === props.sessionId,
-        );
-        setOpenedFor(link?.work_item ?? null);
-      })
+    void workItemLinkFor(props.sessionId)
+      .then((ref) => setOpenedFor(ref))
       .catch(() => setOpenedFor(null));
 
     if (!hostRef) return;
