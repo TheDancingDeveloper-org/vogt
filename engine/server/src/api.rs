@@ -956,6 +956,36 @@ pub async fn apply_session_grant(
     Ok(Json(grant_view(&held)))
 }
 
+/// The project a grant check asks about.
+#[derive(Debug, serde::Deserialize)]
+pub struct GrantCheckQuery {
+    pub project_id: String,
+}
+
+/// `GET /api/sessions/{id}/grant-check?project_id=` — whether an approved
+/// grant for `project_id` could be held here, asked before a request reaches a
+/// person (WI-4523). `refusal` is the text `POST …/grants` would refuse with,
+/// so a request that can never be approved is refused when it is made, and a
+/// pending one shows why it cannot be. vogt-core only.
+pub async fn check_session_grant(
+    State(state): State<Arc<AppState>>,
+    Path(_id): Path<Uuid>,
+    identity: Option<axum::Extension<crate::auth::AuthorizedIdentity>>,
+    axum::extract::Query(query): axum::extract::Query<GrantCheckQuery>,
+) -> Result<Json<serde_json::Value>> {
+    require_core_identity(identity.as_deref())?;
+    let refusal = state
+        .sessions
+        .secret_broker()
+        .project_refusal(&query.project_id)
+        .map(|refusal| refusal.to_string());
+    Ok(Json(serde_json::json!({
+        "project_id": query.project_id,
+        "grantable": refusal.is_none(),
+        "refusal": refusal,
+    })))
+}
+
 /// `DELETE /api/sessions/{id}/grants/{grant_id}` — revoke one grant at once
 /// (WI-973). vogt-core only. Revoking a grant the engine no longer holds is
 /// not an error: absence is the revoked state.

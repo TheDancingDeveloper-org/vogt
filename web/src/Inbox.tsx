@@ -320,7 +320,12 @@ const Entry: Component<EntryProps> = (props) => {
                 <button type="button" disabled={props.busy} onClick={() => begin("reject")}>Reject proposed change…</button>
               </Show>
               <Show when={props.entry.action?.kind === "grant" && props.entry.action.grant_id}>
-                <button type="button" disabled={props.busy} onClick={() => begin("approve_grant")}>Approve grant…</button>
+                <Show
+                  when={props.entry.action?.approvable !== false}
+                  fallback={<span class="inbox-grant-refused">Not approvable: {props.entry.action?.refusal}</span>}
+                >
+                  <button type="button" disabled={props.busy} onClick={() => begin("approve_grant")}>Approve grant…</button>
+                </Show>
                 <button type="button" disabled={props.busy} onClick={() => begin("deny_grant")}>Deny grant…</button>
               </Show>
               {/* The routine triage lives in a quieter, compact second row so the
@@ -409,7 +414,9 @@ const Entry: Component<EntryProps> = (props) => {
                 <button type="button" disabled={props.busy} onClick={() => begin("reject")}>Reject proposed change…</button>
               </Show>
               <Show when={props.entry.action?.kind === "grant" && props.entry.action.grant_id}>
-                <button type="button" disabled={props.busy} onClick={() => begin("approve_grant")}>Approve grant…</button>
+                <Show when={props.entry.action?.approvable !== false}>
+                  <button type="button" disabled={props.busy} onClick={() => begin("approve_grant")}>Approve grant…</button>
+                </Show>
                 <button type="button" disabled={props.busy} onClick={() => begin("deny_grant")}>Deny grant…</button>
               </Show>
             </Show>

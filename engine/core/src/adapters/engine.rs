@@ -889,6 +889,38 @@ impl EngineClient {
         })
     }
 
+    /// Why the engine would refuse an approved grant for `project_id` on
+    /// `session_id`, or `None` when it would hold one (WI-4523). An engine
+    /// without the check (an older build) answers 404, read as no refusal,
+    /// so the apply stays the gate there.
+    pub fn grant_refusal(
+        &self,
+        session_id: &str,
+        project_id: &str,
+    ) -> Result<Option<String>, VogtError> {
+        let payload = self.call(
+            &format!(
+                "{}?project_id={}",
+                session_path(session_id, "/grant-check"),
+                quote_strict(project_id)
+            ),
+            "GET",
+            None,
+            true,
+            None,
+        )?;
+        if payload.get("grantable").and_then(Value::as_bool) != Some(false) {
+            return Ok(None);
+        }
+        Ok(Some(
+            payload
+                .get("refusal")
+                .and_then(Value::as_str)
+                .unwrap_or("the engine refuses grants from this project")
+                .to_string(),
+        ))
+    }
+
     /// Drop one grant at the engine; whether it still held it.
     pub fn revoke_grant(&self, session_id: &str, grant_id: &str) -> Result<bool, VogtError> {
         let payload = self.call(

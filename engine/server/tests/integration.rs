@@ -7972,6 +7972,29 @@ async fn an_approved_grant_reaches_only_its_session_until_revoked_or_expired() {
         "{refusal}"
     );
 
+    // vogt-core asks the same question before a person is asked (WI-4523):
+    // the check gives the refusal the apply gave, and none for `extra`.
+    let check = |client: &reqwest::Client, project: &str| {
+        client
+            .get(format!("{base}/api/sessions/{target}/grant-check"))
+            .query(&[("project_id", project)])
+            .send()
+    };
+    let closed: serde_json::Value = check(&core, "not-listed")
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(closed["grantable"], false);
+    let said = closed["refusal"].as_str().unwrap();
+    assert!(said.contains("not open to grants"), "{said}");
+    assert!(refusal.contains(said), "{refusal} / {said}");
+    let open: serde_json::Value = check(&core, "extra").await.unwrap().json().await.unwrap();
+    assert_eq!(open["grantable"], true);
+    assert!(open["refusal"].is_null());
+    assert_eq!(check(&operator, "extra").await.unwrap().status(), 403);
+
     // Only vogt-core applies a grant: the break-glass operator token holds
     // `sessions` and is still refused.
     let refused = operator

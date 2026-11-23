@@ -143,6 +143,11 @@ fn request<C: Clock + 'static, I: IdFactory + 'static>(
         )));
     }
     check_requester(ctx, &target_engine_id)?;
+    // Refuse now what the engine would refuse at approval, so the agent learns
+    // at once and no person is shown a request nobody can approve (WI-4523).
+    if let Some(refusal) = engine.grant_refusal(&target_engine_id, &project)? {
+        return Err(VogtError::GrantRefused(refusal));
+    }
 
     let reason = asked.reason.to_string();
     let mut write = write_of(ctx);
@@ -957,6 +962,8 @@ mod tests {
         sessions: std::collections::BTreeMap<String, (bool, String)>,
         /// Projects the engine refuses, as one not open to grants is.
         closed_projects: std::collections::BTreeSet<String>,
+        /// An engine built before the grant check (WI-4523): it 404s.
+        no_grant_check: bool,
         applied: Vec<(String, Value)>,
         revoked: Vec<(String, String)>,
     }
@@ -1016,6 +1023,23 @@ mod tests {
                         }
                         state.applied.push((id.to_string(), payload));
                         (200, body.to_vec())
+                    }
+                    ("GET", ["sessions", _, check]) if check.starts_with("grant-check?") => {
+                        if state.no_grant_check {
+                            return (404, Vec::new());
+                        }
+                        let project = check.split("project_id=").nth(1).unwrap_or("");
+                        let refusal = state.closed_projects.contains(project).then(|| {
+                            format!(
+                                "project {project} is not open to grants: refused by engine test"
+                            )
+                        });
+                        let body = json!({
+                            "project_id": project,
+                            "grantable": refusal.is_none(),
+                            "refusal": refusal,
+                        });
+                        (200, serde_json::to_vec(&body).unwrap())
                     }
                     ("DELETE", ["sessions", id, "grants", grant]) => {
                         state.revoked.push((id.to_string(), grant.to_string()));
@@ -1138,12 +1162,13 @@ mod tests {
     #[test]
     fn an_engine_refusal_leaves_the_request_pending_with_its_reason() {
         let (dir, shared, built) = estate("refusal");
+        // Asked while the project was open; the engine closed it since.
+        let id = ask(&overseer_of(&dir, &shared), "eng-worker", json!({}));
         shared
             .lock()
             .unwrap()
             .closed_projects
             .insert("infra".to_string());
-        let id = ask(&overseer_of(&dir, &shared), "eng-worker", json!({}));
         let refused = decide(&built, &id, "approve").unwrap_err();
         assert!(
             matches!(refused, VogtError::GrantRefused(ref message) if message.contains("not open to grants")),
@@ -1437,5 +1462,77 @@ mod tests {
         decide(&built, &own, "deny").unwrap();
         decide(&built, &id, "deny").unwrap();
         assert!(inbox(&built).is_empty());
+    }
+
+    #[test]
+    fn a_request_for_a_project_the_engine_refuses_is_refused_when_made() {
+        let (dir, shared, built) = estate("closed-at-ask");
+        shared
+            .lock()
+            .unwrap()
+            .closed_projects
+            .insert("infra".to_string());
+        let refused = try_ask(&overseer_of(&dir, &shared), "eng-worker", json!({})).unwrap_err();
+        assert!(
+            matches!(refused, VogtError::GrantRefused(ref message) if message.contains("project infra is not open to grants")),
+            "{refused:?}"
+        );
+        // Nothing waits for a person, and another project is still asked.
+        assert!(list(&built, None)["grants"].as_array().unwrap().is_empty());
+        ask(
+            &overseer_of(&dir, &shared),
+            "eng-worker",
+            json!({"project_id": "open"}),
+        );
+        // An engine without the check leaves the apply as the gate.
+        shared.lock().unwrap().no_grant_check = true;
+        ask(&overseer_of(&dir, &shared), "eng-worker", json!({}));
+    }
+
+    #[test]
+    fn a_pending_grant_the_engine_would_refuse_shows_why_and_offers_no_approval() {
+        let (dir, shared, built) = estate("closed-inbox");
+        let id = ask(&overseer_of(&dir, &shared), "eng-worker", json!({}));
+        let entry = || -> Value {
+            crate::registry::default_registry()
+                .get("inbox.list")
+                .expect("inbox.list is registered")
+                .run(Some(&built), json!({}))
+                .unwrap()["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|entry| entry["action"]["grant_id"] == id)
+                .cloned()
+                .expect("the grant is an entry")
+        };
+        let open = entry();
+        assert!(open["action"].get("approvable").is_none(), "{open}");
+        assert!(!open["title"].as_str().unwrap().contains("Not approvable"));
+
+        shared
+            .lock()
+            .unwrap()
+            .closed_projects
+            .insert("infra".to_string());
+        let closed = entry();
+        assert_eq!(closed["action"]["kind"], "grant");
+        assert_eq!(closed["action"]["approvable"], false);
+        assert!(closed["action"]["refusal"]
+            .as_str()
+            .unwrap()
+            .contains("not open to grants"));
+        assert!(closed["title"]
+            .as_str()
+            .unwrap()
+            .starts_with("Not approvable — "));
+        let summary = closed["summary"].as_str().unwrap();
+        assert!(
+            summary.starts_with("Not approvable: project infra is not open to grants"),
+            "{summary}"
+        );
+        assert!(summary.contains("ENGINE_AGENT_GRANT_PROJECTS"), "{summary}");
+        // Deny still clears it.
+        decide(&built, &id, "deny").unwrap();
     }
 }
