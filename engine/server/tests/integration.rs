@@ -22108,18 +22108,47 @@ mod pod_stream {
         (account, login)
     }
 
-    /// WI-4522: a pod running no agent (a shell) is seeded with the default
-    /// account's login, so `claude` typed in it opens signed in.
+    /// A pod template running no agent, tagged `shell` when `shell`.
+    fn shell_pod_templates() -> Vec<SessionTemplate> {
+        ["Shell", "raw"]
+            .into_iter()
+            .map(|name| SessionTemplate {
+                name: name.into(),
+                description: "pod-backed".into(),
+                command: Some(vec!["/bin/cat".into()]),
+                cwd: None,
+                env: Vec::new(),
+                account: None,
+                default_name: None,
+                match_repo_names: Vec::new(),
+                match_path_prefixes: Vec::new(),
+                tags: if name == "Shell" {
+                    vec!["shell".into()]
+                } else {
+                    Vec::new()
+                },
+                backend: "pod".into(),
+                host_capable: true,
+                pod_capable: false,
+            })
+            .collect()
+    }
+
+    /// WI-4522: a shell pod is seeded with the default account's login, so
+    /// `claude` typed in it opens signed in. A pod running some other raw
+    /// command is not.
     #[tokio::test]
     async fn a_shell_pod_is_seeded_with_the_default_account() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().to_path_buf();
-        let mut h = harness_cfg(false, None, move |cfg| {
+        let mut h = harness_cfg(false, Some(shell_pod_templates()), move |cfg| {
             cfg.agent_onboarding = default_account_onboarding(&root);
         })
         .await;
 
-        let id = h.start().await;
+        let id = h
+            .start_body(json!({ "name": "shell", "template": "Shell" }))
+            .await;
         let (_, token) = h.created.recv().await.unwrap();
         let body: Value = h
             .bootstrap_with(id, &token, "claude", true)
@@ -22131,6 +22160,57 @@ mod pod_stream {
         assert_eq!(account, "acct1", "{body}");
         assert!(login.contains("acct1"), "{body}");
         assert!(body["bundle"].get(".claude.json").is_some(), "{body}");
+
+        let id = h
+            .start_body(json!({ "name": "raw", "template": "raw" }))
+            .await;
+        let (_, token) = h.created.recv().await.unwrap();
+        let body: Value = h
+            .bootstrap_with(id, &token, "claude", true)
+            .await
+            .json()
+            .await
+            .unwrap();
+        let (account, login) = seeded_login(&body);
+        assert_eq!(account, "", "{body}");
+        assert_eq!(login, "", "{body}");
+    }
+
+    /// WI-4522 review B1: a seeded shell pod holds an account slot like a
+    /// Claude pod, so the cap bounds how many pods share one refresh token.
+    /// At the cap the next one is refused, and a stopped one frees its slot.
+    #[tokio::test]
+    async fn a_shell_pod_takes_an_account_slot_and_frees_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let mut h = harness_cfg(false, Some(shell_pod_templates()), move |cfg| {
+            cfg.agent_onboarding = default_account_onboarding(&root);
+            cfg.agent_onboarding.account_concurrency_cap = 1;
+        })
+        .await;
+        let start = |name: &str| {
+            h.client
+                .post(format!("{}/api/sessions", h.base))
+                .json(&json!({ "name": name, "template": "Shell" }))
+                .send()
+        };
+        let first = start("one").await.unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+        let first: Value = first.json().await.unwrap();
+        let second = start("two").await.unwrap();
+        assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        let id = first["id"].as_str().unwrap();
+        let gone = h
+            .client
+            .delete(format!("{}/api/sessions/{id}", h.base))
+            .send()
+            .await
+            .unwrap();
+        assert!(gone.status().is_success(), "{}", gone.status());
+        let third = start("three").await.unwrap();
+        assert_eq!(third.status(), StatusCode::OK);
+        let _ = h.created.try_recv();
     }
 
     /// WI-4522: a Claude pod that names no account takes the default, not the
