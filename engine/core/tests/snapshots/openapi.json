@@ -3136,6 +3136,18 @@
             "description": "Extra SessionSummary attribute names on each digest row. A comma-separated string is accepted as well as a list."
           },
           {
+            "name": "starters_only",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Answer from the declared table only: each session's `id` plus the starter columns named in `fields` (`engine_session_id`, `started_by_session`), with no engine call. Needs `mode=full`; sessions with no starter are not listed.",
+              "title": "Starters Only",
+              "type": "boolean"
+            },
+            "description": "Answer from the declared table only: each session's `id` plus the starter columns named in `fields` (`engine_session_id`, `started_by_session`), with no engine call. Needs `mode=full`; sessions with no starter are not listed."
+          },
+          {
             "name": "started_by_session",
             "in": "query",
             "required": false,

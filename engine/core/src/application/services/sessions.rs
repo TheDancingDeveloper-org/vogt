@@ -330,7 +330,7 @@ where
         include_hidden: optional_bool(&params, "include_hidden")?.unwrap_or(false),
         fields: optional_string_list(&params, "fields")?,
     };
-    if starters_only(&parsed, &params) {
+    if starters_only(&parsed, &params)? {
         return list_starters(ctx, &parsed);
     }
     let mut listed =
@@ -345,13 +345,16 @@ where
 /// the one that started it and needs nothing else (WI-4531).
 const STARTER_FIELDS: [&str; 2] = ["engine_session_id", "started_by_session"];
 
-/// A `mode=full` list whose `fields` name only starter columns, with no
-/// filter that needs the engine's state, is answered from the declared table.
-fn starters_only(parsed: &ListSessionsParams, raw: &Value) -> bool {
-    let Some(fields) = parsed.fields.as_deref() else {
-        return false;
-    };
-    parsed.mode == "full"
+/// The starters path is asked for with `starters_only: true` (WI-4543), never
+/// inferred from `fields`, so a caller that names starter columns alone still
+/// gets the ordinary full rows. The flag needs `mode=full`, `fields` naming
+/// only starter columns, and no filter that needs the engine's state.
+fn starters_only(parsed: &ListSessionsParams, raw: &Value) -> Result<bool, VogtError> {
+    if !optional_bool(raw, "starters_only")?.unwrap_or(false) {
+        return Ok(false);
+    }
+    let fields = parsed.fields.as_deref().unwrap_or_default();
+    let usable = parsed.mode == "full"
         && !fields.is_empty()
         && fields
             .iter()
@@ -361,7 +364,15 @@ fn starters_only(parsed: &ListSessionsParams, raw: &Value) -> bool {
         && !parsed.include_hidden
         && raw
             .get("started_by_session")
-            .is_none_or(serde_json::Value::is_null)
+            .is_none_or(serde_json::Value::is_null);
+    if usable {
+        Ok(true)
+    } else {
+        Err(VogtError::InvalidRequest(
+            "starters_only needs mode=full, fields naming only engine_session_id and started_by_session, order=started, and no states, include_hidden or started_by_session"
+                .to_string(),
+        ))
+    }
 }
 
 /// Each Vogt session's `id` plus the named starter columns, read from the

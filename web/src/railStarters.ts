@@ -31,6 +31,14 @@ export const STARTERS_PAGE_SIZE = 500;
 export const STARTERS_MAX_PAGES = 4;
 /** Links read when new sessions appear: the newest page, newest first. */
 export const STARTERS_DELTA_SIZE = 50;
+/** How often the leader tab says it is alive. */
+export const HEARTBEAT_MS = 5_000;
+/** A follower leads itself when the leader has been quiet this long (a tab
+ *  frozen or killed without a `bye`). */
+export const HEARTBEAT_TIMEOUT_MS = 15_000;
+/** Reads that may come back without an id before it is given up on: a session
+ *  with no Vogt link never gets one, so the retry must end. */
+export const MISSING_ID_RETRIES = 3;
 /** The fields that keep `session.list` on the core's cheap starters path. */
 export const STARTER_FIELDS = ["engine_session_id", "started_by_session"] as const;
 const CHANNEL_NAME = "vogt.railStarters";
@@ -77,6 +85,7 @@ export async function readAllStarters(
 export const fetchStartersPage = (offset: number, limit: number): Promise<StartersPage> =>
   listSessions({
     mode: "full",
+    starters_only: true,
     fields: [...STARTER_FIELDS],
     include_stopped: true,
     limit,
@@ -93,6 +102,7 @@ type Message =
   | { type: "hello" }
   | { type: "leader" }
   | { type: "bye" }
+  | { type: "beat" }
   | { type: "map"; entries: [string, string][] };
 
 export interface StartersReaderDeps {
@@ -101,6 +111,8 @@ export interface StartersReaderDeps {
   onMap: (map: ReadonlyMap<string, string>) => void;
   debounceMs?: number;
   leaderWaitMs?: number;
+  heartbeatMs?: number;
+  heartbeatTimeoutMs?: number;
 }
 
 /** The reader behind `railStarters()`. Exported for tests: two of these on one
@@ -108,6 +120,8 @@ export interface StartersReaderDeps {
 export function createStartersReader(deps: StartersReaderDeps) {
   const debounceMs = deps.debounceMs ?? DEBOUNCE_MS;
   const leaderWaitMs = deps.leaderWaitMs ?? LEADER_WAIT_MS;
+  const heartbeatMs = deps.heartbeatMs ?? HEARTBEAT_MS;
+  const heartbeatTimeoutMs = deps.heartbeatTimeoutMs ?? HEARTBEAT_TIMEOUT_MS;
   let map = new Map<string, string>();
   /** Engine ids seen in the session set so far. */
   const known = new Set<string>();
@@ -118,6 +132,12 @@ export function createStartersReader(deps: StartersReaderDeps) {
   let fullWanted = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let electTimer: ReturnType<typeof setTimeout> | undefined;
+  /** The leader's beat while this tab leads. */
+  let beatTimer: ReturnType<typeof setInterval> | undefined;
+  /** The follower's watch on the leader's beat. */
+  let watchdog: ReturnType<typeof setTimeout> | undefined;
+  /** Reads an id has been waited on without turning up in the delta. */
+  const missed = new Map<string, number>();
   let loading = false;
   let pending = false;
 
@@ -127,9 +147,30 @@ export function createStartersReader(deps: StartersReaderDeps) {
     post({ type: "map", entries: [...map] });
   };
 
+  const stopTimers = () => {
+    clearInterval(beatTimer);
+    clearTimeout(watchdog);
+    beatTimer = undefined;
+    watchdog = undefined;
+  };
+
+  /** A follower hears the leader: any message from it resets the watch. If
+   *  the leader goes quiet (its tab froze or died with no `bye`), lead. */
+  const watchLeader = () => {
+    clearTimeout(watchdog);
+    watchdog = setTimeout(() => {
+      if (role !== "follower") return;
+      role = "unknown";
+      loadedOnce = false;
+      elect();
+    }, heartbeatTimeoutMs);
+  };
+
   const becomeLeader = () => {
+    stopTimers();
     role = "leader";
     post({ type: "leader" });
+    beatTimer = setInterval(() => post({ type: "beat" }), heartbeatMs);
     schedule();
   };
 
@@ -160,10 +201,17 @@ export function createStartersReader(deps: StartersReaderDeps) {
           if (role === "electing" || role === "unknown") {
             clearTimeout(electTimer);
             role = "follower";
+            watchLeader();
+          } else if (role === "follower") {
+            watchLeader();
           }
+          break;
+        case "beat":
+          if (role === "follower") watchLeader();
           break;
         case "map":
           if (role !== "leader") {
+            if (role === "follower") watchLeader();
             map = new Map(message.entries);
             loadedOnce = true;
             deps.onMap(new Map(map));
@@ -172,6 +220,7 @@ export function createStartersReader(deps: StartersReaderDeps) {
         case "bye":
           if (role === "follower") {
             // The leader tab closed: elect again, and the winner reads in full.
+            stopTimers();
             role = "unknown";
             loadedOnce = false;
             elect();
@@ -189,6 +238,7 @@ export function createStartersReader(deps: StartersReaderDeps) {
     if (full) {
       map = await readAllStarters(deps.fetchPage);
       loadedOnce = true;
+      missed.clear();
       publish();
       return;
     }
@@ -197,13 +247,34 @@ export function createStartersReader(deps: StartersReaderDeps) {
     const page = await deps.fetchPage(0, STARTERS_DELTA_SIZE);
     for (const [child, starter] of startersById(page.sessions)) map.set(child, starter);
     const seen = new Set(page.sessions.map((s) => s.engine_session_id).filter(Boolean));
-    const missed = [...wanted].some((id) => !seen.has(id));
-    if (missed && page.truncated) {
+    for (const id of seen) if (id) missed.delete(id);
+    const absent = [...wanted].filter((id) => !seen.has(id) && !map.has(id));
+    if (absent.length > 0 && page.truncated) {
       // More new sessions than one page, or an id the newest page does not
       // hold: one full read settles it.
       map = await readAllStarters(deps.fetchPage);
+      missed.clear();
+    } else {
+      retryMissing(absent.filter((id) => !map.has(id)));
     }
     publish();
+  }
+
+  /** A child's link can be written after its session shows in the engine's
+   *  list, so the delta may not hold it yet. Ask again for a few reads. */
+  function retryMissing(ids: readonly string[]): void {
+    let again = false;
+    for (const id of ids) {
+      const tries = (missed.get(id) ?? 0) + 1;
+      if (tries > MISSING_ID_RETRIES) {
+        missed.delete(id);
+        continue;
+      }
+      missed.set(id, tries);
+      fresh.add(id);
+      again = true;
+    }
+    if (again) pending = true;
   }
 
   function load(): void {
@@ -262,6 +333,7 @@ export function createStartersReader(deps: StartersReaderDeps) {
     close(): void {
       clearTimeout(timer);
       clearTimeout(electTimer);
+      stopTimers();
       if (role === "leader") post({ type: "bye" });
       role = "unknown";
     },

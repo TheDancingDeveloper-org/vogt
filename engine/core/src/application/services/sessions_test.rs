@@ -1954,7 +1954,7 @@ fn a_full_page_reads_transcripts_only_for_its_own_rows() {
     assert!(transcript_reads().is_empty());
 }
 
-/// A full list that names only starter columns is read from the declared
+/// A full list that asks `starters_only` is read from the declared
 /// table: no engine call and no transcript read, stopped sessions included
 /// (WI-4531).
 #[test]
@@ -1983,6 +1983,7 @@ fn a_starters_read_asks_neither_the_engine_nor_a_transcript() {
             "include_stopped": true,
             "limit": 500,
             "fields": ["engine_session_id", "started_by_session"],
+            "starters_only": true,
         }),
     )
     .unwrap();
@@ -2009,10 +2010,48 @@ fn a_starters_read_asks_neither_the_engine_nor_a_transcript() {
             "include_stopped": true,
             "limit": 1,
             "fields": ["engine_session_id", "started_by_session"],
+            "starters_only": true,
         }),
     )
     .unwrap();
     assert_eq!(paged["sessions"].as_array().unwrap().len(), 1, "{paged}");
     assert_eq!(paged["truncated"], true);
     assert!(script.seen.lock().unwrap().is_empty(), "engine was asked");
+}
+
+/// Naming starter columns in `fields` alone does not select the fast path: the
+/// caller must ask `starters_only`, and a flag that cannot be honoured is an
+/// error, not a silent change of output (WI-4543).
+#[test]
+fn starter_fields_without_the_flag_keep_the_ordinary_full_rows() {
+    let script = script_with(Vec::new());
+    let built = opened(Some(Arc::clone(&script)));
+    insert_project(&built, "beta");
+    seed_child_session(&built, "eng-parent", None, None);
+    seed_child_session(&built, "eng-child", Some("oversight"), Some("eng-parent"));
+    let plain = list_sessions_op(
+        &built,
+        json!({
+            "mode": "full",
+            "include_stopped": true,
+            "fields": ["engine_session_id", "started_by_session"],
+        }),
+    )
+    .unwrap();
+    // The ordinary path asks the engine; the starters path never does.
+    assert!(!script.seen.lock().unwrap().is_empty(), "engine not asked");
+    assert!(plain["sessions"].is_array(), "{plain}");
+
+    let refused = list_sessions_op(
+        &built,
+        json!({"mode": "digest", "starters_only": true, "fields": ["engine_session_id"]}),
+    )
+    .unwrap_err();
+    assert_eq!(refused.code(), "invalid_request", "{refused:?}");
+    let wide = list_sessions_op(
+        &built,
+        json!({"mode": "full", "starters_only": true, "fields": ["name"]}),
+    )
+    .unwrap_err();
+    assert_eq!(wide.code(), "invalid_request", "{wide:?}");
 }

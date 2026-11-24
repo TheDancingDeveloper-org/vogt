@@ -1526,12 +1526,16 @@ mod tests {
         );
     }
 
-    /// `project.list` gained `mode` (WI-4317, parity_divergence.rs); the Python
-    /// corpus predates it, so the defaulted field is not compared.
+    /// `project.list` gained `mode` (WI-4317, parity_divergence.rs) and
+    /// `session.list` gained `starters_only` (WI-4543); the Python corpus
+    /// predates both, so the defaulted field is not compared.
     fn without_recorded_divergence(op: &str, value: &serde_json::Value) -> serde_json::Value {
         let mut value = value.clone();
         if op == "project.list" && value["mode"] == "full" {
             value.as_object_mut().unwrap().remove("mode");
+        }
+        if op == "session.list" && value["starters_only"] == false {
+            value.as_object_mut().unwrap().remove("starters_only");
         }
         value
     }
