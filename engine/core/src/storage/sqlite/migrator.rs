@@ -230,6 +230,17 @@ pub fn migrate(
     holder: &str,
     now: &str,
 ) -> Result<crate::storage::interface::MigrationReport, MigrateError> {
+    migrate_with_release(conn, store, directory, holder, now, release_lock)
+}
+
+fn migrate_with_release(
+    conn: &mut Connection,
+    store: &str,
+    directory: Option<&Path>,
+    holder: &str,
+    now: &str,
+    release: impl FnOnce(&Connection, &str) -> Result<(), MigrateError>,
+) -> Result<crate::storage::interface::MigrationReport, MigrateError> {
     ensure_framework(conn)?;
     let available = load_migrations(store, directory)?;
     // The lock row stores `acquired_at`, and it is rewritten on every call even
@@ -258,8 +269,18 @@ pub fn migrate(
             version: applied_version(conn)?,
         })
     })();
-    release_lock(conn, holder)?;
-    result
+    // Always release the lock. The migration outcome wins: a release failure
+    // is logged, and only surfaces when the migration itself succeeded.
+    let released = release(conn, holder);
+    match (result, released) {
+        (Err(err), Err(release_err)) => {
+            tracing::error!(error = %release_err, "migration lock release failed after migration error");
+            Err(err)
+        }
+        (Err(err), Ok(())) => Err(err),
+        (Ok(report), Ok(())) => Ok(report),
+        (Ok(_), Err(release_err)) => Err(release_err),
+    }
 }
 
 fn ensure_framework(conn: &Connection) -> Result<(), MigrateError> {
@@ -461,6 +482,70 @@ mod tests {
             |row| row.get(0),
         )
         .unwrap()
+    }
+
+    fn failing_migration_conn(tag: &str) -> (Connection, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("vogt-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("db.sqlite");
+        let _ = std::fs::remove_file(&path);
+        let mut conn = connect(&path).unwrap();
+        migrate(&mut conn, "declared", None, "a", "2026-01-01T00:00:00Z").unwrap();
+        conn.execute("UPDATE migrations SET checksum = 'tampered'", [])
+            .unwrap();
+        (conn, dir)
+    }
+
+    #[test]
+    fn a_failed_migration_is_returned_when_the_release_succeeds() {
+        let (mut conn, dir) = failing_migration_conn("rel-ok");
+        let result = migrate(&mut conn, "declared", None, "b", "2026-01-01T00:00:00Z");
+        let err = result.expect_err("tampered checksum must fail");
+        assert!(
+            err.to_string().contains("modified after being applied"),
+            "{err}"
+        );
+        assert_eq!(holder_of(&conn), None, "lock released");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_failed_migration_is_not_masked_by_a_failed_release() {
+        let (mut conn, dir) = failing_migration_conn("rel-fail");
+        let result = migrate_with_release(
+            &mut conn,
+            "declared",
+            None,
+            "b",
+            "2026-01-01T00:00:00Z",
+            |_, _| Err(MigrateError::Message("release exploded".into())),
+        );
+        let err = result.expect_err("must fail");
+        assert!(
+            err.to_string().contains("modified after being applied"),
+            "{err}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_failed_release_surfaces_when_the_migration_succeeded() {
+        let dir = std::env::temp_dir().join(format!("vogt-rel-only-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("db.sqlite");
+        let _ = std::fs::remove_file(&path);
+        let mut conn = connect(&path).unwrap();
+        let err = migrate_with_release(
+            &mut conn,
+            "declared",
+            None,
+            "a",
+            "2026-01-01T00:00:00Z",
+            |_, _| Err(MigrateError::Message("release exploded".into())),
+        )
+        .expect_err("release failure surfaces");
+        assert!(err.to_string().contains("release exploded"));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
