@@ -39,7 +39,7 @@
 #     check_workflow_policy (runner-policy.yml)
 #   uv run --no-project python (no project deps): check_bundle,
 #     check_rust_version, check_demo_assets (ci.yml)
-#   not wired into any workflow, run by hand: check_engine_spec, call_latency
+#   not wired into any workflow, run by hand: call_latency (check_engine_spec is now scripts/check-engine-files.mjs, in ci.yml)
 
 set -uo pipefail
 
@@ -94,6 +94,7 @@ for half in "${halves[@]}"; do
         fi
         run "pnpm typecheck" pnpm --dir web typecheck
         run "pwa route map" node web/scripts/check-route-map.mjs
+        run "engine spec, image, workflow files" node scripts/check-engine-files.mjs
         run "pnpm test" pnpm --dir web test
         ;;
     *)
