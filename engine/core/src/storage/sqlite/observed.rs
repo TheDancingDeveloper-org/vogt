@@ -18,7 +18,7 @@ use crate::storage::observed_types::{
     ActivityBatch, ActivityEventRow, ActivityIndexStats, ActivityQuery, ActivitySessionRow,
     AppendStats, DepRefRow, PendingObservation, PruneReport, TranscriptCursor,
 };
-use crate::storage::sqlite::connection::connect_with;
+use crate::storage::sqlite::connection::{ConnPool, Lease};
 use crate::storage::sqlite::migrator::{self, migrations_root, table_exists};
 
 const META_INSTANCE_ID: &str = "instance_id";
@@ -154,6 +154,7 @@ pub struct SqliteObservedStore<C, I> {
     clock: Arc<std::sync::Mutex<C>>,
     ids: Arc<std::sync::Mutex<I>>,
     synchronous: String,
+    pool: Arc<ConnPool>,
     has_evidence_cached: AtomicBool,
 }
 
@@ -168,6 +169,7 @@ impl<C, I> Clone for SqliteObservedStore<C, I> {
             clock: Arc::clone(&self.clock),
             ids: Arc::clone(&self.ids),
             synchronous: self.synchronous.clone(),
+            pool: Arc::clone(&self.pool),
             has_evidence_cached: AtomicBool::new(false),
         }
     }
@@ -196,6 +198,7 @@ where
         synchronous: &str,
     ) -> Self {
         Self {
+            pool: ConnPool::for_path(&path, synchronous),
             path,
             clock,
             ids,
@@ -204,8 +207,14 @@ where
         }
     }
 
-    fn open(&self, create: bool) -> Result<Connection, VogtError> {
-        connect_with(&self.path, create, &self.synchronous).map_err(sql_err)
+    /// The pooled writer connection.
+    fn open(&self, create: bool) -> Result<Lease, VogtError> {
+        self.pool.writer(create).map_err(sql_err)
+    }
+
+    /// A pooled read-only connection.
+    fn reader(&self) -> Result<Lease, VogtError> {
+        self.pool.reader().map_err(sql_err)
     }
 
     fn next_id(&self, prefix: &str) -> String {
@@ -257,7 +266,7 @@ where
         if !self.path.exists() {
             return 0;
         }
-        let Ok(conn) = self.open(false) else {
+        let Ok(conn) = self.reader() else {
             return 0;
         };
         migrator::applied_version(&conn).unwrap_or(0)
@@ -324,7 +333,7 @@ where
         if !self.path.exists() {
             return Ok(None);
         }
-        let conn = self.open(false)?;
+        let conn = self.reader()?;
         if !table_exists(&conn, "meta").map_err(VogtError::from)? {
             return Ok(None);
         }
@@ -344,7 +353,7 @@ where
         if self.has_evidence_cached.load(Ordering::Relaxed) {
             return Ok(true);
         }
-        let conn = self.open(false)?;
+        let conn = self.reader()?;
         let exists = table_exists(&conn, "observations").map_err(VogtError::from)?;
         if exists {
             self.has_evidence_cached.store(true, Ordering::Relaxed);
@@ -462,7 +471,7 @@ where
 
     fn list_sweeps(&self, collector: Option<&str>, limit: i64) -> Result<Vec<Sweep>, VogtError> {
         // Python's `if collector` treats "" as absent.
-        let conn = self.open(false)?;
+        let conn = self.reader()?;
         match collector.filter(|name| !name.is_empty()) {
             Some(name) => many(
                 &conn,
@@ -487,7 +496,7 @@ where
         // Python loads every finished row and keeps the first per collector
         // (`observed.py` coverage). The window returns that same row — the
         // greatest (finished_at, id) — without decoding the history behind it.
-        let conn = self.open(false)?;
+        let conn = self.reader()?;
         // Greatest (finished_at, id) per collector, the row Python keeps with
         // `setdefault` after `ORDER BY collector, finished_at DESC, id DESC`.
         // `MAX(finished_at)` rides `idx_sweeps_finished`; a window or a
@@ -516,7 +525,7 @@ where
         // so only the run's last finished moment survives. Parsing and
         // writing the map once per run is the same answer without walking
         // the scope text of every historical row in Rust.
-        let conn = self.open(false)?;
+        let conn = self.reader()?;
         let mut statement = conn
             .prepare(
                 "SELECT collector, scope, finished_at, started_at FROM sweeps \
@@ -610,7 +619,7 @@ where
         } else {
             format!("WHERE {}", clauses.join(" AND "))
         };
-        let conn = self.open(false)?;
+        let conn = self.reader()?;
         many(
             &conn,
             &format!("SELECT * FROM observations {where_sql} ORDER BY observed_at DESC, id DESC LIMIT ? OFFSET ?"),
@@ -649,7 +658,7 @@ where
             format!("WHERE {}", clauses.join(" AND "))
         };
         values.push(limit.to_string());
-        let conn = self.open(false)?;
+        let conn = self.reader()?;
         many(
             &conn,
             &format!(
@@ -661,7 +670,7 @@ where
     }
 
     fn latest_by_subject(&self, subject_key: &str) -> Result<Option<Observation>, VogtError> {
-        let conn = self.open(false)?;
+        let conn = self.reader()?;
         one(
             &conn,
             "SELECT subject_key, observation_id AS id, observation_id, collector, kind, project_id, payload, content_digest, source_url, promoted, observed_at, '' AS sweep_id FROM latest_observations WHERE subject_key = ?",
@@ -681,7 +690,7 @@ where
             clauses.push("project_id = ?".into());
             values.push(project.to_string());
         }
-        let conn = self.open(false)?;
+        let conn = self.reader()?;
         conn.query_row(
             &format!(
                 "SELECT COUNT(*) AS n FROM latest_observations WHERE {}",
@@ -698,7 +707,10 @@ where
         declared_db: &std::path::Path,
         inputs: &crate::storage::interface::BacklogCountInputs,
     ) -> Result<i64, VogtError> {
-        let conn = self.open(false)?;
+        let mut conn = self.reader()?;
+        // ATTACH, a scalar function and query_only change the connection: it
+        // closes on release instead of going back to the pool.
+        conn.discard();
         open_backlog_count(&conn, declared_db)?;
         let sql = backlog_count_sql(&conn)?;
         conn.query_row(
@@ -714,7 +726,7 @@ where
         collector: &str,
         project_id: &str,
     ) -> Result<Option<String>, VogtError> {
-        let conn = self.open(false)?;
+        let conn = self.reader()?;
         let row: Option<Option<String>> = conn
             .query_row(
                 "SELECT watermark FROM sync_state WHERE collector = ? AND project_id = ?",
@@ -768,7 +780,7 @@ where
             return Ok(BTreeMap::new());
         }
         let placeholders = vec!["?"; subject_keys.len()].join(", ");
-        let conn = self.open(false)?;
+        let conn = self.reader()?;
         let rows = many(
             &conn,
             &format!(
@@ -800,7 +812,7 @@ where
         } else {
             format!("WHERE {}", clauses.join(" AND "))
         };
-        let conn = self.open(false)?;
+        let conn = self.reader()?;
         many(
             &conn,
             &format!("SELECT * FROM latest_dep_refs {where_sql} ORDER BY subject_key"),
@@ -810,7 +822,7 @@ where
     }
 
     fn counts(&self) -> Result<BTreeMap<String, i64>, VogtError> {
-        let conn = self.open(false)?;
+        let conn = self.reader()?;
         let mut counts = BTreeMap::new();
         for (name, table) in [
             ("sweeps", "sweeps"),
@@ -847,7 +859,7 @@ where
         if !self.path.exists() {
             return Ok(0);
         }
-        let conn = self.open(false)?;
+        let conn = self.reader()?;
         if !table_exists(&conn, "meta").map_err(VogtError::from)? {
             return Ok(0);
         }
@@ -928,7 +940,7 @@ where
     }
 
     fn activity_cursors(&self) -> Result<BTreeMap<String, TranscriptCursor>, VogtError> {
-        let conn = self.open(false)?;
+        let conn = self.reader()?;
         let rows = many(&conn, "SELECT * FROM agent_activity_files", [], |row| {
             Ok((
                 row.get::<_, String>("path")?,
@@ -1023,7 +1035,7 @@ where
         offset: i64,
     ) -> Result<Vec<ActivityEventRow>, VogtError> {
         let (where_sql, params) = activity_where(query);
-        let conn = self.open(false)?;
+        let conn = self.reader()?;
         many(
             &conn,
             &format!(
@@ -1157,7 +1169,7 @@ fn hostname() -> String {
         .unwrap_or_else(|_| "localhost".to_string())
 }
 
-fn finish<T>(conn: Connection, outcome: Result<T, rusqlite::Error>) -> Result<T, VogtError> {
+fn finish<T>(conn: Lease, outcome: Result<T, rusqlite::Error>) -> Result<T, VogtError> {
     match outcome {
         Ok(value) => {
             conn.execute("COMMIT", []).map_err(sql_err)?;
