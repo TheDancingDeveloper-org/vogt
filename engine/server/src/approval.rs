@@ -38,8 +38,8 @@
 //! answered by choice (`POST /api/sessions/{id}/answer`) rather than by
 //! counting arrow presses.
 
-use once_cell::sync::Lazy;
 use regex::Regex;
+use std::sync::LazyLock;
 
 /// Characters a TUI draws its boxes and rules with, stripped from each line's
 /// edges before matching.
@@ -49,7 +49,7 @@ const BORDER: &[char] = &[
 
 /// Loose prefilter over the ANSI-stripped raw tail; whitespace-insensitive
 /// because a TUI may position words with cursor moves rather than spaces.
-static MENTIONS: Lazy<regex::bytes::Regex> = Lazy::new(|| {
+static MENTIONS: LazyLock<regex::bytes::Regex> = LazyLock::new(|| {
     regex::bytes::Regex::new(
         r"(?i)permission\s*required|always\s*allow|allow\s*once|do\s*you\s*want\s*to|would\s*you\s*like\s*to\s*(?:run|make|apply|allow|grant|send)|allow\s*(?:command|.{1,80}?to\s*run\s*tool)|press\s*\S+\s*to\s*confirm\s*or\s*\S+\s*to\s*cancel|field\s*\d+\s*/\s*\d+|needs\s*your\s*approval|approve\s*network|grant\s*these\s*permissions|send\s*input\s*to|automatically\s*den|requires\s*approval|trust\s*the\s*files|trust\s*this\s*folder|project\s*you\s*(?:created|trust)|external\s*claude\.md|outside\s*(?:of\s*)?(?:the\s*)?(?:current\s*)?working\s*director|enter\s*to\s*select",
     )
@@ -58,7 +58,7 @@ static MENTIONS: Lazy<regex::bytes::Regex> = Lazy::new(|| {
 
 /// The question line of a permission dialog, matched on a border-stripped
 /// line of the rendered screen.
-static QUESTION: Lazy<Regex> = Lazy::new(|| {
+static QUESTION: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r"(?i)^(?:do you want to (?:proceed|make this edit|make these edits|create|run|allow|delete|overwrite|fetch|use|write|execute|apply)\b.*\?|would you like to (?:run|make|apply|allow)\b.*\?|allow (?:command|this command|edit|tool)\b.*\??|.*\brequires approval\b.*|do you trust the files in this folder\??|trust this folder\??|.*\bis this a project you (?:created or one you )?trust\b.*\??|allow external claude\.md(?: file)? imports\??)$",
     )
@@ -70,21 +70,21 @@ static QUESTION: Lazy<Regex> = Lazy::new(|| {
 /// screen: "Press enter to confirm or esc to cancel", with " or o to open
 /// thread" when it comes from another thread. Codex's other pickers say "to
 /// go back", so this footer is the overlay's alone (WI-1355).
-static CODEX_OVERLAY_FOOTER: Lazy<Regex> = Lazy::new(|| {
+static CODEX_OVERLAY_FOOTER: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^press \S+ to confirm or \S+ to cancel\b").expect("codex footer compiles")
 });
 
 /// The progress line that heads every MCP elicitation form Codex draws
 /// (`mcp_server_elicitation.rs`): "Field 1/1", "Field 2/3 (1 required
 /// unanswered)". Its tool approvals and server elicitations alike.
-static CODEX_FIELD: Lazy<Regex> = Lazy::new(|| {
+static CODEX_FIELD: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^Field \d+/\d+(?: \(\d+ required unanswered\))?$").expect("codex field compiles")
 });
 
 /// The elicitation form's footer: "enter to submit | esc to cancel", "enter
 /// to submit all | ←/→ to navigate fields | esc to cancel", "⌃x enter to
 /// submit | esc to cancel", read on up to three joined lines.
-static CODEX_FORM_FOOTER: Lazy<Regex> = Lazy::new(|| {
+static CODEX_FORM_FOOTER: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^(?:\S+ )?\S+ to submit\b.*\besc to cancel\b")
         .expect("codex form footer compiles")
 });
@@ -92,7 +92,7 @@ static CODEX_FORM_FOOTER: Lazy<Regex> = Lazy::new(|| {
 /// The overlay's title, which `approval_overlay.rs` builds for each kind of
 /// request: a command, input to a running terminal, network access, extra
 /// permissions, a patch, and an MCP server's request.
-static CODEX_OVERLAY_TITLE: Lazy<Regex> = Lazy::new(|| {
+static CODEX_OVERLAY_TITLE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r"(?i)^(?:would you like to (?:run the following command|make the following edits|grant these permissions|send input to (?:the existing terminal|terminal \S+))\?|do you want to approve network access to .+\?|.+ needs your approval\.)$",
     )
@@ -103,14 +103,14 @@ static CODEX_OVERLAY_TITLE: Lazy<Regex> = Lazy::new(|| {
 /// WI-1871): "Enter to select · ↑/↓ to navigate · Esc to cancel", "Enter to
 /// select · Tab/Arrow keys to navigate · Esc to cancel". Anchored at both
 /// ends so output drawn under an answered menu does not keep it live.
-static CLAUDE_QUESTION_FOOTER: Lazy<Regex> = Lazy::new(|| {
+static CLAUDE_QUESTION_FOOTER: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^enter to select\b.*\bto navigate\b(?:.*\bto cancel)?$")
         .expect("question footer compiles")
 });
 
 /// A question menu's checkbox: "[ ] Label", "[✔] Label" (multi-select).
-static CHECKBOX: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^\[[ ✔✓xX×]\]\s*").expect("checkbox regex compiles"));
+static CHECKBOX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^\[[ ✔✓xX×]\]\s*").expect("checkbox regex compiles"));
 
 /// The header row above a question menu: one tab ("☐ Approach") or the tab
 /// bar of several ("←  ☐ Approach  ✔ Library  ✔ Submit  →").
@@ -123,23 +123,23 @@ fn is_question_header(line: &str) -> bool {
 const CODEX_UNTITLED: &str = "Codex is waiting for approval";
 
 /// A numbered menu option, with or without the selection glyph.
-static OPTION: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^(?:[❯›>▸]\s*)?1\.\s+\S").expect("option regex compiles"));
+static OPTION: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^(?:[❯›>▸]\s*)?1\.\s+\S").expect("option regex compiles"));
 
 /// Any numbered menu option: the highlight glyph, the number, the label.
-static ANY_OPTION: Lazy<Regex> = Lazy::new(|| {
+static ANY_OPTION: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^(?:([❯›>▸])\s*)?(\d{1,2})\.\s+(\S.*?)\s*$").expect("option regex compiles")
 });
 
 /// Text that makes a permission dialog a read outside the working
 /// directories rather than any other tool call.
-static READ_OUTSIDE: Lazy<Regex> = Lazy::new(|| {
+static READ_OUTSIDE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)outside\s+(?:of\s+)?(?:the\s+)?(?:current\s+)?working\s+director|read\s+(?:files?\s+)?outside")
         .expect("read-outside regex compiles")
 });
 
 /// "…automatically deny this request in 90s", "auto-deny in 1m".
-static DEADLINE: Lazy<Regex> = Lazy::new(|| {
+static DEADLINE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r"(?i)auto(?:matically)?[\s-]*(?:den(?:y|ied|ies)|reject\w*)\D{0,60}?(\d{1,5})\s*(seconds?|secs?|s|minutes?|mins?|m)\b",
     )
@@ -148,12 +148,12 @@ static DEADLINE: Lazy<Regex> = Lazy::new(|| {
 
 /// opencode's dialog title (WI-933): "△ Permission required", and the
 /// follow-up "△ Always allow" that "Allow always" opens.
-static OPENCODE_TITLE: Lazy<Regex> = Lazy::new(|| {
+static OPENCODE_TITLE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^(?:△\s*)?(Permission required|Always allow)$").expect("opencode title compiles")
 });
 
 /// opencode's button row: horizontal buttons, then its key hints.
-static OPENCODE_BUTTONS: Lazy<Regex> = Lazy::new(|| {
+static OPENCODE_BUTTONS: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^(Allow once\s{2,}Allow always\s{2,}Reject|Confirm\s{2,}Cancel)\b")
         .expect("opencode buttons compile")
 });
