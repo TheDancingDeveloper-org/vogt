@@ -55,17 +55,27 @@ struct NewLabel {
     now: Moment,
 }
 
-/// Define a tag, shared instance-wide and GitHub-label aligned.
-pub fn create_label_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
-    crate::with_ctx!(ctx, |ctx| create_label(ctx, params))
+// Define a tag, shared instance-wide and GitHub-label aligned.
+crate::typed_op!(create_label_op, CreateLabelParams, create_label);
+
+#[derive(serde::Serialize)]
+struct LabelOut {
+    label: Label,
 }
 
-fn create_label<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
+#[derive(serde::Serialize)]
+struct LabelsOut {
+    labels: Vec<Label>,
+}
+
+fn create_label<C, I>(
+    ctx: &AppContext<C, I>,
+    params: CreateLabelParams,
+) -> Result<LabelOut, VogtError>
 where
     C: Clock + 'static,
     I: IdFactory + 'static,
 {
-    let params = parse::<CreateLabelParams>(params)?;
     let (declared, _, _, clock, ids, _) = context_parts(ctx);
     // Checked before the id is drawn. The write repeats the check, but a
     // duplicate refused here costs no id, so the next one stays where Python
@@ -84,7 +94,7 @@ where
     };
     let mut writing = crate::application::context::write_of(ctx);
     let label = insert_label(&mut writing, &params.reason, input)?;
-    Ok(json!({"label": label}))
+    Ok(LabelOut { label })
 }
 
 fn insert_label<C: Clock + 'static, I: IdFactory + 'static>(
@@ -118,19 +128,16 @@ fn insert_label<C: Clock + 'static, I: IdFactory + 'static>(
     })
 }
 
-pub fn list_labels_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
-    crate::with_ctx!(ctx, |ctx| list_labels(ctx, params))
-}
+crate::typed_op!(list_labels_op, ListParams, list_labels, null_is_empty);
 
-fn list_labels<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
+fn list_labels<C, I>(ctx: &AppContext<C, I>, params: ListParams) -> Result<LabelsOut, VogtError>
 where
     C: Clock + 'static,
     I: IdFactory + 'static,
 {
-    let params = parse::<ListParams>(or_default_object(params))?;
     let (declared, _, _, _, _, _) = context_parts(ctx);
     let labels = declared.read()?.list_labels(params.limit, params.offset)?;
-    Ok(json!({"labels": labels}))
+    Ok(LabelsOut { labels })
 }
 
 fn or_default_object(params: Value) -> Value {
