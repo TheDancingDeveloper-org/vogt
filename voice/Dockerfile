@@ -25,7 +25,7 @@
 # the C23 `__isoc23_strtol*` symbols, which bookworm's glibc 2.36 lacks, so
 # the link fails there. trixie ships glibc 2.41, and the `ubuntu:26.04` final
 # stage below is newer still, so the binary's glibc floor is met at run time.
-FROM ghcr.io/thedancingdeveloper-org/vogt-base/rust:1-trixie AS build
+FROM ghcr.io/thedancingdeveloper-org/vogt-base/rust:1-trixie@sha256:223cc32ddca8f3ee90c436dbc94b6b5f052ea7f9653c5201e9612f08ad7d21b8 AS build
 RUN apt-get update \
     && apt-get install --no-install-recommends -y clang cmake libclang-dev libopus-dev pkg-config \
     && rm -rf /var/lib/apt/lists/*

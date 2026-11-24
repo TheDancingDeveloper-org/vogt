@@ -68,7 +68,7 @@
 # substitution in reverse so a bump still comes from upstream. Overriding
 # these build args back to their Docker Hub names still works and is the
 # escape hatch for a builder that cannot reach GHCR.
-ARG NODE_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-base/node:22-bookworm
+ARG NODE_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-base/node:22-bookworm@sha256:e13726ca604184d7a91fcacab1fc09eefd642dc28e79ac34e85540dd93b78cfb
 ARG PYTHON_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-base/python:3.13-slim@sha256:ffb752e139c0a19692a43af8d8523b274222dd68eebad5d583b45c2201c6e30a
 # The static demo's *runtime* base, deliberately not `NODE_IMAGE`. Building the
 # PWA needs a toolchain; serving the built bytes does not — `demo-server.mjs`
@@ -80,8 +80,8 @@ ARG PYTHON_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-base/python:3.13-slim@sha2
 # `libexpat1`/`libexpat1-dev` (CVE-2026-56408) was the next, and it failed
 # `dev`'s build on four consecutive pushes while nothing in the tree had
 # changed. The slim base carries 88 packages and neither of those.
-ARG DEMO_RUNTIME_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-base/node:22-bookworm-slim
-ARG RUST_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-base/rust:1-bookworm
+ARG DEMO_RUNTIME_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-base/node:22-bookworm-slim@sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee
+ARG RUST_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-base/rust:1-bookworm@sha256:ade39a710ef85f3506cffcfec3e8a24ba090badef1dff2fb798f71d878833fea
 # The dev-pod toolchain base — everything the shipped stage used to install
 # itself, and 22 of this image's 34 build minutes. Built and published by
 # `.github/workflows/pod-base.yml` from `engine/Dockerfile.pod`; see either for
