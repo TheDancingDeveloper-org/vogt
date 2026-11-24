@@ -849,9 +849,9 @@ impl AgentTaskRegistry {
         Ok(registry)
     }
 
-    pub fn spawn_scheduler(self: &Arc<Self>) {
+    pub fn spawn_scheduler(self: &Arc<Self>, tasks: &crate::boot_tasks::BootTasks) {
         let registry = Arc::clone(self);
-        tokio::spawn(async move {
+        tasks.spawn("agent-task-scheduler", async move {
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             loop {
                 registry.run_due_once().await;
@@ -860,9 +860,13 @@ impl AgentTaskRegistry {
         });
     }
 
-    pub fn spawn_run_watcher(self: &Arc<Self>, bus: EventBus) {
+    pub fn spawn_run_watcher(
+        self: &Arc<Self>,
+        bus: EventBus,
+        tasks: &crate::boot_tasks::BootTasks,
+    ) {
         let registry = Arc::clone(self);
-        tokio::spawn(async move {
+        tasks.spawn("agent-task-run-watcher", async move {
             let mut rx = bus.subscribe();
             loop {
                 match rx.recv().await {
@@ -897,9 +901,13 @@ impl AgentTaskRegistry {
     /// own. It inherits the follower's properties: silent when no core is
     /// configured, and starting from the core's current head so a boot replays
     /// nothing.
-    pub fn spawn_trigger_watcher(self: &Arc<Self>, bus: EventBus) {
+    pub fn spawn_trigger_watcher(
+        self: &Arc<Self>,
+        bus: EventBus,
+        tasks: &crate::boot_tasks::BootTasks,
+    ) {
         let registry = Arc::clone(self);
-        tokio::spawn(async move {
+        tasks.spawn("agent-task-trigger-watcher", async move {
             let mut rx = bus.subscribe();
             loop {
                 match rx.recv().await {

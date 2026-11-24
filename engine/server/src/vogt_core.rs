@@ -874,7 +874,7 @@ pub fn spawn_event_follower(state: Arc<AppState>) {
         tracing::info!("vogt event follower not started: no core token configured");
         return;
     }
-    tokio::spawn(async move {
+    Arc::clone(&state.boot_tasks).spawn("vogt-event-follower", async move {
         // Start at the head. Retried rather than falling back to 0: the core
         // usually restarts with the engine, and a cursor of 0 replays its
         // whole history onto every open client (WI-2328).

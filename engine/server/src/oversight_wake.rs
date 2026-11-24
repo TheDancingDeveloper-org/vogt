@@ -276,7 +276,7 @@ fn overseer_state(registry: &SessionRegistry, id: Uuid, now: Instant) -> Oversee
 
 /// Watch the bus for supervised changes and type due lines.
 pub fn spawn_watcher(state: Arc<AppState>) {
-    tokio::spawn(async move {
+    Arc::clone(&state.boot_tasks).spawn("oversight-wake", async move {
         let mut rx = state.bus.subscribe_seq();
         let mut coalescer = Coalescer::default();
         let mut ticker = tokio::time::interval(TICK);

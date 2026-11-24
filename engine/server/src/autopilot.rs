@@ -388,7 +388,7 @@ pub fn spawn_watcher(state: Arc<AppState>) {
         return;
     }
     let tick = (policy.nudge_after / 4).clamp(Duration::from_millis(250), Duration::from_secs(15));
-    tokio::spawn(async move {
+    Arc::clone(&state.boot_tasks).spawn("autopilot", async move {
         let mut ticker = tokio::time::interval(tick);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {

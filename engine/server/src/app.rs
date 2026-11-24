@@ -105,6 +105,8 @@ pub struct AppState {
     pub chats: Option<Arc<ChatRuntime>>,
     /// Cached workspace tree sizes for `GET /api/workspaces` (WI-1340).
     pub workspace_sizes: Arc<crate::workspaces::WorkspaceSizes>,
+    /// The process-lifetime background tasks spawned at boot (WI-4650).
+    pub boot_tasks: Arc<crate::boot_tasks::BootTasks>,
 }
 
 async fn build_state(cfg: Config) -> Arc<AppState> {
@@ -272,6 +274,7 @@ async fn build_state(cfg: Config) -> Arc<AppState> {
         hibernation,
         chats,
         workspace_sizes: Arc::new(crate::workspaces::WorkspaceSizes::new(workspace_size_ttl)),
+        boot_tasks: Default::default(),
     })
 }
 
@@ -334,13 +337,17 @@ fn spawn_background_tasks(state: &Arc<AppState>) {
     // comment for what that costs across a restart, which is a decision
     // rather than an oversight.
     push_api::spawn_vogt_drift_watcher(Arc::clone(state));
-    state.agent_tasks.spawn_scheduler();
-    state.agent_tasks.spawn_run_watcher(state.bus.clone());
+    state.agent_tasks.spawn_scheduler(&state.boot_tasks);
+    state
+        .agent_tasks
+        .spawn_run_watcher(state.bus.clone(), &state.boot_tasks);
     // Background task: subscribe to the same bus and start runs from matching
     // core-state events. The follower above is what puts vogt-core's
     // events on this bus; this watcher turns the ones a task listens for into
     // runs, bound and audited, capped per task and without a retry storm.
-    state.agent_tasks.spawn_trigger_watcher(state.bus.clone());
+    state
+        .agent_tasks
+        .spawn_trigger_watcher(state.bus.clone(), &state.boot_tasks);
     // Background task: enforce the assistant log's retention horizon on a
     // schedule, so the horizon is a configured maximum rather than
     // whatever the last caller passed.
@@ -758,7 +765,7 @@ fn spawn_assistant_log_retention_sweeper(state: Arc<AppState>) {
         return;
     };
     let retention_days = state.config.assistant_log_retention_days;
-    tokio::spawn(async move {
+    Arc::clone(&state.boot_tasks).spawn("assistant-log-retention", async move {
         loop {
             match log.cleanup(retention_days).await {
                 Ok(removed) if removed > 0 => tracing::info!(
@@ -787,7 +794,7 @@ fn spawn_history_retention_sweeper(state: Arc<AppState>) {
     if retention_days == 0 {
         return;
     }
-    tokio::spawn(async move {
+    Arc::clone(&state.boot_tasks).spawn("history-retention", async move {
         loop {
             match history.cleanup_old_sessions(retention_days).await {
                 Ok(removed) if removed > 0 => {
@@ -806,7 +813,7 @@ fn spawn_history_retention_sweeper(state: Arc<AppState>) {
 /// runs; the ages are measured from each session's exit.
 fn spawn_stopped_session_reaper(state: Arc<AppState>) {
     let sessions = Arc::clone(&state.sessions);
-    tokio::spawn(async move {
+    Arc::clone(&state.boot_tasks).spawn("stopped-reaper", async move {
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
@@ -910,6 +917,10 @@ pub async fn serve_forever(cfg: Config) -> std::io::Result<()> {
             // archived to history as before.
             drain_state.sessions.hibernate_for_shutdown().await;
             drain_state.sessions.drain_to_history().await;
+            drain_state
+                .boot_tasks
+                .shutdown(std::time::Duration::from_secs(5))
+                .await;
             // The last turns' economics are queued, not yet written: flush
             // them before the process goes (WI-2703).
             if let Some(history) = drain_state.history.as_ref() {
