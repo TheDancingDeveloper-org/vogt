@@ -25,6 +25,10 @@ use vogt_engine_contract::source::SourceDescriptor;
 use vogt_session_agent::Frame;
 const BOOTSTRAP_TTL: Duration = Duration::from_secs(300);
 const AGENT_OUTPUT_CHANNEL_CAPACITY: usize = 16;
+/// Frames the engine may queue for one attached agent. Control frames are
+/// never dropped: when the queue is full a send fails loudly instead, and a
+/// later resize supersedes a lost one, so only resizes are shed.
+const AGENT_COMMAND_QUEUE: usize = 1024;
 const AGENT_BUFFER_BYTES: usize = vogt_session_agent::DEFAULT_BUFFER_BYTES;
 /// The largest agent WS message: an `Output` frame carrying
 /// `AGENT_BUFFER_BYTES` of data, JSON-encoded as a byte array (up to four
@@ -69,7 +73,23 @@ struct PendingCredential {
     expires: Instant,
 }
 
-type AgentLinks = HashMap<Uuid, (mpsc::UnboundedSender<Frame>, Arc<PodLink>)>;
+fn try_queue(tx: &mpsc::Sender<Frame>, frame: Frame) -> std::io::Result<()> {
+    use mpsc::error::TrySendError;
+    match tx.try_send(frame) {
+        Ok(()) => Ok(()),
+        Err(TrySendError::Full(Frame::Resize { .. })) => Ok(()),
+        Err(TrySendError::Full(_)) => Err(std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            "agent command queue full",
+        )),
+        Err(TrySendError::Closed(_)) => Err(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "agent stream closed",
+        )),
+    }
+}
+
+type AgentLinks = HashMap<Uuid, (mpsc::Sender<Frame>, Arc<PodLink>)>;
 
 #[derive(Debug, Default)]
 pub struct AgentAuth {
@@ -954,14 +974,14 @@ impl AgentAuth {
         );
         true
     }
-    async fn attach(&self, id: Uuid, tx: mpsc::UnboundedSender<Frame>, link: Arc<PodLink>) {
+    async fn attach(&self, id: Uuid, tx: mpsc::Sender<Frame>, link: Arc<PodLink>) {
         self.links.lock().insert(id, (tx, Arc::clone(&link)));
         link.note_connected();
     }
     /// Drop the link, unless a newer connection has already replaced it. A
     /// dropped socket marks the link disconnected, so a redial is judged by
     /// the reconnect timeout rather than the heartbeat deadline.
-    async fn detach(&self, id: Uuid, tx: &mpsc::UnboundedSender<Frame>) {
+    async fn detach(&self, id: Uuid, tx: &mpsc::Sender<Frame>) {
         let mut links = self.links.lock();
         if let Some((_, link)) = links.get(&id).filter(|(cur, _)| cur.same_channel(tx)) {
             let link = Arc::clone(link);
@@ -1100,12 +1120,15 @@ impl AgentAuth {
         self.source_credentials.lock().remove(&id);
         self.launches.lock().remove(&id);
     }
+    /// Queue a frame for the attached agent without blocking. A full queue
+    /// sheds a `Resize` (the next one supersedes it) and fails every other
+    /// frame with `WouldBlock`, so a control message is never silently lost.
     pub fn send(&self, id: Uuid, frame: Frame) -> std::io::Result<()> {
         let result = self
             .links
             .lock()
             .get(&id)
-            .map(|(tx, _)| tx.send(frame))
+            .map(|(tx, _)| try_queue(tx, frame))
             .ok_or_else(|| {
                 std::io::Error::new(
                     std::io::ErrorKind::NotConnected,
@@ -1113,7 +1136,6 @@ impl AgentAuth {
                 )
             })?;
         result
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "agent stream closed"))
     }
     async fn session_ok(&self, id: Uuid, candidate: &[u8]) -> bool {
         self.sessions
@@ -1688,11 +1710,11 @@ where
         let _ = socket.close().await;
         return;
     }
-    let (tx, mut commands) = mpsc::unbounded_channel();
+    let (tx, mut commands) = mpsc::channel(AGENT_COMMAND_QUEUE);
     agent_auth.attach(id, tx.clone(), Arc::clone(&link)).await;
     // A stop asked for while no agent was attached is delivered on arrival.
     if link.stop_requested() {
-        let _ = tx.send(Frame::Signal {
+        let _ = tx.try_send(Frame::Signal {
             signal: "kill".into(),
         });
     }
@@ -2580,7 +2602,7 @@ mod tests {
         let auth = AgentAuth::default();
         let id = Uuid::new_v4();
         let (link, _reader) = auth.register_pod(id);
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel(8);
         let tx2 = tx.clone();
         auth.attach(id, tx, link).await;
         auth.send(
@@ -2607,13 +2629,34 @@ mod tests {
         let auth = AgentAuth::default();
         let id = Uuid::new_v4();
         let (link, _reader) = auth.register_pod(id);
-        let (old, _old_rx) = mpsc::unbounded_channel();
-        let (new, mut new_rx) = mpsc::unbounded_channel();
+        let (old, _old_rx) = mpsc::channel(8);
+        let (new, mut new_rx) = mpsc::channel(8);
         auth.attach(id, old.clone(), Arc::clone(&link)).await;
         auth.attach(id, new, link).await;
         auth.detach(id, &old).await;
         auth.send(id, Frame::Ack { offset: 3 }).unwrap();
         assert_eq!(new_rx.recv().await, Some(Frame::Ack { offset: 3 }));
+    }
+
+    #[test]
+    fn the_agent_command_queue_is_bounded_and_never_drops_a_control_frame() {
+        let auth = AgentAuth::default();
+        let id = Uuid::new_v4();
+        let (link, _reader) = auth.register_pod(id);
+        let (tx, mut rx) = mpsc::channel(2);
+        futures_util::FutureExt::now_or_never(auth.attach(id, tx, link)).unwrap();
+        auth.send(id, Frame::Ack { offset: 1 }).unwrap();
+        auth.send(id, Frame::Ack { offset: 2 }).unwrap();
+        // Full: a control frame fails rather than queueing without bound.
+        let err = auth.send(id, Frame::Ack { offset: 3 }).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::WouldBlock);
+        // A resize is shed (superseded by the next), not an error.
+        auth.send(id, Frame::Resize { cols: 1, rows: 1 }).unwrap();
+        assert_eq!(rx.try_recv().unwrap(), Frame::Ack { offset: 1 });
+        assert_eq!(rx.try_recv().unwrap(), Frame::Ack { offset: 2 });
+        assert!(rx.try_recv().is_err());
+        // Room again: sends succeed.
+        auth.send(id, Frame::Ack { offset: 3 }).unwrap();
     }
 
     #[test]
