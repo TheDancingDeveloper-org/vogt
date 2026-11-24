@@ -191,6 +191,7 @@ async fn an_identical_repaint_is_not_activity_but_a_spinner_is() {
     );
     // It is still repainting: its output clock keeps moving while it reads idle.
     let before = settled["last_output_at"].clone();
+    // Deliberate: time must pass for the repaint clock to move.
     tokio::time::sleep(Duration::from_millis(400)).await;
     let later = screen(idle_id.clone()).await;
     assert_ne!(later["last_output_at"], before, "{later}");
@@ -560,6 +561,7 @@ async fn wait_returns_on_ready_exit_change_and_timeout() {
     let change = tokio::spawn(get(format!(
         "{base}/api/sessions/{prompt}/wait?until=any-change&timeout_s=20"
     )));
+    // Deliberate: let the spawned long-poll register before the state change.
     tokio::time::sleep(Duration::from_millis(300)).await;
     let cleared = client
         .post(format!("{base}/api/sessions/{prompt}/blocked"))
@@ -753,6 +755,7 @@ async fn session_changes_are_sequenced_filtered_and_waited_on() {
                 .unwrap()
         }
     });
+    // Deliberate: let the spawned long-poll register before the state change.
     tokio::time::sleep(Duration::from_millis(300)).await;
     let blocked = client
         .post(format!("{base}/api/sessions/{prompt}/blocked"))
@@ -1057,7 +1060,15 @@ async fn the_sweep_returns_every_session_with_its_screen_tail_in_one_call() {
         .json()
         .await
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    let ended_id = ended["id"].as_str().unwrap().to_string();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while session_row(&client, &base, &ended_id).await["alive"] != false {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the ended session never exited"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 
     let rows: Vec<Value> = client
         .get(format!("{base}/api/sessions/sweep?screen_lines=2"))
@@ -1132,6 +1143,7 @@ async fn a_requested_stop_is_stopped_and_a_crash_is_still_errored() {
     };
     let reaped = start("reaped child", vec!["/bin/sh", "-c", "sleep 300"]).await;
     let crashed = start("crashing child", vec!["/bin/sh", "-c", "sleep 0.2; exit 3"]).await;
+    // Deliberate: the crashing child must run (and exit 3) before the kill.
     tokio::time::sleep(Duration::from_millis(150)).await;
     let killed = client
         .post(format!("{base}/api/sessions/{reaped}/kill"))
@@ -1335,6 +1347,7 @@ async fn a_stopped_opencode_session_is_stopped_not_errored() {
         ids.push(created["id"].as_str().unwrap().to_string());
     }
     let (stopped, crashed) = (&ids[0], &ids[1]);
+    // Deliberate: the crashing child must run (and exit) before the kill.
     tokio::time::sleep(Duration::from_millis(150)).await;
     let status = client
         .post(format!("{base}/api/sessions/{stopped}/kill"))
@@ -1796,6 +1809,7 @@ async fn osc7501_report_decides_activity_and_no_report_falls_through() {
     // past the quiet window (200 ms) that made the plain stub idle.
     let body = "#!/bin/sh\nprintf '\\033]7501;state=working:app=stub\\007'\nexec sleep 30\n";
     let (working, _t2) = spawn_osc_stub("agent", body);
+    // Deliberate: the report must hold past the quiet window; time is the subject.
     tokio::time::sleep(Duration::from_millis(1500)).await;
     assert_eq!(working.activity(), Running);
 
@@ -1859,6 +1873,7 @@ async fn a_done_marker_in_the_reporting_turn_leaves_it_blocked() {
     std::fs::write(&go, b"").unwrap();
     live_output_containing(&client, &base, &id, &["AUTOPILOT: DONE"]).await;
     wait_for_activity(&client, &base, &id, RESTING).await;
+    // Deliberate: negative check that the report survives over time.
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(
         blocked_report(&client, &base, &id).await["reason"],
