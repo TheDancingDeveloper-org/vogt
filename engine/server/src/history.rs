@@ -192,7 +192,7 @@ impl SessionHistory {
 
         // Create log directory if it doesn't exist
         std::fs::create_dir_all(&log_dir)
-            .map_err(|e| ApiError::Internal(format!("failed to create log dir: {}", e)))?;
+            .map_err(|e| ApiError::internal_src("failed to create log dir", e))?;
 
         // WAL lets readers (session list, search) run while a write commits;
         // NORMAL syncs only at checkpoints, which is safe under WAL and makes
@@ -209,7 +209,7 @@ impl SessionHistory {
             .max_connections(5)
             .connect_with(options)
             .await
-            .map_err(|e| ApiError::Internal(format!("failed to connect to history db: {}", e)))?;
+            .map_err(|e| ApiError::internal_src("failed to connect to history db", e))?;
 
         let economics_pending = Arc::new(Mutex::new(HashMap::new()));
         let history = Self {
@@ -276,7 +276,7 @@ impl SessionHistory {
             .create(true)
             .append(true)
             .open(self.log_path(id))
-            .map_err(|e| ApiError::Internal(format!("failed to open session log: {e}")))
+            .map_err(|e| ApiError::internal_src("failed to open session log", e))
     }
 
     /// Initialize database schema
@@ -297,7 +297,7 @@ impl SessionHistory {
         )
         .execute(&self.pool)
         .await
-        .map_err(|e| ApiError::Internal(format!("failed to create sessions table: {}", e)))?;
+        .map_err(|e| ApiError::internal_src("failed to create sessions table", e))?;
 
         // Create FTS5 virtual table for full-text search
         sqlx::query(
@@ -311,7 +311,7 @@ impl SessionHistory {
         )
         .execute(&self.pool)
         .await
-        .map_err(|e| ApiError::Internal(format!("failed to create fts table: {}", e)))?;
+        .map_err(|e| ApiError::internal_src("failed to create fts table", e))?;
 
         // `end_reason` and the identity columns arrived after the table did;
         // add them to an existing database. SQLite has no ADD COLUMN IF NOT
@@ -321,9 +321,7 @@ impl SessionHistory {
                 .bind(column)
                 .fetch_optional(&self.pool)
                 .await
-                .map_err(|e| {
-                    ApiError::Internal(format!("failed to inspect sessions table: {}", e))
-                })?
+                .map_err(|e| ApiError::internal_src("failed to inspect sessions table", e))?
                 .is_some();
             if !present {
                 // `column` comes from the compile-time list above, never input.
@@ -332,7 +330,7 @@ impl SessionHistory {
                 )))
                 .execute(&self.pool)
                 .await
-                .map_err(|e| ApiError::Internal(format!("failed to add {column}: {}", e)))?;
+                .map_err(|e| ApiError::internal_src(format!("failed to add {column}"), e))?;
             }
         }
 
@@ -340,7 +338,7 @@ impl SessionHistory {
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_sessions_created ON sessions(created_at)")
             .execute(&self.pool)
             .await
-            .map_err(|e| ApiError::Internal(format!("failed to create index: {}", e)))?;
+            .map_err(|e| ApiError::internal_src("failed to create index", e))?;
 
         Ok(())
     }
@@ -361,7 +359,7 @@ impl SessionHistory {
         let created_str = record
             .created_at
             .format(&time::format_description::well_known::Rfc3339)
-            .map_err(|e| ApiError::Internal(format!("time format error: {}", e)))?;
+            .map_err(|e| ApiError::internal_src("time format error", e))?;
 
         let ended_str = record.ended_at.and_then(|t| {
             t.format(&time::format_description::well_known::Rfc3339)
@@ -409,7 +407,7 @@ impl SessionHistory {
         .bind(record.economics)
         .execute(&self.pool)
         .await
-        .map_err(|e| ApiError::Internal(format!("failed to archive session: {}", e)))?;
+        .map_err(|e| ApiError::internal_src("failed to archive session", e))?;
 
         Ok(())
     }
@@ -436,7 +434,7 @@ impl SessionHistory {
         .bind(id.to_string())
         .execute(&self.pool)
         .await
-        .map_err(|e| ApiError::Internal(format!("failed to update session identity: {e}")))?;
+        .map_err(|e| ApiError::internal_src("failed to update session identity", e))?;
         Ok(done.rows_affected() > 0)
     }
 
@@ -450,7 +448,7 @@ impl SessionHistory {
             .bind(id.to_string())
             .execute(&self.pool)
             .await
-            .map_err(|e| ApiError::Internal(format!("failed to update session work item: {e}")))?;
+            .map_err(|e| ApiError::internal_src("failed to update session work item", e))?;
         Ok(done.rows_affected() > 0)
     }
 
@@ -470,7 +468,7 @@ impl SessionHistory {
         .bind(offset as i64)
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| ApiError::Internal(format!("failed to list sessions: {}", e)))?;
+        .map_err(|e| ApiError::internal_src("failed to list sessions", e))?;
 
         Ok(sessions)
     }
@@ -479,7 +477,7 @@ impl SessionHistory {
         let row = sqlx::query("SELECT COUNT(*) AS count FROM sessions")
             .fetch_one(&self.pool)
             .await
-            .map_err(|e| ApiError::Internal(format!("failed to count sessions: {}", e)))?;
+            .map_err(|e| ApiError::internal_src("failed to count sessions", e))?;
         Ok(row.get::<i64, _>("count") as u64)
     }
 
@@ -514,7 +512,7 @@ impl SessionHistory {
             Ok((db_bytes, log_file_count as u64, log_bytes))
         })
         .await
-        .map_err(|e| ApiError::Internal(format!("history storage scan panicked: {e}")))??;
+        .map_err(|e| ApiError::internal_src("history storage scan panicked", e))??;
         if let Ok(mut cached) = self.disk_stats.lock() {
             *cached = Some((std::time::Instant::now(), stats));
         }
@@ -548,7 +546,7 @@ impl SessionHistory {
         .bind(limit as i64)
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| ApiError::Internal(format!("search failed: {}", e)))?;
+        .map_err(|e| ApiError::internal_src("search failed", e))?;
 
         let search_results = results
             .into_iter()
@@ -577,7 +575,7 @@ impl SessionHistory {
             .bind(session_id.to_string())
             .execute(&self.pool)
             .await
-            .map_err(|e| ApiError::Internal(format!("failed to clear indexed output: {}", e)))?;
+            .map_err(|e| ApiError::internal_src("failed to clear indexed output", e))?;
 
         if output.trim().is_empty() {
             return Ok(());
@@ -593,7 +591,7 @@ impl SessionHistory {
         .bind(output)
         .execute(&self.pool)
         .await
-        .map_err(|e| ApiError::Internal(format!("failed to index output: {}", e)))?;
+        .map_err(|e| ApiError::internal_src("failed to index output", e))?;
 
         Ok(())
     }
@@ -637,24 +635,20 @@ impl SessionHistory {
         let rows = sqlx::query("SELECT id FROM sessions")
             .fetch_all(&self.pool)
             .await
-            .map_err(|e| ApiError::Internal(format!("backfill: list ids failed: {e}")))?;
+            .map_err(|e| ApiError::internal_src("backfill: list ids failed", e))?;
         let known: std::collections::HashSet<String> =
             rows.into_iter().map(|r| r.get::<String, _>("id")).collect();
 
         let entries = match std::fs::read_dir(&self.log_dir) {
             Ok(entries) => entries,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-            Err(e) => {
-                return Err(ApiError::Internal(format!(
-                    "backfill: read log dir failed: {e}"
-                )))
-            }
+            Err(e) => return Err(ApiError::internal_src("backfill: read log dir failed", e)),
         };
 
         let mut recovered = 0usize;
         for entry in entries {
-            let entry = entry
-                .map_err(|e| ApiError::Internal(format!("backfill: dir entry failed: {e}")))?;
+            let entry =
+                entry.map_err(|e| ApiError::internal_src("backfill: dir entry failed", e))?;
             let path = entry.path();
             if path.extension().and_then(|ext| ext.to_str()) != Some("log") {
                 continue;
@@ -709,7 +703,7 @@ impl SessionHistory {
             .bind(end_reason)
             .execute(&self.pool)
             .await
-            .map_err(|e| ApiError::Internal(format!("backfill: insert failed: {e}")))?;
+            .map_err(|e| ApiError::internal_src("backfill: insert failed", e))?;
 
             if let Ok(bytes) = std::fs::read(&path) {
                 let visible = crate::activity::strip_ansi(&bytes);
@@ -740,7 +734,7 @@ impl SessionHistory {
         let rows = sqlx::query("SELECT id FROM sessions WHERE ended_at IS NULL")
             .fetch_all(&self.pool)
             .await
-            .map_err(|e| ApiError::Internal(format!("reconcile: list failed: {e}")))?;
+            .map_err(|e| ApiError::internal_src("reconcile: list failed", e))?;
         let now = OffsetDateTime::now_utc();
         let mut closed = 0usize;
         for row in rows {
@@ -753,7 +747,7 @@ impl SessionHistory {
                 .unwrap_or(now);
             let ended = ended
                 .format(&time::format_description::well_known::Rfc3339)
-                .map_err(|e| ApiError::Internal(format!("time format error: {e}")))?;
+                .map_err(|e| ApiError::internal_src("time format error", e))?;
             sqlx::query(
                 "UPDATE sessions SET ended_at = ?, end_reason = COALESCE(end_reason, ?) \
                  WHERE id = ? AND ended_at IS NULL",
@@ -763,7 +757,7 @@ impl SessionHistory {
             .bind(&id)
             .execute(&self.pool)
             .await
-            .map_err(|e| ApiError::Internal(format!("reconcile: update failed: {e}")))?;
+            .map_err(|e| ApiError::internal_src("reconcile: update failed", e))?;
             closed += 1;
         }
         Ok(closed)
@@ -779,7 +773,7 @@ impl SessionHistory {
         .await
         .map_err(|e| match e {
             sqlx::Error::RowNotFound => ApiError::NotFound,
-            _ => ApiError::Internal(format!("failed to get session: {}", e)),
+            _ => ApiError::internal_src("failed to get session", e),
         })?;
 
         Ok(session)
@@ -804,12 +798,12 @@ impl SessionHistory {
             .await
             .map_err(|e| match e.kind() {
                 std::io::ErrorKind::NotFound => ApiError::NotFound,
-                _ => ApiError::Internal(format!("failed to open session log: {e}")),
+                _ => ApiError::internal_src("failed to open session log", e),
             })?;
         let total_bytes = file
             .metadata()
             .await
-            .map_err(|e| ApiError::Internal(format!("failed to stat session log: {e}")))?
+            .map_err(|e| ApiError::internal_src("failed to stat session log", e))?
             .len();
 
         let tail_bytes = tail_bytes.clamp(1, 256 * 1024);
@@ -817,14 +811,14 @@ impl SessionHistory {
         if total_bytes > bytes {
             file.seek(std::io::SeekFrom::Start(total_bytes - bytes))
                 .await
-                .map_err(|e| ApiError::Internal(format!("failed to seek session log: {e}")))?;
+                .map_err(|e| ApiError::internal_src("failed to seek session log", e))?;
         }
 
         let mut buf = vec![0_u8; bytes as usize];
         if bytes > 0 {
             file.read_exact(&mut buf)
                 .await
-                .map_err(|e| ApiError::Internal(format!("failed to read session log: {e}")))?;
+                .map_err(|e| ApiError::internal_src("failed to read session log", e))?;
         }
 
         let text = if strip_ansi {
@@ -852,13 +846,13 @@ impl SessionHistory {
         let cutoff = OffsetDateTime::now_utc() - time::Duration::days(retention_days as i64);
         let cutoff_str = cutoff
             .format(&time::format_description::well_known::Rfc3339)
-            .map_err(|e| ApiError::Internal(format!("time format error: {}", e)))?;
+            .map_err(|e| ApiError::internal_src("time format error", e))?;
 
         let ids = sqlx::query("SELECT id FROM sessions WHERE created_at < ?")
             .bind(&cutoff_str)
             .fetch_all(&self.pool)
             .await
-            .map_err(|e| ApiError::Internal(format!("cleanup query failed: {}", e)))?;
+            .map_err(|e| ApiError::internal_src("cleanup query failed", e))?;
 
         for row in ids {
             let id: String = row.get("id");
@@ -866,7 +860,7 @@ impl SessionHistory {
                 .bind(&id)
                 .execute(&self.pool)
                 .await
-                .map_err(|e| ApiError::Internal(format!("cleanup fts failed: {}", e)))?;
+                .map_err(|e| ApiError::internal_src("cleanup fts failed", e))?;
             if let Ok(uuid) = Uuid::parse_str(&id) {
                 remove_log_file(self.log_path(uuid))?;
             }
@@ -881,7 +875,7 @@ impl SessionHistory {
         .bind(cutoff_str)
         .execute(&self.pool)
         .await
-        .map_err(|e| ApiError::Internal(format!("cleanup failed: {}", e)))?;
+        .map_err(|e| ApiError::internal_src("cleanup failed", e))?;
 
         Ok(result.rows_affected() as usize)
     }
@@ -892,13 +886,13 @@ impl SessionHistory {
             .bind(id.to_string())
             .execute(&self.pool)
             .await
-            .map_err(|e| ApiError::Internal(format!("delete fts failed: {}", e)))?;
+            .map_err(|e| ApiError::internal_src("delete fts failed", e))?;
 
         let result = sqlx::query("DELETE FROM sessions WHERE id = ?")
             .bind(id.to_string())
             .execute(&self.pool)
             .await
-            .map_err(|e| ApiError::Internal(format!("delete failed: {}", e)))?;
+            .map_err(|e| ApiError::internal_src("delete failed", e))?;
 
         remove_log_file(self.log_path(id))?;
         Ok(result.rows_affected() > 0)
@@ -935,7 +929,7 @@ async fn write_economics(pool: &SqlitePool, id: Uuid, economics: &str) -> Result
         .bind(id.to_string())
         .execute(pool)
         .await
-        .map_err(|e| ApiError::Internal(format!("failed to update session economics: {e}")))?;
+        .map_err(|e| ApiError::internal_src("failed to update session economics", e))?;
     Ok(done.rows_affected() > 0)
 }
 
@@ -1048,10 +1042,10 @@ fn remove_log_file(path: PathBuf) -> Result<()> {
     match std::fs::remove_file(&path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(ApiError::Internal(format!(
-            "failed to remove session log {}: {e}",
-            path.display()
-        ))),
+        Err(e) => Err(ApiError::internal_src(
+            format!("failed to remove session log {}", path.display()),
+            e,
+        )),
     }
 }
 
@@ -1071,10 +1065,10 @@ fn summarize_regular_files(path: &Path) -> Result<(usize, u64)> {
             Ok((count, bytes))
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok((0, 0)),
-        Err(e) => Err(ApiError::Internal(format!(
-            "failed to read history log dir {}: {e}",
-            path.display()
-        ))),
+        Err(e) => Err(ApiError::internal_src(
+            format!("failed to read history log dir {}", path.display()),
+            e,
+        )),
     }
 }
 

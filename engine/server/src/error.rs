@@ -31,6 +31,15 @@ pub enum ApiError {
     Io(#[from] std::io::Error),
     #[error("internal: {0}")]
     Internal(String),
+    /// An internal failure that keeps its source error. Renders exactly as
+    /// `Internal(format!("{context}: {source}"))` did, so the body is
+    /// unchanged, but the source stays reachable for logging (WI-4655).
+    #[error("internal: {context}: {source}")]
+    InternalSource {
+        context: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
     /// An optional upstream could not be reached. Distinct from `Internal`
     /// because nothing the engine owns is broken, and the PWA degrades rather
     /// than reporting a server fault.
@@ -59,6 +68,17 @@ pub enum ApiError {
 }
 
 impl ApiError {
+    /// Internal error that carries its source: `internal_src("failed to x", e)`.
+    pub fn internal_src(
+        context: impl Into<String>,
+        source: impl Into<Box<dyn std::error::Error + Send + Sync>>,
+    ) -> Self {
+        ApiError::InternalSource {
+            context: context.into(),
+            source: source.into(),
+        }
+    }
+
     fn status(&self) -> StatusCode {
         match self {
             ApiError::NotFound => StatusCode::NOT_FOUND,
@@ -70,9 +90,11 @@ impl ApiError {
             ApiError::HostCapacity { .. } => StatusCode::TOO_MANY_REQUESTS,
             ApiError::Forbidden(_) => StatusCode::FORBIDDEN,
             ApiError::TooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
-            ApiError::Config(_) | ApiError::Internal(_) | ApiError::Pty(_) | ApiError::Io(_) => {
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
+            ApiError::Config(_)
+            | ApiError::Internal(_)
+            | ApiError::InternalSource { .. }
+            | ApiError::Pty(_)
+            | ApiError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
             ApiError::BadGateway(_) => StatusCode::BAD_GATEWAY,
             ApiError::Unavailable { .. } => StatusCode::SERVICE_UNAVAILABLE,
             ApiError::InsufficientStorage(_) => StatusCode::INSUFFICIENT_STORAGE,
@@ -84,7 +106,11 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
         let status = self.status();
         if status.is_server_error() {
-            tracing::error!(%status, error = %self, "request failed");
+            if let ApiError::InternalSource { context, source } = &self {
+                tracing::error!(%status, error = %self, %context, source = ?source, "request failed");
+            } else {
+                tracing::error!(%status, error = %self, "request failed");
+            }
         }
         let mut body = json!({ "error": self.to_string() });
         if matches!(self, ApiError::UnknownModel(_)) {
@@ -111,6 +137,17 @@ impl IntoResponse for ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn internal_source_renders_like_formatted_internal() {
+        let e = ApiError::internal_src("failed to x", std::io::Error::other("boom"));
+        assert_eq!(e.to_string(), "internal: failed to x: boom");
+        assert_eq!(
+            e.to_string(),
+            ApiError::Internal("failed to x: boom".into()).to_string()
+        );
+        assert_eq!(e.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
 
     #[test]
     fn unavailable_is_503_with_retry_after() {
