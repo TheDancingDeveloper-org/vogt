@@ -214,11 +214,35 @@ async fn reject_other_method(uri: axum::http::Uri) -> Response {
         .expect("a fixed response builds")
 }
 
+/// The plain 500 a failed blocking task, an unrecorded decision or an
+/// unusable grant answers with.
+fn internal_server_error() -> Response {
+    Response::builder()
+        .status(StatusCode::INTERNAL_SERVER_ERROR)
+        .header("content-type", "text/plain; charset=utf-8")
+        .body(Body::from("Internal Server Error"))
+        .expect("a fixed response builds")
+}
+
+/// The one door from an async handler to blocking work (rusqlite, scrypt, the
+/// engine's blocking HTTP). Runs `work` on the blocking pool; a panic or a
+/// cancelled task becomes the plain 500 instead of unwinding the worker.
+#[allow(clippy::result_large_err)]
+pub(crate) async fn blocking<T, F>(work: F) -> Result<T, Response>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|_| internal_server_error())
+}
+
 /// `POST /api/auth/login`. Public, like Python's hand-mounted route. The body
 /// is validated before anything else, and every refusal after that is the
 /// service's own answer: one sentence at 401, or the throttled error at 429.
 /// The decision rows are written inside `login_op`, with transport `http`.
-async fn login<C: Clock, I: IdFactory>(
+async fn login<C: Clock + Send + 'static, I: IdFactory + Send + 'static>(
     State((state, build, clock_for)): State<Routed<C, I>>,
     request: Request<Body>,
 ) -> Response {
@@ -242,16 +266,19 @@ async fn login<C: Clock, I: IdFactory>(
         Ok(params) => params,
         Err(error) => return invalid_arguments(&error, "body"),
     };
-    let request_store = request_store(&state, clock_for);
-    let built = context_for_login(&request_store, &state, build);
-    let Some(built) = built else {
-        return error_response(&VogtError::InvalidRequest(
+    let result = blocking(move || {
+        let request_store = request_store(&state, clock_for);
+        let built = context_for_login(&request_store, &state, build)?;
+        Some(crate::application::services::auth::login_op(&built, params))
+    })
+    .await;
+    match result {
+        Err(response) => response,
+        Ok(None) => error_response(&VogtError::InvalidRequest(
             "the request context could not be built".to_string(),
-        ));
-    };
-    match crate::application::services::auth::login_op(&built, params) {
-        Ok(value) => json_response(StatusCode::OK, value),
-        Err(error) => error_response(&error),
+        )),
+        Ok(Some(Ok(value))) => json_response(StatusCode::OK, value),
+        Ok(Some(Err(error))) => error_response(&error),
     }
 }
 
@@ -356,18 +383,24 @@ fn json_content_type(header: Option<&axum::http::HeaderValue>) -> bool {
 /// `GET /api/install/status`. Public, like Python's hand-mounted route: it
 /// answers a browser that holds no credential, and states one boolean that
 /// caller could infer by trying to bootstrap anyway.
-async fn install_status<C: Clock, I: IdFactory>(
+async fn install_status<C: Clock + Send + 'static, I: IdFactory + Send + 'static>(
     State((state, build, clock_for)): State<Routed<C, I>>,
 ) -> Response {
-    let Some(built) = context_for_login(&request_store(&state, clock_for), &state, build) else {
-        return error_response(&VogtError::InvalidRequest(
+    let result = blocking(move || {
+        let built = context_for_login(&request_store(&state, clock_for), &state, build)?;
+        Some(crate::application::services::install::install_status_op(
+            &built,
+            serde_json::Value::Null,
+        ))
+    })
+    .await;
+    match result {
+        Err(response) => response,
+        Ok(None) => error_response(&VogtError::InvalidRequest(
             "the request context could not be built".to_string(),
-        ));
-    };
-    match crate::application::services::install::install_status_op(&built, serde_json::Value::Null)
-    {
-        Ok(value) => json_response(StatusCode::OK, value),
-        Err(error) => error_response(&error),
+        )),
+        Ok(Some(Ok(value))) => json_response(StatusCode::OK, value),
+        Ok(Some(Err(error))) => error_response(&error),
     }
 }
 
@@ -375,7 +408,7 @@ async fn install_status<C: Clock, I: IdFactory>(
 /// body that is not JSON, or that fails `InstallBootstrapParams`, answers 422
 /// and the store is never opened, so a bad request cannot race the one-shot
 /// bootstrap or write a row.
-async fn install_bootstrap<C: Clock, I: IdFactory>(
+async fn install_bootstrap<C: Clock + Send + 'static, I: IdFactory + Send + 'static>(
     State((state, build, clock_for)): State<Routed<C, I>>,
     request: Request<Body>,
 ) -> Response {
@@ -399,14 +432,20 @@ async fn install_bootstrap<C: Clock, I: IdFactory>(
         Ok(params) => params,
         Err(error) => return invalid_arguments(&error, "body"),
     };
-    let Some(built) = context_for_login(&request_store(&state, clock_for), &state, build) else {
-        return error_response(&VogtError::InvalidRequest(
+    let result = blocking(move || {
+        let built = context_for_login(&request_store(&state, clock_for), &state, build)?;
+        Some(crate::application::services::install::install_bootstrap_op(
+            &built, params,
+        ))
+    })
+    .await;
+    match result {
+        Err(response) => response,
+        Ok(None) => error_response(&VogtError::InvalidRequest(
             "the request context could not be built".to_string(),
-        ));
-    };
-    match crate::application::services::install::install_bootstrap_op(&built, params) {
-        Ok(value) => json_response(StatusCode::OK, value),
-        Err(error) => error_response(&error),
+        )),
+        Ok(Some(Ok(value))) => json_response(StatusCode::OK, value),
+        Ok(Some(Err(error))) => error_response(&error),
     }
 }
 
@@ -528,6 +567,7 @@ async fn dispatch<C: Clock + Send + 'static, I: IdFactory + Send + 'static>(
     response
 }
 
+#[allow(clippy::result_large_err)]
 async fn dispatch_routed<C: Clock + Send + 'static, I: IdFactory + Send + 'static>(
     State((state, build, clock_for)): State<Routed<C, I>>,
     request: Request<Body>,
@@ -670,58 +710,59 @@ async fn dispatch_routed<C: Clock + Send + 'static, I: IdFactory + Send + 'stati
     // fresh for this request and restarts at the hook's start (`step_clock_for`),
     // the same helper `/mcp` uses. `--no-auth` is Python's `local()`, which reads
     // no clock at all, so the operation's own first read stays at the start.
-    let request_store = request_store(&state, clock_for);
-    let now = if state.no_auth {
-        crate::core::Moment::from_unix(0, 0)
-    } else {
-        request_store.now()
-    };
-    let granted = auth_gate::authorize(
-        &request_store,
-        AuthRequest {
-            operation: &operation,
-            transport: Transport::Http,
-            presented: presented.as_deref(),
-            no_auth: state.no_auth,
-            writes_enabled: state.writes_enabled,
-            now,
-        },
-        state.config.session_ttl_days,
-    );
-    let grant = match granted {
-        Ok(grant) => grant,
-        Err(denial) => {
-            if matches!(denial, auth_gate::Denial::Unrecorded { .. }) {
-                // A decision that could not be recorded must not describe the store
-                // failure. The client gets the same plain 500 `/mcp` gives.
-                return Response::builder()
-                    .status(StatusCode::INTERNAL_SERVER_ERROR)
-                    .header("content-type", "text/plain; charset=utf-8")
-                    .body(Body::from("Internal Server Error"))
-                    .expect("a fixed response builds");
-            }
-            return error_response(&denial.error());
+    let gated = blocking({
+        let state = Arc::clone(&state);
+        let operation = operation.clone();
+        move || {
+            let request_store = request_store(&state, clock_for);
+            let now = if state.no_auth {
+                crate::core::Moment::from_unix(0, 0)
+            } else {
+                request_store.now()
+            };
+            let granted = auth_gate::authorize(
+                &request_store,
+                AuthRequest {
+                    operation: &operation,
+                    transport: Transport::Http,
+                    presented: presented.as_deref(),
+                    no_auth: state.no_auth,
+                    writes_enabled: state.writes_enabled,
+                    now,
+                },
+                state.config.session_ttl_days,
+            );
+            let grant = match granted {
+                Ok(grant) => grant,
+                Err(denial) => {
+                    if matches!(denial, auth_gate::Denial::Unrecorded { .. }) {
+                        // A decision that could not be recorded must not describe the
+                        // store failure. The client gets the same plain 500 `/mcp` gives.
+                        return Err(internal_server_error());
+                    }
+                    return Err(error_response(&denial.error()));
+                }
+            };
+            // An authenticated grant with no usable identity must not run as the
+            // local operator. The decision row is already written, so this is the
+            // same plain 500 an unrecorded decision gets.
+            let principal =
+                auth_gate::principal_for(&grant).map_err(|_| internal_server_error())?;
+            let actor = principal.identity_ref.clone();
+            let built = context_for(&request_store, &state, &grant, principal, build);
+            Ok((request_store, built, actor))
         }
-    };
-    let principal = match auth_gate::principal_for(&grant) {
-        Ok(principal) => principal,
-        // An authenticated grant with no usable identity must not run as the
-        // local operator. The decision row is already written, so this is the
-        // same plain 500 an unrecorded decision gets.
-        Err(_) => {
-            return Response::builder()
-                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .header("content-type", "text/plain; charset=utf-8")
-                .body(Body::from("Internal Server Error"))
-                .expect("a fixed response builds");
-        }
+    })
+    .await;
+    let (request_store, built, actor) = match gated {
+        Ok(Ok(parts)) => parts,
+        Ok(Err(response)) | Err(response) => return response,
     };
     // Python's `resolve` names the actor here, after authentication and before
     // the handler, so the access line can say who called. The access-log
     // middleware opened the request scope; this writes into it. A refusal
     // above never gets here, and stays unattributed, the same as Python.
-    crate::observability::set_request_actor(Some(principal.identity_ref.clone()));
-    let built = context_for(&request_store, &state, &grant, principal, build);
+    crate::observability::set_request_actor(Some(actor));
     // Conditional reads answer after authentication and authorization: an old
     // validator must never turn a refused request into a 304.
     // The revision read is rusqlite, the same blocking work `operation.run` is.
@@ -734,7 +775,7 @@ async fn dispatch_routed<C: Clock + Send + 'static, I: IdFactory + Send + 'stati
     // `asyncio.to_thread`; on the tokio runtime it has to leave the worker
     // threads, or a handful of waits starves `/health/live` and every other
     // request. The store is Send: its per-connection cache is a Mutex.
-    let outcome = match tokio::task::spawn_blocking(move || {
+    let outcome = match blocking(move || {
         let etag = if conditional {
             match request_store
                 .read()
@@ -758,13 +799,7 @@ async fn dispatch_routed<C: Clock + Send + 'static, I: IdFactory + Send + 'stati
     .await
     {
         Ok(outcome) => outcome,
-        Err(_) => {
-            return Response::builder()
-                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .header("content-type", "text/plain; charset=utf-8")
-                .body(Body::from("Internal Server Error"))
-                .expect("a fixed response builds");
-        }
+        Err(response) => return response,
     };
     match outcome {
         Ok(Dispatch::NotModified(etag)) => Response::builder()
@@ -1703,6 +1738,18 @@ fn json_response(status: StatusCode, body: serde_json::Value) -> Response {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_panic_in_blocking_work_answers_500_and_a_value_passes_through() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let failed = runtime.block_on(blocking(|| -> u8 { panic!("boom") }));
+        assert_eq!(
+            failed.unwrap_err().status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        let fine = runtime.block_on(blocking(|| 7u8));
+        assert_eq!(fine.ok(), Some(7));
+    }
+
     #[test]
     fn a_busy_store_answers_503_with_retry_after() {
         let response = error_response(&VogtError::StorageBusy("busy".to_string()));
