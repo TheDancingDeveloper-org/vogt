@@ -75,11 +75,10 @@ function sharedLinksRead(which: "live" | "stopped"): ReturnType<typeof listSessi
   const now = Date.now();
   const held = workItemLinksRead[which];
   if (held && now - held.at < WORK_ITEM_LINKS_TTL_MS) return held.answer;
-  const answer = listSessions(
-    which === "live"
-      ? { mode: "full", limit: 500 }
-      : { mode: "full", include_stopped: true, limit: 500 },
-  );
+  // Two columns off the declared table (`starters_only`): no engine call and
+  // no transcript read per row, unlike a whole `mode=full` list (WI-4543).
+  const narrow = { mode: "full", starters_only: true, fields: ["engine_session_id", "work_item"], limit: 500 } as const;
+  const answer = listSessions(which === "live" ? { ...narrow } : { ...narrow, include_stopped: true });
   const read = { at: now, answer };
   workItemLinksRead[which] = read;
   answer.catch(() => {

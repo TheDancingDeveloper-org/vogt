@@ -2055,3 +2055,45 @@ fn starter_fields_without_the_flag_keep_the_ordinary_full_rows() {
     .unwrap_err();
     assert_eq!(wide.code(), "invalid_request", "{wide:?}");
 }
+
+/// A terminal reads the work item its session was opened for through the same
+/// declared-table path: `work_item` is a starters column (WI-4543).
+#[test]
+fn a_starters_read_can_name_the_work_item_without_asking_the_engine() {
+    let script = script_with(Vec::new());
+    let built = opened(Some(Arc::clone(&script)));
+    insert_project(&built, "beta");
+    insert_work_item(&built, "beta", "WI-9");
+    seed_child_session(&built, "eng-a", None, None);
+    seed_child_session(&built, "eng-b", None, None);
+    let Built::StepSequential(ctx) = &built else {
+        unreachable!("opened() builds a step clock");
+    };
+    let db = ctx.config.resolved_data_dir().join("declared.sqlite3");
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute(
+            "UPDATE coding_sessions SET work_item_id = 'wrk_WI-9' WHERE engine_session_id = 'eng-a'",
+            [],
+        )
+        .unwrap();
+    let listed = list_sessions_op(
+        &built,
+        json!({
+            "mode": "full",
+            "starters_only": true,
+            "fields": ["engine_session_id", "work_item"],
+        }),
+    )
+    .unwrap();
+    assert!(script.seen.lock().unwrap().is_empty(), "engine was asked");
+    let rows = listed["sessions"].as_array().unwrap();
+    let find = |id: &str| {
+        rows.iter()
+            .find(|row| row["engine_session_id"] == id)
+            .unwrap()
+    };
+    assert_eq!(find("eng-a")["work_item"], "WI-9");
+    assert!(find("eng-b")["work_item"].is_null());
+    assert!(find("eng-a").get("started_by_session").is_none());
+}
