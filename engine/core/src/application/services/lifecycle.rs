@@ -282,11 +282,8 @@ fn verify_store(source: &Path, name: &str) -> Result<(), VogtError> {
         "file:{}?mode=ro&immutable=1",
         absolute.to_string_lossy().replace('?', "%3f")
     );
-    let conn = rusqlite::Connection::open_with_flags(
-        &uri,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
-    )
-    .map_err(|_| VogtError::InvalidRequest(corrupt.clone()))?;
+    let conn = crate::storage::sqlite::connection::open_read_only_uri(&uri)
+        .map_err(|_| VogtError::InvalidRequest(corrupt.clone()))?;
     let rows = conn
         .query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))
         .map(|value| vec![value])
