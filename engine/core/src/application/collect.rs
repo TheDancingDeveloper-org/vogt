@@ -993,6 +993,7 @@ impl ErrorName for VogtError {
             Self::InvalidParams(_) => "InvalidParams",
             Self::MigrationError(_) => "MigrationError",
             Self::MigrationLocked(_) => "MigrationLocked",
+            Self::StorageBusy(_) => "StorageBusy",
             Self::EngineUnavailable(_) => "EngineUnavailable",
             Self::GitUnavailable(_) => "GitUnavailable",
             Self::GitCommandFailed(_) => "GitCommandFailed",
