@@ -360,7 +360,7 @@ fn is_env_name(name: &str) -> bool {
 /// the broker. Built by [`SecretBroker::grant`], consumed by `pty::spawn`.
 #[derive(Clone, Debug)]
 pub struct BrokerGrant {
-    pub token: String,
+    pub token: crate::secret::Secret<String>,
     pub url: String,
 }
 
@@ -1104,7 +1104,7 @@ impl SecretBroker {
             return None;
         }
         Some(BrokerGrant {
-            token: self.issue(session),
+            token: self.issue(session).into(),
             url: self.loopback_url(),
         })
     }
@@ -3408,7 +3408,10 @@ mod tests {
         assert!(declared.enabled());
         let grant = declared.grant(Uuid::new_v4()).unwrap();
         assert_eq!(grant.url, "http://127.0.0.1:8910");
-        assert_eq!(grant.token.len(), 64, "two simple v4 uuids");
+        assert_eq!(grant.token.expose().len(), 64, "two simple v4 uuids");
+        let shown = format!("{grant:?}");
+        assert!(!shown.contains(grant.token.expose().as_str()), "{shown}");
+        assert!(shown.contains("[redacted]"));
     }
 
     #[test]
