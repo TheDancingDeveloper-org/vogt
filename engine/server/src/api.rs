@@ -1884,6 +1884,7 @@ pub async fn readyz(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Rea
 #[derive(Debug, Serialize)]
 pub struct OperationalStatus {
     pub version: &'static str,
+    pub rustc_version: &'static str,
     pub product_version: &'static str,
     pub source_ref: &'static str,
     pub source_sha: &'static str,
@@ -1984,6 +1985,7 @@ pub async fn operational_status(
 
     Ok(Json(OperationalStatus {
         version: crate::product::VERSION,
+        rustc_version: crate::product::RUSTC_VERSION,
         product_version: crate::product::VERSION,
         source_ref: crate::product::SOURCE_REF,
         source_sha: crate::product::SOURCE_SHA,

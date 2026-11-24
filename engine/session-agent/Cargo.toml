@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 description = "Outbound PTY session agent for Vogt session pods"
+build = "build.rs"
 
 [[bin]]
 name = "vogt-session-agent"
