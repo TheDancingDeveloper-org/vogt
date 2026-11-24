@@ -1,7 +1,7 @@
 use std::time::Instant;
 
-use once_cell::sync::Lazy;
 use regex::bytes::RegexSet;
+use std::sync::LazyLock;
 pub use vogt_engine_contract::ActivityState;
 
 /// Patterns that indicate the program is waiting for the user. Matched against
@@ -9,7 +9,7 @@ pub use vogt_engine_contract::ActivityState;
 ///
 /// Conservative on purpose — false positives nag the user with push
 /// notifications. Add patterns as real prompts surface.
-static WAITING_PATTERNS: Lazy<RegexSet> = Lazy::new(|| {
+static WAITING_PATTERNS: LazyLock<RegexSet> = LazyLock::new(|| {
     RegexSet::new([
         // Generic y/n confirmation prompts
         r"(?i)\[y/n\]\s*\??\s*$",
@@ -33,7 +33,7 @@ static WAITING_PATTERNS: Lazy<RegexSet> = Lazy::new(|| {
 /// Phrases indicating a transient, retryable failure (rate limiting or
 /// upstream overload) rather than a real error. Matched anywhere in the
 /// scanned tail, not anchored — these show up mid-line in API error bodies.
-static RATE_LIMIT_PATTERNS: Lazy<RegexSet> = Lazy::new(|| {
+static RATE_LIMIT_PATTERNS: LazyLock<RegexSet> = LazyLock::new(|| {
     RegexSet::new([
         r"(?i)\b429\b",
         r"(?i)rate.?limit",
