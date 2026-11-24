@@ -316,6 +316,7 @@ fn verify_store(source: &Path, name: &str) -> Result<(), VogtError> {
 /// instance served by the same process keeps its own. Another process serving the same data
 /// directory sees the swap through the memo's key.
 fn forget_live_stores(data_dir: &Path) {
+    crate::storage::sqlite::connection::close_pooled(data_dir);
     crate::application::services::inbox::clear_badge_cache(data_dir);
     crate::application::drift::clear_list_cache(data_dir);
     crate::application::place::clear_metrics_cache(data_dir);
