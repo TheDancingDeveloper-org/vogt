@@ -2490,7 +2490,7 @@ impl PodBackendFactory {
         {
             Ok(_) => Ok(()),
             Err(kube::Error::Api(status)) if status.code == 404 => Ok(()),
-            Err(e) => Err(ApiError::Internal(format!("deleting session pod: {e}"))),
+            Err(e) => Err(ApiError::internal_src("deleting session pod", e)),
         }
     }
 
@@ -2501,7 +2501,7 @@ impl PodBackendFactory {
         let found = Api::<Pod>::namespaced(self.client.clone(), &self.cfg.namespace)
             .get_opt(&pod_name(id))
             .await
-            .map_err(|e| ApiError::Internal(format!("reading session pod: {e}")))?;
+            .map_err(|e| ApiError::internal_src("reading session pod", e))?;
         Ok(match found {
             None => true,
             Some(pod) => uid.is_some_and(|uid| pod.metadata.uid.as_deref() != Some(uid)),
@@ -2511,7 +2511,7 @@ impl PodBackendFactory {
         let pods = Api::<Pod>::namespaced(self.client.clone(), &self.cfg.namespace)
             .list(&ListParams::default().labels(&session_pod_selector(&self.cfg)))
             .await
-            .map_err(|e| ApiError::Internal(format!("listing session pods: {e}")))?;
+            .map_err(|e| ApiError::internal_src("listing session pods", e))?;
         // A pod adopted after an engine restart still holds its allocation.
         for pod in &pods.items {
             if let (Some(uid), Some(allocation)) =
@@ -2537,7 +2537,7 @@ impl PodBackendFactory {
                 },
             )
             .await
-            .map_err(|e| ApiError::Internal(format!("reading session pod logs: {e}")))
+            .map_err(|e| ApiError::internal_src("reading session pod logs", e))
     }
 }
 
@@ -2645,7 +2645,7 @@ fn creation_error(e: kube::Error) -> ApiError {
                 status.code
             ))
         }
-        _ => ApiError::Internal(format!("creating session pod: {e}")),
+        _ => ApiError::internal_src("creating session pod", e),
     }
 }
 
@@ -5966,7 +5966,7 @@ mod creation_error_tests {
     fn other_api_errors_stay_internal() {
         assert!(matches!(
             creation_error(api(500, "boom")),
-            ApiError::Internal(_)
+            ApiError::InternalSource { .. }
         ));
     }
 }
