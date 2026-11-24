@@ -67,13 +67,12 @@ impl WorkspaceSizes {
     }
 
     /// `ENGINE_WORKSPACE_SIZE_TTL` in seconds; unset or unparsable is 60.
-    pub fn from_env() -> Self {
-        let ttl = std::env::var("ENGINE_WORKSPACE_SIZE_TTL")
+    pub fn ttl_from_env() -> Duration {
+        std::env::var("ENGINE_WORKSPACE_SIZE_TTL")
             .ok()
             .and_then(|v| v.trim().parse::<u64>().ok())
             .map(Duration::from_secs)
-            .unwrap_or(DEFAULT_SIZE_TTL);
-        Self::new(ttl)
+            .unwrap_or(DEFAULT_SIZE_TTL)
     }
 
     /// The size of each path, rescanning the stale ones in the background

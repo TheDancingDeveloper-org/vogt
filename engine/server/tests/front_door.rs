@@ -604,6 +604,8 @@ fn base_config() -> Config {
         agent_auth_public_url: None,
         pod: Default::default(),
         pod_salvage: Default::default(),
+        workspace_size_ttl: std::time::Duration::from_secs(60),
+        escalation_ladder: Default::default(),
         cadastre_mcp_url: None,
         vogt_prod_mcp_url: None,
         lane: None,

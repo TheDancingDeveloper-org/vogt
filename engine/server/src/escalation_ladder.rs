@@ -352,7 +352,7 @@ fn promotion_push(rung: &Rung) -> (String, String, serde_json::Value) {
 /// Spawn the ladder. It polls every 30 s; without a webhook URL it still
 /// promotes overseer escalations to the person's push.
 pub fn spawn_escalation_ladder(state: Arc<AppState>) {
-    let config = LadderConfig::from_env();
+    let config = state.config.escalation_ladder;
     let webhook = std::env::var("ENGINE_ESCALATION_WEBHOOK_URL")
         .ok()
         .map(|u| u.trim().to_string())
