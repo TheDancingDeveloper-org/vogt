@@ -6,6 +6,7 @@ use axum::{
     response::IntoResponse,
 };
 use futures_util::{SinkExt, StreamExt};
+use parking_lot::Condvar;
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
 use std::{
@@ -13,12 +14,12 @@ use std::{
     io::Read,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc, Condvar,
+        Arc,
     },
     time::{Duration, Instant},
 };
 use subtle::ConstantTimeEq;
-use tokio::sync::{mpsc, watch, Mutex, Notify};
+use tokio::sync::{mpsc, watch, Notify};
 use uuid::Uuid;
 use vogt_engine_contract::source::SourceDescriptor;
 use vogt_session_agent::Frame;
@@ -72,24 +73,24 @@ type AgentLinks = HashMap<Uuid, (mpsc::UnboundedSender<Frame>, Arc<PodLink>)>;
 
 #[derive(Debug, Default)]
 pub struct AgentAuth {
-    pending: Mutex<HashMap<Uuid, Pending>>,
+    pending: parking_lot::Mutex<HashMap<Uuid, Pending>>,
     /// The last launch's carried fields, until its bootstrap request takes
     /// them. Withdrawn with the credential, so a pod that never boots leaves
     /// nothing behind.
-    launches: Mutex<HashMap<Uuid, PodLaunch>>,
+    launches: parking_lot::Mutex<HashMap<Uuid, PodLaunch>>,
     /// Per-session source credentials minted at pod create, held until the
     /// pod's bootstrap request takes them (or the pod is withdrawn or
     /// forgotten). Handles only: the value stays in the provider's file.
-    source_credentials: Mutex<HashMap<Uuid, PendingCredential>>,
-    sources: Mutex<HashMap<Uuid, SourceDescriptor>>,
+    source_credentials: parking_lot::Mutex<HashMap<Uuid, PendingCredential>>,
+    sources: parking_lot::Mutex<HashMap<Uuid, SourceDescriptor>>,
     /// The core session id a minted graft token is bound to, held until the
     /// pod's bootstrap request writes the token under that name.
-    graft_sessions: Mutex<HashMap<Uuid, String>>,
-    sessions: Mutex<HashMap<Uuid, SessionCredential>>,
+    graft_sessions: parking_lot::Mutex<HashMap<Uuid, String>>,
+    sessions: parking_lot::Mutex<HashMap<Uuid, SessionCredential>>,
     /// The attached agent's command channel, beside the link it belongs to so
     /// attach/detach can update the connection state under one lock.
-    links: std::sync::Mutex<AgentLinks>,
-    pods: std::sync::Mutex<HashMap<Uuid, Arc<PodLink>>>,
+    links: parking_lot::Mutex<AgentLinks>,
+    pods: parking_lot::Mutex<HashMap<Uuid, Arc<PodLink>>>,
 }
 
 /// How a requested salvage ended (WI-4132).
@@ -121,9 +122,9 @@ pub enum FlushOutcome {
 #[derive(Debug)]
 pub struct PodLink {
     /// Absolute offset of the next output byte the engine has not yet taken.
-    next_offset: std::sync::Mutex<u64>,
-    out: std::sync::Mutex<Option<std::sync::mpsc::SyncSender<PodChunk>>>,
-    exit: std::sync::Mutex<Option<i32>>,
+    next_offset: parking_lot::Mutex<u64>,
+    out: parking_lot::Mutex<Option<std::sync::mpsc::SyncSender<PodChunk>>>,
+    exit: parking_lot::Mutex<Option<i32>>,
     exited: Condvar,
     exit_notify: Notify,
     stop_requested: AtomicBool,
@@ -136,7 +137,7 @@ pub struct PodLink {
     /// Salvage requests the agent answered, and the last failure reason.
     salvages: AtomicU64,
     salvage_notify: Notify,
-    salvage_failure: std::sync::Mutex<Option<String>>,
+    salvage_failure: parking_lot::Mutex<Option<String>>,
     /// The pod is gone and the stream forgotten; hibernation waits for it so
     /// a wake never races the old pod's teardown.
     torn_down: AtomicBool,
@@ -145,9 +146,9 @@ pub struct PodLink {
     connected: AtomicBool,
     /// An agent has completed its hello on this link at least once.
     ever_connected: AtomicBool,
-    last_heartbeat: std::sync::Mutex<Instant>,
+    last_heartbeat: parking_lot::Mutex<Instant>,
     /// When the current agent's socket was lost, while it is not connected.
-    disconnected_at: std::sync::Mutex<Option<Instant>>,
+    disconnected_at: parking_lot::Mutex<Option<Instant>>,
     /// The link was rebuilt after an engine restart rather than registered by
     /// a launch: its cursor came from the output log, and until an agent
     /// dials in the pod's fate is unknown.
@@ -162,7 +163,7 @@ pub struct PodLink {
     crashed: AtomicBool,
     /// The session's output log. Set by [`Self::keep_log`] before the reader
     /// takes output; each durable offset is checkpointed beside it.
-    log: std::sync::Mutex<Option<std::path::PathBuf>>,
+    log: parking_lot::Mutex<Option<std::path::PathBuf>>,
 }
 
 /// Output queued for the session reader: the stream offset just past the
@@ -180,9 +181,9 @@ pub struct OutputGap {
 impl PodLink {
     fn new(out: std::sync::mpsc::SyncSender<PodChunk>) -> Self {
         Self {
-            next_offset: std::sync::Mutex::new(0),
-            out: std::sync::Mutex::new(Some(out)),
-            exit: std::sync::Mutex::new(None),
+            next_offset: parking_lot::Mutex::new(0),
+            out: parking_lot::Mutex::new(Some(out)),
+            exit: parking_lot::Mutex::new(None),
             exited: Condvar::new(),
             exit_notify: Notify::new(),
             stop_requested: AtomicBool::new(false),
@@ -192,25 +193,25 @@ impl PodLink {
             flush_notify: Notify::new(),
             salvages: AtomicU64::new(0),
             salvage_notify: Notify::new(),
-            salvage_failure: std::sync::Mutex::new(None),
+            salvage_failure: parking_lot::Mutex::new(None),
             torn_down: AtomicBool::new(false),
             torn_notify: Notify::new(),
             connected: AtomicBool::new(false),
             ever_connected: AtomicBool::new(false),
-            last_heartbeat: std::sync::Mutex::new(Instant::now()),
-            disconnected_at: std::sync::Mutex::new(None),
+            last_heartbeat: parking_lot::Mutex::new(Instant::now()),
+            disconnected_at: parking_lot::Mutex::new(None),
             adopted: AtomicBool::new(false),
             durable: watch::Sender::new(0),
             reader_stopped: AtomicBool::new(false),
             crashed: AtomicBool::new(false),
-            log: std::sync::Mutex::new(None),
+            log: parking_lot::Mutex::new(None),
         }
     }
 
     /// Keep the session's output log, so every durable offset is checkpointed
     /// beside it (see [`checkpoint_path`]). Call before the reader takes output.
     pub fn keep_log(&self, log: std::path::PathBuf) {
-        *self.log.lock().expect("pod link lock poisoned") = Some(log);
+        *self.log.lock() = Some(log);
     }
 
     /// Checkpoint `offset` (the stream offset the reader has written through)
@@ -219,7 +220,7 @@ impl PodLink {
     /// query was written, so a restart needs both numbers. Returns false when
     /// the checkpoint could not be written: the offset must then stay unacked.
     fn checkpoint(&self, offset: u64) -> bool {
-        let Some(log) = self.log.lock().expect("pod link lock poisoned").clone() else {
+        let Some(log) = self.log.lock().clone() else {
             return true;
         };
         let written = std::fs::metadata(&log)
@@ -311,20 +312,17 @@ impl PodLink {
     }
 
     pub fn heartbeat_age(&self) -> Duration {
-        self.last_heartbeat
-            .lock()
-            .expect("pod link lock poisoned")
-            .elapsed()
+        self.last_heartbeat.lock().elapsed()
     }
 
     fn note_heartbeat(&self) {
-        *self.last_heartbeat.lock().expect("pod link lock poisoned") = Instant::now();
+        *self.last_heartbeat.lock() = Instant::now();
     }
 
     /// A new agent completed its hello: it is attached and its heartbeat
     /// clock starts now, not when the previous socket went away.
     pub(crate) fn note_connected(&self) {
-        *self.disconnected_at.lock().expect("pod link lock poisoned") = None;
+        *self.disconnected_at.lock() = None;
         self.ever_connected.store(true, Ordering::Release);
         self.connected.store(true, Ordering::Release);
         self.note_heartbeat();
@@ -335,15 +333,12 @@ impl PodLink {
     /// reconnect timeout owns a disconnect.
     pub(crate) fn note_disconnected(&self) {
         self.connected.store(false, Ordering::Release);
-        *self.disconnected_at.lock().expect("pod link lock poisoned") = Some(Instant::now());
+        *self.disconnected_at.lock() = Some(Instant::now());
     }
 
     /// How long the link has had no attached agent, if it has none now.
     pub fn disconnected_age(&self) -> Option<Duration> {
-        self.disconnected_at
-            .lock()
-            .expect("pod link lock poisoned")
-            .map(|at| at.elapsed())
+        self.disconnected_at.lock().map(|at| at.elapsed())
     }
 
     /// Rebuilt after an engine restart (see `AgentAuth::adopt_pod`).
@@ -358,7 +353,7 @@ impl PodLink {
     /// after the fact. Only an adopted link does this, and only forward: the
     /// bytes are gone, and refusing the agent would strand it.
     fn skip_to(&self, cursor: u64) {
-        let mut next = self.next_offset.lock().expect("pod link lock poisoned");
+        let mut next = self.next_offset.lock();
         if cursor > *next {
             *next = cursor;
         }
@@ -372,7 +367,7 @@ impl PodLink {
     }
 
     pub fn next_offset(&self) -> u64 {
-        *self.next_offset.lock().expect("pod link lock poisoned")
+        *self.next_offset.lock()
     }
 
     /// Take the part of `data` (which starts at absolute `offset`) the engine
@@ -386,7 +381,7 @@ impl PodLink {
                 got: offset,
             });
         }
-        let mut next = self.next_offset.lock().expect("pod link lock poisoned");
+        let mut next = self.next_offset.lock();
         if offset > *next {
             return Err(OutputGap {
                 expected: *next,
@@ -412,7 +407,7 @@ impl PodLink {
     /// engine's stream. A marker for bytes the engine already holds changes
     /// nothing; one that overlaps them only counts the bytes it really lost.
     pub fn ingest_gap(&self, offset: u64, lost: u64) -> Result<u64, OutputGap> {
-        let mut next = self.next_offset.lock().expect("pod link lock poisoned");
+        let mut next = self.next_offset.lock();
         if offset > *next {
             return Err(OutputGap {
                 expected: *next,
@@ -446,7 +441,7 @@ impl PodLink {
 
     /// Queue `data`, which ends at stream offset `end`, for the session reader.
     fn enqueue(&self, data: Vec<u8>, end: u64, expected: u64, got: u64) -> Result<(), OutputGap> {
-        let out = self.out.lock().expect("pod link lock poisoned");
+        let out = self.out.lock();
         let Some(out) = out.as_ref() else {
             return Err(OutputGap { expected, got });
         };
@@ -457,11 +452,11 @@ impl PodLink {
     /// Record the exit and end the output stream, so the reader thread sees
     /// EOF and the exit waiter returns.
     pub fn finish(&self, code: i32) {
-        let mut exit = self.exit.lock().expect("pod link lock poisoned");
+        let mut exit = self.exit.lock();
         if exit.is_none() {
             *exit = Some(code);
         }
-        self.out.lock().expect("pod link lock poisoned").take();
+        self.out.lock().take();
         self.exited.notify_all();
         self.exit_notify.notify_waiters();
     }
@@ -469,21 +464,21 @@ impl PodLink {
     /// The output stream has ended (see [`Self::finish`]): nothing more can
     /// be taken, however often it is resent.
     fn output_closed(&self) -> bool {
-        self.out.lock().expect("pod link lock poisoned").is_none()
+        self.out.lock().is_none()
     }
 
     pub fn is_finished(&self) -> bool {
-        self.exit.lock().expect("pod link lock poisoned").is_some()
+        self.exit.lock().is_some()
     }
 
     /// Block until the agent has reported the child's exit.
     pub fn wait_exit(&self) -> i32 {
-        let mut exit = self.exit.lock().expect("pod link lock poisoned");
+        let mut exit = self.exit.lock();
         loop {
             if let Some(code) = *exit {
                 return code;
             }
-            exit = self.exited.wait(exit).expect("pod link lock poisoned");
+            self.exited.wait(&mut exit);
         }
     }
 
@@ -854,15 +849,15 @@ pub fn global() -> Arc<AgentAuth> {
 
 impl AgentAuth {
     pub async fn issue_source(&self, id: Uuid, source: SourceDescriptor) {
-        self.sources.lock().await.insert(id, source);
+        self.sources.lock().insert(id, source);
     }
 
     pub async fn take_source(&self, id: Uuid) -> Option<SourceDescriptor> {
-        self.sources.lock().await.remove(&id)
+        self.sources.lock().remove(&id)
     }
 
     pub async fn issue(&self, id: Uuid, token: &[u8]) {
-        self.pending.lock().await.insert(
+        self.pending.lock().insert(
             id,
             Pending {
                 token: token.to_vec(),
@@ -874,31 +869,31 @@ impl AgentAuth {
     /// could not be created. It would expire on its own after
     /// `BOOTSTRAP_TTL`; this closes that window.
     pub async fn withdraw(&self, id: Uuid) {
-        self.pending.lock().await.remove(&id);
-        self.launches.lock().await.remove(&id);
-        self.source_credentials.lock().await.remove(&id);
-        self.graft_sessions.lock().await.remove(&id);
+        self.pending.lock().remove(&id);
+        self.launches.lock().remove(&id);
+        self.source_credentials.lock().remove(&id);
+        self.graft_sessions.lock().remove(&id);
     }
     /// Hold the core session id the session's graft token is bound to, for
     /// the bootstrap response that writes the token into the pod.
     pub async fn issue_graft_session(&self, id: Uuid, session_ref: String) {
-        self.graft_sessions.lock().await.insert(id, session_ref);
+        self.graft_sessions.lock().insert(id, session_ref);
     }
     pub async fn take_graft_session(&self, id: Uuid) -> Option<String> {
-        self.graft_sessions.lock().await.remove(&id)
+        self.graft_sessions.lock().remove(&id)
     }
     /// Hold what the session spec asked the pod to carry, for the bootstrap
     /// response to take once the pod presents its credential.
     pub async fn issue_launch(&self, id: Uuid, launch: PodLaunch) {
-        self.launches.lock().await.insert(id, launch);
+        self.launches.lock().insert(id, launch);
     }
     pub async fn take_launch(&self, id: Uuid) -> Option<PodLaunch> {
-        self.launches.lock().await.remove(&id)
+        self.launches.lock().remove(&id)
     }
     /// Whether a bootstrap credential is held for `id`: issued, and neither
     /// consumed nor withdrawn.
     pub async fn bootstrap_pending(&self, id: Uuid) -> bool {
-        self.pending.lock().await.contains_key(&id)
+        self.pending.lock().contains_key(&id)
     }
     /// Hold the credential minted for `id`'s pod until its bootstrap request
     /// takes it. It lives as long as the bootstrap credential does; a pod that
@@ -909,7 +904,7 @@ impl AgentAuth {
         handle: crate::source_provider::CredentialHandle,
     ) {
         let now = Instant::now();
-        let mut held = self.source_credentials.lock().await;
+        let mut held = self.source_credentials.lock();
         held.retain(|_, g| g.expires > now);
         held.insert(
             id,
@@ -924,7 +919,7 @@ impl AgentAuth {
         &self,
         id: Uuid,
     ) -> Option<crate::source_provider::CredentialHandle> {
-        let g = self.source_credentials.lock().await.remove(&id)?;
+        let g = self.source_credentials.lock().remove(&id)?;
         (g.expires > Instant::now()).then_some(g.handle)
     }
     /// Whether `candidate` is the unspent bootstrap credential for `id` —
@@ -933,13 +928,13 @@ impl AgentAuth {
     /// tarball before the session container's one bootstrap request takes it
     /// (WI-4127), so that fetch must not spend it.
     pub async fn bootstrap_ok(&self, id: Uuid, candidate: &[u8]) -> bool {
-        let pending = self.pending.lock().await;
+        let pending = self.pending.lock();
         pending.get(&id).is_some_and(|entry| {
             entry.expires > Instant::now() && bool::from(entry.token.as_slice().ct_eq(candidate))
         })
     }
     pub(crate) async fn consume(&self, id: Uuid, candidate: &[u8]) -> bool {
-        let mut p = self.pending.lock().await;
+        let mut p = self.pending.lock();
         let Some(entry) = p.get(&id) else {
             return false;
         };
@@ -951,7 +946,7 @@ impl AgentAuth {
         // Stored in the form it is handed out in (hex), so the stream's
         // bearer comparison sees exactly what the bootstrap response carried.
         let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
-        self.sessions.lock().await.insert(
+        self.sessions.lock().insert(
             id,
             SessionCredential {
                 token: token.into_bytes(),
@@ -960,17 +955,14 @@ impl AgentAuth {
         true
     }
     async fn attach(&self, id: Uuid, tx: mpsc::UnboundedSender<Frame>, link: Arc<PodLink>) {
-        self.links
-            .lock()
-            .expect("agent links lock poisoned")
-            .insert(id, (tx, Arc::clone(&link)));
+        self.links.lock().insert(id, (tx, Arc::clone(&link)));
         link.note_connected();
     }
     /// Drop the link, unless a newer connection has already replaced it. A
     /// dropped socket marks the link disconnected, so a redial is judged by
     /// the reconnect timeout rather than the heartbeat deadline.
     async fn detach(&self, id: Uuid, tx: &mpsc::UnboundedSender<Frame>) {
-        let mut links = self.links.lock().expect("agent links lock poisoned");
+        let mut links = self.links.lock();
         if let Some((_, link)) = links.get(&id).filter(|(cur, _)| cur.same_channel(tx)) {
             let link = Arc::clone(link);
             links.remove(&id);
@@ -983,10 +975,7 @@ impl AgentAuth {
     pub fn register_pod(&self, id: Uuid) -> (Arc<PodLink>, PodReader) {
         let (tx, rx) = std::sync::mpsc::sync_channel(AGENT_OUTPUT_CHANNEL_CAPACITY);
         let link = Arc::new(PodLink::new(tx));
-        self.pods
-            .lock()
-            .expect("pod links lock poisoned")
-            .insert(id, Arc::clone(&link));
+        self.pods.lock().insert(id, Arc::clone(&link));
         let reader = PodReader {
             rx,
             pending: Vec::new(),
@@ -1009,13 +998,13 @@ impl AgentAuth {
         session_token: String,
     ) -> (Arc<PodLink>, PodReader) {
         let (link, mut reader) = self.register_pod(id);
-        *link.next_offset.lock().expect("pod link lock poisoned") = cursor;
+        *link.next_offset.lock() = cursor;
         // The reader starts at the cursor, so its first checkpoint is the
         // stream offset the log already holds, not zero.
         reader.end = cursor;
         link.mark_durable(cursor);
         link.adopted.store(true, Ordering::Release);
-        self.sessions.lock().await.insert(
+        self.sessions.lock().insert(
             id,
             SessionCredential {
                 token: session_token.into_bytes(),
@@ -1060,7 +1049,7 @@ impl AgentAuth {
         };
         let before = link.salvages.load(Ordering::Acquire);
         // Clear a stale failure so this request cannot return the last one.
-        *link.salvage_failure.lock().expect("salvage lock poisoned") = None;
+        *link.salvage_failure.lock() = None;
         if self.send(id, Frame::Salvage).is_err() {
             return SalvageOutcome::NotAttached;
         }
@@ -1068,12 +1057,7 @@ impl AgentAuth {
             loop {
                 let notified = link.salvage_notify.notified();
                 if link.salvages.load(Ordering::Acquire) > before {
-                    return match link
-                        .salvage_failure
-                        .lock()
-                        .expect("salvage lock poisoned")
-                        .clone()
-                    {
+                    return match link.salvage_failure.lock().clone() {
                         Some(reason) => SalvageOutcome::Failed(reason),
                         None => SalvageOutcome::Done,
                     };
@@ -1097,76 +1081,29 @@ impl AgentAuth {
     }
 
     pub fn pod(&self, id: Uuid) -> Option<Arc<PodLink>> {
-        self.pods
-            .lock()
-            .expect("pod links lock poisoned")
-            .get(&id)
-            .cloned()
+        self.pods.lock().get(&id).cloned()
     }
 
     /// Sessions that have a pod link registered, finished or not.
     pub fn pod_ids(&self) -> Vec<Uuid> {
-        self.pods
-            .lock()
-            .expect("pod links lock poisoned")
-            .keys()
-            .copied()
-            .collect()
+        self.pods.lock().keys().copied().collect()
     }
 
-    /// Forget a pod session's stream and the credentials held for it. The
-    /// async maps are cleared at once when uncontended; when one is busy the
-    /// removal is finished on the runtime rather than skipped, so a contended
-    /// lock no longer leaves the entry behind for good (WI-4290). A deferred
-    /// removal stands down if a newer pod has registered under the id
-    /// meanwhile (a wake), whose entries are not this pod's to drop.
+    /// Forget a pod session's stream and the credentials held for it. Every
+    /// map is a `parking_lot` mutex never held across an `.await`, so the
+    /// removal is always immediate and the old try_lock-else-spawn path
+    /// (WI-4290) is not needed.
     pub fn forget_pod(self: &Arc<Self>, id: Uuid) {
-        self.pods
-            .lock()
-            .expect("pod links lock poisoned")
-            .remove(&id);
-        self.links
-            .lock()
-            .expect("agent links lock poisoned")
-            .remove(&id);
-        let mut busy = false;
-        match self.sessions.try_lock() {
-            Ok(mut sessions) => drop(sessions.remove(&id)),
-            Err(_) => busy = true,
-        }
-        match self.source_credentials.try_lock() {
-            Ok(mut held) => drop(held.remove(&id)),
-            Err(_) => busy = true,
-        }
-        match self.launches.try_lock() {
-            Ok(mut launches) => drop(launches.remove(&id)),
-            Err(_) => busy = true,
-        }
-        if !busy {
-            return;
-        }
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-            tracing::warn!(session = %id, "pod credentials left behind: their lock was busy and no runtime runs");
-            return;
-        };
-        let auth = Arc::clone(self);
-        runtime.spawn(async move {
-            let mut sessions = auth.sessions.lock().await;
-            let mut held = auth.source_credentials.lock().await;
-            let mut launches = auth.launches.lock().await;
-            if auth.pod(id).is_some() {
-                return;
-            }
-            sessions.remove(&id);
-            held.remove(&id);
-            launches.remove(&id);
-        });
+        self.pods.lock().remove(&id);
+        self.links.lock().remove(&id);
+        self.sessions.lock().remove(&id);
+        self.source_credentials.lock().remove(&id);
+        self.launches.lock().remove(&id);
     }
     pub fn send(&self, id: Uuid, frame: Frame) -> std::io::Result<()> {
         let result = self
             .links
             .lock()
-            .expect("agent links lock poisoned")
             .get(&id)
             .map(|(tx, _)| tx.send(frame))
             .ok_or_else(|| {
@@ -1181,7 +1118,6 @@ impl AgentAuth {
     async fn session_ok(&self, id: Uuid, candidate: &[u8]) -> bool {
         self.sessions
             .lock()
-            .await
             .get(&id)
             .is_some_and(|c| bool::from(c.token.as_slice().ct_eq(candidate)))
     }
@@ -1190,7 +1126,6 @@ impl AgentAuth {
     pub async fn session_for_token(&self, candidate: &[u8]) -> Option<Uuid> {
         self.sessions
             .lock()
-            .await
             .iter()
             .find(|(_, c)| bool::from(c.token.as_slice().ct_eq(candidate)))
             .map(|(id, _)| *id)
@@ -1198,7 +1133,6 @@ impl AgentAuth {
     pub async fn session_token(&self, id: Uuid) -> Option<String> {
         self.sessions
             .lock()
-            .await
             .get(&id)
             .map(|c| String::from_utf8_lossy(&c.token).into_owned())
     }
@@ -1892,7 +1826,7 @@ where
                         }
                         Frame::Salvaged { ok, reason, .. } => {
                             link.note_heartbeat();
-                            *link.salvage_failure.lock().expect("salvage lock poisoned") =
+                            *link.salvage_failure.lock() =
                                 (!ok).then(|| {
                                     reason.unwrap_or_else(|| "the pod agent could not save the working tree".into())
                                 });
@@ -2680,6 +2614,33 @@ mod tests {
         auth.detach(id, &old).await;
         auth.send(id, Frame::Ack { offset: 3 }).unwrap();
         assert_eq!(new_rx.recv().await, Some(Frame::Ack { offset: 3 }));
+    }
+
+    #[test]
+    fn a_panic_under_one_sessions_lock_does_not_take_down_others() {
+        let auth = Arc::new(AgentAuth::default());
+        let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
+        let (link_a, _ra) = auth.register_pod(a);
+        let (link_b, _rb) = auth.register_pod(b);
+        // Panic while holding the registry, a link and the pod table locks.
+        let (auth2, link2) = (Arc::clone(&auth), Arc::clone(&link_a));
+        let crashed = std::thread::spawn(move || {
+            let _links = auth2.links.lock();
+            let _pods = auth2.pods.lock();
+            let _exit = link2.exit.lock();
+            let _off = link2.next_offset.lock();
+            panic!("boom");
+        })
+        .join();
+        assert!(crashed.is_err());
+        // Every other caller still works; nothing cascades.
+        assert_eq!(link_b.ingest(0, b"ok"), Ok(2));
+        assert_eq!(link_a.ingest(0, b"ok"), Ok(2));
+        assert!(!link_a.is_finished());
+        assert!(auth.pod(b).is_some());
+        auth.forget_pod(a);
+        assert!(auth.pod(a).is_none());
+        assert!(auth.send(b, Frame::Ack { offset: 1 }).is_err());
     }
 
     #[test]
