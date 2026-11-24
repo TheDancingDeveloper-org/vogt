@@ -938,13 +938,9 @@ impl ReadView for SqliteReadView {
     ) -> Result<BTreeMap<String, WorkOverlay>, VogtError> {
         let mut found = BTreeMap::new();
         for slice in subject_keys.chunks(500) {
-            let placeholders = vec!["?"; slice.len()].join(", ");
-            let rows = many(
-                &self.conn,
-                &format!("SELECT * FROM work_overlay WHERE subject_key IN ({placeholders})"),
-                rusqlite::params_from_iter(slice),
-                row_overlay,
-            )?;
+            let mut filter = Filter::new();
+            filter.and_in("subject_key", slice.to_vec());
+            let rows = select_filtered::<WorkOverlay>(&self.conn, filter, "", Vec::new())?;
             found.extend(
                 rows.into_iter()
                     .map(|overlay| (overlay.subject_key.clone(), overlay)),
