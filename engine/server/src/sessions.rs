@@ -2415,6 +2415,104 @@ impl SessionRegistry {
         }
     }
 
+    /// What a pod-backed start hands the pod through the bootstrap. A wake (or
+    /// an engine restart adopting a pod) replays a record validated when the
+    /// session started, so it must not refuse now; a fresh start refuses.
+    fn pod_launch_for(
+        &self,
+        spec: &SessionSpec,
+        base_env: &[(String, String)],
+        recorded: Option<&hibernation::Record>,
+        pod_backed: bool,
+    ) -> Result<Option<crate::agent_stream::PodLaunch>> {
+        Ok(if pod_backed {
+            // A wake (or an engine restart adopting a pod) replays a record
+            // whose cwd and env were validated when the session started, so
+            // it must not refuse now: a checkout removed since, or a name
+            // this release tightened, drops that one field instead (WI-3883
+            // review). A fresh start validates strictly and refuses.
+            let has_source = spec.source.is_some();
+            let work_root = self.pod_config()?.work_dir();
+            let (agent_env, work_dir) = match recorded {
+                Some(_) => {
+                    pod_carry_recorded(base_env, spec.cwd.as_deref(), has_source, &work_root)
+                }
+                None => (
+                    pod_carry_env(base_env)?,
+                    spec.cwd
+                        .as_deref()
+                        .map(|dir| pod_work_dir_for(dir, has_source, &work_root))
+                        .transpose()?
+                        .map(|resolved| resolved.work_dir),
+                ),
+            };
+            Some(crate::agent_stream::PodLaunch {
+                agent_env,
+                work_dir,
+                ..Default::default()
+            })
+        } else {
+            None
+        })
+    }
+
+    /// Resolve the MCP set and trim for the session, and record it on the pod
+    /// launch. Returns the set, the extra servers, the trim and `$HOME`.
+    fn prepare_mcp(
+        &self,
+        spec: &SessionSpec,
+        recorded: Option<&hibernation::Record>,
+        id: Uuid,
+        pod_launch: Option<&mut crate::agent_stream::PodLaunch>,
+    ) -> Result<(
+        crate::mcp_set::McpSet,
+        Vec<String>,
+        crate::mcp_set::McpTrim,
+        Option<std::path::PathBuf>,
+    )> {
+        // WI-4489: a start another session or autopilot made, and that is
+        // not an oversight session, is a worker: with no set named it gets
+        // the worker set, never the full one.
+        let dispatched = spec.role != SessionRole::Oversight
+            && (spec.supervisor.is_some() || spec.started_by.is_some() || spec.autopilot);
+        let mcp_set = crate::mcp_set::McpSet::for_agent(
+            spec.mcp_set
+                .as_deref()
+                .or_else(|| recorded.and_then(|r| r.mcp_set.as_deref())),
+            self.agent_of(&spec.command, spec.template.as_deref())
+                .as_deref(),
+            dispatched,
+        )?;
+        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+        let claude_dir = spec
+            .env
+            .iter()
+            .flatten()
+            .rev()
+            .find(|(k, _)| k == "CLAUDE_CONFIG_DIR")
+            .map(|(_, v)| std::path::PathBuf::from(v))
+            .or_else(|| std::env::var_os("CLAUDE_CONFIG_DIR").map(std::path::PathBuf::from));
+        let claude_json = crate::mcp_set::claude_json_path(claude_dir.as_deref(), home.as_deref());
+        let mcp_extra: Vec<String> = spec
+            .mcp_extra
+            .clone()
+            .or_else(|| recorded.map(|r| r.mcp_extra.clone()))
+            .unwrap_or_default();
+        if let Some(launch) = pod_launch {
+            launch.mcp_set = mcp_set;
+            launch.mcp_extra = mcp_extra.clone();
+        }
+        let mcp_trim = crate::mcp_set::prepare(
+            mcp_set,
+            &mcp_extra,
+            home.as_deref(),
+            claude_json.as_deref(),
+            &self.cfg.state_dir,
+            id,
+        );
+        Ok((mcp_set, mcp_extra, mcp_trim, home))
+    }
+
     fn create_inner(
         &self,
         mut spec: SessionSpec,
@@ -2603,35 +2701,8 @@ impl SessionRegistry {
                 tracing::warn!(session = %id, "{warning}");
             }
         }
-        let mut pod_launch = if pod_backed {
-            // A wake (or an engine restart adopting a pod) replays a record
-            // whose cwd and env were validated when the session started, so
-            // it must not refuse now: a checkout removed since, or a name
-            // this release tightened, drops that one field instead (WI-3883
-            // review). A fresh start validates strictly and refuses.
-            let has_source = spec.source.is_some();
-            let work_root = self.pod_config()?.work_dir();
-            let (agent_env, work_dir) = match recorded {
-                Some(_) => {
-                    pod_carry_recorded(&base_env, spec.cwd.as_deref(), has_source, &work_root)
-                }
-                None => (
-                    pod_carry_env(&base_env)?,
-                    spec.cwd
-                        .as_deref()
-                        .map(|dir| pod_work_dir_for(dir, has_source, &work_root))
-                        .transpose()?
-                        .map(|resolved| resolved.work_dir),
-                ),
-            };
-            Some(crate::agent_stream::PodLaunch {
-                agent_env,
-                work_dir,
-                ..Default::default()
-            })
-        } else {
-            None
-        };
+        let mut pod_launch =
+            self.pod_launch_for(&spec, &base_env, recorded.map(Box::as_ref), pod_backed)?;
         // Placement is now effective: an omitted placement uses the template
         // or backend default, which is host for local/raw launches. Codex is
         // pod-only even when the caller did not spell out `placement=host`.
@@ -2664,46 +2735,8 @@ impl SessionRegistry {
             ),
             None => self.cfg.agent_onboarding.settings_file.as_deref(),
         };
-        // WI-4489: a start another session or autopilot made, and that is
-        // not an oversight session, is a worker: with no set named it gets
-        // the worker set, never the full one.
-        let dispatched = spec.role != SessionRole::Oversight
-            && (spec.supervisor.is_some() || spec.started_by.is_some() || spec.autopilot);
-        let mcp_set = crate::mcp_set::McpSet::for_agent(
-            spec.mcp_set
-                .as_deref()
-                .or_else(|| recorded.and_then(|r| r.mcp_set.as_deref())),
-            self.agent_of(&spec.command, spec.template.as_deref())
-                .as_deref(),
-            dispatched,
-        )?;
-        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-        let claude_dir = spec
-            .env
-            .iter()
-            .flatten()
-            .rev()
-            .find(|(k, _)| k == "CLAUDE_CONFIG_DIR")
-            .map(|(_, v)| std::path::PathBuf::from(v))
-            .or_else(|| std::env::var_os("CLAUDE_CONFIG_DIR").map(std::path::PathBuf::from));
-        let claude_json = crate::mcp_set::claude_json_path(claude_dir.as_deref(), home.as_deref());
-        let mcp_extra: Vec<String> = spec
-            .mcp_extra
-            .clone()
-            .or_else(|| recorded.map(|r| r.mcp_extra.clone()))
-            .unwrap_or_default();
-        if let Some(launch) = pod_launch.as_mut() {
-            launch.mcp_set = mcp_set;
-            launch.mcp_extra = mcp_extra.clone();
-        }
-        let mcp_trim = crate::mcp_set::prepare(
-            mcp_set,
-            &mcp_extra,
-            home.as_deref(),
-            claude_json.as_deref(),
-            &self.cfg.state_dir,
-            id,
-        );
+        let (mcp_set, mcp_extra, mcp_trim, home) =
+            self.prepare_mcp(&spec, recorded.map(Box::as_ref), id, pod_launch.as_mut())?;
         // A host opencode or shell whose engine home is not writable gets its
         // own data, state and cache directories (WI-4284, WI-4298).
         let engine_home = std::env::var_os("HOME")
