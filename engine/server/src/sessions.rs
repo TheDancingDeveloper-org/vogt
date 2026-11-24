@@ -2273,6 +2273,110 @@ impl SessionRegistry {
         Ok((cut, worktree_base))
     }
 
+    /// The hibernation record of a session started through the API: the
+    /// command and environment as the template and caller gave them.
+    fn fresh_record(
+        &self,
+        id: Uuid,
+        session: &Arc<Session>,
+        input: FreshRecordInputs<'_>,
+    ) -> Record {
+        let FreshRecordInputs {
+            spec,
+            base_command,
+            base_env,
+            posture,
+            account,
+            applied_settings,
+            mcp_set,
+            mcp_extra,
+            prompt_file,
+            workspace,
+            conversation,
+        } = input;
+        let mut record = Record::new(id, session.name(), session.created_at_rfc3339());
+        record.template = spec.template.clone();
+        record.placement = spec.placement.clone();
+        record.command = base_command;
+        // Only a directory the caller chose. The engine's default can
+        // sit outside the workspace (`~` on the pods), and a wake that
+        // replayed it as a requested `cwd` was refused for escaping
+        // the workspace root; with none recorded, a wake starts in the
+        // default again.
+        record.cwd = spec.cwd.clone();
+        record.env = hibernation::without_secrets(base_env);
+        record.model = spec.model.clone();
+        record.effort = spec.effort.clone();
+        record.permission_mode = posture.clone();
+        record.account = account.clone();
+        record.settings_file = applied_settings.clone();
+        record.mcp_set = Some(mcp_set.name().to_string());
+        record.mcp_extra = if mcp_set == crate::mcp_set::McpSet::Worker {
+            mcp_extra.to_vec()
+        } else {
+            Vec::new()
+        };
+        record.add_dirs = prompt_file
+            .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
+            .into_iter()
+            .collect();
+        record.autopilot = spec.autopilot;
+        record.policy = spec.policy.clone();
+        record.source = spec.source.clone();
+        record.budget = spec.budget.clone();
+        record.role = spec.role;
+        record.work_item = spec.work_item.clone();
+        record.supervisor = spec.supervisor;
+        record.wake_on = spec.wake_on.clone();
+        record.session_ref = spec.session_ref.clone();
+        record.workspace = workspace;
+        record.keep_awake = session.keep_awake();
+        record.conversation = conversation;
+        record.brief_file = prompt_file.cloned();
+        record
+    }
+
+    /// The hibernation record a wake replays, with the live session restored
+    /// from it.
+    fn woken_record(
+        &self,
+        id: Uuid,
+        session: &Arc<Session>,
+        record: Record,
+        conversation: Option<vogt_engine_contract::AgentConversation>,
+        prompt_file: Option<std::path::PathBuf>,
+    ) -> Record {
+        let mut record = record;
+        record.hibernation = None;
+        // A compacting wake runs a new conversation from a new brief;
+        // the next wake resumes that one (WI-2037).
+        if record.fresh_conversation.take().is_some() {
+            record.conversation = conversation.clone();
+            record.brief_file = prompt_file.clone();
+        }
+        record.name = session.name();
+        session.set_keep_awake(record.keep_awake);
+        session.set_budget(record.budget.clone());
+        session.set_budget_soft_sent(record.budget_soft_sent);
+        session.set_budget_hard_done(record.budget_hard_done);
+        session
+            .set_budget_session_banked(std::time::Duration::from_secs(record.budget_session_secs));
+        // A forced wake does not undo the handoff. The next hibernation
+        // rebuilds the record from the live session, so the mark has to
+        // live there too.
+        session.set_superseded_by(record.superseded_by.clone());
+        // Taken, not cloned: the live record must not keep a report the
+        // woken session can later clear, and restoring must not publish
+        // — a publish is a push the operator already received. The next
+        // hibernation captures whatever the session still holds.
+        session.restore_blocked(record.blocked.take());
+        // The declaration a wake keeps: the live session carries it
+        // again, and the next hibernation copies it back (WI-1518).
+        session.restore_done_at(record.done_at.clone());
+        hibernation::remove_screen(&self.cfg.state_dir, id);
+        record
+    }
+
     fn create_inner(
         &self,
         mut spec: SessionSpec,
@@ -3038,81 +3142,30 @@ impl SessionRegistry {
         let fresh = matches!(&creating, Creating::Fresh(_));
         let record = match creating {
             Creating::Fresh(Origin::AgentTask) => None,
-            Creating::Fresh(Origin::Api) => {
-                let mut record = Record::new(id, session.name(), session.created_at_rfc3339());
-                record.template = spec.template.clone();
-                record.placement = spec.placement.clone();
-                record.command = base_command;
-                // Only a directory the caller chose. The engine's default can
-                // sit outside the workspace (`~` on the pods), and a wake that
-                // replayed it as a requested `cwd` was refused for escaping
-                // the workspace root; with none recorded, a wake starts in the
-                // default again.
-                record.cwd = spec.cwd.clone();
-                record.env = hibernation::without_secrets(&base_env);
-                record.model = spec.model.clone();
-                record.effort = spec.effort.clone();
-                record.permission_mode = posture.clone();
-                record.account = account.clone();
-                record.settings_file = applied_settings.clone();
-                record.mcp_set = Some(mcp_set.name().to_string());
-                record.mcp_extra = if mcp_set == crate::mcp_set::McpSet::Worker {
-                    mcp_extra.clone()
-                } else {
-                    Vec::new()
-                };
-                record.add_dirs = prompt_file
-                    .as_ref()
-                    .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
-                    .into_iter()
-                    .collect();
-                record.autopilot = spec.autopilot;
-                record.policy = spec.policy.clone();
-                record.source = spec.source.clone();
-                record.budget = spec.budget.clone();
-                record.role = spec.role;
-                record.work_item = spec.work_item.clone();
-                record.supervisor = spec.supervisor;
-                record.wake_on = spec.wake_on.clone();
-                record.session_ref = spec.session_ref.clone();
-                record.workspace = workspace.clone();
-                record.keep_awake = session.keep_awake();
-                record.conversation = conversation.clone();
-                record.brief_file = prompt_file.clone();
-                Some(record)
-            }
-            Creating::Wake(record) => {
-                let mut record = *record;
-                record.hibernation = None;
-                // A compacting wake runs a new conversation from a new brief;
-                // the next wake resumes that one (WI-2037).
-                if record.fresh_conversation.take().is_some() {
-                    record.conversation = conversation.clone();
-                    record.brief_file = prompt_file.clone();
-                }
-                record.name = session.name();
-                session.set_keep_awake(record.keep_awake);
-                session.set_budget(record.budget.clone());
-                session.set_budget_soft_sent(record.budget_soft_sent);
-                session.set_budget_hard_done(record.budget_hard_done);
-                session.set_budget_session_banked(std::time::Duration::from_secs(
-                    record.budget_session_secs,
-                ));
-                // A forced wake does not undo the handoff. The next hibernation
-                // rebuilds the record from the live session, so the mark has to
-                // live there too.
-                session.set_superseded_by(record.superseded_by.clone());
-                // Taken, not cloned: the live record must not keep a report the
-                // woken session can later clear, and restoring must not publish
-                // — a publish is a push the operator already received. The next
-                // hibernation captures whatever the session still holds.
-                session.restore_blocked(record.blocked.take());
-                // The declaration a wake keeps: the live session carries it
-                // again, and the next hibernation copies it back (WI-1518).
-                session.restore_done_at(record.done_at.clone());
-                hibernation::remove_screen(&self.cfg.state_dir, id);
-                Some(record)
-            }
+            Creating::Fresh(Origin::Api) => Some(self.fresh_record(
+                id,
+                &session,
+                FreshRecordInputs {
+                    spec: &spec,
+                    base_command,
+                    base_env: &base_env,
+                    posture: posture.clone(),
+                    account: account.clone(),
+                    applied_settings: applied_settings.clone(),
+                    mcp_set,
+                    mcp_extra: &mcp_extra,
+                    prompt_file: prompt_file.as_ref(),
+                    workspace: workspace.clone(),
+                    conversation: conversation.clone(),
+                },
+            )),
+            Creating::Wake(record) => Some(self.woken_record(
+                id,
+                &session,
+                *record,
+                conversation.clone(),
+                prompt_file.clone(),
+            )),
         };
         if let Some(record) = record {
             if let Err(e) = hibernation::write(&self.cfg.state_dir, &record) {
@@ -5955,6 +6008,20 @@ fn normalize_session_name(name: &str) -> Result<String> {
         ));
     }
     Ok(trimmed.to_string())
+}
+
+struct FreshRecordInputs<'a> {
+    spec: &'a SessionSpec,
+    base_command: Option<Vec<String>>,
+    base_env: &'a [(String, String)],
+    posture: Option<String>,
+    account: Option<String>,
+    applied_settings: Option<std::path::PathBuf>,
+    mcp_set: crate::mcp_set::McpSet,
+    mcp_extra: &'a [String],
+    prompt_file: Option<&'a std::path::PathBuf>,
+    workspace: Option<vogt_engine_contract::Workspace>,
+    conversation: Option<vogt_engine_contract::AgentConversation>,
 }
 
 /// A session worktree cut during a start that has not spawned yet (WI-1298).
