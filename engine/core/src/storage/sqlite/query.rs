@@ -99,6 +99,11 @@ impl Filter {
         }
     }
 
+    /// Add a condition that has no placeholder, such as `"stopped_at IS NULL"`.
+    pub(super) fn and_fixed(&mut self, clause: &'static str) {
+        self.clauses.push(clause);
+    }
+
     /// `WHERE a AND b ` (with a trailing space), or an empty string.
     pub(super) fn where_sql(&self) -> String {
         if self.clauses.is_empty() {
