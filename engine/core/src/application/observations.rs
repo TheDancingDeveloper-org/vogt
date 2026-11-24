@@ -233,7 +233,7 @@ fn mirrors_of<C: Clock, I: IdFactory>(
     project_id: &str,
 ) -> Result<(Vec<Value>, Vec<Value>), VogtError> {
     let slugs: std::collections::BTreeMap<String, String> = view
-        .list_projects(10_000, 0)?
+        .all_projects()?
         .into_iter()
         .map(|project| (project.id, project.slug))
         .collect();
@@ -297,7 +297,7 @@ fn named(view: &dyn ReadView, refs: &[crate::core::DepRef]) -> Result<Vec<Value>
     // One project load, as Python attaches slugs from the project map rather
     // than two `project_by_id` round-trips per dependency row.
     let projects: std::collections::HashMap<String, crate::core::Project> = view
-        .list_projects(10_000, 0)?
+        .all_projects()?
         .into_iter()
         .map(|project| (project.id.clone(), project))
         .collect();

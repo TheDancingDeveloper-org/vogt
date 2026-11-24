@@ -461,7 +461,7 @@ fn observed_inputs<C: Clock, I: IdFactory>(
     // Projects are loaded once, as Python's `views.py` does (`projects = {p.id: p ...}`).
     // `project_by_id` per observed row was a full table lookup for every candidate.
     let projects: std::collections::HashMap<String, crate::core::Project> = view
-        .list_projects(10_000, 0)?
+        .all_projects()?
         .into_iter()
         .map(|project| (project.id.clone(), project))
         .collect();
@@ -817,7 +817,7 @@ fn initiative_weights(
     view: &impl ReadView,
 ) -> Result<std::collections::HashMap<String, i64>, VogtError> {
     Ok(view
-        .list_initiatives(10_000, 0)?
+        .all_initiatives()?
         .into_iter()
         .map(|initiative| (initiative.id, initiative.weight))
         .collect())
