@@ -1,1 +1,0 @@
-The deployment's session policy — what an agent may do without asking — is the settings file this session was started with, not this brief.
