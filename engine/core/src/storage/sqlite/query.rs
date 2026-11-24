@@ -162,6 +162,12 @@ impl Filter {
         }
     }
 
+    /// Add a condition with several placeholders, one value for each `?`.
+    pub(super) fn and_values(&mut self, clause: &'static str, values: Vec<Box<dyn ToSql>>) {
+        self.clauses.push(Cow::Borrowed(clause));
+        self.values.extend(values);
+    }
+
     /// `column IN (?, ?, ...)`, binding each element. `column` is a literal;
     /// the list text is only question marks. An empty list adds nothing.
     pub(super) fn and_in<V: ToSql + 'static>(
@@ -170,6 +176,15 @@ impl Filter {
         values: impl IntoIterator<Item = V>,
     ) {
         self.in_list(column, " IN ", values);
+    }
+
+    /// `column NOT IN (?, ?, ...)`, as `and_in`.
+    pub(super) fn and_not_in<V: ToSql + 'static>(
+        &mut self,
+        column: &'static str,
+        values: impl IntoIterator<Item = V>,
+    ) {
+        self.in_list(column, " NOT IN ", values);
     }
 
     fn in_list<V: ToSql + 'static>(
@@ -201,6 +216,13 @@ impl Filter {
         } else {
             format!("WHERE {} ", self.clauses.join(" AND "))
         }
+    }
+
+    /// `WHERE a AND b` without a trailing space (or an empty string) and the
+    /// bound values, for queries that splice the text into a larger statement.
+    pub(super) fn into_parts(self) -> (String, Vec<Box<dyn ToSql>>) {
+        let sql = self.where_sql().trim_end().to_string();
+        (sql, self.values)
     }
 
     /// The bound values, in clause order, followed by `tail`.
@@ -235,7 +257,9 @@ mod tests {
         let mut filter = Filter::new();
         filter.and_in("k", Vec::<String>::new());
         filter.and_in("w.kind", vec!["a'); --".to_string(), "b".to_string()]);
-        assert_eq!(filter.where_sql(), "WHERE w.kind IN (?, ?) ");
-        assert_eq!(filter.params(Vec::new()).len(), 2);
+        filter.and_not_in("w.state", ["x", "y", "z"].map(String::from));
+        let (sql, values) = filter.into_parts();
+        assert_eq!(sql, "WHERE w.kind IN (?, ?) AND w.state NOT IN (?, ?, ?)");
+        assert_eq!(values.len(), 5);
     }
 }
