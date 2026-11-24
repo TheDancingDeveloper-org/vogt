@@ -47,7 +47,6 @@ dashmap = "6"
 uuid = { version = "1", features = ["v4", "serde"] }
 thiserror = "2"
 regex = "1"
-once_cell = "1"
 parking_lot = "0.12"
 subtle = "2"
 time = { version = "0.3", features = ["serde", "formatting"] }

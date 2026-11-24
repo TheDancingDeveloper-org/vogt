@@ -4871,7 +4871,6 @@ dependencies = [
  "kube",
  "libc",
  "mime_guess",
- "once_cell",
  "parking_lot",
  "portable-pty",
  "prost",
