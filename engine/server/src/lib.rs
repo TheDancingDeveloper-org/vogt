@@ -71,6 +71,7 @@ pub mod redaction;
 pub mod resources;
 pub mod screen;
 pub mod scrollback;
+pub mod secret;
 pub mod secret_broker;
 pub mod session_backend;
 pub mod session_cache;

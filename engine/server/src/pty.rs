@@ -1749,7 +1749,7 @@ pub fn spawn(
     // helper's own `unset` of the brokering identity: it is not the identity,
     // it is the session's leave to ask for one manifest secret at a time.
     if let Some(grant) = defaults.secret_broker.as_ref() {
-        cmd.env(crate::secret_broker::BROKER_TOKEN_ENV, &grant.token);
+        cmd.env(crate::secret_broker::BROKER_TOKEN_ENV, grant.token.expose());
         cmd.env(crate::secret_broker::BROKER_URL_ENV, &grant.url);
     }
     if let Some(env) = spec.env.as_ref() {
