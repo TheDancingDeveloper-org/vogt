@@ -350,8 +350,6 @@ fn spawn_background_tasks(state: &Arc<AppState>) {
     spawn_history_retention_sweeper(Arc::clone(state));
     // Background task: bound what stopped sessions keep in memory (WI-4290).
     spawn_stopped_session_reaper(Arc::clone(state));
-    // Background task: fold and truncate the SQLite write-ahead logs (WI-4638).
-    spawn_wal_checkpointer();
     crate::hibernate_policy::spawn_watcher(Arc::clone(state));
     crate::autopilot::spawn_watcher(Arc::clone(state));
     crate::oversight_wake::spawn_watcher(Arc::clone(state));
@@ -798,32 +796,6 @@ fn spawn_history_retention_sweeper(state: Arc<AppState>) {
                 Err(e) => tracing::warn!("session history retention sweep failed: {e}"),
             }
             tokio::time::sleep(std::time::Duration::from_secs(24 * 60 * 60)).await;
-        }
-    });
-}
-
-/// Checkpoint every pooled SQLite database on a ten-minute tick (WI-4638). The
-/// engine had no periodic checkpoint, so a busy writer let `-wal` grow until
-/// SQLite's page-count auto-checkpoint happened to run and never shrank the
-/// file. The pass takes each pool's writer in turn, off the async runtime.
-fn spawn_wal_checkpointer() {
-    tokio::spawn(async move {
-        let mut tick = tokio::time::interval(std::time::Duration::from_secs(600));
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        tick.tick().await;
-        loop {
-            tick.tick().await;
-            let outcome =
-                tokio::task::spawn_blocking(vogt_core::storage::sqlite::connection::checkpoint_all)
-                    .await;
-            match outcome {
-                Ok((_, failed)) => {
-                    for (path, err) in failed {
-                        tracing::warn!(path = %path.display(), "wal checkpoint failed: {err}");
-                    }
-                }
-                Err(e) => tracing::warn!("wal checkpoint task failed: {e}"),
-            }
         }
     });
 }

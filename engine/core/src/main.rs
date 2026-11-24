@@ -876,6 +876,14 @@ fn serve(args: ServeArgs<'_>) -> ExitCode {
                 config.watch_interval_seconds
             },
         );
+        let mut checkpoints = adapters::http::scheduler::CollectorSchedule::new(
+            adapters::http::scheduler::checkpoint_tick(),
+            if no_schedule {
+                0
+            } else {
+                adapters::http::scheduler::CHECKPOINT_INTERVAL_SECONDS
+            },
+        );
         // The schedule starts only after TLS has loaded and the listener has
         // bound. A certificate that will not parse, or a port that will not
         // bind, must not begin a sweep — Python starts its schedule in the
@@ -901,6 +909,7 @@ fn serve(args: ServeArgs<'_>) -> ExitCode {
                 listener.set_nonblocking(true)?;
                 schedule.start(stop_rx.clone());
                 watches.start(stop_rx.clone());
+                checkpoints.start(stop_rx.clone());
                 bounded_serve(
                     axum_server::from_tcp_rustls(listener, tls)?
                         .handle(handle)
@@ -914,6 +923,7 @@ fn serve(args: ServeArgs<'_>) -> ExitCode {
                 let listener = tokio::net::TcpListener::bind(addr).await?;
                 schedule.start(stop_rx.clone());
                 watches.start(stop_rx.clone());
+                checkpoints.start(stop_rx.clone());
                 // `notified`, not `shutdown`: axum's graceful shutdown stops
                 // accepting and then drains with no bound of its own. Sleeping
                 // the grace inside that future would keep accepting for the
@@ -932,6 +942,7 @@ fn serve(args: ServeArgs<'_>) -> ExitCode {
         // which it already has if we got here via the signal.
         schedule.stop().await;
         watches.stop().await;
+        checkpoints.stop().await;
         outcome
     });
     match result {
