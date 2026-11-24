@@ -397,7 +397,7 @@ impl SessionHistory {
         .bind(record.exit_code)
         .bind(record.cwd)
         .bind(record.command)
-        .bind(record.scrollback_bytes as i64)
+        .bind(crate::chat_store::sql_i64(record.scrollback_bytes))
         .bind(record.end_reason)
         .bind(identity.template)
         .bind(identity.role)
@@ -699,7 +699,7 @@ impl SessionHistory {
             .bind(format!("recovered {}", &stem[..stem.len().min(8)]))
             .bind(&created_str)
             .bind(&ended_str)
-            .bind(size as i64)
+            .bind(crate::chat_store::sql_i64(size))
             .bind(end_reason)
             .execute(&self.pool)
             .await

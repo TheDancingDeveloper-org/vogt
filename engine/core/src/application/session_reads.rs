@@ -80,11 +80,13 @@ fn opencode_replies<C: Clock, I: IdFactory>(
     n: usize,
 ) -> Result<Option<Value>, VogtError> {
     let replies = match ctx.engine.as_ref() {
-        Some(engine) => match engine.session_replies(engine_id, n as i64) {
-            Ok(found) => found,
-            Err(VogtError::EngineUnavailable(_)) => None,
-            Err(error) => return Err(error),
-        },
+        Some(engine) => {
+            match engine.session_replies(engine_id, i64::try_from(n).unwrap_or(i64::MAX)) {
+                Ok(found) => found,
+                Err(VogtError::EngineUnavailable(_)) => None,
+                Err(error) => return Err(error),
+            }
+        }
         None => None,
     };
     let Some((conversation_id, replies)) = replies else {

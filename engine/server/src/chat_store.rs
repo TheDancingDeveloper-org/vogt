@@ -43,6 +43,12 @@ pub struct ChatRecord {
     pub preview: Option<String>,
 }
 
+/// Saturating `u64` -> `i64` for SQLite INTEGER binds. SQLite has no unsigned
+/// type, so a bare `as i64` would store a huge value as a negative number.
+pub(crate) fn sql_i64(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
 impl ChatRecord {
     pub fn summary(&self, state: ChatState, live: bool) -> ChatSummary {
         ChatSummary {
@@ -167,7 +173,7 @@ impl ChatStore {
         .bind(&record.work_item)
         .bind(record.promoted_session.map(|s| s.to_string()))
         .bind(record.started)
-        .bind(record.message_count as i64)
+        .bind(sql_i64(record.message_count))
         .bind(&record.preview)
         .execute(&self.pool)
         .await
@@ -189,7 +195,7 @@ impl ChatStore {
         .bind(&record.work_item)
         .bind(record.promoted_session.map(|s| s.to_string()))
         .bind(record.started)
-        .bind(record.message_count as i64)
+        .bind(sql_i64(record.message_count))
         .bind(&record.preview)
         .bind(record.id.to_string())
         .execute(&self.pool)
@@ -392,6 +398,13 @@ fn record_from_row(r: &sqlx::sqlite::SqliteRow) -> Result<ChatRecord> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sql_i64_saturates_instead_of_wrapping() {
+        assert_eq!(sql_i64(7), 7);
+        assert_eq!(sql_i64(u64::MAX), i64::MAX);
+        assert_eq!(sql_i64(i64::MAX as u64 + 1), i64::MAX);
+    }
 
     fn record(id: Uuid, title: &str, at: &str) -> ChatRecord {
         ChatRecord {
