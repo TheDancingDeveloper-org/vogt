@@ -1,0 +1,470 @@
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.47
+   Compiling syn v2.0.119
+   Compiling libc v0.2.189
+   Compiling shlex v2.0.1
+   Compiling find-msvc-tools v0.1.11
+   Compiling cc v1.4.4
+   Compiling syn v3.0.4
+   Compiling autocfg v1.5.1
+   Compiling bitflags v2.13.1
+   Compiling cfg-if v1.0.4
+    Checking log v0.4.34
+    Checking smallvec v1.15.2
+   Compiling num-traits v0.2.19
+   Compiling glob v0.3.4
+   Compiling clang-sys v1.9.1
+   Compiling prettyplease v0.2.37
+   Compiling cmake v0.1.58
+   Compiling synstructure v0.13.2
+   Compiling minimal-lexical v0.2.1
+   Compiling either v1.18.0
+   Compiling memchr v2.8.3
+   Compiling regex-syntax v0.8.11
+   Compiling regex-automata v0.4.18
+   Compiling nom v7.1.3
+    Checking num-complex v0.4.6
+   Compiling libloading v0.8.9
+    Checking pin-project-lite v0.2.17
+   Compiling cexpr v0.6.0
+   Compiling regex v1.13.1
+   Compiling itertools v0.12.1
+   Compiling zerofrom-derive v0.1.7
+    Checking itoa v1.0.18
+    Checking once_cell v1.21.4
+    Checking bytes v1.12.1
+   Compiling shlex v1.3.0
+    Checking zerofrom v0.1.8
+   Compiling yoke-derive v0.8.2
+    Checking stable_deref_trait v1.2.1
+   Compiling pkg-config v0.3.34
+   Compiling vcpkg v0.2.15
+   Compiling openssl-sys v0.9.117
+    Checking yoke v0.8.3
+   Compiling zerovec-derive v0.11.6
+    Checking lazy_static v1.5.0
+    Checking zerovec v0.11.8
+   Compiling displaydoc v0.2.7
+   Compiling serde_core v1.0.229
+    Checking http v1.5.0
+   Compiling rustix v0.38.44
+   Compiling zeroize v1.9.0
+    Checking bytemuck v1.25.2
+   Compiling openssl v0.10.81
+   Compiling foreign-types-shared v0.1.1
+   Compiling httparse v1.10.1
+   Compiling foreign-types v0.3.2
+    Checking symphonia-core v0.6.1
+    Checking tracing-core v0.1.36
+    Checking errno v0.3.14
+   Compiling openssl-macros v0.1.1
+   Compiling base64ct v1.8.3
+   Compiling native-tls v0.2.18
+   Compiling linux-raw-sys v0.4.15
+   Compiling pem-rfc7468 v1.0.0
+    Checking signal-hook-registry v1.4.8
+   Compiling rustls-pki-types v1.15.1
+    Checking tinystr v0.8.4
+    Checking socket2 v0.6.5
+    Checking mio v1.2.2
+   Compiling tokio-macros v2.7.2
+   Compiling tracing-attributes v0.1.31
+   Compiling home v0.5.12
+   Compiling serde v1.0.229
+    Checking regex-lite v0.1.9
+   Compiling openssl-probe v0.2.1
+   Compiling bindgen v0.72.1
+    Checking futures-core v0.3.34
+    Checking litemap v0.8.3
+    Checking writeable v0.6.4
+   Compiling byteorder v1.5.0
+   Compiling base64 v0.23.1
+   Compiling bindgen v0.69.5
+   Compiling ureq-proto v0.6.4
+   Compiling socks v0.3.4
+    Checking icu_locale_core v2.3.0
+    Checking symphonia-metadata v0.6.1
+   Compiling which v4.4.2
+    Checking tracing v0.1.44
+    Checking tokio v1.54.1
+   Compiling webpki-root-certs v1.0.11
+   Compiling der v0.8.2
+    Checking zerotrie v0.2.5
+    Checking potential_utf v0.1.6
+   Compiling matrixmultiply v0.3.11
+   Compiling serde_derive v1.0.229
+   Compiling ring v0.17.14
+   Compiling percent-encoding v2.3.2
+   Compiling rustc-hash v1.1.0
+    Checking utf8_iter v1.0.4
+   Compiling icu_properties_data v2.3.0
+   Compiling lazycell v1.3.0
+   Compiling utf8-zero v0.8.1
+   Compiling rustc-hash v2.1.3
+   Compiling icu_normalizer_data v2.3.0
+   Compiling ureq v3.4.2
+    Checking icu_collections v2.3.0
+    Checking icu_provider v2.3.1
+   Compiling semver v1.0.28
+   Compiling zmij v1.0.23
+   Compiling fs_extra v1.3.0
+    Checking rawpointer v0.2.1
+   Compiling lzma-rust2 v0.15.8
+   Compiling hmac-sha256 v1.1.15
+   Compiling ort-sys v2.0.0-rc.12
+   Compiling whisper-rs-sys v0.15.0
+   Compiling espeak-rs-sys v0.2.0
+    Checking symphonia-common v0.6.1
+    Checking getrandom v0.2.17
+    Checking num-integer v0.1.47
+   Compiling getrandom v0.3.4
+    Checking untrusted v0.9.0
+   Compiling serde_json v1.0.151
+   Compiling crc32fast v1.5.1
+   Compiling rustix v1.1.4
+   Compiling thiserror v2.0.21
+    Checking icu_normalizer v2.3.0
+    Checking icu_properties v2.3.0
+    Checking form_urlencoded v1.2.2
+    Checking http-body v1.1.0
+   Compiling opusic-sys v0.7.5
+   Compiling thiserror-impl v2.0.21
+   Compiling rustls v0.23.46
+    Checking linux-raw-sys v0.12.1
+    Checking adler2 v2.0.1
+    Checking simd-adler32 v0.3.10
+    Checking miniz_oxide v0.8.9
+    Checking idna_adapter v1.2.2
+    Checking rustls-webpki v0.103.16
+    Checking ndarray v0.17.2
+   Compiling async-trait v0.1.92
+    Checking subtle v2.6.1
+    Checking utf8parse v0.2.2
+    Checking hound v3.5.1
+    Checking tower-service v0.3.3
+   Compiling version_check v0.9.5
+    Checking fastrand v2.5.0
+   Compiling whisper-rs v0.16.0
+    Checking futures-task v0.3.34
+    Checking slab v0.4.12
+    Checking extended v0.1.0
+    Checking symphonia-format-riff v0.6.1
+    Checking futures-util v0.3.34
+    Checking tempfile v3.27.0
+   Compiling multer v3.1.0
+    Checking anstyle-parse v1.0.0
+    Checking ort v2.0.0-rc.12
+    Checking flate2 v1.1.9
+    Checking espeak-rs v0.2.0
+    Checking idna v1.1.0
+    Checking ndarray v0.16.1
+    Checking symphonia-codec-vorbis v0.6.1
+    Checking symphonia-format-mkv v0.6.1
+    Checking symphonia-format-ogg v0.6.1
+    Checking webpki-roots v1.0.10
+    Checking futures-channel v0.3.34
+    Checking symphonia-codec-pcm v0.6.1
+    Checking httpdate v1.0.3
+    Checking mime v0.3.17
+    Checking is_terminal_polyfill v1.70.2
+    Checking anstyle v1.0.14
+    Checking atomic-waker v1.1.2
+    Checking sync_wrapper v1.0.2
+    Checking anstyle-query v1.1.5
+    Checking colorchoice v1.0.5
+    Checking tower-layer v0.3.3
+    Checking anstream v1.0.0
+    Checking hyper v1.11.0
+    Checking symphonia v0.6.1
+    Checking piper-rs v0.2.0
+    Checking opus v0.4.0
+    Checking url v2.5.8
+    Checking http-body-util v0.1.5
+    Checking encoding_rs v0.8.35
+    Checking clap_lex v1.1.1
+    Checking strsim v0.11.1
+    Checking spin v0.9.9
+   Compiling heck v0.5.0
+    Checking ryu v1.0.23
+    Checking serde_urlencoded v0.7.1
+   Compiling clap_derive v4.6.7
+    Checking clap_builder v4.6.7
+    Checking axum-core v0.5.6
+    Checking hyper-util v0.1.20
+    Checking matchers v0.2.0
+    Checking tower v0.5.3
+    Checking tracing-log v0.2.0
+    Checking serde_path_to_error v0.1.20
+    Checking sharded-slab v0.1.7
+    Checking thread_local v1.1.10
+    Checking nu-ansi-term v0.50.3
+    Checking matchit v0.8.4
+    Checking axum v0.8.9
+    Checking tracing-subscriber v0.3.23
+    Checking clap v4.6.7
+    Checking vogt-voice-tts v0.1.0 (/home/sprooty/Working/Active/.agent-tmp/claude-1000/-home-sprooty-Working-Active/d84245a6-1f38-4f60-a993-f2d795069810/scratchpad/w4590/vogt/voice/tts)
+    Checking vogt-voice-stt v0.1.0 (/home/sprooty/Working/Active/.agent-tmp/claude-1000/-home-sprooty-Working-Active/d84245a6-1f38-4f60-a993-f2d795069810/scratchpad/w4590/vogt/voice/stt)
+    Checking vogt-voice-models v0.1.0 (/home/sprooty/Working/Active/.agent-tmp/claude-1000/-home-sprooty-Working-Active/d84245a6-1f38-4f60-a993-f2d795069810/scratchpad/w4590/vogt/voice/models)
+    Checking vogt-voice-server v0.1.0 (/home/sprooty/Working/Active/.agent-tmp/claude-1000/-home-sprooty-Working-Active/d84245a6-1f38-4f60-a993-f2d795069810/scratchpad/w4590/vogt/voice/server)
+warning: unused dependency `ureq`
+  --> tts/Cargo.toml:28:1
+   |
+28 | ureq = "3.4"
+   | ^^^^^^^^^^^^
+   |
+   = note: `cargo::unused_dependencies` is set to `warn` by default
+help: consider removing the dependency on `ureq`
+warning: unused dependency `url`
+  --> tts/Cargo.toml:29:1
+   |
+29 | url = "2.5"
+   | ^^^^^^^^^^^
+   |
+help: consider removing the dependency on `url`
+warning: `vogt-voice-tts` (manifest) generated 2 warnings
+    Finished `dev` profile [unoptimized] target(s) in 2m 18s
+   Compiling log v0.4.34
+   Compiling smallvec v1.15.2
+   Compiling num-traits v0.2.19
+   Compiling num-complex v0.4.6
+   Compiling pin-project-lite v0.2.17
+   Compiling once_cell v1.21.4
+   Compiling zerofrom v0.1.8
+   Compiling stable_deref_trait v1.2.1
+   Compiling yoke v0.8.3
+   Compiling zerovec v0.11.8
+   Compiling serde_core v1.0.229
+   Compiling http v1.5.0
+   Compiling errno v0.3.14
+   Compiling bytemuck v1.25.2
+   Compiling symphonia-core v0.6.1
+   Compiling signal-hook-registry v1.4.8
+   Compiling tracing-core v0.1.36
+   Compiling socket2 v0.6.5
+   Compiling mio v1.2.2
+   Compiling tokio v1.54.1
+   Compiling tinystr v0.8.4
+   Compiling litemap v0.8.3
+   Compiling regex-lite v0.1.9
+   Compiling writeable v0.6.4
+   Compiling icu_locale_core v2.3.0
+   Compiling symphonia-metadata v0.6.1
+   Compiling tracing v0.1.44
+   Compiling serde v1.0.229
+   Compiling httparse v1.10.1
+   Compiling zerotrie v0.2.5
+   Compiling potential_utf v0.1.6
+   Compiling futures-core v0.3.34
+   Compiling utf8_iter v1.0.4
+   Compiling icu_collections v2.3.0
+   Compiling icu_provider v2.3.1
+   Compiling rawpointer v0.2.1
+   Compiling matrixmultiply v0.3.11
+   Compiling icu_properties_data v2.3.0
+   Compiling icu_normalizer_data v2.3.0
+   Compiling symphonia-common v0.6.1
+   Compiling rustls-pki-types v1.15.1
+   Compiling num-integer v0.1.47
+   Compiling getrandom v0.2.17
+   Compiling memchr v2.8.3
+   Compiling linux-raw-sys v0.12.1
+   Compiling untrusted v0.9.0
+   Compiling ring v0.17.14
+   Compiling rustix v1.1.4
+   Compiling thiserror v2.0.21
+   Compiling espeak-rs-sys v0.2.0
+   Compiling icu_normalizer v2.3.0
+   Compiling icu_properties v2.3.0
+   Compiling getrandom v0.3.4
+   Compiling zmij v1.0.23
+   Compiling form_urlencoded v1.2.2
+   Compiling hound v3.5.1
+   Compiling adler2 v2.0.1
+   Compiling fastrand v2.5.0
+   Compiling simd-adler32 v0.3.10
+   Compiling miniz_oxide v0.8.9
+   Compiling tempfile v3.27.0
+   Compiling ort-sys v2.0.0-rc.12
+   Compiling serde_json v1.0.151
+   Compiling idna_adapter v1.2.2
+   Compiling rustls-webpki v0.103.16
+   Compiling crc32fast v1.5.1
+   Compiling ndarray v0.17.2
+   Compiling http-body v1.1.0
+   Compiling subtle v2.6.1
+   Compiling extended v0.1.0
+   Compiling symphonia-format-riff v0.6.1
+   Compiling rustls v0.23.46
+   Compiling ort v2.0.0-rc.12
+   Compiling flate2 v1.1.9
+   Compiling espeak-rs v0.2.0
+   Compiling idna v1.1.0
+   Compiling opusic-sys v0.7.5
+   Compiling whisper-rs-sys v0.15.0
+   Compiling ndarray v0.16.1
+   Compiling webpki-roots v1.0.10
+   Compiling symphonia-format-ogg v0.6.1
+   Compiling symphonia-codec-vorbis v0.6.1
+   Compiling symphonia-format-mkv v0.6.1
+   Compiling ureq-proto v0.6.4
+   Compiling symphonia-codec-pcm v0.6.1
+   Compiling slab v0.4.12
+   Compiling utf8parse v0.2.2
+   Compiling tower-service v0.3.3
+   Compiling futures-task v0.3.34
+   Compiling futures-util v0.3.34
+   Compiling anstyle-parse v1.0.0
+   Compiling symphonia v0.6.1
+   Compiling ureq v3.4.2
+   Compiling piper-rs v0.2.0
+   Compiling whisper-rs v0.16.0
+   Compiling opus v0.4.0
+   Compiling url v2.5.8
+   Compiling futures-channel v0.3.34
+   Compiling httpdate v1.0.3
+   Compiling sync_wrapper v1.0.2
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling tower-layer v0.3.3
+   Compiling regex-syntax v0.8.11
+   Compiling anstyle v1.0.14
+   Compiling atomic-waker v1.1.2
+   Compiling mime v0.3.17
+   Compiling anstyle-query v1.1.5
+   Compiling colorchoice v1.0.5
+   Compiling anstream v1.0.0
+   Compiling hyper v1.11.0
+   Compiling regex-automata v0.4.18
+   Compiling http-body-util v0.1.5
+   Compiling encoding_rs v0.8.35
+   Compiling ryu v1.0.23
+   Compiling clap_lex v1.1.1
+   Compiling strsim v0.11.1
+   Compiling spin v0.9.9
+   Compiling multer v3.1.0
+   Compiling clap_builder v4.6.7
+   Compiling serde_urlencoded v0.7.1
+   Compiling axum-core v0.5.6
+   Compiling matchers v0.2.0
+   Compiling hyper-util v0.1.20
+   Compiling tower v0.5.3
+   Compiling vogt-voice-tts v0.1.0 (/home/sprooty/Working/Active/.agent-tmp/claude-1000/-home-sprooty-Working-Active/d84245a6-1f38-4f60-a993-f2d795069810/scratchpad/w4590/vogt/voice/tts)
+   Compiling vogt-voice-stt v0.1.0 (/home/sprooty/Working/Active/.agent-tmp/claude-1000/-home-sprooty-Working-Active/d84245a6-1f38-4f60-a993-f2d795069810/scratchpad/w4590/vogt/voice/stt)
+   Compiling vogt-voice-models v0.1.0 (/home/sprooty/Working/Active/.agent-tmp/claude-1000/-home-sprooty-Working-Active/d84245a6-1f38-4f60-a993-f2d795069810/scratchpad/w4590/vogt/voice/models)
+   Compiling tracing-log v0.2.0
+   Compiling serde_path_to_error v0.1.20
+   Compiling sharded-slab v0.1.7
+   Compiling thread_local v1.1.10
+   Compiling matchit v0.8.4
+   Compiling nu-ansi-term v0.50.3
+   Compiling tracing-subscriber v0.3.23
+   Compiling axum v0.8.9
+   Compiling clap v4.6.7
+   Compiling vogt-voice-server v0.1.0 (/home/sprooty/Working/Active/.agent-tmp/claude-1000/-home-sprooty-Working-Active/d84245a6-1f38-4f60-a993-f2d795069810/scratchpad/w4590/vogt/voice/server)
+warning: unused dependency `ureq`
+  --> tts/Cargo.toml:28:1
+   |
+28 | ureq = "3.4"
+   | ^^^^^^^^^^^^
+   |
+   = note: `cargo::unused_dependencies` is set to `warn` by default
+help: consider removing the dependency on `ureq`
+warning: unused dependency `url`
+  --> tts/Cargo.toml:29:1
+   |
+29 | url = "2.5"
+   | ^^^^^^^^^^^
+   |
+help: consider removing the dependency on `url`
+warning: `vogt-voice-tts` (manifest) generated 2 warnings
+    Finished `test` profile [unoptimized] target(s) in 44.80s
+     Running unittests src/lib.rs (/home/sprooty/target-w4590/debug/build/vogt-voice-models/ea151ec649d9c021/out/vogt_voice_models-ea151ec649d9c021)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/home/sprooty/target-w4590/debug/build/vogt-voice-server/83085aaca4795dc0/out/vogt_voice_server-83085aaca4795dc0)
+
+running 15 tests
+test metrics::tests::empty_metrics_addr_is_off_and_garbage_is_an_error ... ok
+test config::tests::malformed_command_is_rejected ... ok
+test config::tests::native_model_paths_and_thread_count_are_configurable ... ok
+test config::tests::commands_are_explicit_json_argv ... ok
+test metrics::tests::process_gauges_read_on_linux ... ok
+test metrics::tests::model_bytes_sum_existing_files ... ok
+test metrics::tests::render_uses_prometheus_process_names ... ok
+test routes::tests::health_is_unavailable_when_a_required_native_model_fails ... ok
+test routes::tests::health_and_models_are_openai_sidecar_contracts ... ok
+test routes::tests::provider_contracts_are_object_safe ... ok
+test routes::tests::malformed_requests_are_400 ... ok
+test routes::tests::speech_preserves_json_contract_and_returns_explicit_501 ... ok
+test routes::tests::transcription_validates_multipart_and_returns_explicit_501 ... ok
+test routes::tests::configured_subprocess_backends_are_wired_to_the_http_contract ... ok
+test metrics::tests::listener_serves_expected_names ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running unittests src/main.rs (/home/sprooty/target-w4590/debug/build/vogt-voice-server/ca7114482634bf08/out/vogt_voice-ca7114482634bf08)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/home/sprooty/target-w4590/debug/build/vogt-voice-stt/d885302437566b67/out/vogt_voice_stt-d885302437566b67)
+
+running 9 tests
+test tests::command_requires_an_executable ... ok
+test tests::native_decoder_mixes_stereo_wav_without_shelling_out ... ok
+test tests::audio_path_is_appended_when_template_does_not_contain_it ... ok
+test tests::native_decoder_resamples_to_whisper_rate ... ok
+test tests::native_decoder_rejects_invalid_audio_and_missing_model ... ok
+test tests::placeholders_are_replaced_without_shell_parsing ... ok
+test tests::subprocess_reads_the_real_audio_file_and_returns_stdout ... ok
+test tests::native_decoder_reads_webm_and_ogg_containers ... ok
+test tests::subprocess_rejects_empty_stdout_and_timeout ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src/lib.rs (/home/sprooty/target-w4590/debug/build/vogt-voice-tts/50c592a3902c00e9/out/vogt_voice_tts-50c592a3902c00e9)
+
+running 11 tests
+test tests::command_requires_an_executable ... ok
+test tests::command_templates_replace_metadata_but_not_text ... ok
+test tests::native_speed_is_validated_and_mapped_to_piper_length_scale ... ok
+test tests::piper_round_trip_produces_speech_and_honours_speed ... ignored, needs a Piper voice; set VOGT_VOICE_TEST_PIPER_CONFIG
+test tests::onnx_weights_sit_beside_the_config ... ok
+test tests::response_formats_have_real_audio_content_types ... ok
+test tests::native_constructor_reports_missing_model_config ... ok
+test tests::wav_encoding_is_mono_16_bit_pcm_at_the_model_rate ... ok
+test tests::native_constructor_rejects_streaming_models_and_missing_weights ... ok
+test tests::subprocess_writes_text_to_stdin_and_returns_real_audio_bytes ... ok
+test tests::subprocess_rejects_empty_audio_and_timeout ... ok
+
+test result: ok. 10 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+   Doc-tests vogt_voice_models
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests vogt_voice_server
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests vogt_voice_stt
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests vogt_voice_tts
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+EXIT=0
