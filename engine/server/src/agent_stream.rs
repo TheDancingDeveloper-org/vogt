@@ -638,7 +638,8 @@ pub struct BootstrapRequest {
 }
 #[derive(Debug, Serialize)]
 pub struct BootstrapResponse {
-    pub session_token: String,
+    #[serde(serialize_with = "crate::secret::serialize_exposed")]
+    pub session_token: crate::secret::Secret<String>,
     pub bundle: serde_json::Value,
     pub env: serde_json::Value,
     /// The caller's extra environment (WI-3883), kept apart from `env` on
@@ -653,8 +654,11 @@ pub struct BootstrapResponse {
     /// Credential for the session's source, from its provider, delivered to
     /// the entrypoint as a 0600 file rather than an environment value. Absent
     /// when the provider has none.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub source_token: Option<String>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::secret::serialize_exposed_opt"
+    )]
+    pub source_token: Option<crate::secret::Secret<String>>,
     /// The core session id the source token is bound to, when the core
     /// supplied one: the entrypoint writes the token under that name and
     /// exports `GRAFT_SESSION_ID` so commits attribute to the same session.
@@ -1658,12 +1662,12 @@ pub async fn bootstrap(
     // a restarted engine adopts the pod by reading it back.
     state.sessions.keep_pod_token(id, &session_token);
     axum::Json(BootstrapResponse {
-        session_token,
+        session_token: session_token.into(),
         bundle: serde_json::Value::Object(bundle),
         env: serde_json::Value::Object(env),
         agent_env,
         source,
-        source_token,
+        source_token: source_token.map(Into::into),
         graft_session,
         mcp_config,
         codex_config,
@@ -1917,6 +1921,35 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn bootstrap_response_hides_tokens_in_debug_but_serializes_them() {
+        let r = BootstrapResponse {
+            session_token: "sess-tok-123".to_string().into(),
+            bundle: serde_json::json!({}),
+            env: serde_json::json!({}),
+            agent_env: Default::default(),
+            source: vogt_engine_contract::source::SourceDescriptor {
+                location: vogt_engine_contract::source::SourceLocation::Graft {
+                    endpoint: "http://g".into(),
+                    repo: "r".into(),
+                },
+                reference: "main".into(),
+                landing: Default::default(),
+            },
+            brief: String::new(),
+            source_token: Some("src-tok-456".to_string().into()),
+            graft_session: None,
+            mcp_config: None,
+            codex_config: None,
+            opencode_config: None,
+        };
+        let shown = format!("{r:?}");
+        assert!(!shown.contains("sess-tok-123") && !shown.contains("src-tok-456"));
+        let wire = serde_json::to_value(&r).unwrap();
+        assert_eq!(wire["session_token"], "sess-tok-123");
+        assert_eq!(wire["source_token"], "src-tok-456");
+    }
+
     use super::*;
 
     fn provider(name: &str, models: &[&str]) -> crate::llm_providers::Provider {
