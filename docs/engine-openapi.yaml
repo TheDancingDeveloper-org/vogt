@@ -756,6 +756,32 @@ paths:
         "400": { $ref: "#/components/responses/BadRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
+  /api/sessions/{id}/grant-check:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+      - name: project_id
+        in: query
+        required: true
+        schema: { type: string }
+    get:
+      tags: [sessions]
+      summary: Whether an approved grant for a project could be held here (WI-4523). vogt-core only.
+      description: >-
+        Asked before a request reaches a person. `refusal` is the text
+        `POST .../grants` would refuse with, or null when the grant is allowed.
+      operationId: checkSessionGrant
+      x-capability: sessions
+      responses:
+        "200":
+          description: Whether the grant is grantable, and why not if it is not.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  project_id: { type: string }
+                  grantable: { type: boolean }
+                  refusal: { type: [string, "null"] }
   /api/sessions/{id}/grants/{grant_id}:
     parameters:
       - $ref: "#/components/parameters/SessionId"

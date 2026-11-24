@@ -613,6 +613,12 @@ jobs:
         if: always() && !cancelled()
         run: node web/scripts/check-route-map.mjs
 
+      # The engine OpenAPI spec against the router, the dev image workflows and
+      # the engine image, with no Python (WI-4610).
+      - name: engine spec, image and workflow files
+        if: always() && !cancelled()
+        run: node scripts/check-engine-files.mjs
+
       # The PWA's own tests (`docs/ENGINE.md` §3.4): the five Vogt surfaces
       # mounted in jsdom against a fake front door, asserting the interaction
       # contract that no amount of reading the source can see — an optimistic
