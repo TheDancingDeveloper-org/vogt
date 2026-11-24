@@ -22,7 +22,7 @@ use crate::storage::interface::{
     CloneStamp, Counts, DeclaredStore, MigrationReport, ProjectUpdate, ReadView, WorkFilter,
     WorkItemUpdate, WriteTxn,
 };
-use crate::storage::sqlite::connection::connect_with;
+use crate::storage::sqlite::connection::Lease;
 use crate::storage::sqlite::migrator::{self, migrations_root};
 
 const META_INSTANCE_ID: &str = "instance_id";
@@ -60,6 +60,7 @@ pub struct SqliteDeclaredStore<C, I> {
     clock: Arc<std::sync::Mutex<C>>,
     ids: Arc<std::sync::Mutex<I>>,
     synchronous: String,
+    pool: Arc<crate::storage::sqlite::connection::ConnPool>,
 }
 
 impl<C, I> Clone for SqliteDeclaredStore<C, I> {
@@ -71,6 +72,7 @@ impl<C, I> Clone for SqliteDeclaredStore<C, I> {
             clock: Arc::clone(&self.clock),
             ids: Arc::clone(&self.ids),
             synchronous: self.synchronous.clone(),
+            pool: Arc::clone(&self.pool),
         }
     }
 }
@@ -107,6 +109,7 @@ where
         synchronous: &str,
     ) -> Self {
         Self {
+            pool: crate::storage::sqlite::connection::ConnPool::for_path(&path, synchronous),
             path,
             clock,
             ids,
@@ -137,13 +140,14 @@ where
         &self.ids
     }
 
-    fn open(&self, create: bool) -> Result<Connection, VogtError> {
-        connect_with(&self.path, create, &self.synchronous).map_err(sql_err)
+    /// The pooled writer connection.
+    fn open(&self, create: bool) -> Result<Lease, VogtError> {
+        self.pool.writer(create).map_err(sql_err)
     }
 
     /// Open a connection that belongs to an initialised instance, or the
     /// exact refusal Python's store raises when it does not.
-    fn open_initialized(&self) -> Result<Connection, VogtError> {
+    fn open_initialized(&self) -> Result<Lease, VogtError> {
         if !self.path.exists() {
             return Err(VogtError::NotInitialized(self.not_initialized_message()));
         }
@@ -153,6 +157,19 @@ where
         match meta_get(&conn, META_INSTANCE_ID) {
             Ok(Some(_)) => Ok(conn),
             _ => Err(VogtError::NotInitialized(self.not_initialized_message())),
+        }
+    }
+
+    /// A pooled read-only connection of an initialised instance.
+    fn reader_initialized(&self) -> Result<Lease, VogtError> {
+        let refused = || VogtError::NotInitialized(self.not_initialized_message());
+        if !self.path.exists() {
+            return Err(refused());
+        }
+        let conn = self.pool.reader().map_err(|_| refused())?;
+        match meta_get(&conn, META_INSTANCE_ID) {
+            Ok(Some(_)) => Ok(conn),
+            _ => Err(refused()),
         }
     }
 
@@ -465,7 +482,7 @@ where
     }
 
     fn read(&self) -> Result<Self::Read<'_>, VogtError> {
-        let conn = self.open_initialized()?;
+        let conn = self.reader_initialized()?;
         // BEGIN, not autocommit: a count and the page beside it must see one
         // revision, and SQLite only promises that inside a transaction.
         conn.execute_batch("BEGIN").map_err(sql_err)?;
@@ -500,7 +517,7 @@ where
 }
 
 pub struct SqliteReadView {
-    conn: Connection,
+    conn: Lease,
     workflow_cache: std::sync::Mutex<BTreeMap<String, Workflow>>,
 }
 pub struct SqliteWrite<I: IdFactory> {
@@ -3950,6 +3967,58 @@ mod overlay_tests {
         assert_eq!(err.http_status(), 503);
         assert_eq!(err.code(), "storage_busy");
         assert!(!err.message().to_lowercase().contains("sqlite"));
+    }
+
+    #[test]
+    fn readers_proceed_while_a_write_transaction_is_open() {
+        let dir = std::env::temp_dir().join(format!("vogt-pool-read-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = store(&dir);
+        let txn = store.write().unwrap();
+        let reader_store = store.clone();
+        let handle = std::thread::spawn(move || {
+            let view = reader_store.read().unwrap();
+            view.list_actors(10, 0).unwrap().len()
+        });
+        // The reader finishes while the write transaction is still open.
+        assert_eq!(handle.join().unwrap(), 1);
+        drop(txn);
+    }
+
+    #[test]
+    fn a_read_view_is_read_only() {
+        let dir = std::env::temp_dir().join(format!("vogt-pool-ro-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = store(&dir);
+        let view = store.read().unwrap();
+        let err = view
+            .conn
+            .execute("UPDATE meta SET value = value", [])
+            .unwrap_err();
+        assert!(err.to_string().to_lowercase().contains("readonly"));
+    }
+
+    #[test]
+    fn two_writes_serialize_without_busy() {
+        let dir = std::env::temp_dir().join(format!("vogt-pool-ser-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = store(&dir);
+        let first = store.write().unwrap();
+        let second_store = store.clone();
+        let handle = std::thread::spawn(move || {
+            // Queues behind the first writer; never SQLITE_BUSY.
+            let txn = second_store.write().unwrap();
+            drop(txn);
+        });
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(!handle.is_finished(), "the second write waits its turn");
+        drop(first);
+        handle.join().unwrap();
+        // Both revisions were taken in turn: the rolled-back ones leave it at 0.
+        assert!(store.write().is_ok());
     }
 
     #[test]
