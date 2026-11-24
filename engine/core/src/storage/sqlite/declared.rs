@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use rusqlite::{params, Connection, OptionalExtension, Row};
+use rusqlite::{params, Connection, OptionalExtension, Row, TransactionBehavior};
 
 use crate::core::{
     default_workflow, from_iso, to_iso, Actor, ActorKind, ActorPreference, AuditRecord,
@@ -241,7 +241,7 @@ where
             &to_iso(now),
         )
         .map_err(VogtError::from)?;
-        ensure_default_workflows(&conn, now)?;
+        ensure_default_workflows(&mut conn, now)?;
         Ok(report)
     }
 
@@ -264,10 +264,13 @@ where
     }
 
     fn bootstrap(&self, principal: &Principal) -> Result<BootstrapResult, VogtError> {
-        let conn = self.open(true)?;
-        conn.execute_batch("BEGIN IMMEDIATE").map_err(sql_err)?;
+        let mut conn = self.open(true)?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sql_err)?;
+        let conn = &tx;
         let result = (|| -> Result<BootstrapResult, VogtError> {
-            if meta_get(&conn, META_INSTANCE_ID)?.is_some() {
+            if meta_get(conn, META_INSTANCE_ID)?.is_some() {
                 let parent = self.path.parent().unwrap_or(Path::new("."));
                 return Err(VogtError::AlreadyInitialized(format!(
                     "an instance already exists at {}",
@@ -301,10 +304,10 @@ where
                 .lock()
                 .expect("the shared clock and ids are not poisoned")
                 .next("txn");
-            meta_set(&conn, META_INSTANCE_ID, &instance_id)?;
-            meta_set(&conn, META_REVISION, "0")?;
-            meta_set(&conn, META_WORK_REF_SEQ, "0")?;
-            meta_set(&conn, META_CREATED_AT, &to_iso(now))?;
+            meta_set(conn, META_INSTANCE_ID, &instance_id)?;
+            meta_set(conn, META_REVISION, "0")?;
+            meta_set(conn, META_WORK_REF_SEQ, "0")?;
+            meta_set(conn, META_CREATED_AT, &to_iso(now))?;
             let actor = Actor {
                 id: actor_id,
                 kind: principal.kind,
@@ -313,9 +316,9 @@ where
                 disabled: false,
                 created_at: now,
             };
-            insert_actor(&conn, &actor)?;
+            insert_actor(conn, &actor)?;
             insert_audit(
-                &conn,
+                conn,
                 &AuditRecord {
                     id: audit_id,
                     txn_id,
@@ -332,21 +335,22 @@ where
             )?;
             Ok(BootstrapResult { instance_id, actor })
         })();
-        if result.is_ok() {
-            conn.execute_batch("COMMIT").map_err(sql_err)?;
-        } else {
-            let _ = conn.execute_batch("ROLLBACK");
-        }
-        result
+        let result = result?;
+        tx.commit().map_err(sql_err)?;
+        Ok(result)
     }
 
     fn credentials(&self) -> Result<CarriedCredentials, VogtError> {
-        let conn = self.open_initialized()?;
-        conn.execute("BEGIN", []).map_err(sql_err)?;
+        let mut conn = self.open_initialized()?;
+        // A read-only deferred transaction; dropping it rolls back.
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Deferred)
+            .map_err(sql_err)?;
+        let conn = &tx;
         let outcome = (|| {
-            let tokens = select_columns(&conn, "tokens", TOKEN_CARRY_COLUMNS)?;
-            let passwords = select_columns(&conn, "password_credentials", PASSWORD_CARRY_COLUMNS)?;
-            let forge = select_columns(&conn, "forge_accounts", FORGE_ACCOUNT_CARRY_COLUMNS)?;
+            let tokens = select_columns(conn, "tokens", TOKEN_CARRY_COLUMNS)?;
+            let passwords = select_columns(conn, "password_credentials", PASSWORD_CARRY_COLUMNS)?;
+            let forge = select_columns(conn, "forge_accounts", FORGE_ACCOUNT_CARRY_COLUMNS)?;
             let mut actor_ids: BTreeSet<String> = BTreeSet::new();
             for row in tokens.iter().chain(passwords.iter()).chain(forge.iter()) {
                 if let Some(actor_id) = row.get("actor_id").and_then(|v| v.as_str()) {
@@ -356,7 +360,7 @@ where
             let mut actors = Vec::new();
             for actor_id in actor_ids {
                 if let Some(actor) = one(
-                    &conn,
+                    conn,
                     "SELECT * FROM actors WHERE id = ?",
                     [&actor_id],
                     row_actor,
@@ -371,15 +375,16 @@ where
                 forge_accounts: forge,
             })
         })();
-        let _ = conn.execute("ROLLBACK", []);
         outcome
     }
     fn record_auth_decision(&self, decision: &AuthDecision) -> Result<(), VogtError> {
         // Not a declared write: nothing changed and nobody supplied a reason,
         // and it happens on reads too. An audit row would make "every audit
         // row is a change" false.
-        let conn = self.open_initialized()?;
-        conn.execute("BEGIN IMMEDIATE", []).map_err(sql_err)?;
+        let mut conn = self.open_initialized()?;
+        let conn = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sql_err)?;
         let outcome = conn.execute(
             "INSERT INTO auth_decisions (id, at, decision, reason_code, operation, scope, actor_id, token_id, identity_ref, transport, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![
@@ -388,7 +393,7 @@ where
                 decision.identity_ref, decision.transport, decision.detail,
             ],
         );
-        finish_immediate(&conn, outcome)
+        finish_immediate(conn, outcome)
     }
     fn touch_token(
         &self,
@@ -396,8 +401,10 @@ where
         at: Moment,
         expires_at: Option<Moment>,
     ) -> Result<(), VogtError> {
-        let conn = self.open_initialized()?;
-        conn.execute("BEGIN IMMEDIATE", []).map_err(sql_err)?;
+        let mut conn = self.open_initialized()?;
+        let conn = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sql_err)?;
         let outcome = match expires_at {
             None => conn.execute(
                 "UPDATE tokens SET last_used_at = ? WHERE id = ?",
@@ -408,28 +415,27 @@ where
                 params![to_iso(at), to_iso(at), to_iso(expires), to_iso(expires), token_id],
             ),
         };
-        finish_immediate(&conn, outcome)
+        finish_immediate(conn, outcome)
     }
     fn prune_auth_decisions(
         &self,
         allow_before: Moment,
         deny_before: Moment,
     ) -> Result<i64, VogtError> {
-        let conn = self.open_initialized()?;
-        conn.execute("BEGIN IMMEDIATE", []).map_err(sql_err)?;
+        let mut conn = self.open_initialized()?;
+        let conn = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sql_err)?;
         let outcome = conn.execute(
             "DELETE FROM auth_decisions WHERE (decision = 'allow' AND at < ?) OR (decision = 'deny' AND at < ?)",
             params![to_iso(allow_before), to_iso(deny_before)],
         );
         match outcome {
             Ok(removed) => {
-                conn.execute("COMMIT", []).map_err(sql_err)?;
+                conn.commit().map_err(sql_err)?;
                 Ok(removed as i64)
             }
-            Err(err) => {
-                let _ = conn.execute("ROLLBACK", []);
-                Err(sql_err(err))
-            }
+            Err(err) => Err(sql_err(err)),
         }
     }
     fn publish_event(
@@ -446,13 +452,15 @@ where
         // transaction id is still drawn, though: Python builds a
         // SqliteWriteTxn for the append, and under a sequential id factory
         // every later audit's txn id counts the publishes that came first.
-        let conn = self.open_initialized()?;
+        let mut conn = self.open_initialized()?;
         let _txn_id = self
             .ids
             .lock()
             .expect("the shared clock and ids are not poisoned")
             .next("txn");
-        conn.execute("BEGIN IMMEDIATE", []).map_err(sql_err)?;
+        let conn = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sql_err)?;
         let outcome = (|| -> Result<Event, rusqlite::Error> {
             let rendered = crate::decisions::python_json_dumps(summary, false);
             conn.execute(
@@ -472,13 +480,10 @@ where
         })();
         match outcome {
             Ok(event) => {
-                conn.execute("COMMIT", []).map_err(sql_err)?;
+                conn.commit().map_err(sql_err)?;
                 Ok(event)
             }
-            Err(err) => {
-                let _ = conn.execute("ROLLBACK", []);
-                Err(sql_err(err))
-            }
+            Err(err) => Err(sql_err(err)),
         }
     }
 
@@ -2861,14 +2866,17 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
     }
 }
 
-fn ensure_default_workflows(conn: &Connection, now: Moment) -> Result<(), VogtError> {
+fn ensure_default_workflows(conn: &mut Connection, now: Moment) -> Result<(), VogtError> {
     // Seeding lives in migrate, not bootstrap: an instance created before the
     // workflow table existed never runs bootstrap again, and spelling the
     // defaults in the migration SQL would write them twice.
     if !migrator::table_exists(conn, "workflow_defs").unwrap_or(false) {
         return Ok(());
     }
-    conn.execute_batch("BEGIN IMMEDIATE").map_err(sql_err)?;
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(sql_err)?;
+    let conn = &tx;
     let seeded = (|| -> Result<(), VogtError> {
         for kind in ["feature", "bug", "chore", "question"] {
             let present: bool = conn
@@ -2887,12 +2895,8 @@ fn ensure_default_workflows(conn: &Connection, now: Moment) -> Result<(), VogtEr
         }
         Ok(())
     })();
-    if seeded.is_ok() {
-        conn.execute_batch("COMMIT").map_err(sql_err)?;
-    } else {
-        let _ = conn.execute_batch("ROLLBACK");
-    }
-    seeded
+    seeded?;
+    tx.commit().map_err(sql_err)
 }
 
 fn meta_get(conn: &Connection, key: &str) -> Result<Option<String>, VogtError> {
@@ -3066,14 +3070,14 @@ fn vocab_text<T: serde::Serialize>(value: T) -> String {
         .to_string()
 }
 
-/// Commit an immediate transaction, or roll it back and surface the error.
-fn finish_immediate(conn: &Connection, outcome: rusqlite::Result<usize>) -> Result<(), VogtError> {
+/// Commit the transaction, or drop it (rolling back) and surface the error.
+fn finish_immediate(
+    tx: rusqlite::Transaction<'_>,
+    outcome: rusqlite::Result<usize>,
+) -> Result<(), VogtError> {
     match outcome {
-        Ok(_) => conn.execute("COMMIT", []).map(|_| ()).map_err(sql_err),
-        Err(err) => {
-            let _ = conn.execute("ROLLBACK", []);
-            Err(sql_err(err))
-        }
+        Ok(_) => tx.commit().map_err(sql_err),
+        Err(err) => Err(sql_err(err)),
     }
 }
 
