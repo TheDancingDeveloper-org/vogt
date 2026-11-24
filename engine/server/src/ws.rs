@@ -13,7 +13,10 @@ use axum::{
     },
     response::IntoResponse,
 };
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{
+    stream::{SplitSink, SplitStream},
+    SinkExt, StreamExt,
+};
 use serde::Deserialize;
 use tokio::sync::{
     broadcast::error::{RecvError, TryRecvError},
@@ -504,6 +507,351 @@ async fn may_type(
     .map_err(|refusal| refusal.to_string())
 }
 
+/// The snapshot header, the scrollback in zero-copy `Bytes` slices, and the
+/// done marker. `false` when the socket went away part-way.
+async fn send_snapshot(
+    sink: &mut SplitSink<WebSocket, Message>,
+    meta: &ServerControl,
+    snapshot: &bytes::Bytes,
+) -> bool {
+    if sink
+        .send(Message::Text(serde_json::to_string(meta).unwrap().into()))
+        .await
+        .is_err()
+    {
+        return false;
+    }
+
+    // Stream the scrollback in zero-copy `Bytes` slices: `snapshot`
+    // is `Bytes`, so each frame shares the buffer instead of copying 64 KiB.
+    let mut offset = 0;
+    while offset < snapshot.len() {
+        let end = (offset + SNAPSHOT_CHUNK).min(snapshot.len());
+        if sink
+            .send(Message::Binary(snapshot.slice(offset..end)))
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        offset = end;
+    }
+    sink.send(Message::Text(
+        serde_json::to_string(&ServerControl::SnapshotDone)
+            .unwrap()
+            .into(),
+    ))
+    .await
+    .is_ok()
+}
+
+/// Inbound: client -> PTY stdin + control frames.
+async fn inbound_loop(
+    mut stream: SplitStream<WebSocket>,
+    heard: Arc<AtomicU64>,
+    clock: Instant,
+    writer_session: Arc<Session>,
+    identity: auth::AuthorizedIdentity,
+    refused_tx: mpsc::UnboundedSender<String>,
+    ping_tx: mpsc::UnboundedSender<u64>,
+) {
+    while let Some(msg) = stream.next().await {
+        let Ok(msg) = msg else { break };
+        heard.store(millis_since(clock), Ordering::Relaxed);
+        match msg {
+            Message::Binary(data) => {
+                if data.len() > MAX_INPUT_BYTES {
+                    continue;
+                }
+                if let Err(refusal) = may_type(&writer_session, &identity).await {
+                    let _ = refused_tx.send(refusal);
+                    continue;
+                }
+                if writer_session.write_input(&data).is_err() {
+                    break;
+                }
+                // The socket already passed `may_type`. A person's
+                // keystroke moves the retention clock; an agent's
+                // (allowed while no permission dialog shows) does not.
+                if crate::person_gate::is_person(Some(&identity), None) {
+                    writer_session.note_person_input();
+                    if has_typed_bytes(&data) {
+                        writer_session.note_addressed(false);
+                    }
+                }
+            }
+            Message::Text(s) => {
+                // Try to decode a control frame; fall back to raw text input.
+                match serde_json::from_str::<ClientControl>(&s) {
+                    Ok(ClientControl::Resize { cols, rows }) => {
+                        let _ = writer_session.resize(cols, rows);
+                    }
+                    Ok(ClientControl::Ping { id }) => {
+                        // Hand the probe to the outbound task; it answers
+                        // with the position it has actually sent this
+                        // socket, after flushing queued output, so the pong
+                        // can never report the server ahead of the client.
+                        let _ = ping_tx.send(id);
+                    }
+                    Ok(ClientControl::Auth { .. }) => {
+                        // Already authenticated; ignore further auth frames.
+                    }
+                    Err(_) => {
+                        // Plain-text input (some tools send text frames).
+                        if s.len() > MAX_INPUT_BYTES {
+                            continue;
+                        }
+                        if let Err(refusal) = may_type(&writer_session, &identity).await {
+                            let _ = refused_tx.send(refusal);
+                            continue;
+                        }
+                        if writer_session.write_input(s.as_bytes()).is_err() {
+                            break;
+                        }
+                        if crate::person_gate::is_person(Some(&identity), None) {
+                            writer_session.note_person_input();
+                            if has_typed_bytes(s.as_bytes()) {
+                                writer_session.note_addressed(false);
+                            }
+                        }
+                    }
+                }
+            }
+            Message::Ping(_) | Message::Pong(_) => {}
+            Message::Close(_) => break,
+        }
+    }
+}
+
+struct OutboundCtx {
+    sink: SplitSink<WebSocket, Message>,
+    rx: tokio::sync::broadcast::Receiver<OutputChunk>,
+    size_rx: tokio::sync::watch::Receiver<(u16, u16)>,
+    idle_rx: tokio::sync::oneshot::Receiver<()>,
+    refused_rx: mpsc::UnboundedReceiver<String>,
+    ping_rx: mpsc::UnboundedReceiver<u64>,
+    session: Arc<Session>,
+    snap_pos: u64,
+    ping_every: Duration,
+}
+
+/// Outbound: broadcast chunks -> client. Bursts are coalesced into fewer
+/// frames, and a lagging client is recovered in-band rather than dropped.
+async fn outbound_loop(ctx: OutboundCtx) {
+    let OutboundCtx {
+        mut sink,
+        mut rx,
+        mut size_rx,
+        mut idle_rx,
+        mut refused_rx,
+        mut ping_rx,
+        session: outbound_session,
+        snap_pos,
+        ping_every,
+    } = ctx;
+    // `snap_pos` is the dedup boundary handed to `live_skip`; `sent_pos` is
+    // the absolute offset the client has been streamed up to. Both jump
+    // forward after an in-band resync.
+    let mut snap_pos = snap_pos;
+    let mut sent_pos = snap_pos;
+    // Consecutive resyncs with no normal live send in between. Reset on any
+    // live output; a client that trips the ceiling is handed back to a
+    // clean reattach instead of driving unbounded resnapshotting.
+    let mut resyncs: u32 = 0;
+    let mut ping_tick =
+        tokio::time::interval_at(tokio::time::Instant::now() + ping_every, ping_every);
+    ping_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    loop {
+        tokio::select! {
+            _ = &mut idle_rx => {
+                // Counted by the watchdog, which knows it closed even if
+                // this write never completes.
+                let _ = sink
+                    .send(Message::Close(Some(CloseFrame {
+                        code: CLOSE_IDLE,
+                        reason: "idle".into(),
+                    })))
+                    .await;
+                return;
+            }
+            _ = ping_tick.tick() => {
+                if sink.send(Message::Ping(bytes::Bytes::new())).await.is_err() {
+                    break;
+                }
+            }
+            Ok(()) = size_rx.changed() => {
+                // Another client (or this one) resized the PTY. Flush the
+                // output already queued — it was painted before the
+                // resize — then tell this client the new size, so it
+                // renders what follows at the width the program paints
+                // for (WI-1089).
+                let Ok(lagged) =
+                    flush_available(&mut sink, &mut rx, snap_pos, &mut sent_pos).await
+                else {
+                    break;
+                };
+                if lagged {
+                    match recover_from_lag(
+                        &mut sink,
+                        &outbound_session,
+                        sent_pos,
+                        &mut resyncs,
+                    )
+                    .await
+                    {
+                        Recovery::Resynced(pos) => {
+                            snap_pos = pos;
+                            sent_pos = pos;
+                        }
+                        Recovery::GiveUp => break,
+                    }
+                }
+                let (cols, rows) = *size_rx.borrow_and_update();
+                let frame = ServerControl::Resize { cols, rows };
+                if sink
+                    .send(Message::Text(serde_json::to_string(&frame).unwrap().into()))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Some(reason) = refused_rx.recv() => {
+                let frame = ServerControl::InputRefused { reason };
+                if sink
+                    .send(Message::Text(serde_json::to_string(&frame).unwrap().into()))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Some(ping_id) = ping_rx.recv() => {
+                // Flush anything already queued for this socket, then answer
+                // the probe with `sent_pos` — the byte offset actually
+                // written here. Because the pong is ordered AFTER those
+                // chunks on the wire and carries only what has been sent, it
+                // can never report the server ahead of what the client has
+                // received, so a bursty session no longer trips a spurious
+                // recycle (WI-126).
+                let Ok(lagged) =
+                    flush_available(&mut sink, &mut rx, snap_pos, &mut sent_pos).await
+                else {
+                    break;
+                };
+                if lagged {
+                    match recover_from_lag(
+                        &mut sink,
+                        &outbound_session,
+                        sent_pos,
+                        &mut resyncs,
+                    )
+                    .await
+                    {
+                        Recovery::Resynced(pos) => {
+                            snap_pos = pos;
+                            sent_pos = pos;
+                        }
+                        Recovery::GiveUp => break,
+                    }
+                }
+                let pong = ServerControl::Pong { id: ping_id, pos: sent_pos };
+                if sink
+                    .send(Message::Text(serde_json::to_string(&pong).unwrap().into()))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            result = rx.recv() => {
+                let first = match result {
+                    Ok(chunk) => chunk,
+                    // Lagged straight from the blocking recv: recover in-band.
+                    Err(RecvError::Lagged(_)) => {
+                        match recover_from_lag(
+                            &mut sink,
+                            &outbound_session,
+                            sent_pos,
+                            &mut resyncs,
+                        )
+                        .await
+                        {
+                            Recovery::Resynced(pos) => {
+                                snap_pos = pos;
+                                sent_pos = pos;
+                                continue;
+                            }
+                            Recovery::GiveUp => break,
+                        }
+                    }
+                    Err(RecvError::Closed) => break,
+                };
+
+                // Drain everything already queued so a burst becomes one
+                // frame, not dozens — each frame is a client main-thread
+                // wakeup. Bounded so one session can't build a huge frame.
+                let mut drained = vec![first];
+                let mut queued = drained[0].data.len();
+                let mut lagged = false;
+                let mut closed = false;
+                while queued < OUTBOUND_COALESCE_CAP {
+                    match rx.try_recv() {
+                        Ok(next) => {
+                            queued += next.data.len();
+                            drained.push(next);
+                        }
+                        Err(TryRecvError::Empty) => break,
+                        Err(TryRecvError::Lagged(_)) => {
+                            lagged = true;
+                            break;
+                        }
+                        Err(TryRecvError::Closed) => {
+                            closed = true;
+                            break;
+                        }
+                    }
+                }
+
+                let (frame, end) = coalesce(snap_pos, &drained);
+                if !frame.is_empty() {
+                    if sink.send(Message::Binary(frame.into())).await.is_err() {
+                        break;
+                    }
+                    // Live output flowed: the client is keeping up again.
+                    resyncs = 0;
+                }
+                // Only now, with the frame written, is `end` the client's
+                // cursor: the resync below resumes from `sent_pos`.
+                if end > sent_pos {
+                    sent_pos = end;
+                }
+
+                if closed {
+                    break;
+                }
+                if lagged {
+                    match recover_from_lag(
+                        &mut sink,
+                        &outbound_session,
+                        sent_pos,
+                        &mut resyncs,
+                    )
+                    .await
+                    {
+                        Recovery::Resynced(pos) => {
+                            snap_pos = pos;
+                            sent_pos = pos;
+                        }
+                        Recovery::GiveUp => break,
+                    }
+                }
+            }
+        }
+    }
+}
+
 async fn handle_socket(
     mut socket: WebSocket,
     state: Arc<AppState>,
@@ -531,7 +879,7 @@ async fn handle_socket(
     };
 
     crate::metrics::metrics().ws_attach.inc(&[]);
-    let (mut sink, mut stream) = socket.split();
+    let (mut sink, stream) = socket.split();
     // Keepalive (WI-2704): the inbound task stamps every frame it reads; the
     // outbound task pings on `ping_every`; the watchdog below closes the
     // socket once nothing has come back for `KEEPALIVE_MISSED_PONGS` pings.
@@ -539,15 +887,15 @@ async fn handle_socket(
     let clock = Instant::now();
     let last_heard = Arc::new(AtomicU64::new(0));
     let heard = Arc::clone(&last_heard);
-    let (idle_tx, mut idle_rx) = tokio::sync::oneshot::channel::<()>();
+    let (idle_tx, idle_rx) = tokio::sync::oneshot::channel::<()>();
     // Carries liveness-probe ids from the inbound task to the outbound task.
     // The pong is *formed* by the outbound task with the position it has
     // actually streamed, not by the inbound task with `total_written` — see the
     // ping branch of the outbound select (WI-126).
-    let (ping_tx, mut ping_rx) = mpsc::unbounded_channel::<u64>();
+    let (ping_tx, ping_rx) = mpsc::unbounded_channel::<u64>();
 
     // Subscribe BEFORE snapshotting so no broadcast chunks are missed in the gap.
-    let mut rx = session.subscribe();
+    let rx = session.subscribe();
     // Likewise the size: read it before the snapshot, marked seen, so a resize
     // landing after this point still reaches the client as a `resize` frame.
     let mut size_rx = session.watch_size();
@@ -566,320 +914,39 @@ async fn handle_socket(
         cols: Some(cols),
         rows: Some(rows),
     };
-    if sink
-        .send(Message::Text(serde_json::to_string(&meta).unwrap().into()))
-        .await
-        .is_err()
-    {
-        return;
-    }
-
-    // Stream the scrollback in zero-copy `Bytes` slices: `snapshot`
-    // is `Bytes`, so each frame shares the buffer instead of copying 64 KiB.
-    let mut offset = 0;
-    while offset < snapshot.len() {
-        let end = (offset + SNAPSHOT_CHUNK).min(snapshot.len());
-        if sink
-            .send(Message::Binary(snapshot.slice(offset..end)))
-            .await
-            .is_err()
-        {
-            return;
-        }
-        offset = end;
-    }
-    if sink
-        .send(Message::Text(
-            serde_json::to_string(&ServerControl::SnapshotDone)
-                .unwrap()
-                .into(),
-        ))
-        .await
-        .is_err()
-    {
+    if !send_snapshot(&mut sink, &meta, &snapshot).await {
         return;
     }
 
     let writer_session = Arc::clone(&session);
     // Refusals the inbound task hands the outbound one to say in band.
-    let (refused_tx, mut refused_rx) = mpsc::unbounded_channel::<String>();
+    let (refused_tx, refused_rx) = mpsc::unbounded_channel::<String>();
     let identity = auth.identity;
     // Inbound: client → PTY stdin + control frames.
-    let inbound = tokio::spawn(async move {
-        while let Some(msg) = stream.next().await {
-            let Ok(msg) = msg else { break };
-            heard.store(millis_since(clock), Ordering::Relaxed);
-            match msg {
-                Message::Binary(data) => {
-                    if data.len() > MAX_INPUT_BYTES {
-                        continue;
-                    }
-                    if let Err(refusal) = may_type(&writer_session, &identity).await {
-                        let _ = refused_tx.send(refusal);
-                        continue;
-                    }
-                    if writer_session.write_input(&data).is_err() {
-                        break;
-                    }
-                    // The socket already passed `may_type`. A person's
-                    // keystroke moves the retention clock; an agent's
-                    // (allowed while no permission dialog shows) does not.
-                    if crate::person_gate::is_person(Some(&identity), None) {
-                        writer_session.note_person_input();
-                        if has_typed_bytes(&data) {
-                            writer_session.note_addressed(false);
-                        }
-                    }
-                }
-                Message::Text(s) => {
-                    // Try to decode a control frame; fall back to raw text input.
-                    match serde_json::from_str::<ClientControl>(&s) {
-                        Ok(ClientControl::Resize { cols, rows }) => {
-                            let _ = writer_session.resize(cols, rows);
-                        }
-                        Ok(ClientControl::Ping { id }) => {
-                            // Hand the probe to the outbound task; it answers
-                            // with the position it has actually sent this
-                            // socket, after flushing queued output, so the pong
-                            // can never report the server ahead of the client.
-                            let _ = ping_tx.send(id);
-                        }
-                        Ok(ClientControl::Auth { .. }) => {
-                            // Already authenticated; ignore further auth frames.
-                        }
-                        Err(_) => {
-                            // Plain-text input (some tools send text frames).
-                            if s.len() > MAX_INPUT_BYTES {
-                                continue;
-                            }
-                            if let Err(refusal) = may_type(&writer_session, &identity).await {
-                                let _ = refused_tx.send(refusal);
-                                continue;
-                            }
-                            if writer_session.write_input(s.as_bytes()).is_err() {
-                                break;
-                            }
-                            if crate::person_gate::is_person(Some(&identity), None) {
-                                writer_session.note_person_input();
-                                if has_typed_bytes(s.as_bytes()) {
-                                    writer_session.note_addressed(false);
-                                }
-                            }
-                        }
-                    }
-                }
-                Message::Ping(_) | Message::Pong(_) => {}
-                Message::Close(_) => break,
-            }
-        }
-    });
+    let inbound = tokio::spawn(inbound_loop(
+        stream,
+        heard,
+        clock,
+        writer_session,
+        identity,
+        refused_tx,
+        ping_tx,
+    ));
 
     // Outbound: broadcast chunks → client. Bursts are coalesced into fewer
     // frames, and a lagging client is recovered in-band rather than dropped
     let outbound_session = Arc::clone(&session);
-    let outbound = tokio::spawn(async move {
-        // `snap_pos` is the dedup boundary handed to `live_skip`; `sent_pos` is
-        // the absolute offset the client has been streamed up to. Both jump
-        // forward after an in-band resync.
-        let mut snap_pos = snap_pos;
-        let mut sent_pos = snap_pos;
-        // Consecutive resyncs with no normal live send in between. Reset on any
-        // live output; a client that trips the ceiling is handed back to a
-        // clean reattach instead of driving unbounded resnapshotting.
-        let mut resyncs: u32 = 0;
-        let mut ping_tick =
-            tokio::time::interval_at(tokio::time::Instant::now() + ping_every, ping_every);
-        ping_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-
-        loop {
-            tokio::select! {
-                _ = &mut idle_rx => {
-                    // Counted by the watchdog, which knows it closed even if
-                    // this write never completes.
-                    let _ = sink
-                        .send(Message::Close(Some(CloseFrame {
-                            code: CLOSE_IDLE,
-                            reason: "idle".into(),
-                        })))
-                        .await;
-                    return;
-                }
-                _ = ping_tick.tick() => {
-                    if sink.send(Message::Ping(bytes::Bytes::new())).await.is_err() {
-                        break;
-                    }
-                }
-                Ok(()) = size_rx.changed() => {
-                    // Another client (or this one) resized the PTY. Flush the
-                    // output already queued — it was painted before the
-                    // resize — then tell this client the new size, so it
-                    // renders what follows at the width the program paints
-                    // for (WI-1089).
-                    let Ok(lagged) =
-                        flush_available(&mut sink, &mut rx, snap_pos, &mut sent_pos).await
-                    else {
-                        break;
-                    };
-                    if lagged {
-                        match recover_from_lag(
-                            &mut sink,
-                            &outbound_session,
-                            sent_pos,
-                            &mut resyncs,
-                        )
-                        .await
-                        {
-                            Recovery::Resynced(pos) => {
-                                snap_pos = pos;
-                                sent_pos = pos;
-                            }
-                            Recovery::GiveUp => break,
-                        }
-                    }
-                    let (cols, rows) = *size_rx.borrow_and_update();
-                    let frame = ServerControl::Resize { cols, rows };
-                    if sink
-                        .send(Message::Text(serde_json::to_string(&frame).unwrap().into()))
-                        .await
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-                Some(reason) = refused_rx.recv() => {
-                    let frame = ServerControl::InputRefused { reason };
-                    if sink
-                        .send(Message::Text(serde_json::to_string(&frame).unwrap().into()))
-                        .await
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-                Some(ping_id) = ping_rx.recv() => {
-                    // Flush anything already queued for this socket, then answer
-                    // the probe with `sent_pos` — the byte offset actually
-                    // written here. Because the pong is ordered AFTER those
-                    // chunks on the wire and carries only what has been sent, it
-                    // can never report the server ahead of what the client has
-                    // received, so a bursty session no longer trips a spurious
-                    // recycle (WI-126).
-                    let Ok(lagged) =
-                        flush_available(&mut sink, &mut rx, snap_pos, &mut sent_pos).await
-                    else {
-                        break;
-                    };
-                    if lagged {
-                        match recover_from_lag(
-                            &mut sink,
-                            &outbound_session,
-                            sent_pos,
-                            &mut resyncs,
-                        )
-                        .await
-                        {
-                            Recovery::Resynced(pos) => {
-                                snap_pos = pos;
-                                sent_pos = pos;
-                            }
-                            Recovery::GiveUp => break,
-                        }
-                    }
-                    let pong = ServerControl::Pong { id: ping_id, pos: sent_pos };
-                    if sink
-                        .send(Message::Text(serde_json::to_string(&pong).unwrap().into()))
-                        .await
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-                result = rx.recv() => {
-                    let first = match result {
-                        Ok(chunk) => chunk,
-                        // Lagged straight from the blocking recv: recover in-band.
-                        Err(RecvError::Lagged(_)) => {
-                            match recover_from_lag(
-                                &mut sink,
-                                &outbound_session,
-                                sent_pos,
-                                &mut resyncs,
-                            )
-                            .await
-                            {
-                                Recovery::Resynced(pos) => {
-                                    snap_pos = pos;
-                                    sent_pos = pos;
-                                    continue;
-                                }
-                                Recovery::GiveUp => break,
-                            }
-                        }
-                        Err(RecvError::Closed) => break,
-                    };
-
-                    // Drain everything already queued so a burst becomes one
-                    // frame, not dozens — each frame is a client main-thread
-                    // wakeup. Bounded so one session can't build a huge frame.
-                    let mut drained = vec![first];
-                    let mut queued = drained[0].data.len();
-                    let mut lagged = false;
-                    let mut closed = false;
-                    while queued < OUTBOUND_COALESCE_CAP {
-                        match rx.try_recv() {
-                            Ok(next) => {
-                                queued += next.data.len();
-                                drained.push(next);
-                            }
-                            Err(TryRecvError::Empty) => break,
-                            Err(TryRecvError::Lagged(_)) => {
-                                lagged = true;
-                                break;
-                            }
-                            Err(TryRecvError::Closed) => {
-                                closed = true;
-                                break;
-                            }
-                        }
-                    }
-
-                    let (frame, end) = coalesce(snap_pos, &drained);
-                    if !frame.is_empty() {
-                        if sink.send(Message::Binary(frame.into())).await.is_err() {
-                            break;
-                        }
-                        // Live output flowed: the client is keeping up again.
-                        resyncs = 0;
-                    }
-                    // Only now, with the frame written, is `end` the client's
-                    // cursor: the resync below resumes from `sent_pos`.
-                    if end > sent_pos {
-                        sent_pos = end;
-                    }
-
-                    if closed {
-                        break;
-                    }
-                    if lagged {
-                        match recover_from_lag(
-                            &mut sink,
-                            &outbound_session,
-                            sent_pos,
-                            &mut resyncs,
-                        )
-                        .await
-                        {
-                            Recovery::Resynced(pos) => {
-                                snap_pos = pos;
-                                sent_pos = pos;
-                            }
-                            Recovery::GiveUp => break,
-                        }
-                    }
-                }
-            }
-        }
-    });
+    let outbound = tokio::spawn(outbound_loop(OutboundCtx {
+        sink,
+        rx,
+        size_rx,
+        idle_rx,
+        refused_rx,
+        ping_rx,
+        session: outbound_session,
+        snap_pos,
+        ping_every,
+    }));
 
     // First one to finish terminates the other — aborted, not just dropped:
     // a dropped JoinHandle detaches, and a stale outbound task would keep its
