@@ -24,7 +24,9 @@ use crate::storage::interface::{
 };
 use crate::storage::sqlite::connection::Lease;
 use crate::storage::sqlite::migrator::{self, migrations_root};
-use crate::storage::sqlite::query::{select_filtered, select_many, select_one, Filter, FromRow};
+use crate::storage::sqlite::query::{
+    select_filtered, select_in, select_many, select_one, select_work_briefs, Filter, FromRow,
+};
 
 const META_INSTANCE_ID: &str = "instance_id";
 const META_REVISION: &str = "revision";
@@ -596,6 +598,24 @@ impl ReadView for SqliteReadView {
             "ORDER BY identity_ref LIMIT ? OFFSET ?",
             params![limit, offset],
         )
+    }
+    fn actors_by_ids(&self, ids: &[String]) -> Result<Vec<Actor>, VogtError> {
+        select_in::<Actor>(&self.conn, "id", ids)
+    }
+    fn projects_by_ids(&self, ids: &[String]) -> Result<Vec<Project>, VogtError> {
+        select_in::<Project>(&self.conn, "id", ids)
+    }
+    fn work_briefs_by_ids(
+        &self,
+        ids: &[String],
+    ) -> Result<Vec<(String, String, String, String)>, VogtError> {
+        select_work_briefs(&self.conn, "id", ids)
+    }
+    fn work_briefs_by_refs(
+        &self,
+        refs: &[String],
+    ) -> Result<Vec<(String, String, String, String)>, VogtError> {
+        select_work_briefs(&self.conn, "ref", refs)
     }
     fn project_by_slug(&self, slug: &str) -> Result<Option<Project>, VogtError> {
         select_one::<Project>(&self.conn, "WHERE slug = ?", [slug])
@@ -1524,6 +1544,24 @@ impl<I: IdFactory> ReadView for SqliteWrite<I> {
     }
     fn list_actors(&self, l: i64, o: i64) -> Result<Vec<Actor>, VogtError> {
         self.view.list_actors(l, o)
+    }
+    fn actors_by_ids(&self, a: &[String]) -> Result<Vec<Actor>, VogtError> {
+        self.view.actors_by_ids(a)
+    }
+    fn projects_by_ids(&self, a: &[String]) -> Result<Vec<Project>, VogtError> {
+        self.view.projects_by_ids(a)
+    }
+    fn work_briefs_by_ids(
+        &self,
+        a: &[String],
+    ) -> Result<Vec<(String, String, String, String)>, VogtError> {
+        self.view.work_briefs_by_ids(a)
+    }
+    fn work_briefs_by_refs(
+        &self,
+        a: &[String],
+    ) -> Result<Vec<(String, String, String, String)>, VogtError> {
+        self.view.work_briefs_by_refs(a)
     }
     fn project_by_slug(&self, a: &str) -> Result<Option<Project>, VogtError> {
         self.view.project_by_slug(a)
@@ -3932,6 +3970,47 @@ mod overlay_tests {
         // The reader finishes while the write transaction is still open.
         assert_eq!(handle.join().unwrap(), 1);
         drop(txn);
+    }
+
+    #[test]
+    fn batched_lookups_match_the_single_lookups() {
+        let dir = std::env::temp_dir().join(format!("vogt-batch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = store(&dir);
+        let a = project(&store, "batch-a");
+        let b = project(&store, "batch-b");
+        let mut txn = store.write().unwrap();
+        txn.insert_project(&a).unwrap();
+        txn.insert_project(&b).unwrap();
+        txn.commit().unwrap();
+        let view = store.read().unwrap();
+        let actors = view.list_actors(10, 0).unwrap();
+        let mut ids: Vec<String> = actors.iter().map(|x| x.id.clone()).collect();
+        ids.push("act_missing".into());
+        let got = view.actors_by_ids(&ids).unwrap();
+        assert_eq!(got.len(), actors.len());
+        for actor in &got {
+            assert_eq!(Some(actor), view.actor_by_id(&actor.id).unwrap().as_ref());
+        }
+        let pids = vec![a.id.clone(), b.id.clone(), "prj_missing".to_string()];
+        let projects = view.projects_by_ids(&pids).unwrap();
+        assert_eq!(projects.len(), 2);
+        for project in &projects {
+            assert_eq!(
+                Some(project),
+                view.project_by_id(&project.id).unwrap().as_ref()
+            );
+        }
+        assert!(view.actors_by_ids(&[]).unwrap().is_empty());
+        assert!(view
+            .work_briefs_by_refs(&["WI-1".to_string()])
+            .unwrap()
+            .is_empty());
+        assert!(view
+            .work_briefs_by_ids(&["x'; DROP TABLE t; --".to_string()])
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

@@ -1701,10 +1701,26 @@ fn sessions_for<C: Clock, I: IdFactory>(
     // value yet, but the tick is spent so the next timestamp matches.
     let _now = super::now_of(&ctx.clock);
     let rows = view.list_sessions(None, Some(&item.id), true, 200, 0)?;
+    let mut actor_ids: Vec<String> = rows.iter().map(|row| row.actor_id.clone()).collect();
+    actor_ids.sort();
+    actor_ids.dedup();
+    let mut project_ids: Vec<String> = rows.iter().map(|row| row.project_id.clone()).collect();
+    project_ids.sort();
+    project_ids.dedup();
+    let actors: std::collections::HashMap<String, crate::core::Actor> = view
+        .actors_by_ids(&actor_ids)?
+        .into_iter()
+        .map(|actor| (actor.id.clone(), actor))
+        .collect();
+    let projects: std::collections::HashMap<String, crate::core::Project> = view
+        .projects_by_ids(&project_ids)?
+        .into_iter()
+        .map(|project| (project.id.clone(), project))
+        .collect();
     let mut out = Vec::new();
     for session in rows {
-        let actor = view.actor_by_id(&session.actor_id)?;
-        let project = view.project_by_id(&session.project_id)?;
+        let actor = actors.get(&session.actor_id);
+        let project = projects.get(&session.project_id);
         out.push(json!({
             "id": session.id,
             "engine_session_id": session.engine_session_id,
