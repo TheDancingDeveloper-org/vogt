@@ -314,7 +314,13 @@ impl SoakPlan {
 }
 
 /// A soak plan sized by the same knob, with the seed ranking trimmed to one.
-#[allow(dead_code)] // The load harness calls the args form; the scale form is what its test drives.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "The load harness calls the args form; the scale form is what its test drives."
+    )
+)]
 pub fn soak_plan_from_scale(
     scale: i64,
     iterations: i64,
@@ -363,7 +369,13 @@ impl DeployedPlan {
 }
 
 /// A deployed plan sized by the same knob, ranking trimmed like the soak seed.
-#[allow(dead_code)] // The load harness calls the args form; the scale form is what its test drives.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "The load harness calls the args form; the scale form is what its test drives."
+    )
+)]
 pub fn deployed_plan_from_scale(
     scale: i64,
     requests: i64,

@@ -12,7 +12,7 @@
 //! subscriber. Nothing in this chunk emits yet, so the surface stays public
 //! for the HTTP adapter.
 
-#![allow(dead_code)]
+#![expect(dead_code, reason = "ported ahead of the callers that will wire it in")]
 use std::collections::VecDeque;
 use std::io::Write;
 use std::sync::{LazyLock, Mutex};

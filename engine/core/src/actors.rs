@@ -3,7 +3,13 @@
 //! Pure classification over facts a collector already stored. A bot is never
 //! external. Unknown is reported as unknown, never guessed.
 
-#![allow(dead_code)]
+#![cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "only the tests call this until the service layer wires it in"
+    )
+)]
 pub const DEFAULT_BOT_LOGINS: [&str; 4] =
     ["dependabot", "renovate", "renovate-bot", "github-actions"];
 

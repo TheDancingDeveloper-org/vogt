@@ -639,7 +639,10 @@ where
 
 /// [`collect_stored`], naming the entries whose trust was judged against now
 /// and the instant each was judged at, in the order the clock was read.
-#[allow(clippy::type_complexity)]
+#[expect(
+    clippy::type_complexity,
+    reason = "the nested type is local and reads clearer inline than behind an alias"
+)]
 fn collect_stored_judged<C, I>(
     ctx: &AppContext<C, I>,
     observed: &crate::storage::sqlite::observed::SqliteObservedStore<C, I>,
@@ -1161,7 +1164,10 @@ fn entry(spec: EntrySpec<'_>) -> Value {
     value
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the parameters mirror the call's inputs; a params struct would churn every caller"
+)]
 fn observation_entry<C: Clock, I: IdFactory>(
     ctx: &AppContext<C, I>,
     observation: &Observation,
@@ -2578,12 +2584,11 @@ fn base64_decode(text: &str) -> Result<Vec<u8>, ()> {
 // with declared sessions. They stay here so the shapes are pinned, and are
 // reached once the engine session join lands. Until then `collect` reports the
 // agent source as unconfigured coverage rather than inventing entries.
-#[allow(dead_code)]
+#[expect(dead_code, reason = "ported ahead of the callers that will wire it in")]
 fn session_shapes(session: &CodingSession, grant: &SessionGrant) -> (String, String) {
     (session.id.clone(), grant.id.clone())
 }
 
-#[allow(dead_code)]
 const _BRANCH_KIND: &str = BRANCH_CONCLUDED_KIND;
 
 #[cfg(test)]

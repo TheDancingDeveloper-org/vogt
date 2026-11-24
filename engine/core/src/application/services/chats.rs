@@ -696,7 +696,10 @@ mod tests {
     /// An engine that records each request and answers the way the Python chat
     /// tests' stand-in does: a 404 while chats are off, a person-gate refusal,
     /// and otherwise the canned chat.
-    #[allow(clippy::type_complexity)]
+    #[expect(
+        clippy::type_complexity,
+        reason = "the nested type is local and reads clearer inline than behind an alias"
+    )]
     fn context(
         name: &str,
         principal: Principal,

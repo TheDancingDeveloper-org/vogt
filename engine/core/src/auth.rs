@@ -5,7 +5,7 @@
 //! swap locks everyone out. A password is chosen by a person, so it gets
 //! scrypt, in the same `scrypt$n$r$p$salt$hash` form.
 
-#![allow(dead_code)]
+#![expect(dead_code, reason = "ported ahead of the callers that will wire it in")]
 use subtle::ConstantTimeEq;
 
 pub const ALL_SCOPES: [&str; 5] = ["read", "work.write", "project.write", "admin", "writeback"];

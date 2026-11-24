@@ -15,7 +15,9 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use crate::adapters::forge::{self, ForgeResponse, ForgeTransport, WriteMethod};
+#[cfg(test)]
+use crate::adapters::forge::api_path;
+use crate::adapters::forge::{ForgeResponse, ForgeTransport, WriteMethod};
 use crate::errors::VogtError;
 
 pub const API_ROOT: &str = "https://api.github.com";
@@ -295,7 +297,10 @@ impl GitHubClient {
         url
     }
 
-    #[allow(clippy::type_complexity)]
+    #[expect(
+        clippy::type_complexity,
+        reason = "the nested type is local and reads clearer inline than behind an alias"
+    )]
     fn fetch(
         &self,
         url: &str,
@@ -340,9 +345,6 @@ impl ForgeTransport for GitHubClient {
         self.send(method, path, body)
     }
 }
-
-#[allow(unused_imports)]
-pub use forge::api_path;
 
 /// Extract `(owner, repo)` from a project's repository URL. One definition,
 /// the forge provider's, which matches Python's `urlsplit` host handling:
