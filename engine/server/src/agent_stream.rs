@@ -1267,6 +1267,157 @@ fn resumes_conversation(path: &str, conversation: &str) -> bool {
     vogt_session_agent::is_conversation_transcript(path, conversation)
 }
 
+/// The account bundle a pod resumes from: the login, the global config, a
+/// woken session's transcript, and project memory when it is on. Returns the
+/// bundle and whether it carries the session's conversation.
+fn pod_bundle(
+    state: &AppState,
+    cli: &str,
+    account: Option<&str>,
+    conversation: Option<&str>,
+    source: &vogt_engine_contract::source::SourceDescriptor,
+    onboarding_dirs: &[&str],
+    pod_work_dir: &str,
+) -> (serde_json::Map<String, serde_json::Value>, bool) {
+    let mut bundle = serde_json::Map::new();
+    let mut resume = false;
+    // The login travels whenever the session holds an account: an agent-task
+    // session has no conversation pinned yet, but still needs to be signed in
+    // (WI-3334). A Codex session never holds a Claude account (the engine
+    // refuses one for a non-Claude CLI), but its rollout belongs to the
+    // conversation, not an account: snapshot it with an empty account or a
+    // wake would seed nothing and start fresh (WI-3873).
+    let snapshot_account = account.or_else(|| (cli == "codex").then_some(""));
+    if let Some(account) = snapshot_account {
+        let files = state
+            .sessions
+            .secret_broker()
+            .bundle_snapshot(account, conversation.unwrap_or(""));
+        for (path, bytes) in with_onboarding_config(files, onboarding_dirs) {
+            // Claude keeps `<conversation>.jsonl`; a Codex rollout is
+            // `rollout-<stamp>-<conversation>.jsonl`. Both must count, or a
+            // woken Codex pod starts a fresh conversation and loses its
+            // transcript (WI-3873).
+            resume |= conversation.is_some_and(|c| resumes_conversation(&path, c));
+            bundle.insert(
+                path,
+                serde_json::Value::String(base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    bytes,
+                )),
+            );
+        }
+    }
+    // Project memory is keyed by the project, not the pod's path or the
+    // leased account, and restored only at launch (WI-3371). Off unless the
+    // deployment turned it on.
+    if crate::pod_salvage::persist_memory_enabled() {
+        for (path, bytes) in crate::pod_salvage::memory_bundle(
+            state.sessions.state_dir(),
+            source.location.repo(),
+            pod_work_dir,
+        ) {
+            bundle.insert(
+                path,
+                serde_json::Value::String(base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    bytes,
+                )),
+            );
+        }
+    }
+    (bundle, resume)
+}
+
+struct PodConfigInputs<'a> {
+    engine_endpoint: &'a str,
+    vogt_prod_bearer: bool,
+    cadastre_bearer: bool,
+    providers: &'a [crate::llm_providers::Provider],
+}
+
+/// The per-CLI MCP and provider config a pod is handed, plus the credential
+/// variables that go with it (inserted into `env`).
+async fn pod_agent_configs(
+    state: &AppState,
+    req: &BootstrapRequest,
+    id: Uuid,
+    mcp_set: crate::mcp_set::McpSet,
+    mcp_extra: &[String],
+    inputs: &PodConfigInputs<'_>,
+    env: &mut serde_json::Map<String, serde_json::Value>,
+) -> (
+    Option<serde_json::Value>,
+    Option<String>,
+    Option<serde_json::Value>,
+) {
+    let (mut mcp_config, mut codex_config, mut opencode_config) = (None, None, None);
+    if matches!(req.cli.as_str(), "claude" | "codex" | "opencode") {
+        let token = state.sessions.mint_agent_token(&req.cli, id).await;
+        let endpoints = state.sessions.pod_mcp_endpoints(
+            inputs.engine_endpoint,
+            inputs.vogt_prod_bearer,
+            mcp_set,
+            mcp_extra,
+        );
+        let has = token.is_some();
+        let wants = |cli: &str| req.cli == cli || (req.shell && cli != "opencode");
+        if wants("claude") {
+            mcp_config = Some(crate::session_endpoints::claude_mcp_config(
+                &endpoints,
+                has,
+                inputs.cadastre_bearer,
+            ));
+        }
+        if wants("codex") {
+            codex_config = Some(crate::session_endpoints::codex_mcp_config(
+                &endpoints,
+                has,
+                inputs.cadastre_bearer,
+            ));
+        }
+        if req.cli == "opencode" {
+            opencode_config = Some(crate::session_endpoints::opencode_mcp_config(
+                &endpoints,
+                has,
+                inputs.cadastre_bearer,
+            ));
+        }
+        if let Some(token) = token {
+            for (name, value) in [
+                ("VOGT_HTTP_TOKEN", token),
+                ("VOGT_ENGINE_SESSION_ID", id.to_string()),
+            ] {
+                env.insert(name.into(), serde_json::Value::String(value));
+            }
+        }
+    }
+    // WI-3491/WI-3886: a Codex pod gets the registered LLM providers as it
+    // launches, as a host session does: their `model_providers` tables in its
+    // config, and their `env_key` names among the ondemand breadcrumbs above.
+    // The session agent fetches each key around the Codex child; resolving it
+    // here would put the value in the whole pod's environment.
+    if (req.cli == "codex" || req.shell) && !inputs.providers.is_empty() {
+        codex_config = Some(
+            crate::llm_providers::codex_config(req.model.as_deref(), inputs.providers)
+                + "\n"
+                + &codex_config.unwrap_or_default(),
+        );
+    }
+    // WI-4296: an opencode pod gets them as its config's `provider` block,
+    // each key named `{env:KEY}`; without one opencode starts signed out on
+    // its own free default, whatever model the session asked for.
+    if req.cli == "opencode" {
+        if let (Some(serde_json::Value::Object(config)), serde_json::Value::Object(extra)) = (
+            opencode_config.as_mut(),
+            crate::llm_providers::opencode_provider_config(inputs.providers),
+        ) {
+            config.extend(extra);
+        }
+    }
+    (mcp_config, codex_config, opencode_config)
+}
+
 pub async fn bootstrap(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1455,129 +1606,36 @@ pub async fn bootstrap(
     // A Claude session gets what a host-launched one does: its own core
     // credential and the engine's MCP endpoints (WI-3243). The credential
     // travels in the environment, never in the config file.
-    let (mut mcp_config, mut codex_config, mut opencode_config) = (None, None, None);
-    if matches!(req.cli.as_str(), "claude" | "codex" | "opencode") {
-        let token = state.sessions.mint_agent_token(&req.cli, id).await;
-        let endpoints = state.sessions.pod_mcp_endpoints(
-            &engine_endpoint,
+    let (mcp_config, codex_config, opencode_config) = pod_agent_configs(
+        &state,
+        &req,
+        id,
+        launch.mcp_set,
+        &launch.mcp_extra,
+        &PodConfigInputs {
+            engine_endpoint: &engine_endpoint,
             vogt_prod_bearer,
-            launch.mcp_set,
-            &launch.mcp_extra,
-        );
-        let has = token.is_some();
-        let wants = |cli: &str| req.cli == cli || (req.shell && cli != "opencode");
-        if wants("claude") {
-            mcp_config = Some(crate::session_endpoints::claude_mcp_config(
-                &endpoints,
-                has,
-                cadastre_bearer,
-            ));
-        }
-        if wants("codex") {
-            codex_config = Some(crate::session_endpoints::codex_mcp_config(
-                &endpoints,
-                has,
-                cadastre_bearer,
-            ));
-        }
-        if req.cli == "opencode" {
-            opencode_config = Some(crate::session_endpoints::opencode_mcp_config(
-                &endpoints,
-                has,
-                cadastre_bearer,
-            ));
-        }
-        if let Some(token) = token {
-            for (name, value) in [
-                ("VOGT_HTTP_TOKEN", token),
-                ("VOGT_ENGINE_SESSION_ID", id.to_string()),
-            ] {
-                env.insert(name.into(), serde_json::Value::String(value));
-            }
-        }
-    }
-    // WI-3491/WI-3886: a Codex pod gets the registered LLM providers as it
-    // launches, as a host session does: their `model_providers` tables in its
-    // config, and their `env_key` names among the ondemand breadcrumbs above.
-    // The session agent fetches each key around the Codex child; resolving it
-    // here would put the value in the whole pod's environment.
-    if (req.cli == "codex" || req.shell) && !providers.is_empty() {
-        codex_config = Some(
-            crate::llm_providers::codex_config(req.model.as_deref(), &providers)
-                + "\n"
-                + &codex_config.unwrap_or_default(),
-        );
-    }
-    // WI-4296: an opencode pod gets them as its config's `provider` block,
-    // each key named `{env:KEY}`; without one opencode starts signed out on
-    // its own free default, whatever model the session asked for.
-    if req.cli == "opencode" {
-        if let (Some(serde_json::Value::Object(config)), serde_json::Value::Object(extra)) = (
-            opencode_config.as_mut(),
-            crate::llm_providers::opencode_provider_config(&providers),
-        ) {
-            config.extend(extra);
-        }
-    }
+            cadastre_bearer,
+            providers: &providers,
+        },
+        &mut env,
+    )
+    .await;
     // A pod resumes from the account bundle the engine holds: the login, the
     // global config and, for a woken session, its conversation's transcript.
     let crate::sessions::PodAccountConversation {
         account,
         conversation,
     } = state.sessions.pod_account_conversation(id);
-    let mut bundle = serde_json::Map::new();
-    let mut resume = false;
-    // The login travels whenever the session holds an account: an agent-task
-    // session has no conversation pinned yet, but still needs to be signed in
-    // (WI-3334). A Codex session never holds a Claude account (the engine
-    // refuses one for a non-Claude CLI), but its rollout belongs to the
-    // conversation, not an account: snapshot it with an empty account or a
-    // wake would seed nothing and start fresh (WI-3873).
-    let snapshot_account = account
-        .as_deref()
-        .or_else(|| (req.cli == "codex").then_some(""));
-    if let Some(account) = snapshot_account {
-        let files = state
-            .sessions
-            .secret_broker()
-            .bundle_snapshot(account, conversation.as_deref().unwrap_or(""));
-        for (path, bytes) in
-            with_onboarding_config(files, &[pod_work_dir.as_str(), workspace_root.as_str()])
-        {
-            // Claude keeps `<conversation>.jsonl`; a Codex rollout is
-            // `rollout-<stamp>-<conversation>.jsonl`. Both must count, or a
-            // woken Codex pod starts a fresh conversation and loses its
-            // transcript (WI-3873).
-            resume |= conversation
-                .as_deref()
-                .is_some_and(|c| resumes_conversation(&path, c));
-            bundle.insert(
-                path,
-                serde_json::Value::String(base64::Engine::encode(
-                    &base64::engine::general_purpose::STANDARD,
-                    bytes,
-                )),
-            );
-        }
-    }
-    // Project memory is keyed by the project, not the pod's path or the
-    // leased account, and restored only at launch (WI-3371). Off unless the
-    // deployment turned it on.
-    if crate::pod_salvage::persist_memory_enabled() {
-        for (path, bytes) in crate::pod_salvage::memory_bundle(
-            state.sessions.state_dir(),
-            source.location.repo(),
-            &pod_work_dir,
-        ) {
-            bundle.insert(
-                path,
-                serde_json::Value::String(base64::Engine::encode(
-                    &base64::engine::general_purpose::STANDARD,
-                    bytes,
-                )),
-            );
-        }
-    }
+    let (bundle, resume) = pod_bundle(
+        &state,
+        &req.cli,
+        account.as_deref(),
+        conversation.as_deref(),
+        &source,
+        &[pod_work_dir.as_str(), workspace_root.as_str()],
+        &pod_work_dir,
+    );
     if let Some(account) = account {
         env.insert(
             "VOGT_SESSION_ACCOUNT".into(),
