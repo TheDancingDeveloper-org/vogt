@@ -24,6 +24,7 @@ use crate::storage::interface::{
 };
 use crate::storage::sqlite::connection::Lease;
 use crate::storage::sqlite::migrator::{self, migrations_root};
+use crate::storage::sqlite::query::{select_many, select_one, FromRow};
 
 const META_INSTANCE_ID: &str = "instance_id";
 const META_REVISION: &str = "revision";
@@ -2840,33 +2841,6 @@ fn count(conn: &Connection, table: &str) -> Result<i64, VogtError> {
     .map_err(sql_err)
 }
 
-/// A stored entity: the table it lives in, the columns its mapper reads, and
-/// the mapper. Queries build their select list from `COLUMNS`, so a schema
-/// change shows up in one place instead of hiding behind `SELECT *`.
-trait FromRow: Sized {
-    const TABLE: &'static str;
-    const COLUMNS: &'static str;
-    fn from_row(row: &Row<'_>) -> rusqlite::Result<Self>;
-}
-/// `tail` is a `&'static str` on purpose: it holds only constant SQL, and user
-/// text travels as bound parameters.
-fn select_sql<T: FromRow>(tail: &'static str) -> String {
-    format!("SELECT {} FROM {} {tail}", T::COLUMNS, T::TABLE)
-}
-fn select_one<T: FromRow>(
-    conn: &Connection,
-    tail: &'static str,
-    params: impl rusqlite::Params,
-) -> Result<Option<T>, VogtError> {
-    one(conn, &select_sql::<T>(tail), params, T::from_row)
-}
-fn select_many<T: FromRow>(
-    conn: &Connection,
-    tail: &'static str,
-    params: impl rusqlite::Params,
-) -> Result<Vec<T>, VogtError> {
-    many(conn, &select_sql::<T>(tail), params, T::from_row)
-}
 impl FromRow for Actor {
     const TABLE: &'static str = "actors";
     const COLUMNS: &'static str = "id, kind, display_name, identity_ref, disabled, created_at";
