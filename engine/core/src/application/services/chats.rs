@@ -509,7 +509,8 @@ fn wait_for_turn(
                 .min()
         })
         .unwrap_or(1);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait_s as u64);
+    let deadline = std::time::Instant::now()
+        + std::time::Duration::from_secs(u64::try_from(wait_s).unwrap_or(0));
     while std::time::Instant::now() < deadline {
         let detail = match client.chat_get(&chat_id, 500) {
             Ok(Some(detail)) => detail,

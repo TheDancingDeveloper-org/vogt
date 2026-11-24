@@ -2864,7 +2864,7 @@ impl SessionBackend for PodBackend {
     }
     fn wait(&self) -> std::io::Result<portable_pty::ExitStatus> {
         Ok(portable_pty::ExitStatus::with_exit_code(
-            self.link.wait_exit() as u32,
+            u32::try_from(self.link.wait_exit()).unwrap_or(1),
         ))
     }
 }
