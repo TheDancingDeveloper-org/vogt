@@ -25,7 +25,8 @@ use crate::storage::interface::{
 use crate::storage::sqlite::connection::Lease;
 use crate::storage::sqlite::migrator::{self, migrations_root};
 use crate::storage::sqlite::query::{
-    select_filtered, select_in, select_many, select_one, select_work_briefs, Filter, FromRow,
+    select_filtered, select_in, select_many, select_one, select_work_briefs, AnyGroup, Filter,
+    FromRow,
 };
 
 const META_INSTANCE_ID: &str = "instance_id";
@@ -688,7 +689,7 @@ impl ReadView for SqliteReadView {
         let Some(high_water) = high_water else {
             return Ok(BTreeMap::new());
         };
-        let (where_sql, params) = with_board_high_water(filter, high_water)?;
+        let (where_sql, params) = with_board_high_water(filter, high_water)?.into_parts();
         let lane = board_lane(lane_mode)?;
         let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|v| v.as_ref()).collect();
         let rows = many(
@@ -728,24 +729,32 @@ impl ReadView for SqliteReadView {
         if cells.is_empty() {
             return Ok(result);
         }
-        let (mut where_sql, mut params) = with_board_high_water(filter, high_water)?;
+        let mut board_filter = with_board_high_water(filter, high_water)?;
         let lane = board_lane(lane_mode)?;
-        let mut requested: Vec<String> = Vec::new();
+        let lane_eq = board_lane_eq(lane_mode)?;
+        let mut requested: Vec<AnyGroup> = Vec::new();
         for cell in cells {
-            let mut clause = vec![format!("{lane} = ?"), "w.state = ?".to_string()];
-            params.push(Box::new(cell.lane_key.clone()));
-            params.push(Box::new(cell.state.clone()));
+            let mut clause = vec![lane_eq, "w.state = ?"];
+            let mut values: Vec<Box<dyn rusqlite::ToSql>> = vec![
+                Box::new(cell.lane_key.clone()),
+                Box::new(cell.state.clone()),
+            ];
             if let (Some(after), Some(after_ref)) = (&cell.after_created_at, &cell.after_ref) {
-                clause.push("(w.created_at > ? OR (w.created_at = ? AND w.ref > ?))".to_string());
+                clause.push("(w.created_at > ? OR (w.created_at = ? AND w.ref > ?))");
                 let moment = *after;
-                params.push(Box::new(moment));
-                params.push(Box::new(moment));
-                params.push(Box::new(after_ref.clone()));
+                values.push(Box::new(moment));
+                values.push(Box::new(moment));
+                values.push(Box::new(after_ref.clone()));
             }
-            requested.push(format!("({})", clause.join(" AND ")));
+            requested.push((clause, values));
         }
-        where_sql = append_where(&where_sql, &format!("({})", requested.join(" OR ")));
-        params.push(Box::new(limit));
+        board_filter.and_any(requested);
+        let (where_sql, params) = board_filter.into_parts();
+        let params = {
+            let mut p = params;
+            p.push(Box::new(limit));
+            p
+        };
         let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|v| v.as_ref()).collect();
         let rows = many(
             &self.conn,
@@ -1138,28 +1147,16 @@ impl ReadView for SqliteReadView {
         project_id: Option<&str>,
         limit: i64,
     ) -> Result<Vec<DriftProposal>, VogtError> {
-        let mut clauses: Vec<String> = Vec::new();
-        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-        for (column, value) in [
-            ("d.status", status),
-            ("d.kind", kind),
-            ("d.project_id", project_id),
-        ] {
-            if let Some(value) = value {
-                clauses.push(format!("{column} = ?"));
-                params.push(Box::new(value.to_string()));
-            }
-        }
-        let where_sql = if clauses.is_empty() {
-            String::new()
-        } else {
-            format!("WHERE {}", clauses.join(" AND "))
-        };
-        params.push(Box::new(limit));
+        let mut filter = Filter::new();
+        filter.and_some("d.status = ?", status.map(str::to_string));
+        filter.and_some("d.kind = ?", kind.map(str::to_string));
+        filter.and_some("d.project_id = ?", project_id.map(str::to_string));
+        let where_sql = filter.where_sql();
+        let params = filter.params(vec![Box::new(limit)]);
         let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|v| v.as_ref()).collect();
         many(
             &self.conn,
-            &format!("{DRIFT_SELECT} {where_sql} ORDER BY d.opened_at DESC, d.id DESC LIMIT ?"),
+            &format!("{DRIFT_SELECT} {where_sql}ORDER BY d.opened_at DESC, d.id DESC LIMIT ?"),
             refs.as_slice(),
             row_drift,
         )
@@ -3512,6 +3509,10 @@ fn work_order(filter: &WorkFilter) -> (&'static str, Option<String>) {
 /// The WHERE clause every work view filters through, so a count and the page
 /// beside it describe the same set.
 fn work_where(filter: &WorkFilter) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
+    work_filter(filter).into_parts()
+}
+
+fn work_filter(filter: &WorkFilter) -> Filter {
     let mut out = Filter::new();
     if !filter.include_superseded {
         // A native row that migrated upstream is retired. The row stays
@@ -3553,33 +3554,36 @@ fn work_where(filter: &WorkFilter) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
         "EXISTS (SELECT 1 FROM work_item_labels wl JOIN labels l ON l.id = wl.label_id WHERE wl.work_item_id = w.id AND l.name = ?)",
         filter.label.clone(),
     );
-    out.into_parts()
-}
-
-fn append_where(where_sql: &str, clause: &str) -> String {
-    if where_sql.is_empty() {
-        format!("WHERE {clause}")
-    } else {
-        format!("{where_sql} AND {clause}")
-    }
+    out
 }
 
 fn with_board_high_water(
     filter: &WorkFilter,
     high_water: &(Moment, String),
-) -> Result<(String, Vec<Box<dyn rusqlite::ToSql>>), VogtError> {
-    let (where_sql, mut params) = work_where(filter);
+) -> Result<Filter, VogtError> {
+    let mut out = work_filter(filter);
     let moment = high_water.0;
-    params.push(Box::new(moment));
-    params.push(Box::new(moment));
-    params.push(Box::new(high_water.1.clone()));
-    Ok((
-        append_where(
-            &where_sql,
-            "(w.created_at < ? OR (w.created_at = ? AND w.ref <= ?))",
-        ),
-        params,
-    ))
+    out.and_values(
+        "(w.created_at < ? OR (w.created_at = ? AND w.ref <= ?))",
+        vec![
+            Box::new(moment),
+            Box::new(moment),
+            Box::new(high_water.1.clone()),
+        ],
+    );
+    Ok(out)
+}
+
+/// `lane = ?` for the lane expression, drawn only from the same closed set.
+fn board_lane_eq(lane_mode: &str) -> Result<&'static str, VogtError> {
+    match lane_mode {
+        "none" => Ok("'' = ?"),
+        "project" => Ok("COALESCE(p.slug, '') = ?"),
+        "initiative" => Ok("COALESCE(w.initiative_id, '') = ?"),
+        other => Err(VogtError::InvalidRequest(format!(
+            "unknown Board lane mode: {other}"
+        ))),
+    }
 }
 
 /// The lane expression, drawn only from the closed set the application names.

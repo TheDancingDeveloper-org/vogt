@@ -135,6 +135,9 @@ pub(super) fn select_work_briefs(
     Ok(out)
 }
 
+/// One AND-ed group for `Filter::and_any`: static conditions and their values.
+pub(super) type AnyGroup = (Vec<&'static str>, Vec<Box<dyn ToSql>>);
+
 /// A list of AND-ed conditions with their bound values. A condition is a
 /// `&'static str` holding one `?` per value; the values are never part of the
 /// SQL text.
@@ -202,6 +205,21 @@ impl Filter {
             .push(Cow::Owned(format!("{column}{operator}({marks})")));
         self.values
             .extend(values.into_iter().map(|v| Box::new(v) as Box<dyn ToSql>));
+    }
+
+    /// `((a AND b) OR (c AND d))`: each group is a list of static conditions
+    /// with their values; groups are OR-ed. No groups adds nothing.
+    pub(super) fn and_any(&mut self, groups: Vec<AnyGroup>) {
+        if groups.is_empty() {
+            return;
+        }
+        let mut parts = Vec::with_capacity(groups.len());
+        for (clauses, values) in groups {
+            parts.push(format!("({})", clauses.join(" AND ")));
+            self.values.extend(values);
+        }
+        self.clauses
+            .push(Cow::Owned(format!("({})", parts.join(" OR "))));
     }
 
     /// Add a condition that has no placeholder, such as `"stopped_at IS NULL"`.
