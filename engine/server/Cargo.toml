@@ -89,3 +89,6 @@ libc = "0.2"
 # A fake graft AdminService for the MintToken client tests.
 tonic = { version = "0.14", default-features = false, features = ["channel", "codegen", "server", "router"] }
 tokio-tungstenite = "0.30"
+
+[lints]
+workspace = true

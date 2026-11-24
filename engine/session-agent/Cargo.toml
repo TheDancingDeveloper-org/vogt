@@ -47,3 +47,6 @@ libc = "0.2"
 rcgen = "0.13"
 tempfile = "3"
 tokio-rustls = "0.26"
+
+[lints]
+workspace = true

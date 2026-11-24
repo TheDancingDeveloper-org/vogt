@@ -72,3 +72,6 @@ libc = "0.2"
 hmac = "0.13"
 aes = "0.8"
 cbc = "0.1"
+
+[lints]
+workspace = true
