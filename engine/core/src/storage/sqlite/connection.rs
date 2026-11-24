@@ -287,9 +287,7 @@ impl Drop for Lease {
 impl ConnPool {
     /// The process pool for this file and synchronous mode.
     pub fn for_path(path: &Path, synchronous: &str) -> Arc<ConnPool> {
-        type Registry = Mutex<HashMap<(PathBuf, String), Weak<ConnPool>>>;
-        static REGISTRY: OnceLock<Registry> = OnceLock::new();
-        let registry = REGISTRY.get_or_init(|| Mutex::new(HashMap::new()));
+        let registry = pool_registry();
         let mut map = registry.lock().unwrap_or_else(|e| e.into_inner());
         let key = (path.to_path_buf(), synchronous.to_ascii_lowercase());
         if let Some(pool) = map.get(&key).and_then(Weak::upgrade) {
@@ -304,6 +302,17 @@ impl ConnPool {
         });
         map.insert(key, Arc::downgrade(&pool));
         pool
+    }
+
+    /// Close every idle connection now and make leased ones close on release.
+    /// A replaced database must not meet a connection that still holds the old
+    /// one: closing the last connection to a WAL database deletes its `-wal` and
+    /// `-shm` by name, and by then those names belong to the new file.
+    fn close_all(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.generation += 1;
+        state.writer = None;
+        state.readers.clear();
     }
 
     /// Drop pooled connections when the path now names a different file.
@@ -387,9 +396,13 @@ impl ConnPool {
             None => {
                 let conn = Connection::open_with_flags(
                     &self.path,
-                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
                         | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
                 )?;
+                // Opened read-write so WAL recovery and the -shm file work after a
+                // restore (a SQLITE_OPEN_READONLY handle hit an I/O error there),
+                // then made read-only: no statement on it can write.
+                conn.pragma_update(None, "query_only", true)?;
                 conn.pragma_update(None, "foreign_keys", "ON")?;
                 conn.pragma_update(None, "busy_timeout", BUSY_TIMEOUT_MS)?;
                 conn
@@ -402,4 +415,27 @@ impl ConnPool {
             generation,
         })
     }
+}
+
+/// Close the pooled connections of every database file in `data_dir`. Call it
+/// before the files are replaced (restore, clone).
+pub fn close_pooled(data_dir: &Path) {
+    let pools: Vec<Arc<ConnPool>> = {
+        let registry = pool_registry().lock().unwrap_or_else(|e| e.into_inner());
+        registry
+            .iter()
+            .filter(|((path, _), _)| path.parent() == Some(data_dir))
+            .filter_map(|(_, weak)| weak.upgrade())
+            .collect()
+    };
+    for pool in pools {
+        pool.close_all();
+    }
+}
+
+type Registry = Mutex<HashMap<(PathBuf, String), Weak<ConnPool>>>;
+
+fn pool_registry() -> &'static Registry {
+    static REGISTRY: OnceLock<Registry> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
 }

@@ -167,7 +167,8 @@ where
             return Err(refused());
         }
         let conn = self.pool.reader().map_err(|_| refused())?;
-        match meta_get(&conn, META_INSTANCE_ID) {
+        let got = meta_get(&conn, META_INSTANCE_ID);
+        match got {
             Ok(Some(_)) => Ok(conn),
             _ => Err(refused()),
         }
