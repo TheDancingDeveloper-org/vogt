@@ -69,7 +69,7 @@ fn sweep<C: Clock + 'static, I: IdFactory + 'static>(
         if let Some(slug) = project_slug.as_deref() {
             vec![resolve::project(&view, slug)?]
         } else {
-            view.list_projects(10_000, 0)?
+            view.all_projects()?
         }
     };
 
@@ -78,7 +78,7 @@ fn sweep<C: Clock + 'static, I: IdFactory + 'static>(
     // root manifest, so a sweep narrowed to one slug still has to see them all.
     let registered = {
         let view = ctx.declared.read()?;
-        view.list_projects(10_000, 0)?
+        view.all_projects()?
             .into_iter()
             .map(|project| RegisteredProject {
                 id: project.id,
@@ -780,7 +780,7 @@ fn scp_style(candidate: &str) -> Option<(&str, &str)> {
 fn resolve_dep_refs<C: Clock, I: IdFactory>(
     ctx: &AppContext<C, I>,
 ) -> Result<Vec<DepRefRow>, VogtError> {
-    let projects = ctx.declared.read()?.list_projects(10_000, 0)?;
+    let projects = ctx.declared.read()?.all_projects()?;
     let index = index(&projects);
     let mut rows = Vec::new();
     for observation in

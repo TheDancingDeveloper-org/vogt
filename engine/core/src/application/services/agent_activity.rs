@@ -268,7 +268,7 @@ where
     let mut roots: Vec<(String, String)> = ctx
         .declared
         .read()?
-        .list_projects(10_000, 0)?
+        .all_projects()?
         .into_iter()
         .filter(|project| !project.root_path.is_empty())
         .map(|project| {

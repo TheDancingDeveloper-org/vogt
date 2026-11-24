@@ -56,7 +56,7 @@ where
         None => None,
     };
     let slugs: BTreeMap<String, String> = view
-        .list_projects(10_000, 0)?
+        .all_projects()?
         .into_iter()
         .map(|project| (project.id, project.slug))
         .collect();

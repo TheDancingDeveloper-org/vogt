@@ -478,7 +478,7 @@ pub fn clone_instance<C: Clock + 'static, I: IdFactory + 'static>(
         let sanitised = audited_write(&mut write, CLONE_OPERATION, reason, |txn, _actor| {
             let carry = txn.carry_credentials(&carried, &revoke_reason, cloned_at)?;
             let mut reset = Vec::new();
-            for project in txn.list_projects(10_000, 0)? {
+            for project in txn.all_projects()? {
                 if project.write_back != crate::core::WriteBack::Disabled {
                     txn.update_project(
                         &project.id,
@@ -810,16 +810,16 @@ pub fn export_instance<C: Clock, I: IdFactory>(
         .map(str::to_string);
     let view = ctx.declared.read()?;
     let stamp = view.clone_stamp()?;
-    let mut projects = view.list_projects(10_000, 0)?;
+    let mut projects = view.all_projects()?;
     let mut items = view.list_work_items(&WorkFilter {
         limit: 10_000,
         exclude_terminal: false,
         include_superseded: true,
         ..WorkFilter::default()
     })?;
-    let mut initiatives = view.list_initiatives(10_000, 0)?;
-    let mut labels = view.list_labels(10_000, 0)?;
-    let mut actors = view.list_actors(10_000, 0)?;
+    let mut initiatives = view.all_initiatives()?;
+    let mut labels = view.all_labels()?;
+    let mut actors = view.all_actors()?;
     if let Some(slug) = &project_slug {
         let scoped = view
             .project_by_slug(slug)?

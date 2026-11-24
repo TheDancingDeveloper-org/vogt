@@ -209,6 +209,55 @@ pub struct AuditQuery {
     pub until: Option<Moment>,
 }
 
+/// Page size the `all_*` readers use per query.
+pub const ALL_PAGE_SIZE: i64 = 500;
+
+/// Fetch every row by paging `fetch(limit, offset)` until a short page.
+pub fn collect_pages<T>(
+    page: i64,
+    mut fetch: impl FnMut(i64, i64) -> Result<Vec<T>, crate::errors::VogtError>,
+) -> Result<Vec<T>, crate::errors::VogtError> {
+    let mut out = Vec::new();
+    loop {
+        let rows = fetch(page, out.len() as i64)?;
+        let n = rows.len() as i64;
+        out.extend(rows);
+        if n < page {
+            return Ok(out);
+        }
+    }
+}
+
+#[cfg(test)]
+mod collect_pages_tests {
+    use super::collect_pages;
+
+    #[test]
+    fn returns_more_rows_than_one_page() {
+        let data: Vec<i64> = (0..10).collect();
+        let got = collect_pages(3, |l, o| {
+            Ok(data
+                .iter()
+                .skip(o as usize)
+                .take(l as usize)
+                .copied()
+                .collect())
+        })
+        .unwrap();
+        assert_eq!(got, data);
+        let exact = collect_pages(5, |l, o| {
+            Ok(data
+                .iter()
+                .skip(o as usize)
+                .take(l as usize)
+                .copied()
+                .collect())
+        })
+        .unwrap();
+        assert_eq!(exact, data);
+    }
+}
+
 /// Reads. A transaction and a store's read handle both implement this.
 pub trait ReadView {
     fn instance_id(&self) -> Result<String, crate::errors::VogtError>;
@@ -296,6 +345,23 @@ pub trait ReadView {
         limit: i64,
         offset: i64,
     ) -> Result<Vec<Initiative>, crate::errors::VogtError>;
+
+    /// Every actor, paged until exhausted so nothing is silently truncated.
+    fn all_actors(&self) -> Result<Vec<Actor>, crate::errors::VogtError> {
+        collect_pages(ALL_PAGE_SIZE, |l, o| self.list_actors(l, o))
+    }
+    /// Every project, paged until exhausted so nothing is silently truncated.
+    fn all_projects(&self) -> Result<Vec<Project>, crate::errors::VogtError> {
+        collect_pages(ALL_PAGE_SIZE, |l, o| self.list_projects(l, o))
+    }
+    /// Every label, paged until exhausted.
+    fn all_labels(&self) -> Result<Vec<Label>, crate::errors::VogtError> {
+        collect_pages(ALL_PAGE_SIZE, |l, o| self.list_labels(l, o))
+    }
+    /// Every initiative, paged until exhausted.
+    fn all_initiatives(&self) -> Result<Vec<Initiative>, crate::errors::VogtError> {
+        collect_pages(ALL_PAGE_SIZE, |l, o| self.list_initiatives(l, o))
+    }
     fn workflow_for(&self, kind: &str) -> Result<Workflow, crate::errors::VogtError>;
 
     fn list_suppressions(
