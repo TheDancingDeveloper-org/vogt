@@ -1,0 +1,244 @@
+name: release-mobile-dev
+
+# Signed Android App Bundle for the **dev** app (`com.thedancingdeveloper.vogt.dev`)
+# on the Google Play **internal** track — the dev counterpart of release-mobile.yml
+# The dev app is a separate Play record with its own Play App Signing
+# enrolment and its own upload key: prod's key cannot sign it.
+#
+# ⚠️ First-upload binding: the first real upload to the dev record permanently
+# binds Play App Signing to whatever key signs it. So this workflow only
+# uploads when a *deliberate* dev upload key is configured
+# (VOGT_ANDROID_DEV_KEYSTORE_*) AND VOGT_PLAY_PUBLISH_DEV=true. With no dev
+# key it builds a throwaway-signed AAB as a dry-run artifact and never uploads.
+#
+# Every credential is a plain GitHub Actions secret — no secret broker and no
+# CLI — so the job runs on any self-hosted runner and a fork can supply its own.
+#
+# Manual only: dev builds are not tied to a release tag.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_name:
+        description: Informational only — the AAB versionName is <product version>-dev.<run number>, computed in the job
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  PACKAGE_NAME: com.thedancingdeveloper.vogt.dev
+
+jobs:
+  android-dev:
+    name: build the signed dev Play AAB (upload gated on a deliberate dev key)
+    runs-on: [self-hosted]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: "22"
+
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
+        with:
+          version: 11
+
+      # Prefer the deliberate dev upload key; fall back to a throwaway so the
+      # signing path can be proven end to end before that key exists. `real`
+      # gates the upload below — a throwaway-signed build is never uploaded
+      # (the first-upload binding above).
+      - id: keystore
+        name: resolve the dev upload key (or a throwaway for dry-run)
+        env:
+          KEYSTORE_B64: ${{ secrets.VOGT_ANDROID_DEV_KEYSTORE_B64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.VOGT_ANDROID_DEV_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.VOGT_ANDROID_DEV_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.VOGT_ANDROID_DEV_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          umask 077
+          keystore="$RUNNER_TEMP/dev-upload.keystore"
+          if [ -n "${KEYSTORE_B64:-}" ] && [ -n "${KEYSTORE_PASSWORD:-}" ] \
+             && [ -n "${KEY_ALIAS:-}" ] && [ -n "${KEY_PASSWORD:-}" ]; then
+            printf '%s' "$KEYSTORE_B64" | base64 -d > "$keystore"
+            echo "real=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Using the configured dev upload key."
+            {
+              echo "VOGT_ANDROID_KEYSTORE_PATH=$keystore"
+              echo "VOGT_ANDROID_KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD"
+              echo "VOGT_ANDROID_KEY_ALIAS=$KEY_ALIAS"
+              echo "VOGT_ANDROID_KEY_PASSWORD=$KEY_PASSWORD"
+            } >> "$GITHUB_ENV"
+          else
+            # Throwaway key: proves bundleRelease signs, but must never be the
+            # first upload to the real dev record.
+            pw="throwaway-$(date +%s)"
+            keytool -genkeypair -keystore "$keystore" -alias dev-throwaway \
+              -keyalg RSA -keysize 2048 -validity 30 -storepass "$pw" -keypass "$pw" \
+              -dname "CN=vogt-dev-dryrun, O=dryrun, C=AU" >/dev/null 2>&1
+            echo "real=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::No dev upload key configured (VOGT_ANDROID_DEV_KEYSTORE_*). Building a THROWAWAY-signed dev AAB as a dry-run artifact; it will NOT be uploaded. Configure the dev upload key to arm the real first upload."
+            {
+              echo "VOGT_ANDROID_KEYSTORE_PATH=$keystore"
+              echo "VOGT_ANDROID_KEYSTORE_PASSWORD=$pw"
+              echo "VOGT_ANDROID_KEY_ALIAS=dev-throwaway"
+              echo "VOGT_ANDROID_KEY_PASSWORD=$pw"
+            } >> "$GITHUB_ENV"
+          fi
+
+      - name: install the shell's dependencies
+        working-directory: mobile
+        run: pnpm install --frozen-lockfile
+
+      # Prefer a real dev Firebase config — the same `VOGT_FIREBASE_DEV_JSON`
+      # secret `ci.yml`'s debug build uses; fall back to the sanitized
+      # placeholder (it carries the .dev Android client) so a build can proceed
+      # before the operator adds the secret. Push is inert on the placeholder.
+      - name: write the dev Firebase config
+        env:
+          VOGT_FIREBASE_JSON: ${{ secrets.VOGT_FIREBASE_DEV_JSON }}
+          VOGT_FIREBASE_OUTPUT: mobile/android/app/google-services.json
+          VOGT_ANDROID_EXPECTED_PACKAGE: com.thedancingdeveloper.vogt.dev
+        run: |
+          set -euo pipefail
+          if [ -n "${VOGT_FIREBASE_JSON:-}" ]; then
+            bash scripts/write_firebase_config.sh
+          else
+            echo "::warning::VOGT_FIREBASE_DEV_JSON is not set; using the sanitized google-services.json.example placeholder (build only; FCM inert)."
+            cp mobile/android/app/google-services.json.example mobile/android/app/google-services.json
+          fi
+          python3 -c 'import json,sys; d=json.load(open("mobile/android/app/google-services.json")); pkgs={c.get("client_info",{}).get("android_client_info",{}).get("package_name") for c in d.get("client",[])}; sys.exit(0 if "com.thedancingdeveloper.vogt.dev" in pkgs else "Firebase config has no Android client for com.thedancingdeveloper.vogt.dev")'
+
+      # The dev app is a separate Play record, so its versionCode only has to
+      # climb among dev uploads: product semver code × 10000 + run number
+      # (0.6.2 → 60020000+N). Play refuses a re-upload of a code it has
+      # already seen, and the product version alone moves too rarely for a
+      # dev channel that republishes between releases.
+      - name: dev version code
+        working-directory: mobile
+        run: |
+          set -euo pipefail
+          version="$(python3 -c 'import json; print(json.load(open("package.json"))["version"])')"
+          IFS=. read -r major minor patch <<<"${version%%-*}"
+          code=$(( (major * 1000000 + minor * 1000 + patch) * 10000 + GITHUB_RUN_NUMBER ))
+          {
+            echo "VOGT_ANDROID_VERSION_CODE=$code"
+            echo "VOGT_ANDROID_VERSION_NAME=${version}-dev.${GITHUB_RUN_NUMBER}"
+          } >> "$GITHUB_ENV"
+          echo "::notice::dev AAB versionCode=$code versionName=${version}-dev.${GITHUB_RUN_NUMBER}"
+
+      - name: capacitor sync
+        working-directory: mobile
+        env:
+          VOGT_ANDROID_APP_ID: com.thedancingdeveloper.vogt.dev
+          VOGT_ANDROID_APP_NAME: Vogt Dev
+        run: npx cap sync android
+
+      - name: bundle and sign the dev AAB
+        working-directory: mobile/android
+        env:
+          VOGT_ANDROID_APP_ID: com.thedancingdeveloper.vogt.dev
+          VOGT_ANDROID_APP_NAME: Vogt Dev
+          VOGT_ANDROID_APP_ICON: dev
+        run: |
+          set -euo pipefail
+          # keystore path + creds come from $GITHUB_ENV (set by the resolve step).
+          trap 'rm -f "$VOGT_ANDROID_KEYSTORE_PATH"' EXIT
+          ./gradlew bundleRelease --no-daemon
+
+      - name: the bundle is actually signed
+        working-directory: mobile/android
+        run: |
+          set -euo pipefail
+          aab="$(find app/build/outputs/bundle/release -name '*.aab' | head -1)"
+          test -n "$aab"
+          jarsigner -verify "$aab" | grep -q 'jar verified'
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: vogt-dev-play-aab-${{ github.run_id }}
+          path: mobile/android/app/build/outputs/bundle/release/*.aab
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: dry run (upload not armed)
+        if: steps.keystore.outputs.real != 'true' || vars.VOGT_PLAY_PUBLISH_DEV != 'true'
+        run: |
+          echo "::notice::Dry run — signed dev AAB kept as an artifact, no Play upload. To publish: configure VOGT_ANDROID_DEV_KEYSTORE_* (a deliberate dev upload key), grant the VOGT_PLAY_SERVICE_ACCOUNT_JSON service account release access to the dev app, complete the dev app's Play Console setup, then set VOGT_PLAY_PUBLISH_DEV=true."
+
+      # Real upload — only with a deliberate dev key AND the dev publish flag, so
+      # a throwaway-signed build can never be the binding first upload.
+      - name: write the Play service account
+        if: steps.keystore.outputs.real == 'true' && vars.VOGT_PLAY_PUBLISH_DEV == 'true'
+        env:
+          VOGT_PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.VOGT_PLAY_SERVICE_ACCOUNT_JSON }}
+        run: |
+          set -euo pipefail
+          test -n "${VOGT_PLAY_SERVICE_ACCOUNT_JSON:-}" || {
+            echo "::error::VOGT_PLAY_SERVICE_ACCOUNT_JSON is not set but VOGT_PLAY_PUBLISH_DEV is 'true'." >&2
+            exit 1
+          }
+          umask 077
+          # Through the environment, never the log; owner-only from creation.
+          printf '%s' "$VOGT_PLAY_SERVICE_ACCOUNT_JSON" > "${RUNNER_TEMP}/play-service-account.json"
+          python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "${RUNNER_TEMP}/play-service-account.json"
+
+      # Play preflight: refuse, before `fastlane supply`, a bundle Play would
+      # reject - SDK floors, launcher icon, upload-key signer, and (when
+      # upload is armed and the service account is written above) a
+      # versionCode above everything Play has seen plus proof the account can
+      # act on this app. Runs on dry runs too, minus the Play API half, so a
+      # bad bundle shows red before anyone arms the upload. Results land in
+      # the job summary. See docs/mobile-release-validation.md.
+      - name: Play preflight
+        working-directory: mobile/android
+        env:
+          PLAY_UPLOAD_CERT_SHA256: ${{ steps.keystore.outputs.real == 'true' && vars.VOGT_PLAY_DEV_UPLOAD_CERT_SHA256 || '' }}
+        run: |
+          set -euo pipefail
+          aab="$(find app/build/outputs/bundle/release -name '*.aab' | head -1)"
+          test -n "$aab"
+          python3 "$GITHUB_WORKSPACE/scripts/play_preflight.py" \
+            --aab "$aab" \
+            --package "${PACKAGE_NAME}" \
+            --service-account "${RUNNER_TEMP}/play-service-account.json" \
+            --title "Play preflight (dev)"
+
+      - name: upload to Play internal testing (dev app)
+        if: steps.keystore.outputs.real == 'true' && vars.VOGT_PLAY_PUBLISH_DEV == 'true'
+        working-directory: mobile/android
+        run: |
+          set -euo pipefail
+          json_key="${RUNNER_TEMP}/play-service-account.json"
+          test -s "$json_key"
+          trap 'rm -f "$json_key"' EXIT
+          export GEM_HOME="${RUNNER_TEMP}/gems"
+          export PATH="${GEM_HOME}/bin:${PATH}"
+          gem install fastlane -v 2.228.0 --no-document
+          aab="$(find app/build/outputs/bundle/release -name '*.aab' | head -1)"
+          test -n "$aab"
+          fastlane supply \
+            --package_name "${PACKAGE_NAME}" \
+            --track internal \
+            --aab "$aab" \
+            --json_key "$json_key" \
+            --skip_upload_metadata --skip_upload_images --skip_upload_screenshots
+
+      - name: remove Firebase config and the Play service account
+        if: always()
+        run: rm -f mobile/android/app/google-services.json "${RUNNER_TEMP}/play-service-account.json"
+
+      # Loud failure: a red run on a tag push is easy to miss (v0.7.1 and
+      # v0.7.2 were), so say in the summary what did not happen.
+      - name: report the failure
+        if: failure()
+        run: |
+          {
+            echo "## release-mobile-dev FAILED"
+            echo
+            echo "No bundle reached Play from this run. Check the failed step above; when the Play preflight failed, its table says why."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::error::release-mobile-dev failed for ${GITHUB_REF_NAME}; no bundle was uploaded to Play."

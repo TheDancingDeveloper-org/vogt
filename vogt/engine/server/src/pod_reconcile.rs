@@ -1,0 +1,1156 @@
+//! Reconciles the cluster's session pods with the engine's sessions.
+//!
+//! The engine holds each pod session's state in memory (its stream link and
+//! credentials), the cluster holds the pods. They drift apart when a pod dies
+//! without its agent reporting `Exited`, when a pod vanishes, and when the
+//! engine restarts. One sweep lists the pods and settles every disagreement:
+//!
+//! - a live session whose pod failed, completed unreported, is stuck in a
+//!   state that cannot heal, or has disappeared, is ended (the pod phase and
+//!   reason become the session's last output and its exit code);
+//! - a pod with no live session behind it is reported and left running: its
+//!   workspace exists only in that pod, so an orphan is not permission to
+//!   delete unlanded work. Deletion belongs to the session's own end, except
+//!   for a pod no live or hibernated session owns that has outlived
+//!   `orphan_ttl` (WI-4233) since the sweep first found it unowned, and whose
+//!   latest salvage report did not fail, is not older than the pod and has its
+//!   manifest on disk: a stop that could not delete its pod is reaped then.
+//!   Any other pod is kept and warned about (once, then every 10 minutes).
+//!
+//! After an engine restart the previous process's pods are still the only
+//! copy of their sessions' workspaces. Boot re-adopts the ones whose record
+//! and stream credential survived (`readopt_pods`); any other pod is
+//! reported, never deleted, so an operator can recover it by hand.
+use crate::{
+    agent_stream::{AgentAuth, PodLink},
+    chats::redact,
+    error::Result,
+    pod_backend::{
+        pod_deadline, pod_exit_code, pod_fatal_waiting_reason, pod_hit_active_deadline,
+        pod_is_ours, pod_phase, pod_reason, pod_unschedulable_message, session_id_from_pod,
+        PodConfig, PodLauncher, LOG_TAIL_LINES,
+    },
+};
+use k8s_openapi::api::core::v1::Pod;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::{Duration, Instant},
+};
+use tokio::task::JoinHandle;
+use uuid::Uuid;
+
+/// What a sweep decides about one pod.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Verdict {
+    /// Nothing to do yet.
+    Keep,
+    /// The session's pod is gone or beyond help: end the session.
+    End { code: i32, note: String },
+    /// No live session owns the pod, or an adopted pod's agent has not
+    /// dialled back yet. Report it and leave it running: the pod is the only
+    /// copy of its workspace, and reconciliation must not delete it.
+    Report { note: String },
+}
+
+/// Judge one pod. `link` is the engine's stream link for the pod's session,
+/// `None` when the engine holds none; `age` is how old the pod is.
+pub fn judge(pod: &Pod, link: Option<&PodLink>, cfg: &PodConfig, age: Option<Duration>) -> Verdict {
+    if pod.metadata.deletion_timestamp.is_some() {
+        return Verdict::Keep;
+    }
+    let Some(link) = link else {
+        // A pod younger than the connect grace may belong to a start still in
+        // flight; the next sweep decides.
+        return match age {
+            Some(age) if age < cfg.connect_timeout => Verdict::Keep,
+            _ => Verdict::Report {
+                note: "no live session owns this pod; left running".into(),
+            },
+        };
+    };
+    if link.is_finished() {
+        // The session already ended; its start task deletes the pod. If that
+        // delete failed, the link is forgotten and the pod is reported next.
+        return Verdict::Keep;
+    }
+    if link.is_adopted() && !link.has_connected() && matches!(pod_phase(pod), "running" | "pending")
+    {
+        // The engine restarted and its agent has not dialled back. Never end
+        // or delete this pod: the session's workspace lives only inside it,
+        // and a late agent can still take the link over. A pod that has
+        // already terminated falls through to the phase rules, which end the
+        // session on the exit it reported.
+        return if link.age() > cfg.reconnect_timeout {
+            Verdict::Report {
+                note: format!(
+                    "restarted engine: its agent has not reconnected after {}s; left running",
+                    cfg.reconnect_timeout.as_secs()
+                ),
+            }
+        } else {
+            Verdict::Keep
+        };
+    }
+    if pod_phase(pod) == "running" && link.has_connected() {
+        if link.is_connected() {
+            if link.heartbeat_age() > cfg.heartbeat_timeout {
+                return Verdict::End {
+                    code: 1,
+                    note: format!(
+                        "agent heartbeat silent for more than {}s",
+                        cfg.heartbeat_timeout.as_secs()
+                    ),
+                };
+            }
+        } else if link
+            .disconnected_age()
+            .is_some_and(|age| age > cfg.reconnect_timeout)
+        {
+            return Verdict::End {
+                code: 1,
+                note: format!(
+                    "agent did not reconnect within {}s",
+                    cfg.reconnect_timeout.as_secs()
+                ),
+            };
+        }
+    }
+    let detail = |what: &str| match pod_reason(pod) {
+        Some(reason) => format!("{what}: {reason}"),
+        None => what.to_string(),
+    };
+    match pod_phase(pod) {
+        "exited" => Verdict::End {
+            code: pod_exit_code(pod).unwrap_or(0),
+            note: detail("completed before the agent reported its exit"),
+        },
+        "errored" => Verdict::End {
+            code: pod_exit_code(pod).filter(|c| *c != 0).unwrap_or(1),
+            // A pod the kubelet stopped at its activeDeadlineSeconds gets its
+            // own reason, so a session ended by policy reads differently from
+            // one that failed.
+            note: if pod_hit_active_deadline(pod) {
+                detail("hit its active deadline")
+            } else {
+                detail("failed")
+            },
+        },
+        "pending" => {
+            if let Some(reason) = pod_fatal_waiting_reason(pod) {
+                return Verdict::End {
+                    code: 1,
+                    note: format!("could not start: {reason}"),
+                };
+            }
+            // A pod the scheduler has refused is ended sooner than one that
+            // is merely slow, and says why (WI-4494).
+            let unschedulable = pod_unschedulable_message(pod);
+            let limit = match unschedulable {
+                Some(_) => cfg.unschedulable_timeout.min(cfg.pending_timeout),
+                None => cfg.pending_timeout,
+            };
+            match age {
+                Some(age) if age > limit => Verdict::End {
+                    code: 1,
+                    note: match unschedulable {
+                        Some(reason) => {
+                            format!("could not be scheduled after {}s: {reason}", age.as_secs())
+                        }
+                        None => format!("was still pending after {}s", age.as_secs()),
+                    },
+                },
+                _ => Verdict::Keep,
+            }
+        }
+        _ => Verdict::Keep,
+    }
+}
+
+/// End a live session from outside its agent: the note becomes its last
+/// output and the code its exit status, as if the agent had reported it.
+fn end_session(link: &PodLink, code: i32, note: &str) {
+    let text = format!("\r\nsession pod {note}\r\n");
+    let _ = link.ingest(link.next_offset(), text.as_bytes());
+    link.finish(code);
+}
+
+/// Bytes of container log one failed-session note keeps, so fifty long lines
+/// cannot turn the note into a wall of text.
+const LOG_NOTE_BYTES: usize = 8 * 1024;
+
+/// The tail of a failed pod's container log, or `None` when there is none to
+/// show. The pod's status only ever says "Error" for a container that exited
+/// without a message; the log is where the reason actually is.
+async fn failed_log_tail(launcher: &dyn PodLauncher, auth: &AgentAuth, id: Uuid) -> Option<String> {
+    match launcher.log_tail(id).await {
+        Ok(tail) => {
+            let tail = tail.trim_end();
+            if tail.trim().is_empty() {
+                return None;
+            }
+            let mut start = tail.len().saturating_sub(LOG_NOTE_BYTES);
+            while !tail.is_char_boundary(start) {
+                start += 1;
+            }
+            // Start at a line boundary so the first line is whole.
+            if start > 0 {
+                start = tail[start..]
+                    .find('\n')
+                    .map(|i| start + i + 1)
+                    .unwrap_or(start);
+            }
+            let mut tail = redact(&tail[start..]);
+            if let Some(token) = auth.session_token(id).await {
+                tail = tail.replace(&token, "[redacted]");
+            }
+            Some(tail)
+        }
+        Err(e) => {
+            tracing::debug!(session = %id, error = %e, "reading a failed pod's log failed");
+            None
+        }
+    }
+}
+
+fn pod_age(pod: &Pod) -> Option<Duration> {
+    let created = pod.metadata.creation_timestamp.as_ref()?;
+    (k8s_openapi::chrono::Utc::now() - created.0).to_std().ok()
+}
+
+/// How often the reaper repeats its "keeping this pod" warning: once when it
+/// first keeps the pod, then at most this often.
+const KEEP_WARN_EVERY: Duration = Duration::from_secs(600);
+
+/// What one sweep did.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Sweep {
+    pub ended: Vec<Uuid>,
+    /// Of `ended`, the sessions whose pod the kubelet stopped at its
+    /// `activeDeadlineSeconds` (WI-4519): audited and raised in the Inbox.
+    pub deadline: Vec<Uuid>,
+    /// Live sessions whose pod is past its age limit
+    /// ([`crate::pod_backend::DEADLINE_ANNOTATION`]). The sweep does not end
+    /// them: the engine does, unless the session is oversight or pinned awake
+    /// by then (WI-4519).
+    pub overdue: Vec<Uuid>,
+    /// Pods left running because no live session owns them, with the reason.
+    /// Reconciliation never deletes them.
+    pub reported: Vec<(Uuid, String)>,
+    /// Orphan pods deleted after `orphan_ttl`.
+    pub reaped: Vec<Uuid>,
+}
+
+/// Whether a salvage covers a pod: session, pod creation (unix s), pod uid.
+pub type SalvagedFn = Arc<dyn Fn(Uuid, i64, Option<&str>) -> bool + Send + Sync>;
+
+/// What the reaper remembers between sweeps: when each unowned pod was first
+/// seen unowned, and when it last warned about keeping one. The TTL runs from
+/// the first sweep that found the pod unowned, not from its creation, so a
+/// long session whose stop failed is not reaped the moment it loses its
+/// owner. An engine restart starts the clocks again, which is conservative.
+#[derive(Debug, Default)]
+pub struct OrphanTracker {
+    first_unowned: HashMap<Uuid, Instant>,
+    last_warned: HashMap<Uuid, Instant>,
+}
+
+impl OrphanTracker {
+    /// Pods now being timed.
+    pub fn tracked(&self) -> Vec<Uuid> {
+        self.first_unowned.keys().copied().collect()
+    }
+}
+
+/// [`sweep_with`] with no memory and no salvage record: nothing is ever
+/// reaped, because no pod can be shown salvaged.
+pub async fn sweep(
+    launcher: &dyn PodLauncher,
+    auth: &AgentAuth,
+    cfg: &PodConfig,
+    owned: &(dyn Fn(Uuid) -> bool + Sync),
+) -> Result<Sweep> {
+    sweep_with(
+        launcher,
+        auth,
+        cfg,
+        owned,
+        &|_, _, _| false,
+        &mut OrphanTracker::default(),
+    )
+    .await
+}
+
+/// `owned` says whether a live or hibernated session still claims an id;
+/// `salvaged` whether its work is recorded as salvaged. Only a pod `owned`
+/// denies, that `tracker` has seen unowned for `orphan_ttl`, and whose salvage
+/// is recorded complete is ever reaped.
+pub async fn sweep_with(
+    launcher: &dyn PodLauncher,
+    auth: &AgentAuth,
+    cfg: &PodConfig,
+    owned: &(dyn Fn(Uuid) -> bool + Sync),
+    salvaged: &(dyn Fn(Uuid, i64, Option<&str>) -> bool + Sync),
+    tracker: &mut OrphanTracker,
+) -> Result<Sweep> {
+    let pods = launcher.list().await?;
+    let mut report = Sweep::default();
+    let mut seen = HashSet::new();
+    for pod in &pods {
+        // The list is selected by label already; an engine's own label is
+        // checked again so a pod of another deployment is never judged.
+        if !pod_is_ours(pod, cfg) {
+            continue;
+        }
+        let Some(id) = session_id_from_pod(pod) else {
+            continue;
+        };
+        seen.insert(id);
+        let link = auth.pod(id);
+        match judge(pod, link.as_deref(), cfg, pod_age(pod)) {
+            Verdict::Keep => {
+                let live = link.as_deref().is_some_and(|l| !l.is_finished());
+                let past = pod_deadline(pod)
+                    .zip(pod_age(pod))
+                    .is_some_and(|(limit, age)| age >= limit);
+                if live && past {
+                    report.overdue.push(id);
+                }
+            }
+            Verdict::End { code, note } => {
+                if let Some(link) = link.as_deref() {
+                    tracing::warn!(session = %id, code, %note, "ending a session whose pod died");
+                    let note = if code != 0 {
+                        match failed_log_tail(launcher, auth, id).await {
+                            Some(tail) => format!(
+                                "{note}\n--- container log (last {LOG_TAIL_LINES} lines) ---\n{tail}"
+                            ),
+                            None => note,
+                        }
+                    } else {
+                        note
+                    };
+                    end_session(link, code, &note);
+                    report.ended.push(id);
+                    if pod_hit_active_deadline(pod) {
+                        report.deadline.push(id);
+                    }
+                }
+            }
+            Verdict::Report { note } => {
+                let now = Instant::now();
+                let unowned = link.is_none() && !owned(id);
+                let held = if unowned {
+                    now.duration_since(*tracker.first_unowned.entry(id).or_insert(now))
+                } else {
+                    tracker.first_unowned.remove(&id);
+                    tracker.last_warned.remove(&id);
+                    Duration::ZERO
+                };
+                if unowned && !cfg.orphan_ttl.is_zero() && held > cfg.orphan_ttl {
+                    let created = pod
+                        .metadata
+                        .creation_timestamp
+                        .as_ref()
+                        .map_or(i64::MAX, |t| t.0.timestamp());
+                    if !salvaged(id, created, pod.metadata.uid.as_deref()) {
+                        let due = tracker
+                            .last_warned
+                            .get(&id)
+                            .is_none_or(|t| now.duration_since(*t) >= KEEP_WARN_EVERY);
+                        if due {
+                            tracker.last_warned.insert(id, now);
+                            tracing::warn!(session = %id,
+                                age_secs = pod_age(pod).map_or(0, |a| a.as_secs()),
+                                unowned_secs = held.as_secs(),
+                                "keeping an expired orphan session pod: no completed salvage is recorded, so its workspace may hold unlanded work");
+                        }
+                    } else {
+                        match launcher.delete(id, pod.metadata.uid.clone()).await {
+                            Ok(()) => {
+                                tracing::warn!(session = %id, ttl_secs = cfg.orphan_ttl.as_secs(),
+                                    "deleted an orphan session pod past its TTL");
+                                tracker.first_unowned.remove(&id);
+                                tracker.last_warned.remove(&id);
+                                report.reaped.push(id);
+                                continue;
+                            }
+                            Err(e) => tracing::warn!(session = %id, error = %e,
+                                "could not delete an orphan session pod"),
+                        }
+                    }
+                }
+                report.reported.push((id, note));
+            }
+        }
+    }
+    tracker.first_unowned.retain(|id, _| seen.contains(id));
+    tracker.last_warned.retain(|id, _| seen.contains(id));
+    // A live session whose pod is not in the cluster at all.
+    for id in auth.pod_ids() {
+        if seen.contains(&id) {
+            continue;
+        }
+        let Some(link) = auth.pod(id) else { continue };
+        if !link.is_finished() && link.age() > cfg.connect_timeout {
+            tracing::warn!(session = %id, "ending a session whose pod disappeared");
+            end_session(&link, 1, "disappeared from the cluster");
+            report.ended.push(id);
+        }
+    }
+    Ok(report)
+}
+
+/// Run [`sweep`] every `cfg.reconcile_interval` until the engine stops.
+pub fn spawn(
+    launcher: Arc<dyn PodLauncher>,
+    auth: Arc<AgentAuth>,
+    cfg: PodConfig,
+    owned: Arc<dyn Fn(Uuid) -> bool + Send + Sync>,
+    salvaged: SalvagedFn,
+    on_deadline: Arc<dyn Fn(Uuid) + Send + Sync>,
+    on_overdue: Arc<dyn Fn(Uuid) + Send + Sync>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut failing = false;
+        // A pod reported once stays reported while it is still there, so a
+        // session left running after a restart does not warn every interval.
+        let mut reported: HashSet<Uuid> = HashSet::new();
+        let mut tracker = OrphanTracker::default();
+        loop {
+            match sweep_with(
+                launcher.as_ref(),
+                &auth,
+                &cfg,
+                owned.as_ref(),
+                salvaged.as_ref(),
+                &mut tracker,
+            )
+            .await
+            {
+                Ok(report) => {
+                    failing = false;
+                    for id in &report.deadline {
+                        on_deadline(*id);
+                    }
+                    for id in &report.overdue {
+                        on_overdue(*id);
+                    }
+                    let current: HashSet<Uuid> =
+                        report.reported.iter().map(|(id, _)| *id).collect();
+                    for (id, note) in &report.reported {
+                        if reported.insert(*id) {
+                            tracing::warn!(session = %id, %note, "session pod left running");
+                        }
+                    }
+                    reported.retain(|id| current.contains(id));
+                }
+                Err(e) if !failing => {
+                    failing = true;
+                    tracing::warn!(error = %e, "session pod reconcile failed");
+                }
+                Err(e) => tracing::debug!(error = %e, "session pod reconcile still failing"),
+            }
+            tokio::time::sleep(cfg.reconcile_interval).await;
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pod_backend::{
+        CreateFuture, GoneFuture, LaunchFuture, ListFuture, DEFAULT_ENGINE_ID, ENGINE_LABEL,
+    };
+    use k8s_openapi::api::core::v1::{
+        ContainerState, ContainerStateTerminated, ContainerStateWaiting, ContainerStatus, PodStatus,
+    };
+    use std::{collections::BTreeMap, sync::Mutex};
+
+    /// A stand-in for the kube API: serves a fixed pod list and records deletes.
+    struct MockKube {
+        pods: Mutex<Vec<Pod>>,
+        deleted: Mutex<Vec<(Uuid, Option<String>)>>,
+        list_fails: bool,
+        /// What the session container's log returns; `None` fails like an
+        /// unavailable log stream (a pending pod, an API error).
+        log: Option<String>,
+    }
+    impl MockKube {
+        fn with(pods: Vec<Pod>) -> Self {
+            Self {
+                pods: Mutex::new(pods),
+                deleted: Mutex::new(Vec::new()),
+                list_fails: false,
+                log: None,
+            }
+        }
+    }
+    impl PodLauncher for MockKube {
+        fn create<'a>(&'a self, _: Uuid, _: &'a [u8], _: Pod) -> CreateFuture<'a> {
+            Box::pin(async { Ok(None) })
+        }
+        fn gone(&self, _: Uuid, _: Option<String>) -> GoneFuture<'_> {
+            Box::pin(async { Ok(true) })
+        }
+        fn delete(&self, id: Uuid, uid: Option<String>) -> LaunchFuture<'_> {
+            Box::pin(async move {
+                self.deleted.lock().unwrap().push((id, uid));
+                Ok(())
+            })
+        }
+        fn list(&self) -> ListFuture<'_> {
+            Box::pin(async move {
+                if self.list_fails {
+                    return Err(crate::error::ApiError::Internal("api down".into()));
+                }
+                Ok(self.pods.lock().unwrap().clone())
+            })
+        }
+        fn log_tail(&self, _: Uuid) -> crate::pod_backend::LogFuture<'_> {
+            Box::pin(async move {
+                self.log
+                    .clone()
+                    .ok_or_else(|| crate::error::ApiError::Internal("no log".into()))
+            })
+        }
+    }
+
+    fn pod(id: Uuid, status: PodStatus) -> Pod {
+        let mut pod = Pod::default();
+        pod.metadata.labels = Some(BTreeMap::from([
+            ("vogt.session".into(), id.to_string()),
+            (ENGINE_LABEL.into(), DEFAULT_ENGINE_ID.into()),
+        ]));
+        pod.metadata.uid = Some(format!("uid-{id}"));
+        pod.status = Some(status);
+        pod
+    }
+    fn phase(phase: &str) -> PodStatus {
+        PodStatus {
+            phase: Some(phase.into()),
+            ..Default::default()
+        }
+    }
+    fn terminated(phase_: &str, exit_code: i32, message: &str) -> PodStatus {
+        PodStatus {
+            container_statuses: Some(vec![ContainerStatus {
+                state: Some(ContainerState {
+                    terminated: Some(ContainerStateTerminated {
+                        exit_code,
+                        message: Some(message.into()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }]),
+            ..phase(phase_)
+        }
+    }
+    fn waiting(reason: &str) -> PodStatus {
+        PodStatus {
+            container_statuses: Some(vec![ContainerStatus {
+                state: Some(ContainerState {
+                    waiting: Some(ContainerStateWaiting {
+                        reason: Some(reason.into()),
+                        message: None,
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }]),
+            ..phase("Pending")
+        }
+    }
+    fn cfg() -> PodConfig {
+        PodConfig {
+            connect_timeout: Duration::ZERO,
+            ..Default::default()
+        }
+    }
+    fn live(id: Uuid) -> (AgentAuth, Arc<PodLink>) {
+        let auth = AgentAuth::default();
+        let (link, _reader) = auth.register_pod(id);
+        // The reader is dropped: the session's reader thread is not needed to
+        // judge the link.
+        (auth, link)
+    }
+
+    #[test]
+    fn phases_map_to_verdicts() {
+        let id = Uuid::new_v4();
+        let (_auth, link) = live(id);
+        let cfg = cfg();
+        let judge_of = |status| judge(&pod(id, status), Some(&link), &cfg, None);
+
+        assert_eq!(judge_of(phase("Running")), Verdict::Keep);
+        assert_eq!(judge_of(phase("Pending")), Verdict::Keep);
+        assert_eq!(
+            judge_of(terminated("Failed", 137, "OOMKilled")),
+            Verdict::End {
+                code: 137,
+                note: "failed: OOMKilled".into()
+            }
+        );
+        // A failed pod whose container reported no code still fails the session.
+        assert!(matches!(
+            judge_of(phase("Failed")),
+            Verdict::End { code: 1, .. }
+        ));
+        assert!(matches!(
+            judge_of(phase("Unknown")),
+            Verdict::End { code: 1, .. }
+        ));
+        assert!(matches!(
+            judge_of(terminated("Succeeded", 0, "")),
+            Verdict::End { code: 0, .. }
+        ));
+        assert!(matches!(
+            judge_of(waiting("ImagePullBackOff")),
+            Verdict::End { code: 1, .. }
+        ));
+        // Waiting for a node is not fatal until the pending timeout passes.
+        assert_eq!(judge_of(waiting("ContainerCreating")), Verdict::Keep);
+        let late = Some(cfg.pending_timeout + Duration::from_secs(1));
+        assert!(matches!(
+            judge(&pod(id, phase("Pending")), Some(&link), &cfg, late),
+            Verdict::End { code: 1, .. }
+        ));
+    }
+
+    #[test]
+    fn an_unschedulable_pod_ends_early_with_the_schedulers_reason() {
+        use k8s_openapi::api::core::v1::PodCondition;
+        let id = Uuid::new_v4();
+        let (_auth, link) = live(id);
+        let cfg = cfg();
+        let mut status = phase("Pending");
+        status.conditions = Some(vec![PodCondition {
+            type_: "PodScheduled".into(),
+            status: "False".into(),
+            reason: Some("Unschedulable".into()),
+            message: Some("0/4 nodes are available: 3 didn't match node selector".into()),
+            ..Default::default()
+        }]);
+        let p = pod(id, status);
+        let early = cfg.unschedulable_timeout + Duration::from_secs(1);
+        assert!(early < cfg.pending_timeout);
+        // Within the unschedulable window the pod is kept.
+        assert_eq!(
+            judge(&p, Some(&link), &cfg, Some(Duration::from_secs(5))),
+            Verdict::Keep
+        );
+        // Past it, well before the 600 s pending limit, the note carries the reason.
+        match judge(&p, Some(&link), &cfg, Some(early)) {
+            Verdict::End { code: 1, note } => {
+                assert!(note.contains("could not be scheduled"), "{note}");
+                assert!(note.contains("3 didn't match node selector"), "{note}");
+            }
+            other => panic!("expected End, got {other:?}"),
+        }
+        // A pending pod with no scheduler verdict keeps the long limit.
+        assert_eq!(
+            judge(&pod(id, phase("Pending")), Some(&link), &cfg, Some(early)),
+            Verdict::Keep
+        );
+    }
+
+    #[test]
+    fn a_pod_stopped_at_its_active_deadline_has_its_own_end_reason() {
+        let id = Uuid::new_v4();
+        let (_auth, link) = live(id);
+        let mut status = terminated("Failed", 137, "");
+        status.reason = Some("DeadlineExceeded".into());
+        status.message =
+            Some("Pod was active on the node longer than the specified deadline".into());
+        status.container_statuses.as_mut().unwrap()[0]
+            .state
+            .as_mut()
+            .unwrap()
+            .terminated
+            .as_mut()
+            .unwrap()
+            .reason = Some("DeadlineExceeded".into());
+        match judge(&pod(id, status), Some(&link), &cfg(), None) {
+            Verdict::End { code, note } => {
+                assert_eq!(code, 137);
+                assert!(note.starts_with("hit its active deadline:"), "{note}");
+                assert_ne!(note, "failed: DeadlineExceeded");
+            }
+            other => panic!("unexpected verdict: {other:?}"),
+        }
+    }
+
+    /// WI-4519: a sweep that ends a session at its active deadline says so,
+    /// so the engine audits it and raises an Inbox item; any other end does
+    /// not.
+    #[tokio::test]
+    async fn a_sweep_reports_a_session_ended_at_its_deadline() {
+        let auth = AgentAuth::default();
+        let (id, other) = (Uuid::new_v4(), Uuid::new_v4());
+        let _links = (auth.register_pod(id), auth.register_pod(other));
+        let mut status = terminated("Failed", 137, "");
+        status.reason = Some("DeadlineExceeded".into());
+        let kube = MockKube::with(vec![
+            pod(id, status),
+            pod(other, terminated("Failed", 137, "OOMKilled")),
+        ]);
+        let report = sweep(&kube, &auth, &cfg(), &|_| false).await.unwrap();
+        assert_eq!(report.ended.len(), 2);
+        assert_eq!(report.deadline, vec![id]);
+    }
+
+    /// WI-4519: a live pod past its annotated age limit is reported overdue,
+    /// not ended by the sweep; one within it, or with no limit, is not.
+    #[tokio::test]
+    async fn a_live_pod_past_its_age_limit_is_reported_overdue_not_ended() {
+        let auth = AgentAuth::default();
+        let (old, young, unbounded) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let _links = (
+            auth.register_pod(old),
+            auth.register_pod(young),
+            auth.register_pod(unbounded),
+        );
+        let limited = |id, age| {
+            let mut p = aged(pod(id, phase("Running")), age);
+            p.metadata.annotations = Some(BTreeMap::from([(
+                crate::pod_backend::DEADLINE_ANNOTATION.into(),
+                "3600".into(),
+            )]));
+            p
+        };
+        let kube = MockKube::with(vec![
+            limited(old, 3601),
+            limited(young, 60),
+            aged(pod(unbounded, phase("Running")), 100_000),
+        ]);
+        let report = sweep(&kube, &auth, &cfg(), &|_| false).await.unwrap();
+        assert_eq!(report.overdue, vec![old]);
+        assert!(report.ended.is_empty());
+        assert!(!auth.pod(old).unwrap().is_finished());
+    }
+
+    #[test]
+    fn a_finished_link_or_a_terminating_pod_is_left_alone() {
+        let id = Uuid::new_v4();
+        let (_auth, link) = live(id);
+        let failed = pod(id, phase("Failed"));
+        link.finish(0);
+        assert_eq!(judge(&failed, Some(&link), &cfg(), None), Verdict::Keep);
+
+        let (_auth, link) = live(id);
+        let mut terminating = pod(id, phase("Failed"));
+        terminating.metadata.deletion_timestamp = Some(
+            k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(k8s_openapi::chrono::Utc::now()),
+        );
+        assert_eq!(
+            judge(&terminating, Some(&link), &cfg(), None),
+            Verdict::Keep
+        );
+    }
+
+    #[test]
+    fn a_disconnect_is_judged_by_reconnect_timeout_not_heartbeat_timeout() {
+        let id = Uuid::new_v4();
+        let (_auth, link) = live(id);
+        link.note_connected();
+        link.note_disconnected();
+        std::thread::sleep(Duration::from_millis(5));
+
+        let reconnecting = PodConfig {
+            heartbeat_timeout: Duration::ZERO,
+            reconnect_timeout: Duration::from_secs(60),
+            ..Default::default()
+        };
+        assert_eq!(
+            judge(&pod(id, phase("Running")), Some(&link), &reconnecting, None),
+            Verdict::Keep,
+            "a disconnected agent gets the reconnect timeout, not the heartbeat one"
+        );
+
+        let gone = PodConfig {
+            heartbeat_timeout: Duration::ZERO,
+            reconnect_timeout: Duration::ZERO,
+            ..Default::default()
+        };
+        assert!(!link.is_connected());
+        assert!(link.has_connected());
+        assert!(link.disconnected_age().unwrap() > gone.reconnect_timeout);
+        match judge(&pod(id, phase("Running")), Some(&link), &gone, None) {
+            Verdict::End { code, note } => {
+                assert_eq!(code, 1);
+                assert!(note.contains("did not reconnect"), "{note}");
+            }
+            other => panic!("unexpected verdict: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_young_pod_with_no_link_waits_out_the_grace() {
+        let id = Uuid::new_v4();
+        let cfg = PodConfig {
+            connect_timeout: Duration::from_secs(30),
+            ..Default::default()
+        };
+        let p = pod(id, phase("Running"));
+        assert_eq!(
+            judge(&p, None, &cfg, Some(Duration::from_secs(5))),
+            Verdict::Keep
+        );
+        assert!(matches!(
+            judge(&p, None, &cfg, Some(Duration::from_secs(31))),
+            Verdict::Report { .. }
+        ));
+        assert!(matches!(
+            judge(&p, None, &cfg, None),
+            Verdict::Report { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_adopted_pod_that_already_terminated_ends_with_its_exit() {
+        let id = Uuid::new_v4();
+        let auth = AgentAuth::default();
+        let (link, _reader) = auth.adopt_pod(id, 0, "kept-token".into()).await;
+
+        // Adoption preserves a pod that is still running, not one whose
+        // process has already ended: the session ends on the exit it reported.
+        let verdict = judge(
+            &pod(id, terminated("Succeeded", 0, "")),
+            Some(&link),
+            &cfg(),
+            None,
+        );
+
+        assert!(
+            matches!(verdict, Verdict::End { code: 0, .. }),
+            "{verdict:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_session_whose_pod_died_without_exited_ends_with_the_reason() {
+        let id = Uuid::new_v4();
+        let auth = AgentAuth::default();
+        let (link, mut reader) = auth.register_pod(id);
+        auth.issue(id, b"bootstrap").await;
+        assert!(auth.consume(id, b"bootstrap").await);
+        let session_token = auth.session_token(id).await.unwrap();
+        link.ingest(0, b"hello").unwrap();
+        let mut kube = MockKube::with(vec![pod(id, terminated("Failed", 137, "OOMKilled"))]);
+        kube.log = Some(format!(
+            "session-entrypoint: step clone\n\
+                 session agent failed: no such file\n\
+                 Authorization: Bearer bearer-secret-123456\n\
+                 token=source-secret-123456\n\
+                 session={session_token}\n"
+        ));
+
+        let report = sweep(&kube, &auth, &cfg(), &|_| false).await.unwrap();
+
+        assert_eq!(report.ended, vec![id]);
+        assert!(report.reported.is_empty());
+        assert!(link.is_finished());
+        assert_eq!(link.wait_exit(), 137);
+        // The reason was appended after the bytes already received.
+        assert!(link.next_offset() > 5);
+        // The container's own tail is in the note: a status of "Error" alone
+        // is not a diagnosis (WI-3762).
+        let mut output = String::new();
+        std::io::Read::read_to_string(&mut reader, &mut output).unwrap();
+        assert!(output.contains("session pod failed: OOMKilled"));
+        assert!(output.contains("--- container log (last 50 lines) ---"));
+        assert!(output.contains("session agent failed: no such file"));
+        assert!(output.contains("Authorization: Bearer [redacted]"));
+        assert!(output.contains("token=[redacted]"));
+        assert!(!output.contains("bearer-secret-123456"));
+        assert!(!output.contains("source-secret-123456"));
+        assert!(!output.contains(&session_token));
+    }
+
+    #[tokio::test]
+    async fn an_unavailable_log_leaves_the_status_reason_alone() {
+        let id = Uuid::new_v4();
+        let auth = AgentAuth::default();
+        let (_link, mut reader) = auth.register_pod(id);
+        let kube = MockKube::with(vec![pod(id, terminated("Failed", 1, "Error"))]);
+
+        let report = sweep(&kube, &auth, &cfg(), &|_| false).await.unwrap();
+
+        assert_eq!(report.ended, vec![id]);
+        let mut output = String::new();
+        std::io::Read::read_to_string(&mut reader, &mut output).unwrap();
+        assert!(output.contains("session pod failed: Error"));
+        assert!(!output.contains("--- container log"));
+    }
+
+    #[tokio::test]
+    async fn a_pod_with_no_live_session_is_reported_and_left_running() {
+        let id = Uuid::new_v4();
+        let kube = MockKube::with(vec![
+            pod(id, phase("Running")),
+            // A pod without the session label is not ours to touch.
+            Pod::default(),
+        ]);
+        let auth = AgentAuth::default();
+
+        let report = sweep(&kube, &auth, &cfg(), &|_| false).await.unwrap();
+
+        assert_eq!(
+            report
+                .reported
+                .iter()
+                .map(|(id, _)| *id)
+                .collect::<Vec<_>>(),
+            vec![id]
+        );
+        assert!(
+            kube.deleted.lock().unwrap().is_empty(),
+            "an orphan is never deleted"
+        );
+    }
+
+    #[tokio::test]
+    async fn after_a_restart_every_pod_of_the_old_process_is_reported() {
+        // The new process has no links: pods that were running and pods that
+        // had already finished are both reported, and both are left alone.
+        let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
+        let kube = MockKube::with(vec![pod(a, phase("Running")), pod(b, phase("Succeeded"))]);
+
+        let report = sweep(&kube, &AgentAuth::default(), &cfg(), &|_| false)
+            .await
+            .unwrap();
+
+        let mut reported = report
+            .reported
+            .iter()
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>();
+        reported.sort();
+        let mut expected = vec![a, b];
+        expected.sort();
+        assert_eq!(reported, expected);
+        assert!(kube.deleted.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_adopted_pod_whose_agent_has_not_dialled_back_is_reported_not_ended() {
+        let id = Uuid::new_v4();
+        let auth = AgentAuth::default();
+        let (link, _reader) = auth.adopt_pod(id, 0, "kept-token".into()).await;
+        assert!(link.is_adopted() && !link.has_connected());
+        std::thread::sleep(Duration::from_millis(5));
+        let cfg = PodConfig {
+            reconnect_timeout: Duration::ZERO,
+            ..Default::default()
+        };
+
+        let verdict = judge(&pod(id, phase("Running")), Some(&link), &cfg, None);
+
+        assert!(matches!(verdict, Verdict::Report { .. }), "{verdict:?}");
+        assert!(!link.is_finished(), "the session is not ended");
+    }
+
+    #[tokio::test]
+    async fn a_live_pod_with_a_live_session_is_left_alone() {
+        let id = Uuid::new_v4();
+        let (auth, link) = live(id);
+        let kube = MockKube::with(vec![pod(id, phase("Running"))]);
+
+        let report = sweep(&kube, &auth, &cfg(), &|_| false).await.unwrap();
+
+        assert_eq!(report, Sweep::default());
+        assert!(!link.is_finished());
+        assert!(kube.deleted.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_session_whose_pod_vanished_ends_after_the_grace() {
+        let id = Uuid::new_v4();
+        let (auth, link) = live(id);
+        let kube = MockKube::with(vec![]);
+        tokio::time::sleep(Duration::from_millis(5)).await;
+
+        // Within the grace the pod may simply not be listed yet.
+        let patient = PodConfig {
+            connect_timeout: Duration::from_secs(60),
+            ..Default::default()
+        };
+        assert_eq!(
+            sweep(&kube, &auth, &patient, &|_| false).await.unwrap(),
+            Sweep::default()
+        );
+        assert!(!link.is_finished());
+
+        let report = sweep(&kube, &auth, &cfg(), &|_| false).await.unwrap();
+        assert_eq!(report.ended, vec![id]);
+        assert_eq!(link.wait_exit(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_failing_list_changes_nothing() {
+        let id = Uuid::new_v4();
+        let (auth, link) = live(id);
+        let mut kube = MockKube::with(vec![pod(id, phase("Failed"))]);
+        kube.list_fails = true;
+
+        assert!(sweep(&kube, &auth, &cfg(), &|_| false).await.is_err());
+        assert!(!link.is_finished());
+    }
+
+    fn aged(mut p: Pod, secs: i64) -> Pod {
+        p.metadata.creation_timestamp = Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+            k8s_openapi::chrono::Utc::now() - k8s_openapi::chrono::Duration::seconds(secs),
+        ));
+        p
+    }
+
+    fn ttl_cfg() -> PodConfig {
+        PodConfig {
+            orphan_ttl: Duration::from_millis(50),
+            ..cfg()
+        }
+    }
+
+    async fn run(
+        kube: &MockKube,
+        cfg: &PodConfig,
+        owned: &(dyn Fn(Uuid) -> bool + Sync),
+        salvaged: bool,
+        tracker: &mut OrphanTracker,
+    ) -> Sweep {
+        sweep_with(
+            kube,
+            &AgentAuth::default(),
+            cfg,
+            owned,
+            &move |_, _, _| salvaged,
+            tracker,
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn an_old_pod_with_a_fresh_first_seen_is_kept() {
+        let id = Uuid::new_v4();
+        let kube = MockKube::with(vec![aged(pod(id, phase("Running")), 10_000)]);
+        let mut tracker = OrphanTracker::default();
+        let report = run(&kube, &ttl_cfg(), &|_| false, true, &mut tracker).await;
+        assert!(report.reaped.is_empty());
+        assert!(kube.deleted.lock().unwrap().is_empty());
+        assert_eq!(tracker.tracked(), vec![id]);
+    }
+
+    #[tokio::test]
+    async fn reaped_after_the_ttl_since_first_seen_only_with_a_salvage_record() {
+        let id = Uuid::new_v4();
+        let kube = MockKube::with(vec![aged(pod(id, phase("Running")), 10_000)]);
+        let mut tracker = OrphanTracker::default();
+        run(&kube, &ttl_cfg(), &|_| false, true, &mut tracker).await;
+        tokio::time::sleep(Duration::from_millis(80)).await;
+
+        let report = run(&kube, &ttl_cfg(), &|_| false, false, &mut tracker).await;
+        assert!(report.reaped.is_empty());
+        assert!(kube.deleted.lock().unwrap().is_empty());
+        assert_eq!(report.reported.len(), 1);
+
+        let report = run(&kube, &ttl_cfg(), &|_| false, true, &mut tracker).await;
+        assert_eq!(report.reaped, vec![id]);
+        assert_eq!(
+            kube.deleted.lock().unwrap().clone(),
+            vec![(id, Some(format!("uid-{id}")))]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pod_that_regained_an_owner_or_vanished_leaves_the_map() {
+        let (back, gone) = (Uuid::new_v4(), Uuid::new_v4());
+        let kube = MockKube::with(vec![
+            pod(back, phase("Running")),
+            pod(gone, phase("Running")),
+        ]);
+        let mut tracker = OrphanTracker::default();
+        run(&kube, &ttl_cfg(), &|_| false, true, &mut tracker).await;
+        assert_eq!(tracker.tracked().len(), 2);
+
+        kube.pods
+            .lock()
+            .unwrap()
+            .retain(|p| session_id_from_pod(p) == Some(back));
+        run(&kube, &ttl_cfg(), &|id| id == back, true, &mut tracker).await;
+        assert!(tracker.tracked().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_zero_ttl_never_reaps() {
+        let id = Uuid::new_v4();
+        let kube = MockKube::with(vec![aged(pod(id, phase("Running")), 99999)]);
+        let cfg = PodConfig {
+            orphan_ttl: Duration::ZERO,
+            ..cfg()
+        };
+        let report = sweep(&kube, &AgentAuth::default(), &cfg, &|_| false)
+            .await
+            .unwrap();
+        assert!(report.reaped.is_empty());
+        assert!(kube.deleted.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn another_engines_pod_is_never_judged_or_deleted() {
+        let (mine, theirs, unlabelled) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let mut other = pod(theirs, phase("Running"));
+        other
+            .metadata
+            .labels
+            .as_mut()
+            .unwrap()
+            .insert(ENGINE_LABEL.into(), "vogt-prod".into());
+        let mut legacy = pod(unlabelled, phase("Running"));
+        legacy
+            .metadata
+            .labels
+            .as_mut()
+            .unwrap()
+            .remove(ENGINE_LABEL);
+        let kube = MockKube::with(vec![pod(mine, phase("Running")), other, legacy]);
+
+        let report = sweep(&kube, &AgentAuth::default(), &cfg(), &|_| false)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            report
+                .reported
+                .iter()
+                .map(|(id, _)| *id)
+                .collect::<Vec<_>>(),
+            vec![mine]
+        );
+        assert!(kube.deleted.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_orphan_without_a_uid_is_also_reported() {
+        let id = Uuid::new_v4();
+        let mut p = pod(id, phase("Running"));
+        p.metadata.uid = None;
+        let kube = MockKube::with(vec![p]);
+
+        let report = sweep(&kube, &AgentAuth::default(), &cfg(), &|_| false)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            report
+                .reported
+                .iter()
+                .map(|(id, _)| *id)
+                .collect::<Vec<_>>(),
+            vec![id]
+        );
+        assert!(kube.deleted.lock().unwrap().is_empty());
+    }
+}

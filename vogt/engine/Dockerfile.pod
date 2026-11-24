@@ -1,0 +1,385 @@
+# syntax=docker/dockerfile:1
+# Layered session images. The stages are base (the session image), rust (the
+# lean dev toolchain) and mobile (rust plus Flutter, the Android SDK and Chrome).
+# Docker builds the LAST stage when no --target is given, which is mobile, so
+# every build names its target: `rust` for the lean pod and the vogt-dev pod
+# (rust2-images.yml), `mobile` for the full pod (pod-base.yml).
+
+# Both bases are pinned by the digest of the mirrored manifest list, so a
+# rebuild of this file cannot silently pick up a newer upstream image. Renovate
+# tracks the tag and updates the digest.
+ARG UBUNTU_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-base/ubuntu:26.04@sha256:6a06111c3b0a8600feadb270aec771dc239bf407b25625f93f44ab00e11f4d3c
+ARG RUST_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-base/rust:1-bookworm@sha256:ade39a710ef85f3506cffcfec3e8a24ba090badef1dff2fb798f71d878833fea
+ARG NODE_VERSION=22.14.0
+ARG PNPM_VERSION=10.12.4
+ARG UV_VERSION=0.7.12
+ARG GRAFT_VERSION=0.1.0
+# The agent CLIs are pinned by `agent-versions.env`, the same manifest the
+# stack image reads (renovate may pass either name as a build arg override).
+ARG CLAUDE_CODE_VERSION
+ARG OPENCODE_VERSION
+# RUST_VERSION is the default toolchain (and the one `stable` resolves to);
+# RUST_EXTRA_VERSIONS are baked beside it, comma-separated, for repos that pin
+# an older release.
+ARG RUST_VERSION=1.100.0
+ARG RUST_EXTRA_VERSIONS=1.94.0
+ARG RUST_TARGETS="x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu"
+ARG FLUTTER_VERSION=3.35.3
+ARG ANDROID_CMDLINE_TOOLS_VERSION=13114758
+ARG ANDROID_PLATFORM_TOOLS_VERSION=35.0.2
+ARG CHROME_VERSION=156.0.8078.80
+ARG NODE_X64_SHA256=69b09dba5c8dcb05c4e4273a4340db1005abeafe3927efda2bc5b249e80437ec
+ARG NODE_ARM64_SHA256=08bfbf538bad0e8cbb0269f0173cca28d705874a67a22f60b57d99dc99e30050
+ARG UV_X64_SHA256=735891fb553d0be129f3aa39dc8e9c4c49aaa76ec17f7dfb6a732e79a714873a
+ARG UV_ARM64_SHA256=23233d2e950ed8187858350da5c6803b14cbbeaef780382093bb2f2bc4ba1200
+ARG GRAFT_X64_SHA256=46c64a82bbc8f218b584860662a73f69c4baeeb49a926fd7e8a36c19c1c580fa
+ARG GRAFT_ARM64_SHA256=63253bad6117aab2c65cc86db7125fc4f66c325b1d7a7d16f9ca006a4942d427
+ARG FLUTTER_SHA256=791550652e29a9588815c0e3aac7cf7cd1d1d5d6a1f1631d46cb146e8a2e1a1d
+ARG ANDROID_CMDLINE_TOOLS_SHA256=7ec965280a073311c339e571cd5de778b9975026cfcbe79f2b1cdcb1e15317ee
+ARG CHROME_X64_SHA256=b711c720f774be355197f32edf37e0651418ba036d92446ee2da19ac017540a7
+# rustup-init is pinned by its versioned release binary, not the sh.rustup.rs
+# script: that script is replaced in place on every rustup release, so a hash
+# of it breaks the build without any change here.
+ARG RUSTUP_VERSION=1.29.3
+ARG RUSTUP_X64_SHA256=b1c8cb14e30889e7e2999e6b69e62d9e9b9ffc0f4df8180564d306d9680e6c55
+ARG RUSTUP_ARM64_SHA256=9f608c142e0e38a78957d0661ba1dfaf0b6fb37184cfaa4b9a0aa57af6184282
+# Keep the session image's cache client identical to the CI runner image. The
+# checksum is for the release tarball, not an unpinned install script.
+ARG KACHE_VERSION=v2.0.0
+ARG KACHE_SHA256=6c59665faf1b14d0944391e6f2a1b510195e6be92c63060a9d1770ed00676824
+
+FROM ${RUST_IMAGE} AS session-agent-build
+WORKDIR /src
+COPY . .
+RUN cargo build --locked --release -p vogt-session-agent
+
+FROM ${UBUNTU_IMAGE} AS base
+ARG NODE_VERSION
+ARG PNPM_VERSION
+ARG UV_VERSION
+ARG GRAFT_VERSION
+ARG CLAUDE_CODE_VERSION
+ARG OPENCODE_VERSION
+ARG TARGETARCH
+ARG NODE_X64_SHA256
+ARG NODE_ARM64_SHA256
+ARG UV_X64_SHA256
+ARG UV_ARM64_SHA256
+ARG GRAFT_X64_SHA256
+ARG GRAFT_ARM64_SHA256
+
+LABEL org.opencontainers.image.title="vogt-session-base" \
+      org.opencontainers.image.description="Base image for Vogt coding sessions" \
+      org.opencontainers.image.source="https://github.com/TheDancingDeveloper-org/vogt"
+
+# /cache is a per-pod emptyDir at runtime, never shared storage (WI-3242): a
+# cache that two sessions can write lets one poison the other.
+ENV DEBIAN_FRONTEND=noninteractive \
+    LANG=C.UTF-8 \
+    HOME=/home/vogt \
+    NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/caddy-local-root.crt \
+    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+    XDG_CACHE_HOME=/cache/xdg \
+    NPM_CONFIG_CACHE=/cache/npm \
+    PNPM_HOME=/cache/pnpm \
+    PIP_CACHE_DIR=/cache/pip \
+    UV_CACHE_DIR=/cache/uv \
+    UV_TOOL_BIN_DIR=/usr/local/bin \
+    NPM_CONFIG_PREFIX=/usr/local \
+    PATH=/usr/local/bin:/usr/local/sbin:/home/vogt/.local/bin:/opt/rust/cargo/bin:/opt/flutter/bin:/opt/android-sdk/platform-tools:/opt/android-sdk/cmdline-tools/latest/bin:$PATH
+
+# Keep the base deterministic at the tool level. Package indexes are not
+# retained in the layer, and no credentials or runtime configuration is copied.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       ca-certificates coreutils curl git git-lfs jq ripgrep fd-find build-essential \
+       pkg-config libssl-dev python3 python3-pip python3-venv python3-dev \
+       openssh-client sudo unzip zip xz-utils zstd \
+    && find /var/lib/apt/lists -type f -delete \
+    && command -v timeout >/dev/null \
+    && test "$(command -v timeout)" = /usr/bin/timeout
+
+# Kubernetes MCP server (containers/kubernetes-mcp-server), read-only cluster
+# access for agents (docs/ENGINE.md §4). Pinned to one release and verified
+# against a sha256 recorded here, one per architecture; bump all three together.
+# Nothing is registered with a client here: `vogt-mcp-bootstrap` does that per
+# session, and only when the session holds K8S_AGENT_READONLY_KUBECONFIG.
+ARG K8S_MCP_VERSION=v0.0.67
+ARG K8S_MCP_SHA256_AMD64=d791c22b5367813cc9e7c66e405d8ff7f7d51189b5bd619fdd84a99cf7a1c116
+ARG K8S_MCP_SHA256_ARM64=d9378039b68b5247796655ba8bbb210d5e94287e56bd532112d81950a19f0e50
+RUN set -eu; \
+    case "$(dpkg --print-architecture)" in \
+        amd64) arch=amd64; sum="$K8S_MCP_SHA256_AMD64" ;; \
+        arm64) arch=arm64; sum="$K8S_MCP_SHA256_ARM64" ;; \
+        *) echo "no pinned kubernetes-mcp-server for $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://github.com/containers/kubernetes-mcp-server/releases/download/${K8S_MCP_VERSION}/kubernetes-mcp-server-linux-${arch}" \
+        -o /tmp/kubernetes-mcp-server; \
+    echo "${sum}  /tmp/kubernetes-mcp-server" | sha256sum -c -; \
+    install -m 755 /tmp/kubernetes-mcp-server /usr/local/bin/kubernetes-mcp-server; \
+    rm -f /tmp/kubernetes-mcp-server; \
+    kubernetes-mcp-server --version
+
+# Infisical CLI. The agent-auth helper (`engine/deploy/agent-auth.sh`) runs
+# `infisical` by name, and the engine calls that helper for on-demand provider
+# keys (WI-3886). Without it the broker fails with "command not found" and a pod
+# Codex session gets no key. `gnupg` is installed here because this base does
+# not carry it. Every stage that inherits this base must keep the binary.
+RUN install -m 0755 -d /usr/share/keyrings \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends gnupg \
+    && curl -1sLf https://artifacts-cli.infisical.com/infisical.gpg \
+       | gpg --dearmor -o /usr/share/keyrings/infisical-archive-keyring.gpg \
+    && chmod 0644 /usr/share/keyrings/infisical-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/infisical-archive-keyring.gpg] https://artifacts-cli.infisical.com/deb stable main" \
+       > /etc/apt/sources.list.d/infisical.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends infisical \
+    && rm -rf /var/lib/apt/lists/* \
+    && command -v infisical
+
+# Session pods reach estate services through Caddy's internal PKI. This public
+# root augments, rather than replaces, the system trust store.
+COPY deploy/pod/ca/caddy-local-root.crt /usr/local/share/ca-certificates/caddy-local-root.crt
+RUN update-ca-certificates
+
+# Node is installed from the official, versioned tarball rather than a moving
+# distribution channel. pnpm and uv are exact tool pins.
+RUN case "$TARGETARCH" in amd64) node_arch=x64; node_sha="$NODE_X64_SHA256"; uv_arch=x86_64; uv_sha="$UV_X64_SHA256" ;; arm64) node_arch=arm64; node_sha="$NODE_ARM64_SHA256"; uv_arch=aarch64; uv_sha="$UV_ARM64_SHA256" ;; *) echo "unsupported architecture: $TARGETARCH" >&2; exit 1 ;; esac \
+    && curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${node_arch}.tar.xz" -o /tmp/node.tar.xz \
+    && echo "${node_sha}  /tmp/node.tar.xz" | sha256sum -c - \
+    && mkdir -p /opt/node \
+    && tar -xJf /tmp/node.tar.xz --strip-components=1 -C /opt/node \
+    && ln -s /opt/node/bin/node /usr/local/bin/node \
+    && ln -s /opt/node/bin/npm /usr/local/bin/npm \
+    && ln -s /opt/node/bin/npx /usr/local/bin/npx \
+    && npm install --global "pnpm@${PNPM_VERSION}" \
+    && curl -fsSL "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-${uv_arch}-unknown-linux-gnu.tar.gz" -o /tmp/uv.tar.gz \
+    && echo "${uv_sha}  /tmp/uv.tar.gz" | sha256sum -c - \
+    && tar -xzf /tmp/uv.tar.gz -C /tmp \
+    && install -m 0755 "/tmp/uv-${uv_arch}-unknown-linux-gnu/uv" /usr/local/bin/uv \
+    && install -m 0755 "/tmp/uv-${uv_arch}-unknown-linux-gnu/uvx" /usr/local/bin/uvx \
+    && find /tmp -maxdepth 1 -type f \( -name 'node.tar.xz' -o -name 'uv.tar.gz' \) -delete
+
+# Graft is pinned by release, not fetched from a mutable branch. The image
+# remains usable without a graft token; authentication is supplied at runtime.
+RUN case "$TARGETARCH" in amd64) graft_arch=x86_64; graft_sha="$GRAFT_X64_SHA256" ;; arm64) graft_arch=aarch64; graft_sha="$GRAFT_ARM64_SHA256" ;; *) echo "unsupported architecture: $TARGETARCH" >&2; exit 1 ;; esac \
+    && curl -fsSL "https://github.com/TheDancingDeveloper-org/graft/releases/download/v${GRAFT_VERSION}/graft-${graft_arch}-unknown-linux-musl.tar.gz" -o /tmp/graft.tar.gz \
+    && echo "${graft_sha}  /tmp/graft.tar.gz" | sha256sum -c - \
+    && tar -xzf /tmp/graft.tar.gz -C /usr/local/bin --strip-components=1 \
+    && chmod 0755 /usr/local/bin/graft \
+    && ln -s /usr/local/bin/graft /usr/local/bin/g \
+    && find /tmp -maxdepth 1 -type f -name 'graft.tar.gz' -delete
+
+COPY agent-versions.env /usr/local/share/vogt/agent-versions.env
+# Agent CLIs are pinned in the image, while their credentials are always
+# brokered after startup. opencode is installed from npm to avoid a curl|sh.
+# The pins are read from the copied manifest so this image and the stack image
+# cannot drift; the `--version` guards are the stack image's, because npm can
+# resolve to a stub (`@anthropic-ai/claude-code` has shipped a ~500-byte
+# `bin/claude.exe`) and a green build must not ship a pod whose CLI cannot
+# start.
+RUN set -eu; \
+    . /usr/local/share/vogt/agent-versions.env; \
+    claude_code_version="${CLAUDE_CODE_VERSION:-${VOGT_CLAUDE_CODE_VERSION}}"; \
+    opencode_version="${OPENCODE_VERSION:-${VOGT_OPENCODE_VERSION}}"; \
+    npm install --global \
+      "@anthropic-ai/claude-code@${claude_code_version}" \
+      "opencode-ai@${opencode_version}" \
+    && { /usr/local/bin/claude --version | grep -qF "$claude_code_version" \
+         || { echo "claude is not $claude_code_version — a stub install" >&2; exit 1; }; } \
+    && { /usr/local/bin/opencode --version | grep -qF "$opencode_version" \
+         || { echo "opencode is not $opencode_version — the platform binary did not install" >&2; exit 1; }; }
+
+# The GitHub CLI (WI-4512), pinned and checksummed exactly as the stack image
+# does (engine/Dockerfile, WI-4325) from the same manifest. gh reads GH_TOKEN
+# from the environment; no credential or `gh auth` state is baked in. The
+# version check is the build-time smoke check: a pod without a working `gh`
+# does not ship.
+RUN set -eu; \
+    . /usr/local/share/vogt/agent-versions.env; \
+    gh_version="$VOGT_GH_VERSION"; \
+    case "$TARGETARCH" in \
+        amd64) gh_arch=amd64; gh_sum="$VOGT_GH_SHA256_LINUX_AMD64" ;; \
+        arm64) gh_arch=arm64; gh_sum="$VOGT_GH_SHA256_LINUX_ARM64" ;; \
+        *) echo "unsupported architecture: $TARGETARCH" >&2; exit 1 ;; \
+    esac; \
+    gh_dir="gh_${gh_version}_linux_${gh_arch}"; \
+    curl -fsSL "https://github.com/cli/cli/releases/download/v${gh_version}/${gh_dir}.tar.gz" -o /tmp/gh.tar.gz; \
+    echo "$gh_sum  /tmp/gh.tar.gz" | sha256sum -c -; \
+    tar -xzf /tmp/gh.tar.gz -C /tmp; \
+    install -m 0755 "/tmp/${gh_dir}/bin/gh" /usr/local/bin/gh; \
+    rm -rf /tmp/gh.tar.gz "/tmp/${gh_dir}"; \
+    gh --version | grep -qF "gh version ${gh_version} "
+
+COPY --chmod=0755 deploy/codex-full-access.sh /usr/local/bin/codex
+COPY --chown=root:root --chmod=0644 deploy/driven-session-codex-requirements.toml /etc/codex/requirements.toml
+RUN set -eu; \
+    . /usr/local/share/vogt/agent-versions.env; \
+    case "$TARGETARCH" in \
+        amd64) target=x86_64-unknown-linux-musl; codex_sum="$VOGT_CODEX_SHA256_LINUX_AMD64" ;; \
+        arm64) target=aarch64-unknown-linux-musl; codex_sum="$VOGT_CODEX_SHA256_LINUX_ARM64" ;; \
+        *) echo "unsupported architecture: $TARGETARCH" >&2; exit 1 ;; \
+    esac; \
+    if [ -n "$codex_sum" ]; then \
+        asset="codex-${target}.tar.gz"; \
+        curl -fsSL "$VOGT_CODEX_SOURCE/releases/download/fork-${VOGT_CODEX_SHA}/${asset}" -o "/tmp/${asset}"; \
+        curl -fsSL "$VOGT_CODEX_SOURCE/releases/download/fork-${VOGT_CODEX_SHA}/SHA256SUMS" -o /tmp/SHA256SUMS; \
+        tar -xzf "/tmp/${asset}" -C /tmp; \
+        (cd /tmp && grep -F "  ${target}/" SHA256SUMS | sha256sum -c -); \
+        echo "$codex_sum  /tmp/${target}/codex" | sha256sum -c -; \
+        install -d /usr/local/libexec; \
+        install -m 0755 "/tmp/${target}/codex" /usr/local/libexec/codex-real; \
+        install -m 0755 "/tmp/${target}/bwrap" /usr/local/libexec/bwrap; \
+        install -m 0755 "/tmp/${target}/codex-code-mode-host" /usr/local/libexec/codex-code-mode-host; \
+        rm -rf "/tmp/${asset}" /tmp/SHA256SUMS "/tmp/${target}"; \
+        /usr/local/bin/codex --version; \
+    else \
+        echo "no Codex release for $TARGETARCH; leaving the image copy unset" >&2; \
+    fi
+
+# The session user is uid/gid 1000. Ubuntu images may already ship a user at
+# 1000, which is removed so vogt owns the id. /run/vogt (the session token) and
+# /work (the clone) are created here because the non-root user cannot create
+# them under / at runtime. The base may already have a root-owned /home/vogt,
+# which useradd leaves alone, so the home is chowned explicitly.
+RUN if existing="$(getent passwd 1000 | cut -d: -f1)" && [ -n "$existing" ]; then userdel --remove "$existing"; fi \
+    && if existing="$(getent group 1000 | cut -d: -f1)" && [ -n "$existing" ]; then groupdel "$existing"; fi \
+    && groupadd --gid 1000 vogt \
+    && useradd --uid 1000 --gid 1000 --create-home --shell /bin/bash vogt \
+    && cp -rn /etc/skel/. /home/vogt/ \
+    && chown -R 1000:1000 /home/vogt \
+    && install -d -o 1000 -g 1000 -m 0700 /run/vogt /work \
+    && install -d -o 1000 -g 1000 /home/vogt/Working /home/vogt/.config /cache/xdg /cache/npm /cache/pnpm /cache/pip /cache/uv
+
+# The Codex managed policy is only a policy if the session user can read it:
+# `requirements.toml` being 0644 says nothing when its parent /etc/codex is
+# root-only, and the session agent then refuses to start Codex at all
+# ("cannot be read (Permission denied)"). The base image may already carry an
+# /etc/codex with such a mode, so set both and prove the read as vogt — the
+# same rule the merged image applies (engine/Dockerfile, WI-1143).
+RUN mkdir -p /etc/codex \
+    && chown root:root /etc/codex \
+    && chmod 0755 /etc/codex \
+    && chown root:root /etc/codex/requirements.toml \
+    && chmod 0644 /etc/codex/requirements.toml \
+    && su - vogt -c 'test -r /etc/codex/requirements.toml'
+
+# Runtime hooks. The entrypoint fetches all session-specific state from the
+# authenticated broker; no account or service credential is baked here.
+COPY --chmod=0755 deploy/agent-auth.sh /usr/local/bin/vogt-agent-auth
+COPY --chmod=0755 deploy/claude-session-hook.sh /usr/local/bin/vogt-claude-session-hook
+COPY --chmod=0755 deploy/policy-hook.sh /usr/local/bin/vogt-policy-hook
+COPY --chmod=0755 deploy/session-entrypoint.sh /usr/local/bin/vogt-session-entrypoint
+# The driven-session permission policy (WI-926, WI-3243): the session agent
+# starts Claude Code with --settings pointing here, as the merged image's
+# engine does for a host session. Root-owned and read-only to the session user.
+# No --chmod: BuildKit applies it to the directories this creates too, and a
+# 0644 /usr/local/share/vogt cannot be entered by the session user (WI-3243).
+COPY --chown=root:root deploy/driven-session-settings.json /usr/local/share/vogt/driven-session-settings.json
+COPY --from=session-agent-build /src/target/release/vogt-session-agent /usr/local/bin/vogt-session-agent
+
+WORKDIR /home/vogt/Working
+ENTRYPOINT ["/usr/local/bin/vogt-session-entrypoint"]
+
+FROM base AS rust
+ARG RUST_VERSION
+ARG RUST_EXTRA_VERSIONS
+ARG RUST_TARGETS
+ARG TARGETARCH
+ARG RUSTUP_VERSION
+ARG RUSTUP_X64_SHA256
+ARG RUSTUP_ARM64_SHA256
+# Global ARGs are empty inside a stage unless redeclared; without these the
+# kache URL had no version and the checksum was blank.
+ARG KACHE_VERSION
+ARG KACHE_SHA256
+LABEL org.opencontainers.image.title="vogt-session-rust"
+# RUSTUP_AUTO_INSTALL=0: the session pod's root filesystem is read-only, so a
+# rust-toolchain.toml that names another channel or version must fail with
+# rustup's own error rather than try (and fail) to install it at run time.
+# A rust-toolchain.toml with `channel = "stable"` must also resolve here, so the
+# pinned toolchain must answer to the name `stable` too. rustup refuses
+# `toolchain link stable`, so the RUN below adds a symlink of the toolchain
+# directory under that name. Both names then point at the pinned ${RUST_VERSION}
+# and nothing is downloaded at run time.
+ENV RUSTUP_HOME=/opt/rust/rustup \
+    CARGO_HOME=/cache/cargo \
+    SCCACHE_DIR=/var/cache/sccache \
+    RUSTUP_AUTO_INSTALL=0
+USER root
+RUN install -d -o vogt -g vogt /opt/rust /opt/rust/cargo /opt/rust/rustup /cache/cargo /var/cache/sccache \
+    && case "$TARGETARCH" in amd64) rustup_arch=x86_64; rustup_sha="$RUSTUP_X64_SHA256" ;; arm64) rustup_arch=aarch64; rustup_sha="$RUSTUP_ARM64_SHA256" ;; *) echo "unsupported architecture: $TARGETARCH" >&2; exit 1 ;; esac \
+    && curl --proto '=https' --tlsv1.2 -fsSL "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/${rustup_arch}-unknown-linux-gnu/rustup-init" -o /tmp/rustup-init \
+    && echo "${rustup_sha}  /tmp/rustup-init" | sha256sum -c - \
+    && chown vogt:vogt /tmp/rustup-init \
+    && chmod 0755 /tmp/rustup-init \
+    && su - vogt -c "RUSTUP_HOME=/opt/rust/rustup CARGO_HOME=/opt/rust/cargo /tmp/rustup-init -y --default-toolchain ${RUST_VERSION} --profile default" \
+    && find /tmp -maxdepth 1 -type f -name rustup-init -delete \
+    && su - vogt -c "RUSTUP_HOME=/opt/rust/rustup CARGO_HOME=/opt/rust/cargo rustup component add rust-src" \
+    && ln -s "${RUST_VERSION}-${rustup_arch}-unknown-linux-gnu" "/opt/rust/rustup/toolchains/stable-${rustup_arch}-unknown-linux-gnu" \
+    && su - vogt -c "RUSTUP_HOME=/opt/rust/rustup CARGO_HOME=/opt/rust/cargo rustup target add $(printf '%s' "${RUST_TARGETS}" | tr ',' ' ')" \
+    && for v in $(printf '%s' "${RUST_EXTRA_VERSIONS}" | tr ',' ' '); do su - vogt -c "RUSTUP_HOME=/opt/rust/rustup CARGO_HOME=/opt/rust/cargo rustup toolchain install $v --profile default --component rust-src --target $(printf '%s' "${RUST_TARGETS}")" || exit 1; done \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends clang lld cmake protobuf-compiler \
+    && find /var/lib/apt/lists -type f -delete \
+    && su - vogt -c "RUSTUP_HOME=/opt/rust/rustup CARGO_HOME=/opt/rust/cargo cargo install --locked cargo-nextest --version 0.9.102" \
+    && su - vogt -c "RUSTUP_HOME=/opt/rust/rustup CARGO_HOME=/opt/rust/cargo rustup component add rust-analyzer" \
+    && case "${TARGETARCH}" in \
+         amd64) \
+           curl -fsSL -o /tmp/kache.tgz "https://github.com/kunobi-ninja/kache/releases/download/${KACHE_VERSION}/kache-x86_64-unknown-linux-musl.tar.gz" \
+             && echo "${KACHE_SHA256}  /tmp/kache.tgz" | sha256sum -c - \
+             && install -d /tmp/kache \
+             && tar -xzf /tmp/kache.tgz -C /tmp/kache \
+             && install -m 0755 /tmp/kache/kache /tmp/kache/kache-engine /usr/local/bin/ \
+             && find /tmp/kache.tgz /tmp/kache -delete \
+             && kache --version ;; \
+         *) echo "kache ${KACHE_VERSION} has no release for ${TARGETARCH}" >&2; exit 1 ;; \
+       esac
+# This config is a placeholder for a runtime-provided sccache client. No cache
+# credentials or cache contents are baked into the image.
+RUN printf '%s\n' '[build]' '# rustc-wrapper = "/usr/local/bin/sccache"' > /etc/cargo-config.toml
+USER 1000:1000
+
+FROM rust AS mobile
+ARG FLUTTER_VERSION
+ARG ANDROID_CMDLINE_TOOLS_VERSION
+ARG ANDROID_PLATFORM_TOOLS_VERSION
+ARG FLUTTER_SHA256
+ARG ANDROID_CMDLINE_TOOLS_SHA256
+ARG CHROME_VERSION
+ARG CHROME_X64_SHA256
+ARG TARGETARCH
+LABEL org.opencontainers.image.title="vogt-session-mobile"
+USER root
+ENV ANDROID_HOME=/opt/android-sdk ANDROID_SDK_ROOT=/opt/android-sdk FLUTTER_ROOT=/opt/flutter
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends openjdk-21-jdk-headless xwayland libgl1-mesa-dri fonts-liberation \
+       libasound2t64 libatk-bridge2.0-0t64 libatk1.0-0t64 libcairo2 libcups2t64 libdbus-1-3 \
+       libdrm2 libgbm1 libglib2.0-0t64 libnspr4 libnss3 libpango-1.0-0 libx11-6 libxcb1 \
+       libxcomposite1 libxdamage1 libxext6 libxfixes3 libxkbcommon0 libxrandr2 \
+    && find /var/lib/apt/lists -type f -delete \
+    && if [ "$TARGETARCH" != amd64 ]; then echo "Chrome for Testing is published for linux64 only; got $TARGETARCH" >&2; exit 1; fi \
+    && curl -fsSL "https://storage.googleapis.com/chrome-for-testing-public/${CHROME_VERSION}/linux64/chrome-linux64.zip" -o /tmp/chrome.zip \
+    && echo "${CHROME_X64_SHA256}  /tmp/chrome.zip" | sha256sum -c - \
+    && unzip -q /tmp/chrome.zip -d /opt \
+    && mv /opt/chrome-linux64 /opt/chrome \
+    && ln -s /opt/chrome/chrome /usr/local/bin/chromium \
+    && ln -s /opt/chrome/chrome /usr/local/bin/google-chrome \
+    && chromium --headless --no-sandbox --version \
+    && rm -f /tmp/chrome.zip \
+    && curl -fsSL "https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_${FLUTTER_VERSION}-stable.tar.xz" -o /tmp/flutter.tar.xz \
+    && echo "${FLUTTER_SHA256}  /tmp/flutter.tar.xz" | sha256sum -c - \
+    && tar -xJf /tmp/flutter.tar.xz -C /opt \
+    && chown -R vogt:vogt /opt/flutter \
+    && install -d -o vogt -g vogt /opt/android-sdk/cmdline-tools \
+    && curl -fsSL --retry 5 --retry-all-errors "https://dl.google.com/android/repository/commandlinetools-linux-${ANDROID_CMDLINE_TOOLS_VERSION}_latest.zip" -o /tmp/android.zip \
+    && echo "${ANDROID_CMDLINE_TOOLS_SHA256}  /tmp/android.zip" | sha256sum -c - \
+    && unzip -q /tmp/android.zip -d /opt/android-sdk/cmdline-tools \
+    && mv /opt/android-sdk/cmdline-tools/cmdline-tools /opt/android-sdk/cmdline-tools/latest \
+    && yes | /opt/android-sdk/cmdline-tools/latest/bin/sdkmanager --licenses >/dev/null \
+    && /opt/android-sdk/cmdline-tools/latest/bin/sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0" \
+    && chown -R vogt:vogt /opt/android-sdk \
+    && find /tmp -maxdepth 1 -type f \( -name 'flutter.tar.xz' -o -name 'android.zip' \) -delete
+USER 1000:1000
+RUN flutter config --no-analytics && flutter precache --android

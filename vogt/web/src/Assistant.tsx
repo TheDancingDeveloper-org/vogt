@@ -1,0 +1,2361 @@
+// Conversational assistant tab: transcript + composer, optional voice.
+//
+// Voice support is progressive and chosen by capability, not by platform name:
+//  - TTS uses the browser's Web Speech `speechSynthesis` when it exists (the
+//    desktop PWA). The Android WebView has *no* `speechSynthesis`, so the APK
+//    speaks through the server route `POST /api/assistant/tts` instead — and
+//    only when a TTS backend is configured. With none, the reply is shown, not
+//    spoken: the engine defaults its speech base-URL lists to empty on purpose,
+//    so `assistant_tts_enabled` reads false rather than advertising a mouth
+//    that cannot speak (see `engine/server/src/config.rs`).
+//  - STT prefers the @capacitor-community/speech-recognition native plugin
+//    (APK only), then the browser's Web Speech recognizer, then the server
+//    pipeline (MediaRecorder → `POST /api/assistant/stt`) for a client with
+//    neither. Everything degrades to typed input.
+import {
+  createEffect,
+  createSignal,
+  For,
+  on,
+  onCleanup,
+  onMount,
+  Show,
+} from "solid-js";
+import { Capacitor } from "@capacitor/core";
+import GoToButton from "./GoToButton";
+
+import {
+  api,
+  ApiError,
+  getBase,
+  getToken,
+  type AssistantPendingAction,
+  type AssistantReply,
+  type AssistantSendInputAction,
+  type AssistantVogtWriteAction,
+  type PublicConfig,
+} from "./api";
+import { renderMarkdown } from "./markdown";
+import { writeClipboardText } from "./clipboard";
+import { describeRepairs, repairUtterance } from "./voiceRepair";
+import { readToolDraft, writeToolDraft } from "./toolDrafts";
+import { pendingAction, setPendingAction } from "./pendingAction";
+import { getPreferServerStt, sttVocabularyPrompt } from "./sttPref";
+import { isConnected, sessionsError, sessionsStore } from "./store";
+import {
+  deferAssistantHydration,
+  invalidateAssistantSnapshot,
+  readAssistantSnapshot,
+} from "./assistantCache";
+import {
+  onVoiceServiceEnded,
+  registerPushSpeaker,
+  startCallAudio,
+  startVoiceService,
+  stopCallAudio,
+  stopVoiceService,
+} from "./voiceService";
+import {
+  readVoiceConfig,
+  VoiceConversation,
+  voiceStatusLabel,
+  type VoicePorts,
+  type VoiceState,
+} from "./voiceTurn";
+import { readOnsetConfig, startBargeInDetection, watchStreamForSilence } from "./voiceVad";
+import { diag, diagBoot } from "./diag";
+import {
+  audioContextAvailable,
+  playAudioBlob,
+  primeAudio,
+  sharedAudioContext,
+  suspendAudio,
+  type Playback,
+} from "./audioPlayback";
+import { callPhaseLabel, type CallView } from "./callProtocol";
+import { CallSession, callSocketUrl } from "./callSession";
+import { callCaptureSupported, startCapture } from "./callCapture";
+import { CallPlayer } from "./callPlayer";
+import { runtimeTransport } from "./runtimeTransport";
+import { TransportError } from "./transport";
+
+const TTS_PREF_KEY = "vogt.assistant.tts";
+
+/** Voice-turn tuning lives under one localStorage namespace, so any deployment
+ *  can tune a take's silence window without a rebuild — and the hands-free
+ *  conversation mode (WI-174) reads the same keys. Generic defaults, no vendor
+ *  or estate specifics; a missing or malformed value falls back rather than
+ *  throwing (private windows and locked-down browsers make reads fail). */
+const VOICE_CFG_PREFIX = "vogt.assistant.voice.";
+function voiceMs(key: string, fallback: number): number {
+  try {
+    const raw = localStorage.getItem(VOICE_CFG_PREFIX + key);
+    if (raw === null) return fallback;
+    const n = Number(raw);
+    return Number.isFinite(n) && n >= 0 ? n : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+/** How long the server holds a pending action before it expires. The
+ *  card counts down against this so an approval you can no longer make stops
+ *  inviting you to make it. Kept in step with `PENDING_ACTION_TTL` in the
+ *  engine's `assistant.rs`. */
+const PENDING_ACTION_TTL_MS = 120_000;
+
+/** How long an approval tap that failed on a live connection waits before it
+ *  is sent again. A tap that failed while the stream was down waits for the
+ *  stream instead. */
+export const TAP_RETRY_MS = 3_000;
+
+/** An approval tap the card is holding: sending, or queued because the
+ *  connection dropped under it. The card stays up until the tap succeeds. */
+interface HeldTap {
+  action: AssistantPendingAction;
+  approve: boolean;
+  state: "sending" | "queued";
+}
+
+/** A failure a retry can fix: the connection dropped, or the front door is
+ *  reconnecting. Anything else is a refusal the card should be restored for. */
+export function isTransientTapFailure(error: unknown): boolean {
+  if (error instanceof TransportError) return true;
+  return error instanceof ApiError && [502, 503, 504].includes(error.status);
+}
+
+/** A transcript row plus the two things the server never sends: whether an
+ *  optimistic user turn failed to reach the engine, so it can offer a Retry
+ *  instead of masquerading as a recorded message. */
+export interface AssistantUiEntry {
+  role: "user" | "assistant";
+  text: string;
+  tool_trace?: string[];
+  /** A send that errored or was refused: shown as failed, with a Retry. */
+  failed?: boolean;
+  /** Original recognized text, retained for retrying a failed voice turn. */
+  utterance?: string;
+  created_at?: string;
+  session_refs?: { id: string; name: string; activity: string }[];
+  actions?: { kind: "open-session"; session_id: string; label: string }[];
+}
+
+export function transcriptTimeLabel(
+  createdAt: string | undefined,
+  previousCreatedAt?: string,
+  now = new Date(),
+): string | null {
+  if (!createdAt) return null;
+  const created = new Date(createdAt);
+  if (Number.isNaN(created.getTime())) return null;
+  if (previousCreatedAt) {
+    const previous = new Date(previousCreatedAt);
+    if (
+      !Number.isNaN(previous.getTime()) &&
+      previous.getFullYear() === created.getFullYear() &&
+      previous.getMonth() === created.getMonth() &&
+      previous.getDate() === created.getDate() &&
+      previous.getHours() === created.getHours() &&
+      previous.getMinutes() === created.getMinutes()
+    ) {
+      return null;
+    }
+  }
+  const sameDay =
+    now.getFullYear() === created.getFullYear() &&
+    now.getMonth() === created.getMonth() &&
+    now.getDate() === created.getDate();
+  const day = sameDay
+    ? "Today"
+    : created.toLocaleDateString([], { month: "short", day: "numeric" });
+  const time = created.toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+  return `${day} · ${time}`;
+}
+
+/**
+ * Whether the transcript is scrolled close enough to the end that new content
+ * should follow it down. Pulled out as a pure function so the "don't
+ * yank a reader who scrolled up back to the bottom" rule is testable without a
+ * layout engine — jsdom reports every scroll metric as zero.
+ */
+export function nearBottom(
+  scrollTop: number,
+  clientHeight: number,
+  scrollHeight: number,
+  pad = 120,
+): boolean {
+  return scrollHeight - scrollTop - clientHeight <= pad;
+}
+
+// The Web Speech recognizer, read defensively. TypeScript's DOM lib does not
+// declare the vendor-prefixed `webkitSpeechRecognition`, and Firefox ships
+// neither name — so both are looked up off `window` and the absent case is a
+// first-class "no microphone here", not an error.
+interface WebSpeechAlternative {
+  readonly transcript: string;
+}
+interface WebSpeechResult {
+  readonly length: number;
+  readonly [index: number]: WebSpeechAlternative;
+}
+interface WebSpeechResultList {
+  readonly length: number;
+  readonly [index: number]: WebSpeechResult;
+}
+interface WebSpeechRecognitionEvent {
+  readonly results: WebSpeechResultList;
+}
+interface WebSpeechRecognition {
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  onresult: ((event: WebSpeechRecognitionEvent) => void) | null;
+  onend: (() => void) | null;
+  onerror: ((event: { error: string }) => void) | null;
+  start(): void;
+  stop(): void;
+  abort(): void;
+}
+type WebSpeechRecognitionCtor = new () => WebSpeechRecognition;
+
+/** The recognizer constructor this browser offers, or null (e.g. Firefox). */
+function webSpeechCtor(): WebSpeechRecognitionCtor | null {
+  const scope = window as unknown as {
+    webkitSpeechRecognition?: WebSpeechRecognitionCtor;
+    SpeechRecognition?: WebSpeechRecognitionCtor;
+  };
+  return scope.webkitSpeechRecognition ?? scope.SpeechRecognition ?? null;
+}
+
+/**
+ * Whether this browser can capture microphone audio for the server pipeline
+ * A `MediaRecorder` to encode it and `getUserMedia` to open the mic.
+ * Both absent — an older WebView, a browser with no recorder — leaves the
+ * server STT path unusable, which degrades to typed input.
+ */
+function mediaRecorderAvailable(): boolean {
+  return (
+    typeof MediaRecorder !== "undefined" &&
+    typeof navigator !== "undefined" &&
+    !!navigator.mediaDevices?.getUserMedia
+  );
+}
+
+interface AssistantDraft {
+  text: string;
+  profile: string;
+}
+
+interface AssistantProps {
+  onError: (message: string) => void;
+  /** Capability gate already fetched by the application shell. */
+  assistantEnabled?: boolean;
+  /** Reuse the shell's config instead of fetching it for every instance. */
+  publicConfig?: PublicConfig | null;
+  /** Sessions renders the shared action card when composed in its workspace. */
+  pendingHosted?: boolean;
+  /** Clearing the conversation is destructive, so it is confirmed before it
+   *  happens. Absent (e.g. in a bare mount) falls back to clearing directly. */
+  confirmAction?: (title: string, body?: string) => Promise<boolean>;
+}
+
+function speakSentences(text: string, onDone?: () => void) {
+  if (!("speechSynthesis" in window) || !text.trim()) {
+    onDone?.();
+    return;
+  }
+  // Sentence-level chunks keep the synth responsive and interruptible.
+  //
+  // Split only where a terminator is followed by space or line end, so an
+  // identifier keeps its full stop: the old pattern broke `work.transition`
+  // into "work." and "transition on WI-7", which a screen reader renders as
+  // two sentences and a speaker reads with a pause in the middle of the one
+  // word that says what is about to happen.
+  const sentences = text
+    .split(/(?<=[.!?])\s+|\n+/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (!sentences.length) {
+    onDone?.();
+    return;
+  }
+  sentences.forEach((sentence, index) => {
+    const utterance = new SpeechSynthesisUtterance(sentence);
+    // The hands-free loop re-opens the mic when the reply finishes, so the
+    // last chunk carries the "done" — half-duplex has no capture until then.
+    if (index === sentences.length - 1 && onDone) utterance.onend = () => onDone();
+    window.speechSynthesis.speak(utterance);
+  });
+}
+
+function stopSpeaking() {
+  if ("speechSynthesis" in window) window.speechSynthesis.cancel();
+}
+
+/** Escape control characters so the confirm card shows exactly what will be typed. */
+function visibleText(text: string): string {
+  return text.replace(/[\x00-\x1f\x7f]/g, (c) => {
+    if (c === "\n") return "\\n";
+    if (c === "\r") return "\\r";
+    if (c === "\t") return "\\t";
+    return `\\x${c.charCodeAt(0).toString(16).padStart(2, "0")}`;
+  });
+}
+
+/** Narrowings for the card, so each branch renders its own fields only. */
+function asSendInput(
+  action: AssistantPendingAction | null | undefined,
+): AssistantSendInputAction | undefined {
+  return action?.kind === "send_input" ? action : undefined;
+}
+
+function asVogtWrite(
+  action: AssistantPendingAction | null | undefined,
+): AssistantVogtWriteAction | undefined {
+  return action?.kind === "vogt_write" ? action : undefined;
+}
+
+/**
+ * The exact payload, whichever effector it is for. `display: block` and a
+ * scroll ceiling because a Vogt payload is several lines and must not push the
+ * approve button off screen — an approval you have to hunt for is worse than
+ * one you can read.
+ */
+/**
+ * What the assistant is asking permission for, spoken.
+ *
+ * Says what will happen and to what, and never offers a way to answer it:
+ * approval is an on-screen act, so a misheard "yes" authorises nothing
+ */
+function announce(action: AssistantPendingAction): string {
+  if (action.kind === "send_input") {
+    return `I'd like to type into session ${action.session_name}. Approve on screen.`;
+  }
+  // A session write is said by the session's name, never its id: an id is
+  // nothing a listener can check before tapping approve (WI-1267).
+  const session = action.session;
+  if (session) {
+    const verb = action.operation.replace(/^session\./, "").replace(/_/g, " ");
+    const onItem = session.work_item ? `, on ${session.work_item}` : "";
+    const ends = action.destructive ? " That ends its current turn." : "";
+    return `I'd like to ${verb} session ${session.name}${onItem}, now ${session.activity}.${ends} Approve on screen.`;
+  }
+  return `I'd like to make a Vogt change: ${action.operation} on ${action.target}. Approve on screen.`;
+}
+
+export default function Assistant(props: AssistantProps) {
+  const restored = readToolDraft<AssistantDraft>("assistant", {
+    text: "",
+    profile: "",
+  });
+  const [transcript, setTranscript] = createSignal<AssistantUiEntry[]>([]);
+  const [busy, setBusy] = createSignal(false);
+  // The controller for the turn in flight, so the Stop button can abort it
+  // Null when nothing is outstanding.
+  const [inFlight, setInFlight] = createSignal<AbortController | null>(null);
+  // Seconds left before the pending action expires. Null when there is
+  // no card; ticks down from 120 so an approval that can no longer be made
+  // stops asking to be made.
+  const [pendingSecondsLeft, setPendingSecondsLeft] = createSignal<number | null>(null);
+  const [reasonDraft, setReasonDraft] = createSignal("");
+  const [reasonBusy, setReasonBusy] = createSignal(false);
+  // The approval tap the card is holding. Null when no tap is outstanding.
+  const [heldTap, setHeldTap] = createSignal<HeldTap | null>(null);
+  let tapRetry: ReturnType<typeof setTimeout> | null = null;
+  const clearTapRetry = () => {
+    if (tapRetry !== null) clearTimeout(tapRetry);
+    tapRetry = null;
+  };
+  const [draft, setDraft] = createSignal(restored.text);
+  const [ttsOn, setTtsOn] = createSignal(localStorage.getItem(TTS_PREF_KEY) === "1");
+  // Hands-free conversation mode (WI-174). Session-only — it opens the mic, so
+  // it never auto-resumes on mount. `voiceState`/`voiceMuted` mirror the pure
+  // machine for the status chip.
+  const [conversationOn, setConversationOn] = createSignal(false);
+  const [callEnabled, setCallEnabled] = createSignal(false);
+  const [callView, setCallView] = createSignal<CallView | null>(null);
+  const [callMuted, setCallMuted] = createSignal(false);
+  let call: CallSession | null = null;
+  const [voiceState, setVoiceState] = createSignal<VoiceState>("idle");
+  const [voiceMuted, setVoiceMuted] = createSignal(false);
+  const [listening, setListening] = createSignal(false);
+  const [sttAvailable, setSttAvailable] = createSignal(false);
+  // Whether the server-side speech pipeline is configured. Read from
+  // `/api/config`, so a client with no on-device recognizer/synthesis picks the
+  // server path by capability rather than by provoking a 404. Either can go
+  // false at runtime if the route later 404s — a config that changed under a
+  // long-lived tab — after which that half degrades silently.
+  const [serverSttEnabled, setServerSttEnabled] = createSignal(false);
+  const [serverTtsEnabled, setServerTtsEnabled] = createSignal(false);
+  // The vocabulary the repair pass matches against. Fetched from
+  // `project.list`, not hard-coded: a repair against a list in this file
+  // would be a guess wearing a validation pass's clothes. Empty is a working
+  // state — the pass repairs work-item refs and leaves names alone.
+  const [slugs, setSlugs] = createSignal<string[]>([]);
+  const [repaired, setRepaired] = createSignal("");
+  // Which backend this conversation runs on. Empty means the
+  // deployment's default, which is what a client that never chose sends.
+  const [profiles, setProfiles] = createSignal<
+    { name: string; model: string; default: boolean }[]
+  >([]);
+  const [profile, setProfile] = createSignal(restored.profile);
+  const disconnected = () => sessionsStore.ready && !isConnected();
+  const waitingCount = () =>
+    sessionsStore.order.filter((id) => {
+      const session = sessionsStore.sessions[id];
+      return session?.exit_code === null && session.activity === "waiting-for-input";
+    }).length;
+  const watchState = () => {
+    if (!sessionsStore.ready) {
+      return sessionsError()
+        ? "sessions unavailable"
+        : "sessions loading — no answer yet";
+    }
+    const answer = `watching ${sessionsStore.order.length} sessions · ${waitingCount()} waiting`;
+    return isConnected() ? answer : `${answer} · from last answer`;
+  };
+  const pendingReasonReady = () => {
+    const action = pendingAction();
+    return action?.kind !== "vogt_write" ||
+      (Boolean(reasonDraft().trim()) && reasonDraft().trim() === action.reason);
+  };
+
+  let scroller: HTMLDivElement | undefined;
+  let inputEl: HTMLTextAreaElement | undefined;
+  // Whether the reader was pinned to the end just before the transcript grew.
+  // Read in the scroll effect so appending a message follows the conversation
+  // down only when the reader was already there, and never yanks one who
+  // scrolled up to re-read. Updated on every scroll, before the append.
+  let stuckToBottom = true;
+  // The server-TTS clip currently playing, if any, so it can be stopped the
+  // moment the speaker sends again or leaves. On-device synthesis is
+  // stopped through `speechSynthesis.cancel()`; this is its `<audio>` twin.
+  // Whatever is playing the current server-TTS clip: a Web Audio source (the
+  // path the Android WebView can hear — see audioPlayback.ts) or, where there
+  // is no AudioContext, an `<audio>` element wrapped to the same shape.
+  let currentPlayback: Playback | null = null;
+  // Native (Android) voice-conversation plumbing. Both stay undefined
+  // on the desktop PWA, where their registrars are no-ops. Cleaned up on leave.
+  let voiceEndedCleanup: (() => void) | undefined;
+  let pushSpeakerCleanup: (() => void) | undefined;
+
+  /** Stop every speech channel — on-device synthesis and a server clip alike. */
+  let speechController: AbortController | null = null;
+  let transcriptionController: AbortController | null = null;
+  const [speechStatus, setSpeechStatus] = createSignal("");
+  // The hands-free loop, created lazily when Conversation is turned on. Declared
+  // here because `applyReply` and `send` feed it their outcomes.
+  let conversation: VoiceConversation | null = null;
+  // Whether barge-in (v2) is enabled for this session — read once when the
+  // conversation begins. Gates the echo-cancelled detection capture below; the
+  // machine ignores `speechDetected` when it is off, so this is only to avoid
+  // opening a second mic during playback for nothing.
+  let bargeInEnabled = false;
+
+  // `reason` names the caller: an in-flight reply that vanishes is otherwise
+  // indistinguishable from one that never played, and the diagnostic line that
+  // says *who* halted it is the whole point.
+  const haltSpeech = (reason: string) => {
+    if (speechController !== null || currentPlayback !== null) {
+      diag("speech.halt", {
+        reason,
+        inFlight: speechController !== null,
+        playing: currentPlayback?.playing() ?? false,
+      });
+    }
+    speechController?.abort();
+    speechController = null;
+    stopSpeaking();
+    // A halted clip never reports "ended" — the loop must not re-open the mic
+    // on top of whatever halted it. And release the output stream: the mic
+    // that usually follows a halt must not start behind our own playback.
+    currentPlayback?.stop();
+    currentPlayback = null;
+    suspendAudio();
+  };
+
+  /**
+   * Speak a reply, choosing by capability: the browser's own
+   * synthesis when it has any, else the server pipeline for a client that has
+   * none. A server route that 404s (unconfigured) degrades this half silently
+   * — a spoken reply that cannot be spoken is still shown in the transcript.
+   */
+  // `onDone`, when given, fires once the reply has finished playing (or at once
+  // when there is nothing to play, or no mouth to play it). The hands-free loop
+  // passes it to re-open the mic; a plain spoken reply passes nothing.
+  const speak = (text: string, onDone?: () => void) => {
+    diag("speak.path", {
+      len: text.length,
+      synthInWindow: "speechSynthesis" in window,
+      serverTts: serverTtsEnabled(),
+      hasDone: Boolean(onDone),
+    });
+    if ("speechSynthesis" in window) {
+      speakSentences(text, onDone);
+      return;
+    }
+    if (serverTtsEnabled()) void playServerTts(text, onDone);
+    else {
+      setSpeechStatus("Spoken replies are unavailable. Read the reply below.");
+      onDone?.();
+    }
+  };
+
+  const playServerTts = async (text: string, onDone?: () => void) => {
+    if (!text.trim()) {
+      onDone?.();
+      return;
+    }
+    haltSpeech("speak-restart");
+    const controller = new AbortController();
+    speechController = controller;
+    const started = Date.now();
+    diag("tts.fetch", { len: text.length });
+    try {
+      const blob = await api.assistantTts(text, controller.signal);
+      if (controller.signal.aborted) {
+        diag("tts.aborted", { at: "fetch", ms: Date.now() - started });
+        return;
+      }
+      setSpeechStatus("");
+      // What the client was handed — the first two facts a "no audio" report
+      // needs. (Diagnostics found the WebView rejecting a perfectly typed
+      // clip at the `blob:` URL, which is why Web Audio is the primary path.)
+      diag("tts.blob", { type: blob.type, size: blob.size, ms: Date.now() - started });
+      if (audioContextAvailable()) {
+        const playback = await playAudioBlob(blob, {
+          signal: controller.signal,
+          onPlaying: (duration) => diag("tts.playing", { via: "webaudio", duration }),
+          onEnded: () => {
+            diag("tts.ended", { via: "webaudio" });
+            // Release the output stream before the mic re-opens behind it, and
+            // let go of the finished request.
+            suspendAudio();
+            if (speechController === controller) speechController = null;
+            currentPlayback = null;
+            // The reply is over: re-open the mic. Natural end only — a clip cut
+            // short by the next turn never reports itself finished.
+            onDone?.();
+          },
+        });
+        if (controller.signal.aborted) {
+          playback.stop();
+          diag("tts.aborted", { at: "play", ms: Date.now() - started });
+          return;
+        }
+        currentPlayback = playback;
+        diag("tts.play.ok", { via: "webaudio", duration: playback.duration });
+        return;
+      }
+      // No AudioContext at all (an old browser): the element path. Kept as a
+      // fallback only — it is the one the Android WebView refuses.
+      const url = URL.createObjectURL(blob);
+      const audio = new Audio(url);
+      const release = () => URL.revokeObjectURL(url);
+      audio.addEventListener("ended", release, { once: true });
+      audio.addEventListener("playing", () => diag("tts.playing", { via: "element", duration: audio.duration }), { once: true });
+      audio.addEventListener("ended", () => diag("tts.ended", { via: "element" }), { once: true });
+      audio.addEventListener("error", () => {
+        const err = audio.error;
+        diag("tts.media-error", { code: err?.code ?? null, message: err?.message ?? "" });
+      }, { once: true });
+      if (onDone) audio.addEventListener("ended", onDone, { once: true });
+      controller.signal.addEventListener("abort", release, { once: true });
+      currentPlayback = {
+        duration: Number.isFinite(audio.duration) ? audio.duration : 0,
+        playing: () => !audio.paused && !audio.ended,
+        stop: () => {
+          try {
+            audio.pause();
+          } catch {
+            /* already stopped */
+          }
+        },
+      };
+      await audio.play();
+      diag("tts.play.ok", { via: "element", muted: audio.muted, volume: audio.volume });
+    } catch (e) {
+      if (controller.signal.aborted) {
+        diag("tts.aborted", { at: "play", ms: Date.now() - started });
+        return;
+      }
+      const err = e as { name?: string; message?: string; status?: number };
+      diag("tts.play.rejected", {
+        name: err?.name ?? "",
+        message: err?.message ?? String(e),
+        status: err?.status ?? null,
+      });
+      setSpeechStatus("Spoken replies are unavailable. Read the reply below.");
+      onDone?.();
+      if (e instanceof ApiError && e.status === 404) {
+        setServerTtsEnabled(false);
+      } else {
+        props.onError(`assistant speech: ${String(e)}`);
+      }
+    }
+  };
+
+  const scrollToEnd = () => {
+    queueMicrotask(() => {
+      if (scroller) scroller.scrollTop = scroller.scrollHeight;
+    });
+  };
+
+  /** Remember whether the reader is at the end, so the next append knows
+   *  whether to follow it. Called on the scroller's own scroll. */
+  const onScroll = () => {
+    if (!scroller) return;
+    stuckToBottom = nearBottom(
+      scroller.scrollTop,
+      scroller.clientHeight,
+      scroller.scrollHeight,
+    );
+  };
+
+  /** Size the composer to its content, up to a ceiling: a pasted or
+   *  dictated multi-line message is visible without a scrollbar, and a long
+   *  one scrolls inside a bounded box instead of swallowing the transcript. */
+  const growComposer = () => {
+    const el = inputEl;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
+  };
+
+  createEffect(() => {
+    transcript();
+    pendingAction();
+    // Only chase the end when the reader was already there. A reader who
+    // scrolled up to re-read an answer keeps their place while a reply lands.
+    if (stuckToBottom) scrollToEnd();
+  });
+
+  // Keep the composer's height in step with its content, dictation included.
+  createEffect(() => {
+    draft();
+    queueMicrotask(growComposer);
+  });
+
+  createEffect(() => {
+    const action = pendingAction();
+    setReasonDraft(action?.kind === "vogt_write" ? action.reason : "");
+  });
+
+  // The pending card's expiry countdown. The server sends no deadline,
+  // so the clock starts from when the card arrived here — close enough that a
+  // card reading "0s" is one the engine has already dropped. Cleared, and the
+  // interval stopped, the moment there is no card.
+  createEffect(() => {
+    const action = pendingAction();
+    if (!action) {
+      setPendingSecondsLeft(null);
+      return;
+    }
+    const deadline = Date.now() + PENDING_ACTION_TTL_MS;
+    const tick = () => {
+      const left = Math.max(0, Math.round((deadline - Date.now()) / 1000));
+      setPendingSecondsLeft(left);
+    };
+    tick();
+    const timer = setInterval(tick, 1000);
+    onCleanup(() => clearInterval(timer));
+  });
+
+  // A voice conversation being *active* is, on this surface, spoken replies
+  // being on: that is the toggle that turns a typed chat into a hands-free one
+  // where audio capture and TTS have to survive the phone sleeping. So while it
+  // is on, hold the Android foreground service; release it the moment
+  // it goes off. Both calls are no-ops on the desktop PWA, so this effect is
+  // invisible there — desktop voice is unaffected.
+  createEffect(() => {
+    if (ttsOn()) startVoiceService();
+    else stopVoiceService();
+  });
+
+  // The notification's "End conversation" action stops the service natively and
+  // dispatches this back to us, so the conversation ends on both sides at once.
+  const endFromNotification = () => {
+    if (!ttsOn()) return;
+    setTtsOn(false);
+    localStorage.setItem(TTS_PREF_KEY, "0");
+    haltSpeech("notification-end");
+  };
+
+  const applyConfig = (cfg: PublicConfig | null | undefined) => {
+    if (!cfg) return;
+    setProfiles(cfg.assistant_profiles ?? []);
+    setServerSttEnabled(cfg.assistant_stt_enabled ?? false);
+    setServerTtsEnabled(cfg.assistant_tts_enabled ?? false);
+    setCallEnabled(cfg.assistant_call_enabled ?? false);
+  };
+
+  const configureSpeechInput = async () => {
+    if (sttBackend || sttAvailable()) return;
+    // A device whose on-device recognizer keeps mangling the vocabulary can
+    // opt to transcribe on the server instead, where the names bias the
+    // decode. Honoured only when the deployment actually offers server STT.
+    if (getPreferServerStt() && serverSttEnabled() && mediaRecorderAvailable()) {
+      sttBackend = "server";
+      setSttAvailable(true);
+      return;
+    }
+    if (Capacitor.isPluginAvailable("SpeechRecognition")) {
+      try {
+        const { SpeechRecognition } = await import(
+          "@capacitor-community/speech-recognition"
+        );
+        const { available } = await SpeechRecognition.available();
+        if (available) {
+          sttBackend = "native";
+          setSttAvailable(true);
+        }
+      } catch {
+        setSpeechStatus("Voice input is unavailable. Type your message below.");
+        setSttAvailable(false);
+      }
+    } else if (webSpeechCtor()) {
+      sttBackend = "web";
+      setSttAvailable(true);
+    } else if (serverSttEnabled() && mediaRecorderAvailable()) {
+      sttBackend = "server";
+      setSttAvailable(true);
+    }
+  };
+
+  const hydrate = async () => {
+    if (props.assistantEnabled === false) return;
+    try {
+      const snapshot = await readAssistantSnapshot(true);
+      if (!snapshot) return;
+      setTranscript(snapshot.transcript);
+      setPendingAction(snapshot.pendingAction);
+      setSlugs(snapshot.projects.map((project) => project.slug));
+    } catch (e) {
+      props.onError(`assistant history: ${String(e)}`);
+    }
+
+    await configureSpeechInput();
+  };
+
+  onMount(async () => {
+    diagBoot();
+    voiceEndedCleanup = onVoiceServiceEnded(endFromNotification);
+    // Speak-the-push: an FCM message that arrives while a voice
+    // conversation is active is spoken as well as shown. Outside an active
+    // conversation the gate is false, so nothing is spoken and the push's
+    // shown/handled behaviour is exactly as before. No-op off a native platform.
+    pushSpeakerCleanup = await registerPushSpeaker((text) => {
+      if (ttsOn()) speak(text);
+    });
+    applyConfig(props.publicConfig);
+    // Standalone consumers predate the shell config prop. Read their config
+    // before deferred history hydration so capability-gated controls are
+    // ready on the same mount turn as they were before hydration was deferred.
+    if (props.publicConfig === undefined && props.assistantEnabled === undefined) {
+      void api.publicConfig()
+        .then((cfg) => {
+          applyConfig(cfg);
+          void configureSpeechInput();
+        })
+        .catch(() => {
+          void configureSpeechInput();
+        });
+    } else {
+      void configureSpeechInput();
+    }
+    const cancelHydration = deferAssistantHydration(() => void hydrate());
+    onCleanup(cancelHydration);
+    // STT backend, in preference order: the Capacitor native plugin inside the
+    // APK, then the browser's Web Speech recognizer on the desktop, then the
+    // server-side pipeline for a
+    // client with neither — a desktop without Web Speech that can still capture
+    // audio and let the engine transcribe it. Absent all three — no recognizer,
+    // no server route, no MediaRecorder — is a working state that degrades to
+    // typed input with no error.
+  });
+
+  onCleanup(() => {
+    writeToolDraft<AssistantDraft>("assistant", {
+      text: draft(),
+      profile: profile(),
+    });
+    haltSpeech("unmount");
+    clearSilence();
+    clearTakeGuards();
+    transcriptionController?.abort();
+    inFlight()?.abort();
+    clearTapRetry();
+    // Leaving the surface ends the conversation, so release the held service
+    // and drop the native listeners (all no-ops on the desktop PWA).
+    call?.hangUp();
+    stopCallAudio();
+    stopVoiceService();
+    voiceEndedCleanup?.();
+    pushSpeakerCleanup?.();
+    // Leaving ends a hands-free conversation: stop the machine and close its
+    // recognizer, so nothing keeps listening after the surface is gone.
+    conversation?.end("user");
+    conversation = null;
+    void closeConversationMic();
+    // Abandoned, not sent: leaving the surface mid-sentence must not put
+    // half an utterance into the conversation on the way out.
+    if (listening()) void abandonTake();
+  });
+
+  /** Put a reply into the transcript and set its pending action — the visible
+   *  record, with no speech. Speaking is decided by the caller. */
+  const recordReply = (reply: AssistantReply) => {
+    if (reply.reply !== null && reply.reply !== undefined) {
+      setTranscript((cur) => [
+        ...cur,
+        {
+          role: "assistant",
+          text: reply.reply ?? "",
+          tool_trace: reply.tool_trace,
+          created_at: reply.created_at,
+          session_refs: reply.session_refs,
+          actions: reply.actions,
+        },
+      ]);
+    }
+    setPendingAction(reply.pending_action ?? null);
+  };
+
+  const applyReply = (reply: AssistantReply) => {
+    recordReply(reply);
+    diag("turn.reply", {
+      replyLen: (reply.reply ?? "").length,
+      pending: Boolean(reply.pending_action),
+      conversation: Boolean(conversation?.isActive()),
+      ttsOn: ttsOn(),
+    });
+    // In a hands-free conversation the machine owns speech: it speaks the reply
+    // (or the pending-action announcement) and re-opens the mic when playback
+    // ends. Feeding it here routes both `send` and `resolve` through the loop.
+    if (conversation?.isActive()) {
+      const spoken = reply.pending_action
+        ? announce(reply.pending_action)
+        : (reply.reply ?? "");
+      conversation.replied({
+        text: spoken.trim() ? spoken : null,
+        hasPendingAction: Boolean(reply.pending_action),
+      });
+      return;
+    }
+    if (reply.reply !== null && reply.reply !== undefined && ttsOn()) speak(reply.reply);
+    if (reply.pending_action && ttsOn()) speak(announce(reply.pending_action));
+  };
+
+  const send = async (text: string, utterance?: string) => {
+    const trimmed = text.trim();
+    if (!trimmed || busy()) return;
+    setDraft("");
+    setBusy(true);
+    haltSpeech("send");
+    // The optimistic bubble is held by reference so the outcome can find it
+    // again: a success leaves it be, a failure marks it, and a Stop removes
+    // it. Kept off `failed` so it renders as an ordinary in-flight turn.
+    const userEntry: AssistantUiEntry = { role: "user", text: trimmed, utterance };
+    setTranscript((cur) => [...cur, userEntry]);
+    const controller = new AbortController();
+    setInFlight(controller);
+    try {
+      applyReply(
+        await api.assistantMessage(trimmed, profile() || undefined, controller.signal, utterance),
+      );
+      invalidateAssistantSnapshot();
+    } catch (e) {
+      // Restore the message either way — a failed or cancelled send must not
+      // eat what was typed.
+      setDraft(trimmed);
+      if (controller.signal.aborted) {
+        // Stopped by the reader: the request never reached a recorded turn, so
+        // drop the optimistic bubble rather than leave a phantom the server
+        // never answered. No toast — a deliberate cancel is not an error.
+        setTranscript((cur) => cur.filter((entry) => entry !== userEntry));
+      } else {
+        // Failed: keep the bubble but mark it, so it reads as unsent and
+        // offers a Retry instead of pretending it landed.
+        setTranscript((cur) =>
+          cur.map((entry) => (entry === userEntry ? { ...entry, failed: true } : entry)),
+        );
+        props.onError(`assistant: ${String(e)}`);
+      }
+      // A hands-free turn that did not land must not leave the loop stuck in
+      // "sending": re-open the mic (the mode stays; the failed bubble carries
+      // the Retry). A no-op outside a conversation.
+      conversation?.sendFailed();
+    } finally {
+      setBusy(false);
+      setInFlight(null);
+      // Return the caret to the composer so the next message can be typed
+      // without reaching for the mouse — after a send, a retry, or a stop.
+      inputEl?.focus();
+    }
+  };
+
+  /** Abort the turn in flight (the Stop button). The request tears down
+   *  cleanly and the engine treats the dropped connection as a cancellation. */
+  const stop = () => {
+    inFlight()?.abort();
+  };
+
+  /** Resend a message whose send failed, dropping the failed bubble first so
+   *  the retry does not stack a second copy beneath it. */
+  const retry = (entry: AssistantUiEntry) => {
+    setTranscript((cur) => cur.filter((row) => row !== entry));
+    void send(entry.text, entry.utterance);
+  };
+
+  /** Send an approval tap. The card stays up, marked sending, until the
+   *  request succeeds. A failure the connection can fix keeps the tap queued;
+   *  any other failure restores the card so the approval can be made again. */
+  const sendTap = async (tap: HeldTap) => {
+    clearTapRetry();
+    setHeldTap({ ...tap, state: "sending" });
+    try {
+      const reply = await api.assistantAction(tap.action.id, tap.approve);
+      setHeldTap(null);
+      applyReply(reply);
+      invalidateAssistantSnapshot();
+    } catch (e) {
+      if (isTransientTapFailure(e)) {
+        setHeldTap({ ...tap, state: "queued" });
+        // The stream is up, so the request is what failed: try again shortly.
+        // A stream that is down sends the tap when it reconnects instead.
+        if (isConnected()) tapRetry = setTimeout(flushTap, TAP_RETRY_MS);
+        return;
+      }
+      setHeldTap(null);
+      setPendingAction(tap.action);
+      invalidateAssistantSnapshot();
+      props.onError(`assistant action: ${String(e)}`);
+    }
+  };
+
+  /** Send a queued tap again, if one is waiting. */
+  const flushTap = () => {
+    clearTapRetry();
+    const held = heldTap();
+    if (held?.state === "queued") void sendTap(held);
+  };
+
+  // A queued tap goes out as soon as the event stream is back.
+  createEffect(
+    on(
+      isConnected,
+      (connected) => {
+        if (connected) flushTap();
+      },
+      { defer: true },
+    ),
+  );
+
+  const resolve = async (approve: boolean) => {
+    const action = pendingAction();
+    if (!action || busy() || heldTap()) return;
+    // On a call, the button goes up the call socket so the outcome is spoken.
+    // (It is still a button: nothing said on the call resolves a card.)
+    if (call?.resolve(action.id, approve)) {
+      setPendingAction(null);
+      invalidateAssistantSnapshot();
+      return;
+    }
+    await sendTap({ action, approve, state: "sending" });
+  };
+
+  const replaceReason = async (action: AssistantVogtWriteAction) => {
+    const reason = reasonDraft().trim();
+    if (!reason || reasonBusy() || busy()) return;
+    setReasonBusy(true);
+    try {
+      setPendingAction(await api.assistantReplaceReason(action.id, reason));
+      invalidateAssistantSnapshot();
+    } catch (e) {
+      props.onError(`assistant reason: ${String(e)}`);
+    } finally {
+      setReasonBusy(false);
+    }
+  };
+
+  const reset = async () => {
+    // Clearing throws away the whole conversation, so it asks first — the same
+    // guard the destructive controls elsewhere in the app use.
+    if (props.confirmAction) {
+      const ok = await props.confirmAction(
+        "Clear the conversation?",
+        "This removes the whole transcript. It cannot be undone.",
+      );
+      if (!ok) return;
+    }
+    haltSpeech("reset");
+    try {
+      await api.assistantReset();
+      setTranscript([]);
+      setPendingAction(null);
+      invalidateAssistantSnapshot();
+    } catch (e) {
+      props.onError(`assistant reset: ${String(e)}`);
+    }
+  };
+
+  const toggleTts = () => {
+    const next = !ttsOn();
+    setTtsOn(next);
+    localStorage.setItem(TTS_PREF_KEY, next ? "1" : "0");
+    if (!next) haltSpeech("tts-off");
+    else {
+      // Prime the synth inside a user gesture — Android WebView requires it.
+      window.speechSynthesis?.speak(new SpeechSynthesisUtterance(""));
+      // And the Web Audio context, for the same reason (autoplay policy).
+      primeAudio();
+    }
+  };
+
+  // One take: from the press that opens the microphone to the release, or to
+  // the recognizer stopping first because the speaker went quiet. Both ends
+  // can arrive, and either can arrive first, so ending a take is idempotent —
+  // a double send is one thing said once and answered twice.
+  let takeOpen = false;
+  // Which recognizer this session decided on (onMount), and the live Web
+  // Speech instance when that is the one. Native has no handle to hold — the
+  // plugin is a module singleton. `server` is the server-side pipeline: capture with
+  // `MediaRecorder`, transcribe on the engine.
+  let sttBackend: "native" | "web" | "server" | null = null;
+  let webRecognition: WebSpeechRecognition | null = null;
+  // Server-STT capture state. The take is a single recording: press starts it,
+  // release stops it, and the recorder's `stop` posts the audio and sends what
+  // came back. `abandonServer` lets leaving the surface mid-take drop the audio
+  // instead of sending it.
+  let serverRecorder: MediaRecorder | null = null;
+  let serverChunks: Blob[] = [];
+  let abandonServer = false;
+
+  // Tap-to-talk, and the startup race it fixes (WI-173). A press opens the
+  // take; a release that lands *after* the native recognizer is up ends it
+  // (push-to-talk), and a release that lands *before* `start()` resolved is not
+  // a stop at all — the recognizer is not listening yet, so tearing it down
+  // there is what orphaned it and stripped the very listeners that same startup
+  // had just added. Such a release is deferred and the take runs on, ended by
+  // silence instead: the tap-to-talk the design has always promised.
+  let held = false; // the mic button is physically down right now
+  let nativeStarting = false; // committed to a native take, `start()` not yet resolved
+  // Tap or hold (WI-958). The composer mic is a tap toggle first: a tap opens a
+  // take that ends when the speaker goes quiet or taps again. A press held past
+  // `hold_threshold_ms` is still push-to-talk — it ends on release. Before
+  // this, the release of every press ended the take unless it happened to land
+  // inside the recognizer's startup, so on a phone whose recognizer starts fast
+  // a tap opened and closed the microphone in one gesture: the button had to be
+  // held, and a held take never ended on silence.
+  let pressStartedAt = 0;
+  // This press landed on an open take: it is the tap that ends it, and its
+  // release must not be read as a second gesture.
+  let pressEndsTake = false;
+  // A stop tap that landed while the native recognizer was still starting:
+  // honoured the moment startup finishes rather than against a half-built one.
+  let stopAfterStart = false;
+  // Whether the take has heard anything yet: a partial transcript, or (on the
+  // server path) a speech onset. Silence only ends a take that heard speech.
+  let heardSpeech = false;
+  // The take's guards: a take that never hears speech ends quietly after
+  // `no_speech_timeout_ms` instead of leaving a microphone open (the Android
+  // recognizer's own no-speech error never reaches JS), and every tap take is
+  // capped at `max_turn_ms`.
+  let noSpeechTimer: ReturnType<typeof setTimeout> | null = null;
+  let maxTurnTimer: ReturnType<typeof setTimeout> | null = null;
+  // The server take's endpointer over its own capture stream.
+  let stopServerEndpointer: (() => void) | null = null;
+  const clearTakeGuards = () => {
+    if (noSpeechTimer !== null) clearTimeout(noSpeechTimer);
+    if (maxTurnTimer !== null) clearTimeout(maxTurnTimer);
+    noSpeechTimer = null;
+    maxTurnTimer = null;
+    stopServerEndpointer?.();
+    stopServerEndpointer = null;
+  };
+  const armTakeGuards = () => {
+    if (noSpeechTimer !== null || maxTurnTimer !== null) return;
+    noSpeechTimer = setTimeout(() => {
+      noSpeechTimer = null;
+      if (!held && takeOpen && !heardSpeech) void abandonTake();
+    }, voiceMs("no_speech_timeout_ms", 8000));
+    maxTurnTimer = setTimeout(() => {
+      maxTurnTimer = null;
+      if (!held && takeOpen) void stopListening();
+    }, voiceMs("max_turn_ms", 30000));
+  };
+  // The JS-owned silence detector. The Android recognizer's own end-of-speech
+  // is late and untunable in dictation mode, so a tap's turn ends here: a timer
+  // rearmed on every partial result, firing once the transcript stops changing.
+  let silenceTimer: ReturnType<typeof setTimeout> | null = null;
+  const clearSilence = () => {
+    if (silenceTimer !== null) {
+      clearTimeout(silenceTimer);
+      silenceTimer = null;
+    }
+  };
+  // Rearm the silence timer for a tap. Skipped while the button is held: a hold
+  // *is* the take's length, so a mid-sentence pause must not end it.
+  const armSilence = () => {
+    heardSpeech = true;
+    if (held) return;
+    clearSilence();
+    silenceTimer = setTimeout(() => {
+      silenceTimer = null;
+      void stopListening();
+    }, voiceMs("silence_duration_ms", 1000));
+  };
+  // The recognizer stopped on its own (usually the speaker went quiet). End the
+  // take, but after a short grace, because the plugin fires `listeningState:
+  // stopped` *before* the final, best result — delivered as one last
+  // `partialResults`. Ending immediately would send the last interim guess.
+  const endTakeAfterFinal = () => {
+    clearSilence();
+    silenceTimer = setTimeout(() => {
+      silenceTimer = null;
+      void stopListening();
+    }, voiceMs("final_result_grace_ms", 300));
+  };
+
+  const closeRecognizer = async () => {
+    setListening(false);
+    if (sttBackend === "web") {
+      const recognition = webRecognition;
+      webRecognition = null;
+      try {
+        recognition?.stop();
+      } catch {
+        /* already stopped */
+      }
+      return;
+    }
+    if (sttBackend === "server") {
+      // `stop()` flushes the last chunk and fires `onstop`, which is where the
+      // audio is posted (unless the take was abandoned). The tracks are stopped
+      // there too, so the browser's recording indicator clears.
+      const recorder = serverRecorder;
+      serverRecorder = null;
+      try {
+        if (recorder && recorder.state !== "inactive") recorder.stop();
+      } catch {
+        /* already stopped */
+      }
+      return;
+    }
+    try {
+      const { SpeechRecognition } = await import(
+        "@capacitor-community/speech-recognition"
+      );
+      await SpeechRecognition.stop();
+      await SpeechRecognition.removeAllListeners();
+    } catch {
+      /* plugin gone mid-flight — nothing to stop */
+    }
+  };
+
+  /** End the take and send what was said. */
+  const stopListening = async () => {
+    if (!takeOpen) return;
+    // A release during native startup is not a stop: the recognizer is not up
+    // yet, so tearing it down here is what orphaned it. Leave the take open and
+    // let silence (or the recognizer's own stop) end it — tap-to-talk.
+    if (nativeStarting) return;
+    takeOpen = false;
+    clearSilence();
+    clearTakeGuards();
+    await closeRecognizer();
+    // The server pipeline sends from the recorder's `onstop` once the audio has
+    // been transcribed, not from the draft — there is nothing in the composer
+    // to send yet — so this path ends here for it.
+    if (sttBackend === "server") return;
+    // Sent here rather than from the recognizer's own "stopped" event,
+    // because releasing the button removes that listener and the release is
+    // now the ordinary way a take ends. Under the toggle this lived in the
+    // listener and worked because the recognizer usually stopped itself.
+    const heard = draft();
+    if (!heard.trim()) return;
+    // The recognizer's best guess is put back into the vocabulary the
+    // domain is made of before it is sent. `WI-7` and a project slug are
+    // exactly what a recognizer mangles, and they are the subject of the
+    // sentence — an utterance that survives everything except its subject is
+    // a failed utterance.
+    const { text, repairs } = repairUtterance(heard, slugs());
+    // Shown, not silently applied: a wrong repair is confidently wrong and is
+    // what gets sent, so the speaker gets to see it in the transcript.
+    setRepaired(repairs.length ? describeRepairs(repairs) : "");
+    setDraft(text);
+    void send(text, heard);
+  };
+
+  /** End the take and send nothing — for leaving the surface mid-sentence. */
+  const abandonTake = async () => {
+    takeOpen = false;
+    clearSilence();
+    clearTakeGuards();
+    // Tell the server recorder's `onstop` to drop the audio rather than post it.
+    abandonServer = true;
+    await closeRecognizer();
+  };
+
+  // The composer mic is tap-to-talk with push-to-talk kept for a long press
+  // (WI-958, see `pressMic`/`releaseMic`). A tap take auto-sends when the
+  // speaker goes quiet, so an open microphone is bounded: silence ends it, a
+  // take that hears nothing ends quietly, and every tap take is capped at
+  // `max_turn_ms`. `docs/ENGINE.md` §6 describes both gestures.
+  // The desktop take, on the browser's own recognizer. The browser asks for
+  // the microphone itself (no plugin permission call), tap and hold work
+  // exactly as on the phone, and the recognizer stopping fires `onend`, which
+  // is the same "recognizer stopped first" end the native `listeningState`
+  // handler covers — routed through the one `stopListening` so what was said is
+  // sent once.
+  const startListeningWeb = () => {
+    const Ctor = webSpeechCtor();
+    if (!Ctor) return;
+    try {
+      haltSpeech("take-start");
+      const recognition = new Ctor();
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      recognition.lang = navigator.language || "en-US";
+      recognition.onresult = (event) => {
+        let heard = "";
+        for (let i = 0; i < event.results.length; i += 1) {
+          heard += event.results[i]?.[0]?.transcript ?? "";
+        }
+        const trimmed = heard.trim();
+        if (trimmed) {
+          setDraft(trimmed);
+          // Continuous Web Speech does not end itself on a pause, so the tap
+          // take's silence clock is rearmed here exactly as on the phone.
+          armSilence();
+        }
+      };
+      recognition.onend = () => {
+        if (takeOpen) void stopListening();
+      };
+      recognition.onerror = (event) => {
+        // A take that simply heard nothing, or was aborted by the release, is
+        // an ordinary end — not something to surface as a failure.
+        if (event.error !== "no-speech" && event.error !== "aborted") {
+          setListening(false);
+          props.onError(`speech recognition: ${event.error}`);
+        }
+      };
+      webRecognition = recognition;
+      takeOpen = true;
+      setListening(true);
+      recognition.start();
+    } catch (e) {
+      setListening(false);
+      props.onError(`speech recognition: ${String(e)}`);
+    }
+  };
+
+  // The desktop take on the server pipeline: capture audio with
+  // `MediaRecorder`, and when the take ends (silence, a stop tap, a hold's
+  // release) post it to the engine's STT route and send what comes back.
+  const startListeningServer = async () => {
+    try {
+      haltSpeech("take-start");
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream);
+      serverChunks = [];
+      abandonServer = false;
+      recorder.addEventListener("dataavailable", (event) => {
+        if (event.data && event.data.size > 0) serverChunks.push(event.data);
+      });
+      recorder.addEventListener("stop", () => {
+        // Release the microphone so the browser's recording indicator clears.
+        stream.getTracks().forEach((track) => track.stop());
+        const chunks = serverChunks;
+        serverChunks = [];
+        if (abandonServer) return;
+        const blob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
+        void transcribeAndSend(blob);
+      });
+      serverRecorder = recorder;
+      takeOpen = true;
+      heardSpeech = false;
+      setListening(true);
+      recorder.start();
+      // No partials here, so silence is read off the capture itself: speech
+      // then `silence_duration_ms` of quiet ends a tap take, as on the phone.
+      stopServerEndpointer = watchStreamForSilence(
+        stream,
+        { ...readOnsetConfig(), silence_duration_ms: voiceMs("silence_duration_ms", 1000) },
+        {
+          onSpeech: () => {
+            heardSpeech = true;
+          },
+          onSilence: () => {
+            if (!held && takeOpen) void stopListening();
+          },
+        },
+      );
+    } catch (e) {
+      setListening(false);
+      props.onError(`microphone: ${String(e)}`);
+    }
+  };
+
+  // The server round-trip: audio up, text back, then the same repair pass and
+  // send the on-device paths use. A 404 means the route is
+  // unconfigured, and the take degrades to typed input with no error.
+  const transcribeAndSend = async (blob: Blob) => {
+    transcriptionController?.abort();
+    const controller = new AbortController();
+    transcriptionController = controller;
+    try {
+      const { text: heard } = await api.assistantStt(
+        blob,
+        controller.signal,
+        sttVocabularyPrompt(slugs()),
+      );
+      if (controller.signal.aborted || !heard.trim()) return;
+      setSpeechStatus("");
+      const { text: repairedText, repairs } = repairUtterance(heard, slugs());
+      setRepaired(repairs.length ? describeRepairs(repairs) : "");
+      setDraft(repairedText);
+      void send(repairedText, heard);
+    } catch (e) {
+      if (controller.signal.aborted) return;
+      if (e instanceof ApiError && e.status === 404) {
+        // Unconfigured: retire the server mic and fall back to typed input,
+        // silently — the same degradation an absent recognizer gives.
+        setSpeechStatus("Voice input is unavailable. Type your message below.");
+        setSttAvailable(false);
+        sttBackend = null;
+      } else {
+        props.onError(`speech transcription: ${String(e)}`);
+      }
+    } finally {
+      if (transcriptionController === controller) transcriptionController = null;
+    }
+  };
+
+  const startListening = async () => {
+    if (listening()) return;
+    transcriptionController?.abort();
+    if (sttBackend === "web") {
+      startListeningWeb();
+      if (!held && takeOpen) armTakeGuards();
+      return;
+    }
+    if (sttBackend === "server") {
+      await startListeningServer();
+      // A tap released while the microphone was still being opened.
+      if (!held && takeOpen) armTakeGuards();
+      return;
+    }
+    try {
+      const { SpeechRecognition } = await import(
+        "@capacitor-community/speech-recognition"
+      );
+      const perm = await SpeechRecognition.requestPermissions();
+      if (perm.speechRecognition !== "granted") {
+        props.onError("microphone permission denied");
+        return;
+      }
+      haltSpeech("take-start");
+      // Commit to the take, then wire and start with no teardown in between: a
+      // release that lands mid-startup is deferred by `stopListening` (which
+      // sees `nativeStarting`) rather than run against a half-built recognizer,
+      // and `removeAllListeners` only ever runs *before* our listeners — so it
+      // cannot strip the pair this same startup just added.
+      takeOpen = true;
+      nativeStarting = true;
+      heardSpeech = false;
+      setListening(true);
+      await SpeechRecognition.removeAllListeners();
+      await SpeechRecognition.addListener("partialResults", (data) => {
+        const best = data.matches?.[0];
+        if (best) {
+          setDraft(best);
+          // Each new partial resets the silence clock: a tap ends its turn a
+          // beat after the transcript stops changing.
+          armSilence();
+        }
+      });
+      await SpeechRecognition.addListener("listeningState", (data) => {
+        // The other end of the take: the recognizer gave up before the button
+        // was released, usually because the speaker went quiet. Ended through
+        // the one `stopListening`, after a grace for the final result, so what
+        // was said is sent once and only once.
+        if (data.status === "stopped") endTakeAfterFinal();
+      });
+      await SpeechRecognition.start({
+        partialResults: true,
+        popup: false,
+      });
+    } catch (e) {
+      nativeStarting = false;
+      takeOpen = false;
+      setListening(false);
+      props.onError(`speech recognition: ${String(e)}`);
+      return;
+    }
+    // Startup is done: a release that arrives from here on ends the take at once
+    // (push-to-talk), and any release that already landed was deferred and now
+    // leaves the take running until silence — the tap.
+    nativeStarting = false;
+    if (stopAfterStart) {
+      stopAfterStart = false;
+      void stopListening();
+    } else if (!held && takeOpen) {
+      // A tap released during startup: its guards start now.
+      armTakeGuards();
+    }
+  };
+
+  // -- the composer mic's gestures (WI-958) ---------------------------------
+  //
+  // Press: on an idle mic, open a take; on an open take, end it (the stop tap).
+  // Release: after a short press, nothing — the take is a tap take and runs
+  // until silence, a stop tap, or a guard; after a long press, end it
+  // (push-to-talk). The keyboard (space/enter) drives the same two functions.
+  const holdThresholdMs = () => voiceMs("hold_threshold_ms", 400);
+
+  const pressMic = () => {
+    if (takeOpen || listening()) {
+      pressEndsTake = true;
+      held = false;
+      if (nativeStarting) stopAfterStart = true;
+      else void stopListening();
+      return;
+    }
+    pressEndsTake = false;
+    stopAfterStart = false;
+    held = true;
+    pressStartedAt = Date.now();
+    // A press is a user gesture: let the reply's audio start later.
+    primeAudio();
+    void startListening();
+  };
+
+  /** `cancelled` when the platform took the gesture away (a scroll, a system
+   *  dialog): the take ends rather than being read as a tap left open. */
+  const releaseMic = (cancelled = false) => {
+    if (pressEndsTake) {
+      pressEndsTake = false;
+      return;
+    }
+    if (!held) return;
+    held = false;
+    if (!cancelled && Date.now() - pressStartedAt < holdThresholdMs()) {
+      // A tap. The take stays open; if words already arrived during the press
+      // the silence clock starts now, and the take's guards start once the
+      // recognizer is up.
+      if (heardSpeech) armSilence();
+      if (!nativeStarting && takeOpen) armTakeGuards();
+      return;
+    }
+    void stopListening();
+  };
+
+  // -- hands-free conversation mode (WI-174) --------------------------------
+  //
+  // The pure loop in `voiceTurn.ts` decides *when*; these functions are its
+  // ports — capture that forwards the recognizer's events to the machine
+  // (rather than the tap path's send-on-stop), and playback that tells the
+  // machine when a reply has finished so it can re-open the mic. Kept separate
+  // from the tap path above so push/tap-to-talk is untouched.
+  let convWebRecognition: WebSpeechRecognition | null = null;
+
+  const ttsCapable = () => "speechSynthesis" in window || serverTtsEnabled();
+  /** Whether hands-free can run here: an event-driven recognizer (v1 excludes
+   *  the server-STT path, which has no partials/endpoint of its own) and a way
+   *  to speak. */
+  const conversationSupported = () =>
+    sttAvailable() &&
+    (sttBackend === "native" || sttBackend === "web") &&
+    ttsCapable();
+  const conversationDisabledReason = () => {
+    if (!sttAvailable() || (sttBackend !== "native" && sttBackend !== "web")) {
+      return "Hands-free needs a live voice recognizer (the app, or a browser with voice input).";
+    }
+    if (!ttsCapable()) return "Hands-free needs spoken replies, which aren't available here.";
+    return "";
+  };
+
+  const openConversationMicNative = async () => {
+    try {
+      const { SpeechRecognition } = await import(
+        "@capacitor-community/speech-recognition"
+      );
+      const perm = await SpeechRecognition.requestPermissions();
+      if (perm.speechRecognition !== "granted") {
+        conversation?.end("no_backend");
+        return;
+      }
+      await SpeechRecognition.removeAllListeners();
+      let partials = 0;
+      await SpeechRecognition.addListener("partialResults", (data) => {
+        const best = data.matches?.[0];
+        if (!best) return;
+        partials += 1;
+        // The first and then every fifth: proof the mic is alive, cheaply.
+        if (partials === 1 || partials % 5 === 0) diag("rec.partial", { n: partials, len: best.length });
+        conversation?.partial(best);
+      });
+      await SpeechRecognition.addListener("listeningState", (data) => {
+        diag("rec.state", { status: data.status });
+        if (data.status === "started") conversation?.recognizerStarted();
+        else if (data.status === "stopped") conversation?.recognizerStopped();
+      });
+      await SpeechRecognition.start({ partialResults: true, popup: false });
+      // Note: with partialResults the plugin resolves start() at once and can
+      // never report a native start failure — hence the loop's watchdog.
+      diag("rec.start", { ok: true });
+      conversation?.micReady();
+    } catch (e) {
+      diag("rec.start", { ok: false, error: String(e) });
+      props.onError(`speech recognition: ${String(e)}`);
+      conversation?.end("no_backend");
+    }
+  };
+
+  const openConversationMicWeb = () => {
+    const Ctor = webSpeechCtor();
+    if (!Ctor) {
+      conversation?.end("no_backend");
+      return;
+    }
+    try {
+      const recognition = new Ctor();
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      recognition.lang = navigator.language || "en-US";
+      recognition.onresult = (event) => {
+        let heard = "";
+        for (let i = 0; i < event.results.length; i += 1) {
+          heard += event.results[i]?.[0]?.transcript ?? "";
+        }
+        if (heard.trim()) conversation?.partial(heard.trim());
+      };
+      recognition.onend = () => conversation?.recognizerStopped();
+      recognition.onerror = (event) => {
+        // `no-speech`/`aborted` are ordinary turn ends, handled by the machine's
+        // own silence timer; anything else means the recognizer is gone.
+        if (event.error !== "no-speech" && event.error !== "aborted") {
+          conversation?.end("no_backend");
+        }
+      };
+      convWebRecognition = recognition;
+      recognition.start();
+      conversation?.micReady();
+    } catch (e) {
+      props.onError(`speech recognition: ${String(e)}`);
+      conversation?.end("no_backend");
+    }
+  };
+
+  const closeConversationMic = async () => {
+    if (convWebRecognition) {
+      const recognition = convWebRecognition;
+      convWebRecognition = null;
+      try {
+        recognition.stop();
+      } catch {
+        /* already stopped */
+      }
+    }
+    if (sttBackend === "native") {
+      try {
+        const { SpeechRecognition } = await import(
+          "@capacitor-community/speech-recognition"
+        );
+        await SpeechRecognition.stop();
+        await SpeechRecognition.removeAllListeners();
+      } catch {
+        /* plugin gone mid-flight — nothing to stop */
+      }
+    }
+  };
+
+  /** Tear the conversation down. `userInitiated` when the toggle/leave did it,
+   *  as opposed to the machine ending itself (idle, empty turns, backend gone).*/
+  // ----- The live call (WI-960) -------------------------------------------
+  //
+  // A call is a different thing from the hands-free loop above: the engine
+  // listens continuously, decides when a turn is over, and speaks the reply a
+  // sentence at a time while it is still being written; speaking over it
+  // stops it. The two never run at once. Offered only when the engine says a
+  // call can be placed (`assistant_call_enabled`) and this browser can
+  // capture for one.
+  const callActive = () => {
+    const view = callView();
+    return view !== null && view.phase !== "ended";
+  };
+  const callSupported = () => callEnabled() && callCaptureSupported() && audioContextAvailable();
+
+  const releaseCall = () => {
+    call = null;
+    stopCallAudio();
+    stopVoiceService();
+  };
+
+  const refreshTranscript = async () => {
+    invalidateAssistantSnapshot();
+    try {
+      const snapshot = await readAssistantSnapshot(true);
+      if (snapshot) setTranscript(snapshot.transcript);
+    } catch {
+      /* the call goes on; the transcript catches up on the next turn */
+    }
+  };
+
+  const startCall = async () => {
+    if (call || !callSupported()) return;
+    if (conversationOn()) endConversation(true);
+    haltSpeech("call-start");
+    setSpeechStatus("");
+    // Inside the gesture: the playback context and the microphone both want one.
+    primeAudio();
+    startVoiceService();
+    startCallAudio();
+    const session = new CallSession(
+      {
+        url: callSocketUrl(getBase(), window.location),
+        token: getToken(),
+        profile: profile() || undefined,
+        openSocket: (url) => runtimeTransport().openSocket(url),
+        startCapture,
+        createPlayer: (events) => new CallPlayer(sharedAudioContext(), events),
+        log: (event, fields) => diag(event, fields),
+        onResponseDone: () => void refreshTranscript(),
+      },
+      (view, muted) => {
+        setCallView(view);
+        setCallMuted(muted);
+        if (view.pending && pendingAction()?.id !== view.pending.id) {
+          setPendingAction(view.pending);
+          invalidateAssistantSnapshot();
+        }
+        if (view.phase === "ended") {
+          releaseCall();
+          void refreshTranscript();
+          // A call that ended cleanly closes its panel; one that ended on an
+          // error keeps it open so the reason is read.
+          if (!view.error) setCallView(null);
+        }
+      },
+    );
+    call = session;
+    diag("call.start", {});
+    await session.start();
+  };
+
+  const endCall = () => {
+    call?.hangUp();
+  };
+
+  const endConversation = (userInitiated: boolean, reason?: string) => {
+    const machine = conversation;
+    conversation = null;
+    setConversationOn(false);
+    setVoiceState("idle");
+    setVoiceMuted(false);
+    void closeConversationMic();
+    haltSpeech("conversation-end");
+    if (userInitiated) machine?.end("user");
+    setSpeechStatus(
+      reason === "idle"
+        ? "Conversation ended — no speech for a while."
+        : reason === "empty_turns"
+          ? "Conversation ended — heard nothing."
+          : reason === "no_backend"
+            ? "Conversation ended — voice is unavailable here."
+            : "",
+    );
+  };
+
+  const conversationPorts: VoicePorts = {
+    openMic: () => {
+      haltSpeech("mic-open");
+      if (sttBackend === "web") openConversationMicWeb();
+      else void openConversationMicNative();
+    },
+    closeMic: () => void closeConversationMic(),
+    sendTurn: (text) => {
+      // The same repair pass the tap path uses: a work-item ref the recognizer
+      // mangled is the subject of the sentence.
+      const { text: repairedText, repairs } = repairUtterance(text, slugs());
+      setRepaired(repairs.length ? describeRepairs(repairs) : "");
+      void send(repairedText, text);
+    },
+    speak: (text) => speak(text, () => conversation?.speechFinished()),
+    stopSpeaking: () => haltSpeech("machine-stop"),
+    onChange: (state, muted) => {
+      setVoiceState(state);
+      setVoiceMuted(muted);
+      diag("voice.state", { state, muted });
+    },
+    onEnded: (reason) => endConversation(false, reason),
+    onRecognizerRestart: (attempt) => diag("rec.watchdog-restart", { attempt }),
+  };
+
+  const toggleConversation = () => {
+    if (conversationOn()) {
+      endConversation(true);
+      return;
+    }
+    if (!conversationSupported()) return;
+    setSpeechStatus("");
+    // Hands-free needs a mouth: turning it on turns spoken replies on.
+    if (!ttsOn()) {
+      setTtsOn(true);
+      localStorage.setItem(TTS_PREF_KEY, "1");
+    }
+    // Prime the synth inside the user gesture — the Android WebView requires it.
+    window.speechSynthesis?.speak(new SpeechSynthesisUtterance(""));
+    primeAudio();
+    const cfg = readVoiceConfig();
+    bargeInEnabled = cfg.interrupt_response;
+    conversation = new VoiceConversation(conversationPorts, cfg);
+    setConversationOn(true);
+    conversation.begin();
+  };
+
+  // Barge-in (v2): while a reply is playing and interrupt_response is on, run an
+  // echo-cancelled capture that lets the speaker cut in. An onset halts the
+  // reply and re-opens the mic (the machine's `speechDetected`). The capture is
+  // open only during `speaking`, and torn down the moment that ends — so the
+  // second microphone is never held longer than the reply it listens over.
+  createEffect(() => {
+    if (!conversationOn() || !bargeInEnabled || voiceState() !== "speaking") return;
+    const stop = startBargeInDetection(() => conversation?.speechDetected());
+    onCleanup(stop);
+  });
+
+  // Desktop shortcut: `M` mutes/unmutes an active conversation, unless the
+  // caret is in a text field (where `m` is just a letter).
+  createEffect(() => {
+    if (!conversationOn()) return;
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.key === "m" || e.key === "M") && !e.repeat) {
+        const target = e.target as HTMLElement | null;
+        const typing =
+          target &&
+          (target.tagName === "TEXTAREA" ||
+            target.tagName === "INPUT" ||
+            target.isContentEditable);
+        if (typing) return;
+        e.preventDefault();
+        conversation?.toggleMute();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    onCleanup(() => window.removeEventListener("keydown", onKey));
+  });
+
+  return (
+    <div class="assistant">
+      <div class="assistant-head">
+        <div class="assistant-head__title">
+          <h1>Assistant</h1>
+          <span
+            class={`assistant-watch-line${disconnected() ? " stale" : ""}`}
+            data-state={
+              sessionsStore.ready
+                ? isConnected()
+                  ? "ready"
+                  : "stale"
+                : sessionsError()
+                  ? "unavailable"
+                  : "loading"
+            }
+          >
+            {watchState()}
+          </span>
+        </div>
+        <GoToButton />
+        {/*
+          Offered only when there is a choice to make. One configured
+          profile is not a decision, and a select with one option is a control
+          that asks a question with no answer.
+        */}
+        <Show when={profiles().length > 1}>
+          <select
+            data-testid="assistant-profile"
+            aria-label="Provider profile"
+            value={profile()}
+            onChange={(e) => setProfile(e.currentTarget.value)}
+          >
+            <option value="">
+              {`default (${profiles().find((p) => p.default)?.model ?? ""})`}
+            </option>
+            <For each={profiles()}>
+              {(entry) => (
+                <option value={entry.name}>{`${entry.name} · ${entry.model}`}</option>
+              )}
+            </For>
+          </select>
+        </Show>
+        <button
+          type="button"
+          class="assistant-toggle"
+          aria-pressed={ttsOn()}
+          aria-label={ttsOn() ? "Spoken replies on" : "Spoken replies off"}
+          title={ttsOn() ? "Disable spoken replies" : "Speak replies aloud"}
+          onClick={toggleTts}
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M11 5 6.5 8.5H3v7h3.5L11 19V5Z" />
+            <Show
+              when={ttsOn()}
+              fallback={<path d="m16 9 5 6m0-6-5 6" />}
+            >
+              <path d="M15 9.5a4 4 0 0 1 0 5M18 7a7 7 0 0 1 0 10" />
+            </Show>
+          </svg>
+        </button>
+        {/*
+          Hands-free conversation: speak, go quiet, the turn sends, the reply is
+          spoken, the mic re-opens — no touch between turns. Shown always, so the
+          feature is discoverable, but disabled with its reason when the device
+          has no live recognizer or no way to speak.
+        */}
+        <button
+          type="button"
+          class="assistant-toggle assistant-convo"
+          data-testid="assistant-conversation"
+          aria-pressed={conversationOn()}
+          disabled={!conversationOn() && !conversationSupported()}
+          aria-label={
+            conversationOn()
+              ? "Hands-free conversation on"
+              : "Start hands-free conversation"
+          }
+          title={
+            conversationOn()
+              ? "End hands-free conversation"
+              : conversationSupported()
+                ? "Hands-free: speak, and it listens between turns"
+                : conversationDisabledReason()
+          }
+          onClick={toggleConversation}
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <rect x="9" y="2.5" width="6" height="11" rx="3" />
+            <path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21" />
+            <Show when={conversationOn()}>
+              <circle cx="19" cy="5" r="2.2" />
+            </Show>
+          </svg>
+        </button>
+        <Show when={callEnabled()}>
+          <button
+            type="button"
+            class="assistant-toggle assistant-call-toggle"
+            data-testid="assistant-call"
+            aria-pressed={callActive()}
+            disabled={!callActive() && !callSupported()}
+            aria-label={callActive() ? "End the call" : "Call the assistant"}
+            title={
+              callActive()
+                ? "End the call"
+                : callSupported()
+                  ? "Call: talk it through live, and talk over it to interrupt"
+                  : "This browser cannot place a call (no microphone or Web Audio)"
+            }
+            onClick={() => (callActive() ? endCall() : void startCall())}
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M6.6 3.5 9 3l1.6 4-2 1.3a11 11 0 0 0 7.1 7.1l1.3-2 4 1.6-.5 2.4a2 2 0 0 1-2.1 1.6A16.5 16.5 0 0 1 5 5.6a2 2 0 0 1 1.6-2.1Z" />
+              <Show when={callActive()}>
+                <circle cx="19" cy="5" r="2.2" />
+              </Show>
+            </svg>
+          </button>
+        </Show>
+        <button type="button" aria-label="Clear the conversation" title="Clear the conversation" onClick={() => void reset()}>
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M6.5 7l1 12A1.5 1.5 0 0 0 9 20.4h6a1.5 1.5 0 0 0 1.5-1.4l1-12" />
+          </svg>
+        </button>
+      </div>
+
+      <div ref={scroller} class="assistant-scroll" onScroll={onScroll}>
+        <Show when={transcript().length === 0 && !pendingAction()}>
+          <div class="assistant-empty">
+            Ask about your terminal sessions — “what is the build doing?”,
+            “is any agent stuck?”, “answer yes to the prompt in session two” —
+            or about your work: “what's the top bug?”, “why is WI-7 ranked
+            there?”, “start a session on it”.
+          </div>
+        </Show>
+        <For each={transcript()}>
+          {(entry, index) => (
+            <>
+            <Show when={transcriptTimeLabel(entry.created_at, transcript()[index() - 1]?.created_at)}>
+              {(label) => <div class="assistant-time-separator"><time datetime={entry.created_at}>{label()}</time></div>}
+            </Show>
+            <div class={`assistant-row assistant-row--${entry.role}${entry.failed ? " assistant-row--failed" : ""}`}>
+              <Show when={entry.role === "assistant" && entry.tool_trace?.length}>
+                <div class="assistant-trace">
+                  ▸ {entry.tool_trace?.join(" · ")}
+                </div>
+              </Show>
+              <div class={`assistant-bubble assistant-bubble--${entry.role}`}>
+                {/*
+                  Assistant replies are Markdown now (reusing the work item
+                  body's sanitising renderer): fenced code and lists arrive as real
+                  nodes rather than literal `#` and backticks. Every node is
+                  built, never injected — a `<script>` in a reply is inert
+                  text. A user's own message stays verbatim, pre-wrapped.
+                */}
+                <Show when={entry.role === "assistant"} fallback={entry.text}>
+                  <div class="md-body">{renderMarkdown(entry.text)}</div>
+                </Show>
+              </div>
+              <Show when={entry.role === "assistant" && entry.text.trim()}>
+                <button
+                  type="button"
+                  class="assistant-copy"
+                  data-testid="assistant-copy"
+                  title="Copy this reply"
+                  aria-label="Copy this reply"
+                  onClick={() => {
+                    void writeClipboardText(entry.text).catch((e) =>
+                      props.onError(`copy: ${String(e)}`),
+                    );
+                  }}
+                >
+                  Copy
+                </button>
+              </Show>
+              <Show when={entry.failed}>
+                <div class="assistant-failed-note">
+                  <span>Not sent.</span>
+                  <button
+                    type="button"
+                    class="assistant-retry"
+                    data-testid="assistant-retry"
+                    disabled={busy()}
+                    onClick={() => retry(entry)}
+                  >
+                    Retry
+                  </button>
+                </div>
+              </Show>
+              <Show when={entry.session_refs?.length}>
+                <div class="assistant-session-refs" aria-label="Referenced sessions">
+                  <For each={entry.session_refs}>
+                    {(ref) => <a href={`#/t/${ref.id}`} class={`assistant-session-chip ${ref.activity}`}><span class={`activity-dot ${ref.activity}`} aria-hidden="true" />{ref.name}<small>{ref.activity}</small></a>}
+                  </For>
+                </div>
+              </Show>
+              <Show when={entry.actions?.length}>
+                <div class="assistant-entry-actions">
+                  <For each={entry.actions}>
+                    {(action) => <a href={`#/t/${action.session_id}`} class="assistant-open-session">{action.label} ›</a>}
+                  </For>
+                </div>
+              </Show>
+            </div>
+            </>
+          )}
+        </For>
+        <Show when={!props.pendingHosted && pendingAction()}>
+          {(action) => (
+            <div class="assistant-pending-card" role="region" aria-label="Pending approval">
+              <div class="assistant-pending-head">
+                <span class="activity-dot running" aria-hidden="true" />
+                <span>Approval required</span>
+              </div>
+              <Show when={asSendInput(action())}>
+                {(send) => (
+                  <>
+                    <div class="assistant-pending-copy">
+                      Send <code class="assistant-keystroke">
+                        {visibleText(send().text)}{send().submit ? " ⏎" : ""}
+                      </code>{" "}to <strong>{send().session_name}</strong>
+                    </div>
+                  </>
+                )}
+              </Show>
+              <Show when={asVogtWrite(action())}>
+                {(write) => (
+                  <>
+                    <Show when={write().destructive}>
+                      <div class="assistant-pending-destructive" role="alert">
+                        Destructive: this ends the session's current turn and cannot be undone.
+                      </div>
+                    </Show>
+                    <div class="assistant-pending-copy">
+                      Write to Vogt: <strong>{write().operation}</strong> on{" "}
+                      <strong>{write().target}</strong>
+                    </div>
+                    {/*
+                      The session a session write acts on, by the name a
+                      person knows it by. An id alone is not something
+                      anyone can check before approving (WI-1267).
+                    */}
+                    <Show when={write().session}>
+                      {(session) => (
+                        <dl class="assistant-pending-session" aria-label="Target session">
+                          <dt>Session</dt>
+                          <dd>{session().name}</dd>
+                          <dt>Work item</dt>
+                          <dd>{session().work_item ?? "none"}</dd>
+                          <dt>Activity</dt>
+                          <dd>{session().activity}</dd>
+                          <dt>Directory</dt>
+                          <dd>{session().cwd}</dd>
+                        </dl>
+                      )}
+                    </Show>
+                    <Show when={(write().reason_names ?? []).length > 0}>
+                      <div class="assistant-pending-mismatch" role="alert">
+                        The reason names {(write().reason_names ?? []).join(", ")}, but this
+                        acts on {write().session?.name ?? "another session"}. Check which
+                        session you meant.
+                      </div>
+                    </Show>
+                    {/*
+                      The reason gets its own line above the payload because
+                      Vogt stores it and someone reads it back later — it is
+                      the part of this card that outlives the approval.
+                    */}
+                    <div class="assistant-pending-copy">
+                      Recorded reason (editable before approval):
+                    </div>
+                    <textarea
+                      aria-label="Assistant Vogt write reason"
+                      value={reasonDraft()}
+                      rows={2}
+                      disabled={reasonBusy() || busy() || disconnected()}
+                      onInput={(event) => setReasonDraft(event.currentTarget.value)}
+                    />
+                    <button
+                      type="button"
+                      disabled={reasonBusy() || busy() || !reasonDraft().trim()}
+                      onClick={() => void replaceReason(write())}
+                    >
+                      {reasonBusy() ? "Updating reason…" : "Update reason for review"}
+                    </button>
+                    <code class="assistant-pending-payload">{write().payload}</code>
+                  </>
+                )}
+              </Show>
+              <div class="assistant-pending-actions">
+                <button
+                  type="button"
+                  disabled={busy() || disconnected() || heldTap() !== null}
+                  onClick={() => void resolve(false)}
+                >
+                  Deny
+                </button>
+                <button
+                  type="button"
+                  class="assistant-approve"
+                  disabled={
+                    busy() ||
+                    reasonBusy() ||
+                    disconnected() ||
+                    heldTap() !== null ||
+                    !pendingReasonReady()
+                  }
+                  onClick={() => void resolve(true)}
+                >
+                  Approve on screen
+                </button>
+                {/*
+                  The 120s expiry, counting down. The server drops the
+                  card at zero, so an approval you can no longer make stops
+                  inviting you to make it — and the last few seconds are visible
+                  rather than a surprise.
+                */}
+                <Show when={pendingSecondsLeft() !== null}>
+                  <span
+                    class="assistant-countdown"
+                    data-testid="assistant-countdown"
+                    aria-live="polite"
+                  >
+                    {(pendingSecondsLeft() ?? 0) > 0
+                      ? `expires in ${pendingSecondsLeft()}s`
+                      : "expired"}
+                  </span>
+                </Show>
+              </div>
+              <Show when={heldTap()}>
+                {(held) => (
+                  <p class="assistant-pending-status" role="status">
+                    {held().state === "queued"
+                      ? "The connection dropped. Your answer is queued and sends when it is back."
+                      : "Sending your answer…"}
+                  </p>
+                )}
+              </Show>
+              <p class="assistant-pending-audit">
+                {disconnected()
+                  ? "Approval needs the live stream — reconnect to answer."
+                  : "Audited to the approver."}
+              </p>
+            </div>
+          )}
+        </Show>
+        <Show when={busy()}>
+          <div style={{ opacity: 0.6, "font-size": "13px" }}>thinking…</div>
+        </Show>
+      </div>
+
+      {/*
+        What the repair pass changed on the way from the microphone to the
+        composer. Shown because a repair that nobody can see is
+        indistinguishable from a recognizer that heard correctly — and when it
+        is wrong, this line is the only thing that says why the answer is
+        about the wrong item.
+      */}
+      <Show when={conversationOn()}>
+        <div
+          class="assistant-voice-status"
+          role="status"
+          aria-live="polite"
+          data-testid="voice-status"
+          data-state={voiceState()}
+          data-muted={voiceMuted() ? "yes" : "no"}
+        >
+          <span class="assistant-voice-dot" aria-hidden="true" />
+          {voiceStatusLabel(voiceState(), voiceMuted())}
+        </div>
+      </Show>
+      <Show when={speechStatus()}>
+        <p role="status" data-testid="speech-status">{speechStatus()}</p>
+      </Show>
+      <Show when={repaired()}>
+        <div
+          data-testid="voice-repair"
+          style={{ opacity: 0.7, "font-size": "12px" }}
+        >
+          heard differently: {repaired()}
+        </div>
+      </Show>
+
+      <Show when={callView()}>
+        {(view) => (
+          <section
+            class="assistant-call"
+            data-testid="assistant-call-panel"
+            data-phase={view().phase}
+            aria-label="Call"
+          >
+            <div class="assistant-call__status" role="status">
+              <span class="assistant-call__dot" aria-hidden="true" />
+              {callPhaseLabel(view().phase, callMuted())}
+            </div>
+            <Show when={view().heard}>
+              <p class="assistant-call__heard" data-partial={view().heardIsPartial ? "true" : "false"}>
+                {view().heard}
+              </p>
+            </Show>
+            <Show when={view().reply}>
+              <p class="assistant-call__reply" data-testid="assistant-call-reply">{view().reply}</p>
+            </Show>
+            <Show when={view().error}>
+              <p class="assistant-call__error" role="alert">{view().error}</p>
+            </Show>
+            <div class="assistant-call__controls">
+              <Show
+                when={view().phase !== "ended"}
+                fallback={
+                  <button type="button" onClick={() => setCallView(null)}>
+                    Close
+                  </button>
+                }
+              >
+                <Show when={view().phase === "speaking"}>
+                  <button type="button" data-testid="assistant-call-stop" onClick={() => call?.interrupt()}>
+                    Stop reply
+                  </button>
+                </Show>
+                <button
+                  type="button"
+                  data-testid="assistant-call-mute"
+                  aria-pressed={callMuted()}
+                  onClick={() => call?.setMuted(!callMuted())}
+                >
+                  {callMuted() ? "Unmute" : "Mute"}
+                </button>
+                <button
+                  type="button"
+                  class="assistant-call__hangup"
+                  data-testid="assistant-call-hangup"
+                  onClick={endCall}
+                >
+                  End call
+                </button>
+              </Show>
+            </div>
+            <Show when={view().lastMetrics?.speech_end_to_first_audio_ms}>
+              {(ms) => (
+                <small class="assistant-call__latency">
+                  answered in {(ms() / 1000).toFixed(1)} s
+                </small>
+              )}
+            </Show>
+          </section>
+        )}
+      </Show>
+
+      <form
+        class="assistant-form"
+        onSubmit={(e) => {
+          e.preventDefault();
+          void send(draft());
+        }}
+      >
+        <textarea
+          ref={inputEl}
+          class="assistant-input"
+          rows={1}
+          value={draft()}
+          disabled={busy()}
+          placeholder={listening() ? "listening…" : "Ask about your sessions…"}
+          onInput={(e) => setDraft(e.currentTarget.value)}
+          onKeyDown={(e) => {
+            // Enter sends; Shift+Enter (and IME composition) inserts a newline,
+            // so a multi-line message is typed in place. The Send button
+            // stays the pointer route via the form's submit.
+            if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+              e.preventDefault();
+              void send(draft());
+            }
+          }}
+        />
+        {/*
+          The mic is shown even when it cannot be used, with the reason in its
+          title, rather than hidden — a control that vanishes leaves the reader
+          wondering whether voice exists at all.
+
+          In a hands-free conversation the mic is a mute: a tap mutes and
+          unmutes, and the button renders the live mute state. The tap-to-talk
+          (or hold-to-talk) control below is for the rest of the time.
+        */}
+        <Show
+          when={conversationOn()}
+          fallback={
+            <Show
+              when={sttAvailable()}
+              fallback={
+            <button
+              type="button"
+              class="assistant-mic assistant-mic--off"
+              data-testid="mic-unavailable"
+              disabled
+              title="Voice input isn't available in this browser."
+              aria-label="Voice input unavailable in this browser"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <rect x="9" y="3" width="6" height="11" rx="3" />
+                <path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21" />
+              </svg>
+            </button>
+          }
+        >
+          <button
+            type="button"
+            class="assistant-mic"
+            data-testid="mic"
+            data-listening={listening() ? "yes" : "no"}
+            title={listening() ? "Tap to stop and send (or just stop talking)" : "Tap to speak — or hold to talk"}
+            aria-label={listening() ? "Stop and send" : "Speak a message"}
+            style={{
+              // A held button must not also be a drag handle or a scroll
+              // start: on a phone the gesture that opens the microphone is
+              // the same one that scrolls the transcript.
+              "touch-action": "none",
+              ...(listening() ? { background: "var(--danger-strong)", color: "var(--on-emphasis)" } : {}),
+            }}
+            onPointerDown={(e) => {
+              // Capture, so releasing a hold off the button still ends it. A
+              // finger that slides while speaking is ordinary; a microphone
+              // that stays open because of it is not.
+              e.currentTarget.setPointerCapture?.(e.pointerId);
+              pressMic();
+            }}
+            onPointerUp={() => releaseMic()}
+            onPointerCancel={() => releaseMic(true)}
+            onLostPointerCapture={() => releaseMic()}
+            onKeyDown={(e) => {
+              // A control only pointers can work is one some people cannot
+              // use: space and enter tap or hold exactly as a finger does. The
+              // repeat guard stops the key's own auto-repeat from re-pressing.
+              if ((e.key === " " || e.key === "Enter") && !e.repeat) {
+                e.preventDefault();
+                pressMic();
+              }
+            }}
+            onKeyUp={(e) => {
+              if (e.key === " " || e.key === "Enter") {
+                e.preventDefault();
+                releaseMic();
+              }
+            }}
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <rect x="9" y="3" width="6" height="11" rx="3" />
+              <path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21" />
+            </svg>
+          </button>
+            </Show>
+          }
+        >
+          {/*
+            Conversation is on: the control in the mic's slot is a MUTE toggle,
+            and it must not look like the push-to-talk mic. The first cut reused
+            the mic glyph here; it read as "send", invited a tap mid-turn, and
+            that tap muted capture and re-armed the mic — two conflicting events
+            from one honest mistake. So it carries its word.
+          */}
+          <button
+            type="button"
+            class="assistant-mute"
+            data-testid="mic-mute"
+            data-muted={voiceMuted() ? "yes" : "no"}
+            aria-pressed={voiceMuted()}
+            title={voiceMuted() ? "Muted — tap to unmute (or press M)" : "Mute the conversation (or press M)"}
+            aria-label={voiceMuted() ? "Unmute conversation" : "Mute conversation"}
+            onClick={() => conversation?.toggleMute()}
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <rect x="9" y="3" width="6" height="11" rx="3" />
+              <path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21" />
+              <Show when={voiceMuted()}>
+                <path d="M4 4 20 20" />
+              </Show>
+            </svg>
+            <span>{voiceMuted() ? "Unmute" : "Mute"}</span>
+          </button>
+        </Show>
+        {/*
+          Stop while a turn is in flight, Send otherwise. Stop aborts the
+          request; the engine treats the dropped connection as a cancellation.
+        */}
+        <Show
+          when={busy()}
+          fallback={
+            <button type="submit" disabled={!draft().trim()} aria-label="Send message">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 19V5M6 11l6-6 6 6" />
+              </svg>
+              <span class="visually-hidden">Send</span>
+            </button>
+          }
+        >
+          <button
+            type="button"
+            class="assistant-stop"
+            data-testid="assistant-stop"
+            onClick={stop}
+          >
+            Stop
+          </button>
+        </Show>
+      </form>
+    </div>
+  );
+}

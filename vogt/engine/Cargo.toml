@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = ["server", "contract", "core", "session-agent"]
+
+[workspace.package]
+edition = "2021"
+license = "AGPL-3.0-only"
+repository = "https://github.com/TheDancingDeveloper-org/vogt"
+rust-version = "1.100"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }

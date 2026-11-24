@@ -1,0 +1,645 @@
+//! The entity views the operations return: labels, actors, logins, tokens,
+//! auth decisions, suppressions, workflows, preferences and ranking
+//! contributions.
+//!
+//! Ports the `Label`, `Actor`, `PasswordCredential`, `Token`, `AuthDecision`
+//! and `Suppression` entities from `src/vogt/core/entities.py`, and the
+//! views from `src/vogt/application/models.py`. They are shared by several
+//! operations, which is why they live here rather than beside one.
+
+use std::collections::BTreeMap;
+
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+use super::{
+    date_time, integer, number, open_object, optional_date_time, optional_open_object, string_map,
+};
+
+fn token_kind_api() -> TokenKind {
+    TokenKind::Api
+}
+
+// `ActorKind` in Python: a literal, so the schema is inline.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[schemars(inline)]
+pub enum ActorKind {
+    #[serde(rename = "human")]
+    Human,
+    #[serde(rename = "agent")]
+    Agent,
+}
+
+// `Literal["api", "session", "agent"]` in Python, inline.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[schemars(inline)]
+pub enum TokenKind {
+    #[serde(rename = "api")]
+    Api,
+    #[serde(rename = "session")]
+    Session,
+    #[serde(rename = "agent")]
+    Agent,
+}
+
+// `Literal["allow", "deny"]` in Python, inline.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[schemars(inline)]
+pub enum DecisionKind {
+    #[serde(rename = "allow")]
+    Allow,
+    #[serde(rename = "deny")]
+    Deny,
+}
+
+// `Literal["exact", "pattern"]` in Python, inline.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[schemars(inline)]
+pub enum MatchKind {
+    #[serde(rename = "exact")]
+    Exact,
+    #[serde(rename = "pattern")]
+    Pattern,
+}
+
+/// A free-form tag, shared per instance and GitHub-label aligned.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Label {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub color: Option<String>,
+    #[schemars(schema_with = "date_time")]
+    pub created_at: String,
+}
+
+/// A human or an agent. Both are first-class.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Actor {
+    pub id: String,
+    pub kind: ActorKind,
+    pub display_name: String,
+    pub identity_ref: String,
+    #[serde(default)]
+    pub disabled: bool,
+    #[schemars(schema_with = "date_time")]
+    pub created_at: String,
+}
+
+/// A human's login: a username, the scopes a login grants, and nothing else.
+///
+/// The hash is deliberately not on the model. It is written and read by the
+/// storage layer alone, so no listing, result or audit payload can carry it.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PasswordCredential {
+    pub actor_id: String,
+    #[serde(default)]
+    pub actor_identity_ref: Option<String>,
+    pub username: String,
+    pub scopes: Vec<String>,
+    #[schemars(schema_with = "date_time")]
+    pub created_at: String,
+    #[schemars(schema_with = "date_time")]
+    pub updated_at: String,
+}
+
+/// A scoped credential bound to an actor.
+///
+/// Never carries the secret: only the hash is stored, and the secret is
+/// shown once at issue time. A model that could round-trip the credential
+/// is a model that leaks it into logs and API responses.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Token {
+    pub id: String,
+    pub actor_id: String,
+    #[serde(default)]
+    pub actor_identity_ref: Option<String>,
+    pub name: String,
+    pub scopes: Vec<String>,
+    // `api` for a minted or adopted token, `session` for one a password login
+    // produced (expiring, revoked by `auth.logout`), `agent` for a coding
+    // session's own token. Checked identically at authentication.
+    #[serde(default = "token_kind_api")]
+    #[schemars(extend("default" = "api"))]
+    pub kind: TokenKind,
+    #[schemars(schema_with = "date_time")]
+    pub created_at: String,
+    #[serde(default)]
+    #[schemars(schema_with = "optional_date_time")]
+    pub expires_at: Option<String>,
+    #[serde(default)]
+    #[schemars(schema_with = "optional_date_time")]
+    pub last_used_at: Option<String>,
+    #[serde(default)]
+    #[schemars(schema_with = "optional_date_time")]
+    pub revoked_at: Option<String>,
+    #[serde(default)]
+    pub revoked_reason: Option<String>,
+}
+
+/// One allow or deny, recorded.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AuthDecision {
+    pub id: String,
+    #[schemars(schema_with = "date_time")]
+    pub at: String,
+    pub decision: DecisionKind,
+    pub reason_code: String,
+    pub operation: String,
+    #[serde(default)]
+    pub scope: Option<String>,
+    #[serde(default)]
+    pub actor_id: Option<String>,
+    #[serde(default)]
+    pub token_id: Option<String>,
+    #[serde(default)]
+    pub identity_ref: Option<String>,
+    pub transport: String,
+    #[serde(default)]
+    pub detail: Option<String>,
+}
+
+/// An audited decision that an observed subject is not work.
+///
+/// Lives in the declared store because it is a decision, not an
+/// observation — which is exactly why it survives re-observation of the same
+/// subject, and why a dismissal recorded in the evidence store could never
+/// have worked.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Suppression {
+    pub id: String,
+    pub match_kind: MatchKind,
+    pub subject_key_or_pattern: String,
+    #[serde(default)]
+    pub scope_project_id: Option<String>,
+    #[serde(default)]
+    pub scope_project_slug: Option<String>,
+    pub actor_id: String,
+    #[serde(default)]
+    pub actor_identity_ref: Option<String>,
+    pub reason: String,
+    #[schemars(schema_with = "date_time")]
+    pub created_at: String,
+    #[serde(default)]
+    #[schemars(schema_with = "optional_date_time")]
+    pub revoked_at: Option<String>,
+    #[serde(default)]
+    pub revoked_reason: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowView {
+    pub kind: String,
+    pub initial_state: String,
+    pub states: Vec<String>,
+    pub transitions: BTreeMap<String, Vec<String>>,
+}
+
+/// One of the caller's own settings.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PreferenceView {
+    pub key: String,
+    #[schemars(schema_with = "open_object")]
+    pub value: serde_json::Map<String, serde_json::Value>,
+    #[schemars(schema_with = "integer")]
+    pub version: i64,
+    #[schemars(schema_with = "date_time")]
+    pub updated_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ContributionView {
+    pub input: String,
+    pub detail: String,
+    #[schemars(schema_with = "number")]
+    pub value: f64,
+    #[schemars(schema_with = "number")]
+    pub weight: f64,
+    #[schemars(schema_with = "number")]
+    pub contribution: f64,
+}
+
+// `Literal["incubating", "active", "maintenance", "archived"]` in Python.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(inline)]
+pub enum LifecycleState {
+    Incubating,
+    Active,
+    Maintenance,
+    Archived,
+}
+
+// `Literal["compliant", "non_compliant", "not_checked", "not_applicable"]`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(inline)]
+pub enum ComplianceStatus {
+    Compliant,
+    NonCompliant,
+    NotChecked,
+    NotApplicable,
+}
+
+// `Literal["none", "comment_only", "full"]` in Python, inline.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(inline)]
+pub enum WriteBack {
+    None,
+    CommentOnly,
+    Full,
+}
+
+// `Literal["unlinked", "linked"]` in Python, inline.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(inline)]
+pub enum LinkState {
+    Unlinked,
+    Linked,
+}
+
+// `Literal["verified", "stale", "unverified", "disputed"]` in Python, inline.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(inline)]
+pub enum TrustState {
+    Verified,
+    Stale,
+    Unverified,
+    Disputed,
+}
+
+// `Literal["push_branch", "open_pr"]` in Python, inline.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(inline)]
+pub enum WorkerLandsBy {
+    PushBranch,
+    OpenPr,
+}
+
+// `Literal["oversight", "operator"]` in Python, inline.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(inline)]
+pub enum MergeBy {
+    Oversight,
+    Operator,
+}
+
+// `Literal["fast_forward", "rebase"]` in Python, inline.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(inline)]
+pub enum MergeMode {
+    FastForward,
+    Rebase,
+}
+
+pub(super) fn lifecycle_active() -> LifecycleState {
+    LifecycleState::Active
+}
+
+pub(super) fn compliance_not_checked() -> ComplianceStatus {
+    ComplianceStatus::NotChecked
+}
+
+pub(super) fn write_back_none() -> WriteBack {
+    WriteBack::None
+}
+
+pub(super) fn link_unlinked() -> LinkState {
+    LinkState::Unlinked
+}
+
+pub(super) fn trust_unverified() -> TrustState {
+    TrustState::Unverified
+}
+
+pub(super) fn branch_pattern_default() -> String {
+    "^wi-{n}-[a-z0-9-]+$".to_string()
+}
+
+pub(super) fn operator_default() -> String {
+    "operator".to_string()
+}
+
+pub(super) fn default_true() -> bool {
+    true
+}
+
+pub(super) fn review_template() -> String {
+    "claude".to_string()
+}
+
+pub(super) fn review_model() -> String {
+    "opus".to_string()
+}
+
+pub(super) fn review_effort() -> String {
+    "low".to_string()
+}
+
+pub(super) fn review_budget_turns() -> i64 {
+    40
+}
+
+/// One explicitly registered repository or folder.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Project {
+    pub id: String,
+    pub slug: String,
+    pub name: String,
+    pub root_path: String,
+    #[serde(default)]
+    pub repo_url: Option<String>,
+    #[serde(default = "lifecycle_active")]
+    pub lifecycle_state: LifecycleState,
+    #[serde(default)]
+    pub current_version: Option<String>,
+    #[serde(default)]
+    pub contract_version: Option<String>,
+    #[serde(default = "compliance_not_checked")]
+    pub compliance_status: ComplianceStatus,
+    #[serde(default)]
+    #[schemars(schema_with = "optional_date_time")]
+    pub compliance_checked_at: Option<String>,
+    #[serde(default)]
+    pub agent_policy: AgentPolicy,
+    #[serde(default)]
+    #[schemars(schema_with = "optional_date_time")]
+    pub contract_adopted_at: Option<String>,
+    #[serde(default = "write_back_none")]
+    pub write_back: WriteBack,
+    #[serde(default = "link_unlinked")]
+    pub link_state: LinkState,
+    #[serde(default)]
+    #[schemars(extend("x-keep-default" = true))]
+    pub exclusions: Vec<String>,
+    #[serde(default)]
+    #[schemars(extend("x-keep-default" = true))]
+    pub mcp_extra: Vec<String>,
+    #[serde(default = "trust_unverified")]
+    pub trust_state: TrustState,
+    #[schemars(schema_with = "date_time")]
+    pub created_at: String,
+    #[schemars(schema_with = "date_time")]
+    pub updated_at: String,
+}
+
+/// A project's agent policy, stored as data and shown in every session brief.
+///
+/// `forbidden_text` and `merge_deploys_prod` are the two facts the session
+/// hooks refuse on. `landing`, `review` and `verification` are recorded so
+/// the brief can state them; nothing enforces them yet. Everything else is
+/// guidance the brief carries and nothing enforces: compliance stays a fact
+/// to read, never a precondition.
+#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AgentPolicy {
+    #[serde(default)]
+    #[schemars(extend("x-keep-default" = true))]
+    pub forbidden_text: Vec<String>,
+    #[serde(default)]
+    pub merge_deploys_prod: bool,
+    #[serde(default)]
+    #[schemars(extend("x-keep-default" = true))]
+    pub main_branches: Vec<String>,
+    #[serde(default)]
+    pub base_branch: String,
+    #[serde(default)]
+    pub commit_identity: String,
+    #[serde(default)]
+    pub test_recipe: String,
+    #[serde(default)]
+    pub deployed_setup: String,
+    #[serde(default)]
+    #[schemars(extend("x-keep-default" = true))]
+    pub rules: Vec<String>,
+    #[serde(default)]
+    pub session_wall_clock_minutes: Option<i64>,
+    #[serde(default)]
+    pub landing: Option<LandingPolicy>,
+    #[serde(default)]
+    pub review: Option<ReviewPolicy>,
+    #[serde(default)]
+    pub verification: Option<VerificationPolicy>,
+}
+
+/// How a worker's branch is cut and landed on this project.
+///
+/// Recorded so a brief can state the rule and, later, so the engine can
+/// enforce it. Nothing here is enforced yet: a later item reads it.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LandingPolicy {
+    pub base_branch: String,
+    #[serde(default = "branch_pattern_default")]
+    pub branch_pattern: String,
+    pub worker_lands_by: WorkerLandsBy,
+    pub merge_by: MergeBy,
+    pub merge_mode: MergeMode,
+    #[serde(default = "default_true")]
+    pub linear_history: bool,
+    #[serde(default = "operator_default")]
+    pub deploy_by: String,
+    #[serde(default)]
+    #[schemars(schema_with = "string_map", extend("x-keep-default" = true))]
+    pub initiative_bases: serde_json::Map<String, serde_json::Value>,
+    #[serde(default)]
+    #[schemars(extend("x-keep-default" = true))]
+    pub long_lived_branches: Vec<String>,
+    // The project's source, when it states one. A session's pod gets a
+    // credential scoped to it and nothing else (WI-4213).
+    #[serde(default, deserialize_with = "checked_source")]
+    #[schemars(schema_with = "optional_open_object", extend("x-keep-default" = true))]
+    pub source: Option<serde_json::Value>,
+    /// The Python-era `graft` landing key (`null`, or `{line, mirror,
+    /// endpoint}`), still in stored policies (gh#1461). Graft settings now live
+    /// server-side (mirror rows, the session token mint), so it is accepted on
+    /// read, ignored, and never written back.
+    #[serde(default, skip_serializing)]
+    #[schemars(skip)]
+    pub graft: Option<serde_json::Value>,
+}
+
+/// A source is stored as the object it arrived as; it must read as a
+/// [`ProjectSource`], so a malformed one is refused when the policy is written.
+fn checked_source<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<serde_json::Value>, D::Error> {
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    if let Some(value) = &value {
+        ProjectSource::deserialize(value).map_err(serde::de::Error::custom)?;
+    }
+    Ok(value)
+}
+
+/// The shape a stored source must have. Mirrors the engine's
+/// `SourceDescriptor`; it carries no credential.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct ProjectSource {
+    location: SourceLocation,
+    /// A branch for git, a line for graft.
+    #[serde(rename = "ref", deserialize_with = "non_empty")]
+    reference: String,
+    #[serde(default)]
+    landing: SourceLanding,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+#[allow(dead_code)]
+enum SourceLocation {
+    Git { url: String, repo: String },
+    Graft { endpoint: String, repo: String },
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum SourceLanding {
+    #[default]
+    PushBranch,
+    OpenPr,
+    Line,
+}
+
+fn non_empty<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    let value = String::deserialize(deserializer)?;
+    if value.is_empty() {
+        return Err(serde::de::Error::custom("source ref must not be empty"));
+    }
+    Ok(value)
+}
+
+/// How a review of this project's work is run. Guidance until enforced.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewPolicy {
+    #[serde(default = "review_template")]
+    pub template: String,
+    #[serde(default = "review_model")]
+    pub model: String,
+    #[serde(default = "review_effort")]
+    pub effort: String,
+    #[serde(default)]
+    #[schemars(extend("x-keep-default" = true))]
+    pub never_models: Vec<String>,
+    #[serde(default = "review_budget_turns")]
+    pub budget_turns: i64,
+}
+
+/// Whether closing an item needs a verification record, and where.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct VerificationPolicy {
+    #[serde(default)]
+    pub required_for_done: bool,
+    #[serde(default)]
+    #[schemars(extend("x-keep-default" = true))]
+    pub lanes: Vec<String>,
+}
+
+// `Literal["fresh", "never_swept", "partial"]` in Python; a fresh view takes never_swept.
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(inline)]
+pub enum FreshnessStatus {
+    Fresh,
+    #[default]
+    NeverSwept,
+    Partial,
+}
+
+/// How old the evidence behind an answer is.
+///
+/// Every aggregating answer carries one. `oldest_relevant_sweep` is the
+/// honest number: an answer is exactly as fresh as the least fresh thing it
+/// depends on.
+#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Freshness {
+    #[serde(default)]
+    pub status: FreshnessStatus,
+    #[serde(default)]
+    #[schemars(schema_with = "optional_date_time")]
+    pub oldest_relevant_sweep: Option<String>,
+    #[serde(default)]
+    pub age_seconds: Option<i64>,
+    /// Per collector: how long ago it last completed.
+    #[serde(default)]
+    #[schemars(extend("x-keep-default" = true))]
+    pub collectors: BTreeMap<String, String>,
+    #[serde(default)]
+    pub detail: Option<String>,
+}
+
+#[cfg(test)]
+mod landing_source_tests {
+    use super::LandingPolicy;
+    use serde_json::{json, Value};
+
+    fn landing(source: Value) -> Value {
+        json!({
+            "base_branch": "main",
+            "worker_lands_by": "push_branch",
+            "merge_by": "oversight",
+            "merge_mode": "rebase",
+            "source": source,
+        })
+    }
+
+    #[test]
+    fn a_graft_source_is_accepted_and_kept_as_stated() {
+        let source = json!({
+            "location": {"kind": "graft", "endpoint": "http://graft.test", "repo": "vogt"},
+            "ref": "rust-2",
+            "landing": "line",
+        });
+        let policy: LandingPolicy = serde_json::from_value(landing(source.clone())).unwrap();
+        assert_eq!(policy.source, Some(source));
+    }
+
+    #[test]
+    fn the_legacy_graft_key_is_read_and_never_written() {
+        for graft in [
+            Value::Null,
+            json!({"line": "backlog-1", "mirror": "m", "endpoint": "graft-dev:17888"}),
+        ] {
+            let mut value = landing(Value::Null);
+            value["graft"] = graft;
+            let policy: LandingPolicy = serde_json::from_value(value).unwrap();
+            let written = serde_json::to_value(&policy).unwrap();
+            assert!(written.get("graft").is_none(), "{written}");
+        }
+        let mut other = landing(Value::Null);
+        other["grafted"] = json!(1);
+        assert!(serde_json::from_value::<LandingPolicy>(other).is_err());
+    }
+
+    #[test]
+    fn a_malformed_source_is_refused() {
+        for bad in [
+            json!({"location": {"kind": "svn", "repo": "r"}, "ref": "main"}),
+            json!({"location": {"kind": "git", "url": "u", "repo": "r"}, "ref": ""}),
+            json!({"location": {"kind": "git", "url": "u", "repo": "r"}, "ref": "m", "landing": "merge"}),
+            json!({"ref": "main"}),
+        ] {
+            assert!(serde_json::from_value::<LandingPolicy>(landing(bad)).is_err());
+        }
+    }
+}

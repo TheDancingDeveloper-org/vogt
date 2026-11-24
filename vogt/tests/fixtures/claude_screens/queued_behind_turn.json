@@ -1,0 +1,32 @@
+{
+ "captured": "2026-10-18T21:53Z, live Claude Code v2.1.293 driven by session_input (WI-1870)",
+ "activity": "running",
+ "text": "reply with the single word queued-ok",
+ "held": false,
+ "lines": [
+  " ▐▛███▛█   Claude Code v2.1.293",
+  "▝▜██████▀  Opus 5.5 with low effort · Claude Max",
+  " ▝▝   ▝▝   ~/Working/Active/vogt-01M58G2BEKS1GS1KX8918Z2AJP",
+  "",
+  "⚠ Your login expires in 1 day · run /login to renew",
+  "",
+  "❯ Vogt started this session with a brief in /home/sprooty/.local/share/vogt-eng",
+  "  ine/agent-task-prompts/sessions/9b5eac60-859e-4a48-a56e-3d6a7837f73d.md. Read",
+  "  that file now. If it has a \"Task\" section, carry that task out; otherwise",
+  "  summarise the brief in one line and wait for instructions.",
+  "",
+  "  Running cat /home/sprooty/.local/share/vogt-engine/agent-… · 15s",
+  "  ⎿  $ sleep 25 (15s)",
+  "     (ctrl+b to run in background)",
+  "",
+  "❯ reply with the single word queued-ok",
+  "  ctrl+x ctrl+s to send now",
+  "",
+  "✢ Nebulizing… (21s · ↓ 161 tokens)",
+  "                             Your login expires in 1 day · run /login to renew",
+  "────────────────────────────────────────────────────────────────────────────────",
+  "❯ Press up to edit queued messages",
+  "────────────────────────────────────────────────────────────────────────────────",
+  "  ⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt · ← 4 agents"
+ ]
+}

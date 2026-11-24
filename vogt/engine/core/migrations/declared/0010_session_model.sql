@@ -1,0 +1,24 @@
+-- 0010_session_model — which model a session was asked to run, and how hard
+-- it was asked to think (FR-T11, r16).
+--
+-- These are *declared* columns and belong here for the same reason `template`
+-- and `reason` do: they record what Vogt asked for. They are not a claim
+-- about what the agent inside the terminal is currently using — a session
+-- whose operator typed `/model` at the prompt has moved on, and no column
+-- here will know. That is the same line 0007 draws around activity state, and
+-- it is drawn in the same place for the same reason.
+--
+-- Both nullable, and null is the ordinary case: a session started without
+-- naming either ran the provider profile's default, and recording the value
+-- that was *resolved* would make this column say something the caller never
+-- asked for. What was applied is in the audit payload; what was asked for is
+-- here.
+--
+-- Free-text rather than a CHECK constraint. Model ids are a third party's
+-- namespace and change without asking (`gpt-5.4-mini`, `claude-sonnet-4-5`,
+-- `qwen/qwen3-coder`), and effort levels differ per CLI. A constraint here
+-- would turn every upstream rename into a migration, and the value's job is
+-- to be handed to a CLI that will refuse it far more precisely than SQLite
+-- could.
+ALTER TABLE coding_sessions ADD COLUMN model  TEXT;
+ALTER TABLE coding_sessions ADD COLUMN effort TEXT;

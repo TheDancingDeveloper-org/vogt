@@ -1,0 +1,88 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# Tooling
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Vogt data (never committed)
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+data/
+backups/
+
+# Engine (Rust)
+target/
+**/*.rs.bk
+
+# Web / mobile
+node_modules/
+web/dist/
+mobile/android/app/build/
+mobile/android/build/
+mobile/android/.gradle/
+mobile/dist/
+
+# Agent worktrees (this repo's own, not a product artifact).
+# Matched at any depth: `git worktree add` resolves a relative path against
+# the shell's cwd, so one created from `web/` lands at `web/.claude/...` and
+# is otherwise committed as an embedded repository.
+**/.claude/worktrees/
+.claude/
+
+# Editor / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/
+web/test-results/
+
+# Operator-local Compose settings. `deploy/.env.example` is the committed
+# template; the copy an operator edits is theirs, not the repository's.
+deploy/.env
+.env
+
+# Broker-written credential files: the pre_deploy hook writes these
+# beside the compose at deploy time; they must never be committed. Belt-and-
+# braces alongside push protection now that the repo is public.
+github-token
+vogt-core-token
+vogt-engine-token
+deploy/github-token
+deploy/vogt-core-token
+deploy/vogt-engine-token
+# The FCM service-account JSON (an RSA private key): a file secret, never
+# committed and never an env var.
+deploy/fcm-service-account.json
+
+# The clean-consumer smoke's receipt (scripts/clean_consumer_smoke.sh):
+# resolved image digests + provenance from a run. A run artifact, not source.
+clean-consumer-receipt.json
+# The custom-image example's operator-created core token (deploy/examples).
+deploy/examples/custom-stack/vogt-core-token
+
+# Operator-local documents. Runbooks, cutover plans and estate notes that are
+# specific to one deployment and have no place in a public repository — the
+# same reasoning as `deploy/.env` above. `docs/` proper is the product's
+# documentation; this is the operator's.
+docs/local/
+
+# Requirements documentation is maintained outside the public repository
+# (it lives under docs/local/). Nothing under this name should be committed.
+docs/REQUIREMENTS*.md
+**/REQUIREMENTS.md
+
+# Design canvases and wireframes are maintainer working material, kept under
+# docs/local/. Only the contract-required placeholder stays tracked.
+design/*
+!design/.gitkeep

@@ -1,0 +1,1444 @@
+openapi: 3.1.0
+# Hand-maintained. The source of truth is the code: routes in
+# engine/server/src/app.rs, handlers in engine/server/src/api.rs and ws.rs,
+# wire types in engine/contract/src/lib.rs, the capability gate in
+# engine/server/src/auth.rs. `scripts/check_engine_spec.py` (run by
+# `scripts/check_docs.py` and by pytest) fails when a `/api/sessions…` route in
+# app.rs has no path here, or when a path here names no route in app.rs.
+# Prose, rationale and the driving recipe: docs/ENGINE.md, "Session APIs".
+info:
+  title: Vogt session engine
+  version: "1"
+  summary: The engine's HTTP API for terminal sessions — list, create, read, type into, render and stop PTYs.
+  description: |
+    The engine (a Rust process, `:8910` by default) owns PTY sessions. This
+    document covers its session routes and the few routes a session driver
+    also needs (events, auth check, health). Everything else the engine serves
+    — files, git, assistant, push, agent tasks, history, the `/api/vogt` and
+    `/mcp` proxies to vogt-core — is described in prose in docs/ENGINE.md §5.
+
+    **Prefer the core's operations.** An agent drives sessions through
+    vogt-core's `session.*` operations (MCP `session_start`, `session_list`,
+    `session_screen`, `session_input`, `session_log_tail`, `session_stop`),
+    which accept either id form and audit every input. Calling these routes
+    directly is the fallback; a direct `POST …/input` is not recorded in the
+    core's audit log.
+
+    **Ids.** Every `{id}` here is the engine's session UUID. Vogt's own
+    `ses_…` ids are a core concept and are refused (`400`) by these routes;
+    the core maps one to the other (`engine_session_id` in `session.list`).
+
+    **Reaching it from inside a session.** Every session's environment
+    carries `VOGT_ENGINE_URL` (the engine's own loopback URL, or the URL
+    vogt-core reaches it at for a session the core started). Authenticate with
+    `Authorization: Bearer $VOGT_HTTP_TOKEN`; a core token with `work.write`,
+    `project.write` or `admin` scope carries the engine's `sessions`
+    capability.
+
+    **Errors** are `{"error": "<message>"}` (except an `{id}` that is not a
+    UUID, which is a plain-text `400` from the router): `400` malformed
+    input, `401` unknown bearer, `403` the bearer
+    lacks the route's capability, `404` no such session, `429` the
+    per-identity write-rate cap (with `Retry-After`), `503` the core could not
+    be asked about the bearer (with `Retry-After`).
+  license:
+    name: AGPL-3.0-only
+servers:
+  - url: http://127.0.0.1:8910
+    description: The engine on loopback, as a session in the pod reaches it ($VOGT_ENGINE_URL).
+security:
+  - bearer: []
+tags:
+  - name: sessions
+  - name: events
+  - name: health
+paths:
+  /healthz:
+    get:
+      tags: [health]
+      summary: Liveness — the process is listening.
+      operationId: healthz
+      security: []
+      responses:
+        "200":
+          description: Listening.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OkResponse" }
+  /readyz:
+    get:
+      tags: [health]
+      summary: Readiness checks; 503 when a fatal check fails.
+      operationId: readyz
+      security: []
+      responses:
+        "200":
+          description: Every fatal check passes.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Readiness" }
+        "503":
+          description: A fatal check failed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Readiness" }
+  /api/auth/check:
+    get:
+      tags: [health]
+      summary: Who this bearer is, and which engine capabilities it holds.
+      description: >-
+        A cheap credential probe. A driver checks `identity.capabilities`
+        contains `sessions` before it tries to create, read or type into a
+        session.
+      operationId: authCheck
+      responses:
+        "200":
+          description: The bearer's identity and capabilities.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthCheck" }
+  /api/events:
+    get:
+      tags: [events]
+      summary: Server-sent event stream (session lifecycle and activity).
+      description: >-
+        `text/event-stream`, one JSON `ServerEvent` per `data:` line, with a
+        `:ka` keep-alive comment every 15 seconds. Read it with `fetch` (it
+        needs the bearer header). A driver waits here for its session's
+        `activity` event: `waiting-for-input` means a prompt is up;
+        `awaiting-approval` means an agent CLI's permission dialog is up (the
+        event carries `approval`); on `idle` read `/screen` and check `ready`;
+        `exited`/`errored` or
+        `session-killed` mean nothing will read input again. Missed events are
+        not replayed — resynchronise with `GET /api/sessions`. Other event
+        types (`vogt.changed`, `task.*`) are documented in docs/ENGINE.md.
+      operationId: events
+      responses:
+        "200":
+          description: The stream.
+          content:
+            text/event-stream:
+              schema: { $ref: "#/components/schemas/SessionEvent" }
+  /api/sessions:
+    get:
+      tags: [sessions]
+      summary: List every session the engine holds, live and exited.
+      description: >-
+        Any valid bearer. An exited session stays listed (its scrollback and
+        screen remain readable) until it is deleted, so filter on `alive` for
+        running sessions.
+      operationId: listSessions
+      responses:
+        "200":
+          description: Sessions.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/SessionSummary" }
+    post:
+      tags: [sessions]
+      summary: Create (spawn) a session.
+      description: >-
+        Requires the `sessions` capability. A `prompt` is written to a file
+        whose path the child receives as `VOGT_ENGINE_AGENT_TASK_PROMPT_FILE`;
+        an agent CLI the engine recognises (`claude`, `codex`, `opencode`,
+        wrapped or not) is also given a fixed first prompt telling it to read
+        that file and carry out its "Task" section. The text of the brief is
+        never put on argv.
+      operationId: createSession
+      x-capability: sessions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SessionSpec" }
+      responses:
+        "200":
+          description: The new session.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionSummary" }
+        "400":
+          description: >-
+            Bad name or cwd, an unknown template, or `model`/`effort`/`resume`
+            given for a command the engine cannot pass them to.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /api/sessions/{id}:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+    get:
+      tags: [sessions]
+      summary: One session with its raw scrollback (base64).
+      description: >-
+        Requires the `sessions` capability: the scrollback routinely holds
+        pasted secrets. The scrollback is the raw byte stream, escapes and
+        redraws included; to read what the terminal shows, use `/screen`.
+      operationId: getSession
+      x-capability: sessions
+      parameters:
+        - name: tail_bytes
+          in: query
+          required: false
+          description: Return only the last N bytes, aligned forward to a safe replay boundary.
+          schema: { type: integer, minimum: 0 }
+      responses:
+        "200":
+          description: The session.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionDetail" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [sessions]
+      summary: Rename a session.
+      operationId: renameSession
+      x-capability: sessions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                  description: Trimmed; non-empty and at most 256 bytes, else 400.
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [sessions]
+      summary: Kill the child (if running) and forget the session and its prompt file.
+      operationId: deleteSession
+      x-capability: sessions
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/sessions/{id}/answer:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+    post:
+      tags: [sessions]
+      summary: Choose an option of the dialog on screen.
+      description: >-
+        Works for a permission dialog or a startup gate (`approval.kind`:
+        `folder-trust`, `external-imports`, `read-outside-cwd`). The engine
+        re-reads the menu, moves the highlight from where it is to the chosen
+        option, presses Enter, and reports whether the dialog went away.
+        Choose by `option` (number) or `label` (unique, case-insensitive
+        text). With `expect_question`, the answer is refused if the dialog
+        asks something else now. A permission prompt (`kind` `permission` or
+        `read-outside-cwd`) is answered only by a person (WI-983): a caller
+        the core resolves to a human actor, vogt-core's credential with
+        `person: true`, or the break-glass token unless `person: false`.
+        Anyone else gets 403 `person required` and nothing is typed.
+      operationId: answerSession
+      x-capability: sessions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                option: { type: integer, minimum: 1 }
+                label: { type: string }
+                expect_question: { type: string }
+                person:
+                  type: boolean
+                  description: >-
+                    Whether a person is behind this answer. Read only from
+                    vogt-core's credential (absent means false) and the
+                    break-glass token (absent means true); ignored from
+                    anyone else.
+      responses:
+        "200":
+          description: What was chosen.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [question, kind, chosen, dismissed]
+                properties:
+                  question: { type: string }
+                  kind: { type: string }
+                  chosen: { $ref: "#/components/schemas/ApprovalOption" }
+                  dismissed: { type: boolean }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403":
+          description: A permission prompt is showing and the caller is not a person.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /api/sessions/sweep:
+    get:
+      tags: [sessions]
+      summary: Every session at once, each with the tail of its screen.
+      description: >-
+        Lists live and hibernated sessions (and exited ones with
+        `include_exited=true`). Each row carries its summary, the last
+        `screen_lines` (default 8, at most 40) non-blank lines of its rendered
+        screen (the kept screen for a hibernated session), and `ready`.
+        Screens are rendered concurrently. This is the oversight table in one
+        request; vogt-core's `session.sweep` orders it by attention.
+      operationId: sweepSessions
+      x-capability: sessions
+      parameters:
+        - { name: screen_lines, in: query, schema: { type: integer, minimum: 0, maximum: 40 } }
+        - { name: include_exited, in: query, schema: { type: boolean } }
+      responses:
+        "200":
+          description: One entry per session.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required: [summary]
+                  properties:
+                    summary: { $ref: "#/components/schemas/SessionSummary" }
+                    screen_tail: { type: array, items: { type: string } }
+                    ready: { type: boolean }
+        "400": { $ref: "#/components/responses/BadRequest" }
+  /api/sessions/{id}/screen:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+    get:
+      tags: [sessions]
+      summary: The terminal's current visible screen, rendered as text.
+      description: >-
+        Rendered per request by replaying the last 1 MiB of scrollback into a
+        terminal grid at the PTY's current size — what a client attaching now
+        would see. Works for an exited session too (`alive` false, `ready`
+        false).
+      operationId: getSessionScreen
+      x-capability: sessions
+      parameters:
+        - name: scrollback_lines
+          in: query
+          required: false
+          description: >-
+            Also return up to N lines that scrolled off the top of the screen,
+            oldest first, as `scrollback` (bounded by the replayed 1 MiB).
+            More than 2000 is 400.
+          schema: { type: integer, minimum: 0, maximum: 2000 }
+      responses:
+        "200":
+          description: The screen.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionScreen" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/sessions/{id}/replies:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+    get:
+      tags: [sessions]
+      summary: An opencode session's last assistant replies, from opencode's own store.
+      description: >-
+        Claude Code and Codex write transcripts the core reads itself; opencode
+        keeps one SQLite database that also holds its credentials, so the
+        engine opens it read-only and returns this session's assistant text
+        and nothing else (WI-931). Empty `replies` for a session that is not
+        opencode or whose conversation id is not known yet. Unredacted: the
+        core redacts before showing it.
+      operationId: getSessionReplies
+      x-capability: sessions
+      parameters:
+        - name: n
+          in: query
+          required: false
+          description: How many of the latest replies, oldest first.
+          schema: { type: integer, minimum: 1, maximum: 20, default: 1 }
+      responses:
+        "200":
+          description: The replies.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [agent, conversation_id, replies]
+                properties:
+                  agent: { type: string, nullable: true, enum: [opencode, null] }
+                  conversation_id: { type: string, nullable: true }
+                  replies:
+                    type: array
+                    items:
+                      type: object
+                      required: [text]
+                      properties:
+                        text: { type: string }
+                        at: { type: string, format: date-time, nullable: true }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/sessions/changes:
+    get:
+      tags: [sessions]
+      summary: Session changes published after a cursor.
+      description: >-
+        Every session event on the bus carries a monotonic `seq`; the engine
+        keeps the last 4096. Returns the overseer-relevant ones after `since`
+        — kinds ready, approval, exited, errored, blocked, unblocked,
+        hibernated, woken — each with a summary of at most 120 characters,
+        and `next_cursor` to pass next time. `truncated` is true when the
+        cursor fell off the ring or is from a previous engine run (a cursor
+        past the head); read a sweep then.
+      operationId: sessionChanges
+      x-capability: sessions
+      parameters:
+        - name: since
+          in: query
+          required: false
+          schema: { type: integer, minimum: 0, default: 0 }
+        - name: ids
+          in: query
+          required: false
+          description: Engine session ids, comma separated. Absent means every session.
+          schema: { type: string }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 500, default: 100 }
+      responses:
+        "200":
+          description: The page of changes and the cursor to read from next.
+          content:
+            application/json:
+              schema: { type: object }
+        "400": { $ref: "#/components/responses/BadRequest" }
+  /api/sessions/wait-any:
+    get:
+      tags: [sessions]
+      summary: Wait, server-side, until any named session changes in a way `until` names.
+      description: >-
+        Subscribes before checking the ring, so nothing published between
+        calls is missed: answers at once with the first matching change after
+        `cursor`, else blocks for the next one, else `outcome: timeout` with
+        the current head as `next_cursor`. A cursor past the head (an engine
+        restart) reads from the start of the ring.
+      operationId: sessionWaitAny
+      x-capability: sessions
+      parameters:
+        - name: ids
+          in: query
+          required: false
+          description: Engine session ids, comma separated. Absent means every session.
+          schema: { type: string }
+        - name: until
+          in: query
+          required: false
+          description: Kinds, comma separated. Default ready, blocked, approval, exited, errored.
+          schema: { type: string }
+        - name: cursor
+          in: query
+          required: false
+          schema: { type: integer, minimum: 0, default: 0 }
+        - name: timeout_s
+          in: query
+          required: false
+          schema: { type: integer, minimum: 0, maximum: 600, default: 120 }
+      responses:
+        "200":
+          description: Why the wait ended, the change if any, and the next cursor.
+          content:
+            application/json:
+              schema: { type: object }
+        "400": { $ref: "#/components/responses/BadRequest" }
+  /api/sessions/{id}/wait:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+    get:
+      tags: [sessions]
+      summary: Wait, server-side, until the session is ready, exits or changes.
+      description: >-
+        Blocks on the engine's event bus (the one `/api/events` streams) and
+        answers once the session reaches `until` — `ready` (the default; also
+        ends on `awaiting-approval`, a blocked report, or exit, because no
+        amount of waiting makes those ready), `exited`, or `any-change` (any
+        activity, blocked-state or liveness change after the call) — or when
+        `timeout_s` passes. Answers at once when the condition already holds.
+        Replaces polling `/screen`.
+      operationId: waitSession
+      x-capability: sessions
+      parameters:
+        - name: until
+          in: query
+          required: false
+          schema: { type: string, enum: [ready, exited, any-change], default: ready }
+        - name: timeout_s
+          in: query
+          required: false
+          schema: { type: integer, minimum: 0, maximum: 600, default: 120 }
+      responses:
+        "200":
+          description: Why the wait ended, and the screen then.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionWait" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/sessions/{id}/blocked:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+    post:
+      tags: [sessions]
+      summary: Set or clear the agent's "blocked on a person" report.
+      description: >-
+        `{"blocked": true, "reason": "...", "items": [...]}` records the
+        report (reason required, at most 2000 bytes; at most 20 items of 500
+        bytes; blank items dropped); `{"blocked": false}` clears it. The
+        report rides on the summary and the screen, publishes a
+        `session-blocked` event, and blocking sends a push. Cleared when the
+        session exits; `409` to block an exited session. vogt-core's
+        `session.report_blocked` / `report_unblocked` call this, audited.
+      operationId: setSessionBlocked
+      x-capability: sessions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SetBlocked" }
+      responses:
+        "200":
+          description: The session after the change.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionSummary" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/sessions/{id}/hibernate:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+    post:
+      tags: [sessions]
+      summary: Stop the session's process tree; keep it listed to wake later.
+      description: >-
+        Writes the session's last screen and its hibernation record (no
+        secrets), sends `SIGTERM` to the process group and every descendant,
+        and `SIGKILL`s what is left after 5 s. The session stays listed under
+        the same id with `activity` `hibernated` and a `hibernation` object,
+        and a `session-hibernated` event is published. Only a session with a
+        known agent conversation can be hibernated: a bare Claude Code launch
+        (its id is the session id) or any agent started with `resume`.
+        Otherwise this is `409` with the reason, unless `allow_shell` is set,
+        in which case the session wakes as a fresh process in the same
+        directory. Agent-task runs are never hibernated. Hibernating a
+        hibernated session returns it unchanged. Body optional.
+      operationId: hibernateSession
+      x-capability: sessions
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/HibernateRequest" }
+      responses:
+        "200":
+          description: The hibernated session.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionSummary" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /api/sessions/{id}/wake:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+    post:
+      tags: [sessions]
+      summary: Start a hibernated session again, resuming its conversation.
+      description: >-
+        Respawns the session under the same id with the recorded command,
+        directory, model and environment, plus `resume` of its agent
+        conversation. It sends no brief prompt: the conversation has already
+        read its brief. `env` is set on top of the recorded environment.
+        The record holds no secrets, so this is how a caller gives the
+        session its credentials back. vogt-core's `session.wake` passes a
+        newly minted `VOGT_HTTP_TOKEN`. Waking a live session returns it
+        unchanged; a session that has exited is `409`. Publishes
+        `session-woken`. Body optional.
+      operationId: wakeSession
+      x-capability: sessions
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/WakeRequest" }
+      responses:
+        "200":
+          description: The live session.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionSummary" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /api/sessions/{id}/keep-awake:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+    post:
+      tags: [sessions]
+      summary: Pin a session awake, or unpin it.
+      description: >-
+        A pinned session (`keep_awake` on its summary) is never hibernated by
+        policy. Live or hibernated; the pin is kept in its record.
+      operationId: keepSessionAwake
+      x-capability: sessions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [keep_awake]
+              properties:
+                keep_awake: { type: boolean }
+      responses:
+        "200":
+          description: The session after the change.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionSummary" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/sessions/{id}/role:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+    post:
+      tags: [sessions]
+      summary: Nominate a session as oversight, or make it a worker again.
+      description: >-
+        WI-957. `oversight` marks a session that supervises the others; it is
+        also pinned awake (`keep_awake`), so a restart wakes it by itself.
+        `worker` clears the role; on a session that was oversight it also
+        lifts the pin oversight set, so the ordinary idle/hibernate policy
+        applies again (WI-1091). A worker pinned on its own keeps its pin.
+        Live or hibernated; the role is kept in the session's record.
+      operationId: setSessionRole
+      x-capability: sessions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [role]
+              properties:
+                role: { $ref: "#/components/schemas/SessionRole" }
+      responses:
+        "200":
+          description: The session after the change.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionSummary" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/sessions/{id}/work-item:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+    post:
+      tags: [sessions]
+      summary: Label a session with the work item it serves, or clear the label.
+      description: >-
+        WI-998. An opaque label (a ref such as `WI-7`), trimmed, at most 200
+        characters and free of control characters; `null` or blank clears it.
+        Live or hibernated; kept in the session's record and its History row,
+        so a wake keeps it and a resume from History can bind again. vogt-core's
+        audited `session.bind_work` is the way to set it; for a session the
+        core started, the core's row is the truth and this is its copy.
+      operationId: setSessionWorkItem
+      x-capability: sessions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [work_item]
+              properties:
+                work_item: { type: string, nullable: true, maxLength: 200 }
+      responses:
+        "200":
+          description: The session after the change.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionSummary" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/sessions/{id}/conversation:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+    post:
+      tags: [sessions]
+      summary: Link the agent conversation running in a session, or unlink it.
+      description: >-
+        WI-962. An agent CLI inside the session reports the conversation it
+        runs, so a `claude` typed by hand into a plain shell is linked to the
+        session: its record then holds the conversation, which makes the
+        session resumable (hibernated at shutdown, kept across a restart, woken
+        into the agent) and its History row shows it. `ended` unlinks the
+        conversation only while it is still the session's. A hibernating
+        session ignores both. Claude Code's hook
+        (`vogt-claude-session-hook`) normally reports through
+        `POST /api/agent-auth/conversation` instead, with the same body and
+        the session's own broker token in place of an engine credential.
+      operationId: reportSessionConversation
+      x-capability: sessions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [agent, id]
+              properties:
+                agent:
+                  type: string
+                  enum: [claude, codex, opencode]
+                id: { type: string, description: The agent CLI's conversation id. }
+                ended: { type: boolean, default: false }
+      responses:
+        "200":
+          description: The session after the report.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionSummary" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /api/sessions/{id}/grants:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+    get:
+      tags: [sessions]
+      summary: The person-approved grants a session holds now (WI-973).
+      description: >-
+        Names only, never a value. Expired grants are dropped. An operator's
+        read: the stack secret, the break-glass token or an admin-scoped token;
+        any other credential gets 403. A session lists its own with
+        `GET /api/agent-auth/grants` and its broker token.
+      operationId: listSessionGrants
+      x-capability: sessions
+      responses:
+        "200":
+          description: The session's live grants.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/SessionGrant" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [sessions]
+      summary: Hold a person-approved credential grant for a live session (WI-973).
+      description: >-
+        Accepted only from vogt-core's own identity (the stack secret), which
+        sends it once a person approved the grant. Every other credential is
+        refused with 403 even though it holds `sessions`. The session then
+        fetches the secret with `vogt-agent-auth fetch VAR` through the broker.
+      operationId: applySessionGrant
+      x-capability: sessions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SessionGrant" }
+      responses:
+        "200":
+          description: The grant as the engine holds it.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionGrant" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /api/sessions/{id}/grant-check:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+      - name: project_id
+        in: query
+        required: true
+        schema: { type: string }
+    get:
+      tags: [sessions]
+      summary: Whether an approved grant for a project could be held here (WI-4523). vogt-core only.
+      description: >-
+        Asked before a request reaches a person. `refusal` is the text
+        `POST .../grants` would refuse with, or null when the grant is allowed.
+      operationId: checkSessionGrant
+      x-capability: sessions
+      responses:
+        "200":
+          description: Whether the grant is grantable, and why not if it is not.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  project_id: { type: string }
+                  grantable: { type: boolean }
+                  refusal: { type: [string, "null"] }
+  /api/sessions/{id}/grants/{grant_id}:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+      - name: grant_id
+        in: path
+        required: true
+        schema: { type: string }
+    delete:
+      tags: [sessions]
+      summary: Revoke one grant at once (WI-973). vogt-core only.
+      operationId: revokeSessionGrant
+      x-capability: sessions
+      responses:
+        "200":
+          description: Whether the engine still held it; absence is the revoked state.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  revoked: { type: boolean }
+  /api/sessions/{id}/kill:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+    post:
+      tags: [sessions]
+      summary: SIGKILL the child; the session stays listed and readable.
+      description: >-
+        The stop is recorded first, with the optional `reason` and `by`.
+        The session then reads `alive` false and `activity` `stopped`, with
+        `stop` on its summary: a requested stop is not a crash (WI-913). Use
+        `DELETE` to forget it. A hibernated session has no process: killing
+        it forgets it, record and all.
+      operationId: killSession
+      x-capability: sessions
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: { type: string, description: Why; at most 500 characters are kept. }
+                by: { type: string, description: Who asked; vogt-core sends the caller's identity. }
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/sessions/{id}/input:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+    post:
+      tags: [sessions]
+      summary: Write bytes to the session's PTY stdin.
+      description: >-
+        `text` is written verbatim — control sequences included (Esc is
+        `\u001b`, Up `\u001b[A`, Ctrl-C `\u0003`, Enter `\r`). `submit`
+        appends `\r` after the text. At most 64 KiB of UTF-8 per request.
+        Not recorded in vogt-core's audit log (only the engine's own request
+        log line); agents should prefer the core's `session.input`, which is.
+        Never send a bare Enter without first reading `/screen`: an Enter at
+        an unexpected menu accepts whatever is highlighted. While a permission
+        prompt is showing, only a person's input is typed (WI-983; who counts
+        is as for `/answer`); anyone else's is refused with 403.
+      operationId: sessionInput
+      x-capability: sessions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SessionInput" }
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+        "400":
+          description: Over the 64 KiB cap, or malformed body.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: A permission prompt is showing and the caller is not a person; nothing was typed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500":
+          description: The write to the PTY failed (for example the child has exited).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /api/sessions/{id}/attach:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+    get:
+      tags: [sessions]
+      summary: WebSocket attach — live, bidirectional terminal stream.
+      description: >-
+        A WebSocket upgrade, outside the bearer middleware: the first text
+        frame must be `{"type":"auth","token":"…","resume_from"?:N,
+        "snapshot_tail_bytes"?:N}` and the token needs the `sessions`
+        capability. The server replies `snapshot-start` (with the PTY's
+        `cols`/`rows`), binary scrollback chunks, `snapshot-done`, then live
+        output, plus a `{"type":"resize","cols":N,"rows":N}` frame to every
+        attached socket whenever any client changes the PTY's size. Client binary frames (and
+        text frames that are not control messages) go to PTY stdin; control
+        frames are `resize` and `ping`. Close codes: 4408 no auth frame within
+        five seconds, 4401 bad auth, 4404 no such session. A hibernated
+        session replays its kept output, sends `{"type":"hibernated"}` after
+        `snapshot-done` and closes with 1000; attaching never wakes it. The full protocol
+        is in docs/ENGINE.md, "Attach protocol". Agents should not need it:
+        `/screen` and `/input` cover driving.
+      operationId: attachSession
+      security: []
+      responses:
+        "101":
+          description: Switching protocols to WebSocket.
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+      description: >-
+        A vogt-core token (API token, login session, or a coding session's
+        `VOGT_HTTP_TOKEN`), resolved through the core, or the engine's static
+        `ENGINE_TOKEN`. Core scopes map to engine capabilities: `admin` holds
+        all; `work.write`/`project.write` hold `sessions` among others; `read`
+        alone holds no session capability.
+  parameters:
+    SessionId:
+      name: id
+      in: path
+      required: true
+      description: The engine session UUID (not Vogt's `ses_…` id).
+      schema: { type: string, format: uuid }
+  responses:
+    Ok:
+      description: Done.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/OkResponse" }
+    BadRequest:
+      description: Malformed input.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: The engine holds no session with this id.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Conflict:
+      description: >-
+        The session is not in a state that allows this: for example, it is
+        hibernated (wake it first), it has exited, or it cannot be hibernated.
+        The error says which.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+  schemas:
+    SessionGrant:
+      type: object
+      required: [grant_id, var, project_id, secret_name, expires_at]
+      properties:
+        grant_id: { type: string, description: "vogt-core's grant id (grt_…)." }
+        var: { type: string, description: The name the session fetches it under. }
+        project_id: { type: string }
+        secret_name: { type: string }
+        uses: { type: string, enum: [once, ttl], default: once }
+        expires_at: { type: string, format: date-time }
+        reason:
+          type: string
+          default: ""
+          description: >-
+            Why it was asked for, as the requester wrote it and the approver
+            read it (at most 2000 characters). Untrusted text the session and
+            its permission classifier see; never a value.
+    OkResponse:
+      type: object
+      required: [ok]
+      properties:
+        ok: { type: boolean }
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+    ActivityState:
+      type: string
+      enum: [running, idle, waiting-for-input, awaiting-approval, exited, errored, hibernated, stopped]
+      description: >-
+        `hibernated`: the process tree was stopped to free memory, and the
+        session is kept so it can be woken (`POST /api/sessions/{id}/wake`).
+        `alive` is false. It is not finished: a wake resumes the same agent
+        conversation under the same id.
+        `exited` (code 0) and `errored` (non-zero or a signal) are terminal
+        facts: `alive` is false and the state never changes again. Three
+        live states are a heuristic over the last ~512 visible bytes:
+        `running` — output within the idle threshold; `idle` — quiet longer
+        than that; `waiting-for-input` — a recognised prompt pattern
+        (`[y/n]`, a password prompt, a numbered menu, a bare `❯`). The fourth,
+        `awaiting-approval`, overrides them: the rendered screen shows an agent
+        CLI's permission dialog (Claude Code's "Do you want to proceed?",
+        Codex's "Would you like to run the following command?") with a
+        numbered menu under it; `approval` says what it asks. Answer it — the
+        CLI may deny by itself when its countdown runs out.
+    SessionSummary:
+      type: object
+      required: [id, name, activity, alive]
+      properties:
+        id: { type: string, format: uuid, description: The engine session UUID. }
+        name: { type: string }
+        activity: { $ref: "#/components/schemas/ActivityState" }
+        exit_code:
+          type: [integer, "null"]
+          description: Set exactly when the child has exited.
+        alive:
+          type: boolean
+          description: True while the child runs; false exactly when `exit_code` is set.
+        scrollback_bytes: { type: integer }
+        cwd: { type: string }
+        command:
+          type: string
+          description: The explicit command, shell-quoted; absent for a default-shell session.
+        created_at: { type: string, format: date-time }
+        activity_changed_at:
+          type: string
+          format: date-time
+          description: When the current activity state began.
+        turn_started_at:
+          type: string
+          format: date-time
+          description: >-
+            When the current (or last) turn began: the last time the session
+            went `running` from `idle`/`waiting-for-input`, or its spawn. An
+            answered permission dialog continues the same turn. With
+            `last_output_at`, tells a long turn (output still arriving) from a
+            hung one. Absent from older engines.
+        last_output_at:
+          type: string
+          format: date-time
+          description: When the PTY last produced output; absent before the first byte.
+        approval: { $ref: "#/components/schemas/ApprovalPrompt" }
+        blocked: { $ref: "#/components/schemas/BlockedReport" }
+        conversation: { $ref: "#/components/schemas/AgentConversation" }
+        hibernation: { $ref: "#/components/schemas/Hibernation" }
+        keep_awake:
+          type: boolean
+          description: Pinned awake; absent when false.
+        autopilot:
+          type: boolean
+          description: >-
+            On autopilot (WI-949) — exempt from the idle policy and re-prompted
+            at its prompt until it prints `AUTOPILOT: DONE`; absent when false.
+        autopilot_nudges:
+          type: integer
+          description: How many times the engine has told it to carry on; absent when none.
+        role:
+          $ref: "#/components/schemas/SessionRole"
+        work_item:
+          type: string
+          description: The work item the session serves (WI-998); absent when bound to none.
+        resources: { $ref: "#/components/schemas/SessionResources" }
+        budget: { $ref: "#/components/schemas/SessionBudget" }
+        template:
+          type: string
+          description: The session template it was started from, by the name given; absent for an explicit command.
+        permission_mode:
+          type: string
+          enum: [accept-edits, bypass]
+          description: The permission posture when not the default (docs/ENGINE.md, "Permission posture").
+        account:
+          type: string
+          description: The named Claude Code account the session runs under, when one was named (docs/ENGINE.md, "Claude accounts").
+    SessionBudget:
+      type: object
+      description: >-
+        Limits on one session (WI-1245). A field absent or zero is not a limit.
+        The engine warns once at `ENGINE_BUDGET_SOFT_PCT` of a turn or context
+        limit and hibernates at the limit; `wall_clock_minutes` is hard only,
+        and only while one turn is running.
+      properties:
+        turns: { type: integer, minimum: 1 }
+        context_tokens: { type: integer, minimum: 1 }
+        wall_clock_minutes: { type: integer, minimum: 1 }
+    SessionResources:
+      type: object
+      required: [rss_bytes, cpu_pct, processes, sampled_at]
+      description: >-
+        The last sample of the session's process tree (the PTY child and
+        everything below it), taken every 10 s from /proc. This is visibility,
+        not a limit. Absent before the first sample, for a hibernated or
+        exited session, and off Linux.
+      properties:
+        rss_bytes: { type: integer, description: Resident memory summed over the tree. }
+        cpu_pct: { type: number, description: CPU over the last interval, percent of one core. }
+        processes: { type: integer }
+        sampled_at: { type: string, format: date-time }
+        over_threshold:
+          type: boolean
+          description: At or over ENGINE_SESSION_RSS_WARN; absent when false.
+    ApprovalOption:
+      type: object
+      required: [number, label]
+      properties:
+        number: { type: integer }
+        label: { type: string, description: As shown; untrusted terminal text. }
+        selected: { type: boolean, description: Where the highlight is. }
+    AgentConversation:
+      type: object
+      required: [agent, id]
+      description: >-
+        The agent conversation a session runs, when the engine knows its id:
+        the id it was resumed from, or the session id itself for a fresh
+        Claude Code launch. It is what a wake resumes.
+      properties:
+        agent: { type: string, enum: [claude, codex, opencode] }
+        id: { type: string }
+    Hibernation:
+      type: object
+      required: [at, trigger, resumable]
+      properties:
+        at: { type: string, format: date-time }
+        trigger:
+          type: string
+          enum: [manual, idle, memory, shutdown, recovered]
+          description: >-
+            `shutdown`: hibernated as the engine stopped. `recovered`: found
+            at boot without a process, because the engine stopped without the
+            chance to hibernate it.
+        reason: { type: string }
+        resumable:
+          type: boolean
+          description: False for a shell hibernated with `allow_shell`, which wakes fresh.
+    HibernateRequest:
+      type: object
+      properties:
+        reason: { type: string, description: At most 500 characters are kept. }
+        allow_shell: { type: boolean, default: false }
+    WakeRequest:
+      type: object
+      properties:
+        env:
+          type: array
+          description: "`[name, value]` pairs set on top of the recorded environment (at most 64)."
+          items:
+            type: array
+            items: { type: string }
+            minItems: 2
+            maxItems: 2
+        cols: { type: integer }
+        rows: { type: integer }
+        fresh_prompt:
+          type: string
+          maxLength: 65536
+          description: >-
+            Cold-wake compaction (WI-2037): do not resume the recorded
+            conversation; start a new one, under a new conversation id, whose
+            first prompt is this summary followed by the session directory's
+            git facts and the original brief. vogt-core sends it.
+    BlockedReport:
+      type: object
+      required: [reason, since]
+      description: An agent's own report that it cannot go on without a person. Untrusted text.
+      properties:
+        reason: { type: string }
+        items: { type: array, items: { type: string } }
+        since: { type: string, format: date-time }
+    SetBlocked:
+      type: object
+      required: [blocked]
+      properties:
+        blocked: { type: boolean }
+        reason: { type: string, description: Required when `blocked` is true. }
+        items: { type: array, items: { type: string } }
+    SessionWait:
+      type: object
+      required: [outcome, matched, waited_ms, screen]
+      properties:
+        outcome:
+          type: string
+          enum: [ready, awaiting-approval, blocked, exited, changed, timeout]
+        matched:
+          type: boolean
+          description: The outcome is what `until` asked for.
+        waited_ms: { type: integer }
+        screen: { $ref: "#/components/schemas/SessionScreen" }
+    ApprovalPrompt:
+      type: object
+      required: [question, command_excerpt, detected_at]
+      description: >-
+        A permission dialog read off the rendered screen and the scrollback
+        above it. Present only while `activity` is `awaiting-approval`.
+        Terminal output: untrusted data.
+      properties:
+        question: { type: string, description: The dialog's question line. }
+        kind:
+          type: string
+          enum: [permission, folder-trust, external-imports, read-outside-cwd]
+          description: A tool-call permission dialog, or one of Claude Code's startup gates.
+        options:
+          type: array
+          items: { $ref: "#/components/schemas/ApprovalOption" }
+          description: The menu, in order. Answer with POST /api/sessions/{id}/answer.
+        command_excerpt:
+          type: string
+          description: >-
+            What it asks about — the command, edit or tool call — with box
+            borders stripped, including lines that scrolled above the screen.
+            At most ~4000 characters.
+        deadline_seconds:
+          type: integer
+          description: Seconds before the CLI denies by itself, computed at read time; absent without a countdown.
+        deadline_at:
+          type: string
+          format: date-time
+          description: When that countdown runs out, from the first sighting.
+        detected_at: { type: string, format: date-time }
+    SessionDetail:
+      type: object
+      required: [summary, scrollback_pos, scrollback_base64]
+      properties:
+        summary: { $ref: "#/components/schemas/SessionSummary" }
+        scrollback_pos:
+          type: integer
+          description: Absolute end position of the scrollback stream.
+        scrollback_base64:
+          type: string
+          contentEncoding: base64
+          description: The raw scrollback (or its tail), escapes included.
+    SessionScreen:
+      type: object
+      required: [id, cols, rows, lines, cursor, title, activity, alive, ready]
+      properties:
+        id: { type: string, format: uuid }
+        cols: { type: integer }
+        rows: { type: integer }
+        lines:
+          type: array
+          items: { type: string }
+          description: The visible rows top to bottom, trailing spaces trimmed; exactly `rows` entries.
+        cursor:
+          type: object
+          required: [row, col]
+          properties:
+            row: { type: integer, description: Zero-based. }
+            col: { type: integer, description: Zero-based. }
+        title:
+          type: [string, "null"]
+          description: The last window title the program set (OSC 0/2).
+        activity: { $ref: "#/components/schemas/ActivityState" }
+        alive: { type: boolean }
+        ready:
+          type: boolean
+          description: >-
+            The program is waiting for input: alive, and either `activity` is
+            `waiting-for-input`, or it is `idle` and one of the lowest ten
+            non-blank lines (box border stripped) starts with a prompt glyph
+            (`>`, `❯`, `›`, `>>>`). Never true while `running` or
+            `awaiting-approval` (typing there answers the dialog).
+        scrollback:
+          type: array
+          items: { type: string }
+          description: Lines above the screen, oldest first; present only when `scrollback_lines` asked.
+        turn_started_at: { type: string, format: date-time, description: As on SessionSummary. }
+        last_output_at: { type: string, format: date-time, description: As on SessionSummary. }
+        approval: { $ref: "#/components/schemas/ApprovalPrompt" }
+        blocked: { $ref: "#/components/schemas/BlockedReport" }
+    SessionRole:
+      type: string
+      enum: [worker, oversight]
+      description: >-
+        What a session is for (WI-957). `oversight` is a session nominated to
+        supervise the others: pinned awake and listed first by the PWA.
+        Absent means `worker`.
+    SessionSpec:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          description: Trimmed; non-empty, at most 256 bytes. Need not be unique.
+        command:
+          type: array
+          items: { type: string }
+          description: argv. Omitted means the configured default shell (or `template`).
+        template:
+          type: string
+          description: >-
+            A configured session template, by name (case-insensitive) or tag
+            (an `agent`-tagged template wins an ambiguous tag). Ignored when
+            `command` is given; an unknown name is 400.
+        placement:
+          type: string
+          enum: [host, pod, auto]
+          description: >-
+            Where the session runs. `host` and `pod` must be available for the
+            template; `auto` (and an omitted value) uses the template's default
+            placement. Codex is pod-only, so `host` is refused for it.
+        cwd:
+          type: string
+          description: Resolved against the workspace root; escaping it is 400.
+        env:
+          type: array
+          description: Extra environment, applied last (overrides engine defaults such as VOGT_ENGINE_URL).
+          items:
+            type: array
+            prefixItems:
+              - { type: string }
+              - { type: string }
+            minItems: 2
+            maxItems: 2
+        prompt:
+          type: string
+          description: >-
+            The brief. Written to `state_dir/agent-task-prompts/sessions/<id>.md`;
+            the child gets the path as `VOGT_ENGINE_AGENT_TASK_PROMPT_FILE`.
+            Empty or whitespace means no file.
+        model:
+          type: string
+          description: Model id for the agent CLI in `command`; refused for a command with no mapping.
+        effort:
+          type: string
+          description: Reasoning effort for the agent CLI; refused for `opencode` and unmapped commands.
+        resume:
+          type: string
+          pattern: "^[A-Za-z0-9_.][A-Za-z0-9_.-]{0,127}$"
+          description: >-
+            The agent CLI's own conversation id to continue (`claude --resume`,
+            `codex resume`, `opencode --session`). A fresh Claude Code session
+            the engine started has its engine session id as its conversation id.
+            For `claude` and `codex` the session starts in the directory the
+            conversation's transcript records, when that is inside the
+            workspace, instead of `cwd`.
+        account:
+          type: string
+          pattern: "^[a-z0-9][a-z0-9_-]{0,31}$"
+          description: >-
+            Run under a named Claude Code account from
+            `ENGINE_AGENT_CLAUDE_ACCOUNTS`; the engine sets that account's
+            `CLAUDE_CONFIG_DIR`. Refused (`400`) for an unknown name or a
+            command that is not Claude Code. Kept in the hibernation record.
+        role:
+          $ref: "#/components/schemas/SessionRole"
+        work_item:
+          type: string
+          maxLength: 200
+          description: >-
+            The work item the session serves (WI-998), as an opaque label kept
+            with the record and reported on the summary.
+        autopilot:
+          type: boolean
+          default: false
+          description: >-
+            Keep the agent working unattended (WI-949): exempt from the idle
+            hibernation trigger, and re-prompted when it stops at its prompt
+            without reporting itself blocked, until it prints a line reading
+            `AUTOPILOT: DONE` or `ENGINE_AUTOPILOT_MAX_NUDGES` is reached. Kept
+            in the hibernation record.
+        cols: { type: integer }
+        rows: { type: integer }
+        scrollback_bytes: { type: integer }
+        budget:
+          $ref: "#/components/schemas/SessionBudget"
+          description: >-
+            Limits enforced on this session. An empty object sets none. Kept in
+            the hibernation record and restored on wake.
+    SessionInput:
+      type: object
+      required: [text]
+      properties:
+        text:
+          type: string
+          description: Written verbatim; at most 64 KiB of UTF-8. May be empty with `submit`.
+        submit:
+          type: boolean
+          default: false
+          description: Append `\r` (press Enter) after `text`.
+        person:
+          type: boolean
+          description: >-
+            Whether a person is behind this input (WI-983), as for
+            `/answer`; matters only while a permission prompt is showing.
+    SessionEvent:
+      description: The session-related `ServerEvent` variants, tagged by `type`.
+      oneOf:
+        - type: object
+          required: [type, id, name]
+          properties:
+            type: { const: session-created }
+            id: { type: string, format: uuid }
+            name: { type: string }
+        - type: object
+          required: [type, id, name]
+          properties:
+            type: { const: session-renamed }
+            id: { type: string, format: uuid }
+            name: { type: string }
+        - type: object
+          required: [type, id]
+          description: >-
+            The child has exited, however it ended (its own exit, a kill, a
+            delete), published once its last output is in the scrollback.
+          properties:
+            type: { const: session-killed }
+            id: { type: string, format: uuid }
+            exit_code: { type: [integer, "null"] }
+        - type: object
+          required: [type, id, state]
+          properties:
+            type: { const: activity }
+            id: { type: string, format: uuid }
+            state: { $ref: "#/components/schemas/ActivityState" }
+            activity_changed_at: { type: string, format: date-time }
+            approval: { $ref: "#/components/schemas/ApprovalPrompt" }
+            turn_started_at: { type: string, format: date-time }
+        - type: object
+          required: [type, id]
+          description: The agent reported itself blocked (`blocked` set) or cleared it (absent).
+          properties:
+            type: { const: session-blocked }
+            id: { type: string, format: uuid }
+            blocked: { $ref: "#/components/schemas/BlockedReport" }
+    AuthCheck:
+      type: object
+      required: [ok, version, product_version, storage, identity]
+      properties:
+        ok: { type: boolean }
+        version: { type: string }
+        product_version: { type: string }
+        storage:
+          type: object
+          properties:
+            state_dir: { type: string }
+            workspace_root: { type: string }
+        identity:
+          type: object
+          required: [name, scopes, capabilities]
+          properties:
+            name:
+              type: string
+              description: The core actor's identity_ref, or `primary` / `vogt-core` for the static credentials.
+            scopes:
+              type: array
+              items: { type: string }
+            capabilities:
+              type: array
+              items: { type: string }
+              description: Engine capabilities, e.g. `sessions`, `filesystem-write`.
+    Readiness:
+      type: object
+      required: [ok, checks]
+      properties:
+        ok: { type: boolean }
+        checks:
+          type: array
+          items:
+            type: object
+            properties:
+              name: { type: string }
+              ok: { type: boolean }
+              detail: { type: string }
+              fatal: { type: boolean }

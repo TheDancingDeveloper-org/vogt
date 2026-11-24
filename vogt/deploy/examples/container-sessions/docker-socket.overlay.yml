@@ -1,0 +1,44 @@
+# Overlay that lets terminal sessions run in your own container images
+# ("bring your own image", per-session). It layers onto the public base
+# `deploy/stack.compose.yml`.
+#
+#   cd deploy/examples/container-sessions
+#   openssl rand -hex 32 > vogt-core-token
+#   # in .env: ENGINE_TOKEN, COMPOSE_PROJECT_NAME=vogt,
+#   #          DOCKER_GID=$(getent group docker | cut -d: -f3)
+#   docker compose --project-directory . \
+#     -f ../../stack.compose.yml -f docker-socket.overlay.yml up -d --wait
+#
+# ── SECURITY ────────────────────────────────────────────────────────────────
+# Mounting the host Docker socket gives the pod control of the host's Docker
+# daemon, which is **root-equivalent on the host**. Only do this where you would
+# already trust whoever can open a terminal in the pod. It is an opt-in overlay
+# and never part of the base.
+
+services:
+  vogt:
+    volumes:
+      # The host Docker daemon, so a session can `docker run` its own image.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # The engine config carrying the container session templates, read at
+      # ENGINE_CONFIG below. Relative to --project-directory (this folder).
+      - ./engine.container-sessions.toml:/run/vogt/engine.toml:ro
+      # Put the Working tree on a NAMED volume. The stack image declares an
+      # anonymous `VOLUME /home/sprooty/Working`, which otherwise lands the work
+      # tree on a random volume that no session container can mount by name (and
+      # that a `docker compose down` orphans). An explicit named mount at the
+      # exact path overrides that anonymous volume, so the tree is stable,
+      # persisted, and shareable into session containers as `vogt_vogt-work`.
+      - vogt-work:/home/sprooty/Working
+    environment:
+      # Adds the session templates in the mounted file. NOTE: providing
+      # session_templates there replaces the built-in ones — see the .toml.
+      ENGINE_CONFIG: /run/vogt/engine.toml
+    # The socket is owned by the host's `docker` group; add the pod user to that
+    # gid so `docker` works without sudo. Find it with:
+    #   getent group docker | cut -d: -f3
+    group_add:
+      - "${DOCKER_GID:?Set DOCKER_GID (getent group docker | cut -d: -f3) in .env}"
+
+volumes:
+  vogt-work:

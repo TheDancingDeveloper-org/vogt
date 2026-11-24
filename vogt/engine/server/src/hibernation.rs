@@ -1,0 +1,810 @@
+//! What the engine keeps about a session so it can stop its processes and
+//! start it again later: the hibernation record (WI-912).
+//!
+//! An idle agent session holds a few hundred MiB in its CLI and MCP servers,
+//! while everything needed to continue it — the conversation — is already on
+//! disk in the agent CLI's own transcript. A record here is the rest: the
+//! command, directory, environment and conversation id to resume, plus the
+//! last screen to show while nothing is running.
+//!
+//! Three rules:
+//!
+//! **Written ahead, at spawn.** A session that can be hibernated has a record
+//! from the moment it starts, so an engine that is SIGKILLed — a redeploy
+//! whose grace ran out, a crash — still leaves behind the list of sessions it
+//! was running. At boot every record without a process is a hibernated
+//! session (`trigger: recovered`); nothing has to be reconstructed by hand
+//! from transcripts.
+//!
+//! **No secret is ever written.** Variables `pty::is_secret_env` matches
+//! (`VOGT_HTTP_TOKEN`, broker tokens, anything named like a token, secret,
+//! password or API key) are dropped before the record is written. A woken
+//! session gets a fresh broker grant from the engine and, through
+//! `POST /api/sessions/{id}/wake`'s `env`, whatever credential its caller
+//! mints for it.
+//!
+//! **Files, one per session, replaced atomically.** `state_dir/sessions/
+//! <uuid>.json` (mode 0600) and, while hibernated, `<uuid>.screen` holding
+//! the raw tail of its output. A torn write leaves the previous version.
+
+use std::{
+    io::Write,
+    path::{Path, PathBuf},
+    time::Duration,
+};
+
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+use vogt_engine_contract::{AgentConversation, Hibernation, SessionPolicy, SessionRole};
+
+/// How much of a session's output is kept to show while it is hibernated.
+/// Enough to render the screen and a few hundred lines above it.
+pub const SCREEN_BYTES: usize = 256 * 1024;
+
+/// How long a hibernating agent is given to exit on `SIGTERM` — to flush its
+/// transcript — before its process group is killed.
+pub const STOP_GRACE: Duration = Duration::from_secs(5);
+
+const RECORD_VERSION: u32 = 1;
+
+/// Everything needed to start a session again, and, while it is hibernated,
+/// when and why it stopped.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Record {
+    pub version: u32,
+    pub id: Uuid,
+    pub name: String,
+    /// RFC 3339; when the session was first created. Kept across wakes.
+    pub created_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
+    /// The requested placement from the first start. An explicit placement
+    /// must survive hibernation so a wake does not silently move the session
+    /// to the template's current default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<String>,
+    /// The command as the template expanded it, before the engine added
+    /// model, resume, session-id or brief arguments: a wake adds its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    /// The template's and caller's environment, secrets removed.
+    #[serde(default)]
+    pub env: Vec<(String, String)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    /// The permission posture it was started with, kept so a wake does not
+    /// quietly change it (WI-926).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<String>,
+    /// The posture the agent's own screen showed when it was last hibernated
+    /// (WI-2252): `bypass`, `accept-edits`, `auto` or `plan`, read from
+    /// Claude Code's footer. It covers a posture a person changed after the
+    /// start (Shift+Tab) or typed into a plain shell. Never replayed: the
+    /// screen is the agent's to draw, so it only lets a wake say that a
+    /// bypass was lost (`posture_lost_on_resume`), never grant one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_permission_mode: Option<String>,
+    /// The Claude Code account it was started under; a wake keeps it, and its
+    /// `CLAUDE_CONFIG_DIR` rides in `env`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+    /// The launch posture actually applied at the first start (WI-1250): the
+    /// driven-session settings file, and every extra directory the agent was
+    /// given. A wake replays these instead of reading the deployment's current
+    /// config or dropping them because the wake has no new brief. Absent on a
+    /// record written before this field existed; a wake of one falls back to
+    /// the deployment's current settings and adds no directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings_file: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub add_dirs: Vec<PathBuf>,
+    /// The MCP set the first start asked for (WI-2740); a wake keeps it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_set: Option<String>,
+    /// The worker set's extra servers the first start asked for (WI-2746).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mcp_extra: Vec<String>,
+    /// What a wake resumes. `None` only for a shell hibernated on request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation: Option<AgentConversation>,
+    /// The brief the engine wrote at the first start, if any. A wake points
+    /// the session at it again (the variable) but never re-sends it as a
+    /// first prompt: the resumed conversation has already read it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brief_file: Option<PathBuf>,
+    #[serde(default)]
+    pub keep_awake: bool,
+    /// On autopilot (WI-949); a wake keeps it on.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub autopilot: bool,
+    /// When the agent last declared itself done under autopilot (WI-1518); a
+    /// wake keeps it until the next turn starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub done_at: Option<String>,
+    /// The project policy it enforces (WI-1243); a wake keeps it. Absent on a
+    /// record written before the field existed, which wakes without one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<SessionPolicy>,
+    /// The project source a pod-backed session checked out (WI-3369); a wake
+    /// keeps it. Absent means the deployment's default source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<vogt_engine_contract::source::SourceDescriptor>,
+    /// The budget the session was started with (WI-1245); a wake keeps it,
+    /// and the two flags with it, so a warning already given is not given
+    /// again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<vogt_engine_contract::SessionBudget>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub budget_soft_sent: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub budget_hard_done: bool,
+    /// Seconds of running the whole-session wall clock had counted (WI-1281);
+    /// a wake resumes from here rather than from nothing.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub budget_session_secs: u64,
+    /// What the session is for (WI-957); a wake keeps it.
+    #[serde(default, skip_serializing_if = "SessionRole::is_worker")]
+    pub role: SessionRole,
+    /// The work item it serves (WI-998); a wake and a redeploy keep it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_item: Option<String>,
+    /// The session that started it (WI-1521); a wake keeps it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supervisor: Option<uuid::Uuid>,
+    /// Change kinds that wake it as an overseer (WI-1521); a wake keeps them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wake_on: Vec<String>,
+    /// The core's own session id (WI-4124); a wake keeps it so the replacement
+    /// graft token is bound to the same session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_ref: Option<String>,
+    /// Its git tree and the baseline taken at the first start (WI-1324); a
+    /// wake reuses it rather than taking the baseline again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<vogt_engine_contract::Workspace>,
+    /// The session this one's work was handed to (WI-1251): an engine session
+    /// id. Kept on the record itself, so a forced wake does not forget it and
+    /// the next hibernation still says who replaced it. A wake is refused
+    /// while it is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<String>,
+    /// Set while hibernated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hibernation: Option<Hibernation>,
+    /// The last archive of the pod's uncommitted work, so a hibernated
+    /// session still shows where it was kept (WI-4132).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub salvage: Option<vogt_engine_contract::salvage::SalvageReport>,
+    /// The latest economics snapshot, as JSON (WI-1245). Kept so removing a
+    /// hibernated session can record its cost once; nothing reads it back
+    /// onto a summary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub economics: Option<String>,
+    /// Bytes of the kept screen at hibernation (WI-2692). A rail list reads
+    /// this instead of the screen file. Absent on a record written before
+    /// the field existed; the list then uses the file's metadata length,
+    /// never its contents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screen_len: Option<u64>,
+    /// The terminal size at hibernation, to render the kept screen with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rows: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cols: Option<u16>,
+    /// The blocked report the session carried when it was hibernated (C4).
+    /// A wake puts it back on the session, and a restart lists it again.
+    /// Absent on a record written before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked: Option<vogt_engine_contract::BlockedReport>,
+    /// Set only for the length of a compacting wake (WI-2037): the id the
+    /// new conversation is pinned to, so it does not collide with the one
+    /// it replaces. Never written.
+    #[serde(skip)]
+    pub fresh_conversation: Option<Uuid>,
+    /// The conversation a wake could not resume because its transcript was
+    /// gone (GH #1466). The session started a new conversation instead, said
+    /// so on its screen, and raised an Inbox item.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_lost: Option<vogt_engine_contract::AgentConversation>,
+}
+
+/// Whether a woken session lost the bypass it showed before it slept
+/// (WI-2252): its screen said `bypass` and the posture the wake replays, the
+/// one a person gave at the start, is not.
+pub fn posture_lost(observed: Option<&str>, granted: Option<&str>) -> bool {
+    observed == Some("bypass") && granted != Some("bypass")
+}
+
+/// The posture a hibernation records as seen (WI-2252): what the screen
+/// shows now, except that a session woken without its bypass, and not given
+/// it back since, keeps the bypass it had before. Otherwise a second
+/// hibernation would read the worker posture off the screen and the loss
+/// would stop being said.
+pub fn observed_posture(
+    previous: Option<&str>,
+    still_lost: bool,
+    shown: Option<&str>,
+) -> Option<String> {
+    if still_lost && shown != Some("bypass") {
+        return previous.map(str::to_string);
+    }
+    shown.map(str::to_string)
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
+}
+
+impl Record {
+    pub fn new(id: Uuid, name: String, created_at: String) -> Self {
+        Self {
+            version: RECORD_VERSION,
+            id,
+            name,
+            created_at,
+            template: None,
+            placement: None,
+            command: None,
+            cwd: None,
+            env: Vec::new(),
+            model: None,
+            screen_len: None,
+            effort: None,
+            permission_mode: None,
+            observed_permission_mode: None,
+            account: None,
+            settings_file: None,
+            add_dirs: Vec::new(),
+            mcp_set: None,
+            mcp_extra: Vec::new(),
+            conversation: None,
+            brief_file: None,
+            keep_awake: false,
+            autopilot: false,
+            done_at: None,
+            policy: None,
+            source: None,
+            budget: None,
+            budget_soft_sent: false,
+            budget_hard_done: false,
+            budget_session_secs: 0,
+            role: SessionRole::Worker,
+            work_item: None,
+            supervisor: None,
+            wake_on: Vec::new(),
+            session_ref: None,
+            workspace: None,
+            superseded_by: None,
+            hibernation: None,
+            salvage: None,
+            economics: None,
+            rows: None,
+            cols: None,
+            blocked: None,
+            fresh_conversation: None,
+            conversation_lost: None,
+        }
+    }
+}
+
+/// The environment worth keeping: everything but credentials.
+pub fn without_secrets(env: &[(String, String)]) -> Vec<(String, String)> {
+    env.iter()
+        .filter(|(k, _)| !crate::pty::is_secret_env(k))
+        .cloned()
+        .collect()
+}
+
+/// Where the records live.
+pub fn dir(state_dir: &Path) -> PathBuf {
+    state_dir.join("sessions")
+}
+
+// Path safety: every file name here is built from a parsed `Uuid`, whose
+// textual form is 36 characters of hex digits and dashes — no separator, no
+// `..` — joined onto the engine's own configured `state_dir`. CodeQL's
+// `rust/path-injection` reads the route's `{id}` as a user-provided path and
+// cannot model the `Uuid` parse as the barrier it is (see the same note in
+// `workspace_path.rs`).
+fn record_path(state_dir: &Path, id: Uuid) -> PathBuf {
+    dir(state_dir).join(format!("{id}.json"))
+}
+
+fn screen_path(state_dir: &Path, id: Uuid) -> PathBuf {
+    dir(state_dir).join(format!("{id}.screen"))
+}
+
+/// A pod opencode's last assistant replies, as its agent sent them (WI-4291).
+fn replies_path(state_dir: &Path, id: Uuid) -> PathBuf {
+    dir(state_dir).join(format!("{id}.replies"))
+}
+
+/// The program's last OSC 7501 report, kept while its process runs so an
+/// engine restart that adopts the process can restore it (WI-4499).
+fn reported_path(state_dir: &Path, id: Uuid) -> PathBuf {
+    dir(state_dir).join(format!("{id}.reported"))
+}
+
+/// Replace `path` with `bytes`: written to a sibling temp file (0600) and
+/// renamed over it, so a reader sees the old or the new, never a torn one.
+fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let tmp = parent.join(format!(
+        ".{}.{}.tmp",
+        path.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        Uuid::new_v4()
+    ));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let result = (|| {
+        let mut file = options.open(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        std::fs::rename(&tmp, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
+pub fn write(state_dir: &Path, record: &Record) -> std::io::Result<()> {
+    let json = serde_json::to_vec_pretty(record).map_err(std::io::Error::other)?;
+    write_atomic(&record_path(state_dir, record.id), &json)
+}
+
+pub fn write_screen(state_dir: &Path, id: Uuid, bytes: &[u8]) -> std::io::Result<()> {
+    write_atomic(&screen_path(state_dir, id), bytes)
+}
+
+/// The kept output of a hibernated session; empty when there is none.
+/// The rail list must not call this: it uses [`screen_metadata_len`].
+pub fn read_screen(state_dir: &Path, id: Uuid) -> Vec<u8> {
+    std::fs::read(screen_path(state_dir, id)).unwrap_or_default()
+}
+
+/// The screen file's length, or zero when there is no file. Never reads
+/// the bytes (WI-2692).
+pub fn screen_metadata_len(state_dir: &Path, id: Uuid) -> u64 {
+    std::fs::metadata(screen_path(state_dir, id))
+        .map(|m| m.len())
+        .unwrap_or(0)
+}
+
+pub fn remove_screen(state_dir: &Path, id: Uuid) {
+    let _ = std::fs::remove_file(screen_path(state_dir, id));
+}
+
+pub fn write_replies(state_dir: &Path, id: Uuid, bytes: &[u8]) -> std::io::Result<()> {
+    write_atomic(&replies_path(state_dir, id), bytes)
+}
+
+/// A pod session's kept replies, when it has any.
+pub fn read_replies(state_dir: &Path, id: Uuid) -> Option<Vec<u8>> {
+    std::fs::read(replies_path(state_dir, id)).ok()
+}
+
+pub fn write_reported(
+    state_dir: &Path,
+    id: Uuid,
+    status: &vogt_engine_contract::ReportedStatus,
+) -> std::io::Result<()> {
+    let json = serde_json::to_vec(status).map_err(std::io::Error::other)?;
+    write_atomic(&reported_path(state_dir, id), &json)
+}
+
+/// The kept OSC 7501 report, when there is a readable one.
+pub fn read_reported(state_dir: &Path, id: Uuid) -> Option<vogt_engine_contract::ReportedStatus> {
+    let bytes = std::fs::read(reported_path(state_dir, id)).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+pub fn remove_reported(state_dir: &Path, id: Uuid) {
+    let _ = std::fs::remove_file(reported_path(state_dir, id));
+}
+
+/// Forget a session: its record, its kept screen, replies and report.
+pub fn remove(state_dir: &Path, id: Uuid) {
+    let _ = std::fs::remove_file(record_path(state_dir, id));
+    remove_screen(state_dir, id);
+    let _ = std::fs::remove_file(replies_path(state_dir, id));
+    remove_reported(state_dir, id);
+}
+
+/// Every readable record. One that cannot be parsed is logged and left in
+/// place for a person to look at, never deleted.
+pub fn load_all(state_dir: &Path) -> Vec<Record> {
+    let Ok(entries) = std::fs::read_dir(dir(state_dir)) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let parsed = std::fs::read(&path)
+            .map_err(|e| e.to_string())
+            .and_then(|bytes| serde_json::from_slice::<Record>(&bytes).map_err(|e| e.to_string()));
+        match parsed {
+            Ok(record) if record.version != RECORD_VERSION => {
+                tracing::warn!(
+                    path = %path.display(),
+                    found = record.version,
+                    supported = RECORD_VERSION,
+                    "session record has an unsupported version (written by a newer or unknown engine); ignored and left in place"
+                );
+            }
+            Ok(record)
+                if path.file_stem().and_then(|s| s.to_str())
+                    == Some(record.id.to_string().as_str()) =>
+            {
+                out.push(record)
+            }
+            Ok(_) => {
+                tracing::warn!(path = %path.display(), "session record names another id; ignored")
+            }
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "unreadable session record; ignored")
+            }
+        }
+    }
+    out
+}
+
+/// Every process below `root` (not `root` itself), found by walking
+/// `/proc/*/stat` parent links. Taken *before* anything is signalled: once a
+/// parent dies its children are re-parented and the tree can no longer be
+/// read. Empty off Linux.
+pub fn descendants(root: u32) -> Vec<u32> {
+    #[cfg(target_os = "linux")]
+    {
+        let mut parent_of: Vec<(u32, u32)> = Vec::new();
+        if let Ok(entries) = std::fs::read_dir("/proc") {
+            for entry in entries.flatten() {
+                let Some(pid) = entry
+                    .file_name()
+                    .to_str()
+                    .and_then(|s| s.parse::<u32>().ok())
+                else {
+                    continue;
+                };
+                if let Some(ppid) = parent_pid(pid) {
+                    parent_of.push((pid, ppid));
+                }
+            }
+        }
+        let mut found = Vec::new();
+        let mut frontier = vec![root];
+        while let Some(parent) = frontier.pop() {
+            for &(pid, ppid) in &parent_of {
+                if ppid == parent && pid != root && !found.contains(&pid) {
+                    found.push(pid);
+                    frontier.push(pid);
+                }
+            }
+        }
+        found
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = root;
+        Vec::new()
+    }
+}
+
+/// The parent of `pid` from `/proc/<pid>/stat`, whose second field (the
+/// command name, in parentheses) may itself contain spaces and parentheses —
+/// so the fields are read after the *last* `)`.
+#[cfg(target_os = "linux")]
+fn parent_pid(pid: u32) -> Option<u32> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let rest = &stat[stat.rfind(')')? + 1..];
+    let mut fields = rest.split_whitespace();
+    let _state = fields.next()?;
+    fields.next()?.parse().ok()
+}
+
+/// The command name of `pid` (`/proc/<pid>/comm`), if it still exists.
+pub fn process_name(pid: u32) -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_to_string(format!("/proc/{pid}/comm"))
+            .ok()
+            .map(|s| s.trim().to_string())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
+fn signal(pid: i32, sig: i32) {
+    #[cfg(unix)]
+    unsafe {
+        // ESRCH (already gone) is the expected outcome for most of these.
+        let _ = libc::kill(pid, sig);
+    }
+}
+
+/// Stop a session's whole process tree: `SIGTERM` to the child's process
+/// group (the PTY child is a session leader, so its group is its pid) and to
+/// every descendant found beforehand — a CLI's MCP servers and tool shells
+/// may sit in groups of their own — then, after `grace` or as soon as
+/// `exited()` says the child is gone and nothing else is left, `SIGKILL` to
+/// whatever remains.
+///
+/// The plain kill route signals the child pid alone, which leaves MCP
+/// servers running orphaned; hibernation exists to free that memory, so it
+/// takes the tree.
+pub async fn stop_tree(pid: u32, grace: Duration, exited: impl Fn() -> bool) {
+    let tree = descendants(pid);
+    let group = -(pid as i32);
+    #[cfg(unix)]
+    {
+        signal(group, libc::SIGTERM);
+        for &p in &tree {
+            signal(p as i32, libc::SIGTERM);
+        }
+    }
+    let deadline = tokio::time::Instant::now() + grace;
+    while tokio::time::Instant::now() < deadline {
+        if exited() && tree.iter().all(|&p| !alive(p)) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    #[cfg(unix)]
+    {
+        signal(group, libc::SIGKILL);
+        signal(pid as i32, libc::SIGKILL);
+        for &p in &tree {
+            signal(p as i32, libc::SIGKILL);
+        }
+    }
+}
+
+/// `SIGKILL` to `pid`'s process group, `pid`, and every pid in `tree` (taken
+/// with [`descendants`] before the leader was signalled). For a stop that must
+/// leave nothing running in the session's directory (WI-1304).
+pub fn kill_tree(pid: u32, tree: &[u32]) {
+    #[cfg(unix)]
+    {
+        signal(-(pid as i32), libc::SIGKILL);
+        signal(pid as i32, libc::SIGKILL);
+        for &p in tree {
+            signal(p as i32, libc::SIGKILL);
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (pid, tree);
+    }
+}
+
+/// Whether `pid` is a process that can still run: present and not a zombie.
+/// A zombie has stopped writing anywhere; only its exit status is left.
+/// Off Linux this cannot be told apart, so any process that exists counts.
+pub fn running(pid: u32) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            return exists(pid);
+        };
+        let Some(close) = stat.rfind(')') else {
+            return true;
+        };
+        !matches!(
+            stat[close + 1..].split_whitespace().next(),
+            Some("Z") | Some("X") | Some("x")
+        )
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        exists(pid)
+    }
+}
+
+/// Whether `pid` exists at all. `EPERM` means it exists but is not ours,
+/// which still counts.
+fn exists(pid: u32) -> bool {
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(pid as i32, 0) == 0
+            || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        true
+    }
+}
+
+fn alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(pid as i32, 0) == 0
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_bypass_seen_and_not_granted_is_lost() {
+        assert!(posture_lost(Some("bypass"), None));
+        assert!(posture_lost(Some("bypass"), Some("accept-edits")));
+        assert!(!posture_lost(Some("bypass"), Some("bypass")));
+        assert!(!posture_lost(Some("auto"), None));
+        assert!(!posture_lost(None, None));
+    }
+
+    #[test]
+    fn a_lost_bypass_is_remembered_until_the_screen_shows_it_again() {
+        assert_eq!(
+            observed_posture(None, false, Some("bypass")).as_deref(),
+            Some("bypass")
+        );
+        assert_eq!(
+            observed_posture(Some("bypass"), false, Some("auto")).as_deref(),
+            Some("auto")
+        );
+        assert_eq!(
+            observed_posture(Some("bypass"), true, Some("auto")).as_deref(),
+            Some("bypass")
+        );
+        assert_eq!(
+            observed_posture(Some("bypass"), true, None).as_deref(),
+            Some("bypass")
+        );
+        assert_eq!(
+            observed_posture(Some("bypass"), true, Some("bypass")).as_deref(),
+            Some("bypass")
+        );
+    }
+
+    #[test]
+    fn a_record_round_trips_and_never_holds_a_secret() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = Uuid::new_v4();
+        let mut record = Record::new(id, "agent".into(), "2026-10-05T00:00:00Z".into());
+        record.env = without_secrets(&[
+            ("VOGT_HTTP_TOKEN".into(), "sekrit".into()),
+            ("VOGT_SESSION_ID".into(), "ses_1".into()),
+            ("OPENAI_API_KEY".into(), "sk".into()),
+        ]);
+        record.conversation = Some(AgentConversation {
+            agent: "claude".into(),
+            id: id.to_string(),
+        });
+        write(dir.path(), &record).unwrap();
+        let text = std::fs::read_to_string(dir.path().join("sessions").join(format!("{id}.json")))
+            .unwrap();
+        assert!(
+            !text.contains("sekrit") && !text.contains("\"sk\""),
+            "{text}"
+        );
+        let loaded = load_all(dir.path());
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(
+            loaded[0].env,
+            vec![("VOGT_SESSION_ID".to_string(), "ses_1".to_string())]
+        );
+        assert_eq!(loaded[0].conversation, record.conversation);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(dir.path().join("sessions").join(format!("{id}.json")))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+
+        write_screen(dir.path(), id, b"last screen").unwrap();
+        assert_eq!(read_screen(dir.path(), id), b"last screen");
+        remove(dir.path(), id);
+        assert!(load_all(dir.path()).is_empty());
+        assert!(read_screen(dir.path(), id).is_empty());
+    }
+
+    #[test]
+    fn a_record_filed_under_another_id_or_unparseable_is_ignored_not_deleted() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = dir.path().join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let bad = sessions.join(format!("{}.json", Uuid::new_v4()));
+        std::fs::write(&bad, b"{not json").unwrap();
+        let other = Record::new(Uuid::new_v4(), "x".into(), String::new());
+        let misfiled = sessions.join(format!("{}.json", Uuid::new_v4()));
+        std::fs::write(&misfiled, serde_json::to_vec(&other).unwrap()).unwrap();
+        assert!(load_all(dir.path()).is_empty());
+        assert!(bad.exists() && misfiled.exists());
+    }
+
+    #[test]
+    fn a_record_with_an_unknown_version_is_refused_not_loaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = Uuid::new_v4();
+        let mut record = Record::new(id, "x".into(), String::new());
+        record.version = RECORD_VERSION + 1;
+        let sessions = dir.path().join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let path = sessions.join(format!("{id}.json"));
+        std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+        assert!(load_all(dir.path()).is_empty());
+        assert!(path.exists(), "the record is left for a person to look at");
+        record.version = RECORD_VERSION;
+        std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+        assert_eq!(load_all(dir.path()).len(), 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn stop_tree_takes_children_in_their_own_groups() {
+        use std::os::unix::process::CommandExt;
+        // A parent in its own session that starts a child in yet another
+        // process group, standing in for an agent CLI and an MCP server.
+        let mut parent = std::process::Command::new("/bin/sh");
+        parent
+            .arg("-c")
+            .arg("setsid sleep 300 & echo $! ; wait")
+            .stdout(std::process::Stdio::piped());
+        unsafe {
+            parent.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+        let mut parent = parent.spawn().unwrap();
+        let pid = parent.id();
+        let mut line = String::new();
+        {
+            use std::io::BufRead;
+            let stdout = parent.stdout.take().unwrap();
+            std::io::BufReader::new(stdout)
+                .read_line(&mut line)
+                .unwrap();
+        }
+        let grandchild: u32 = line.trim().parse().unwrap();
+        // setsid(1) may fork once more; take whichever `sleep` is below.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let below = descendants(pid);
+        assert!(
+            !below.is_empty(),
+            "the child should be found below the parent"
+        );
+
+        let reaper = std::thread::spawn(move || parent.wait());
+        stop_tree(pid, Duration::from_millis(500), || false).await;
+        reaper.join().unwrap().unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        for p in below.iter().chain(std::iter::once(&grandchild)) {
+            // A zombie still answers kill(0); the name is gone with the
+            // process, or it is a zombie awaiting init.
+            let state = std::fs::read_to_string(format!("/proc/{p}/stat")).unwrap_or_default();
+            let gone = state.is_empty() || state[state.rfind(')').unwrap() + 2..].starts_with('Z');
+            assert!(gone, "process {p} survived: {state}");
+        }
+    }
+}

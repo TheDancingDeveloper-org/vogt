@@ -1,0 +1,71 @@
+//! Ensure the embedded PWA directory exists before `rust-embed` reads it.
+//!
+//! `src/assets.rs` embeds `../../web/dist/` at compile time. That directory is
+//! produced by the web build (`cd web && pnpm build`) and is gitignored, so a
+//! clean clone does not have it — and a missing folder makes the `RustEmbed`
+//! derive fail to expand with an error that names `WebAssets`, not the missing
+//! build step. To keep `cargo build` working from a clean clone with no prior
+//! PWA build, write a minimal placeholder `index.html` into `web/dist/` when
+//! the real bundle is absent.
+//!
+//! The Docker image build still runs the real `pnpm build` before `cargo
+//! build`, so the shipped binary embeds the actual PWA; only a bare local
+//! `cargo build` falls back to this placeholder. Deleting `web/dist/` and
+//! rebuilding regenerates it.
+
+use std::fs;
+use std::path::PathBuf;
+use std::process::Command;
+
+/// Capture the compiler that builds this crate, so a running binary can say it.
+fn emit_rustc_version() {
+    let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
+    let version = Command::new(rustc)
+        .arg("-V")
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .and_then(|out| String::from_utf8(out.stdout).ok())
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty())
+        .unwrap_or_else(|| "rustc unknown".to_string());
+    println!("cargo:rustc-env=VOGT_RUSTC_VERSION={version}");
+    println!("cargo:rerun-if-env-changed=RUSTC");
+}
+fn main() {
+    emit_rustc_version();
+    // Resolve `../../web/dist/` the same way `rust-embed` does: relative to the
+    // crate's manifest directory (`engine/server`), which lands at the
+    // repository root's `web/dist`.
+    let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+    let dist = manifest_dir.join("../../web/dist");
+    let index = dist.join("index.html");
+
+    // Only act when the real bundle is absent: a present `index.html` means the
+    // web build already ran and must not be clobbered by a placeholder.
+    if !index.exists() {
+        if let Err(e) = fs::create_dir_all(&dist) {
+            println!(
+                "cargo:warning=could not create placeholder web/dist ({}): {e}",
+                dist.display()
+            );
+            return;
+        }
+        // The restrictive CSP test embeds whatever index.html this build
+        // produced, and a clean clone has only this placeholder. It must
+        // carry the theme bootstrap as an external script (the real bundle
+        // does) and never a raw inline <script>, or the assertion fails on
+        // a tree that has not run `pnpm build`.
+        let placeholder = "<!doctype html>\n<meta charset=\"utf-8\">\n<title>Vogt engine</title>\n<script src=\"/theme-bootstrap.js\"></script>\n<p>Placeholder PWA bundle. Build the real one with <code>cd web &amp;&amp; pnpm build</code>.</p>\n";
+        if let Err(e) = fs::write(&index, placeholder) {
+            println!(
+                "cargo:warning=could not write placeholder {} ({e})",
+                index.display()
+            );
+        }
+    }
+
+    // rust-embed reads the directory at compile time; rerun if it changes so a
+    // later real `pnpm build` is picked up.
+    println!("cargo:rerun-if-changed=../../web/dist");
+}

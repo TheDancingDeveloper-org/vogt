@@ -1,0 +1,1192 @@
+#!/usr/bin/env bash
+# Reference agent-auth helper: load service credentials on demand from a
+# secrets manager for agent commands, without persisting tokens to PID 1.
+#
+# This is one *example* of an `ENGINE_AGENT_AUTH_HELPER`, not a required part
+# of Vogt. It is written against Infisical, and it is entirely data-driven: it
+# bakes in no address, project, secret name or service list. A deployment that
+# wants credential brokering points `ENGINE_AGENT_AUTH_HELPER` at this script
+# and describes its own secrets through the environment (below); a deployment
+# that does not simply leaves the helper unselected, and the entrypoint skips
+# it. A clean clone running the image with only a token needs none of this.
+#
+# What it reads from the environment when it is actually invoked (never at
+# import — a stranger sourcing this file to reuse `probe_mcp` gets no failure):
+#
+#   INFISICAL_API_URL              required — the secrets-manager API
+#   INFISICAL_CLIENT_ID/_SECRET    required — the machine identity
+#   ENGINE_INFISICAL_ENV           Infisical environment slug (default: prod)
+#   ENGINE_AGENT_AUTH_SECRETS      the secrets to load, one per line:
+#                                    VAR PROJECT_ID SECRET_NAME [flags]
+#                                  where flags is a comma-separated list drawn
+#                                  from {optional, ondemand, writable}. Each is
+#                                  fetched and exported as VAR; a missing
+#                                  required secret fails, naming the secret.
+#                                  `ondemand` declares VAR for sessions but
+#                                  does NOT fetch it at launch: it is reachable
+#                                  only through the engine's broker, on request
+#                                  (`fetch`, below), and every fetch is audited.
+#                                  `writable` lets a session *store* VAR through
+#                                  the broker (`store`/`set`, below), audited by
+#                                  name; it is orthogonal to the read policy.
+#   ENGINE_AGENT_AUTH_SECRETS_FILE  (engine-side, WI-3491) a manifest file the
+#                                  engine re-reads at every launch; it hands
+#                                  this helper the composed manifest as
+#                                  ENGINE_AGENT_AUTH_SECRETS, so the helper
+#                                  itself never reads the file
+#   ENGINE_AGENT_AUTH_GH_TOKEN_FROM  a VAR from the manifest to also export as
+#                                    GH_TOKEN (the git/gh default identity).
+#   ENGINE_AGENT_AUTH_PROBES       optional `check` probes, one per line:
+#                                    NAME URL TOKEN_VAR   (a bearer GET)
+#   ENGINE_AGENT_AUTH_TIMEOUT      seconds one secrets-manager call may take
+#                                  (login, a project read; default 10)
+#   ENGINE_AGENT_AUTH_LAUNCH_BUDGET  seconds ALL secrets-manager calls of one
+#                                  launch may take together (default 20); a
+#                                  call is cut to what is left, and none is
+#                                  made once it is spent
+#
+# A session launch (`run`, `shell`) never depends on the secrets manager being
+# up (WI-1812). If it cannot be reached — no identity, login failed or timed
+# out, a required secret unreadable — the launch goes on WITHOUT those
+# credentials: each call is bounded by ENGINE_AGENT_AUTH_TIMEOUT and tried
+# once, the whole launch shares one budget (ENGINE_AGENT_AUTH_LAUNCH_BUDGET), a
+# project read that times out or cannot connect is not retried secret by
+# secret, the session prints an "agent auth unavailable" warning, exports the
+# reason as `AGENT_AUTH_UNAVAILABLE` beside an accurate `AGENT_AUTH_GRANTED`,
+# and reports the launch to the engine as `degraded`, which the engine's
+# status shows. Nothing is cached, so the next launch after the secrets
+# manager recovers gets its credentials. Only a malformed manifest still
+# fails a launch. `check` keeps failing loudly: it is the explicit probe.
+#
+# Vogt is handled directly rather than through the manifest, because its
+# credential is brokered as a *file*:
+#
+#   ENGINE_AGENT_AUTH_VOGT_SECRET_NAME     the Vogt token secret for this instance
+#   ENGINE_AGENT_AUTH_TOKEN_PROJECT_ID  the project holding that secret
+#
+# The contract this helper gives a session: a session gets exactly
+# the manifest — every secret above, resolved once at launch and exported as a
+# brokered token — and nothing more. The machine identity that could read the
+# rest of the vault is dropped before the shell/command starts, so an agent's
+# own "log in to the secrets manager and fetch a secret" step finds
+# INFISICAL_CLIENT_ID empty *by design*, not because the credential is missing.
+# Two names-only breadcrumbs mark the boundary for tooling that needs to tell
+# those apart: `AGENT_AUTH_MODE=brokered` and `AGENT_AUTH_GRANTED`, the
+# space-separated names (never values) of the credential variables granted. To
+# make a new secret reachable from sessions, add a line to
+# ENGINE_AGENT_AUTH_SECRETS — do not reach for the identity. (The strip is a
+# propagation boundary between processes, not a kernel one: a same-uid process
+# can still read PID 1's environment via /proc/1/environ; the identity is out
+# of the manifest's reach, not out of the machine's.)
+#
+# The on-demand broker is the one sanctioned way to get a manifest
+# secret *after* launch, and it has two halves in this file:
+#
+#   get VAR      engine-side. Run by the engine, which holds the identity,
+#                with the same re-granted environment a session launch gets.
+#                Resolves exactly one manifest entry and prints its value —
+#                nothing else — to stdout. Refuses a VAR not in the manifest.
+#   fetch VAR    session-side. Runs inside a session, which holds no identity,
+#                only the broker address and a per-session credential: an
+#                engine session's VOGT_ENGINE_BROKER_URL and
+#                VOGT_ENGINE_BROKER_TOKEN (minted by the engine for that
+#                session), or a pod session's VOGT_ENGINE_URL and
+#                VOGT_SESSION_TOKEN_FILE, as `policy-hook.sh` already uses.
+#                Asks the engine's
+#                `POST /api/agent-auth/fetch/VAR` and prints the value. The
+#                engine enforces the manifest, rate-limits, and audits the
+#                fetch by session and name, never value.
+#
+# The write mirror, for a session that has just *produced* a secret:
+#
+#   set VAR      engine-side. Reads the value on stdin (never argv), re-checks
+#                the manifest and the `writable` flag, upserts, and prints
+#                `created`/`updated`. Used by the engine's store broker.
+#   store VAR    session-side. Sends a value on stdin to the engine's
+#                `POST /api/agent-auth/store/VAR`; the engine enforces the
+#                manifest and the `writable` flag, rate-limits, and audits the
+#                write by session and name, never value.
+#
+# A session's environment therefore says which names it may ask for, in
+# `AGENT_AUTH_ONDEMAND`, and which it may store, in `AGENT_AUTH_WRITABLE`,
+# beside what it already holds in `AGENT_AUTH_GRANTED`.
+
+set -euo pipefail
+
+readonly INFISICAL_ENV="${ENGINE_INFISICAL_ENV:-prod}"
+readonly VOGT_SECRET_NAME="${ENGINE_AGENT_AUTH_VOGT_SECRET_NAME:-}"
+readonly TOKEN_PROJECT_ID="${ENGINE_AGENT_AUTH_TOKEN_PROJECT_ID:-}"
+# The front door on loopback, the same default `vogt-mcp-auth.sh` uses: in the
+# merged stack the engine is the only published port and this runs
+# inside that container, so loopback needs no DNS and no certificate. A
+# session's own `VOGT_URL` still wins where one is set.
+readonly DEFAULT_VOGT_URL="http://127.0.0.1:8910"
+readonly CURL_EXTRA_CA_FILE="${VOGT_ENGINE_EXTRA_CA_FILE:-${ENGINE_AGENT_AUTH_EXTRA_CA_FILE:-}}"
+AUTH_TMP_DIR=""
+
+# The broker's address. An engine session is handed VOGT_ENGINE_BROKER_URL; a
+# pod session has no broker URL and names the same engine as VOGT_ENGINE_URL,
+# exactly as `policy-hook.sh` does (WI-3885).
+broker_url() {
+    printf '%s' "${VOGT_ENGINE_BROKER_URL:-${VOGT_ENGINE_URL:-}}"
+}
+
+# The file holding the broker credential, when there is one. Precedence is the
+# engine's broker token file, then the broker token value, then a pod
+# session's stream credential (VOGT_SESSION_TOKEN_FILE, a 0600 file the
+# entrypoint wrote; it names the same session to the same route — WI-3243).
+broker_token_file() {
+    if [[ -n "${VOGT_ENGINE_BROKER_TOKEN_FILE:-}" ]]; then
+        printf '%s' "$VOGT_ENGINE_BROKER_TOKEN_FILE"
+        return 0
+    fi
+    if [[ -n "${VOGT_ENGINE_BROKER_TOKEN:-}" ]]; then
+        return 1
+    fi
+    [[ -n "${VOGT_SESSION_TOKEN_FILE:-}" ]] || return 1
+    printf '%s' "$VOGT_SESSION_TOKEN_FILE"
+}
+
+broker_token_available() {
+    local file
+    if [[ -n "${VOGT_ENGINE_BROKER_TOKEN_FILE:-}" ]]; then
+        [[ -r "$VOGT_ENGINE_BROKER_TOKEN_FILE" ]] || die "broker token file is not readable"
+        return 0
+    fi
+    [[ -n "${VOGT_ENGINE_BROKER_TOKEN:-}" ]] && return 0
+    file="$(broker_token_file)" || return 1
+    [[ -r "$file" ]]
+}
+
+# Why a broker call cannot be made, and what to do about it. A process started
+# outside a Vogt session — a plain pod shell, a sudo, a tmux server from another
+# login — can keep part of the pair (usually the address) while losing the
+# credential. Say which half is missing and how to get a shell that has both,
+# rather than listing unset variables and leaving the reader to infer the fix
+# (WI-4310).
+die_no_broker() {
+    if [[ -z "$(broker_url)" ]]; then
+        die "no Vogt secret broker address in this environment (VOGT_ENGINE_BROKER_URL and VOGT_ENGINE_URL are both unset): this is not a Vogt session shell. Fix: start the shell through Vogt (session_start), which exports the broker address and credential."
+    fi
+    die "no Vogt secret broker credential in this environment (VOGT_ENGINE_BROKER_TOKEN, VOGT_ENGINE_BROKER_TOKEN_FILE and VOGT_SESSION_TOKEN_FILE are all unset or unreadable): this is not a Vogt session shell, so a plain shell cannot authenticate to the broker. Fix: start the shell through Vogt (session_start), which exports the broker credential."
+}
+
+broker_curl() {
+    local -a tls_args=()
+    local file token
+    broker_token_available || return 1
+    [[ -z "$CURL_EXTRA_CA_FILE" ]] || tls_args+=(--cacert "$CURL_EXTRA_CA_FILE")
+    # The credential reaches curl through a file descriptor, never argv, where
+    # every process on the host could read it.
+    if [[ -n "${VOGT_ENGINE_BROKER_TOKEN:-}" && -z "${VOGT_ENGINE_BROKER_TOKEN_FILE:-}" ]]; then
+        token="$VOGT_ENGINE_BROKER_TOKEN"
+    else
+        file="$(broker_token_file)"
+        token="$(tr -d '[:space:]' <"$file")"
+    fi
+    curl "${tls_args[@]}" \
+        -H @<(printf 'Authorization: Bearer %s\n' "$token") "$@"
+}
+
+# Names of the credential variables this helper grants the launched session,
+# accumulated as each is exported. Published as the `AGENT_AUTH_GRANTED`
+# breadcrumb (names only, never values) just before the brokering identity is
+# dropped, so a session that follows the near-universal "log in to the secrets
+# manager, fetch what you need" pattern sees the brokered model instead of an
+# empty INFISICAL_CLIENT_ID and the wrong conclusion that the credential does
+# not exist.
+AGENT_AUTH_GRANTED_VARS=""
+# Names declared `ondemand`: reachable through the broker, never exported at
+# launch. Published as the `AGENT_AUTH_ONDEMAND` breadcrumb.
+AGENT_AUTH_ONDEMAND_VARS=""
+# Names flagged `writable`: a session may *store* these through the engine's
+# broker. Published as the `AGENT_AUTH_WRITABLE` breadcrumb, so a session
+# knows what it may write rather than guessing and being refused.
+AGENT_AUTH_WRITABLE_VARS=""
+# Set when a manifest entry matched ENGINE_AGENT_AUTH_GH_TOKEN_FROM and GH_TOKEN
+# was aliased from it. Checked after the manifest load: a GH_TOKEN_FROM that
+# names no manifest entry aliases nothing, and must not do so in silence.
+GH_TOKEN_ALIASED=0
+# Seconds one secrets-manager call may take before the launch gives up on it.
+AUTH_TIMEOUT="${ENGINE_AGENT_AUTH_TIMEOUT:-10}"
+[[ "$AUTH_TIMEOUT" =~ ^[1-9][0-9]*$ ]] || AUTH_TIMEOUT=10
+# Seconds every secrets-manager call of one launch may take together, and the
+# deadline (epoch seconds) `begin_launch` derives from it. Empty outside a
+# launch: `check`, `get` and `set` are bounded per call only.
+LAUNCH_BUDGET="${ENGINE_AGENT_AUTH_LAUNCH_BUDGET:-20}"
+[[ "$LAUNCH_BUDGET" =~ ^[1-9][0-9]*$ ]] || LAUNCH_BUDGET=20
+LAUNCH_DEADLINE=""
+# Set by `run`/`shell`: a secrets-manager failure degrades the launch instead
+# of failing it (WI-1812). Each reason it degraded, joined with "; ".
+DEGRADE_ON_UNAVAILABLE=0
+AGENT_AUTH_UNAVAILABLE_REASON=""
+
+# Launch timing (WI-927). A session launch is `run`/`shell`; each stage of it
+# is timed here and reported once, at handover or at `die`, to the engine
+# (`POST /api/agent-auth/launch-report`), which logs it per stage, audits the
+# secret names read, and keeps the durations as metrics. Values never enter
+# any of it.
+LAUNCH_REPORTING=0
+LAUNCH_COMMAND=""
+LAUNCH_T0=""
+# One JSON object per finished stage, newline-separated; assembled by jq.
+LAUNCH_STAGES=""
+# A launch slower than this says so in the session itself.
+readonly SLOW_LAUNCH_MS=5000
+# Each project's secrets, fetched once per launch (`prefetch_project`):
+# project id -> {name: value} as JSON. Held in memory only, never written out.
+declare -A PROJECT_SECRETS=()
+# Per project: how it was fetched (`bulk`, or `cli` one secret at a time),
+# how long that took, and which names were read from it — for the report.
+declare -A PROJECT_MODE=() PROJECT_MS=() PROJECT_OUTCOME=() PROJECT_NAMES=()
+
+# Microseconds since the epoch, from bash's own clock (no fork).
+now_us() {
+    local t="${EPOCHREALTIME/./}"
+    printf '%s' "${t/,/}"
+}
+
+# Milliseconds since a `now_us` stamp.
+ms_since() {
+    printf '%s' $(( ($(now_us) - $1) / 1000 ))
+}
+
+# Record one finished stage for the report.
+launch_stage() {
+    command -v jq >/dev/null 2>&1 || return 0
+    LAUNCH_STAGES+="$(jq -nc --arg stage "$1" --argjson ms "$2" --arg outcome "$3" \
+        '{stage: $stage, ms: $ms, outcome: $outcome}')"$'\n'
+}
+
+# Send the launch report to the engine. Best-effort and short: the broker is
+# on loopback, and a launch must never wait on, or fail because of, its own
+# telemetry. Without a broker (not an engine session) there is no one to tell.
+report_launch() {
+    local outcome="$1" error="${2:-}" total_ms stages p body url
+    [[ -n "$LAUNCH_T0" ]] || return 0
+    total_ms="$(ms_since "$LAUNCH_T0")"
+    # Said in the session too when it was slow, so the person waiting sees why.
+    if (( total_ms >= SLOW_LAUNCH_MS )); then
+        printf 'agent-auth: launch took %d.%ds; the engine log (vogt::launch) has each stage\n' \
+            $(( total_ms / 1000 )) $(( total_ms % 1000 / 100 )) >&2
+    fi
+    url="$(broker_url)"
+    [[ -n "$url" ]] && broker_token_available || return 0
+    command -v jq >/dev/null 2>&1 || return 0
+    command -v curl >/dev/null 2>&1 || return 0
+    for p in "${!PROJECT_MODE[@]}"; do
+        LAUNCH_STAGES+="$(jq -nc --arg project "$p" --arg mode "${PROJECT_MODE[$p]}" \
+            --argjson ms "${PROJECT_MS[$p]:-0}" --arg outcome "${PROJECT_OUTCOME[$p]:-ok}" \
+            --arg names "${PROJECT_NAMES[$p]:-}" \
+            '{stage: "secrets", project: $project, mode: $mode, ms: $ms, outcome: $outcome,
+              secrets: ($names | split(" ") | map(select(length > 0) | split(":")
+                        | {var: .[0], name: .[1], found: (.[2] == "1")}))}')"$'\n'
+    done
+    stages="$(printf '%s' "$LAUNCH_STAGES" | jq -sc '.')" || return 0
+    body="$(jq -nc --arg outcome "$outcome" --arg error "${error:0:300}" \
+        --arg command "$LAUNCH_COMMAND" --argjson total_ms "$total_ms" \
+        --argjson stages "$stages" \
+        '{outcome: $outcome, command: $command, total_ms: $total_ms, stages: $stages}
+         + (if $error == "" then {} else {error: $error} end)')" || return 0
+    broker_curl -sS --max-time 2 -o /dev/null -X POST \
+        -H 'Content-Type: application/json' --data-binary @- \
+        "${url%/}/api/agent-auth/launch-report" <<<"$body" \
+        >/dev/null 2>&1 || true
+}
+
+# Record a granted credential variable name for the breadcrumb. Names only:
+# no value ever leaves this helper through it.
+grant_var() {
+    AGENT_AUTH_GRANTED_VARS+="${AGENT_AUTH_GRANTED_VARS:+ }$1"
+}
+
+# The secrets manager is unavailable. In a launch, record why and carry on
+# without the credentials; anywhere else (`check`, `get`, `set`), fail.
+unavailable() {
+    [[ "$DEGRADE_ON_UNAVAILABLE" == "1" ]] || die "$*"
+    AGENT_AUTH_UNAVAILABLE_REASON+="${AGENT_AUTH_UNAVAILABLE_REASON:+; }$*"
+}
+
+# Seconds the next secrets-manager call may take: AUTH_TIMEOUT, cut to what is
+# left of the launch budget. 0 once the budget is spent.
+call_timeout() {
+    local left
+    if [[ -z "$LAUNCH_DEADLINE" ]]; then
+        printf '%s' "$AUTH_TIMEOUT"
+        return
+    fi
+    left=$(( LAUNCH_DEADLINE - EPOCHSECONDS ))
+    (( left > 0 )) || left=0
+    (( left < AUTH_TIMEOUT )) || left="$AUTH_TIMEOUT"
+    printf '%s' "$left"
+}
+
+# Run a secrets-manager command bounded by `call_timeout`, when `timeout`
+# exists. Fails at once (124, as `timeout` would) once the budget is spent.
+bounded() {
+    local secs
+    secs="$(call_timeout)"
+    (( secs > 0 )) || return 124
+    if command -v timeout >/dev/null 2>&1; then
+        timeout --kill-after=2 "$secs" "$@"
+    else
+        "$@"
+    fi
+}
+
+cleanup_auth_artifacts() {
+    if [[ -n "$AUTH_TMP_DIR" && -d "$AUTH_TMP_DIR" ]]; then
+        rm -rf "$AUTH_TMP_DIR"
+    fi
+}
+
+usage() {
+    cat <<'EOF'
+Usage:
+  vogt-agent-auth check
+  vogt-agent-auth run -- <command> [args...]
+  vogt-agent-auth shell
+  vogt-agent-auth get <VAR>
+  vogt-agent-auth fetch <VAR>
+  vogt-agent-auth set <VAR>     (value on stdin)
+  vogt-agent-auth store <VAR>   (value on stdin)
+  vogt-agent-auth grants
+
+Commands:
+  check  Fetch credentials and validate secrets-manager access, any configured
+         service probes, and the Vogt MCP endpoint.
+  run    Execute one command with service credentials on demand in memory.
+  shell  Start a login shell with service credentials on demand in memory.
+  get    (engine-side) Resolve one ENGINE_AGENT_AUTH_SECRETS entry with the
+         machine identity and print its value to stdout. Used by the engine's
+         on-demand broker; needs the identity, so it cannot run in a session.
+  fetch  (session-side) Ask the engine's broker for one manifest secret and
+         print its value to stdout. Needs only the session's broker token.
+  set    (engine-side) Store one `writable` ENGINE_AGENT_AUTH_SECRETS entry,
+         reading the value from stdin and printing created/updated. Used by the
+         engine's store broker; needs the identity, so it cannot run in a
+         session.
+  store  (session-side) Send a value on stdin to the engine's broker to store
+         under one `writable` manifest entry. Needs only the broker token.
+  grants (session-side) List the credential grants a person approved for this
+         session (WI-973): VAR, secret, uses, expiry, grant id and the reason
+         it was approved for. Never a value. Fetch one with `fetch VAR`.
+EOF
+}
+
+die() {
+    printf 'vogt-agent-auth: %s\n' "$*" >&2
+    # A launch that fails still says how far it got and why (WI-927).
+    if [[ "$LAUNCH_REPORTING" == "1" ]]; then
+        LAUNCH_REPORTING=0
+        report_launch failed "$*"
+    fi
+    exit 1
+}
+
+require_command() {
+    command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
+}
+
+require_identity() {
+    [[ -n "${INFISICAL_API_URL:-}" ]] || die \
+        "INFISICAL_API_URL is not set; the Infisical agent-auth helper needs the secrets-manager API URL"
+    [[ -n "${INFISICAL_CLIENT_ID:-}" ]] || die \
+        "INFISICAL_CLIENT_ID is not set; the Infisical agent-auth helper needs a machine identity"
+    [[ -n "${INFISICAL_CLIENT_SECRET:-}" ]] || die \
+        "INFISICAL_CLIENT_SECRET is not set; the Infisical agent-auth helper needs a machine identity"
+}
+
+probe_mcp() {
+    local service="$1" url="$2" token="$3" credential="$4"
+    local response_file="$5" error_file="$6" failure_hint="$7"
+    local status detail
+    shift 7
+
+    # One JSON-RPC-aware probe serves every MCP endpoint. Keep the response
+    # files caller-owned so credentials and refusal details remain in the
+    # protected agent-auth temporary lifecycle.
+    : >"$response_file"
+    : >"$error_file"
+    status="$(curl -sS --max-time 15 "$@" \
+        -o "$response_file" -w '%{http_code}' \
+        -H @<(printf 'Authorization: Bearer %s\n' "$token") \
+        -H 'Content-Type: application/json' \
+        -H 'Accept: application/json, text/event-stream' \
+        --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"vogt-agent-auth","version":"1"}}}' \
+        "$url" 2>"$error_file")" || status="000"
+    detail="$(tr -d '\r\n' <"$response_file" | cut -c1-300)"
+
+    if [[ "$status" == "000" ]]; then
+        die "$service is unreachable at $url: $(tr -d '\r\n' <"$error_file" | cut -c1-200)"
+    elif [[ "$status" != "200" ]]; then
+        die "$service rejected $credential at $url (HTTP $status): ${detail:-<empty body>}$failure_hint"
+    elif [[ "$detail" == *'"error"'* ]]; then
+        # JSON-RPC refusals normally ride on HTTP 200. Treating transport
+        # success as service success is the false green this helper prevents.
+        die "$service answered at $url but refused the handshake: $detail$failure_hint"
+    fi
+    printf 'ok: %s (%s)\n' "$service" "$url"
+}
+
+mint_access_token() {
+    local base secs raw token
+    command -v curl >/dev/null 2>&1 || return 1
+    command -v jq >/dev/null 2>&1 || return 1
+    secs="$(call_timeout)"
+    (( secs > 0 )) || return 1
+    base="${INFISICAL_API_URL%/}"
+    base="${base%/api}"
+    # The client secret rides in the JSON body on stdin, never argv, and this
+    # is the same universal-auth request `infisical login` makes (WI-3885):
+    # on the host, --client-secret was visible in `ps` to every user, and so
+    # is `jq --arg secret "$..."` — jq reads both values from its environment.
+    raw="$(INFISICAL_CLIENT_ID="$INFISICAL_CLIENT_ID" \
+            INFISICAL_CLIENT_SECRET="$INFISICAL_CLIENT_SECRET" \
+            jq -nc '{clientId: env.INFISICAL_CLIENT_ID, clientSecret: env.INFISICAL_CLIENT_SECRET}' |
+        curl -sS --fail --connect-timeout "$secs" --max-time "$secs" \
+            -H 'Content-Type: application/json' --data-binary @- \
+            "$base/api/v1/auth/universal-auth/login" 2>/dev/null)" || return 1
+    # A 200 without a token is a failed login, not an empty credential: the
+    # callers' `|| die` must see it, as they did when the CLI did the login.
+    token="$(jq -er '.accessToken // empty' <<<"$raw")" || return 1
+    [[ -n "$token" ]] || return 1
+    printf '%s\n' "$token"
+}
+
+get_secret() {
+    local access_token="$1" project_id="$2" secret_name="$3"
+    # The access token is an environment value for this one CLI call, never
+    # argv: the CLI has no token-file switch, and --token was visible in `ps`
+    # (WI-3885).
+    INFISICAL_TOKEN="$access_token" bounded infisical secrets get "$secret_name" \
+        --domain "${INFISICAL_API_URL:-}" \
+        --projectId "$project_id" \
+        --env "$INFISICAL_ENV" \
+        --plain --silent
+}
+
+# Every secret in one project, as a JSON object {name: value}, in ONE request
+# (WI-927). The pluggable read half for a launch, beside `get_secret` for a
+# single late fetch.
+#
+# Why not `get_secret` per entry: each `infisical` CLI run spends ~650 ms after
+# the API has answered, sending usage telemetry to the vendor over the public
+# internet, and has no switch to stop it. A launch made fifteen such calls in
+# series — ~10 s on a good day, 85–145 s when that egress was slow — before
+# the session's shell or agent could start. The CLI's own `secrets get`
+# already downloads the whole project to return one value; this is the same
+# request (`GET /api/v4/secrets`, references expanded, imports included), made
+# once. The token goes in a header read from a file descriptor, never argv.
+#
+# Returns 2 when the secrets manager did not answer at all (cannot connect,
+# timed out, connection dropped, launch budget spent): the caller must not
+# then retry it secret by secret. 1 is any other failure, where the per-secret
+# CLI is still worth a try.
+get_project_secrets() {
+    local access_token="$1" project_id="$2" base secs raw rc=0
+    command -v curl >/dev/null 2>&1 || return 1
+    command -v jq >/dev/null 2>&1 || return 1
+    secs="$(call_timeout)"
+    (( secs > 0 )) || return 2
+    base="${INFISICAL_API_URL%/}"
+    base="${base%/api}"
+    raw="$(curl -sS --fail --connect-timeout "$secs" --max-time "$secs" \
+        -H @<(printf 'Authorization: Bearer %s\n' "$access_token") \
+        --get "$base/api/v4/secrets" \
+        --data-urlencode "projectId=$project_id" \
+        --data-urlencode "environment=$INFISICAL_ENV" \
+        --data-urlencode "secretPath=/" \
+        --data "expandSecretReferences=true&includeImports=true&recursive=false" \
+        2>/dev/null)" || rc=$?
+    case "$rc" in
+        0) ;;
+        # couldn't resolve, couldn't connect, timed out, TLS connect, empty
+        # reply, receive error: nobody answered.
+        6|7|28|35|52|56) return 2 ;;
+        *) return 1 ;;
+    esac
+    jq -ce '
+        # Imported secrets first, so the project'"'"'s own keys win, as in the CLI.
+        [((.imports // [])[] | .secrets // [])[], (.secrets // [])[]]
+        | map(select(.secretValueHidden != true))
+        | reduce .[] as $s ({}; .[$s.secretKey] = $s.secretValue)' <<<"$raw"
+}
+
+# Fetch a project once per launch, in this shell (not a subshell, so the
+# cache and the timing survive), falling back to per-secret CLI reads when the
+# bulk request is not possible here. Never fails: a project that cannot be
+# read leaves each lookup empty, and the manifest's own required/optional
+# rule decides what that means.
+prefetch_project() {
+    local access_token="$1" project="$2" started json rc=0
+    [[ -n "${PROJECT_MODE[$project]:-}" ]] && return 0
+    started="$(now_us)"
+    json="$(get_project_secrets "$access_token" "$project")" || rc=$?
+    if [[ "$rc" == 0 ]]; then
+        PROJECT_SECRETS[$project]="$json"
+        PROJECT_MODE[$project]=bulk
+        PROJECT_OUTCOME[$project]=ok
+    elif [[ "$rc" == 2 ]]; then
+        # Nobody answered: one CLI read per secret would wait out the same
+        # timeout again for every entry (WI-1812). Read nothing more here.
+        PROJECT_MODE[$project]=bulk
+        PROJECT_OUTCOME[$project]=unreachable
+        unavailable "Infisical did not answer reading project $project (timeout or no connection)"
+    else
+        PROJECT_MODE[$project]=cli
+        PROJECT_OUTCOME[$project]=bulk-failed
+    fi
+    PROJECT_MS[$project]="$(ms_since "$started")"
+}
+
+# Resolve one secret into the shell variable named by $1 (assigned, not
+# exported). From the project's prefetched JSON when there is one; otherwise
+# one CLI read, timed into the project's total.
+resolve_secret() {
+    local _into="$1" _token="$2" _project="$3" _name="$4" _var="$5" _value _started _found=0
+    prefetch_project "$_token" "$_project"
+    if [[ "${PROJECT_OUTCOME[$_project]}" == "unreachable" ]]; then
+        _value=""
+    elif [[ "${PROJECT_MODE[$_project]}" == "bulk" ]]; then
+        _value="$(jq -r --arg n "$_name" 'if has($n) then .[$n] else empty end' \
+            <<<"${PROJECT_SECRETS[$_project]}")"
+    else
+        _started="$(now_us)"
+        _value="$(get_secret "$_token" "$_project" "$_name" || true)"
+        PROJECT_MS[$_project]=$(( ${PROJECT_MS[$_project]:-0} + $(ms_since "$_started") ))
+    fi
+    [[ -n "$_value" ]] && _found=1
+    PROJECT_NAMES[$_project]+="${PROJECT_NAMES[$_project]:+ }$_var:$_name:$_found"
+    printf -v "$_into" '%s' "$_value"
+}
+
+# Write one secret value, reading the value from stdin (never argv — this is the
+# pluggable write half of the broker, mirroring `get_secret`; a different
+# secrets manager replaces exactly this function).
+write_secret() {
+    local access_token="$1" project_id="$2" secret_name="$3" value tmp rc=0
+    value="$(cat)"
+    # The value goes through a 0600 file (`NAME=@file`), not argv, so it is
+    # not readable in `ps`; the access token likewise rides in the
+    # environment for this one call (WI-3885).
+    umask 077
+    tmp="$(mktemp)"
+    printf '%s' "$value" >"$tmp"
+    INFISICAL_TOKEN="$access_token" infisical secrets set "$secret_name=@$tmp" \
+        --domain "${INFISICAL_API_URL:-}" \
+        --projectId "$project_id" \
+        --env "$INFISICAL_ENV" \
+        --silent || rc=$?
+    rm -f "$tmp"
+    return "$rc"
+}
+
+# True when a comma-separated flag list contains a given flag. The flag field
+# of a manifest line is now a list — `ondemand,writable` — parsed the same way
+# here and in the engine's `parse_flags` so the two cannot disagree.
+flags_contain() {
+    local list="$1" want="$2"
+    case ",${list}," in
+        *",${want},"*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Reject an unknown flag or two conflicting policy flags, mirroring the engine's
+# `parse_flags` so a bad manifest fails the launch here as it does there.
+validate_flags() {
+    local list="$1" line="$2" flag seen_policy=""
+    [[ -n "$list" ]] || return 0
+    local -a parts
+    IFS=',' read -ra parts <<<"$list"
+    for flag in "${parts[@]}"; do
+        case "$flag" in
+            required | optional | ondemand)
+                if [[ -n "$seen_policy" && "$seen_policy" != "$flag" ]]; then
+                    die "ENGINE_AGENT_AUTH_SECRETS entry sets conflicting policy flags: $line"
+                fi
+                seen_policy="$flag"
+                ;;
+            writable) ;;
+            *)
+                die "ENGINE_AGENT_AUTH_SECRETS entry has unknown flag '$flag' (flags are a comma-separated list of optional, ondemand, writable): $line"
+                ;;
+        esac
+    done
+}
+
+# Print `PROJECT_ID SECRET_NAME FLAGS` for one manifest variable, or return 1
+# when the manifest does not declare it. The one place the manifest is read
+# for a *single* name; the launch-time loop below reads it for all of them.
+manifest_entry() {
+    local want="$1" line var project name flag
+    [[ -n "${ENGINE_AGENT_AUTH_SECRETS:-}" ]] || return 1
+    while IFS= read -r line; do
+        line="${line%%#*}"
+        read -r var project name flag <<<"$line"
+        [[ "${var:-}" == "$want" ]] || continue
+        [[ -n "${project:-}" && -n "${name:-}" ]] || die \
+            "malformed ENGINE_AGENT_AUTH_SECRETS entry (want 'VAR PROJECT_ID SECRET_NAME [flags]'): $line"
+        validate_flags "${flag:-}" "$line"
+        printf '%s %s %s' "$project" "$name" "${flag:-required}"
+        return 0
+    done <<<"${ENGINE_AGENT_AUTH_SECRETS}"
+    return 1
+}
+
+# `get VAR`: the engine's half of the on-demand broker. The engine
+# holds the identity and runs this with the same re-granted environment a
+# session launch gets, after enforcing the manifest itself; this enforces it
+# again because the helper is the part that is pluggable and must stand
+# alone. stdout *is* the value, so nothing else is ever printed there.
+get_one() {
+    local var="$1" entry project name flag access_token value
+    entry="$(manifest_entry "$var")" || die \
+        "$var is not a variable in ENGINE_AGENT_AUTH_SECRETS; nothing is fetched that the deployment did not declare"
+    read -r project name flag <<<"$entry"
+    require_identity
+    require_command infisical
+    access_token="$(mint_access_token)" || die "Infisical universal-auth login failed"
+    value="$(get_secret "$access_token" "$project" "$name" || true)"
+    [[ -n "$value" ]] || die "Infisical secret $name is missing or empty"
+    printf '%s' "$value"
+}
+
+# `set VAR`: the engine's half of the *write* broker. The engine holds
+# the identity and runs this with the same re-granted environment a session
+# launch gets, after enforcing the manifest and the `writable` flag itself;
+# this enforces both again because the helper is the pluggable part and must
+# stand alone. The value is read from stdin — never argv, so `ps`, shell
+# history and audit excerpts never see it — and stdout is only `created` or
+# `updated`, nothing else.
+set_one() {
+    local var="$1" entry project name flag access_token value existing
+    entry="$(manifest_entry "$var")" || die \
+        "$var is not a variable in ENGINE_AGENT_AUTH_SECRETS; nothing is stored that the deployment did not declare"
+    read -r project name flag <<<"$entry"
+    flags_contain "${flag:-}" writable || die \
+        "$var is declared in ENGINE_AGENT_AUTH_SECRETS but not writable; add the 'writable' flag to its line (e.g. 'ondemand,writable') to let sessions store it"
+    value="$(cat)"
+    [[ -n "$value" ]] || die "no value on stdin to store for $var"
+    require_identity
+    require_command infisical
+    access_token="$(mint_access_token)" || die "Infisical universal-auth login failed"
+    # Create vs update is the one thing the caller cares to hear back; decide it
+    # by whether the secret already resolves, then upsert.
+    existing="$(get_secret "$access_token" "$project" "$name" 2>/dev/null || true)"
+    printf '%s' "$value" | write_secret "$access_token" "$project" "$name" >/dev/null \
+        || die "Infisical secret $name could not be stored"
+    if [[ -n "$existing" ]]; then printf 'updated'; else printf 'created'; fi
+}
+
+# `store VAR`: the session's half of the write broker. Runs *inside* a
+# session, which holds no identity — only the broker address and token — and
+# POSTs the value (read from stdin, never argv) to the engine's store route.
+# Every refusal repeats the engine's own reason, which for an undeclared or
+# non-writable name is the manifest line or flag to add.
+store_one() {
+    local var="$1" value response status body url
+    url="$(broker_url)"
+    if [[ -z "$url" ]] || ! broker_token_available; then
+        die_no_broker
+    fi
+    require_command curl
+    value="$(cat)"
+    [[ -n "$value" ]] || die "no value on stdin to store for $var"
+    umask 077
+    response="$(mktemp)"
+    status="$(printf '%s' "$value" | broker_curl -sS --max-time 45 -o "$response" -w '%{http_code}' \
+        -X POST \
+        -H 'Content-Type: text/plain' --data-binary @- \
+        "${url%/}/api/agent-auth/store/$var" 2>/dev/null)" || status="000"
+    if [[ "$status" == "200" ]]; then
+        cat "$response"
+        rm -f "$response"
+        return 0
+    fi
+    # The server's own message is the cause (its `{"error": ...}` body): pass
+    # it through, never a fixed text that hides it (gh#1424).
+    if command -v jq >/dev/null 2>&1 && body="$(jq -er '.error // empty' "$response" 2>/dev/null)" && [[ -n "$body" ]]; then
+        body="$(printf '%s' "$body" | tr -d '\r\n' | cut -c1-600)"
+    else
+        body="$(tr -d '\r\n' <"$response" | cut -c1-600)"
+    fi
+    rm -f "$response"
+    case "$status" in
+        000) die "secret broker unreachable at $url" ;;
+        401) die "secret broker refused this session's token (HTTP 401): ${body:-the engine no longer knows this session}" ;;
+        403) die "secret broker refused storing $var (HTTP 403): ${body:-not writable in the manifest}" ;;
+        413) die "secret broker refused storing $var (HTTP 413): value over the size cap" ;;
+        *) die "secret broker failed storing $var (HTTP $status): ${body:-<empty body>}" ;;
+    esac
+}
+
+# `fetch VAR`: the session's half of the broker. Runs *inside* a
+# session, which holds no identity — only the broker address and the token
+# the engine minted for this session — and asks the engine for one manifest
+# secret. Prints the value verbatim to stdout. Every refusal repeats the
+# engine's own reason, which for an undeclared name is the manifest line to
+# add; the identity is never involved on this side.
+fetch_one() {
+    local var="$1" response status body url
+    url="$(broker_url)"
+    if [[ -z "$url" ]] || ! broker_token_available; then
+        die_no_broker
+    fi
+    require_command curl
+    umask 077
+    response="$(mktemp)"
+    status="$(broker_curl -sS --max-time 45 -o "$response" -w '%{http_code}' \
+        -X POST \
+        "${url%/}/api/agent-auth/fetch/$var" 2>/dev/null)" || status="000"
+    if [[ "$status" == "200" ]]; then
+        cat "$response"
+        rm -f "$response"
+        return 0
+    fi
+    # The server's own message is the cause (its `{"error": ...}` body): pass
+    # it through, never a fixed text that hides it (gh#1424).
+    if command -v jq >/dev/null 2>&1 && body="$(jq -er '.error // empty' "$response" 2>/dev/null)" && [[ -n "$body" ]]; then
+        body="$(printf '%s' "$body" | tr -d '\r\n' | cut -c1-600)"
+    else
+        body="$(tr -d '\r\n' <"$response" | cut -c1-600)"
+    fi
+    rm -f "$response"
+    case "$status" in
+        000) die "secret broker unreachable at $url" ;;
+        401) die "secret broker refused this session's token (HTTP 401): ${body:-the engine no longer knows this session}" ;;
+        403) die "secret broker refused $var (HTTP 403): ${body:-not in the manifest}" ;;
+        *) die "secret broker failed for $var (HTTP $status): ${body:-<empty body>}" ;;
+    esac
+}
+
+# `grants`: the session's half of an approved grant (WI-973). Lists what a
+# person approved for this session — one line per grant, never a value — so
+# the agent knows which VAR to `fetch`, and the grant is visible in its
+# transcript. Needs only the broker token.
+list_grants() {
+    local response status url
+    url="$(broker_url)"
+    if [[ -z "$url" ]] || ! broker_token_available; then
+        die_no_broker
+    fi
+    require_command curl
+    require_command jq
+    umask 077
+    response="$(mktemp)"
+    status="$(broker_curl -sS --max-time 15 -o "$response" -w '%{http_code}' \
+        "${url%/}/api/agent-auth/grants" 2>/dev/null)" || status="000"
+    if [[ "$status" != "200" ]]; then
+        rm -f "$response"
+        die "secret broker could not list grants (HTTP $status)"
+    fi
+    if [[ "$(jq 'length' "$response")" == "0" ]]; then
+        echo "no approved grants for this session"
+    else
+        # The reason is the requester's text: one line, tabs and newlines
+        # folded, so a listing is always one grant per line.
+        jq -r '.[] | "\(.var)\tsecret=\(.secret_name) project=\(.project_id) uses=\(.uses) expires=\(.expires_at) grant=\(.grant_id) reason=\((.reason // "") | gsub("[\\n\\r\\t]+"; " "))"' "$response"
+    fi
+    rm -f "$response"
+}
+
+# Ask the engine whether manifest entry $1 is stale at GitHub (gh#1460). The
+# request carries no token: the engine resolves the secret itself and checks its
+# own copy, so nothing here can probe or move Inbox state with a value of its
+# own. Prints `stale` when GitHub rejected it; prints nothing for every other
+# outcome (ok, unknown, no broker, engine too old), so the launch fails open
+# exactly like the broker does. $2 (the resolved value) only decides whether
+# the name is worth asking about; it is never sent.
+github_stale() {
+    local var="$1" value="$2" url response
+    case " GH_TOKEN GITHUB_MCP_TOKEN ${ENGINE_AGENT_AUTH_GH_TOKEN_FROM:-} $(printf %s "${ENGINE_AGENT_AUTH_GITHUB_VARS:-}" | tr "," " ") " in
+        *" $var "*) ;;
+        *)
+            case "$value" in
+                ghp_* | gho_* | ghs_* | github_pat_*) ;;
+                *) return 0 ;;
+            esac
+            ;;
+    esac
+    url="$(broker_url)"
+    if [[ -z "$url" ]] || ! broker_token_available || ! command -v curl >/dev/null 2>&1; then
+        return 0
+    fi
+    response="$(broker_curl -sS --max-time 15 -X POST \
+        "${url%/}/api/agent-auth/github-check/$var" 2>/dev/null)" || return 0
+    case "$response" in
+        *'"status":"stale"'*) printf 'stale' ;;
+    esac
+}
+
+# Load every secret named in ENGINE_AGENT_AUTH_SECRETS, export it under its
+# manifest variable, and optionally alias one of them to GH_TOKEN.
+#
+# Assign, check, then export — never `export VAR="$(...)"`. `export` is a
+# command with its own exit status, and it succeeds; under `set -e` a
+# `get_secret` that fails inside that substitution would leave the variable
+# empty and be swallowed, surfacing later as a 401 from whichever service is
+# asked first — a long way from the secret store that was actually
+# unavailable. `printf -v` assigns first, so the emptiness guard below is real.
+load_manifest_secrets() {
+    local access_token="$1"
+    local line var project name flag value
+    [[ -n "${ENGINE_AGENT_AUTH_SECRETS:-}" ]] || return 0
+    while IFS= read -r line; do
+        line="${line%%#*}"
+        read -r var project name flag <<<"$line"
+        [[ -n "${var:-}" ]] || continue
+        [[ -n "${project:-}" && -n "${name:-}" ]] || die \
+            "malformed ENGINE_AGENT_AUTH_SECRETS entry (want 'VAR PROJECT_ID SECRET_NAME [flags]'): $line"
+        validate_flags "${flag:-}" "$line"
+        # `writable` is orthogonal to the read policy: record it for the
+        # breadcrumb whether the entry is launched or ondemand.
+        if flags_contain "${flag:-}" writable; then
+            AGENT_AUTH_WRITABLE_VARS+="${AGENT_AUTH_WRITABLE_VARS:+ }$var"
+        fi
+        if flags_contain "${flag:-}" ondemand; then
+            # Declared for sessions, deliberately not resolved here: it
+            # never sits in the session's environment for the whole session.
+            # Listed by name so the session knows what it may ask for.
+            [[ "$var" != "${ENGINE_AGENT_AUTH_GH_TOKEN_FROM:-}" ]] || die \
+                "ENGINE_AGENT_AUTH_GH_TOKEN_FROM names '$var', which is an ondemand entry; the git/gh identity must be resolved at launch"
+            AGENT_AUTH_ONDEMAND_VARS+="${AGENT_AUTH_ONDEMAND_VARS:+ }$var"
+            continue
+        fi
+        # The alias name matched a manifest entry: recorded before any of the
+        # degraded skips below, so the post-load check never misreports a
+        # degraded launch as a GH_TOKEN_FROM typo and kills it.
+        [[ "$var" != "${ENGINE_AGENT_AUTH_GH_TOKEN_FROM:-}" ]] || GH_TOKEN_ALIASED=1
+        if [[ -z "$access_token" ]]; then
+            # The secrets manager is unreachable and the launch is already
+            # marked degraded: nothing is read or exported.
+            continue
+        fi
+        resolve_secret value "$access_token" "$project" "$name" "$var"
+        # An unreachable project is already recorded once, not per secret.
+        [[ "${PROJECT_OUTCOME[$project]}" != "unreachable" ]] || continue
+        if [[ -z "$value" ]] && ! flags_contain "${flag:-}" optional; then
+            unavailable "Infisical secret $name is missing or empty"
+            continue
+        fi
+        if [[ -n "$value" && "$(github_stale "$var" "$value")" == "stale" ]]; then
+            # GitHub rejected it: export nothing for this name (and no GH_TOKEN
+            # alias), and say why where the session can read it, so an agent
+            # sees a stale credential and not a bare "Bad credentials".
+            unavailable "credential stale: $name, needs a person"
+            printf 'vogt-agent-auth: credential stale: %s (%s), needs a person to refresh it; not exported\n' \
+                "$name" "$var" >&2
+            continue
+        fi
+        printf -v "$var" '%s' "$value"
+        export "${var?}"
+        [[ -n "$value" ]] && grant_var "$var"
+        if [[ "$var" == "${ENGINE_AGENT_AUTH_GH_TOKEN_FROM:-}" ]]; then
+            # The name matched a manifest entry, which is what the post-load
+            # check below verifies; the alias is still worth only a non-empty
+            # value.
+            GH_TOKEN_ALIASED=1
+            if [[ -n "$value" ]]; then
+                export GH_TOKEN="$value"
+                grant_var GH_TOKEN
+            fi
+        fi
+    done <<<"${ENGINE_AGENT_AUTH_SECRETS}"
+}
+
+load_agent_environment() {
+    local access_token="" started
+    if [[ -z "${INFISICAL_API_URL:-}" || -z "${INFISICAL_CLIENT_ID:-}" \
+          || -z "${INFISICAL_CLIENT_SECRET:-}" ]]; then
+        [[ "$DEGRADE_ON_UNAVAILABLE" == "1" ]] || require_identity
+        unavailable "no secrets-manager identity (INFISICAL_API_URL/CLIENT_ID/CLIENT_SECRET)"
+    elif ! command -v infisical >/dev/null 2>&1; then
+        unavailable "the infisical CLI is not installed"
+    else
+        started="$(now_us)"
+        if access_token="$(mint_access_token)"; then
+            launch_stage login "$(ms_since "$started")" ok
+        else
+            access_token=""
+            launch_stage login "$(ms_since "$started")" failed
+            unavailable "Infisical universal-auth login failed or timed out after ${AUTH_TIMEOUT}s"
+        fi
+    fi
+
+    # Retired release-automation names whose values are revoked. If they are
+    # inherited they masquerade as a GitHub credential and every `gh` call
+    # fails with "Bad credentials"; clear them so a stale value cannot outlive
+    # a fresh login. GH_TOKEN is (re)set from the manifest alias below.
+    unset GITHUB_PAT GH_RELEASE_TOKEN
+    load_manifest_secrets "$access_token"
+
+    # A GH_TOKEN alias that names nothing is the one manifest error that stayed
+    # silent: the alias above only fires while iterating manifest entries, so a
+    # GH_TOKEN_FROM that is not among them left GH_TOKEN unset with no warning,
+    # and every `gh` call then failed as if unauthenticated — a long way from
+    # the typo that caused it. Fail here, naming the mismatch; under
+    # ENGINE_AGENT_AUTH_REQUIRED the entrypoint runs this at boot, so it
+    # surfaces before a session ever starts.
+    if [[ -n "${ENGINE_AGENT_AUTH_GH_TOKEN_FROM:-}" && "$GH_TOKEN_ALIASED" != "1" ]]; then
+        die "ENGINE_AGENT_AUTH_GH_TOKEN_FROM names '${ENGINE_AGENT_AUTH_GH_TOKEN_FROM}', which is not a variable in ENGINE_AGENT_AUTH_SECRETS; no GH_TOKEN was aliased"
+    fi
+
+    # Vogt is the backlog/project tracker. An absent token is not fatal: an
+    # instance may legitimately not be deployed yet, and agent auth must keep
+    # working for git/gh regardless.
+    #
+    # Inside a coding session, do not fetch: the session already holds a token
+    # Vogt minted for its own actor, and this helper is what launches
+    # the session's shell when auto-agent-auth is on. Fetching here would
+    # replace that credential with the pod's before the agent ever ran, and
+    # nothing would look wrong — the writes still land, the audit log just
+    # attributes a session's work to the pod.
+    if [[ -n "${VOGT_SESSION_ID:-}" && -n "${VOGT_HTTP_TOKEN:-}" ]]; then
+        printf 'agent-auth: keeping the session token for %s\n' \
+            "$VOGT_SESSION_ID" >&2
+    elif [[ -n "$access_token" && -n "$VOGT_SECRET_NAME" && -n "$TOKEN_PROJECT_ID" ]]; then
+        # Deliberately unguarded on emptiness: absent is a supported state —
+        # an instance may not be deployed yet — and `check` reports that as
+        # `skip`, never as success and never as failure.
+        resolve_secret VOGT_HTTP_TOKEN "$access_token" "$TOKEN_PROJECT_ID" \
+            "$VOGT_SECRET_NAME" VOGT_HTTP_TOKEN
+        export VOGT_HTTP_TOKEN
+    else
+        unset VOGT_HTTP_TOKEN 2>/dev/null || true
+    fi
+    [[ -n "${VOGT_HTTP_TOKEN:-}" ]] && grant_var VOGT_HTTP_TOKEN
+
+    umask 077
+    AUTH_TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/vogt-agent-auth.XXXXXXXX")"
+    if [[ -n "${VOGT_HTTP_TOKEN:-}" ]]; then
+        printf '%s' "$VOGT_HTTP_TOKEN" >"$AUTH_TMP_DIR/vogt-http-token"
+        export VOGT_TOKEN_FILE="$AUTH_TMP_DIR/vogt-http-token"
+        grant_var VOGT_TOKEN_FILE
+    fi
+
+    # Register Vogt with the agent clients present in the image.
+    started="$(now_us)"
+    # The ondemand breadcrumb is exported further down; the bootstrap needs it
+    # now to register a server whose token is fetched at spawn (vogt-prod).
+    AGENT_AUTH_ONDEMAND="$AGENT_AUTH_ONDEMAND_VARS" \
+        "${VOGT_MCP_BOOTSTRAP:-/usr/local/bin/vogt-mcp-bootstrap}"
+    launch_stage bootstrap "$(ms_since "$started")" ok
+
+    export GIT_ASKPASS=/usr/local/bin/vogt-git-askpass
+    export GIT_TERMINAL_PROMPT=0
+
+    # Signpost the strip. The identity and the manifest are about to be
+    # dropped; without a breadcrumb the launched session sees only empty
+    # INFISICAL_* vars, its `infisical login` fails, and the natural wrong
+    # conclusion is "no such credential exists." These two names-only vars —
+    # never a value, and deliberately not the API URL — let session tooling
+    # detect the brokered model and either read a credential it was granted or
+    # fail with an actionable message. See docs/ENGINE.md §9.
+    # Identity-passthrough is an explicit per-deployment opt-in that keeps
+    # the machine identity in the session (reverses the identity strip below).
+    # Decided here, before the identity is unset, and reused for both.
+    local identity_passthrough=0
+    if [[ "${ENGINE_AGENT_AUTH_IDENTITY_PASSTHROUGH:-}" =~ ^(1|true|TRUE|yes|on)$ ]]; then
+        identity_passthrough=1
+    fi
+    if [[ "$identity_passthrough" -eq 1 ]]; then
+        # The session holds the full secrets-manager identity; session tooling
+        # should use `infisical` directly, not the manifest broker.
+        export AGENT_AUTH_MODE=identity
+    else
+        export AGENT_AUTH_MODE=brokered
+    fi
+    export AGENT_AUTH_GRANTED="$AGENT_AUTH_GRANTED_VARS"
+    export AGENT_AUTH_ONDEMAND="$AGENT_AUTH_ONDEMAND_VARS"
+    # Names a session may *store* through the broker, beside the names it
+    # may fetch. A session reads this instead of guessing and being refused.
+    export AGENT_AUTH_WRITABLE="$AGENT_AUTH_WRITABLE_VARS"
+    # Why this launch holds fewer credentials than the manifest names, if it
+    # does. Unset on a full launch, so its presence alone means degraded.
+    if [[ -n "$AGENT_AUTH_UNAVAILABLE_REASON" ]]; then
+        export AGENT_AUTH_UNAVAILABLE="$AGENT_AUTH_UNAVAILABLE_REASON"
+    else
+        unset AGENT_AUTH_UNAVAILABLE 2>/dev/null || true
+    fi
+
+    # Drop the brokering inputs before the shell/command this helper launches.
+    # The manifest, the secret-name breadcrumbs and the passthrough switch itself
+    # are engine config the launched shell never needs — dropped in either mode.
+    # The brokered agent tokens exported above are kept — that is the whole point.
+    unset ENGINE_AGENT_AUTH_SECRETS ENGINE_AGENT_AUTH_SECRETS_FILE \
+        ENGINE_AGENT_AUTH_GH_TOKEN_FROM ENGINE_AGENT_AUTH_TOKEN_PROJECT_ID \
+        ENGINE_AGENT_AUTH_PROBES ENGINE_AGENT_AUTH_IDENTITY_PASSTHROUGH \
+        ENGINE_AGENT_AUTH_VOGT_SECRET_NAME \
+        2>/dev/null || true
+    # The machine identity is dropped by default: a normal session
+    # must not keep the credential that could read the rest of the vault. In
+    # identity-passthrough mode it is deliberately KEPT so the session can
+    # use `infisical` directly against any project.
+    if [[ "$identity_passthrough" -eq 0 ]]; then
+        unset INFISICAL_CLIENT_ID INFISICAL_CLIENT_SECRET INFISICAL_API_URL \
+            ENGINE_INFISICAL_ENV \
+            2>/dev/null || true
+    fi
+}
+
+# The service-probe list is configuration, not a baked-in estate service map.
+# Each line is `NAME URL TOKEN_VAR`: a bearer-authenticated GET that must
+# return 2xx. An empty/unset manifest runs no service probes — the MCP probes
+# below still run.
+run_configured_probes() {
+    local line name url token_var token
+    [[ -n "${ENGINE_AGENT_AUTH_PROBES:-}" ]] || return 0
+    while IFS= read -r line; do
+        line="${line%%#*}"
+        read -r name url token_var <<<"$line"
+        [[ -n "${name:-}" ]] || continue
+        [[ -n "${url:-}" && -n "${token_var:-}" ]] || die \
+            "malformed ENGINE_AGENT_AUTH_PROBES entry (want 'NAME URL TOKEN_VAR'): $line"
+        token="${!token_var:-}"
+        if curl -fsS -H @<(printf 'Authorization: Bearer %s\n' "$token") "$url" >/dev/null; then
+            printf 'ok: %s (%s)\n' "$name" "$url"
+        else
+            die "$name probe failed at $url"
+        fi
+    done <<<"${ENGINE_AGENT_AUTH_PROBES}"
+}
+
+check_access() {
+    local response_file error_file vogt_url vogt_mcp_url
+    local vogt_failure_hint
+    require_command curl
+    load_agent_environment
+    response_file="$(mktemp)"
+    error_file="$(mktemp)"
+    # Defaulted expansions, because this trap fires at *script* exit — by
+    # which point `check_access` has returned and its locals are gone. Under
+    # `set -u` the bare form aborts with "unbound variable" after every probe
+    # has reported ok, so a fully green check would exit 1 and the temp files
+    # would never be removed.
+    trap 'rm -f "${response_file:-}" "${error_file:-}"' EXIT
+
+    printf 'ok: secrets-manager universal auth\n'
+    [[ -z "$AGENT_AUTH_ONDEMAND_VARS" ]] || \
+        printf 'ondemand (fetched on request through the engine broker): %s\n' "$AGENT_AUTH_ONDEMAND_VARS"
+    [[ -z "$AGENT_AUTH_WRITABLE_VARS" ]] || \
+        printf 'writable (stored on request through the engine broker): %s\n' "$AGENT_AUTH_WRITABLE_VARS"
+    run_configured_probes
+
+    # Vogt, probed with the credential a client will use — because until this existed, the
+    # check reported services green while Vogt was completely unusable from the
+    # pod. It is the one place that can catch that class of failure: it
+    # runs in the pod holding the same credential a client will use, against
+    # the endpoint that client will use.
+    #
+    # An absent token is not a failure: an instance may legitimately not be
+    # deployed yet, and agent auth must keep working for git/gh regardless. So
+    # this reports three distinct states and never conflates them — configured
+    # and answering, not configured, or configured and refused.
+    #
+    # `/mcp`, not `/api/vogt/*`: the front door forwards a client's *core*
+    # token there untouched and injects its own on the API prefix, so `/mcp` is
+    # the one surface this credential is the right kind of token for.
+    vogt_url="${VOGT_URL:-$DEFAULT_VOGT_URL}"
+    vogt_mcp_url="${vogt_url%/}/mcp"
+    if [[ -z "${VOGT_HTTP_TOKEN:-}" ]]; then
+        printf 'skip: Vogt MCP (no %s secret; no instance configured)\n' \
+            "${VOGT_SECRET_NAME:-Vogt token}"
+    else
+        # The token is what a client presents; the file is where a client
+        # reads it from, and the rejection an agent eventually sees names that
+        # file. Absent means every client here is broken, so it is a named
+        # failure rather than the `skip` above, which means no instance.
+        [[ -s "${VOGT_TOKEN_FILE:-}" ]] || die \
+            "Vogt token loaded but VOGT_TOKEN_FILE (${VOGT_TOKEN_FILE:-<unset>}) is missing or empty; every registered client reads the credential from that file"
+        # Named, because a Vogt token is minted by one instance and stored
+        # hashed there. A token from another instance is refused however fresh
+        # it is, and the message an agent sees points at the token file.
+        vogt_failure_hint=" — if the token is current, check it was issued by *this* instance; tokens are not shared between Vogt instances"
+        probe_mcp "Vogt MCP" "$vogt_mcp_url" "$VOGT_HTTP_TOKEN" \
+            "${VOGT_SECRET_NAME:-Vogt token}" "$response_file" "$error_file" \
+            "$vogt_failure_hint"
+    fi
+}
+
+# The start of a session launch: from here to the handover is what the
+# launch report measures.
+begin_launch() {
+    LAUNCH_COMMAND="$1"
+    LAUNCH_T0="$(now_us)"
+    LAUNCH_REPORTING=1
+    DEGRADE_ON_UNAVAILABLE=1
+    LAUNCH_DEADLINE=$(( EPOCHSECONDS + LAUNCH_BUDGET ))
+}
+
+# The handover: report the launch, and say so in the session when it holds
+# fewer credentials than the manifest names (WI-1812).
+finish_launch() {
+    LAUNCH_REPORTING=0
+    if [[ -n "$AGENT_AUTH_UNAVAILABLE_REASON" ]]; then
+        printf '\n*** agent auth unavailable: %s\n*** This session started WITHOUT its brokered credentials (granted: %s).\n*** Start a new session once the secrets manager is back to get them.\n\n' \
+            "$AGENT_AUTH_UNAVAILABLE_REASON" "${AGENT_AUTH_GRANTED_VARS:-none}" >&2
+        report_launch degraded "$AGENT_AUTH_UNAVAILABLE_REASON"
+    else
+        report_launch ok
+    fi
+}
+
+main() {
+    case "${1:-}" in
+        check)
+            check_access
+            ;;
+        run)
+            shift
+            [[ "${1:-}" == "--" ]] && shift
+            [[ $# -gt 0 ]] || die "run requires a command"
+            begin_launch run
+            load_agent_environment
+            finish_launch
+            trap cleanup_auth_artifacts EXIT
+            "$@"
+            ;;
+        shell)
+            begin_launch shell
+            load_agent_environment
+            finish_launch
+            trap cleanup_auth_artifacts EXIT
+            "${SHELL:-/bin/bash}" -l
+            ;;
+        get)
+            shift
+            [[ $# -eq 1 && -n "${1:-}" ]] || die "get requires exactly one VAR"
+            get_one "$1"
+            ;;
+        fetch)
+            shift
+            [[ $# -eq 1 && -n "${1:-}" ]] || die "fetch requires exactly one VAR"
+            fetch_one "$1"
+            ;;
+        set)
+            shift
+            [[ $# -eq 1 && -n "${1:-}" ]] || die "set requires exactly one VAR"
+            set_one "$1"
+            ;;
+        store)
+            shift
+            [[ $# -eq 1 && -n "${1:-}" ]] || die "store requires exactly one VAR"
+            store_one "$1"
+            ;;
+        grants)
+            list_grants
+            ;;
+        -h|--help|help)
+            usage
+            ;;
+        *)
+            usage >&2
+            exit 2
+            ;;
+    esac
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

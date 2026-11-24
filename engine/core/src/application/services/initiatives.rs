@@ -12,41 +12,218 @@
 
 use serde_json::{json, Value};
 
-use crate::application::context::{AppContext, Built};
-use crate::application::services::preferences::{optional_i64, optional_string, require_string};
-use crate::application::services::{context_parts, dispatch, next_id, now_of, write_context};
+use crate::application::context::AppContext;
+use crate::application::services::{context_parts, next_id, now_of, write_context};
 use crate::application::writes::{audited_write, WriteOutcome};
 use crate::core::{slugify, Clock, IdFactory, Initiative, InitiativeState};
 use crate::errors::VogtError;
 use crate::storage::interface::{DeclaredStore, ReadView, WriteTxn};
 use std::sync::Arc;
 
-pub fn initiative_create_op(built: &Built, params: Value) -> Result<Value, VogtError> {
-    dispatch!(built, initiative_create, params)
+crate::typed_op!(initiative_create_op, CreateParams, initiative_create);
+crate::typed_op!(initiative_list_op, ListParams, initiative_list);
+crate::typed_op!(initiative_update_op, UpdateParams, initiative_update);
+crate::typed_op!(initiative_publish_op, PublishParams, initiative_publish);
+
+/// Raw wire fields. Each is held as a JSON value so the typed parameter types
+/// below can coerce them with the exact messages the hand-rolled readers gave.
+/// `null` reads as absent, as it always has. A body that is not an object reads
+/// as no fields at all.
+#[derive(serde::Deserialize, Default)]
+struct Raw {
+    #[serde(default)]
+    slug: Option<Value>,
+    #[serde(default)]
+    title: Option<Value>,
+    #[serde(default)]
+    body: Option<Value>,
+    #[serde(default)]
+    state: Option<Value>,
+    #[serde(default)]
+    weight: Option<Value>,
+    #[serde(default)]
+    reason: Option<Value>,
+    #[serde(default)]
+    limit: Option<Value>,
+    #[serde(default)]
+    offset: Option<Value>,
+    #[serde(default)]
+    mode: Option<Value>,
 }
 
-pub fn initiative_list_op(built: &Built, params: Value) -> Result<Value, VogtError> {
-    dispatch!(built, initiative_list, params)
+fn raw_of<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Raw, D::Error> {
+    use serde::de::Error;
+    match <Value as serde::Deserialize>::deserialize(deserializer)? {
+        Value::Object(map) => serde_json::from_value(Value::Object(map)).map_err(D::Error::custom),
+        _ => Ok(Raw::default()),
+    }
 }
 
-pub fn initiative_update_op(built: &Built, params: Value) -> Result<Value, VogtError> {
-    dispatch!(built, initiative_update, params)
+fn required(field: &str, value: &Option<Value>) -> Result<String, VogtError> {
+    match value.as_ref().and_then(Value::as_str) {
+        Some(text) if !text.trim().is_empty() => Ok(text.to_string()),
+        _ => Err(VogtError::InvalidRequest(format!("{field} is required"))),
+    }
 }
 
-pub fn initiative_publish_op(built: &Built, params: Value) -> Result<Value, VogtError> {
-    dispatch!(built, initiative_publish, params)
+fn string_or_none(field: &str, value: &Option<Value>) -> Result<Option<String>, VogtError> {
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(text)) => Ok(Some(text.clone())),
+        Some(_) => Err(VogtError::InvalidRequest(format!(
+            "{field} must be a string"
+        ))),
+    }
 }
 
-fn initiative_create<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
+fn integer_or_none(field: &str, value: &Option<Value>) -> Result<Option<i64>, VogtError> {
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Number(number)) => number
+            .as_i64()
+            .map(Some)
+            .ok_or_else(|| VogtError::InvalidRequest(format!("{field} must be an integer"))),
+        Some(_) => Err(VogtError::InvalidRequest(format!(
+            "{field} must be an integer"
+        ))),
+    }
+}
+
+fn custom<E: serde::de::Error>(err: VogtError) -> E {
+    match err {
+        VogtError::InvalidRequest(message) => E::custom(message),
+        other => E::custom(other),
+    }
+}
+
+/// `initiative.create` parameters. Absent and `null` both mean "use the default".
+struct CreateParams {
+    title: String,
+    body: String,
+    state: String,
+    weight: i64,
+    reason: String,
+}
+
+impl CreateParams {
+    fn from_raw(raw: &Raw) -> Result<Self, VogtError> {
+        let title = required("title", &raw.title)?;
+        let body = string_or_none("body", &raw.body)?.unwrap_or_default();
+        let state = string_or_none("state", &raw.state)?.unwrap_or_else(|| "open".to_string());
+        let weight = integer_or_none("weight", &raw.weight)?.unwrap_or(0);
+        let reason = required("reason", &raw.reason)?;
+        Ok(Self {
+            title,
+            body,
+            state,
+            weight,
+            reason,
+        })
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for CreateParams {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::from_raw(&raw_of(deserializer)?).map_err(custom)
+    }
+}
+
+/// `initiative.list` parameters.
+struct ListParams {
+    limit: i64,
+    offset: i64,
+    summary: bool,
+}
+
+impl<'de> serde::Deserialize<'de> for ListParams {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = raw_of(deserializer)?;
+        let read = || -> Result<Self, VogtError> {
+            Ok(Self {
+                limit: integer_or_none("limit", &raw.limit)?.unwrap_or(100),
+                offset: integer_or_none("offset", &raw.offset)?.unwrap_or(0),
+                // Only the exact string `summary` blanks bodies.
+                summary: raw.mode.as_ref().and_then(Value::as_str) == Some("summary"),
+            })
+        };
+        read().map_err(custom)
+    }
+}
+
+/// `initiative.update` parameters. A field that is absent or `null` is not
+/// changed, so `None` covers both; the guard against an empty update runs here.
+struct UpdateParams {
+    slug: String,
+    title: Option<String>,
+    body: Option<String>,
+    weight: Option<i64>,
+    state: Option<InitiativeState>,
+    reason: String,
+}
+
+impl<'de> serde::Deserialize<'de> for UpdateParams {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = raw_of(deserializer)?;
+        let read = || -> Result<Self, VogtError> {
+            let slug = required("slug", &raw.slug)?;
+            let title = string_or_none("title", &raw.title)?;
+            let body = string_or_none("body", &raw.body)?;
+            let weight = integer_or_none("weight", &raw.weight)?;
+            let state = match string_or_none("state", &raw.state)? {
+                Some(text) => Some(parse_state(&text)?),
+                None => None,
+            };
+            let reason = required("reason", &raw.reason)?;
+            if title.is_none() && body.is_none() && weight.is_none() && state.is_none() {
+                return Err(VogtError::InvalidRequest(
+                    "give a title, body, weight or state; there is nothing else to update"
+                        .to_string(),
+                ));
+            }
+            Ok(Self {
+                slug,
+                title,
+                body,
+                weight,
+                state,
+                reason,
+            })
+        };
+        read().map_err(custom)
+    }
+}
+
+/// `initiative.publish` parameters.
+struct PublishParams {
+    slug: String,
+    reason: String,
+}
+
+impl<'de> serde::Deserialize<'de> for PublishParams {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = raw_of(deserializer)?;
+        let read = || -> Result<Self, VogtError> {
+            Ok(Self {
+                slug: required("slug", &raw.slug)?,
+                reason: required("reason", &raw.reason)?,
+            })
+        };
+        read().map_err(custom)
+    }
+}
+
+fn initiative_create<C, I>(ctx: &AppContext<C, I>, params: CreateParams) -> Result<Value, VogtError>
 where
     C: Clock + 'static,
     I: IdFactory + 'static,
 {
-    let title = require_string(&params, "title")?;
-    let body = optional_string(&params, "body")?.unwrap_or_default();
-    let state = optional_string(&params, "state")?.unwrap_or_else(|| "open".to_string());
-    let weight = optional_i64(&params, "weight", 0)?;
-    let reason = require_string(&params, "reason")?;
+    let CreateParams {
+        title,
+        body,
+        state,
+        weight,
+        reason,
+    } = params;
     let slug = slugify(&title);
     if slug.is_empty() {
         return Err(VogtError::InvalidRequest(
@@ -112,19 +289,17 @@ fn insert_initiative<C: Clock + 'static, I: IdFactory + 'static>(
     })
 }
 
-fn initiative_list<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
+fn initiative_list<C, I>(ctx: &AppContext<C, I>, params: ListParams) -> Result<Value, VogtError>
 where
     C: Clock + 'static,
     I: IdFactory + 'static,
 {
-    let limit = optional_i64(&params, "limit", 100)?;
-    let offset = optional_i64(&params, "offset", 0)?;
     let (declared, _, _, _, _, _) = context_parts(ctx);
     let view = declared.read()?;
-    let rows = view.list_initiatives(limit, offset)?;
+    let rows = view.list_initiatives(params.limit, params.offset)?;
     // `summary` blanks each body. Anything else, including the default `full`,
     // keeps it. Python copies the row and sets body to "" only in that case.
-    let summary = params.get("mode").and_then(Value::as_str) == Some("summary");
+    let summary = params.summary;
     let initiatives = rows
         .iter()
         .map(|row| {
@@ -138,44 +313,19 @@ where
     Ok(json!({ "initiatives": initiatives }))
 }
 
-fn initiative_update<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
+fn initiative_update<C, I>(ctx: &AppContext<C, I>, params: UpdateParams) -> Result<Value, VogtError>
 where
     C: Clock + 'static,
     I: IdFactory + 'static,
 {
-    let slug = require_string(&params, "slug")?;
-    let title = optional_string(&params, "title")?;
-    let body = match params.get("body") {
-        None | Some(Value::Null) => None,
-        Some(Value::String(text)) => Some(text.clone()),
-        Some(_) => {
-            return Err(VogtError::InvalidRequest(
-                "body must be a string".to_string(),
-            ))
-        }
-    };
-    let weight =
-        match params.get("weight") {
-            None | Some(Value::Null) => None,
-            Some(Value::Number(number)) => Some(number.as_i64().ok_or_else(|| {
-                VogtError::InvalidRequest("weight must be an integer".to_string())
-            })?),
-            Some(_) => {
-                return Err(VogtError::InvalidRequest(
-                    "weight must be an integer".to_string(),
-                ))
-            }
-        };
-    let state = match optional_string(&params, "state")? {
-        Some(text) => Some(parse_state(&text)?),
-        None => None,
-    };
-    let reason = require_string(&params, "reason")?;
-    if title.is_none() && body.is_none() && weight.is_none() && state.is_none() {
-        return Err(VogtError::InvalidRequest(
-            "give a title, body, weight or state; there is nothing else to update".to_string(),
-        ));
-    }
+    let UpdateParams {
+        slug,
+        title,
+        body,
+        weight,
+        state,
+        reason,
+    } = params;
     let changed_text = title.is_some() || body.is_some();
 
     let (declared, _, principal, clock, ids, _) = context_parts(ctx);
@@ -277,13 +427,15 @@ fn apply_initiative_update<C: Clock + 'static, I: IdFactory + 'static>(
 /// forge-linked repo the initiative spans. A repo that cannot be written is a
 /// `skipped` row, not a silent drop. Closing the initiative raises a drift
 /// proposal; it never closes the upstream issue.
-fn initiative_publish<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
+fn initiative_publish<C, I>(
+    ctx: &AppContext<C, I>,
+    params: PublishParams,
+) -> Result<Value, VogtError>
 where
     C: Clock + 'static,
     I: IdFactory + 'static,
 {
-    let slug = require_string(&params, "slug")?;
-    let reason = require_string(&params, "reason")?;
+    let PublishParams { slug, reason } = params;
     let (initiative, targets, mut skipped) = {
         let view = ctx.declared.read()?;
         let initiative = view.initiative_by_slug(&slug)?.ok_or_else(|| {
@@ -829,6 +981,102 @@ mod tests {
     use crate::application::services::services_test::opened;
     use crate::errors::VogtError;
     use serde_json::json;
+
+    fn refused(result: Result<serde_json::Value, VogtError>) -> String {
+        match result {
+            Err(VogtError::InvalidRequest(message)) => message,
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    /// Every coercion message is pinned byte for byte, as the hand-rolled
+    /// readers wrote them, including the order when two fields are wrong.
+    #[test]
+    fn decode_messages_are_unchanged() {
+        let built = opened();
+        let create = |v| refused(initiative_create_op(&built, v));
+        assert_eq!(create(json!({"reason": "r"})), "title is required");
+        assert_eq!(
+            create(json!({"title": "  ", "reason": "r"})),
+            "title is required"
+        );
+        assert_eq!(
+            create(json!({"title": 3, "reason": "r"})),
+            "title is required"
+        );
+        assert_eq!(create(json!(null)), "title is required");
+        assert_eq!(create(json!({"title": "T"})), "reason is required");
+        assert_eq!(
+            create(json!({"title": "T", "reason": "r", "body": 1})),
+            "body must be a string"
+        );
+        assert_eq!(
+            create(json!({"title": "T", "reason": "r", "state": true})),
+            "state must be a string"
+        );
+        assert_eq!(
+            create(json!({"title": "T", "reason": "r", "weight": "x"})),
+            "weight must be an integer"
+        );
+        assert_eq!(
+            create(json!({"title": "T", "reason": "r", "weight": 1.5})),
+            "weight must be an integer"
+        );
+        assert_eq!(
+            create(json!({"title": "T", "reason": "r", "state": "weird"})),
+            "initiative state \"weird\" is not open or closed"
+        );
+        assert_eq!(
+            create(json!({"title": "!!!", "reason": "r"})),
+            "initiative title does not yield a slug"
+        );
+        assert_eq!(
+            create(json!({"title": "T", "reason": "r", "body": 1, "weight": "x"})),
+            "body must be a string"
+        );
+
+        let list = |v| refused(initiative_list_op(&built, v));
+        assert_eq!(list(json!({"limit": "x"})), "limit must be an integer");
+        assert_eq!(list(json!({"offset": []})), "offset must be an integer");
+
+        let update = |v| refused(initiative_update_op(&built, v));
+        assert_eq!(update(json!({"reason": "r"})), "slug is required");
+        assert_eq!(update(json!({"slug": "s"})), "reason is required");
+        assert_eq!(
+            update(json!({"slug": "s", "reason": "r", "title": 1})),
+            "title must be a string"
+        );
+        assert_eq!(
+            update(json!({"slug": "s", "reason": "r", "body": 1})),
+            "body must be a string"
+        );
+        assert_eq!(
+            update(json!({"slug": "s", "reason": "r", "weight": "x"})),
+            "weight must be an integer"
+        );
+        assert_eq!(
+            update(json!({"slug": "s", "reason": "r", "state": 1})),
+            "state must be a string"
+        );
+        assert_eq!(
+            update(json!({"slug": "s", "reason": "r", "state": "weird"})),
+            "initiative state \"weird\" is not open or closed"
+        );
+        assert_eq!(
+            update(json!({"slug": "s", "reason": "r"})),
+            "give a title, body, weight or state; there is nothing else to update"
+        );
+        // null is absent: it does not count as a field to change.
+        assert_eq!(
+            update(
+                json!({"slug": "s", "reason": "r", "title": null, "body": null, "weight": null})
+            ),
+            "give a title, body, weight or state; there is nothing else to update"
+        );
+        let publish = |v| refused(initiative_publish_op(&built, v));
+        assert_eq!(publish(json!({"reason": "r"})), "slug is required");
+        assert_eq!(publish(json!({"slug": "s"})), "reason is required");
+    }
 
     /// Creating an initiative returns it, and listing it back finds the same slug.
     #[test]
