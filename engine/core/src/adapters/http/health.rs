@@ -15,7 +15,7 @@ use serde::Serialize;
 
 use sha2::{Digest, Sha256};
 
-use crate::storage::sqlite::connection::connect;
+use crate::storage::sqlite::connection::BUSY_TIMEOUT_MS;
 use crate::storage::sqlite::migrator::{self, MigrateError};
 use crate::storage::sqlite::{declared_path, observed_path};
 
@@ -173,7 +173,11 @@ struct Readiness {
 }
 
 async fn ready(State(state): State<Arc<HealthState>>) -> (StatusCode, Json<Readiness>) {
-    match readiness(&state.data_dir) {
+    let data_dir = state.data_dir.clone();
+    let probed = tokio::task::spawn_blocking(move || readiness(&data_dir))
+        .await
+        .unwrap_or_else(|err| Err(MigrateError::Io(std::io::Error::other(err.to_string()))));
+    match probed {
         Ok(body) if body.status == "ready" => (StatusCode::OK, Json(body)),
         Ok(body) => (StatusCode::SERVICE_UNAVAILABLE, Json(body)),
         Err(err) => {
@@ -203,10 +207,8 @@ fn error_reference(detail: &str) -> String {
 
 fn readiness(data_dir: &std::path::Path) -> Result<Readiness, MigrateError> {
     let root = migrator::migrations_root();
-    let declared = connect(&declared_path(data_dir))?;
-    let observed = connect(&observed_path(data_dir))?;
-    let declared_version = migrator::applied_version(&declared)?;
-    let observed_version = migrator::applied_version(&observed)?;
+    let declared_version = probe_version(&declared_path(data_dir))?;
+    let observed_version = probe_version(&observed_path(data_dir))?;
     let declared_expected = migrator::bundled_version(
         "declared",
         root.as_deref().map(|path| path.join("declared")).as_deref(),
@@ -245,10 +247,32 @@ fn readiness(data_dir: &std::path::Path) -> Result<Readiness, MigrateError> {
     })
 }
 
+/// Open a database for the probe: read-only, never created. `None` when the
+/// file is absent, so a missing or unmounted data directory stays untouched.
+fn open_probe(path: &std::path::Path) -> rusqlite::Result<Option<rusqlite::Connection>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let conn = rusqlite::Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    conn.pragma_update(None, "busy_timeout", BUSY_TIMEOUT_MS)?;
+    Ok(Some(conn))
+}
+
+/// Applied schema version, 0 when the database file does not exist.
+fn probe_version(path: &std::path::Path) -> Result<i64, MigrateError> {
+    match open_probe(path)? {
+        Some(conn) => migrator::applied_version(&conn),
+        None => Ok(0),
+    }
+}
+
 /// The id bootstrap wrote into `meta`. Null only on a database that was never
 /// bootstrapped.
 fn instance_id(data_dir: &std::path::Path) -> Option<String> {
-    let conn = connect(&declared_path(data_dir)).ok()?;
+    let conn = open_probe(&declared_path(data_dir)).ok()??;
     conn.query_row(
         "SELECT value FROM meta WHERE key = 'instance_id'",
         [],
@@ -406,6 +430,26 @@ mod tests {
         assert!(detail.contains("declared schema is at 0"), "{detail}");
         assert!(detail.contains("vogt migrate"), "{detail}");
         assert!(json["instance_id"].is_null(), "{json}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The probe must not create anything: a missing database is not ready and
+    /// the directory stays empty.
+    #[test]
+    fn a_probe_on_a_missing_database_creates_nothing() {
+        let dir =
+            std::env::temp_dir().join(format!("vogt-health-ro-{}", crate::core::fresh_id("t")));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let body = readiness(&dir).unwrap();
+        assert_eq!(body.status, "not_ready");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+
+        let absent = dir.join("not-mounted");
+        let body = readiness(&absent).unwrap();
+        assert_eq!(body.status, "not_ready");
+        assert!(!absent.exists());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
