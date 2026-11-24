@@ -7,7 +7,7 @@ use vogt_engine_server::{config, serve_forever};
 #[derive(Debug, Parser)]
 #[command(
     name = "vogt-engine",
-    version,
+    version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("VOGT_RUSTC_VERSION"), ")"),
     about = "Vogt engine — the front-door server"
 )]
 struct Cli {

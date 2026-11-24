@@ -69,12 +69,14 @@ async fn live(State(state): State<Arc<HealthState>>) -> Json<Liveness> {
 struct VersionBody {
     version: String,
     name: &'static str,
+    rustc: &'static str,
 }
 
 async fn version(State(state): State<Arc<HealthState>>) -> Json<VersionBody> {
     Json(VersionBody {
         version: state.version.clone(),
         name: "vogt",
+        rustc: env!("VOGT_RUSTC_VERSION"),
     })
 }
 
@@ -338,10 +340,9 @@ mod tests {
         let body = |raw: &str| raw.split("\r\n\r\n").nth(1).unwrap().to_string();
 
         let version: serde_json::Value = serde_json::from_str(&body(&get("/version", ""))).unwrap();
-        assert_eq!(
-            version,
-            serde_json::json!({"version": "0.7.7", "name": "vogt"})
-        );
+        assert_eq!(version["version"], "0.7.7");
+        assert_eq!(version["name"], "vogt");
+        assert!(version["rustc"].as_str().unwrap().contains("rustc"));
 
         let info: serde_json::Value =
             serde_json::from_str(&body(&get("/connection-info", ""))).unwrap();

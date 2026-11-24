@@ -36,6 +36,9 @@ pub const VERSION: &str = match option_env!("VOGT_VERSION") {
     _ => "unknown",
 };
 
+/// The compiler that built this binary (`rustc -V`), captured by `build.rs`.
+pub const RUSTC_VERSION: &str = env!("VOGT_RUSTC_VERSION");
+
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -199,7 +202,7 @@ fn main() -> ExitCode {
         let code = adapters::cli::main_cli(
             &argv,
             &registry::default_registry(),
-            VERSION,
+            &format!("{VERSION} ({RUSTC_VERSION})"),
             &mut |operation, params| {
                 // Parsing and pydantic validation have both succeeded, which is
                 // where Python builds the context and announces the hooks. A
