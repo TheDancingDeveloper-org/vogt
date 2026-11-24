@@ -1263,7 +1263,7 @@ impl SessionRegistry {
                 crate::pod_backend::POD_GONE_POLL,
             )
             .await;
-            remove_pod_token(&state_dir, id);
+            remove_pod_token_if(&state_dir, &auth, id, &link);
             auth.forget_pod_if(id, &link);
             link.mark_torn_down();
             // Revoke-on-stop (WI-3235). After the teardown is marked, so a slow
@@ -5857,6 +5857,21 @@ fn remove_pod_token(state_dir: &std::path::Path, id: Uuid) {
     let _ = std::fs::remove_file(pod_token_dir(state_dir).join(id.to_string()));
 }
 
+/// Remove the pod token only while `link` is still the session's registered
+/// pod. A wake that outran a slow teardown has registered a newer pod and
+/// written its adoption token; that one must survive (WI-4605).
+fn remove_pod_token_if(
+    state_dir: &std::path::Path,
+    auth: &std::sync::Arc<crate::agent_stream::AgentAuth>,
+    id: Uuid,
+    link: &std::sync::Arc<crate::agent_stream::PodLink>,
+) {
+    match auth.pod(id) {
+        Some(current) if !std::sync::Arc::ptr_eq(&current, link) => {}
+        _ => remove_pod_token(state_dir, id),
+    }
+}
+
 /// The last `SCREEN_BYTES` of a session's raw output log.
 fn log_tail(path: &std::path::Path) -> Option<Vec<u8>> {
     use std::io::{Read, Seek, SeekFrom};
@@ -5987,6 +6002,36 @@ mod tests {
         validate_pod_placement_fields, validate_requested_placement, validate_template_placement,
     };
     use crate::config::SessionTemplate;
+
+    #[test]
+    fn late_teardown_keeps_the_newer_pods_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = uuid::Uuid::new_v4();
+        let auth = std::sync::Arc::new(crate::agent_stream::AgentAuth::default());
+        let (old, _r1) = auth.register_pod(id);
+        // Wake while the old teardown is pending: a new pod registers and
+        // keeps its token.
+        let (_new, _r2) = auth.register_pod(id);
+        std::fs::create_dir_all(super::pod_token_dir(dir.path())).unwrap();
+        std::fs::write(super::pod_token_dir(dir.path()).join(id.to_string()), "new").unwrap();
+        super::remove_pod_token_if(dir.path(), &auth, id, &old);
+        assert_eq!(
+            super::read_pod_token(dir.path(), id).as_deref(),
+            Some("new")
+        );
+    }
+
+    #[test]
+    fn teardown_of_the_current_pod_removes_its_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = uuid::Uuid::new_v4();
+        let auth = std::sync::Arc::new(crate::agent_stream::AgentAuth::default());
+        let (cur, _r) = auth.register_pod(id);
+        std::fs::create_dir_all(super::pod_token_dir(dir.path())).unwrap();
+        std::fs::write(super::pod_token_dir(dir.path()).join(id.to_string()), "t").unwrap();
+        super::remove_pod_token_if(dir.path(), &auth, id, &cur);
+        assert!(super::read_pod_token(dir.path(), id).is_none());
+    }
 
     /// `git` in `dir`, asserting it succeeds (WI-1774 fixtures).
     fn git_in(dir: &std::path::Path, args: &[&str]) {
