@@ -858,8 +858,11 @@ impl SessionRegistry {
         if let Some(r) = slot.as_ref() {
             return Ok(r.clone());
         }
-        let r = crate::source_provider::SourceRegistry::for_deployment(&self.cfg.state_dir)
-            .map_err(|e| ApiError::Config(e.to_string()))?;
+        let r = crate::source_provider::SourceRegistry::for_deployment(
+            &self.cfg.state_dir,
+            self.cfg.graft.clone(),
+        )
+        .map_err(|e| ApiError::Config(e.to_string()))?;
         *slot = Some(r.clone());
         Ok(r)
     }

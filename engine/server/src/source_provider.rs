@@ -191,13 +191,13 @@ impl SourceRegistry {
     /// The registry a deployment serves sessions from: git, plus every
     /// built-in provider with its settings read from the environment. This is
     /// the one place providers are named.
-    pub fn for_deployment(state_dir: &Path) -> Result<Self, SourceError> {
+    pub fn for_deployment(
+        state_dir: &Path,
+        graft: crate::graft_provider::GraftSettings,
+    ) -> Result<Self, SourceError> {
         let mut r = Self::with_defaults();
         r.register(Arc::new(
-            crate::graft_provider::GraftProvider::for_deployment(
-                state_dir,
-                crate::graft_provider::GraftSettings::from_env(),
-            )?,
+            crate::graft_provider::GraftProvider::for_deployment(state_dir, graft)?,
         ));
         Ok(r)
     }

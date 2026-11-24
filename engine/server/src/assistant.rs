@@ -3093,6 +3093,7 @@ mod tests {
             agent_auth_public_url: None,
             pod: Default::default(),
             pod_salvage: Default::default(),
+            graft: crate::graft_provider::GraftSettings::from_lookup(|_| None),
             workspace_size_ttl: std::time::Duration::from_secs(60),
             escalation_ladder: Default::default(),
             cadastre_mcp_url: None,
