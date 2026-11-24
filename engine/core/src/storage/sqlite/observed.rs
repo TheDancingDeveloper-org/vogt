@@ -297,12 +297,10 @@ where
                 "INSERT INTO meta (key, value) VALUES (?, ?)",
                 params![
                     META_CREATED_AT,
-                    crate::core::to_iso(
-                        self.clock
-                            .lock()
-                            .expect("the shared clock and ids are not poisoned")
-                            .now()
-                    )
+                    self.clock
+                        .lock()
+                        .expect("the shared clock and ids are not poisoned")
+                        .now()
                 ],
             )?;
             Ok(())
@@ -371,7 +369,7 @@ where
         write_tx(&mut conn, |conn| {
             conn.execute(
                 "INSERT INTO sweeps (id, collector, scope, started_at, outcome, stats) VALUES (?, ?, ?, ?, 'running', '{}')",
-                params![sweep_id, collector, rendered_scope, crate::core::to_iso(at)],
+                params![sweep_id, collector, rendered_scope, &at],
             )?;
             Ok(())
         })?;
@@ -403,7 +401,7 @@ where
             conn.execute(
                 "UPDATE sweeps SET finished_at = ?, outcome = ?, stats = ?, detail = ? WHERE id = ?",
                 params![
-                    crate::core::to_iso(at),
+                    &at,
                     vocab_text(outcome),
                     rendered,
                     detail,
@@ -456,7 +454,7 @@ where
                         finding.content_digest,
                         finding.source_url,
                         finding.promoted as i64,
-                        crate::core::to_iso(at),
+                        &at,
                     ],
                 )?;
                 stats.new += 1;
@@ -745,7 +743,7 @@ where
         write_tx(&mut conn, |conn| {
             conn.execute(
                 "INSERT INTO sync_state (collector, project_id, watermark, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT (collector, project_id) DO UPDATE SET watermark = excluded.watermark, updated_at = excluded.updated_at",
-                params![collector, project_id, watermark, crate::core::to_iso(at)],
+                params![collector, project_id, watermark, &at],
             )?;
             Ok(())
         })
@@ -755,7 +753,7 @@ where
         if subject_keys.is_empty() {
             return Ok(());
         }
-        let stamp = crate::core::to_iso(at);
+        let stamp = &at;
         let mut conn = self.open(true)?;
         write_tx(&mut conn, |conn| {
             for key in subject_keys {
@@ -884,7 +882,7 @@ where
                         row.raw_target,
                         row.manifest,
                         row.to_project_id,
-                        crate::core::to_iso(row.observed_at),
+                        &row.observed_at,
                     ],
                 )?;
             }
@@ -910,7 +908,7 @@ where
             let candidates: Vec<String> = {
                 let mut statement =
                     conn.prepare("SELECT id FROM observations WHERE observed_at < ?")?;
-                let rows = statement.query_map([crate::core::to_iso(before)], |row| row.get(0))?;
+                let rows = statement.query_map([&before], |row| row.get(0))?;
                 rows.collect::<Result<Vec<String>, _>>()?
             };
             let doomed: Vec<&String> = candidates
@@ -984,7 +982,7 @@ where
                         call.summary,
                         services,
                         call.withheld as i64,
-                        crate::core::to_iso(call.at),
+                        &call.at,
                     ],
                 )?;
                 calls += changed as i64;
@@ -998,7 +996,7 @@ where
                         result.excerpt,
                         WITHHELD,
                         result.excerpt,
-                        result.at.map(crate::core::to_iso),
+                        result.at,
                         result.source_path,
                         result.call_id,
                     ],
@@ -1015,7 +1013,7 @@ where
                         cursor.size,
                         cursor.agent_session_id,
                         cursor.cwd,
-                        crate::core::to_iso(at),
+                        &at,
                     ],
                 )?;
             }
@@ -1221,21 +1219,17 @@ fn vocab_cell<T: serde::de::DeserializeOwned>(row: &Row<'_>, column: &str) -> ru
 }
 
 fn moment(row: &Row<'_>, column: impl rusqlite::RowIndex) -> rusqlite::Result<Moment> {
-    crate::core::from_iso(&row.get::<_, String>(column)?)
-        .map_err(rusqlite::Error::InvalidColumnName)
+    row.get(column)
 }
 
 fn opt_moment(row: &Row<'_>, column: &str) -> rusqlite::Result<Option<Moment>> {
-    row.get::<_, Option<String>>(column)?
-        .map(|text| crate::core::from_iso(&text).map_err(rusqlite::Error::InvalidColumnName))
-        .transpose()
+    row.get(column)
 }
 
 fn json_cell(row: &Row<'_>, column: &str) -> rusqlite::Result<serde_json::Value> {
-    let text: String = row.get(column)?;
-    serde_json::from_str(&text).map_err(|err| {
-        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
-    })
+    Ok(row
+        .get::<_, crate::core::Json<serde_json::Value>>(column)?
+        .0)
 }
 
 fn one<T>(
