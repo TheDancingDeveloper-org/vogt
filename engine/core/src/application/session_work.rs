@@ -609,6 +609,7 @@ mod tests {
                     // gains the status the stand-in's program reported.
                     let mut row: Value = serde_json::from_slice(body).unwrap_or(json!({}));
                     if let Some(object) = row.as_object_mut() {
+                        object.insert("id".to_string(), json!(path));
                         object.insert(
                             "reported_status".to_string(),
                             json!({"state": "working", "msg": "building"}),
