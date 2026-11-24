@@ -1,8 +1,0 @@
-{
- "agent": "claude-code",
- "version": "2.1.322",
- "scenario": "turn-disable-terminal-title",
- "term": "xterm-256color unless named",
- "note": "OSC and BEL sequences only, in order; screen frames omitted; cwd redacted",
- "sequences": []
-}
