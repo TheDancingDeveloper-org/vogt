@@ -1037,7 +1037,7 @@ jobs:
           cache-from: type=registry,ref=${{ env.CACHE_IMAGE }}:rust-core-preview-${{ github.ref_name }}
           cache-to: type=registry,ref=${{ env.CACHE_IMAGE }}:rust-core-preview-${{ github.ref_name }},mode=max
           build-args: |
-            RUST_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-base/rust:1-bookworm
+            RUST_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-base/rust:1-bookworm@sha256:ade39a710ef85f3506cffcfec3e8a24ba090badef1dff2fb798f71d878833fea
 
       # What the preview stack does on every start: `init` on an empty data
       # directory, then `serve`, and readiness answers 200. python3 is checked
