@@ -1631,6 +1631,40 @@ impl AssistantRuntime {
 
     /// Core loop. `carried_results` are tool messages that must be appended
     /// before the next model call (from an approve/deny resolution).
+    /// Budget exhausted: acknowledge without executing anything. The model
+    /// still asked, so each call and its refusal are recorded — "every tool
+    /// call" includes the ones nothing ran.
+    async fn refuse_over_budget(&self, actor: &str, tool_calls: &[Value]) -> Vec<Value> {
+        const BUDGET_REFUSAL: &str =
+            "not executed: tool budget exhausted, answer with what you have";
+        let mut refusals: Vec<Value> = Vec::with_capacity(tool_calls.len());
+        for call in tool_calls {
+            let (name, args) = tool_call_name_and_args(call);
+            self.log_event(
+                actor,
+                LogEvent::ToolCall {
+                    name: name.clone(),
+                    arguments: args,
+                },
+            )
+            .await;
+            self.log_event(
+                actor,
+                LogEvent::ToolResult {
+                    name,
+                    content: BUDGET_REFUSAL.to_string(),
+                },
+            )
+            .await;
+            refusals.push(json!({
+                "role": "tool",
+                "tool_call_id": call.get("id").and_then(Value::as_str).unwrap_or_default(),
+                "content": BUDGET_REFUSAL,
+            }));
+        }
+        refusals
+    }
+
     async fn run_loop(
         &self,
         convo: &mut Conversation,
@@ -1670,28 +1704,7 @@ impl AssistantRuntime {
                     "I hit my tool budget before finishing — ask again to continue.".to_string();
                 self.log_event(&actor, LogEvent::Reply { text: text.clone() })
                     .await;
-                convo.transcript.push(TranscriptEntry {
-                    role: "assistant".into(),
-                    text: text.clone(),
-                    tool_trace: tool_trace.clone(),
-                    created_at: Some(transcript_now()),
-                    session_refs: session_refs.clone(),
-                    actions: open_session_actions(&session_refs),
-                    interrupted: false,
-                });
-                trim_history(convo);
-                return Ok(AssistantReply {
-                    reply: Some(text),
-                    pending_action: None,
-                    tool_trace,
-                    created_at: convo
-                        .transcript
-                        .last()
-                        .and_then(|entry| entry.created_at.clone()),
-                    actions: open_session_actions(&session_refs),
-                    session_refs,
-                    interrupted: false,
-                });
+                return Ok(finish_with_text(convo, text, tool_trace, session_refs));
             }
             let body = self.request_body(convo, force_final, turn, profile);
             let response = match stream {
@@ -1735,28 +1748,7 @@ impl AssistantRuntime {
                     )
                     .await;
                     let text = "The assistant backend is unavailable right now.".to_string();
-                    convo.transcript.push(TranscriptEntry {
-                        role: "assistant".into(),
-                        text: text.clone(),
-                        tool_trace: tool_trace.clone(),
-                        created_at: Some(transcript_now()),
-                        session_refs: session_refs.clone(),
-                        actions: open_session_actions(&session_refs),
-                        interrupted: false,
-                    });
-                    trim_history(convo);
-                    return Ok(AssistantReply {
-                        reply: Some(text),
-                        pending_action: None,
-                        tool_trace,
-                        created_at: convo
-                            .transcript
-                            .last()
-                            .and_then(|entry| entry.created_at.clone()),
-                        actions: open_session_actions(&session_refs),
-                        session_refs,
-                        interrupted: false,
-                    });
+                    return Ok(finish_with_text(convo, text, tool_trace, session_refs));
                 }
             };
             let message = response
@@ -1780,60 +1772,11 @@ impl AssistantRuntime {
                     .to_string();
                 self.log_event(&actor, LogEvent::Reply { text: text.clone() })
                     .await;
-                let created_at = transcript_now();
-                let actions = open_session_actions(&session_refs);
-                convo.transcript.push(TranscriptEntry {
-                    role: "assistant".into(),
-                    text: text.clone(),
-                    tool_trace: tool_trace.clone(),
-                    created_at: Some(created_at.clone()),
-                    session_refs: session_refs.clone(),
-                    actions: actions.clone(),
-                    interrupted: false,
-                });
-                trim_history(convo);
-                return Ok(AssistantReply {
-                    reply: Some(text),
-                    pending_action: None,
-                    tool_trace,
-                    created_at: Some(created_at),
-                    session_refs,
-                    actions,
-                    interrupted: false,
-                });
+                return Ok(finish_with_text(convo, text, tool_trace, session_refs));
             }
 
             if force_final {
-                // Budget exhausted: acknowledge without executing anything. The
-                // model still asked, so each call and its refusal are recorded
-                // — "every tool call" includes the ones nothing ran.
-                const BUDGET_REFUSAL: &str =
-                    "not executed: tool budget exhausted, answer with what you have";
-                let mut refusals: Vec<Value> = Vec::with_capacity(tool_calls.len());
-                for call in &tool_calls {
-                    let (name, args) = tool_call_name_and_args(call);
-                    self.log_event(
-                        &actor,
-                        LogEvent::ToolCall {
-                            name: name.clone(),
-                            arguments: args,
-                        },
-                    )
-                    .await;
-                    self.log_event(
-                        &actor,
-                        LogEvent::ToolResult {
-                            name,
-                            content: BUDGET_REFUSAL.to_string(),
-                        },
-                    )
-                    .await;
-                    refusals.push(json!({
-                        "role": "tool",
-                        "tool_call_id": call.get("id").and_then(Value::as_str).unwrap_or_default(),
-                        "content": BUDGET_REFUSAL,
-                    }));
-                }
+                let refusals = self.refuse_over_budget(&actor, &tool_calls).await;
                 convo.messages.extend(refusals);
                 continue;
             }
@@ -2946,6 +2889,37 @@ fn last_user_text(convo: &Conversation) -> Option<String> {
         .rev()
         .find(|entry| entry.role == "user")
         .map(|entry| entry.text.clone())
+}
+
+/// Close a turn with plain assistant text: record it in the transcript, trim
+/// the history and build the reply.
+fn finish_with_text(
+    convo: &mut Conversation,
+    text: String,
+    tool_trace: Vec<String>,
+    session_refs: Vec<SessionRef>,
+) -> AssistantReply {
+    let created_at = transcript_now();
+    let actions = open_session_actions(&session_refs);
+    convo.transcript.push(TranscriptEntry {
+        role: "assistant".into(),
+        text: text.clone(),
+        tool_trace: tool_trace.clone(),
+        created_at: Some(created_at.clone()),
+        session_refs: session_refs.clone(),
+        actions: actions.clone(),
+        interrupted: false,
+    });
+    trim_history(convo);
+    AssistantReply {
+        reply: Some(text),
+        pending_action: None,
+        tool_trace,
+        created_at: Some(created_at),
+        session_refs,
+        actions,
+        interrupted: false,
+    }
 }
 
 fn trim_history(convo: &mut Conversation) {
