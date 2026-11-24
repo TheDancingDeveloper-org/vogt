@@ -8,7 +8,13 @@
 // two pub items are used across crates: `ship_opencode_replies` (server
 // integration tests) and `CODEX_APPROVAL_POLICIES` (re-exported by server's
 // agent_cli). Allowed for the test build only.
-#![cfg_attr(test, allow(dead_code_pub_in_binary))]
+#![cfg_attr(
+    test,
+    expect(
+        dead_code_pub_in_binary,
+        reason = "two pub items are used across crates: ship_opencode_replies (server integration tests) and CODEX_APPROVAL_POLICIES (server agent_cli)"
+    )
+)]
 
 pub mod codex_guidance;
 pub mod codex_policy;
