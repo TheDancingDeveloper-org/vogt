@@ -144,6 +144,31 @@ for (const literal of [...literals].sort()) {
   }
 }
 
+// One door: the client's prefix is `/api/vogt`, it has exactly one outbound
+// call site (through the shared transport), no bare `fetch`, and reaches no
+// other origin. (`tests/test_pwa.py`: front door, other origin.)
+if (!client.includes('export const VOGT_PREFIX = "/api/vogt"')) {
+  problems.push('the PWA no longer mounts the front door at "/api/vogt"');
+}
+if ((client.match(/\bfetchWithRetry\(/g) ?? []).length !== 1) {
+  problems.push("the Vogt client must have exactly one fetchWithRetry call site");
+}
+if (/\bfetch\(/.test(client)) {
+  problems.push("the Vogt client calls bare fetch, bypassing the shared transport");
+}
+const offenders = client.match(/["'(](?:https?:)?\/\/[^"')\s]+/g) ?? [];
+if (offenders.length > 0) {
+  problems.push(`the Vogt client reaches outside the origin: ${offenders}`);
+}
+
+// The front door must not shadow an engine route of its own.
+const own = [...served].filter(
+  (route) => route.startsWith("/api/vogt") && !route.includes("{}"),
+);
+if (own.length !== 1 || own[0] !== "/api/vogt") {
+  problems.push(`the engine serves ${own} under the front door's own prefix`);
+}
+
 if (problems.length > 0) {
   console.error(problems.join("\n"));
   process.exit(1);
