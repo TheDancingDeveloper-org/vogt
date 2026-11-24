@@ -100,23 +100,43 @@ step=launch-secrets; say launch-secrets
 # the engine broker (which audits the name) straight into this shell's
 # environment, never the pod spec, a Secret or an argument. A required name
 # that fails stops the launch; an optional one is skipped with a warning.
+# The fetches run concurrently, at most launch_jobs at a time: each is an
+# Infisical round trip behind the broker (~0.85 s), so a dozen in series cost
+# 12-16 s of every pod start (WI-4546). The broker still audits and rate-limits
+# each name; results are applied here in manifest order, so the breadcrumb and
+# the error reported for a failed required name do not depend on timing.
 launch_granted=""
-fetch_launch() {
-  case "$1" in ''|[!A-Za-z_]*|*[!A-Za-z0-9_]*) fail "bootstrap returned an invalid launch-time name: $1" ;; esac
-  if value=$(vogt-agent-auth fetch "$1" 2>"$tmp_dir/fetch.err") && [ -n "$value" ]; then
-    export "$1=$value"; launch_granted="$launch_granted${launch_granted:+ }$1"; return 0
-  fi
-  unset value; return 1
+launch_jobs="${VOGT_LAUNCH_FETCH_JOBS:-6}"
+launch_dir="$tmp_dir/launch"
+mkdir -m 700 "$launch_dir"
+for name in ${AGENT_AUTH_LAUNCH_REQUIRED:-} ${AGENT_AUTH_LAUNCH_OPTIONAL:-}; do
+  case "$name" in ''|[!A-Za-z_]*|*[!A-Za-z0-9_]*) fail "bootstrap returned an invalid launch-time name: $name" ;; esac
+done
+running=0
+for name in ${AGENT_AUTH_LAUNCH_REQUIRED:-} ${AGENT_AUTH_LAUNCH_OPTIONAL:-}; do
+  (
+    if v=$(vogt-agent-auth fetch "$name" 2>"$launch_dir/$name.err") && [ -n "$v" ]; then
+      printf '%s' "$v" >"$launch_dir/$name.val"
+    fi
+  ) &
+  running=$((running + 1))
+  if [ "$running" -ge "$launch_jobs" ]; then wait; running=0; fi
+done
+wait
+apply_launch() {
+  [ -r "$launch_dir/$1.val" ] || return 1
+  value=$(cat "$launch_dir/$1.val"); rm -f "$launch_dir/$1.val"
+  export "$1=$value"; launch_granted="$launch_granted${launch_granted:+ }$1"
 }
 for name in ${AGENT_AUTH_LAUNCH_REQUIRED:-}; do
-  fetch_launch "$name" || fail "required agent-auth secret $name could not be fetched through the broker: $(tail -n1 "$tmp_dir/fetch.err" 2>/dev/null | cut -c1-300)"
+  apply_launch "$name" || fail "required agent-auth secret $name could not be fetched through the broker: $(tail -n1 "$launch_dir/$name.err" 2>/dev/null | cut -c1-300)"
 done
 for name in ${AGENT_AUTH_LAUNCH_OPTIONAL:-}; do
-  fetch_launch "$name" || printf 'session-entrypoint: WARNING: optional agent-auth secret %s was not delivered; skipped: %s\n' \
-    "$name" "$(tail -n1 "$tmp_dir/fetch.err" 2>/dev/null | cut -c1-300)" >&2
+  apply_launch "$name" || printf 'session-entrypoint: WARNING: optional agent-auth secret %s was not delivered; skipped: %s\n' \
+    "$name" "$(tail -n1 "$launch_dir/$name.err" 2>/dev/null | cut -c1-300)" >&2
 done
 unset value AGENT_AUTH_LAUNCH_REQUIRED AGENT_AUTH_LAUNCH_OPTIONAL
-rm -f "$tmp_dir/fetch.err"
+rm -rf "$launch_dir"
 AGENT_AUTH_GRANTED="$launch_granted${launch_granted:+${AGENT_AUTH_GRANTED:+ }}${AGENT_AUTH_GRANTED:-}"; export AGENT_AUTH_GRANTED
 [ -z "$launch_granted" ] || printf 'session-entrypoint: launch-time secrets: %s\n' "$launch_granted" >&2
 step=claude-config; say claude-config

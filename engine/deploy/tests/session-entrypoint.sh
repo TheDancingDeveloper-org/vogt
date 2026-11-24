@@ -93,6 +93,15 @@ printf '%s\n' "$*" >>"$CASE_DIR/agent-auth.calls"
 [ "$1" = fetch ] || exit 2
 [ -r "$VOGT_SESSION_TOKEN_FILE" ] || { echo "vogt-agent-auth: no broker credential" >&2; exit 1; }
 [ -r "$CASE_DIR/secrets/$2" ] || { echo "vogt-agent-auth: secret broker refused $2 (HTTP 403): not in the manifest" >&2; exit 1; }
+# PAR_BARRIER=N: wait (20 s cap) until N fetches have started, which only
+# happens when they run concurrently.
+if [ -n "${PAR_BARRIER:-}" ]; then
+  : >"$CASE_DIR/started.$2"; i=0
+  while [ "$(ls "$CASE_DIR" | grep -c '^started\.')" -lt "$PAR_BARRIER" ]; do
+    i=$((i + 1)); [ "$i" -lt 200 ] || { echo "vogt-agent-auth: fetches did not overlap" >&2; exit 1; }
+    sleep 0.1
+  done
+fi
 cat "$CASE_DIR/secrets/$2"
 SH
   # The two hook scripts the image installs: record how the entrypoint ran them.
@@ -416,8 +425,20 @@ grep -qx 'GH_TOKEN=gh-launch-value' "$tmp/launch/agent.env" || fail "optional la
 grep -qx 'AGENT_AUTH_GRANTED=FORGEJO_TOKEN GH_TOKEN GRANTED_X' "$tmp/launch/agent.env" || fail "granted breadcrumb: $(grep AGENT_AUTH_GRANTED "$tmp/launch/agent.env")"
 ! grep -q '^AGENT_AUTH_LAUNCH_' "$tmp/launch/agent.env" || fail "launch name lists left in the agent environment"
 grep -q 'optional agent-auth secret MISSING_OPT was not delivered; skipped: .*HTTP 403' "$tmp/launch.out" || fail "optional skip not warned"
-[[ $(cat "$tmp/launch/agent-auth.calls") == $'fetch FORGEJO_TOKEN\nfetch GH_TOKEN\nfetch MISSING_OPT' ]] || fail "broker calls: $(cat "$tmp/launch/agent-auth.calls")"
+[[ $(sort "$tmp/launch/agent-auth.calls") == $'fetch FORGEJO_TOKEN\nfetch GH_TOKEN\nfetch MISSING_OPT' ]] || fail "broker calls: $(cat "$tmp/launch/agent-auth.calls")"
 ! grep -Eq 'forgejo-launch-value|gh-launch-value' "$tmp/launch.out" "$tmp/launch/agent-auth.calls" || fail "launch secret value appeared in output or argv"
+# WI-4546: the fetches overlap (bounded by VOGT_LAUNCH_FETCH_JOBS) and the
+# granted breadcrumb keeps manifest order whichever finishes first. The stub
+# holds each fetch until FETCH_PEER names a peer's marker, so six serial
+# fetches would deadlock; a 20 s cap turns that into a failure.
+PAR_NAMES="P1 P2 P3 P4 P5 P6 P7 P8"
+PAR_ENV='{"VOGT_SESSION_ID":"s1","AGENT_AUTH_MODE":"brokered","AGENT_AUTH_LAUNCH_REQUIRED":"P1 P2 P3","AGENT_AUTH_LAUNCH_OPTIONAL":"P4 P5 P6 P7 P8"}'
+mkdir -p "$tmp/par/secrets"
+for n in $PAR_NAMES; do printf 'v-%s' "$n" >"$tmp/par/secrets/$n"; done
+run_case "$tmp/par" ENV_JSON="$PAR_ENV" VOGT_CLAUDE_SETTINGS_FILE=off VOGT_LAUNCH_FETCH_JOBS=4 PAR_BARRIER=4 >"$tmp/par.out" 2>&1 || fail "parallel launch fetch: $(cat "$tmp/par.out")"
+grep -qx 'AGENT_AUTH_GRANTED=P1 P2 P3 P4 P5 P6 P7 P8' "$tmp/par/agent.env" || fail "parallel breadcrumb order: $(grep AGENT_AUTH_GRANTED "$tmp/par/agent.env")"
+grep -qx 'P8=v-P8' "$tmp/par/agent.env" || fail "parallel secret not exported"
+[ "$(sort -u "$tmp/par/agent-auth.calls" | wc -l)" = 8 ] || fail "parallel broker calls: $(cat "$tmp/par/agent-auth.calls")"
 # A required name the broker refuses stops the launch, naming it and why.
 mkdir -p "$tmp/launch-required/secrets"
 if run_case "$tmp/launch-required" ENV_JSON="$LAUNCH_ENV" >"$tmp/launch-required.out" 2>&1; then fail "launch went on without a required secret"; fi
