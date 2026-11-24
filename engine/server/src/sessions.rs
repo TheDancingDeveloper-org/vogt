@@ -2377,6 +2377,44 @@ impl SessionRegistry {
         record
     }
 
+    /// Provisional history row, written at spawn with `ended_at` and
+    /// `exit_code` NULL, so a session SIGKILLed on redeploy is still visible
+    /// in the History tab.
+    fn write_provisional_history_row(&self, session: &Arc<Session>, role: SessionRole) {
+        if let Some(history) = self.history.clone() {
+            let role = role.as_str();
+            let live = Arc::clone(session);
+            let sid = session.id;
+            tokio::spawn(async move {
+                // Built when the task runs, not when it is spawned: a work
+                // item bound in between updates no row yet (there is none),
+                // so the insert must carry the label as it is now (WI-998).
+                let record = ArchiveRecord {
+                    id: live.id,
+                    name: live.name(),
+                    created_at: live.created_at,
+                    ended_at: None,
+                    exit_code: None,
+                    cwd: Some(live.cwd.clone()),
+                    command: live.command(),
+                    scrollback_bytes: 0,
+                    end_reason: None,
+                    identity: Some(SessionIdentity {
+                        template: live.template(),
+                        role: Some(role),
+                        conversation: live.conversation(),
+                        work_item: live.work_item(),
+                    }),
+                    economics: None,
+                };
+                drop(live);
+                if let Err(e) = history.archive_session(record).await {
+                    tracing::warn!(session = %sid, error = %e, "failed to record provisional history row");
+                }
+            });
+        }
+    }
+
     fn create_inner(
         &self,
         mut spec: SessionSpec,
@@ -3192,38 +3230,7 @@ impl SessionRegistry {
         // guard means this provisional write can never NULL a completed row,
         // even if it lands after the finalize under load. Metadata only — no
         // FTS write here, so it cannot wipe indexed output either.
-        if let Some(history) = self.history.clone() {
-            let role = spec.role.as_str();
-            let live = Arc::clone(&session);
-            let sid = session.id;
-            tokio::spawn(async move {
-                // Built when the task runs, not when it is spawned: a work
-                // item bound in between updates no row yet (there is none),
-                // so the insert must carry the label as it is now (WI-998).
-                let record = ArchiveRecord {
-                    id: live.id,
-                    name: live.name(),
-                    created_at: live.created_at,
-                    ended_at: None,
-                    exit_code: None,
-                    cwd: Some(live.cwd.clone()),
-                    command: live.command(),
-                    scrollback_bytes: 0,
-                    end_reason: None,
-                    identity: Some(SessionIdentity {
-                        template: live.template(),
-                        role: Some(role),
-                        conversation: live.conversation(),
-                        work_item: live.work_item(),
-                    }),
-                    economics: None,
-                };
-                drop(live);
-                if let Err(e) = history.archive_session(record).await {
-                    tracing::warn!(session = %sid, error = %e, "failed to record provisional history row");
-                }
-            });
-        }
+        self.write_provisional_history_row(&session, spec.role);
         self.bus.publish(ServerEvent::SessionCreated {
             id: session.id,
             name: session.name(),
