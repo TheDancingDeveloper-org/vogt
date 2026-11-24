@@ -20,4 +20,16 @@ describe("terminal work-item links", () => {
     expect(listSessions).toHaveBeenCalledTimes(1);
     expect(listSessions.mock.calls[0]![0]).not.toHaveProperty("include_stopped");
   });
+
+  it("reads two columns off the declared table, not whole full rows (WI-4543)", async () => {
+    const { workItemLinkFor, forgetWorkItemLinks } = await import("../Terminal");
+    forgetWorkItemLinks();
+    listSessions.mockClear();
+    expect(await workItemLinkFor("eng-1")).toBe("WI-1");
+    expect(listSessions.mock.calls[0]![0]).toMatchObject({
+      mode: "full",
+      starters_only: true,
+      fields: ["engine_session_id", "work_item"],
+    });
+  });
 });

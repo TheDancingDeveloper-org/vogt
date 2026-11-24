@@ -230,7 +230,7 @@ pub struct ListSessionsParams {
     #[serde(default)]
     #[schemars(extend("x-keep-default" = true))]
     pub fields: Vec<String>,
-    /// Answer from the declared table only: each session's `id` plus the starter columns named in `fields` (`engine_session_id`, `started_by_session`), with no engine call. Needs `mode=full`; sessions with no starter are not listed.
+    /// Answer from the declared table only: each session's `id` plus the starter columns named in `fields` (`engine_session_id`, `started_by_session`, `work_item`), with no engine call. Needs `mode=full`; sessions with no starter are not listed.
     #[serde(default)]
     pub starters_only: bool,
     /// Keep only sessions this one started: the starter's engine session id, or its Vogt `ses_…` id. Unlinked engine sessions (no starter) never match.

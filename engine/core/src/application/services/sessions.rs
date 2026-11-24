@@ -341,14 +341,16 @@ where
     Ok(listed)
 }
 
-/// The columns a starter read may name: the GUI rail nests a session under
-/// the one that started it and needs nothing else (WI-4531).
-const STARTER_FIELDS: [&str; 2] = ["engine_session_id", "started_by_session"];
+/// The columns a `starters_only` read may name, all held on the declared
+/// session row: the GUI rail nests a session under the one that started it
+/// (WI-4531), and a terminal reads the work item its session was opened for
+/// (WI-4543).
+const STARTER_FIELDS: [&str; 3] = ["engine_session_id", "started_by_session", "work_item"];
 
 /// The starters path is asked for with `starters_only: true` (WI-4543), never
 /// inferred from `fields`, so a caller that names starter columns alone still
 /// gets the ordinary full rows. The flag needs `mode=full`, `fields` naming
-/// only starter columns, and no filter that needs the engine's state.
+/// only declared-row columns, and no filter that needs the engine's state.
 fn starters_only(parsed: &ListSessionsParams, raw: &Value) -> Result<bool, VogtError> {
     if !optional_bool(raw, "starters_only")?.unwrap_or(false) {
         return Ok(false);
@@ -369,7 +371,7 @@ fn starters_only(parsed: &ListSessionsParams, raw: &Value) -> Result<bool, VogtE
         Ok(true)
     } else {
         Err(VogtError::InvalidRequest(
-            "starters_only needs mode=full, fields naming only engine_session_id and started_by_session, order=started, and no states, include_hidden or started_by_session"
+            "starters_only needs mode=full, fields naming only engine_session_id, started_by_session and work_item, order=started, and no states, include_hidden or started_by_session"
                 .to_string(),
         ))
     }
@@ -405,10 +407,20 @@ where
         limit.saturating_add(1),
         offset,
     )?;
-    drop(view);
     let truncated = rows.len() as i64 > limit;
     rows.truncate(limit as usize);
     let fields = params.fields.as_deref().unwrap_or_default();
+    // The item's ref is read once per item, and only when it was asked for.
+    let mut refs: std::collections::BTreeMap<String, Option<String>> = Default::default();
+    if fields.iter().any(|wanted| wanted == "work_item") {
+        for id in rows.iter().filter_map(|row| row.work_item_id.as_deref()) {
+            if !refs.contains_key(id) {
+                let reference = view.work_item_by_id(id)?.map(|item| item.reference);
+                refs.insert(id.to_string(), reference);
+            }
+        }
+    }
+    drop(view);
     let sessions: Vec<Value> = rows
         .iter()
         .map(|session| {
@@ -420,6 +432,11 @@ where
                 }
                 let value = match field {
                     "engine_session_id" => Value::String(session.engine_session_id.clone()),
+                    "work_item" => session
+                        .work_item_id
+                        .as_deref()
+                        .and_then(|id| refs.get(id).cloned().flatten())
+                        .map_or(Value::Null, Value::String),
                     _ => session
                         .started_by_session
                         .clone()
