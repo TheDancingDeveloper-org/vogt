@@ -139,7 +139,7 @@ pinned by the `application/resolve.rs` tests in the Rust core (WI-1058).
 | test_product_identity.py | retired | User-facing rename and legacy compatibility names across Python packaging. The Rust binary stays `vogt-core` for the overlap. |
 | test_product_version.py | ported | `VERSION` in `main.rs`. `scripts/check_product_version.py` keeps the fallback equal to `pyproject.toml`. |
 | test_public_delivery.py | retired | Deploy-file shape. Its 32 cases read the release tags in `pyproject.toml`, the `deploy/` compose files, `deploy/.env.example`, the `Dockerfile`s, the custom-image example and the published docs as text. Two cases run `docker compose config` to render them. None calls the core, so none pins core behaviour, and the deploy files are not a core unit. |
-| test_pwa.py | retired | Solid PWA route map. `web/`; the core crate does not embed the bundle. |
+| test_pwa.py | retired | Solid PWA route map, rehomed to `web/scripts/check-route-map.mjs` (CI and `scripts/check.sh`); the core crate does not embed the bundle. |
 | test_ranking.py | ported | Ranking in `decisions.rs`. |
 | test_read_pool.py | retired | Python's pooled read connections (`borrow_read`, WI-1224) exist to avoid reopening SQLite under the GIL. Rust reads open their own rusqlite connection, with no pool and no shared connection to discard when the file or WAL changes identity, so there is no unit to port. The restore-time invalidation the pool also covered is ported as the memo clear in `lifecycle.rs` (`forget_live_stores`, WI-1054). |
 | test_readonly_mcp_wrappers.py | retired | `engine/deploy/readonly-mcp.sh`. An engine deploy script, not the core. |

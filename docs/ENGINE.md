@@ -592,7 +592,7 @@ session, the way the Rust LSP entry above shows.
 This section is the source-of-truth summary for the engine's wire contract.
 
 `engine/server/src/app.rs` holds the route table and is what actually answers
-requests; this section describes it route by route. `tests/test_pwa.py` resolves
+requests; this section describes it route by route. `web/scripts/check-route-map.mjs` resolves
 every engine path in the shipped PWA against both, so the two cannot drift
 apart silently. When they do disagree, this section is the one that is wrong.
 
