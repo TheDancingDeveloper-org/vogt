@@ -3512,78 +3512,48 @@ fn work_order(filter: &WorkFilter) -> (&'static str, Option<String>) {
 /// The WHERE clause every work view filters through, so a count and the page
 /// beside it describe the same set.
 fn work_where(filter: &WorkFilter) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
-    let mut clauses: Vec<String> = Vec::new();
-    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    let mut out = Filter::new();
     if !filter.include_superseded {
         // A native row that migrated upstream is retired. The row stays
         // reachable by ref or id; only the lists leave it out.
-        clauses.push("w.superseded_by IS NULL".into());
+        out.and_fixed("w.superseded_by IS NULL");
     }
     if filter.exclude_unlinked_native {
         // A native row on an unlinked project leaves the curated surfaces. A
         // project-less item stays: there is no project to be linked.
-        clauses.push(
-            "(w.project_id IS NULL OR EXISTS (SELECT 1 FROM projects lp WHERE lp.id = w.project_id AND lp.link_state = 'linked'))".into(),
+        out.and_fixed(
+            "(w.project_id IS NULL OR EXISTS (SELECT 1 FROM projects lp WHERE lp.id = w.project_id AND lp.link_state = 'linked'))",
         );
     }
-    if let Some(project) = &filter.project_id {
-        clauses.push("w.project_id = ?".into());
-        params.push(Box::new(project.clone()));
-    }
-    if let Some(assignee) = &filter.assignee_actor_id {
-        clauses.push("w.assignee_actor_id = ?".into());
-        params.push(Box::new(assignee.clone()));
-    }
-    if let Some(initiative) = &filter.initiative_id {
-        clauses.push("w.initiative_id = ?".into());
-        params.push(Box::new(initiative.clone()));
-    }
-    for (column, values) in [
-        ("w.kind", &filter.kinds),
-        ("w.state", &filter.states),
-        ("w.priority", &filter.priorities),
-        ("w.trust_state", &filter.trust_states),
-    ] {
-        if !values.is_empty() {
-            let placeholders = vec!["?"; values.len()].join(", ");
-            clauses.push(format!("{column} IN ({placeholders})"));
-            for value in values {
-                params.push(Box::new(value.clone()));
-            }
-        }
-    }
+    out.and_some("w.project_id = ?", filter.project_id.clone());
+    out.and_some("w.assignee_actor_id = ?", filter.assignee_actor_id.clone());
+    out.and_some("w.initiative_id = ?", filter.initiative_id.clone());
+    out.and_in("w.kind", filter.kinds.clone());
+    out.and_in("w.state", filter.states.clone());
+    out.and_in("w.priority", filter.priorities.clone());
+    out.and_in("w.trust_state", filter.trust_states.clone());
     if filter.exclude_terminal {
-        let placeholders = vec!["?"; TERMINAL_STATES.len()].join(", ");
-        clauses.push(format!("w.state NOT IN ({placeholders})"));
-        for state in TERMINAL_STATES {
-            params.push(Box::new(state.to_string()));
-        }
+        out.and_not_in(
+            "w.state",
+            TERMINAL_STATES.iter().map(|state| state.to_string()),
+        );
     }
     if let Some(text) = &filter.text {
         // instr over lower rather than LIKE: the needle is caller text, and
         // LIKE would read its % and _ as wildcards.
         if !text.is_empty() {
             let needle = text.to_lowercase();
-            clauses.push(
-                "(instr(lower(w.title), ?) > 0 OR instr(lower(w.body), ?) > 0 OR instr(lower(w.ref), ?) > 0)".into(),
+            out.and_values(
+                "(instr(lower(w.title), ?) > 0 OR instr(lower(w.body), ?) > 0 OR instr(lower(w.ref), ?) > 0)",
+                vec![Box::new(needle.clone()), Box::new(needle.clone()), Box::new(needle)],
             );
-            params.push(Box::new(needle.clone()));
-            params.push(Box::new(needle.clone()));
-            params.push(Box::new(needle));
         }
     }
-    if let Some(label) = &filter.label {
-        clauses.push(
-            "EXISTS (SELECT 1 FROM work_item_labels wl JOIN labels l ON l.id = wl.label_id WHERE wl.work_item_id = w.id AND l.name = ?)".into(),
-        );
-        params.push(Box::new(label.clone()));
-    }
-    let where_sql = if clauses.is_empty() {
-        String::new()
-    } else {
-        format!("WHERE {}", clauses.join(" AND "))
-    };
-    (where_sql, params)
+    out.and_some(
+        "EXISTS (SELECT 1 FROM work_item_labels wl JOIN labels l ON l.id = wl.label_id WHERE wl.work_item_id = w.id AND l.name = ?)",
+        filter.label.clone(),
+    );
+    out.into_parts()
 }
 
 fn append_where(where_sql: &str, clause: &str) -> String {
@@ -3863,77 +3833,34 @@ fn row_audit(row: &Row<'_>) -> rusqlite::Result<AuditRecord> {
 }
 
 fn audit_where(query: &AuditQuery) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
-    let mut clauses: Vec<String> = Vec::new();
-    let mut params_box: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-    if let Some(actor) = &query.actor_id {
-        clauses.push("a.actor_id = ?".into());
-        params_box.push(Box::new(actor.clone()));
-    }
-    if let Some(operation) = &query.operation {
-        clauses.push("a.operation = ?".into());
-        params_box.push(Box::new(operation.clone()));
-    }
+    let mut out = Filter::new();
+    out.and_some("a.actor_id = ?", query.actor_id.clone());
+    out.and_some("a.operation = ?", query.operation.clone());
     if let Some(entity) = &query.entity_id {
         // A comment is audited against the comment, so an exact match on a
         // work item's id would omit everything said about it. The comment
         // table carries the link, so the trail is a semi-join. The id is
         // bound twice, once for the row and once for the semi-join.
-        clauses.push(
-            "(a.entity_id = ? OR (a.entity_kind = 'comment' AND a.entity_id IN (SELECT id FROM comments WHERE work_item_id = ?)))".into(),
+        out.and_values(
+            "(a.entity_id = ? OR (a.entity_kind = 'comment' AND a.entity_id IN (SELECT id FROM comments WHERE work_item_id = ?)))",
+            vec![Box::new(entity.clone()), Box::new(entity.clone())],
         );
-        params_box.push(Box::new(entity.clone()));
-        params_box.push(Box::new(entity.clone()));
     }
     if let Some(project) = &query.project_id {
         // Nothing about a project is copied onto an audit row. Each kind that
         // belongs to a project is resolved through its own table, and a kind
         // that belongs to the instance (actor, label, token) is absent on
         // purpose. The project id is bound once per kind.
-        let scoped = [
-            ("project", "SELECT id FROM projects WHERE id = ?"),
-            ("work_item", "SELECT id FROM work_items WHERE project_id = ?"),
-            (
-                "comment",
-                "SELECT c.id FROM comments c JOIN work_items w ON w.id = c.work_item_id WHERE w.project_id = ?",
-            ),
-            ("session", "SELECT id FROM coding_sessions WHERE project_id = ?"),
-            (
-                "drift_proposal",
-                "SELECT id FROM drift_proposals WHERE project_id = ?",
-            ),
-            (
-                "suppression",
-                "SELECT id FROM suppressions WHERE scope_project_id = ?",
-            ),
-        ];
-        let joined = scoped
-            .iter()
-            .map(|(kind, resolver)| {
-                format!("(a.entity_kind = '{kind}' AND a.entity_id IN ({resolver}))")
-            })
-            .collect::<Vec<_>>()
-            .join(" OR ");
-        clauses.push(format!("({joined})"));
-        for _ in scoped {
-            params_box.push(Box::new(project.clone()));
-        }
+        out.and_values(
+            "((a.entity_kind = 'project' AND a.entity_id IN (SELECT id FROM projects WHERE id = ?)) OR (a.entity_kind = 'work_item' AND a.entity_id IN (SELECT id FROM work_items WHERE project_id = ?)) OR (a.entity_kind = 'comment' AND a.entity_id IN (SELECT c.id FROM comments c JOIN work_items w ON w.id = c.work_item_id WHERE w.project_id = ?)) OR (a.entity_kind = 'session' AND a.entity_id IN (SELECT id FROM coding_sessions WHERE project_id = ?)) OR (a.entity_kind = 'drift_proposal' AND a.entity_id IN (SELECT id FROM drift_proposals WHERE project_id = ?)) OR (a.entity_kind = 'suppression' AND a.entity_id IN (SELECT id FROM suppressions WHERE scope_project_id = ?)))",
+            (0..6)
+                .map(|_| Box::new(project.clone()) as Box<dyn rusqlite::ToSql>)
+                .collect(),
+        );
     }
-    if let Some(since) = query.since {
-        clauses.push("a.at >= ?".into());
-        params_box.push(Box::new(since));
-    }
-    if let Some(until) = query.until {
-        clauses.push("a.at < ?".into());
-        params_box.push(Box::new(until));
-    }
-    (
-        if clauses.is_empty() {
-            String::new()
-        } else {
-            format!("WHERE {}", clauses.join(" AND "))
-        },
-        params_box,
-    )
+    out.and_some("a.at >= ?", query.since);
+    out.and_some("a.at < ?", query.until);
+    out.into_parts()
 }
 
 #[cfg(test)]
