@@ -1064,7 +1064,10 @@ const REJECT_PATTERNS: &[(&str, &str)] = &[
 /// mid-turn — and the commit lands in the repo that worker's directory belongs
 /// to (or a linked worktree of it), under that repo's own identity. Detached
 /// HEAD and the repo's default branch are refused.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the parameters mirror the call's inputs; a params struct would churn every caller"
+)]
 async fn commit_op(
     state: &Arc<AppState>,
     repo: String,

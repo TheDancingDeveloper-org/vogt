@@ -3,7 +3,6 @@
 
 #[path = "../common/mod.rs"]
 mod common;
-#[allow(unused_imports)]
 use common::*;
 
 mod agent_clis;

@@ -147,7 +147,6 @@ pub async fn boot() -> (String, ServerGuard) {
 /// are exercising (a tiny ring an early cursor ages out of, or the 4 MiB ring
 /// prod runs). A per-session `scrollback_bytes` override on session-create also
 /// works, but sizing the whole engine keeps each test's intent in one place.
-#[allow(dead_code)] // used by the large-session resume tests
 pub async fn boot_with(scrollback_bytes: usize) -> (String, ServerGuard) {
     boot_with_config(Config {
         scrollback_bytes,
@@ -588,7 +587,6 @@ pub async fn ws_attach_with_auth(
 /// bare `[`/`m`/digit left over from a mid-sequence cut.
 pub const SNAPSHOT_HEAD_BYTES: usize = 64;
 
-#[allow(dead_code)] // `first_bytes` is only read by the large-session tests.
 pub async fn read_snapshot(
     ws: &mut tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,

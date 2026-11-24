@@ -4141,7 +4141,10 @@ impl SessionRegistry {
     }
 
     /// The spec a wake (or a pod adoption) starts `record` with.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the parameters mirror the call's inputs; a params struct would churn every caller"
+    )]
     fn wake_spec(
         &self,
         record: &Record,
