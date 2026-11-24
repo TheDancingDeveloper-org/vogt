@@ -5,6 +5,8 @@
 //! Nothing here interpolates caller text into SQL. Every fragment is a
 //! `&'static str` (so only literals compile), and every value is bound.
 
+use std::borrow::Cow;
+
 use rusqlite::types::ToSql;
 use rusqlite::{Connection, OptionalExtension, Row};
 
@@ -77,7 +79,7 @@ pub(super) fn select_filtered<T: FromRow>(
 /// SQL text.
 #[derive(Default)]
 pub(super) struct Filter {
-    clauses: Vec<&'static str>,
+    clauses: Vec<Cow<'static, str>>,
     values: Vec<Box<dyn ToSql>>,
 }
 
@@ -88,7 +90,7 @@ impl Filter {
 
     /// Add a condition with one placeholder, such as `"kind = ?"`.
     pub(super) fn and(&mut self, clause: &'static str, value: impl ToSql + 'static) {
-        self.clauses.push(clause);
+        self.clauses.push(Cow::Borrowed(clause));
         self.values.push(Box::new(value));
     }
 
@@ -99,9 +101,36 @@ impl Filter {
         }
     }
 
+    /// `column IN (?, ?, ...)`, binding each element. `column` is a literal;
+    /// the list text is only question marks. An empty list adds nothing.
+    pub(super) fn and_in<V: ToSql + 'static>(
+        &mut self,
+        column: &'static str,
+        values: impl IntoIterator<Item = V>,
+    ) {
+        self.in_list(column, " IN ", values);
+    }
+
+    fn in_list<V: ToSql + 'static>(
+        &mut self,
+        column: &'static str,
+        operator: &'static str,
+        values: impl IntoIterator<Item = V>,
+    ) {
+        let values: Vec<V> = values.into_iter().collect();
+        if values.is_empty() {
+            return;
+        }
+        let marks = vec!["?"; values.len()].join(", ");
+        self.clauses
+            .push(Cow::Owned(format!("{column}{operator}({marks})")));
+        self.values
+            .extend(values.into_iter().map(|v| Box::new(v) as Box<dyn ToSql>));
+    }
+
     /// Add a condition that has no placeholder, such as `"stopped_at IS NULL"`.
     pub(super) fn and_fixed(&mut self, clause: &'static str) {
-        self.clauses.push(clause);
+        self.clauses.push(Cow::Borrowed(clause));
     }
 
     /// `WHERE a AND b ` (with a trailing space), or an empty string.
@@ -138,5 +167,14 @@ mod tests {
         filter.and("promoted = ?", 1_i64);
         assert_eq!(filter.where_sql(), "WHERE kind = ? AND promoted = ? ");
         assert_eq!(filter.params(vec![Box::new(5_i64)]).len(), 3);
+    }
+
+    #[test]
+    fn in_lists_bind_each_element() {
+        let mut filter = Filter::new();
+        filter.and_in("k", Vec::<String>::new());
+        filter.and_in("w.kind", vec!["a'); --".to_string(), "b".to_string()]);
+        assert_eq!(filter.where_sql(), "WHERE w.kind IN (?, ?) ");
+        assert_eq!(filter.params(Vec::new()).len(), 2);
     }
 }
