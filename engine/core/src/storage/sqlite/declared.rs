@@ -359,12 +359,7 @@ where
             }
             let mut actors = Vec::new();
             for actor_id in actor_ids {
-                if let Some(actor) = one(
-                    conn,
-                    "SELECT * FROM actors WHERE id = ?",
-                    [&actor_id],
-                    row_actor,
-                )? {
+                if let Some(actor) = select_one::<Actor>(conn, "WHERE id = ?", [&actor_id])? {
                     actors.push(actor);
                 }
             }
@@ -589,51 +584,29 @@ impl ReadView for SqliteReadView {
         })
     }
     fn actor_by_identity(&self, identity_ref: &str) -> Result<Option<Actor>, VogtError> {
-        one(
-            &self.conn,
-            "SELECT * FROM actors WHERE identity_ref = ?",
-            [identity_ref],
-            row_actor,
-        )
+        select_one::<Actor>(&self.conn, "WHERE identity_ref = ?", [identity_ref])
     }
     fn actor_by_id(&self, actor_id: &str) -> Result<Option<Actor>, VogtError> {
-        one(
-            &self.conn,
-            "SELECT * FROM actors WHERE id = ?",
-            [actor_id],
-            row_actor,
-        )
+        select_one::<Actor>(&self.conn, "WHERE id = ?", [actor_id])
     }
     fn list_actors(&self, limit: i64, offset: i64) -> Result<Vec<Actor>, VogtError> {
-        many(
+        select_many::<Actor>(
             &self.conn,
-            "SELECT * FROM actors ORDER BY identity_ref LIMIT ? OFFSET ?",
+            "ORDER BY identity_ref LIMIT ? OFFSET ?",
             params![limit, offset],
-            row_actor,
         )
     }
     fn project_by_slug(&self, slug: &str) -> Result<Option<Project>, VogtError> {
-        one(
-            &self.conn,
-            "SELECT * FROM projects WHERE slug = ?",
-            [slug],
-            row_project,
-        )
+        select_one::<Project>(&self.conn, "WHERE slug = ?", [slug])
     }
     fn project_by_id(&self, project_id: &str) -> Result<Option<Project>, VogtError> {
-        one(
-            &self.conn,
-            "SELECT * FROM projects WHERE id = ?",
-            [project_id],
-            row_project,
-        )
+        select_one::<Project>(&self.conn, "WHERE id = ?", [project_id])
     }
     fn list_projects(&self, limit: i64, offset: i64) -> Result<Vec<Project>, VogtError> {
-        many(
+        select_many::<Project>(
             &self.conn,
-            "SELECT * FROM projects ORDER BY slug LIMIT ? OFFSET ?",
+            "ORDER BY slug LIMIT ? OFFSET ?",
             params![limit, offset],
-            row_project,
         )
     }
     fn work_item_by_id(&self, id: &str) -> Result<Option<WorkItem>, VogtError> {
@@ -833,43 +806,26 @@ impl ReadView for SqliteReadView {
         many(&self.conn, sql, params![id, limit], row_comment)
     }
     fn label_by_name(&self, name: &str) -> Result<Option<Label>, VogtError> {
-        one(
-            &self.conn,
-            "SELECT * FROM labels WHERE name = ?",
-            [name],
-            row_label,
-        )
+        select_one::<Label>(&self.conn, "WHERE name = ?", [name])
     }
     fn list_labels(&self, limit: i64, offset: i64) -> Result<Vec<Label>, VogtError> {
-        many(
+        select_many::<Label>(
             &self.conn,
-            "SELECT * FROM labels ORDER BY name LIMIT ? OFFSET ?",
+            "ORDER BY name LIMIT ? OFFSET ?",
             params![limit, offset],
-            row_label,
         )
     }
     fn initiative_by_id(&self, id: &str) -> Result<Option<Initiative>, VogtError> {
-        one(
-            &self.conn,
-            "SELECT * FROM initiatives WHERE id = ?",
-            [id],
-            row_initiative,
-        )
+        select_one::<Initiative>(&self.conn, "WHERE id = ?", [id])
     }
     fn initiative_by_slug(&self, slug: &str) -> Result<Option<Initiative>, VogtError> {
-        one(
-            &self.conn,
-            "SELECT * FROM initiatives WHERE slug = ?",
-            [slug],
-            row_initiative,
-        )
+        select_one::<Initiative>(&self.conn, "WHERE slug = ?", [slug])
     }
     fn list_initiatives(&self, limit: i64, offset: i64) -> Result<Vec<Initiative>, VogtError> {
-        many(
+        select_many::<Initiative>(
             &self.conn,
-            "SELECT * FROM initiatives ORDER BY slug LIMIT ? OFFSET ?",
+            "ORDER BY slug LIMIT ? OFFSET ?",
             params![limit, offset],
-            row_initiative,
         )
     }
     fn workflow_for(&self, kind: &str) -> Result<Workflow, VogtError> {
@@ -973,12 +929,7 @@ impl ReadView for SqliteReadView {
             .transpose()
     }
     fn work_overlay(&self, subject_key: &str) -> Result<Option<WorkOverlay>, VogtError> {
-        one(
-            &self.conn,
-            "SELECT * FROM work_overlay WHERE subject_key = ?",
-            [subject_key],
-            row_overlay,
-        )
+        select_one::<WorkOverlay>(&self.conn, "WHERE subject_key = ?", [subject_key])
     }
     fn work_overlays(
         &self,
@@ -1001,11 +952,10 @@ impl ReadView for SqliteReadView {
         Ok(found)
     }
     fn bound_branch_overlays(&self, limit: i64) -> Result<Vec<WorkOverlay>, VogtError> {
-        many(
+        select_many::<WorkOverlay>(
             &self.conn,
-            "SELECT * FROM work_overlay WHERE branches != '[]' ORDER BY updated_at DESC, subject_key LIMIT ?",
+            "WHERE branches != '[]' ORDER BY updated_at DESC, subject_key LIMIT ?",
             [limit],
-            row_overlay,
         )
     }
     fn token_by_hash(&self, token_hash: &str) -> Result<Option<Token>, VogtError> {
@@ -1071,17 +1021,15 @@ impl ReadView for SqliteReadView {
     ) -> Result<Vec<AuthDecision>, VogtError> {
         // An empty string is no filter, matching Python's `if decision`.
         match decision.filter(|value| !value.is_empty()) {
-            Some(decision) => many(
+            Some(decision) => select_many::<AuthDecision>(
                 &self.conn,
-                "SELECT * FROM auth_decisions WHERE decision = ? ORDER BY at DESC, id DESC LIMIT ?",
+                "WHERE decision = ? ORDER BY at DESC, id DESC LIMIT ?",
                 params![decision, limit],
-                row_auth_decision,
             ),
-            None => many(
+            None => select_many::<AuthDecision>(
                 &self.conn,
-                "SELECT * FROM auth_decisions ORDER BY at DESC, id DESC LIMIT ?",
+                "ORDER BY at DESC, id DESC LIMIT ?",
                 params![limit],
-                row_auth_decision,
             ),
         }
     }
@@ -1230,17 +1178,15 @@ impl ReadView for SqliteReadView {
         // Python's `if outcome` treats "" as absent, so an empty filter
         // returns every row rather than matching the empty outcome.
         match outcome.filter(|value| !value.is_empty()) {
-            Some(value) => many(
+            Some(value) => select_many::<WriteBackRecord>(
                 &self.conn,
-                "SELECT * FROM writeback_actions WHERE outcome = ? ORDER BY at DESC, id DESC LIMIT ?",
+                "WHERE outcome = ? ORDER BY at DESC, id DESC LIMIT ?",
                 params![value, limit],
-                row_writeback,
             ),
-            None => many(
+            None => select_many::<WriteBackRecord>(
                 &self.conn,
-                "SELECT * FROM writeback_actions ORDER BY at DESC, id DESC LIMIT ?",
+                "ORDER BY at DESC, id DESC LIMIT ?",
                 [limit],
-                row_writeback,
             ),
         }
     }
@@ -1323,30 +1269,19 @@ impl ReadView for SqliteReadView {
         )
     }
     fn session_by_id(&self, session_id: &str) -> Result<Option<CodingSession>, VogtError> {
-        one(
-            &self.conn,
-            "SELECT * FROM coding_sessions WHERE id = ?",
-            [session_id],
-            row_session,
-        )
+        select_one::<CodingSession>(&self.conn, "WHERE id = ?", [session_id])
     }
     fn session_grant(&self, grant_id: &str) -> Result<Option<SessionGrant>, VogtError> {
-        one(
-            &self.conn,
-            "SELECT * FROM session_grants WHERE id = ?",
-            [grant_id],
-            row_session_grant,
-        )
+        select_one::<SessionGrant>(&self.conn, "WHERE id = ?", [grant_id])
     }
     fn session_by_engine_id(
         &self,
         engine_session_id: &str,
     ) -> Result<Option<CodingSession>, VogtError> {
-        one(
+        select_one::<CodingSession>(
             &self.conn,
-            "SELECT * FROM coding_sessions WHERE engine_session_id = ?",
+            "WHERE engine_session_id = ?",
             [engine_session_id],
-            row_session,
         )
     }
     fn session_cold_wake_opt_out(&self, session_id: &str) -> Result<bool, VogtError> {
@@ -1453,11 +1388,10 @@ impl ReadView for SqliteReadView {
         )
     }
     fn charter(&self, scope_kind: &str, scope_id: &str) -> Result<Option<Charter>, VogtError> {
-        one(
+        select_one::<Charter>(
             &self.conn,
-            "SELECT * FROM charters WHERE scope_kind = ? AND scope_id = ? ORDER BY version DESC LIMIT 1",
+            "WHERE scope_kind = ? AND scope_id = ? ORDER BY version DESC LIMIT 1",
             [scope_kind, scope_id],
-            row_charter,
         )
     }
     fn charter_history(
@@ -1466,20 +1400,14 @@ impl ReadView for SqliteReadView {
         scope_id: &str,
         limit: i64,
     ) -> Result<Vec<Charter>, VogtError> {
-        many(
+        select_many::<Charter>(
             &self.conn,
-            "SELECT * FROM charters WHERE scope_kind = ? AND scope_id = ? ORDER BY version DESC LIMIT ?",
+            "WHERE scope_kind = ? AND scope_id = ? ORDER BY version DESC LIMIT ?",
             params![scope_kind, scope_id, limit],
-            row_charter,
         )
     }
     fn watch(&self, watch_id: &str) -> Result<Option<Watch>, VogtError> {
-        one(
-            &self.conn,
-            "SELECT * FROM watches WHERE id = ?",
-            [watch_id],
-            row_watch,
-        )
+        select_one::<Watch>(&self.conn, "WHERE id = ?", [watch_id])
     }
     fn list_watches(
         &self,
@@ -1515,12 +1443,7 @@ impl ReadView for SqliteReadView {
         )
     }
     fn decision(&self, decision_id: &str) -> Result<Option<Decision>, VogtError> {
-        one(
-            &self.conn,
-            "SELECT * FROM decisions WHERE id = ?",
-            [decision_id],
-            row_decision,
-        )
+        select_one::<Decision>(&self.conn, "WHERE id = ?", [decision_id])
     }
     fn list_decisions(
         &self,
@@ -1596,12 +1519,7 @@ impl ReadView for SqliteReadView {
         started_by_session: &str,
         limit: i64,
     ) -> Result<Vec<CodingSession>, VogtError> {
-        many(
-            &self.conn,
-            "SELECT * FROM coding_sessions WHERE started_by_session = ? AND stopped_at IS NULL ORDER BY started_at DESC, id DESC LIMIT ?",
-            params![started_by_session, limit],
-            row_session,
-        )
+        select_many::<CodingSession>(&self.conn, "WHERE started_by_session = ? AND stopped_at IS NULL ORDER BY started_at DESC, id DESC LIMIT ?", params![started_by_session, limit])
     }
     fn list_events(
         &self,
@@ -1610,17 +1528,15 @@ impl ReadView for SqliteReadView {
         entity_id: Option<&str>,
     ) -> Result<Vec<Event>, VogtError> {
         match entity_id {
-            Some(entity) => many(
+            Some(entity) => select_many::<Event>(
                 &self.conn,
-                "SELECT * FROM events WHERE seq > ? AND entity_id = ? ORDER BY seq LIMIT ?",
+                "WHERE seq > ? AND entity_id = ? ORDER BY seq LIMIT ?",
                 params![after, entity, limit],
-                row_event,
             ),
-            None => many(
+            None => select_many::<Event>(
                 &self.conn,
-                "SELECT * FROM events WHERE seq > ? ORDER BY seq LIMIT ?",
+                "WHERE seq > ? ORDER BY seq LIMIT ?",
                 params![after, limit],
-                row_event,
             ),
         }
     }
@@ -1629,11 +1545,10 @@ impl ReadView for SqliteReadView {
         entity_id: &str,
         limit: i64,
     ) -> Result<Vec<Event>, VogtError> {
-        many(
+        select_many::<Event>(
             &self.conn,
-            "SELECT * FROM events WHERE entity_id = ? ORDER BY seq DESC LIMIT ?",
+            "WHERE entity_id = ? ORDER BY seq DESC LIMIT ?",
             params![entity_id, limit],
-            row_event,
         )
     }
     fn list_audit(&self, query: &AuditQuery) -> Result<Vec<AuditRecord>, VogtError> {
@@ -2923,6 +2838,127 @@ fn count(conn: &Connection, table: &str) -> Result<i64, VogtError> {
         row.get(0)
     })
     .map_err(sql_err)
+}
+
+/// A stored entity: the table it lives in, the columns its mapper reads, and
+/// the mapper. Queries build their select list from `COLUMNS`, so a schema
+/// change shows up in one place instead of hiding behind `SELECT *`.
+trait FromRow: Sized {
+    const TABLE: &'static str;
+    const COLUMNS: &'static str;
+    fn from_row(row: &Row<'_>) -> rusqlite::Result<Self>;
+}
+/// `tail` is a `&'static str` on purpose: it holds only constant SQL, and user
+/// text travels as bound parameters.
+fn select_sql<T: FromRow>(tail: &'static str) -> String {
+    format!("SELECT {} FROM {} {tail}", T::COLUMNS, T::TABLE)
+}
+fn select_one<T: FromRow>(
+    conn: &Connection,
+    tail: &'static str,
+    params: impl rusqlite::Params,
+) -> Result<Option<T>, VogtError> {
+    one(conn, &select_sql::<T>(tail), params, T::from_row)
+}
+fn select_many<T: FromRow>(
+    conn: &Connection,
+    tail: &'static str,
+    params: impl rusqlite::Params,
+) -> Result<Vec<T>, VogtError> {
+    many(conn, &select_sql::<T>(tail), params, T::from_row)
+}
+impl FromRow for Actor {
+    const TABLE: &'static str = "actors";
+    const COLUMNS: &'static str = "id, kind, display_name, identity_ref, disabled, created_at";
+    fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
+        row_actor(row)
+    }
+}
+impl FromRow for Label {
+    const TABLE: &'static str = "labels";
+    const COLUMNS: &'static str = "id, name, color, created_at";
+    fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
+        row_label(row)
+    }
+}
+impl FromRow for WorkOverlay {
+    const TABLE: &'static str = "work_overlay";
+    const COLUMNS: &'static str = "branches, subject_key, project_id, rank, workflow_state, priority, effort, assignee_actor_id, initiative_id, created_at, updated_at";
+    fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
+        row_overlay(row)
+    }
+}
+impl FromRow for AuthDecision {
+    const TABLE: &'static str = "auth_decisions";
+    const COLUMNS: &'static str = "decision, id, at, reason_code, operation, scope, actor_id, token_id, identity_ref, transport, detail";
+    fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
+        row_auth_decision(row)
+    }
+}
+impl FromRow for WriteBackRecord {
+    const TABLE: &'static str = "writeback_actions";
+    const COLUMNS: &'static str = "id, at, project_id, work_item_id, actor_id, action, subject_key, policy, outcome, reason, detail, source_url";
+    fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
+        row_writeback(row)
+    }
+}
+impl FromRow for CodingSession {
+    const TABLE: &'static str = "coding_sessions";
+    const COLUMNS: &'static str = "id, engine_session_id, project_id, work_item_id, actor_id, cwd, template, model, effort, reason, started_at, stopped_at, purpose, started_by_session, started_by_kind";
+    fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
+        row_session(row)
+    }
+}
+impl FromRow for SessionGrant {
+    const TABLE: &'static str = "session_grants";
+    const COLUMNS: &'static str = "id, target_engine_session_id, kind, var, project_id, secret_name, capability, uses, ttl_seconds, reason, requested_by, requested_at, state, decided_by, decided_at, decision_reason, expires_at, revoked_by, revoked_at";
+    fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
+        row_session_grant(row)
+    }
+}
+impl FromRow for Charter {
+    const TABLE: &'static str = "charters";
+    const COLUMNS: &'static str =
+        "scope_kind, scope_id, version, body, author_actor_id, created_at, reason";
+    fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
+        row_charter(row)
+    }
+}
+impl FromRow for Watch {
+    const TABLE: &'static str = "watches";
+    const COLUMNS: &'static str = "id, owner_actor_id, target_session, kind, trigger_json, note, state, created_at, expires_at, fired_at, outcome_json, attempts, last_error, reason";
+    fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
+        row_watch(row)
+    }
+}
+impl FromRow for Decision {
+    const TABLE: &'static str = "decisions";
+    const COLUMNS: &'static str = "options_json, answer_json, id, asker_actor_id, asker_session, work_item_id, question, context, state, answered_by_actor_id, created_at, answered_at, expires_at, reason";
+    fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
+        row_decision(row)
+    }
+}
+impl FromRow for Event {
+    const TABLE: &'static str = "events";
+    const COLUMNS: &'static str =
+        "summary, seq, kind, entity_kind, entity_id, actor_id, audit_id, at";
+    fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
+        row_event(row)
+    }
+}
+impl FromRow for Project {
+    const TABLE: &'static str = "projects";
+    const COLUMNS: &'static str = "id, slug, name, root_path, repo_url, default_branch, lifecycle_state, current_version, contract_version, compliance_status, compliance_checked_at, agent_policy, contract_adopted_at, write_back, link_state, exclusions, mcp_extra, trust_state, created_at, updated_at";
+    fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
+        row_project(row)
+    }
+}
+impl FromRow for Initiative {
+    const TABLE: &'static str = "initiatives";
+    const COLUMNS: &'static str = "id, slug, title, body, state, weight, created_at, updated_at";
+    fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
+        row_initiative(row)
+    }
 }
 fn one<T>(
     conn: &Connection,
