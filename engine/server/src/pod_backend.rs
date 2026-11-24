@@ -1671,7 +1671,10 @@ pub fn pod_deadline(pod: &Pod) -> Option<Duration> {
     (secs > 0).then(|| Duration::from_secs(secs))
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the parameters mirror the call's inputs; a params struct would churn every caller"
+)]
 pub fn pod_template(
     cfg: &PodConfig,
     template: &SessionTemplate,

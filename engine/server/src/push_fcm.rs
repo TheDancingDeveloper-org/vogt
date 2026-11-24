@@ -195,7 +195,6 @@ impl FcmSender {
 
 /// urlsafe base64 helper used by VAPID/web-push too; lives here because it's
 /// the only place we need it outside the web-push crate.
-#[allow(dead_code)]
 pub fn b64_url_no_pad(b: &[u8]) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b)
 }

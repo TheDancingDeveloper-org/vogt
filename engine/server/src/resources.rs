@@ -120,7 +120,10 @@ pub struct Previous {
 }
 
 /// Sum one session's tree, with CPU against `previous` (updated in place).
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the parameters mirror the call's inputs; a params struct would churn every caller"
+)]
 pub fn measure(
     table: &HashMap<u32, Proc>,
     children: &HashMap<u32, Vec<u32>>,

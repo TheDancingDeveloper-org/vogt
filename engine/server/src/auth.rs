@@ -342,7 +342,10 @@ fn from_core(
 // this middleware returns directly, not an error boxed and rethrown. clippy
 // 1.98's `result_large_err` flags the large `Err`; boxing only one arm would
 // make the signature asymmetric for no runtime win, so the lint is allowed here.
-#[allow(clippy::result_large_err)]
+#[expect(
+    clippy::result_large_err,
+    reason = "the error is returned unboxed so callers match on it directly"
+)]
 pub async fn require_bearer(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
