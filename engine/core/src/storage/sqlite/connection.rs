@@ -5,7 +5,7 @@
 //! (`isolation_level=None`); rusqlite does the same unless a transaction is
 //! opened explicitly.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;
 
@@ -164,4 +164,242 @@ pub fn latest_report_rows(
         return Vec::new();
     };
     rows.flatten().collect()
+}
+
+// ---------------------------------------------------------------------------
+// Long-lived connections (WI-4631).
+//
+// One pool per (database file, synchronous mode) for the whole process. It
+// holds one writer connection that one caller at a time may lease, and a few
+// read-only connections. Pragmas run once per connection, when it is opened.
+// Stores are cheap to clone and are built per request, so the pool lives in a
+// process registry, not in a store.
+// ---------------------------------------------------------------------------
+
+use std::collections::HashMap;
+use std::ops::{Deref, DerefMut};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
+use std::thread::ThreadId;
+
+/// How many idle read-only connections a pool keeps. A reader beyond this opens
+/// a connection that closes on release, so a burst never waits.
+pub const READER_POOL_SIZE: usize = 4;
+
+/// Identity of the file behind the path. A restore or a test that replaces the
+/// file must not keep serving the old inode.
+fn file_identity(path: &Path) -> Option<(u64, u64)> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(path).ok().map(|m| (m.dev(), m.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::metadata(path).ok().map(|_| (0, 0))
+    }
+}
+
+#[derive(Default)]
+struct PoolState {
+    ident: Option<(u64, u64)>,
+    generation: u64,
+    writer: Option<Connection>,
+    writer_busy: bool,
+    writer_owner: Option<ThreadId>,
+    readers: Vec<Connection>,
+}
+
+pub struct ConnPool {
+    path: PathBuf,
+    synchronous: String,
+    state: Mutex<PoolState>,
+    writer_free: Condvar,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LeaseKind {
+    Writer,
+    Reader,
+    /// Not returned to the pool: an extra connection, or one a caller marked
+    /// with [`Lease::discard`].
+    Loose,
+}
+
+/// A connection on loan from the pool. It derefs to `Connection`. On drop an
+/// open transaction is rolled back and the connection goes back.
+pub struct Lease {
+    conn: Option<Connection>,
+    pool: Arc<ConnPool>,
+    kind: LeaseKind,
+    generation: u64,
+}
+
+impl Lease {
+    /// Close this connection on release instead of pooling it. For a caller
+    /// that changed connection state (an `ATTACH`, a scalar function, `query_only`).
+    pub fn discard(&mut self) {
+        self.kind = LeaseKind::Loose;
+    }
+}
+
+impl Deref for Lease {
+    type Target = Connection;
+    fn deref(&self) -> &Connection {
+        self.conn.as_ref().expect("a lease holds its connection")
+    }
+}
+
+impl DerefMut for Lease {
+    fn deref_mut(&mut self) -> &mut Connection {
+        self.conn.as_mut().expect("a lease holds its connection")
+    }
+}
+
+impl Drop for Lease {
+    fn drop(&mut self) {
+        let Some(conn) = self.conn.take() else { return };
+        let mut clean = true;
+        if !conn.is_autocommit() {
+            let _ = conn.execute_batch("ROLLBACK");
+            clean = conn.is_autocommit();
+        }
+        let mut state = self.pool.state.lock().unwrap_or_else(|e| e.into_inner());
+        let current = state.generation == self.generation;
+        match self.kind {
+            LeaseKind::Writer => {
+                if clean && current {
+                    state.writer = Some(conn);
+                }
+                state.writer_busy = false;
+                state.writer_owner = None;
+                self.pool.writer_free.notify_one();
+            }
+            LeaseKind::Reader => {
+                if clean && current && state.readers.len() < READER_POOL_SIZE {
+                    state.readers.push(conn);
+                }
+            }
+            LeaseKind::Loose => {}
+        }
+    }
+}
+
+impl ConnPool {
+    /// The process pool for this file and synchronous mode.
+    pub fn for_path(path: &Path, synchronous: &str) -> Arc<ConnPool> {
+        type Registry = Mutex<HashMap<(PathBuf, String), Weak<ConnPool>>>;
+        static REGISTRY: OnceLock<Registry> = OnceLock::new();
+        let registry = REGISTRY.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut map = registry.lock().unwrap_or_else(|e| e.into_inner());
+        let key = (path.to_path_buf(), synchronous.to_ascii_lowercase());
+        if let Some(pool) = map.get(&key).and_then(Weak::upgrade) {
+            return pool;
+        }
+        map.retain(|_, weak| weak.strong_count() > 0);
+        let pool = Arc::new(ConnPool {
+            path: path.to_path_buf(),
+            synchronous: synchronous.to_string(),
+            state: Mutex::new(PoolState::default()),
+            writer_free: Condvar::new(),
+        });
+        map.insert(key, Arc::downgrade(&pool));
+        pool
+    }
+
+    /// Drop pooled connections when the path now names a different file.
+    fn refresh(&self, state: &mut PoolState) {
+        let ident = file_identity(&self.path);
+        if ident != state.ident {
+            state.ident = ident;
+            state.generation += 1;
+            state.writer = None;
+            state.readers.clear();
+        }
+    }
+
+    /// The single writer. Callers queue on it, so two writers never meet
+    /// `SQLITE_BUSY`. A caller that already holds the writer on this thread
+    /// gets a loose connection rather than a deadlock.
+    pub fn writer(self: &Arc<Self>, create: bool) -> rusqlite::Result<Lease> {
+        let me = std::thread::current().id();
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            self.refresh(&mut state);
+            if !state.writer_busy {
+                break;
+            }
+            if state.writer_owner == Some(me) {
+                drop(state);
+                let conn = connect_with(&self.path, create, &self.synchronous)?;
+                return Ok(Lease {
+                    conn: Some(conn),
+                    pool: Arc::clone(self),
+                    kind: LeaseKind::Loose,
+                    generation: 0,
+                });
+            }
+            state = self
+                .writer_free
+                .wait(state)
+                .unwrap_or_else(|e| e.into_inner());
+        }
+        state.writer_busy = true;
+        state.writer_owner = Some(me);
+        let cached = state.writer.take();
+        let generation = state.generation;
+        drop(state);
+        let conn = match cached {
+            Some(conn) => conn,
+            None => match connect_with(&self.path, create, &self.synchronous) {
+                Ok(conn) => conn,
+                Err(err) => {
+                    let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                    state.writer_busy = false;
+                    state.writer_owner = None;
+                    self.writer_free.notify_one();
+                    return Err(err);
+                }
+            },
+        };
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.ident.is_none() {
+            state.ident = file_identity(&self.path);
+        }
+        drop(state);
+        Ok(Lease {
+            conn: Some(conn),
+            pool: Arc::clone(self),
+            kind: LeaseKind::Writer,
+            generation,
+        })
+    }
+
+    /// A read-only connection. It never creates the file and never takes the
+    /// write lock; a missing file is an error.
+    pub fn reader(self: &Arc<Self>) -> rusqlite::Result<Lease> {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        self.refresh(&mut state);
+        let generation = state.generation;
+        let cached = state.readers.pop();
+        drop(state);
+        let conn = match cached {
+            Some(conn) => conn,
+            None => {
+                let conn = Connection::open_with_flags(
+                    &self.path,
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                        | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+                )?;
+                conn.pragma_update(None, "foreign_keys", "ON")?;
+                conn.pragma_update(None, "busy_timeout", BUSY_TIMEOUT_MS)?;
+                conn
+            }
+        };
+        Ok(Lease {
+            conn: Some(conn),
+            pool: Arc::clone(self),
+            kind: LeaseKind::Reader,
+            generation,
+        })
+    }
 }
