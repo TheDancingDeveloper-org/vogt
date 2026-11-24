@@ -2,14 +2,14 @@
 //!
 //! Append-oriented evidence plus collector coverage. Unlike the declared
 //! store, every method opens and closes its own connection, and a write
-//! begins with `BEGIN IMMEDIATE`.
+//! begins an IMMEDIATE transaction.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row};
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row, TransactionBehavior};
 
 use crate::core::{Clock, DepRef, IdFactory, Moment, Observation, RefKind, Sweep, SweepOutcome};
 use crate::errors::VogtError;
@@ -287,9 +287,8 @@ where
         // A plain insert, not an upsert: binding twice is a constraint
         // failure, the same one Python's second INSERT raises. The created_at
         // row is what a restore checks alongside the instance id.
-        let conn = self.open(true)?;
-        conn.execute("BEGIN IMMEDIATE", []).map_err(sql_err)?;
-        let outcome = (|| -> Result<(), rusqlite::Error> {
+        let mut conn = self.open(true)?;
+        write_tx(&mut conn, |conn| -> Result<(), rusqlite::Error> {
             conn.execute(
                 "INSERT INTO meta (key, value) VALUES (?, ?)",
                 params![META_INSTANCE_ID, instance_id],
@@ -307,14 +306,13 @@ where
                 ],
             )?;
             Ok(())
-        })();
-        finish(conn, outcome)
+        })
     }
 
     fn rebind_instance(&self, instance_id: &str) -> Result<(), VogtError> {
         // A clone re-stamps an existing file, so this never creates one.
-        let conn = self.open(false)?;
-        write_tx(&conn, || {
+        let mut conn = self.open(false)?;
+        write_tx(&mut conn, |conn| {
             let updated = conn.execute(
                 "UPDATE meta SET value = ? WHERE key = ?",
                 params![instance_id, META_INSTANCE_ID],
@@ -369,8 +367,8 @@ where
     ) -> Result<Sweep, VogtError> {
         let sweep_id = self.next_id("swp");
         let rendered_scope = crate::decisions::python_json_dumps(&serde_json::json!(scope), false);
-        let conn = self.open(true)?;
-        write_tx(&conn, || {
+        let mut conn = self.open(true)?;
+        write_tx(&mut conn, |conn| {
             conn.execute(
                 "INSERT INTO sweeps (id, collector, scope, started_at, outcome, stats) VALUES (?, ?, ?, ?, 'running', '{}')",
                 params![sweep_id, collector, rendered_scope, crate::core::to_iso(at)],
@@ -400,8 +398,8 @@ where
         // Python's json.dumps keeps the caller's insertion order and does
         // not sort, so the pair order here is the byte order in the row.
         let rendered = render_stats(stats);
-        let conn = self.open(true)?;
-        write_tx(&conn, || {
+        let mut conn = self.open(true)?;
+        write_tx(&mut conn, |conn| {
             conn.execute(
                 "UPDATE sweeps SET finished_at = ?, outcome = ?, stats = ?, detail = ? WHERE id = ?",
                 params![
@@ -422,10 +420,9 @@ where
         findings: &[PendingObservation],
         at: Moment,
     ) -> Result<AppendStats, VogtError> {
-        let conn = self.open(true)?;
-        conn.execute("BEGIN IMMEDIATE", []).map_err(sql_err)?;
-        let outcome = (|| -> Result<AppendStats, rusqlite::Error> {
-            let collector = collector_of(&conn, sweep_id)?;
+        let mut conn = self.open(true)?;
+        write_tx(&mut conn, |conn| -> Result<AppendStats, rusqlite::Error> {
+            let collector = collector_of(conn, sweep_id)?;
             let mut stats = AppendStats::default();
             for finding in findings {
                 // Dedup against the newest history row, not the projection:
@@ -465,8 +462,7 @@ where
                 stats.new += 1;
             }
             Ok(stats)
-        })();
-        finish(conn, outcome)
+        })
     }
 
     fn list_sweeps(&self, collector: Option<&str>, limit: i64) -> Result<Vec<Sweep>, VogtError> {
@@ -580,8 +576,8 @@ where
             return Ok(());
         }
         let placeholders = vec!["?"; sweep_ids.len()].join(", ");
-        let conn = self.open(true)?;
-        write_tx(&conn, || {
+        let mut conn = self.open(true)?;
+        write_tx(&mut conn, |conn| {
             conn.execute(
                 &format!(
                     "UPDATE sweeps SET outcome = 'failed', detail = ? WHERE id IN ({placeholders})"
@@ -745,8 +741,8 @@ where
         watermark: Option<&str>,
         at: Moment,
     ) -> Result<(), VogtError> {
-        let conn = self.open(true)?;
-        write_tx(&conn, || {
+        let mut conn = self.open(true)?;
+        write_tx(&mut conn, |conn| {
             conn.execute(
                 "INSERT INTO sync_state (collector, project_id, watermark, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT (collector, project_id) DO UPDATE SET watermark = excluded.watermark, updated_at = excluded.updated_at",
                 params![collector, project_id, watermark, crate::core::to_iso(at)],
@@ -760,8 +756,8 @@ where
             return Ok(());
         }
         let stamp = crate::core::to_iso(at);
-        let conn = self.open(true)?;
-        write_tx(&conn, || {
+        let mut conn = self.open(true)?;
+        write_tx(&mut conn, |conn| {
             for key in subject_keys {
                 conn.execute(
                     "INSERT INTO subject_seen (subject_key, last_confirmed_at) VALUES (?, ?) ON CONFLICT (subject_key) DO UPDATE SET last_confirmed_at = excluded.last_confirmed_at",
@@ -836,8 +832,8 @@ where
     }
 
     fn rebuild_latest(&self) -> Result<i64, VogtError> {
-        let conn = self.open(true)?;
-        let outcome = write_tx(&conn, || {
+        let mut conn = self.open(true)?;
+        let outcome = write_tx(&mut conn, |conn| {
             // Same transaction as the rebuild, as Python's `_bump_latest_generation`.
             conn.execute(
                 "INSERT INTO meta (key, value) VALUES (?, '1') ON CONFLICT (key) DO UPDATE SET value = CAST(value AS INTEGER) + 1",
@@ -875,8 +871,8 @@ where
     }
 
     fn replace_dep_refs(&self, rows: &[DepRefRow]) -> Result<i64, VogtError> {
-        let conn = self.open(true)?;
-        write_tx(&conn, || {
+        let mut conn = self.open(true)?;
+        write_tx(&mut conn, |conn| {
             conn.execute("DELETE FROM latest_dep_refs", [])?;
             for row in rows {
                 conn.execute(
@@ -902,8 +898,8 @@ where
         before: Moment,
         protected_observation_ids: &BTreeSet<String>,
     ) -> Result<PruneReport, VogtError> {
-        let conn = self.open(true)?;
-        let outcome = write_tx(&conn, || {
+        let mut conn = self.open(true)?;
+        let outcome = write_tx(&mut conn, |conn| {
             let newest: BTreeSet<String> = {
                 let mut statement = conn.prepare(
                     "SELECT id FROM observations o WHERE o.id = (SELECT id FROM observations x WHERE x.subject_key = o.subject_key ORDER BY x.observed_at DESC, x.id DESC LIMIT 1)",
@@ -963,8 +959,8 @@ where
         batch: &ActivityBatch,
         at: Moment,
     ) -> Result<ActivityIndexStats, VogtError> {
-        let conn = self.open(true)?;
-        let outcome = write_tx(&conn, || {
+        let mut conn = self.open(true)?;
+        let outcome = write_tx(&mut conn, |conn| {
             let mut calls = 0;
             for call in &batch.calls {
                 let services = format!(
@@ -1169,41 +1165,17 @@ fn hostname() -> String {
         .unwrap_or_else(|_| "localhost".to_string())
 }
 
-fn finish<T>(conn: Lease, outcome: Result<T, rusqlite::Error>) -> Result<T, VogtError> {
-    match outcome {
-        Ok(value) => {
-            conn.execute("COMMIT", []).map_err(sql_err)?;
-            Ok(value)
-        }
-        Err(err) => {
-            let _ = conn.execute("ROLLBACK", []);
-            Err(sql_err(err))
-        }
-    }
-}
-
 fn write_tx<T>(
-    conn: &Connection,
-    body: impl FnOnce() -> Result<T, rusqlite::Error>,
+    conn: &mut Connection,
+    body: impl FnOnce(&Connection) -> Result<T, rusqlite::Error>,
 ) -> Result<T, VogtError> {
-    conn.execute("BEGIN IMMEDIATE", []).map_err(sql_err)?;
-    finish_borrowed(conn, body())
-}
-
-fn finish_borrowed<T>(
-    conn: &Connection,
-    outcome: Result<T, rusqlite::Error>,
-) -> Result<T, VogtError> {
-    match outcome {
-        Ok(value) => {
-            conn.execute("COMMIT", []).map_err(sql_err)?;
-            Ok(value)
-        }
-        Err(err) => {
-            let _ = conn.execute("ROLLBACK", []);
-            Err(sql_err(err))
-        }
-    }
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(sql_err)?;
+    // Dropping `tx` on the error path rolls back.
+    let value = body(&tx).map_err(sql_err)?;
+    tx.commit().map_err(sql_err)?;
+    Ok(value)
 }
 
 fn collector_of(conn: &Connection, sweep_id: &str) -> Result<String, rusqlite::Error> {
