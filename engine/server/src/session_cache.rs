@@ -142,7 +142,7 @@ impl HttpCacheProvisioner {
             return Ok(req);
         };
         let token = std::fs::read_to_string(path)
-            .map_err(|e| ApiError::Internal(format!("reading the cache provisioner token: {e}")))?;
+            .map_err(|e| ApiError::internal_src("reading the cache provisioner token", e))?;
         Ok(req.bearer_auth(token.trim()))
     }
 }
@@ -152,7 +152,7 @@ impl CacheProvisioner for HttpCacheProvisioner {
             let expires = time::OffsetDateTime::now_utc() + ALLOCATION_TTL;
             let expires = expires
                 .format(&time::format_description::well_known::Rfc3339)
-                .map_err(|e| ApiError::Internal(format!("formatting expiry: {e}")))?;
+                .map_err(|e| ApiError::internal_src("formatting expiry", e))?;
             let req = self
                 .client
                 .post(format!("{}/internal/cache/sessions", self.url))

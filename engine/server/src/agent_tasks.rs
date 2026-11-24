@@ -2797,7 +2797,7 @@ impl AgentTaskRegistry {
         let body = serde_json::to_vec_pretty(&AgentTaskStore {
             tasks: tasks.to_vec(),
         })
-        .map_err(|e| ApiError::Internal(format!("serialize agent tasks: {e}")))?;
+        .map_err(|e| ApiError::internal_src("serialize agent tasks", e))?;
         std::fs::write(&tmp, body)?;
         std::fs::rename(&tmp, &self.path)?;
         Ok(())
@@ -2960,7 +2960,7 @@ fn load_tasks(path: &Path) -> Result<Vec<AgentTask>> {
     }
     let raw = std::fs::read(path)?;
     let store = serde_json::from_slice::<AgentTaskStore>(&raw)
-        .map_err(|e| ApiError::Internal(format!("parse agent task store: {e}")))?;
+        .map_err(|e| ApiError::internal_src("parse agent task store", e))?;
     Ok(store.tasks)
 }
 
