@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Dev launcher background: amber, so the dev app is telling apart from
+         prod (near-black) at a glance. Selected by VOGT_ANDROID_APP_ICON=dev. -->
+    <color name="ic_launcher_dev_background">#B45309</color>
+</resources>

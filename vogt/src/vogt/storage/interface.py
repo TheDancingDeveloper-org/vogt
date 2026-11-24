@@ -1,0 +1,1202 @@
+"""The storage interface the application layer is allowed to know about.
+
+Nothing above this line may depend on SQLite-only semantics, so that
+a Postgres backend stays possible behind the same interface. Concretely that
+means no rowids, no `INSERT OR REPLACE`, no dynamic typing, and no SQL
+anywhere outside a backend package.
+"""
+
+from __future__ import annotations
+
+from contextlib import AbstractContextManager
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+from typing import Protocol
+
+from vogt.core.entities import (
+    Actor,
+    ActorPreference,
+    AgentPolicy,
+    AuditRecord,
+    AuthDecision,
+    Charter,
+    CodingSession,
+    Comment,
+    ContractExemption,
+    Decision,
+    DepRef,
+    DriftProposal,
+    Event,
+    ForgeAccount,
+    InboxTriage,
+    Initiative,
+    Label,
+    Observation,
+    PasswordCredential,
+    Project,
+    RelationKind,
+    SessionGrant,
+    SessionReport,
+    Suppression,
+    Sweep,
+    SweepOutcome,
+    Token,
+    Watch,
+    WorkItem,
+    WorkLink,
+    WorkOverlay,
+    WriteBackRecord,
+)
+from vogt.core.principal import Principal
+from vogt.core.workflow import Workflow
+from vogt.storage.observed_types import (
+    ActivityBatch,
+    ActivityEventRow,
+    ActivityIndexStats,
+    ActivityQuery,
+    ActivitySessionRow,
+    AppendStats,
+    DepRefRow,
+    PendingObservation,
+    PruneReport,
+    TranscriptCursor,
+)
+
+
+@dataclass(frozen=True)
+class MigrationReport:
+    """What `migrate()` did, so `status` and CI can say it plainly."""
+
+    store: str
+    applied: tuple[str, ...]
+    version: int
+
+
+@dataclass(frozen=True)
+class Counts:
+    """Row counts behind `status`."""
+
+    projects: int
+    actors: int
+    events: int
+    audit: int
+    work_items: int
+    initiatives: int
+
+
+@dataclass(frozen=True)
+class CloneStamp:
+    """That this instance's data came from another instance's backup.
+
+    Kept in `meta` by `clone`, and read back by `status`, so a copy of an
+    instance can always say what it is a copy of — and so the two are not
+    indistinguishable in an export or a receipt.
+    """
+
+    source_instance_id: str
+    cloned_at: datetime
+    backup_taken_at: datetime
+
+
+@dataclass(frozen=True)
+class CarriedCredentials:
+    """An instance's own credentials, secrets included, held across a clone.
+
+    Read from the target before its stores are replaced and written back
+    into the cloned copy (`WriteTxn.carry_credentials`). The rows are opaque
+    column maps on purpose: the hashes and ciphertext they hold are copied,
+    never interpreted, and this type never reaches a result model.
+    """
+
+    #: The actors the rows below belong to, as the target knew them.
+    actors: tuple[Actor, ...]
+    tokens: tuple[dict[str, object], ...]
+    password_credentials: tuple[dict[str, object], ...]
+    forge_accounts: tuple[dict[str, object], ...]
+
+
+@dataclass(frozen=True)
+class CarryReport:
+    """What `carry_credentials` did to the cloned copy."""
+
+    tokens_kept: int
+    source_tokens_revoked: int
+    password_logins_kept: int
+    source_password_logins_dropped: int
+    forge_accounts_kept: int
+    source_forge_accounts_dropped: int
+    actors_added: int
+
+
+@dataclass(frozen=True)
+class BootstrapResult:
+    """The outcome of creating an instance."""
+
+    instance_id: str
+    actor: Actor
+
+
+@dataclass(frozen=True)
+class WorkFilter:
+    """How the views narrow the work set.
+
+    One object rather than a dozen keyword arguments because every ranked
+    view, the per-project brief and the bug view all filter the same way, and
+    they must keep filtering the same way as filters are added.
+    """
+
+    project_id: str | None = None
+    kinds: tuple[str, ...] = ()
+    states: tuple[str, ...] = ()
+    priorities: tuple[str, ...] = ()
+    assignee_actor_id: str | None = None
+    initiative_id: str | None = None
+    label: str | None = None
+    trust_states: tuple[str, ...] = ()
+    #: Case-insensitive text the title, body or ref must contain. `None`
+    #: (and the empty string) narrows nothing.
+    text: str | None = None
+    exclude_terminal: bool = False
+    #: The forge-less withdrawal, expressed as a filter: leave out native rows
+    #: whose
+    #: project is unlinked. Items with no project are untouched — there is no
+    #: project to be linked. Off by default so `work.list`'s raw global query
+    #: stays complete; the curated surfaces (Board, Backlog) switch it on and
+    #: report what it removed.
+    exclude_unlinked_native: bool = False
+    #: Retired rows (`superseded_by` set) are excluded from every work
+    #: view by default — the upstream item is the item. Export is the one
+    #: reader that wants everything, because a portability dump that quietly
+    #: drops the rows anchoring comments and ledger history is not a dump.
+    include_superseded: bool = False
+    limit: int = 100
+    offset: int = 0
+
+
+@dataclass(frozen=True)
+class BoardCellQuery:
+    """One independently continued Board cell inside a batched read."""
+
+    lane_key: str
+    state: str
+    after_created_at: datetime | None = None
+    after_ref: str | None = None
+
+
+@dataclass(frozen=True)
+class Blocker:
+    """An unfinished `depends_on` target, named so a rejection can list it."""
+
+    ref: str
+    state: str
+
+
+@dataclass(frozen=True)
+class ProjectUpdate:
+    """Fields of a project a write may change. Unset fields are untouched."""
+
+    lifecycle_state: str | None = None
+    repo_url: str | None = None
+    current_version: str | None = None
+    compliance_status: str | None = None
+    compliance_checked_at: datetime | None = None
+    write_back: str | None = None
+    link_state: str | None = None
+    exclusions: tuple[str, ...] | None = None
+    #: Replaces the project's agent policy wholesale. `None` leaves it alone.
+    agent_policy: AgentPolicy | None = None
+    contract_adopted_at: datetime | None = None
+    #: Adoption is reversible, and `None` already means "leave alone", so
+    #: declining the contract needs a flag of its own rather than a value.
+    clear_contract_adopted_at: bool = False
+
+
+@dataclass(frozen=True)
+class WorkItemUpdate:
+    """Fields of a work item a write may change. Unset fields are untouched.
+
+    `None` means "leave alone"; clearing a nullable field is expressed by the
+    matching `clear_*` flag, because otherwise unassigning somebody and not
+    mentioning the assignee are the same request.
+    """
+
+    title: str | None = None
+    body: str | None = None
+    state: str | None = None
+    priority: str | None = None
+    effort: str | None = None
+    assignee_actor_id: str | None = None
+    initiative_id: str | None = None
+    project_id: str | None = None
+    clear_effort: bool = False
+    clear_assignee: bool = False
+    clear_initiative: bool = False
+    add_labels: tuple[str, ...] = field(default=())
+    remove_labels: tuple[str, ...] = field(default=())
+    #: The retire marker: the subject key a migrated native item became.
+    #: Set once by the migration on link/publish, never cleared — withdrawing
+    #: an item from the upstream-truth model is a migration question, not a
+    #: toggle, exactly as `forge.link` has no unlink.
+    superseded_by: str | None = None
+
+
+class ReadView(Protocol):
+    """Read access to the declared store within one consistent snapshot."""
+
+    def instance_id(self) -> str: ...
+
+    def clone_stamp(self) -> CloneStamp | None:
+        """What this instance was cloned from, or `None` if it never was."""
+        ...
+
+    def current_revision(self) -> int: ...
+
+    def latest_event_seq(self) -> int:
+        """The newest event's sequence number, 0 for an empty feed.
+
+        Moves on every declared write *and* every observed-side happening
+        published on the collectors' behalf (a sweep finishing), so a cache
+        over a composite read can key on it."""
+        ...
+
+    def counts(self) -> Counts: ...
+
+    # -- identity ----------------------------------------------------------
+
+    def actor_by_identity(self, identity_ref: str) -> Actor | None: ...
+
+    def actor_by_id(self, actor_id: str) -> Actor | None: ...
+
+    def list_actors(self, *, limit: int, offset: int) -> list[Actor]: ...
+
+    # -- projects ----------------------------------------------------------
+
+    def project_by_slug(self, slug: str) -> Project | None: ...
+
+    def project_by_id(self, project_id: str) -> Project | None: ...
+
+    def list_projects(self, *, limit: int, offset: int) -> list[Project]: ...
+
+    # -- work --------------------------------------------------------------
+
+    def work_item_by_id(self, work_item_id: str) -> WorkItem | None: ...
+
+    def work_item_by_ref(self, ref: str) -> WorkItem | None: ...
+
+    def list_work_items(self, work_filter: WorkFilter) -> list[WorkItem]: ...
+
+    def count_work_items(self, work_filter: WorkFilter) -> int: ...
+
+    def board_high_water(
+        self, work_filter: WorkFilter
+    ) -> tuple[datetime, str] | None: ...
+
+    def board_counts(
+        self,
+        work_filter: WorkFilter,
+        *,
+        lane_mode: str,
+        high_water: tuple[datetime, str] | None,
+    ) -> dict[tuple[str, str], int]: ...
+
+    def board_work_items(
+        self,
+        work_filter: WorkFilter,
+        *,
+        lane_mode: str,
+        cells: tuple[BoardCellQuery, ...],
+        high_water: tuple[datetime, str] | None,
+        limit: int,
+    ) -> dict[tuple[str, str], list[WorkItem]]: ...
+
+    def blocking_fan_out(self, work_item_ids: list[str]) -> dict[str, int]:
+        """How many items declare `depends_on` each of these."""
+        ...
+
+    def unfinished_blockers(
+        self, work_item_id: str, *, terminal_states: tuple[str, ...]
+    ) -> list[Blocker]: ...
+
+    def comments_for(
+        self, work_item_id: str, *, limit: int, order: str = "oldest"
+    ) -> list[Comment]:
+        """Comments on one item, oldest first unless `order` is `newest`.
+
+        `newest` returns the newest `limit` rows, newest first. `oldest`
+        (the default, what every existing caller asks for) returns the
+        oldest `limit` rows, oldest first. A limit larger than the table
+        returns every row either way.
+        """
+        ...
+
+    # -- taxonomy ----------------------------------------------------------
+
+    def label_by_name(self, name: str) -> Label | None: ...
+
+    def list_labels(self, *, limit: int, offset: int) -> list[Label]: ...
+
+    def initiative_by_id(self, initiative_id: str) -> Initiative | None: ...
+
+    def initiative_by_slug(self, slug: str) -> Initiative | None: ...
+
+    def list_initiatives(self, *, limit: int, offset: int) -> list[Initiative]: ...
+
+    def workflow_for(self, kind: str) -> Workflow: ...
+
+    # -- observed-first ----------------------------------------------------
+
+    def list_suppressions(
+        self, *, include_revoked: bool = False, limit: int = 100
+    ) -> list[Suppression]: ...
+
+    def suppression_by_id(self, suppression_id: str) -> Suppression | None: ...
+
+    # -- contract adoption ----------------------------------------
+
+    def contract_exemptions(self, project_id: str) -> list[ContractExemption]: ...
+
+    def work_links_for_subjects(self, subject_keys: list[str]) -> dict[str, str]:
+        """Map subject key to the work item ref that adopted it."""
+        ...
+
+    def work_links_for_subjects_by_item(self, work_item_id: str) -> dict[str, str]: ...
+
+    def work_item_by_subject(self, subject_key: str) -> WorkItem | None: ...
+
+    # -- the upstream-truth overlay ---------------------------------
+
+    def work_overlay(self, subject_key: str) -> WorkOverlay | None:
+        """The vogt-local overlay for one upstream subject, if any."""
+        ...
+
+    def work_overlays(self, subject_keys: list[str]) -> dict[str, WorkOverlay]:
+        """The overlays for a batch of subjects, keyed by subject key.
+
+        Batched because every upstream-truth read joins the observed mirror
+        to the overlay, and a ranked view does that for hundreds of subjects
+        at once.
+        """
+        ...
+
+    def bound_branch_overlays(self, *, limit: int) -> list[WorkOverlay]:
+        """Every overlay that declares at least one branch, newest first.
+
+        What the CI watch walks: the branches work items were bound to
+        (`work.bind_branch`, `session.start`)."""
+        ...
+
+    # -- tokens ------------------------------------------------------------
+
+    def token_by_hash(self, token_hash: str) -> Token | None: ...
+
+    def token_by_id(self, token_id: str) -> Token | None: ...
+
+    def list_tokens(
+        self, *, include_revoked: bool = False, limit: int = 100
+    ) -> list[Token]: ...
+
+    def tokens_for_actor(
+        self, actor_id: str, *, include_revoked: bool = False
+    ) -> list[Token]:
+        """Every token bound to one actor, newest first.
+
+        Unlimited on purpose, unlike `list_tokens`: this answers "which
+        credentials must be revoked now" — a session ending revokes the token
+        it ran with — and a page limit there would leave live
+        credentials behind without saying so.
+        """
+        ...
+
+    def install_closed(self) -> bool:
+        """Whether first-run install mode is over (#903): a person (a
+        non-agent actor) holds a credential — a token row, revoked included,
+        or a password login — or the store is latched closed.
+
+        Tokens bound to agent actors — the adopted stack/core and agent
+        tokens, coding-session tokens — are machinery, not an operator, so
+        they never close it. The latch (`install_latch`, migration 0020) is
+        set for a store that already held tokens when it was upgraded, and
+        whenever a person is given a login or a token, so the door never
+        reopens: not on upgrade, and not when a user is removed.
+        """
+        ...
+
+    def list_auth_decisions(
+        self, *, decision: str | None = None, limit: int = 100
+    ) -> list[AuthDecision]: ...
+
+    # -- password credentials (human logins) -------------------------------
+
+    def password_credential_by_username(
+        self, username: str
+    ) -> PasswordCredential | None:
+        """One login by its handle, without the hash."""
+        ...
+
+    def password_credential_for_actor(
+        self, actor_id: str
+    ) -> PasswordCredential | None: ...
+
+    def password_hash(self, actor_id: str) -> str | None:
+        """The stored hash for one login, or `None` when the actor has no
+        password. The single accessor that returns it, so every read of the
+        hash is greppable — the same rule `forge_account_secret` follows."""
+        ...
+
+    def list_password_credentials(self) -> list[PasswordCredential]: ...
+
+    # -- forge accounts (per-actor PATs) -----------------------------------
+
+    def forge_account(self, *, actor_id: str, host: str) -> ForgeAccount | None:
+        """One actor's linked identity for a host, without the token.
+
+        The cleartext columns only, so a status read needs no key. The
+        encrypted PAT is deliberately absent — it is reachable only through
+        `forge_account_secret`, which the write path calls."""
+        ...
+
+    def forge_accounts_for_actor(self, actor_id: str) -> list[ForgeAccount]:
+        """Every host this actor has linked, newest first. No tokens."""
+        ...
+
+    def forge_account_secret(self, *, actor_id: str, host: str) -> str | None:
+        """The encrypted PAT for one (actor, host), or `None` when unlinked.
+
+        The single accessor that returns the ciphertext, so every read of the
+        secret is greppable. The value is Fernet ciphertext; the caller holds
+        the key and decrypts. Plaintext is never stored, so never returned."""
+        ...
+
+    # -- drift -------------------------------------------------------------
+
+    def list_drift(
+        self,
+        *,
+        status: str | None = "open",
+        kind: str | None = None,
+        project_id: str | None = None,
+        limit: int = 100,
+    ) -> list[DriftProposal]: ...
+
+    def drift_by_id(self, proposal_id: str) -> DriftProposal | None: ...
+
+    def open_drift_subjects(self) -> set[tuple[str, str, str]]: ...
+
+    def list_writeback_actions(
+        self, *, outcome: str | None = None, limit: int = 100
+    ) -> list[WriteBackRecord]: ...
+
+    def drift_evidence_ids(self) -> frozenset[str]:
+        """Observation ids any proposal references.
+
+        Read by retention, which refuses to prune them. Evidence must never
+        become unreachable through retention.
+        """
+        ...
+
+    # -- inbox triage -------------------------------------------------------
+
+    def inbox_triage_by_key(self, entry_key: str) -> InboxTriage | None: ...
+
+    def charter(self, *, scope_kind: str, scope_id: str) -> Charter | None:
+        """The newest version of a scope's charter, or `None` when never set."""
+        ...
+
+    def charter_history(
+        self, *, scope_kind: str, scope_id: str, limit: int = 50
+    ) -> list[Charter]:
+        """A scope's charter versions, newest first."""
+        ...
+
+    def actor_preference(self, *, actor_id: str, key: str) -> ActorPreference | None:
+        """One actor's setting under `key`, or `None` when never written."""
+        ...
+
+    def actor_preferences(self, actor_id: str) -> list[ActorPreference]:
+        """Every setting the actor has written, ordered by key."""
+        ...
+
+    def latest_human_preference(self, key: str) -> ActorPreference | None:
+        """The most recent write of `key` by a human actor (`{}` = cleared).
+
+        How a deployment-level setting is read (the `dispatch.*` table,
+        WI-1323): a person's write, never an agent's, and the newest wins.
+        """
+        ...
+
+    def inbox_triage_by_keys(self, entry_keys: list[str]) -> dict[str, InboxTriage]:
+        """Every triage decision among `entry_keys`, keyed by entry key.
+
+        One query for a page of entries rather than one per entry: the Inbox
+        projection applies triage to every entry it collects, and a lookup
+        per entry made the projection's cost scale with the estate.
+        """
+        ...
+
+    def list_inbox_triage(self, *, limit: int = 10_000) -> list[InboxTriage]: ...
+
+    # -- sessions ----------------------------------------------------------
+
+    def session_by_id(self, session_id: str) -> CodingSession | None: ...
+
+    def session_grant(self, grant_id: str) -> SessionGrant | None: ...
+
+    def decision(self, decision_id: str) -> Decision | None: ...
+
+    def watch(self, watch_id: str) -> Watch | None: ...
+
+    def list_watches(
+        self,
+        *,
+        state: str | None = None,
+        target_session: str | None = None,
+        owner_actor_id: str | None = None,
+        limit: int = 200,
+    ) -> list[Watch]:
+        """Watches, newest first, optionally of one state, session or owner."""
+        ...
+
+    def list_decisions(
+        self,
+        *,
+        state: str | None = None,
+        work_item_id: str | None = None,
+        asker_actor_id: str | None = None,
+        limit: int = 200,
+    ) -> list[Decision]:
+        """Decisions, newest first, optionally of one state, item or asker."""
+        ...
+
+    def latest_session_reports(
+        self, engine_session_ids: list[str]
+    ) -> dict[str, SessionReport]:
+        """The newest report each of these engine sessions made, by its id.
+
+        A session that never reported is absent from the result.
+        """
+        ...
+
+    def list_session_reports(
+        self,
+        *,
+        engine_session_id: str | None = None,
+        work_item_id: str | None = None,
+        kind: str | None = None,
+        limit: int = 200,
+    ) -> list[SessionReport]:
+        """Session reports, newest first, optionally of one session, item or kind."""
+        ...
+
+    def list_session_grants(
+        self,
+        *,
+        state: str | None = None,
+        target_engine_session_id: str | None = None,
+        limit: int = 200,
+    ) -> list[SessionGrant]:
+        """Grants, newest request first, optionally of one state or target."""
+        ...
+
+    def session_by_engine_id(self, engine_session_id: str) -> CodingSession | None:
+        """The link for a terminal the engine named.
+
+        The engine speaks in its own ids — an SSE event, a session an
+        operator killed — so the link has to be findable from that side too.
+        """
+        ...
+
+    def list_sessions(
+        self,
+        *,
+        project_id: str | None = None,
+        work_item_id: str | None = None,
+        started_by_session: str | None = None,
+        include_stopped: bool = False,
+        limit: int,
+        offset: int,
+    ) -> list[CodingSession]:
+        """Sessions Vogt started, newest first.
+
+        Live ones only unless `include_stopped`: "what is running for this
+        item" is the question almost every caller has, and a history that
+        answers it by default would bury it.
+        """
+        ...
+
+    # -- history -----------------------------------------------------------
+
+    def list_events(
+        self, *, after: int, limit: int, entity_id: str | None = None
+    ) -> list[Event]: ...
+
+    def list_audit(
+        self,
+        *,
+        limit: int,
+        offset: int = 0,
+        actor_id: str | None = None,
+        operation: str | None = None,
+        entity_id: str | None = None,
+        project_id: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+    ) -> list[AuditRecord]:
+        """The audit log, newest write first.
+
+        `entity_id` returns the entity's *trail*: for a work item that
+        includes the writes audited against its comments, which are audited
+        against the comment. `since` is inclusive and `until` exclusive.
+        """
+        ...
+
+    def count_audit(
+        self,
+        *,
+        actor_id: str | None = None,
+        operation: str | None = None,
+        entity_id: str | None = None,
+        project_id: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+    ) -> int:
+        """How many records `list_audit` would return unpaged."""
+        ...
+
+
+class WriteTxn(ReadView, Protocol):
+    """One atomic declared write.
+
+    Entity change, audit row, event row and revision bump commit together or
+    not at all. The revision and transaction id are allocated when the
+    transaction opens, so every row written inside it shares them.
+    """
+
+    @property
+    def txn_id(self) -> str: ...
+
+    @property
+    def revision(self) -> int: ...
+
+    def insert_actor(self, actor: Actor) -> None: ...
+
+    def insert_project(self, project: Project) -> None: ...
+
+    def update_project(
+        self, project_id: str, update: ProjectUpdate, *, at: datetime
+    ) -> None: ...
+
+    def next_work_ref(self) -> str: ...
+
+    def insert_work_item(self, item: WorkItem) -> None: ...
+
+    def update_work_item(
+        self, work_item_id: str, update: WorkItemUpdate, *, at: datetime
+    ) -> None: ...
+
+    def insert_relation(
+        self,
+        *,
+        work_item_id: str,
+        related_id: str,
+        kind: RelationKind,
+        at: datetime,
+    ) -> None: ...
+
+    def delete_relation(
+        self, *, work_item_id: str, related_id: str, kind: RelationKind
+    ) -> bool: ...
+
+    def insert_label(self, label: Label) -> None: ...
+
+    def insert_initiative(self, initiative: Initiative) -> None: ...
+
+    def update_initiative(self, initiative: Initiative) -> None: ...
+
+    def insert_comment(self, comment: Comment) -> None: ...
+
+    def insert_suppression(self, suppression: Suppression) -> None: ...
+
+    def revoke_suppression(
+        self, suppression_id: str, *, actor_id: str, reason: str, at: datetime
+    ) -> bool: ...
+
+    def insert_contract_exemption(self, exemption: ContractExemption) -> None: ...
+
+    def delete_contract_exemption(
+        self, *, project_id: str, rule: str, target: str
+    ) -> bool: ...
+
+    def insert_work_link(self, link: WorkLink) -> None: ...
+
+    def upsert_work_overlay(self, overlay: WorkOverlay) -> None:
+        """Insert or replace the overlay row for one upstream subject.
+
+        The subject key is the primary key, so writing the merged row whole
+        keeps overlay updates in-place (the ranking-cost watch-item: no
+        re-gather of the observed set on a write). `created_at` is kept
+        from the existing row on conflict; everything else follows the new
+        row.
+        """
+        ...
+
+    def insert_token(self, token: Token, *, token_hash: str) -> None: ...
+
+    def carry_credentials(
+        self, carried: CarriedCredentials, *, reason: str, at: datetime
+    ) -> CarryReport:
+        """Make `carried` the only live credentials in this store.
+
+        The clone's sanitising step. Every live token not in `carried` is
+        revoked (revoked, not deleted: `auth_decisions` names token ids, and
+        the history stays readable); every password login and linked forge
+        account is replaced by the carried ones. Carried actors are matched
+        by `identity_ref` and remapped onto the existing row, or inserted
+        when this store has never seen them.
+        """
+        ...
+
+    def set_instance_identity(self, instance_id: str, stamp: CloneStamp) -> None:
+        """Re-key this store as `instance_id` and record the clone stamp."""
+        ...
+
+    def revoke_token(self, token_id: str, *, reason: str, at: datetime) -> bool: ...
+
+    def reinstate_token(self, token_id: str) -> bool:
+        """Clear a token's revocation. True when a revoked row was reinstated.
+
+        Exists for exactly one caller: a bootstrap secret rotated *back* to a
+        value this store already holds as a revoked row. `token_hash` is
+        unique, so the row cannot be re-inserted; it is brought back instead."""
+        ...
+
+    def upsert_password_credential(
+        self,
+        *,
+        actor_id: str,
+        username: str,
+        password_hash: str,
+        scopes: list[str],
+        at: datetime,
+    ) -> None:
+        """Create or replace an actor's login. A re-set keeps `created_at`
+        and refreshes the hash, the scopes and `updated_at`."""
+        ...
+
+    def delete_password_credential(self, actor_id: str) -> bool:
+        """Remove an actor's login. True when a row was removed."""
+        ...
+
+    def upsert_forge_account(
+        self,
+        *,
+        actor_id: str,
+        host: str,
+        login: str,
+        scopes: str,
+        encrypted_token: str,
+        at: datetime,
+    ) -> None:
+        """Link or re-link an actor's forge account for a host.
+
+        Re-linking overwrites the encrypted token and refreshes `login`,
+        `scopes` and `updated_at`, keeping the original `created_at`. The
+        stored token is always ciphertext — this interface has no plaintext
+        path."""
+        ...
+
+    def delete_forge_account(self, *, actor_id: str, host: str) -> bool:
+        """Unlink an actor's account for a host. True when a row was removed."""
+        ...
+
+    def insert_writeback(self, record: WriteBackRecord) -> None: ...
+
+    def insert_session(self, session: CodingSession) -> None: ...
+
+    def insert_session_grant(self, grant: SessionGrant) -> None: ...
+
+    def insert_decision(self, decision: Decision) -> None: ...
+
+    def insert_session_report(self, report: SessionReport) -> None: ...
+
+    def update_decision(self, decision: Decision) -> None:
+        """Replace a decision's state and answer fields."""
+        ...
+
+    def insert_watch(self, watch: Watch) -> None: ...
+
+    def update_watch(self, watch: Watch) -> None:
+        """Replace a watch's state, outcome, attempts and error."""
+        ...
+
+    def update_session_grant(self, grant: SessionGrant) -> None:
+        """Replace a grant's decision and revocation fields."""
+        ...
+
+    def set_session_cold_wake_opt_out(self, session_id: str, *, opt_out: bool) -> None:
+        """Opt a session out of cold-wake compaction (WI-2037), or back in."""
+        ...
+
+    def set_session_work_item(self, session_id: str, work_item_id: str | None) -> None:
+        """Re-declare the work item a session serves (WI-998), or clear it.
+
+        The one mutable declared field of a session row: binding is a new
+        decision by a principal, audited by the caller, never a copy of live
+        engine state. The history of bindings is the audit log, not this row.
+        """
+        ...
+
+    def mark_session_stopped(self, session_id: str, *, at: datetime) -> None:
+        """Record that Vogt stopped this session.
+
+        Idempotent: a session already stopped keeps the time it first
+        stopped at, so a second `session.stop` — or the engine reporting an
+        end Vogt already recorded — does not rewrite history.
+        """
+        ...
+
+    def insert_drift(self, proposal: DriftProposal) -> None: ...
+
+    def upsert_inbox_triage(self, triage: InboxTriage) -> None: ...
+
+    def insert_charter(self, charter: Charter) -> None:
+        """Append one charter version; (scope, version) is unique."""
+        ...
+
+    def upsert_actor_preference(self, preference: ActorPreference) -> None:
+        """Insert or replace one (actor, key) setting, version and all."""
+        ...
+
+    def mark_drift_superseded(
+        self, proposal_id: str, *, detail: str | None, at: datetime | None
+    ) -> bool:
+        """Flag an open proposal whose raising condition fresher evidence no
+        longer reproduces, or clear the flag when it reproduces again.
+
+        Never a resolution: the proposal stays open and human-gated.
+        """
+        ...
+
+    def resolve_drift(
+        self,
+        proposal_id: str,
+        *,
+        status: str,
+        actor_id: str,
+        reason: str,
+        at: datetime,
+    ) -> bool: ...
+
+    def upsert_workflow(self, workflow: Workflow, *, at: datetime) -> None: ...
+
+    def append_audit(
+        self,
+        *,
+        actor: Actor,
+        operation: str,
+        entity_kind: str,
+        entity_id: str,
+        reason: str,
+        payload_digest: str,
+        at: datetime,
+    ) -> AuditRecord: ...
+
+    def append_event(
+        self,
+        *,
+        kind: str,
+        entity_kind: str,
+        entity_id: str,
+        actor_id: str | None,
+        audit_id: str | None,
+        summary: dict[str, object],
+        at: datetime,
+    ) -> Event: ...
+
+
+class DeclaredStore(Protocol):
+    """The authoritative store. Only the application layer writes here."""
+
+    @property
+    def path(self) -> Path:
+        """Where the store lives: what identifies it across contexts."""
+        ...
+
+    def migrate(self) -> MigrationReport: ...
+
+    def is_initialized(self) -> bool: ...
+
+    def schema_version(self) -> int: ...
+
+    def bundled_schema_version(self) -> int:
+        """The version this build expects, against which `schema_version`
+        is only half an answer."""
+        ...
+
+    def bootstrap(self, principal: Principal) -> BootstrapResult: ...
+
+    def credentials(self) -> CarriedCredentials:
+        """Every token, password login and forge account, secrets included.
+
+        Exists for one caller: `clone`, which carries the target's own
+        credentials across the replacement of its stores.
+        """
+        ...
+
+    def record_auth_decision(self, decision: AuthDecision) -> None:
+        """Append an authorization decision.
+
+        Not a declared write: nothing changed, nobody supplied a reason, and
+        it happens on reads too.
+        """
+        ...
+
+    def touch_token(
+        self, token_id: str, *, at: datetime, expires_at: datetime | None = None
+    ) -> None:
+        """Record that a token was used at `at`. With `expires_at`, also move
+        a live, unrevoked token's expiry out to it — never in."""
+        ...
+
+    def prune_auth_decisions(
+        self, *, allow_before: datetime, deny_before: datetime
+    ) -> int:
+        """Delete auth-decision rows older than the given horizons."""
+        ...
+
+    def publish_event(
+        self,
+        *,
+        kind: str,
+        entity_kind: str,
+        entity_id: str,
+        summary: dict[str, object],
+        at: datetime,
+    ) -> Event:
+        """Append an event that is not a declared write (SCHEMA §2.5).
+
+        The feed has two producers and one table. Declared writes insert
+        their event inside the same transaction as the entity change and the
+        audit row. Observed-side happenings — a sweep finishing, a CI state
+        changing — are published here by the application layer on the
+        collectors' behalf: no audit row, because nobody declared anything,
+        and no revision bump, because the authoritative state did not change.
+
+        Collectors still never write the declared store themselves.
+        """
+        ...
+
+    def read(self) -> AbstractContextManager[ReadView]: ...
+
+    def write(self) -> AbstractContextManager[WriteTxn]: ...
+
+
+class ObservedStore(Protocol):
+    """The append-only evidence store. Only collectors write here.
+
+    Nothing here knows what a project is: resolving a dependency reference to
+    a registered project is a cross-store question the application layer
+    answers and hands down (`SCHEMA.md` §1).
+    """
+
+    @property
+    def path(self) -> Path:
+        """Where the store lives: what identifies it across contexts."""
+        ...
+
+    def migrate(self) -> MigrationReport: ...
+
+    def is_initialized(self) -> bool: ...
+
+    def schema_version(self) -> int: ...
+
+    def bundled_schema_version(self) -> int:
+        """The version this build expects, against which `schema_version`
+        is only half an answer."""
+        ...
+
+    def bind_instance(self, instance_id: str) -> None:
+        """Stamp this store with the instance it belongs to.
+
+        The two stores are backed up and restored independently, so a
+        mismatched pair has to be detectable rather than merely unlikely.
+        """
+        ...
+
+    def rebind_instance(self, instance_id: str) -> None:
+        """Re-stamp an already-bound store, for a clone keeping its own id."""
+        ...
+
+    def instance_id(self) -> str | None: ...
+
+    def has_evidence_tables(self) -> bool: ...
+
+    # -- sweeps ------------------------------------------------------------
+
+    def begin_sweep(
+        self, *, collector: str, scope: list[str], at: datetime
+    ) -> Sweep: ...
+
+    def finish_sweep(
+        self,
+        sweep_id: str,
+        *,
+        outcome: SweepOutcome,
+        stats: dict[str, int],
+        at: datetime,
+        detail: str | None = None,
+    ) -> None: ...
+
+    def append(
+        self, sweep_id: str, findings: list[PendingObservation], *, at: datetime
+    ) -> AppendStats: ...
+
+    def list_sweeps(
+        self, *, collector: str | None = None, limit: int = 50
+    ) -> list[Sweep]: ...
+
+    def coverage(self) -> dict[str, Sweep]:
+        """The newest completed sweep per collector."""
+        ...
+
+    def coverage_by_project(self) -> dict[str, dict[str, datetime]]:
+        """Per collector, when each project was last swept by it."""
+        ...
+
+    def fail_sweeps(self, sweep_ids: list[str], *, detail: str) -> None:
+        """Overwrite finished sweep rows to `failed`.
+
+        For the case where every collector in a batch genuinely finished —
+        each `finish_sweep` committed independently — but the sweep as a
+        whole did not: the shared projection rebuild that follows every
+        batch raised before the operation could be reported complete. Left
+        alone, `coverage` would keep reporting those collectors `ok` and
+        fresh from a run nothing downstream ever heard completed (#44).
+        """
+        ...
+
+    # -- reads -------------------------------------------------------------
+
+    def list_observations(
+        self,
+        *,
+        kind: str | None = None,
+        project_id: str | None = None,
+        subject_key: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[Observation]: ...
+
+    def latest(
+        self,
+        *,
+        kinds: tuple[str, ...] = (),
+        project_id: str | None = None,
+        promoted_only: bool = False,
+        exclude_closed: bool = False,
+        limit: int = 1000,
+    ) -> list[Observation]: ...
+
+    def latest_by_subject(self, subject_key: str) -> Observation | None: ...
+
+    def count_closed(
+        self, *, kinds: tuple[str, ...], project_id: str | None = None
+    ) -> int:
+        """How many latest subjects of these kinds read `closed`/`merged`.
+
+        The counterpart to `latest(exclude_closed=True)`: the ranked view
+        drops closed subjects in SQL so the row window cannot silently
+        truncate once closures are permanent, and still reports how many it
+        dropped (`closed_upstream`)."""
+        ...
+
+    # -- incremental sync state (D1) ---------------------------------------
+
+    def get_watermark(self, *, collector: str, project_id: str) -> str | None:
+        """The max upstream `updated_at` this collector has synced for a
+        project, or `None` before the first sync."""
+        ...
+
+    def set_watermark(
+        self, *, collector: str, project_id: str, watermark: str | None, at: datetime
+    ) -> None: ...
+
+    def touch_subjects(self, subject_keys: list[str], *, at: datetime) -> None:
+        """Record that these subjects were confirmed to still exist now,
+        whether or not their content changed (resolves the #50 residual)."""
+        ...
+
+    def last_confirmed(self, subject_keys: list[str]) -> dict[str, datetime]:
+        """Per subject, when it was last confirmed upstream. Empty for
+        subjects never touched by a sync."""
+        ...
+
+    def dep_refs(
+        self, *, from_project_id: str | None = None, to_project_id: str | None = None
+    ) -> list[DepRef]: ...
+
+    def counts(self) -> dict[str, int]: ...
+
+    # -- projections and retention -----------------------------------------
+
+    def rebuild_latest(self) -> int: ...
+
+    def latest_generation(self) -> int:
+        """A number that moves whenever `rebuild_latest` changes the
+        projection every `latest`-based read is answered from; 0 before the
+        first rebuild."""
+        ...
+
+    def replace_dep_refs(self, rows: list[DepRefRow]) -> int: ...
+
+    def prune(
+        self,
+        *,
+        before: datetime,
+        protected_observation_ids: frozenset[str] = frozenset(),
+    ) -> PruneReport: ...
+
+    # -- agent activity index (SCHEMA.md §3.4) -------------------------------
+
+    def activity_cursors(self) -> dict[str, TranscriptCursor]:
+        """How far each transcript file has been indexed, by path."""
+        ...
+
+    def index_activity(
+        self, sweep_id: str, batch: ActivityBatch, *, at: datetime
+    ) -> ActivityIndexStats:
+        """Store a batch's calls and results and move its cursors, atomically.
+
+        A call already indexed (same file, same call id) is not stored twice,
+        so a batch re-read after a crash is harmless. A result completes the
+        call it answers, whichever batch that call arrived in."""
+        ...
+
+    def search_activity(
+        self, query: ActivityQuery, *, limit: int, offset: int
+    ) -> list[ActivityEventRow]:
+        """Matching calls, newest first."""
+        ...
+
+    def summarize_activity(
+        self, query: ActivityQuery, *, limit: int, offset: int
+    ) -> list[ActivitySessionRow]:
+        """Per agent conversation, what its matching calls add up to, most
+        recently active first. `transcript_path` is the newest indexed file
+        for that conversation, or none; context is not stored here."""
+        ...
+
+
+__all__ = [
+    "Blocker",
+    "BootstrapResult",
+    "Counts",
+    "DeclaredStore",
+    "MigrationReport",
+    "ObservedStore",
+    "ProjectUpdate",
+    "ReadView",
+    "WorkFilter",
+    "WorkItemUpdate",
+    "WriteTxn",
+]

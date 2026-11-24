@@ -1,0 +1,239 @@
+"""The context every use-case runs in.
+
+Carries the configuration, both stores, the authenticated principal, and the
+injectable clock and id factory. Adapters build one of these and hand it to
+the registry; they never reach past it.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from dataclasses import dataclass, field, replace
+from pathlib import Path
+
+from vogt.adapters.engine import EngineClient
+from vogt.adapters.git import Cloner, Pusher, clone_repository, push_branch
+from vogt.adapters.github.client import Transport
+from vogt.adapters.peer import PeerClient
+from vogt.application.identity import (
+    PublicIdentity,
+    claimed_engine_session,
+    identity_from_config,
+)
+from vogt.application.test_hooks import clock_from_env, hooks_active, ids_from_env
+from vogt.config import VogtConfig, load_config
+from vogt.core.clock import Clock, utc_now
+from vogt.core.entities import Token
+from vogt.core.ids import IdFactory, new_id
+from vogt.core.principal import Principal, local_principal
+from vogt.observability import logger
+from vogt.storage.interface import DeclaredStore, ObservedStore
+from vogt.storage.sqlite.connection import drain_read_pool
+from vogt.storage.sqlite.declared import SqliteDeclaredStore
+from vogt.storage.sqlite.observed import SqliteObservedStore
+
+log = logger("context")
+#: Announced once per process: `build_context` runs per request, and a warning
+#: per request would bury the one fact that matters, which is that the process
+#: is not using wall-clock time.
+_hooks_announced = False
+
+
+@dataclass(frozen=True)
+class AppContext:
+    """One request's worth of application state."""
+
+    config: VogtConfig
+    declared: DeclaredStore
+    observed: ObservedStore
+    principal: Principal
+    clock: Clock
+    id_factory: IdFactory
+    #: The token that authenticated this request, secret-free, or `None` on
+    #: the local surface. Only `auth.logout` and `auth.whoami` read it: the
+    #: principal is still the identity, and nothing else may branch on which
+    #: credential carried it.
+    token: Token | None = None
+    #: How `project.import` obtains a checkout. Injectable for the
+    #: same reason the clock is: a use-case that shells out to `git` over the
+    #: network is one the test suite could otherwise only run by having a
+    #: network, and "works offline" is a property this product asserts rather
+    #: than hopes for (NFR-PO2).
+    cloner: Cloner = clone_repository
+    #: How `forge.publish` pushes the local default branch. Injectable
+    #: for the same reason the cloner is; the real function is exercised
+    #: against a local bare remote in the suite, and it can never force —
+    #: the argv is built in one place and carries no force flag.
+    pusher: Pusher = push_branch
+    #: The session engine, or `None` when none is configured — which is the
+    #: shape v1 shipped in and stays supported (engine-optional, read from this
+    #: side).
+    #: `None` is not an outage: the `session.*` operations say no engine is
+    #: configured, and every other operation is unaffected.
+    engine: EngineClient | None = None
+    #: How the forge is spoken to, or `None` for the real network. Injectable
+    #: for the same reason the cloner and engine are: linking a per-actor PAT
+    #: validates it against the forge, and the write path builds a provider
+    #: from a linked PAT — both would otherwise reach GitHub, which a test
+    #: cannot depend on. `None` is the deployed shape.
+    forge_transport: Transport | None = None
+    #: Where a client should reach this instance. Defaults to what the
+    #: configuration says, which is the whole answer when this process is the
+    #: door. Behind a front door the adapter resolves it per request from what
+    #: the door states, because the door owns the address and the mount points
+    #: and this process cannot see either — see `identity.py` for why that is
+    #: not the caller-supplied identity the principal rule forbids.
+    public_identity: PublicIdentity = field(default_factory=PublicIdentity)
+    #: A peer instance `instance.diagnostics` can ask about itself, or `None`
+    #: when none is configured. Injectable for the same reason the engine is.
+    peer: PeerClient | None = None
+    #: The engine session a pod-token caller says it runs in
+    #: (`X-Vogt-Engine-Session`, sent by the MCP bridge), or `None`. A claim,
+    #: not an identity: only `session.start` reads it, to attribute a start
+    #: by a resumed oversight session that lost its own token (WI-1852), and
+    #: only after the engine confirms that session is live oversight.
+    claimed_engine_session: str | None = None
+
+
+def build_context(
+    *,
+    config: VogtConfig | None = None,
+    principal: Principal | None = None,
+    clock: Clock = utc_now,
+    id_factory: IdFactory = new_id,
+    cloner: Cloner = clone_repository,
+    pusher: Pusher = push_branch,
+    engine: EngineClient | None = None,
+    public_identity: PublicIdentity | None = None,
+    forge_transport: Transport | None = None,
+    token: Token | None = None,
+    peer: PeerClient | None = None,
+) -> AppContext:
+    """Build a context over the SQLite backend.
+
+    The principal is passed in by the adapter that authenticated it
+    means it is never read from request data, and this signature is where
+    that rule is kept honest: there is nowhere for a caller to inject one.
+
+    `public_identity` is passed the same way and for a related reason, though
+    it is a different kind of fact: an address grants nothing and says nothing
+    about the caller, but it *is* resolved from the request behind a front
+    door, so the resolution belongs to the adapter and the gate that permits
+    it belongs to the configuration (`fronted`). Defaulting to the config's
+    own answer keeps the core-only shape exactly as it was.
+    """
+    resolved_config = config if config is not None else load_config()
+    # The defaults are the wall clock and random ids. A process started for
+    # golden recording overrides them from the environment, and only from
+    # there: a caller that passed its own clock or factory is a test, and a
+    # test must not be silently redirected by whatever the suite exported.
+    resolved_clock = clock
+    resolved_ids = id_factory
+    if clock is utc_now:
+        override = clock_from_env()
+        if override is not None:
+            resolved_clock = override
+    if id_factory is new_id:
+        override_ids = ids_from_env(path=resolved_config.data_dir / "test-ids.json")
+        if override_ids is not None:
+            resolved_ids = override_ids
+    active = hooks_active()
+    if active:
+        global _hooks_announced
+        if not _hooks_announced:
+            _hooks_announced = True
+            log.warning(
+                "deterministic test hooks are active: %s",
+                ", ".join(active),
+            )
+    return AppContext(
+        config=resolved_config,
+        declared=SqliteDeclaredStore(
+            resolved_config.declared_db_path,
+            clock=resolved_clock,
+            id_factory=resolved_ids,
+            synchronous=resolved_config.sqlite_synchronous,
+        ),
+        observed=SqliteObservedStore(
+            resolved_config.observed_db_path,
+            clock=resolved_clock,
+            id_factory=resolved_ids,
+            synchronous=resolved_config.sqlite_synchronous,
+        ),
+        principal=principal if principal is not None else local_principal(),
+        token=token,
+        clock=resolved_clock,
+        id_factory=resolved_ids,
+        cloner=cloner,
+        pusher=pusher,
+        forge_transport=forge_transport,
+        # Injectable for the same reason the cloner is: a use-case that talks
+        # to another process over HTTP is one the suite could otherwise only
+        # exercise by running that process.
+        engine=engine
+        or EngineClient.from_config(
+            resolved_config.engine_url,
+            # One stack secret for both directions: the engine recognises
+            # the core token it was given as the core's own identity, so a
+            # deployment that set no distinct engine credential still has one.
+            resolved_config.engine_token_file
+            or resolved_config.bootstrap_core_token_file,
+        ),
+        public_identity=(
+            public_identity
+            if public_identity is not None
+            else identity_from_config(resolved_config)
+        ),
+        peer=peer
+        or PeerClient.from_config(
+            resolved_config.diagnostics_peer_url,
+            resolved_config.diagnostics_peer_token_file,
+        ),
+    )
+
+
+def with_stores_at(ctx: AppContext, data_dir: Path) -> AppContext:
+    """The same context over the two store files in another directory.
+
+    For `clone`, which migrates and sanitises a staged copy of a backup
+    before it replaces the live stores — so a failure part-way leaves the
+    live stores exactly as they were. The concrete store classes are wired
+    here, at the composition root, like everywhere else.
+    """
+    synchronous = ctx.config.sqlite_synchronous
+    return replace(
+        ctx,
+        declared=SqliteDeclaredStore(
+            data_dir / ctx.config.declared_db_path.name,
+            clock=ctx.clock,
+            id_factory=ctx.id_factory,
+            synchronous=synchronous,
+        ),
+        observed=SqliteObservedStore(
+            data_dir / ctx.config.observed_db_path.name,
+            clock=ctx.clock,
+            id_factory=ctx.id_factory,
+            synchronous=synchronous,
+        ),
+    )
+
+
+def release_store_connections() -> None:
+    """Close every pooled read connection this process holds.
+
+    For `restore` and `clone`, before they replace a store's files: a pooled
+    connection (`storage/sqlite/connection.py`) must not outlive the database
+    it was opened on, and closing the last connection to a staged copy is
+    what folds its WAL back before the swap.
+    """
+    drain_read_pool()
+
+
+def with_claimed_engine_session(
+    ctx: AppContext, headers: Mapping[str, str]
+) -> AppContext:
+    """`ctx` with the engine session the request claims, when it claims one."""
+    claimed = claimed_engine_session(headers)
+    if claimed is None:
+        return ctx
+    return replace(ctx, claimed_engine_session=claimed)

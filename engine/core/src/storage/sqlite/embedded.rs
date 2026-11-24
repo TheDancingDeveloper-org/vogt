@@ -136,6 +136,10 @@ pub const DECLARED: &[(&str, &str)] = &[
         "0032_work_created_index",
         include_str!("../../../migrations/declared/0032_work_created_index.sql"),
     ),
+    (
+        "0033_text_search_fts",
+        include_str!("../../../migrations/declared/0033_text_search_fts.sql"),
+    ),
 ];
 
 pub const OBSERVED: &[(&str, &str)] = &[

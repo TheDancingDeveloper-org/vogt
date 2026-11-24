@@ -1,0 +1,370 @@
+"""The use-cases. Adapters call these and nothing deeper.
+
+Grouped by the thing they act on rather than by transport, because the
+transports are generated and there is only one of each use-case.
+"""
+
+from __future__ import annotations
+
+from vogt.application.services.agent_activity import (
+    search_agent_activity,
+    summarize_agent_activity,
+)
+from vogt.application.services.agent_auth import (
+    agent_auth_manifest,
+    agent_auth_policy_check,
+)
+from vogt.application.services.agent_clis import agent_cli_list, agent_cli_update
+from vogt.application.services.auth import (
+    create_user,
+    issue_token,
+    list_auth_decisions,
+    list_tokens,
+    list_users,
+    login,
+    logout,
+    remove_user,
+    revoke_token,
+    set_password,
+    whoami,
+)
+from vogt.application.services.board import list_board
+from vogt.application.services.charters import get_charter, set_charter
+from vogt.application.services.chats import (
+    chat_archive,
+    chat_create,
+    chat_decide,
+    chat_get,
+    chat_interrupt,
+    chat_list,
+    chat_promote,
+    chat_send,
+    chat_set_model,
+)
+from vogt.application.services.collect import coverage, deps, observations, sweep
+from vogt.application.services.connect import connect
+from vogt.application.services.contracts import (
+    compliance,
+    contract_adopt,
+    contract_applicable,
+    contract_check,
+    contract_decline,
+    contract_evaluate,
+    contract_inapplicable,
+)
+from vogt.application.services.decisions import (
+    answer_decision,
+    ask_decision,
+    list_decisions,
+    withdraw_decision,
+)
+from vogt.application.services.deployed import deployed_versions
+from vogt.application.services.drift_service import (
+    detect_drift,
+    list_drift,
+    resolve_drift,
+)
+from vogt.application.services.engine_status import engine_status
+from vogt.application.services.forge_accounts import (
+    link_forge_account,
+    status_forge_account,
+    unlink_forge_account,
+)
+from vogt.application.services.forge_import import import_forge_repo
+from vogt.application.services.forge_link import link_project
+from vogt.application.services.forge_publish import publish_project
+from vogt.application.services.forge_repos import list_forge_repos
+from vogt.application.services.grants import (
+    decide_grant,
+    list_grants,
+    request_grant,
+    revoke_grant,
+)
+from vogt.application.services.history import list_audit, list_events
+from vogt.application.services.imports import import_project
+from vogt.application.services.inbox import (
+    archive_inbox,
+    list_inbox,
+    restore_inbox,
+    snooze_inbox,
+)
+from vogt.application.services.initiative_publish import (
+    publish_initiative,
+    reproject_initiative,
+)
+from vogt.application.services.install import install_bootstrap, install_status
+from vogt.application.services.instance import (
+    init_instance,
+    instance_diagnostics,
+    migrate_instance,
+    registry_dump,
+    serve,
+    serve_mcp_stdio,
+    status,
+)
+from vogt.application.services.lifecycle import (
+    backup,
+    clone,
+    export_instance,
+    import_instance,
+    restore,
+)
+from vogt.application.services.llm_providers import (
+    llm_provider_list,
+    llm_provider_remove,
+    llm_provider_set,
+)
+from vogt.application.services.notifications import list_notifications
+from vogt.application.services.observed_first import (
+    adopt,
+    list_suppressions,
+    revoke_suppression,
+    suppress,
+)
+from vogt.application.services.place import place_metrics
+from vogt.application.services.preferences import get_preferences, set_preference
+from vogt.application.services.projects import (
+    brief_project,
+    create_project,
+    get_project,
+    list_projects,
+    register_project,
+    scaffold_project,
+    transition_project,
+    update_project,
+)
+from vogt.application.services.reports import report as report_session
+from vogt.application.services.retention import prune
+from vogt.application.services.sessions import (
+    answer_session,
+    bind_session_work,
+    commit_for_session,
+    digest,
+    economics,
+    engine_session_token,
+    hibernate_session,
+    history_list,
+    keep_session_awake,
+    last_reply,
+    list_session_templates,
+    list_sessions,
+    log_tail,
+    remove_session,
+    rename_session,
+    report_blocked,
+    report_unblocked,
+    search_output,
+    session_changes,
+    session_input,
+    session_screen,
+    session_wait,
+    session_wait_any,
+    set_session_role,
+    start_session,
+    stop_session,
+    sweep_sessions,
+    wake_session,
+)
+from vogt.application.services.taxonomy import (
+    create_actor,
+    create_initiative,
+    create_label,
+    list_actors,
+    list_initiatives,
+    list_labels,
+    list_workflows,
+    update_initiative,
+)
+from vogt.application.services.usage import usage_board_read
+from vogt.application.services.views import backlog, bugs, why
+from vogt.application.services.watches import (
+    cancel_watch,
+    create_watch,
+    list_watches,
+)
+from vogt.application.services.work import (
+    bind_branch,
+    comment_work,
+    create_work,
+    get_many_work,
+    get_work,
+    land_work,
+    list_work,
+    relate_work,
+    transition_work,
+    unrelate_work,
+    update_work,
+)
+from vogt.application.services.workspaces import workspace_clean, workspace_list
+from vogt.application.services.writeback import (
+    list_write_backs,
+    onboard,
+    set_write_back,
+)
+
+__all__ = [
+    "adopt",
+    "agent_auth_manifest",
+    "agent_auth_policy_check",
+    "agent_cli_list",
+    "agent_cli_update",
+    "answer_decision",
+    "answer_session",
+    "archive_inbox",
+    "ask_decision",
+    "backlog",
+    "backup",
+    "bind_branch",
+    "bind_session_work",
+    "brief_project",
+    "bugs",
+    "cancel_watch",
+    "chat_archive",
+    "chat_create",
+    "chat_decide",
+    "chat_get",
+    "chat_interrupt",
+    "chat_list",
+    "chat_promote",
+    "chat_send",
+    "chat_set_model",
+    "clone",
+    "comment_work",
+    "commit_for_session",
+    "compliance",
+    "connect",
+    "contract_adopt",
+    "contract_applicable",
+    "contract_check",
+    "contract_decline",
+    "contract_evaluate",
+    "contract_inapplicable",
+    "coverage",
+    "create_actor",
+    "create_initiative",
+    "create_label",
+    "create_project",
+    "create_user",
+    "create_watch",
+    "create_work",
+    "decide_grant",
+    "deployed_versions",
+    "deps",
+    "detect_drift",
+    "digest",
+    "economics",
+    "engine_session_token",
+    "engine_status",
+    "export_instance",
+    "get_charter",
+    "get_many_work",
+    "get_preferences",
+    "get_project",
+    "get_work",
+    "hibernate_session",
+    "history_list",
+    "import_forge_repo",
+    "import_instance",
+    "import_project",
+    "init_instance",
+    "install_bootstrap",
+    "install_status",
+    "instance_diagnostics",
+    "issue_token",
+    "keep_session_awake",
+    "land_work",
+    "last_reply",
+    "link_forge_account",
+    "link_project",
+    "list_actors",
+    "list_audit",
+    "list_auth_decisions",
+    "list_board",
+    "list_decisions",
+    "list_drift",
+    "list_events",
+    "list_forge_repos",
+    "list_grants",
+    "list_inbox",
+    "list_initiatives",
+    "list_labels",
+    "list_notifications",
+    "list_projects",
+    "list_session_templates",
+    "list_sessions",
+    "list_suppressions",
+    "list_tokens",
+    "list_users",
+    "list_watches",
+    "list_work",
+    "list_workflows",
+    "list_write_backs",
+    "llm_provider_list",
+    "llm_provider_remove",
+    "llm_provider_set",
+    "log_tail",
+    "login",
+    "logout",
+    "migrate_instance",
+    "observations",
+    "onboard",
+    "place_metrics",
+    "prune",
+    "publish_initiative",
+    "publish_project",
+    "register_project",
+    "registry_dump",
+    "relate_work",
+    "remove_session",
+    "remove_user",
+    "rename_session",
+    "report_blocked",
+    "report_session",
+    "report_unblocked",
+    "reproject_initiative",
+    "request_grant",
+    "resolve_drift",
+    "restore",
+    "restore_inbox",
+    "revoke_grant",
+    "revoke_suppression",
+    "revoke_token",
+    "scaffold_project",
+    "search_agent_activity",
+    "search_output",
+    "serve",
+    "serve_mcp_stdio",
+    "session_changes",
+    "session_input",
+    "session_screen",
+    "session_wait",
+    "session_wait_any",
+    "set_charter",
+    "set_password",
+    "set_preference",
+    "set_session_role",
+    "set_write_back",
+    "snooze_inbox",
+    "start_session",
+    "status",
+    "status_forge_account",
+    "stop_session",
+    "summarize_agent_activity",
+    "suppress",
+    "sweep",
+    "sweep_sessions",
+    "transition_project",
+    "transition_work",
+    "unlink_forge_account",
+    "unrelate_work",
+    "update_initiative",
+    "update_project",
+    "update_work",
+    "usage_board_read",
+    "wake_session",
+    "whoami",
+    "why",
+    "withdraw_decision",
+    "workspace_clean",
+    "workspace_list",
+]

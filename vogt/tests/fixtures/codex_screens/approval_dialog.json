@@ -1,0 +1,6 @@
+{
+  "captured": "SYNTHETIC: not captured live. A Codex command-approval dialog, written from Codex's approval layout because the live session (-a on-request, full access) never asked. Its highlighted choice starts with the same prompt glyph as the composer, and no composer or footer is drawn (WI-1669)",
+  "title": "codex: awaiting approval",
+  "activity": "awaiting-approval",
+  "lines": ["› reply with the single word two","","• Running cargo test -p vogt-engine","","  Would you like to run the following command?","","  $ cargo test -p vogt-engine","","› 1. Yes, proceed (y)","  2. Yes, and don't ask again for this command (a)","  3. No, and tell Codex what to do differently (esc)","","  Press enter to confirm or esc to cancel"]
+}

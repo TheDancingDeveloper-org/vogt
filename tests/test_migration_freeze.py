@@ -55,6 +55,7 @@ FROZEN: dict[str, str] = {
     "declared/0030_project_mcp_extra": "100c0453a19af8c40a1994fcef12924c07de003a32abb37531ec5bdf33992ac6",
     "declared/0031_project_default_branch": "f03c87d4d0e7c0751d98d367201f006412b3667a976c2a4b99d8478e1fdcac59",
     "declared/0032_work_created_index": "733f316a70a332d89c485a9e072e4a61887bbba870e5660ce25095b5f9ab5416",
+    "declared/0033_text_search_fts": "11887ca7030906e4ad0d4916a930c4a5b3fc8f127b729b5e30b947e99b4bf625",
     "observed/0001_foundation": "c050f9e4dba983119f045b8fb4ccbe8b1ee97473170eead7d28279e99468de4b",
     "observed/0002_evidence": "9cdc9c9179740af96606bab0b557c7b35639eaabc78faf16630c7705f1d368f5",
     "observed/0003_inherited_dep_refs": "8bf0b8533774a156762fddc2e56bbb9656ba3b6bf0e38ec85a66c9dc9c325ed1",

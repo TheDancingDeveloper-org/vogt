@@ -1,0 +1,14 @@
+{
+ "agent": "claude-code",
+ "version": "2.1.289",
+ "scenario": "turn-unanswered",
+ "term": "xterm-256color unless named",
+ "note": "OSC and BEL sequences only, in order; screen frames omitted; cwd redacted",
+ "sequences": [
+  "\u001b]0;✳ Claude Code\u0007",
+  "\u001b]0;◐ Claude Code\u0007",
+  "\u001b]0;◐ Say hi in 3 words\u0007",
+  "\u001b]0;◑ Say hi in 3 words\u0007",
+  "\u001b]0;✳ Say hi in 3 words\u0007"
+ ]
+}

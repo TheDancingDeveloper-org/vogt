@@ -63,8 +63,14 @@ pub fn connect_with(path: &Path, create: bool, synchronous: &str) -> rusqlite::R
     Ok(conn)
 }
 
-/// Ports `split_statements`. Migrations are plain DDL: no triggers and no
-/// semicolons inside identifiers. A `--` comment runs to the next newline.
+/// True while `statement` is a CREATE TRIGGER whose `END` has not arrived.
+fn is_open_trigger(statement: &str) -> bool {
+    let upper = statement.to_ascii_uppercase();
+    upper.starts_with("CREATE TRIGGER") && !upper.ends_with("END")
+}
+
+/// Ports `split_statements`. Migrations are plain DDL (a CREATE TRIGGER body
+/// is kept whole): no semicolons inside identifiers. A `--` comment runs to the next newline.
 pub fn split_statements(script: &str) -> Vec<String> {
     let mut statements = Vec::new();
     let mut buffer = String::new();
@@ -90,6 +96,12 @@ pub fn split_statements(script: &str) -> Vec<String> {
                 .unwrap_or(bytes.len());
         } else if char == ';' {
             let statement = buffer.trim().to_string();
+            if is_open_trigger(&statement) {
+                // A semicolon inside CREATE TRIGGER ... BEGIN ... END.
+                buffer.push(char);
+                index += 1;
+                continue;
+            }
             if !statement.is_empty() {
                 statements.push(statement);
             }
@@ -473,7 +485,16 @@ mod checkpoint_tests {
 
     #[test]
     fn checkpoint_all_truncates_the_wal_and_keeps_the_data() {
-        let dir = std::env::temp_dir().join(format!("vogt-ckpt-{}", std::process::id()));
+        // A unique directory per run: pid-keyed names collide across reruns
+        // and parallel tests in one process.
+        let dir = std::env::temp_dir().join(format!(
+            "vogt-ckpt-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("ckpt.sqlite3");

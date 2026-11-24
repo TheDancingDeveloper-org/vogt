@@ -1,0 +1,9 @@
+# Keep generated and local state out of the engine build context.
+.git
+.git/**
+.graft
+.graft/**
+**/target
+**/.venv
+**/node_modules
+web/dist

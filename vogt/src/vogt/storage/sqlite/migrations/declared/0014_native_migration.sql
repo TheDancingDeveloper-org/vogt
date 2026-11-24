@@ -1,0 +1,19 @@
+-- 0014_native_migration — retire-by-marker for migrated native items (#183).
+--
+-- When `forge.link` or `forge.publish` succeeds on a project that still holds
+-- open native work items, each is published upstream as an issue and its
+-- vogt-only fields fold into `work_overlay` under the new subject key. The
+-- native row is then *retired*, not deleted: `superseded_by` names the
+-- subject key that replaced it.
+--
+-- Retire-by-marker over deletion, by decision (#183): the row anchors the
+-- item's whole local history — comments, relations, the FR-B2 write-back
+-- ledger, audit rows keyed by its id — and deleting it would either orphan
+-- or destroy that history to satisfy a re-keying. A superseded row is
+-- excluded from every work view (the shared `_work_where` filters it), so
+-- each issue is counted exactly once; the `WI-n` ref still resolves for a
+-- reader following an old trail, and the marker says where the item went.
+-- No `work_links` row is written for the new subject — the #181 dedup reads
+-- `work_links` as "this declared row IS the item", which is exactly what a
+-- retired row is not.
+ALTER TABLE work_items ADD COLUMN superseded_by TEXT;

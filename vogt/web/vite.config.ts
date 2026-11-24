@@ -1,0 +1,31 @@
+import { defineConfig } from "vite";
+import solid from "vite-plugin-solid";
+
+// Backend dev server target — `cargo run -p vogt-engine-server -- --bind 127.0.0.1:8910`
+const BACKEND = "http://127.0.0.1:8910";
+
+export default defineConfig({
+  plugins: [solid()],
+  server: {
+    port: 5173,
+    strictPort: true,
+    proxy: {
+      "/api": {
+        target: BACKEND,
+        changeOrigin: true,
+        ws: true,
+      },
+      "/healthz": BACKEND,
+    },
+  },
+  build: {
+    target: "es2022",
+    outDir: "dist",
+    emptyOutDir: true,
+    // `scripts/check_bundle.py` reads this to work out what the first screen
+    // actually costs: which chunk is the entry, and which chunks it pulls in
+    // statically rather than when a route asks for them.
+    manifest: true,
+    sourcemap: process.env.VITE_SOURCEMAP === "1",
+  },
+});
