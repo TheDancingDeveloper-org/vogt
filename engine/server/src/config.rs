@@ -657,6 +657,10 @@ pub struct Config {
     pub pod: crate::pod_backend::PodConfig,
     /// Pod salvage switch and retention bounds, parsed once at load.
     pub pod_salvage: PodSalvageSettings,
+    /// `ENGINE_WORKSPACE_SIZE_TTL`, parsed once at load.
+    pub workspace_size_ttl: std::time::Duration,
+    /// Escalation ladder timings (`ENGINE_ESCALATION_*`), parsed once at load.
+    pub escalation_ladder: crate::escalation_ladder::LadderConfig,
     /// Optional Cadastre MCP endpoint for pod sessions. Unset means no
     /// Cadastre entry is handed to a pod (the tailnet default is unreachable).
     pub cadastre_mcp_url: Option<String>,
@@ -1452,6 +1456,8 @@ pub fn load(
             .filter(|value| !value.is_empty()),
         pod: Default::default(),
         pod_salvage: PodSalvageSettings::from_env(),
+        workspace_size_ttl: crate::workspaces::WorkspaceSizes::ttl_from_env(),
+        escalation_ladder: crate::escalation_ladder::LadderConfig::from_env(),
         agent_auth_public_url: validate_https_origin(
             "ENGINE_AGENT_AUTH_PUBLIC_URL",
             from_file

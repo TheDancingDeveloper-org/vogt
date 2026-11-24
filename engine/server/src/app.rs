@@ -109,6 +109,7 @@ pub struct AppState {
 
 async fn build_state(cfg: Config) -> Arc<AppState> {
     let cfg = Arc::new(cfg);
+    let workspace_size_ttl = cfg.workspace_size_ttl;
     let bus = EventBus::default();
 
     // Initialize session history (optional, continues if init fails)
@@ -270,7 +271,7 @@ async fn build_state(cfg: Config) -> Arc<AppState> {
         agent_clis: Arc::new(agent_clis::AgentCliRuntime::new(agent_clis_paths)),
         hibernation,
         chats,
-        workspace_sizes: Arc::new(crate::workspaces::WorkspaceSizes::from_env()),
+        workspace_sizes: Arc::new(crate::workspaces::WorkspaceSizes::new(workspace_size_ttl)),
     })
 }
 
