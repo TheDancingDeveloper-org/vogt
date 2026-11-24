@@ -862,6 +862,28 @@ mod tests {
     }
 
     #[test]
+    fn the_work_list_order_is_served_by_the_created_index() {
+        // WI-4638: ORDER BY created_at, ref walks idx_work_items_created
+        // instead of sorting the table.
+        let dir = scratch("work-created-index");
+        let path = dir.join("declared.sqlite3");
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("migrations/declared");
+        let mut conn = connect(&path).unwrap();
+        migrate(&mut conn, "declared", Some(&source), "main/1", NOW).unwrap();
+        let mut stmt = conn
+            .prepare("EXPLAIN QUERY PLAN SELECT id FROM work_items w ORDER BY w.created_at, w.ref LIMIT 50")
+            .unwrap();
+        let plan: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(3))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        let joined = plan.join("; ");
+        assert!(joined.contains("idx_work_items_created"), "{joined}");
+        assert!(!joined.contains("TEMP B-TREE"), "{joined}");
+    }
+
+    #[test]
     fn a_project_registered_before_0031_reads_back_with_no_recorded_branch() {
         // WI-4026: a row written before 0031 existed upgrades to an empty
         // default_branch, which the session path reads as "not recorded" and
