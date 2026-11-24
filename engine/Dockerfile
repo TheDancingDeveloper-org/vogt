@@ -226,11 +226,14 @@ COPY engine/server/Cargo.toml ./server/Cargo.toml
 COPY engine/server/build.rs ./server/build.rs
 COPY engine/server/src ./server/src
 COPY engine/session-agent/Cargo.toml ./session-agent/Cargo.toml
+COPY engine/session-agent/build.rs ./session-agent/build.rs
 COPY engine/session-agent/src ./session-agent/src
 # vogt-core is a workspace member, so the workspace will not load without it,
 # and its migrations are compiled in from the checkout rather than read at
 # runtime. The stack image does not ship src/vogt.
 COPY engine/core/Cargo.toml ./core/Cargo.toml
+COPY engine/core/build.rs ./core/build.rs
+COPY engine/core/migrations ./core/migrations
 COPY engine/core/src ./core/src
 COPY src/vogt/storage/sqlite/migrations /app/src/vogt/storage/sqlite/migrations
 COPY --from=web-build /app/web/dist /app/web/dist
