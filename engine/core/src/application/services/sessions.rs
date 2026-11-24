@@ -2188,42 +2188,8 @@ where
         return found;
     }
     let path = ctx.declared.path().to_path_buf();
-    let Ok(conn) = rusqlite::Connection::open_with_flags(
-        &path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    ) else {
-        return found;
-    };
-    let placeholders = std::iter::repeat_n("?", wanted.len())
-        .collect::<Vec<_>>()
-        .join(", ");
-    let sql = format!(
-        "SELECT kind, summary, data, engine_session_id FROM (
-            SELECT r.kind, r.summary, r.data, r.engine_session_id,
-                   ROW_NUMBER() OVER (
-                       PARTITION BY engine_session_id
-                       ORDER BY created_at DESC, id DESC
-                   ) AS rn
-            FROM session_reports r
-            WHERE engine_session_id IN ({placeholders})
-        ) WHERE rn = 1"
-    );
-    let Ok(mut stmt) = conn.prepare(&sql) else {
-        return found;
-    };
-    let rows = stmt.query_map(rusqlite::params_from_iter(wanted.iter()), |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, Option<String>>(3)?,
-        ))
-    });
-    let Ok(rows) = rows else {
-        return found;
-    };
-    for row in rows.flatten() {
-        let (kind, summary, data, engine_id) = row;
+    let rows = crate::storage::sqlite::connection::latest_report_rows(&path, &wanted);
+    for (kind, summary, data, engine_id) in rows {
         let Some(engine_id) = engine_id else { continue };
         found.insert(engine_id, report_line(&kind, &summary, &data));
     }
