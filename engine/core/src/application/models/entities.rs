@@ -491,7 +491,7 @@ fn checked_source<'de, D: serde::Deserializer<'de>>(
 /// `SourceDescriptor`; it carries no credential.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-#[allow(dead_code)]
+#[expect(dead_code, reason = "ported ahead of the callers that will wire it in")]
 struct ProjectSource {
     location: SourceLocation,
     /// A branch for git, a line for graft.
@@ -503,7 +503,7 @@ struct ProjectSource {
 
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
-#[allow(dead_code)]
+#[expect(dead_code, reason = "ported ahead of the callers that will wire it in")]
 enum SourceLocation {
     Git { url: String, repo: String },
     Graft { endpoint: String, repo: String },

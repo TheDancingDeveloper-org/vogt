@@ -281,7 +281,10 @@ where
 /// Called after the effect, not around it. The audit row and its event still
 /// share one transaction. The argument count matches `audited_action` in
 /// writes.py.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the parameters mirror the call's inputs; a params struct would churn every caller"
+)]
 pub fn audited_action<C, I, D>(
     ctx: &mut WriteContext<'_, C, I, D>,
     operation: &str,

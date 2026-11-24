@@ -821,7 +821,10 @@ pub trait WriteTxn: ReadView {
     ) -> Result<(), crate::errors::VogtError>;
     // The field list is Python's signature, not a struct: the transaction
     // allocates the id and stamps the revision, so the caller cannot pass them.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the parameters mirror the call's inputs; a params struct would churn every caller"
+    )]
     fn append_audit(
         &mut self,
         actor: &Actor,
@@ -832,7 +835,10 @@ pub trait WriteTxn: ReadView {
         payload_digest: &str,
         at: Moment,
     ) -> Result<AuditRecord, crate::errors::VogtError>;
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the parameters mirror the call's inputs; a params struct would churn every caller"
+    )]
     fn append_event(
         &mut self,
         kind: &str,

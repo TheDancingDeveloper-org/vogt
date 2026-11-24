@@ -41,9 +41,7 @@ impl Scope {
 pub enum HttpMethod {
     Get,
     Post,
-    #[allow(dead_code)] // Python's set uses GET and POST only; the type matches it.
     Patch,
-    #[allow(dead_code)]
     Delete,
 }
 
@@ -438,7 +436,10 @@ impl Operation {
 /// What a missing `reason` is told. Every write is audited and the registry
 /// refuses to build a write whose reason is optional, so the reason cannot be
 /// defaulted.
-#[allow(dead_code)] // The reason hint is part of the validation message P2.2 emits.
+#[expect(
+    dead_code,
+    reason = "The reason hint is part of the validation message P2.2 emits."
+)]
 pub const REASON_HINT: &str = "every write is audited and must say why it is being made — pass \
      `reason` as a short sentence, e.g. reason=\"tests pass, ready for review\"";
 
@@ -549,12 +550,18 @@ impl OperationRegistry {
         Ok(registry)
     }
 
-    #[allow(dead_code)] // Registry coverage tests assert the operation count.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Registry coverage tests assert the operation count."
+        )
+    )]
     pub fn len(&self) -> usize {
         self.operations.len()
     }
 
-    #[allow(dead_code)] // Used by the transports that land in P2.3–P2.5.
+    #[expect(dead_code, reason = "Used by the transports that land in P2.3–P2.5.")]
     pub fn is_empty(&self) -> bool {
         self.operations.is_empty()
     }
@@ -563,7 +570,7 @@ impl OperationRegistry {
         self.operations.iter()
     }
 
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "ported ahead of the callers that will wire it in")]
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.operations.iter().map(|operation| operation.name)
     }
@@ -599,7 +606,6 @@ impl OperationRegistry {
         vec![Transport::Cli, Transport::Http, Transport::Mcp]
     }
 
-    #[allow(dead_code)]
     pub fn for_transport(&self, transport: Transport) -> Vec<&Operation> {
         self.operations
             .iter()

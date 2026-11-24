@@ -337,7 +337,7 @@ mod tests {
                     "/boom",
                     axum::routing::get(|| async {
                         panic!("boom token=secret");
-                        #[allow(unreachable_code)]
+                        #[expect(unreachable_code, reason = "the panic diverges; the tail value gives the closure its return type")]
                         ""
                     }),
                 )

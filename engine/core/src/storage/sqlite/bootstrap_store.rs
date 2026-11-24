@@ -220,7 +220,10 @@ fn revoke_named(
 }
 
 /// Write the `token.adopt` audit row, its revision bump and the event.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the parameters mirror the call's inputs; a params struct would churn every caller"
+)]
 fn record_adoption(
     conn: &rusqlite::Connection,
     ids: &mut dyn FnMut(&str) -> String,

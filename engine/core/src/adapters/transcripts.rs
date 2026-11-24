@@ -158,7 +158,10 @@ pub fn find(
 /// directory after the configured Claude root. A pod Claude session's
 /// transcript is written back into its account's directory (WI-4286), not the
 /// core's Claude root.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the parameters mirror the call's inputs; a params struct would churn every caller"
+)]
 pub fn find_in(
     roots: &HashMap<&str, &Path>,
     claude_accounts: &[PathBuf],

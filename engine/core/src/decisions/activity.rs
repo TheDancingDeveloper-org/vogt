@@ -66,7 +66,10 @@ pub(super) fn python_pattern(pattern: &str) -> String {
     let mut class_held = false;
     let mut ignore_case = false;
     let mut group = 0;
-    #[allow(clippy::while_let_on_iterator)]
+    #[expect(
+        clippy::while_let_on_iterator,
+        reason = "the body advances the iterator itself, so a for loop does not fit"
+    )]
     while let Some(ch) = chars.next() {
         if escaped {
             if class {

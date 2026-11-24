@@ -543,7 +543,10 @@ fn sent_or_fail(result: WriteBackResult, action: &str) -> Result<WriteBackResult
 
 /// The write-back ledger row for one successful write-through. Ports
 /// `_upstream_record`.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the parameters mirror the call's inputs; a params struct would churn every caller"
+)]
 fn upstream_record(
     ids: &std::sync::Arc<std::sync::Mutex<impl IdFactory>>,
     clock: &std::sync::Arc<std::sync::Mutex<impl Clock>>,

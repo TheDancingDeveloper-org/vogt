@@ -291,7 +291,10 @@ fn lax_int(value: &Value) -> Option<i64> {
                 && float.fract() == 0.0
                 && (-9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0).contains(&float)
             {
-                #[allow(clippy::cast_possible_truncation)]
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "the value is bounded before the cast"
+                )]
                 Some(float as i64)
             } else {
                 None

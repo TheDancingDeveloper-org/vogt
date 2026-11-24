@@ -2,8 +2,14 @@
 
 use std::collections::BTreeMap;
 
-#[allow(unused_imports)]
 // The test module below is the only reader of the first, second and last.
+#[cfg_attr(
+    not(test),
+    expect(
+        unused_imports,
+        reason = "the test module is the only reader of the first, second and last"
+    )
+)]
 use super::{from_iso, require_text, ActorKind, Moment, DECLARABLE_RELATION_KINDS};
 
 macro_rules! vocab {
@@ -324,7 +330,13 @@ pub struct Project {
 }
 
 impl Project {
-    #[allow(dead_code)] // Ported domain item; only tests use it until the service layer wires it.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Ported domain item; only tests use it until the service layer wires it."
+        )
+    )]
     pub fn new(id: &str, slug: &str, name: &str, root_path: &str, now: Moment) -> Self {
         Self {
             id: id.to_string(),
@@ -710,7 +722,6 @@ pub struct Suppression {
 
 impl Suppression {
     /// A suppression holds until someone revokes it.
-    #[allow(dead_code)] // Ported domain item; only tests use it until the service layer wires it.
     pub fn active(&self) -> bool {
         self.revoked_at.is_none()
     }
@@ -788,7 +799,10 @@ pub struct Token {
 }
 
 impl Token {
-    #[allow(dead_code)] // Ported domain item; only tests use it until the service layer wires it.
+    #[expect(
+        dead_code,
+        reason = "Ported domain item; only tests use it until the service layer wires it."
+    )]
     pub fn active(&self) -> bool {
         self.revoked_at.is_none()
     }
