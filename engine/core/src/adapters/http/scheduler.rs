@@ -116,6 +116,22 @@ pub fn serve_tick(config: VogtConfig) -> Tick {
     })
 }
 
+/// The WAL checkpoint tick (WI-4638): fold and truncate the write-ahead log of
+/// every pooled database. Failures are logged, never raised, so the schedule
+/// carries on.
+pub fn checkpoint_tick() -> Tick {
+    Arc::new(|| {
+        let (_, failed) = crate::storage::sqlite::connection::checkpoint_all();
+        for (path, err) in failed {
+            tracing::warn!(target: TARGET, path = %path.display(), "wal checkpoint failed: {err}");
+        }
+        Ok(())
+    })
+}
+
+/// Seconds between WAL checkpoints.
+pub const CHECKPOINT_INTERVAL_SECONDS: i64 = 600;
+
 /// A fresh service context for each watch pass; no caller identity leaks in.
 pub fn watch_tick(config: VogtConfig) -> Tick {
     Arc::new(move || {
