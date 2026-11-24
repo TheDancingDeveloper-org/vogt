@@ -69,13 +69,6 @@ pub fn developer_instructions(cwd: &Path, home: Option<&Path>) -> Option<String>
     gather(cwd, home)
 }
 
-/// True when `command` already carries a guidance override.
-pub fn has_override(command: &[String]) -> bool {
-    command
-        .iter()
-        .any(|arg| arg.starts_with(&format!("{KEY}=")))
-}
-
 struct Walk {
     /// Canonical roots a file must resolve inside.
     allowed: Vec<PathBuf>,
