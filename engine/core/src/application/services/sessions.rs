@@ -413,11 +413,17 @@ where
     // The item's ref is read once per item, and only when it was asked for.
     let mut refs: std::collections::BTreeMap<String, Option<String>> = Default::default();
     if fields.iter().any(|wanted| wanted == "work_item") {
-        for id in rows.iter().filter_map(|row| row.work_item_id.as_deref()) {
-            if !refs.contains_key(id) {
-                let reference = view.work_item_by_id(id)?.map(|item| item.reference);
-                refs.insert(id.to_string(), reference);
-            }
+        let mut ids: Vec<String> = rows
+            .iter()
+            .filter_map(|row| row.work_item_id.clone())
+            .collect();
+        ids.sort();
+        ids.dedup();
+        for (id, reference, _, _) in view.work_briefs_by_ids(&ids)? {
+            refs.insert(id, Some(reference));
+        }
+        for id in ids {
+            refs.entry(id).or_insert(None);
         }
     }
     drop(view);

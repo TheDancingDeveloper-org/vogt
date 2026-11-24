@@ -74,6 +74,67 @@ pub(super) fn select_filtered<T: FromRow>(
     rows.collect::<Result<Vec<_>, _>>().map_err(sql_err)
 }
 
+/// Values per `IN (...)` statement; far below SQLite's bound-variable limit.
+const IN_CHUNK: usize = 500;
+
+/// `IN (?, ?, ...)` for `n` bound values. Only placeholders are generated.
+fn placeholders(n: usize) -> String {
+    vec!["?"; n].join(", ")
+}
+
+/// Select every row whose `column` is in `values`, in chunked queries with every
+/// value bound. `column` is a `&'static str`, so only literals compile.
+pub(super) fn select_in<T: FromRow>(
+    conn: &Connection,
+    column: &'static str,
+    values: &[String],
+) -> Result<Vec<T>, VogtError> {
+    let sql_err = |err: rusqlite::Error| VogtError::from_sqlite(&err);
+    let mut out = Vec::new();
+    for chunk in values.chunks(IN_CHUNK) {
+        let sql = format!(
+            "SELECT {} FROM {} WHERE {column} IN ({})",
+            T::COLUMNS,
+            T::TABLE,
+            placeholders(chunk.len())
+        );
+        let mut statement = conn.prepare(&sql).map_err(sql_err)?;
+        let rows = statement
+            .query_map(rusqlite::params_from_iter(chunk.iter()), T::from_row)
+            .map_err(sql_err)?;
+        for row in rows {
+            out.push(row.map_err(sql_err)?);
+        }
+    }
+    Ok(out)
+}
+
+/// `(id, ref, title, state)` of work items whose `column` is in `values`.
+pub(super) fn select_work_briefs(
+    conn: &Connection,
+    column: &'static str,
+    values: &[String],
+) -> Result<Vec<(String, String, String, String)>, VogtError> {
+    let sql_err = |err: rusqlite::Error| VogtError::from_sqlite(&err);
+    let mut out = Vec::new();
+    for chunk in values.chunks(IN_CHUNK) {
+        let sql = format!(
+            "SELECT id, ref, title, state FROM work_items WHERE {column} IN ({})",
+            placeholders(chunk.len())
+        );
+        let mut statement = conn.prepare(&sql).map_err(sql_err)?;
+        let rows = statement
+            .query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .map_err(sql_err)?;
+        for row in rows {
+            out.push(row.map_err(sql_err)?);
+        }
+    }
+    Ok(out)
+}
+
 /// A list of AND-ed conditions with their bound values. A condition is a
 /// `&'static str` holding one `?` per value; the values are never part of the
 /// SQL text.

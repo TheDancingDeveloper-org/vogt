@@ -272,6 +272,20 @@ pub trait ReadView {
     ) -> Result<Option<Actor>, crate::errors::VogtError>;
     fn actor_by_id(&self, actor_id: &str) -> Result<Option<Actor>, crate::errors::VogtError>;
     fn list_actors(&self, limit: i64, offset: i64) -> Result<Vec<Actor>, crate::errors::VogtError>;
+    /// Actors with these ids, in one batched query. Unknown ids are absent.
+    fn actors_by_ids(&self, ids: &[String]) -> Result<Vec<Actor>, crate::errors::VogtError>;
+    /// Projects with these ids, in one batched query. Unknown ids are absent.
+    fn projects_by_ids(&self, ids: &[String]) -> Result<Vec<Project>, crate::errors::VogtError>;
+    /// `(id, ref, title, state)` of work items with these ids, one query.
+    fn work_briefs_by_ids(
+        &self,
+        ids: &[String],
+    ) -> Result<Vec<(String, String, String, String)>, crate::errors::VogtError>;
+    /// `(id, ref, title, state)` of work items with these refs, one query.
+    fn work_briefs_by_refs(
+        &self,
+        refs: &[String],
+    ) -> Result<Vec<(String, String, String, String)>, crate::errors::VogtError>;
 
     fn project_by_slug(&self, slug: &str) -> Result<Option<Project>, crate::errors::VogtError>;
     fn project_by_id(&self, project_id: &str) -> Result<Option<Project>, crate::errors::VogtError>;
