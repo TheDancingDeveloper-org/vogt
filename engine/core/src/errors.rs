@@ -65,6 +65,9 @@ pub enum VogtError {
     InvalidParams(String),
     MigrationError(String),
     MigrationLocked(String),
+    /// SQLite reported the database busy or locked past its busy timeout.
+    /// Transient: 503 with `Retry-After`.
+    StorageBusy(String),
     /// The session engine did not answer or refused the credential
     /// (`adapters/engine/client.py`). Optional by design: callers degrade, they
     /// do not crash. 502, the same status as every other upstream adapter.
@@ -196,6 +199,7 @@ impl VogtError {
             | Self::MigrationError(m)
             | Self::NotImplemented(m)
             | Self::MigrationLocked(m)
+            | Self::StorageBusy(m)
             | Self::EngineUnavailable(m)
             | Self::GitUnavailable(m)
             | Self::GitCommandFailed(m)
@@ -254,6 +258,7 @@ impl VogtError {
             Self::InvalidParams(_) => "invalid_params",
             Self::MigrationError(_) => "migration_error",
             Self::MigrationLocked(_) => "migration_locked",
+            Self::StorageBusy(_) => "storage_busy",
             Self::EngineUnavailable(_) => "engine_unavailable",
             Self::GitUnavailable(_) | Self::GitCommandFailed(_) => "git_unavailable",
             Self::GitHubUnavailable(_) => "github_unavailable",
@@ -325,7 +330,7 @@ impl VogtError {
             | Self::ForgejoUnavailable(_) => 502,
             Self::InvalidParams(_) => 422,
             Self::MigrationError(_) => 500,
-            Self::MigrationLocked(_) | Self::GitHubRateLimited(_) => 503,
+            Self::MigrationLocked(_) | Self::StorageBusy(_) | Self::GitHubRateLimited(_) => 503,
             Self::TransitionRejected { .. } => 409,
             Self::Unauthenticated(_) => 401,
             Self::Forbidden(_) => 403,
@@ -496,6 +501,38 @@ pub fn error_table() -> &'static [(&'static str, u16)] {
     ]
 }
 
+/// Seconds a client should wait before retrying a busy store.
+pub const STORAGE_BUSY_RETRY_AFTER_SECS: u64 = 1;
+
+impl VogtError {
+    /// Map a SQLite error to a client-facing error. Busy and locked become a
+    /// retryable 503, constraint violations 409, a missing row 404, and the
+    /// rest 500. The message never carries SQL or driver text; that goes to
+    /// the log with the SQLite code.
+    pub fn from_sqlite(err: &rusqlite::Error) -> Self {
+        use rusqlite::ErrorCode;
+        let code = match err {
+            rusqlite::Error::SqliteFailure(e, _) => Some(e.code),
+            _ => None,
+        };
+        match (err, code) {
+            (_, Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)) => {
+                tracing::warn!(error = %err, "storage busy");
+                Self::StorageBusy("storage is busy, retry shortly".to_string())
+            }
+            (_, Some(ErrorCode::ConstraintViolation)) => {
+                tracing::warn!(error = %err, "storage constraint violation");
+                Self::Conflict("the request conflicts with existing data".to_string())
+            }
+            (rusqlite::Error::QueryReturnedNoRows, _) => Self::NotFound("not found".to_string()),
+            _ => {
+                tracing::error!(error = %err, "storage query failed");
+                Self::MigrationError("Internal Server Error".to_string())
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -561,6 +598,39 @@ mod tests {
             "collector_failed" => VogtError::CollectorFailed(message),
             other => panic!("unmapped code {other}"),
         }
+    }
+
+    fn sqlite_failure(code: i32) -> rusqlite::Error {
+        rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(code),
+            Some("SELECT secret FROM t".into()),
+        )
+    }
+
+    #[test]
+    fn sqlite_busy_and_locked_are_503() {
+        for code in [rusqlite::ffi::SQLITE_BUSY, rusqlite::ffi::SQLITE_LOCKED] {
+            let e = VogtError::from_sqlite(&sqlite_failure(code));
+            assert_eq!(e.http_status(), 503);
+            assert_eq!(e.code(), "storage_busy");
+            assert!(!e.message().contains("SELECT"));
+        }
+    }
+
+    #[test]
+    fn sqlite_constraint_is_409_without_sql() {
+        let e = VogtError::from_sqlite(&sqlite_failure(rusqlite::ffi::SQLITE_CONSTRAINT));
+        assert_eq!(e.http_status(), 409);
+        assert!(!e.message().contains("SELECT"));
+    }
+
+    #[test]
+    fn sqlite_no_rows_is_404_and_other_is_500_without_leak() {
+        let missing = VogtError::from_sqlite(&rusqlite::Error::QueryReturnedNoRows);
+        assert_eq!(missing.http_status(), 404);
+        let e = VogtError::from_sqlite(&sqlite_failure(rusqlite::ffi::SQLITE_IOERR));
+        assert_eq!(e.http_status(), 500);
+        assert!(!e.message().contains("SELECT"));
     }
 
     #[test]

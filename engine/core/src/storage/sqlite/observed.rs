@@ -1147,8 +1147,7 @@ where
 }
 
 fn sql_err(err: rusqlite::Error) -> VogtError {
-    tracing::error!(error = %err, "storage query failed");
-    VogtError::MigrationError("Internal Server Error".to_string())
+    VogtError::from_sqlite(&err)
 }
 
 /// `socket.gethostname()`, which reads the kernel name rather than `$HOSTNAME`.
@@ -1720,9 +1719,10 @@ mod tests {
         let error = store.rebind_instance("inst_2");
         assert!(error.is_ok());
         // Binding again is a constraint failure, the same one Python's
-        // second INSERT raises; a clone uses rebind_instance instead.
+        // second INSERT raises; a clone uses rebind_instance instead. It
+        // surfaces as a conflict (409), not a 500.
         let conflict = store.bind_instance("inst_3");
-        assert!(matches!(conflict, Err(VogtError::MigrationError(_))));
+        assert!(matches!(conflict, Err(VogtError::Conflict(_))));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

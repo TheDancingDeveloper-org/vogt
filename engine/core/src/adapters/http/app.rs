@@ -1644,10 +1644,17 @@ fn bearer(header: Option<&axum::http::HeaderValue>) -> Option<String> {
 fn error_response(error: &VogtError) -> Response {
     let status =
         StatusCode::from_u16(error.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-    json_response(
+    let mut response = json_response(
         status,
         serde_json::json!({"error": error.error_object(error.code(), error.message())}),
-    )
+    );
+    if matches!(error, VogtError::StorageBusy(_)) {
+        response.headers_mut().insert(
+            axum::http::header::RETRY_AFTER,
+            axum::http::HeaderValue::from(crate::errors::STORAGE_BUSY_RETRY_AFTER_SECS),
+        );
+    }
+    response
 }
 
 fn not_found() -> Response {
@@ -1696,6 +1703,15 @@ fn json_response(status: StatusCode, body: serde_json::Value) -> Response {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_busy_store_answers_503_with_retry_after() {
+        let response = error_response(&VogtError::StorageBusy("busy".to_string()));
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers().get("retry-after").unwrap(), "1");
+        let other = error_response(&VogtError::Conflict("x".to_string()));
+        assert!(other.headers().get("retry-after").is_none());
+    }
+
     use super::*;
     use crate::adapters::http::test_harness;
     use std::io::{Read, Write};
