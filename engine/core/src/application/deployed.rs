@@ -135,12 +135,18 @@ fn lane_view(
         }
     }
     let mut items: Vec<Value> = Vec::new();
+    let wanted: Vec<String> = refs.iter().cloned().collect();
+    let found: std::collections::HashMap<String, (String, String)> = view
+        .work_briefs_by_refs(&wanted)?
+        .into_iter()
+        .map(|(_, reference, title, state)| (reference, (title, state)))
+        .collect();
     for reference in &refs {
-        let item = view.work_item_by_ref(reference)?;
+        let item = found.get(reference);
         items.push(json!({
             "ref": reference,
-            "title": item.as_ref().map(|item| item.title.clone()),
-            "state": item.as_ref().map(|item| item.state.to_string()),
+            "title": item.map(|item| item.0.clone()),
+            "state": item.map(|item| item.1.clone()),
         }));
     }
     let details: Vec<&str> = ["live_detail", "receipt_detail", "compare_detail"]
