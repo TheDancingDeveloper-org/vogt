@@ -39,6 +39,13 @@ pub enum ApiError {
     /// The host is too short of disk to take on more work (WI-1810).
     #[error("insufficient storage: {0}")]
     InsufficientStorage(String),
+    /// A dependency the engine needs is temporarily unavailable (503).
+    /// `retry_after` seconds, when known, is sent as a `Retry-After` header.
+    #[error("unavailable: {message}")]
+    Unavailable {
+        message: String,
+        retry_after: Option<u64>,
+    },
     #[error("account at capacity: {0}")]
     AtCapacity(String),
     /// The host already runs `ENGINE_HOST_SESSION_CAP` live host sessions.
@@ -67,6 +74,7 @@ impl ApiError {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
             ApiError::BadGateway(_) => StatusCode::BAD_GATEWAY,
+            ApiError::Unavailable { .. } => StatusCode::SERVICE_UNAVAILABLE,
             ApiError::InsufficientStorage(_) => StatusCode::INSUFFICIENT_STORAGE,
         }
     }
@@ -86,7 +94,38 @@ impl IntoResponse for ApiError {
             body["cap"] = json!(cap);
             body["counts"] = counts.clone();
         }
-        let body = Json(body);
-        (status, body).into_response()
+        let retry_after = match &self {
+            ApiError::Unavailable { retry_after, .. } => *retry_after,
+            _ => None,
+        };
+        let mut response = (status, Json(body)).into_response();
+        if let Some(secs) = retry_after {
+            response
+                .headers_mut()
+                .insert(axum::http::header::RETRY_AFTER, secs.into());
+        }
+        response
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unavailable_is_503_with_retry_after() {
+        let r = ApiError::Unavailable {
+            message: "busy".into(),
+            retry_after: Some(7),
+        }
+        .into_response();
+        assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(r.headers()["retry-after"], "7");
+        let r = ApiError::Unavailable {
+            message: "busy".into(),
+            retry_after: None,
+        }
+        .into_response();
+        assert!(r.headers().get("retry-after").is_none());
     }
 }
