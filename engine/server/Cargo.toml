@@ -49,6 +49,7 @@ thiserror = "2"
 regex = "1"
 parking_lot = "0.12"
 subtle = "2"
+zeroize = "1"
 time = { version = "0.3", features = ["serde", "formatting"] }
 rust-embed = { version = "8", features = ["mime-guess"] }
 mime_guess = "2"

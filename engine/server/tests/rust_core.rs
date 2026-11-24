@@ -617,7 +617,7 @@ async fn vogt_tools_lists_and_calls_the_real_rust_core() {
     let _ = &mut cfg;
     let caller = vogt_engine_server::vogt_tools::Caller {
         token_name: "stack".into(),
-        core_token: Some(SECRET.to_string()),
+        core_token: Some(SECRET.into()),
         person: false,
     };
     let listed = tools.tools_for(&caller).await;

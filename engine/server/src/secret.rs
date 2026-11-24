@@ -2,12 +2,20 @@
 //! (WI-4656). The value is reachable only through [`Secret::expose`].
 
 use serde::{Deserialize, Deserializer, Serializer};
+use zeroize::Zeroize;
 
 /// A credential. `Debug` and `Display` print `[redacted]`.
 #[derive(Clone, PartialEq, Eq, Default)]
-pub struct Secret<T>(T);
+pub struct Secret<T: Zeroize>(T);
 
-impl<T> Secret<T> {
+/// The value is wiped from memory when the secret drops.
+impl<T: Zeroize> Drop for Secret<T> {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
+
+impl<T: Zeroize> Secret<T> {
     pub fn new(value: T) -> Self {
         Self(value)
     }
@@ -16,13 +24,9 @@ impl<T> Secret<T> {
     pub fn expose(&self) -> &T {
         &self.0
     }
-
-    pub fn into_inner(self) -> T {
-        self.0
-    }
 }
 
-impl<T> From<T> for Secret<T> {
+impl<T: Zeroize> From<T> for Secret<T> {
     fn from(value: T) -> Self {
         Self(value)
     }
@@ -40,19 +44,19 @@ pub fn expose_opt(secret: &Option<Secret<String>>) -> Option<&str> {
     secret.as_ref().map(|s| s.expose().as_str())
 }
 
-impl<T> std::fmt::Debug for Secret<T> {
+impl<T: Zeroize> std::fmt::Debug for Secret<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("[redacted]")
     }
 }
 
-impl<T> std::fmt::Display for Secret<T> {
+impl<T: Zeroize> std::fmt::Display for Secret<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("[redacted]")
     }
 }
 
-impl<'de, T: Deserialize<'de>> Deserialize<'de> for Secret<T> {
+impl<'de, T: Deserialize<'de> + Zeroize> Deserialize<'de> for Secret<T> {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         T::deserialize(d).map(Self)
     }
@@ -60,7 +64,7 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for Secret<T> {
 
 /// `#[serde(serialize_with)]` helper: emit the inner value, for a secret that
 /// is meant to go over the wire.
-pub fn serialize_exposed<T: serde::Serialize, S: Serializer>(
+pub fn serialize_exposed<T: serde::Serialize + Zeroize, S: Serializer>(
     secret: &Secret<T>,
     s: S,
 ) -> Result<S::Ok, S::Error> {
@@ -68,7 +72,7 @@ pub fn serialize_exposed<T: serde::Serialize, S: Serializer>(
 }
 
 /// As [`serialize_exposed`] for an optional secret.
-pub fn serialize_exposed_opt<T: serde::Serialize, S: Serializer>(
+pub fn serialize_exposed_opt<T: serde::Serialize + Zeroize, S: Serializer>(
     secret: &Option<Secret<T>>,
     s: S,
 ) -> Result<S::Ok, S::Error> {
@@ -88,5 +92,12 @@ mod tests {
         assert_eq!(format!("{s:?}"), "[redacted]");
         assert_eq!(format!("{s}"), "[redacted]");
         assert_eq!(s.expose(), "hunter2");
+    }
+
+    #[test]
+    fn zeroize_wipes_the_value() {
+        let mut s = Secret::new("hunter2".to_string());
+        s.0.zeroize();
+        assert!(s.expose().is_empty());
     }
 }

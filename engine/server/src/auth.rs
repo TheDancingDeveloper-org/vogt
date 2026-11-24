@@ -214,7 +214,7 @@ pub struct AuthorizedIdentity {
     /// behalf: the caller's own bearer when the core resolved it, the stack
     /// secret for the break-glass token, `None` when there is nothing to
     /// present (a break-glass token on a door with no stack secret).
-    pub core_bearer: Option<String>,
+    pub core_bearer: Option<crate::secret::Secret<String>>,
     pub mutating_requests_per_minute: u32,
     /// Whether the bearer *was* the stack secret: vogt-core's own identity,
     /// decided by constant-time comparison with the configured value and by
@@ -275,7 +275,7 @@ pub async fn authorize(
                 // The break-glass token has no actor of its own at the core;
                 // it borrows the stack secret's, which is the one shared
                 // identity this design keeps, and keeps for exactly this.
-                core_bearer: crate::secret::expose_opt(&cfg.vogt_core_token).map(str::to_string),
+                core_bearer: cfg.vogt_core_token.clone(),
                 mutating_requests_per_minute: cfg.token_mutating_request_limit_per_minute,
                 stack_secret: false,
                 break_glass: true,
@@ -289,7 +289,7 @@ pub async fn authorize(
                 name: STACK_SECRET_NAME.to_string(),
                 capabilities: STACK_SECRET_CAPABILITIES.to_vec(),
                 scopes: Vec::new(),
-                core_bearer: Some(secret.to_string()),
+                core_bearer: Some(secret.into()),
                 mutating_requests_per_minute: cfg.token_mutating_request_limit_per_minute,
                 stack_secret: true,
                 break_glass: false,
@@ -325,7 +325,7 @@ fn from_core(
         name: identity.identity_ref,
         capabilities: capabilities_for_scopes(&identity.scopes),
         scopes: identity.scopes,
-        core_bearer: Some(bearer.to_string()),
+        core_bearer: Some(bearer.into()),
         mutating_requests_per_minute: cfg.token_mutating_request_limit_per_minute,
         stack_secret: false,
         break_glass: false,

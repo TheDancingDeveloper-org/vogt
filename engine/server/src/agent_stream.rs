@@ -40,10 +40,18 @@ const AGENT_WS_MAX_MESSAGE_SIZE: usize = AGENT_BUFFER_BYTES * 4 + 64 * 1024;
 /// so this only keeps the cursor finite and far from overflow (256 TiB).
 const AGENT_MAX_GAP_BYTES: u64 = 1 << 48;
 static AUTH: OnceLock<Arc<AgentAuth>> = OnceLock::new();
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct Pending {
     token: Vec<u8>,
     expires: Instant,
+}
+impl std::fmt::Debug for Pending {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Pending")
+            .field("token", &"[redacted]")
+            .field("expires", &self.expires)
+            .finish()
+    }
 }
 /// What a session spec asked the pod for that only the bootstrap response can
 /// carry (WI-3883): the caller's extra environment, which the entrypoint
@@ -63,9 +71,16 @@ pub struct PodLaunch {
     /// The project's `mcp_extra`, kept on top of the worker set.
     pub mcp_extra: Vec<String>,
 }
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct SessionCredential {
     token: Vec<u8>,
+}
+impl std::fmt::Debug for SessionCredential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionCredential")
+            .field("token", &"[redacted]")
+            .finish()
+    }
 }
 #[derive(Debug, Clone)]
 struct PendingCredential {
@@ -1877,6 +1892,21 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pending_and_session_credential_debug_redact_the_token() {
+        let token = b"tok-secret-xyz".to_vec();
+        let p = super::Pending {
+            token: token.clone(),
+            expires: std::time::Instant::now(),
+        };
+        let c = super::SessionCredential { token };
+        for out in [format!("{p:?}"), format!("{c:?}")] {
+            assert!(out.contains("[redacted]"), "{out}");
+            assert!(!out.contains("tok-secret-xyz"), "{out}");
+            assert!(!out.contains("116, 111"), "{out}");
+        }
+    }
+
     #[test]
     fn bootstrap_response_hides_tokens_in_debug_but_serializes_them() {
         let r = BootstrapResponse {
