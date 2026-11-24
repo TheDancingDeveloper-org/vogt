@@ -86,3 +86,7 @@ docs/REQUIREMENTS*.md
 # docs/local/. Only the contract-required placeholder stays tracked.
 design/*
 !design/.gitkeep
+
+# Cargo build output captured by agents or CI wrappers (never committed).
+gates.log
+*.gates.log
