@@ -2,6 +2,7 @@
 
 pub mod connection;
 pub mod embedded;
+pub mod instance_store;
 pub mod migrator;
 
 use std::path::{Path, PathBuf};
