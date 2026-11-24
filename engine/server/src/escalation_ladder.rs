@@ -361,7 +361,7 @@ pub fn spawn_escalation_ladder(state: Arc<AppState>) {
         .timeout(Duration::from_secs(10))
         .build()
         .unwrap_or_default();
-    tokio::spawn(async move {
+    Arc::clone(&state.boot_tasks).spawn("escalation-ladder", async move {
         let mut ladder = Ladder::new(config);
         loop {
             tokio::time::sleep(Duration::from_secs(30)).await;

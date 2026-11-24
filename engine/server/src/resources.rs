@@ -372,7 +372,7 @@ pub fn spawn_sampler(state: Arc<AppState>) {
     if !cfg!(target_os = "linux") {
         return;
     }
-    tokio::spawn(async move {
+    Arc::clone(&state.boot_tasks).spawn("resources", async move {
         let mut sampler = Sampler::new(state.config.session_rss_warn_bytes);
         let mut ticker = tokio::time::interval(INTERVAL);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);

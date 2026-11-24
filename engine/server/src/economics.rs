@@ -901,7 +901,7 @@ fn feed_bytes(tail: &mut Tail, bytes: &[u8]) {
 /// not spawn this when that is zero.
 pub fn spawn_economics_tailer(state: Arc<AppState>, home: PathBuf, tick: Duration) {
     let claude_dirs = state.config.agent_onboarding.claude_dirs();
-    tokio::spawn(async move {
+    Arc::clone(&state.boot_tasks).spawn("economics", async move {
         let mut interval = tokio::time::interval(wake_every(tick));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut watches: std::collections::HashMap<_, Watch> = Default::default();
