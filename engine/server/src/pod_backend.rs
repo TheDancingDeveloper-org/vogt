@@ -151,6 +151,13 @@ pub struct PodConfig {
     /// Empty leaves these volumes unbounded.
     #[serde(default = "default_tmp_size_limit")]
     pub tmp_size_limit: Option<k8s_openapi::apimachinery::pkg::api::resource::Quantity>,
+    /// The size limit on the `session-home` `emptyDir` alone
+    /// (`ENGINE_POD_HOME_SIZE_LIMIT`). Unset it follows `tmp_size_limit`
+    /// (10Gi); set, it is independent of it, so ops can raise home (build dirs under `$HOME`)
+    /// without raising `/tmp` and the run dir. Empty leaves it unbounded.
+    /// `None` (unset) follows `tmp_size_limit`; `Some(None)` is unbounded.
+    #[serde(default)]
+    pub home_size_limit: Option<Option<k8s_openapi::apimachinery::pkg::api::resource::Quantity>>,
     /// The size limit on the work tree, the workspace tree and the private
     /// tool cache `emptyDir`s (`ENGINE_POD_WORK_SIZE_LIMIT`, default 30Gi).
     /// These hold real build output (a Rust `target/` is tens of GiB), so they
@@ -664,6 +671,16 @@ fn bounded_empty_dir(cfg: &PodConfig) -> EmptyDirVolumeSource {
         ..Default::default()
     }
 }
+/// The `session-home` `emptyDir`, bounded by `home_size_limit`.
+fn bounded_home_dir(cfg: &PodConfig) -> EmptyDirVolumeSource {
+    EmptyDirVolumeSource {
+        size_limit: cfg
+            .home_size_limit
+            .clone()
+            .unwrap_or_else(|| cfg.tmp_size_limit.clone()),
+        ..Default::default()
+    }
+}
 /// An `emptyDir` for build output and the workspace tree, bounded by the
 /// deployment's `work_size_limit` instead of the smaller `tmp_size_limit`.
 fn bounded_work_dir(cfg: &PodConfig) -> EmptyDirVolumeSource {
@@ -753,6 +770,7 @@ impl Default for PodConfig {
             unschedulable_timeout: default_unschedulable_timeout(),
             session_deadline: default_session_deadline(),
             tmp_size_limit: default_tmp_size_limit(),
+            home_size_limit: None,
             work_size_limit: default_work_size_limit(),
             reconnect_timeout: default_reconnect_timeout(),
             orphan_ttl: default_orphan_ttl(),
@@ -892,6 +910,13 @@ impl PodConfig {
             text("ENGINE_POD_TMP_SIZE_LIMIT"),
             cfg.tmp_size_limit.take(),
         )?;
+        if let Some(v) = text("ENGINE_POD_HOME_SIZE_LIMIT") {
+            cfg.home_size_limit = Some(parse_size_limit(
+                "ENGINE_POD_HOME_SIZE_LIMIT",
+                Some(v),
+                None,
+            )?);
+        }
         cfg.work_size_limit = parse_size_limit(
             "ENGINE_POD_WORK_SIZE_LIMIT",
             text("ENGINE_POD_WORK_SIZE_LIMIT"),
@@ -1903,7 +1928,7 @@ pub fn pod_template(
         (
             "session-home",
             HOME_MOUNT.to_string(),
-            bounded_empty_dir(cfg),
+            bounded_home_dir(cfg),
         ),
         ("session-tmp", TMP_MOUNT.to_string(), bounded_empty_dir(cfg)),
         ("session-work", cfg.work_dir(), bounded_work_dir(cfg)),
@@ -5080,6 +5105,44 @@ mod tests {
         assert_eq!(limit("session-home").as_deref(), Some("1Gi"));
         assert_eq!(limit("session-tmp").as_deref(), Some("1Gi"));
         assert_eq!(limit("session-run").as_deref(), Some("1Gi"));
+    }
+
+    #[test]
+    fn home_and_tmp_size_limits_are_independent_when_home_is_set() {
+        let default = PodConfig::from_lookup(lookup(&[]), None).unwrap();
+        assert_eq!(default.home_size_limit, None);
+        let cfg = PodConfig::from_lookup(lookup(&[("ENGINE_POD_HOME_SIZE_LIMIT", "25Gi")]), None)
+            .unwrap();
+        assert_eq!(cfg.tmp_size_limit.as_ref().unwrap().0, "10Gi");
+        let volumes = pod_template_for(&cfg).spec.unwrap().volumes.unwrap();
+        let limit = |n: &str| {
+            volumes
+                .iter()
+                .find(|v| v.name == n)
+                .and_then(|v| v.empty_dir.as_ref())
+                .and_then(|e| e.size_limit.as_ref())
+                .map(|q| q.0.clone())
+        };
+        assert_eq!(limit("session-home").as_deref(), Some("25Gi"));
+        assert_eq!(limit("session-tmp").as_deref(), Some("10Gi"));
+        let cfg =
+            PodConfig::from_lookup(lookup(&[("ENGINE_POD_TMP_SIZE_LIMIT", "20Gi")]), None).unwrap();
+        let volumes = pod_template_for(&cfg).spec.unwrap().volumes.unwrap();
+        let home = volumes.iter().find(|v| v.name == "session-home").unwrap();
+        assert_eq!(
+            home.empty_dir
+                .as_ref()
+                .unwrap()
+                .size_limit
+                .as_ref()
+                .unwrap()
+                .0,
+            "20Gi"
+        );
+        assert!(
+            PodConfig::from_lookup(lookup(&[("ENGINE_POD_HOME_SIZE_LIMIT", "lots")]), None)
+                .is_err()
+        );
     }
 
     #[test]
