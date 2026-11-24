@@ -1,0 +1,24 @@
+name: "vogt code scanning"
+
+# Query suite. `security-extended` is the same set the workflow ran inline
+# before this config existed; it lives here now so the query selection and the
+# path scope are described in one place.
+queries:
+  - uses: security-extended
+
+# Test code is not product attack surface: it drives local fixtures and asserts
+# on literal strings, which the default suite mis-reads as real vulnerabilities.
+# Two whole clusters of alerts come only from tests and are false positives:
+#
+#   * rust/cleartext-transmission — engine/server/tests/integration.rs sends a
+#     fixture `session_id` over HTTP to a local test server. No secret, no wire.
+#   * py/incomplete-url-substring-sanitization — tests/test_forge_*.py assert
+#     that a host literal ("github.com", "gitlab.com", "forge.example.net")
+#     appears in a diagnostic message. These are assertions, not URL checks.
+#
+# Excluding tests keeps scanning focused on shipped code. Product-code findings
+# are unaffected. (paths-ignore applies to languages analyzed without a build,
+# which is every language in this repo's matrix — see build-mode: none.)
+paths-ignore:
+  - "tests/**"
+  - "**/tests/**"

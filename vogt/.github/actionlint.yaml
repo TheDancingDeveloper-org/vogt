@@ -1,0 +1,10 @@
+# actionlint config: declares the self-hosted runner labels Vogt's workflows
+# select with `runs-on: [self-hosted, <label>]`. Without this, actionlint
+# rejects every custom label as unknown. Keep this list in step with the
+# `runs-on` lines under .github/workflows/.
+self-hosted-runner:
+  labels:
+    - bigmem
+    - docker
+    - publish
+    - tailnet

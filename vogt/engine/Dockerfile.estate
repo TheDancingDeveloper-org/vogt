@@ -1,0 +1,26 @@
+# syntax=docker/dockerfile:1
+# Vogt estate base: the slow, tool-versioned layer shared by engine images.
+ARG POD_BASE_IMAGE
+FROM ${POD_BASE_IMAGE}
+
+LABEL org.opencontainers.image.title="vogt-estate" \
+      org.opencontainers.image.description="Vogt development estate tools and agent CLIs" \
+      org.opencontainers.image.source="https://github.com/TheDancingDeveloper-org/vogt"
+
+ARG TARGETARCH
+COPY engine/agent-versions.env /usr/local/share/vogt/agent-versions.env
+RUN set -eu; \
+    . /usr/local/share/vogt/agent-versions.env; \
+    npm install --global \
+      "@anthropic-ai/claude-code@${VOGT_CLAUDE_CODE_VERSION}" \
+      "@agentclientprotocol/codex-acp@${VOGT_CODEX_ACP_VERSION}" \
+      "opencode-ai@${VOGT_OPENCODE_VERSION}"; \
+    printf 'claude-code\t@anthropic-ai/claude-code\tclaude\tVOGT_CLAUDE_CODE_VERSION\tnpm\n' \
+      > /usr/local/share/vogt/agent-clis.tools; \
+    printf 'codex-acp\t@agentclientprotocol/codex-acp\tcodex-acp\tVOGT_CODEX_ACP_VERSION\tnpm\n' \
+      >> /usr/local/share/vogt/agent-clis.tools; \
+    printf 'opencode\topencode-ai\topencode\tVOGT_OPENCODE_VERSION\tnpm\n' \
+      >> /usr/local/share/vogt/agent-clis.tools; \
+    claude --version | grep -qF "$VOGT_CLAUDE_CODE_VERSION"; \
+    codex-acp --version | grep -qF "$VOGT_CODEX_ACP_VERSION"; \
+    opencode --version | grep -qF "$VOGT_OPENCODE_VERSION"

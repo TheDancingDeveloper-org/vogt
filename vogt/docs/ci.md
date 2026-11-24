@@ -1,0 +1,266 @@
+# CI: pull requests, the merge queue, and `main`
+
+Vogt's CI does two different jobs. A pull request gets fast feedback on what
+it changed. The merge queue proves that the exact tree `main` will become still
+passes everything. Before WI-1886 every PR ran the whole suite (20–60 minutes),
+and each merge forced sibling PRs to rebase and run it all again.
+
+## What runs where
+
+| Event | `ci.yml` | `codeql.yml` | `runner-policy` | `dependency review` |
+|---|---|---|---|---|
+| `pull_request` | only the halves the diff touches (below) | **does not run** | full | reviews the PR's dependency changes |
+| `merge_group` (the queue) | **everything** | **does not run** | full | posts the context; the review already ran on the PR |
+| `push` to `main` | everything | **does not run** | full | — |
+| `push` of a `v*` tag (beta, prod) | — | every language | — | — |
+| `workflow_dispatch` | — | every language, at `ref` if given | — | — |
+
+### Path scoping on a pull request
+
+`ci.yml`'s `classify changes` job reads `git diff` against the merge base:
+
+| Changed paths | Runs |
+|---|---|
+| `.github/workflows/`, `Dockerfile`, `.dockerignore`, `deploy/`, `.gitignore` | everything, as in the queue |
+| `src/`, `tests/`, `scripts/`, `pyproject.toml`, `uv.lock`, `config.example.toml` | Python lint/mypy/pytest on 3.13, and the core-alone job |
+| `engine/`, `docs/ENGINE.md` | the engine job's **rust** half: fmt, rust-version, cargo audit, clippy, nextest, doctests |
+| `engine/deploy/**` | the engine job's **rust** half plus the entrypoint shellcheck and contract test |
+| `engine/session-agent/**` | the engine job's **rust** half, `cargo test -p vogt-session-agent`, and the entrypoint contract test |
+| `web/` | the engine job's **web** half: pnpm audit, typecheck, vitest, demo Playwright, PWA build, bundle budget |
+| `voice/` | the voice job |
+| `engine/server/**`, `engine/contract/**` or `engine/core/**` | only the Rust member the diff touches: clippy, nextest and doctests run with `-p` |
+| `voice/{server,stt,tts,models}/**` | only that voice member, likewise scoped with `-p` |
+| `mobile/` | the android job |
+| anything else (docs, markdown) | nothing: the `ci` gate passes on skipped halves |
+
+Scoping narrows *which crates* are checked, never *what* is checked: a PR
+touching one member runs the same clippy, nextest and doctest steps as the
+queue, just with `-p <member>` instead of `--workspace`. Anything that cannot
+be attributed to one member (`engine/Cargo.toml`, a new crate, another
+`engine/` or `voice/` path) falls back to the full workspace, as does a scope
+that resolves to nothing. `cargo fmt`, the rust-version check and
+`cargo audit` read the whole manifest tree and are never scoped.
+
+`deploy/rust-core.Dockerfile` is built only by `rust-core.yml`'s compose and
+Playwright jobs, which run on a schedule, a manual dispatch, or the one
+rust-core-to-main pull request. A normal batch PR skips them, so a path
+dependency the Dockerfile forgets to copy stayed hidden until that cut PR.
+The engine job now runs `python3 scripts/check_rust_core_dockerfile.py` on
+every pull request that reaches it: the check reads the Dockerfile, its
+`.dockerignore` and the Cargo manifests, and fails when a local path
+dependency of `vogt-core`, transitively, is not in the build context. It
+does not need a Docker daemon or a built image.
+
+Only the queue and `main` run these:
+
+- Python **3.11**, the declared floor. A PR runs 3.13 only.
+- the core-alone job when no Python changed. It deletes `engine/`, `web/` and
+  `mobile/` before it tests, so on a PR only a Python change can affect it.
+- a web-only change rebuilt into the engine. The crate embeds `web/dist`, but
+  a web-only PR does not run clippy or nextest against the new bundle.
+
+### What makes a pull request fast
+
+- A shared rust-cache key per workspace (`engine-ci`, `voice-ci`). A pull
+  request restores the cache `main` saved instead of starting cold. Only a
+  push to `main` writes the cache back; the post-job save costs about two
+  minutes and a pull request's cache is never reused by another ref.
+- `setup-uv` is asked for its cache explicitly (`enable-cache: true`, keyed
+  on `uv.lock`). Its `auto` mode only caches on GitHub-hosted runners, and
+  these runners are self-hosted, so without the flag a Python job resolves
+  the environment again every time.
+- `cargo-nextest` for the Rust and voice tests. It runs each test in its own
+  process, so a hang is terminated by the workspace nextest config and
+  reported as a failure instead of holding the job to its timeout, and
+  `--no-fail-fast` lists every failure in one round. Doctests are not
+  nextest's job and keep their own step.
+
+Python's `pytest` stays serial on purpose. The suite is bound by SQLite file
+I/O rather than CPU, and its tests bind sockets and spawn subprocesses, so
+xdist would add failure modes without buying wall clock. `pytest -n auto` is
+not used: a PR already runs only the Python job the diff touches.
+
+### Release dry run
+
+`release.yml` runs only on a `v*` tag, so without a rehearsal the first
+execution of the release path is the release itself. `release-dry-run.yml`
+removes that: on a PR touching the files a release reads (the release, build,
+pod-base and mirror workflows, the Dockerfiles and their ignore files, the
+version manifests and the version/policy scripts) and nightly at 03:00 UTC on
+`main`, it runs
+
+- the release-shape tests, the workflow-policy gate, and
+  `check_product_version.py` with no tag (the manifests agree with each
+  other), and
+- a local build of the core, then of the merged stack on top of that local
+  core, starting both halves.
+
+There is nothing to leak: no login, no `packages: write`, no `secrets.`, no
+`id-token`, no `cosign`, no `push`, no tag and no GitHub Release. It is
+deliberately not a required check (it depends on a Docker runner and is slow),
+so it can only ever be advisory on a PR; its nightly run is what notices drift
+that no PR touches.
+
+### Quarantined jobs
+
+`runner-watchdog.yml` runs on a schedule only and is quarantined with
+`continue-on-error: true` while `gh` is absent from the self-hosted runner
+image (it exits 127). The red run stays visible in the Actions tab. Because
+the workflow has no pull-request or `merge_group` trigger, there is no
+required context to restrict.
+
+### Quarantined tests
+
+These are skipped with `#[ignore = "<reason>"]`, so they stay in the source and
+are listed by `cargo nextest run --run-ignored all`. Each one names its work
+item in the reason.
+
+| Test | Symptom | Item | Date | Un-quarantine |
+|---|---|---|---|---|
+| `vogt-engine-server` `integration::an_autopilot_opencode_session_advances_through_its_backlog_unattended` | fourth nudge after a silent gap (4 items, expected 3); 4/40 in the v2 load runs | WI-4449 (part c) | 2026-11-20 | remove the `#[ignore]` and this row once the re-nudge rule is decided |
+
+### CodeQL
+
+CodeQL runs only when a release is cut, as an operator decision. It does not
+gate pull requests, the merge queue, or `main`, so its `analyze (<language>)`
+jobs are not required checks. A `v*` tag push (beta and prod) runs it. So does
+a `workflow_dispatch`: the dev deploy lane passes the commit it deploys as the
+`ref` input, and checkout uses that SHA. Every such run analyses all three
+languages. The job names are unchanged.
+
+### Concurrency
+
+Every workflow that runs on PRs cancels in progress per ref (`github.ref`).
+A force-push to a PR therefore cancels the superseded run. Each queue entry has
+its own `gh-readonly-queue/main/pr-N-<sha>` ref, so queue entries never cancel
+each other. The queue removes an entry it no longer needs.
+
+### Required checks must run in the queue
+
+A required context that nothing posts on `merge_group` leaves every queued
+entry waiting until the queue times it out. `scripts/check_workflow_policy.py`
+(run by `runner-policy`) fails when a check listed under SECURITY.md's
+"required checks" has no `merge_group` producer.
+
+### Runners
+
+Queue runs use the same labels as PR runs: `self-hosted`, plus `docker`,
+`publish` or `bigmem` where a job asks for one. No vogt workflow targets the
+GCP rust-heavy or spot labels. The queue adds full runs, but PRs now skip
+everything they do not touch, and a merge no longer re-runs every open PR.
+CodeQL no longer runs in the queue. Its single `bigmem` slot serialises the
+three languages within a release run.
+
+## How changes land
+
+1. Branch from `origin/main`. Run the targeted gates for what you touched.
+2. Push and open the pull request. It runs only the path-scoped checks: fast
+   feedback on the changed halves, not the whole suite.
+3. Review happens on the pull request. The proposed tree is not retested by a
+   second review run.
+4. `land-pr` enqueues it. The merge queue runs the full suite on the exact
+   tree `main` will become: Python 3.11 and 3.13, the core alone, Rust and
+   the PWA, voice, the Android shell, and the `ci` gate.
+5. Merge only when `ci`, `dependency review` and `runner-policy` are green.
+   Those are the required status checks on `main`. A red queue run dequeues
+   the pull request; fix it and enqueue again.
+6. Versions move only at release. Feature pull requests do not bump them, and
+   a `v*` tag is cut from `main`.
+
+The `ci` gate takes seconds; the queue run is the expensive part and is
+deliberately not duplicated on every push to a pull request.
+
+## Pre-land check on `rust-2`
+
+Workers land on the `rust-2` graft line with `g land`, and graft runs no CI
+gate of its own. Batches 131-134 each landed and then turned the line red on
+a gate the worker's local loop did not run. `scripts/pre-land-check.sh` is
+the local form of those gates:
+
+```sh
+scripts/pre-land-check.sh          # the default quick set
+scripts/pre-land-check.sh --rust   # also fmt, clippy and nextest
+scripts/pre-land-check.sh --self-test
+```
+
+It runs, in workflow order, the commands from `rust-core.yml` and `ci.yml`
+and stops at the first failure with one line and a log path:
+
+1. `cargo deny --all-features check` in `engine/` (the wildcard-dependency
+   gate).
+2. `cargo test -p vogt-core --bin vogt-core
+   every_python_test_has_one_disposition` (the ledger test).
+3. `python3 scripts/check_rust_core_dockerfile.py` (the Rust core image
+   copies every local path dependency of `vogt-core` and its ignore file
+   does not exclude them).
+4. `pytest tests/test_engine_parity.py` (every engine route has an MCP
+   counterpart or a reason).
+5. `ruff check .`.
+6. `ruff format --check .`.
+7. `mypy`.
+8. The parity checks against the committed `tests/parity/golden` directory:
+   the Python CLI, HTTP and MCP recordings; the Rust CLI, HTTP and MCP
+   recordings; the actor and schema probes; `crossopen`, `selftest`,
+   `errors`, and both `contract` checks. The record-twice-and-diff
+   determinism probe is skipped: it proves the recorder, not the change, and
+   costs minutes.
+
+`--rust` adds `cargo fmt --all -- --check`, then clippy and nextest scoped
+to the crates the diff touches; `engine/Cargo.toml`, a new crate or an
+unattributable engine path falls back to `--workspace`. Run it before
+`g commit`: the working-copy diff is what scopes it. Once the change is a
+committed draft, reading that diff needs graft auth; set
+`PRE_LAND_RUST_PACKAGES` to a space-separated crate list instead.
+`CARGO_BUILD_JOBS` defaults to 4, and every gate runs under `nice`.
+
+A graft working copy has no `.git`, so `scripts/select_parity_golden.sh`
+cannot read its history. The script detects that, chooses the newest
+committed golden by `meta.json`'s `recorded_at`, prints the choice, and does
+not run any git-dependent test. A normal checkout uses the selector
+unchanged. `PRE_LAND_PARITY_GOLDEN=<dir>` overrides either choice, and
+`PRE_LAND_BASE=<ref>` overrides the git base `--rust` diffs against.
+
+The `--self-test` mode proves both failure paths. It forces the first gate to
+fail through `PRE_LAND_FORCE_FAIL` and asserts the script reports
+`FAIL cargo-deny` and exits non-zero. It also stubs the expensive commands
+and forces the third parity command (`parity-python-mcp`) to fail, asserting
+that the inside-gate failure is reported as `FAIL parity`, names the step,
+exits non-zero, and never prints `every gate passed`. Every command in every
+gate is checked with `|| return 1`, so a failure in the middle of the parity
+sequence cannot be hidden by a later command's success. The quick set is a
+few minutes on a warm checkout; the first run also syncs the Python
+environment and builds `vogt-core`.
+
+## Landing
+
+`land-pr` (workspace `.agent-tools/bin/land-pr`) detects a merge queue from
+the base branch's rulesets. It enqueues with `gh pr merge --auto` and follows
+the entry's `merge_group` runs. On a failed run it prints the failing job's
+log and exits 1. The PR is never rebased by hand while it is queued.
+
+The required status checks on `main` are `ci`, `dependency review` and
+`runner-policy`. Those are the three contexts a change must produce; every
+other job (`build`, `e2e`, `release`, `codeql`) is a separate workflow and is
+not required. Feature pull requests do not bump the product version: the
+version moves only in a release change, and the product-version check in CI
+asserts the manifests currently agree rather than that they changed.
+
+Run targeted checks before pushing — the test file you touched, the one crate
+you touched, the one surface you touched — and let the queue run the full
+suite. `scripts/check.sh <surface>` is the convenience form.
+
+## Turning the queue on (operator)
+
+The workflows support a queue but do not require one. Until a ruleset with a
+`merge_queue` rule exists on `main`, PRs merge exactly as before, with the
+narrower PR checks. The exact ruleset is in the WI-1886 hand-off. In
+outline: one branch ruleset on `main` with a `merge_queue` rule
+(method rebase, build concurrency 3, group size 1–3, wait 5 minutes,
+`ALLGREEN`, check timeout 60 minutes) and the same required checks as today
+(`ci`, `runner-policy`, `dependency review`).
+
+Once the queue is on, `push` to `main` re-runs the full suite on a commit the
+queue has already tested. It is kept deliberately for now: `build.yml` and
+`e2e.yml` key off it, and it is the full check for anything that reaches `main`
+without the queue. Dropping `ci.yml`'s `push` trigger is a follow-up once the
+queue has proved itself.

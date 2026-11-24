@@ -1,0 +1,268 @@
+# Permission posture of driven sessions (WI-926)
+
+Status: **implemented** in the PR that adds this note. Where this note and
+[`ENGINE.md`](../ENGINE.md) disagree, `ENGINE.md` describes what exists.
+
+## What happens today
+
+Nothing in Vogt sets a permission mode. The engine launches
+`vogt-agent-auth run -- claude` with no permission flag, and no settings file
+in the pod sets `permissions.defaultMode`. Driven sessions run in Claude
+Code's own default, which on this pod is **auto mode**: a classifier judges
+each action against natural-language rules, and the defaults include `soft_deny` rules
+such as *Merge Without Review*, *Modify Shared Resources*, *Production
+Deploy* and *Credential Materialization*. In an interactive session an auto-mode
+block is a **denial, not a dialog**. Nobody is asked, so nothing is answerable,
+and the agent has to stop. That is how `sonarr-imports` could not merge its
+own green PRs (arr-diskwarden #21, ops #21) on 2026-10-05, while the
+oversight runner, started with `--dangerously-skip-permissions`, could.
+
+## Model
+
+Three postures, in order of preference:
+
+1. **Auto mode with a scoped policy (the default).** Every engine-launched
+   Claude session is given a Vogt-managed settings file (`--settings`) whose
+   `autoMode` section adds to Claude Code's built-in rules, through the
+   literal `"$defaults"` entry, and replaces none of them. Prod-mutating,
+   destructive, shared-resource and secret-exposing actions keep gating,
+   because their rules are untouched. The policy adds:
+   - an **environment** entry naming the repositories where an agent may
+     merge its own work (`Autonomous-merge repositories`), which the
+     deployment fills in; *none configured* by default;
+   - one **allow** exception, *Own Green PR Merge*. It covers merging a pull
+     request the agent opened for its task, in a listed repository, once the
+     repository's required checks have passed, with the plain merge command.
+     `--admin`, force options, bypassed reviews and disabled checks stay
+     blocked.
+
+   The shipped policy changes nothing until a deployment lists repositories.
+   A deployment adds its own estate facts (secret stores, deploy targets,
+   sensitive hosts) in the same file, so the classifier knows what "prod"
+   means there.
+2. **Per-spawn opt-in** on `session.start`: `permission_mode`
+   - `default` keeps the posture above;
+   - `accept_edits` uses Claude Code's `acceptEdits` mode: file edits are
+     auto-accepted, and everything else prompts;
+   - `bypass` uses `--dangerously-skip-permissions`: no checks at all.
+
+   `bypass` is never the default. It needs the `admin` scope, so an agent
+   session cannot hand a child the autonomy it lacks itself (the session token
+   holds every scope except `admin`). It is recorded on the audit row and shown
+   on the session row.
+3. **The oversight runner** stays the single standing bypassed session, started
+   by the operator as before.
+
+## Why not the other knobs
+
+- **`permissions.allow` rules** (`Bash(gh pr merge:*)`) are pattern matches.
+  They would also allow `gh pr merge --admin` on any repository, and allow
+  rules are evaluated before the classifier, so nothing would judge the call.
+  The auto-mode exception is judged in context: whose PR, which repository,
+  whether the checks passed.
+- **Blanket bypass** removes every guardrail. On 2026-10-05 those guardrails
+  gated a Komodo stack env change and a raw secret print, both of which should
+  have gated.
+- **"Defer to the driver" (WI-917)** would be the better long-term shape, but
+  auto mode does not produce a prompt to answer: a block is a denial.
+  `session_answer` can only answer dialogs the CLI draws (`manual` /
+  `acceptEdits` prompts, startup gates). So today's deferral path is the
+  blocked report. The autopilot and driving briefs now tell an agent whose
+  action was denied **not to retry or work around it**, and to call
+  `session_report_blocked` with the action, the denial and what a person needs
+  to do. That raises it in the Inbox and the Oversight sweep (WI-915), where a
+  driver or the operator acts on it. If Claude Code later offers
+  ask-instead-of-deny in auto mode, `session_answer` can answer it directly.
+
+## Where the policy lives
+
+- The image ships `/usr/local/share/vogt/driven-session-settings.json` (source
+  `engine/deploy/driven-session-settings.json`).
+- `ENGINE_AGENT_CLAUDE_SETTINGS` points the engine at a deployment's own file
+  instead. Empty means the image's policy, and `off` turns the policy off.
+- Settings are versioned with the deployment (the ops overlay). They are not
+  per project, because the estate facts are the same for every session on a
+  stack. A per-template override can come later if a stack needs one.
+
+## Operator decisions (2026-10-05)
+
+1. **Autonomous-merge repositories**: TheDancingDeveloper-org/arr-diskwarden,
+   TheDancingDeveloper-org/vogt and indexarr/ops. These are listed in the
+   estate's policy file, not in the shipped default, which stays *none
+   configured*.
+2. **Who may grant `bypass`**: a person only. Every agent is refused,
+   the oversight runner included (as implemented).
+3. **Where the estate policy lives**: the ops overlay. Each vogt stack has
+   `personal/<stack>/driven-session-settings.json`, mounted read-only at
+   `/run/vogt/driven-session-settings.json` and named by
+   `ENGINE_AGENT_CLAUDE_SETTINGS` (indexarr/ops PR #23). It also names the
+   estate's secret store (Infisical), deploy path (Komodo) and sensitive
+   targets (the Node B prod stacks), so those keep gating.
+
+## opencode (WI-932, 2026-10-05)
+
+The postures above were Claude Code only. A driven opencode session stalled
+at "Access external directory" with nobody to answer. To stop that,
+javascan's operator edited the **shared** `~/.config/opencode/opencode.jsonc`
+to allow every tool, `bash` included, for every opencode session on the pod,
+including ones a person starts. That is the blanket bypass this design
+rejects, applied globally.
+
+opencode reads an inline config from `OPENCODE_CONFIG_CONTENT` and layers it
+over the user's own, for that process only. The engine uses it for each
+session's posture:
+- **default:** the deployment's opencode policy
+  (`ENGINE_AGENT_OPENCODE_CONFIG`; the image ships
+  `engine/deploy/driven-session-opencode.json`). Routine tools are allowed.
+  Destructive, shared-resource and secret-exposing commands are **denied**
+  rather than asked, because a prompt nobody answers is the stall this
+  exists to end, and a denial is reported.
+- **accept-edits:** edits allowed, the rest asks.
+- **bypass:** everything allowed, a person's grant only.
+
+opencode matches command patterns rather than judging context, so its list
+is coarser than Claude Code's classifier. The shipped default denies `gh pr
+merge` outright, matching "no autonomous-merge repositories configured". A
+deployment that lists repositories allows it in its own file. Once this is
+deployed, the shared config's blanket `"bash": "allow"` is overridden for
+every engine-launched session, and can be removed so that sessions a person
+starts by hand ask again.
+
+## Agents in engine-started sessions (WI-926, 2026-10-06)
+
+Dev validation found the bypass rule bypassed. An agent in a session the
+engine started itself (from the GUI or a protected template) asked for a
+`bypass` child and got one. Its `VOGT_HTTP_TOKEN` was the pod's brokered
+token, issued to the person `local:vogt`, so vogt-core counted the agent as
+that person.
+
+The engine now asks vogt-core for a credential of the session's own
+(`session.token`, an operation only the engine's credential may call) for
+every Claude Code, Codex or opencode session it launches without one, and
+revokes it when the session ends. The token is bound to the agent actor
+`agent:engine:<engine id>` with `agent_session_scopes`, the same scopes
+`session.start` mints for its own sessions. Such sessions are now refused
+`bypass`, and their writes are attributed to the session rather than to the
+person.
+
+A plain shell keeps the pod's token: a person is at it, so their
+attribution does not change. An agent a person starts by hand in that shell
+inherits the shell's token, and that is their choice to make.
+
+## Read-only relief (2026-10-07)
+
+Driven sessions were denied reads: `docker ps` and `docker inspect` as
+*Modify Shared Resources* or *Interfere With Workloads*, and checking whether
+a credential variable is set as credential materialization. The shipped
+policy adds two exceptions in the classifier's own wording, and no pattern
+rule:
+
+- **Read-Only Inspection** clears those two rules for an exhaustive list
+  of commands that only report state; a command it does not name is not
+  covered. It does not cover secret printing, environment dumps
+  (`.Config.Env` or a whole-object inspect), `docker exec`, any other
+  `docker` subcommand, Komodo, Infisical, non-loopback or non-GET requests.
+- **Credential Presence Check** yields only set or unset for a credential
+  the session already holds: never a length, substring, hash or comparison,
+  and never another process's environment, `/run/secrets` or the vault.
+  Fetching stays with the default rules and the grant flow (WI-973).
+
+Both texts are golden-pinned by the engine's `driven_policy_tests`, so a
+rewording is a deliberate, reviewed change. A deployment's own policy file
+replaces the image's, so it has to carry the same rules for them to apply.
+
+Pattern allow rules were rejected because they resolve before the
+classifier and cannot tell a harmless `docker inspect --format` from an
+environment dump, or a health-check GET from a curl that carries a body.
+
+**Not changed: merge as a prompt.** An explicit `permissions.ask` rule is
+the only way to make auto mode prompt rather than deny. But any agent with
+`work.write` can answer a session's prompt (`session.answer`,
+`session.input`), so an ask rule on `gh pr merge` would let one agent
+approve another's merge. That waits on WI-983. An ask rule on `git push`
+was also rejected: ordinary pushes already pass, a rule would make every
+push prompt, and it would turn a classifier-denied force-push into a
+prompt.
+
+Whether the classifier honours the new exceptions is judged at run time.
+The engine's unit tests pin the file's shape, and the verdicts need a
+check on vogt-dev.
+
+## Worker-loop allow list and scoped oversight answers (WI-1831, 2026-10-18)
+
+Haiku workers do not run in auto mode, so every command the pattern rules do
+not allow raises a prompt, and on 2026-10-18 they stalled on `git fetch &&
+git log` and `git checkout origin/rust-core` until a person tapped the
+prompt. The shipped policy now carries `permissions.allow` rules for the
+routine loop only: read-only git and `gh` inspection, `git fetch`, checkout
+of a remote ref or new branch, `git rebase origin/*` and its
+continue/abort/skip, `git push` of the checked-out branch (`origin HEAD`,
+optionally `-u` or `--force-with-lease`), cargo/pnpm/uv build and test, and
+the Vogt tools a session reports itself with (`work_comment`,
+`session_report_blocked`, `session_report_unblocked`). `permissions.deny`
+closes the code-execution holes those patterns would otherwise open
+(`--upload-pack`, `--output`, `rebase --exec`/`-x`/`-i`, cargo `--config`,
+and cargo `--manifest-path` pointing outside the worktree: absolute, `~`, `$VAR`
+or `..` paths). An explicit-lease push (`--force-with-lease=<br>:<sha> origin
+HEAD:<br>`) matches no allow pattern: it goes to the classifier, and the deny
+patterns refuse any push naming `main`/`master` (any spelling or position), a
+`+` refspec, `--force`/`-f` or `--receive-pack`. Merges, other pushes, destruction and secrets still go to the
+classifier, as the pinning tests check.
+
+Two classifier exceptions came out of the WI-2235 audit
+(`notes/permission-blocks-audit-2026-10-22.md`): **Feature Branch Lease Push**
+(Git Destructive, own work branch only) and **Cadastre-Named Secret Read**
+(Credential Materialization, the one secret Cadastre named for the task, read
+into a variable or 0600 file, never printed; guess-loops stay Credential
+Exploration). Pattern rules ending in `:*` are prefix rules, and a
+trailing `*` matches any further arguments, so a pattern can't safely allow
+`HEAD:<branch>`.
+
+**Dev Admin Token Lifecycle (WI-4279, 2026-11-15).** A third exception lets an
+oversight session mint and revoke an API token on the vogt-dev lane without a
+person: `vogt token issue` / `vogt token revoke` inside the vogt-dev pod, with
+`--expires-in-days 1` and scopes from `read`, `work.write`, `project.write`,
+`admin`, to run `tests/acceptance`; revoke it when the run ends. It was chosen
+over an `ondemand` manifest line because a stored token would be long-lived and
+shared, against the 1-day, revoke-after-use rule. The rule names the vogt-dev
+lane only, so a prod token still goes through a person. The engine gives every
+Claude launch the same settings file, so the rule requires engine proof of the
+oversight role in the session's own transcript (an `auth_whoami` naming
+`agent:session:<id>` or `agent:engine:<id>` and a `session_list` row for that
+id with `role` `oversight`), the same way *Approved Vogt Grant* requires a
+grants listing. WI-4282 added the `agent:engine:<id>` form: an agent session a
+person opens from the GUI and makes oversight has an engine-minted credential
+and an unlinked row keyed by its engine UUID, and no Vogt record. Accepting it
+was chosen over giving such sessions a Vogt record and an `agent:session`
+token when the role is set, because a running agent's credential is fixed at
+launch and could not be swapped in; the engine credential is already
+per-session and bound to that UUID, so a worker still cannot borrow it. A
+`claude` typed into a plain shell keeps the pod's shared token and stays out.
+It also restricts `--actor` to `agent:oversight-*`, and requires the token to
+be captured into a 0600 file (`vogt --json token issue ... | jq -r .secret >
+"$f"`) and never printed. Deployments that
+replace the settings file must copy the exception.
+
+Pushing the checked-out branch relies on the worktree being on the session's
+own branch. A worker in the shared checkout on `main` would push `main`, which
+the forge's branch protection refuses.
+
+For prompts these rules do not cover, an oversight session may now answer
+`Yes` through `session_answer` when the command is one-line, in the same
+classes, and runs in the worker's own linked worktree. The engine decides
+this (`oversight_answer.rs`), not the core, and audits both answers and
+refusals. Before this change the core relayed any oversight answer as a
+person's, so nothing limited what an overseer could approve. `session_input`
+stays person-only while a permission prompt shows.
+
+**Superseded by WI-2028 (2026-10-20).** The operator removed the allow-list
+limit on oversight answers: an oversight session may answer any `permission`
+prompt, through `session_answer` or `session_input` keys, audited as the
+oversight session with the command excerpt. Non-oversight callers still get
+`person_required`, and `read-outside-cwd` stays a person's. Driven Codex
+workers now launch with `-a never` by default (`ENGINE_CODEX_APPROVAL_POLICY`
+restores `on-request` per stack), so they stop prompting at all.
+
+Deployments that replace this file (the ops overlay's
+`/run/vogt/driven-session-settings.json`) must copy the new `permissions`
+block to get the worker-loop allow list.

@@ -1,0 +1,32 @@
+{
+ "captured": "2026-10-18T21:53Z, live Claude Code v2.1.293 driven by session_input (WI-1870)",
+ "activity": "idle",
+ "text": "reply with the single word stuck-ok",
+ "held": true,
+ "lines": [
+  "",
+  " ▐▛███▛█   Claude Code v2.1.293",
+  "▝▜██████▀  Opus 5.5 with low effort · Claude Max",
+  " ▝▝   ▝▝   ~/Working/Active/vogt-01M58G2BEKS1GS1KX8918Z2AJP",
+  "",
+  "⚠ Your login expires in 1 day · run /login to renew",
+  "",
+  "❯ Vogt started this session with a brief in /home/sprooty/.local/share/vogt-eng",
+  "  ine/agent-task-prompts/sessions/9b5eac60-859e-4a48-a56e-3d6a7837f73d.md. Read",
+  "  that file now. If it has a \"Task\" section, carry that task out; otherwise",
+  "  summarise the brief in one line and wait for instructions.",
+  "",
+  "  Read 1 file, ran 1 shell command",
+  "",
+  "❯ reply with the single word queued-ok",
+  "",
+  "● queued-ok",
+  "",
+  "✻ Cogitated for 31s · done 9:53 PM",
+  "",
+  "────────────────────────────────────────────────────────────────────────────────",
+  "❯ reply with the single word stuck-ok",
+  "────────────────────────────────────────────────────────────────────────────────",
+  "  ⏵⏵ auto mode on (shift+tab to cycle)"
+ ]
+}

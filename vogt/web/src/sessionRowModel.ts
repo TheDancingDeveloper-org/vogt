@@ -1,0 +1,258 @@
+// The session row, as data rather than markup.
+//
+// One place lists running sessions three times over: the desktop Places rail
+// (App.tsx), the desktop Sessions overview and the phone Sessions body (both
+// through `SessionList`). These helpers are the words a row uses for a
+// session's activity and the order a set of them is shown in, kept here so the
+// rail and the list cannot drift apart — a session that reads "running · 6m"
+// in one and "running" in the other is the same bug the shared breakpoint in
+// `narrow.ts` exists to prevent for widths.
+
+import type { ActivityState, SessionSummary } from "./api";
+import { formatAgo } from "./viewAge";
+
+/** The activity-dot class for a session, folding a finished session's exit
+ *  code into `done`/`errored` rather than leaving it on the live-activity
+ *  vocabulary. */
+export function activityClass(s: SessionSummary): string {
+  // A requested stop exits non-zero (a kill) but is not a crash (WI-913).
+  if (s.activity === "stopped") return "stopped";
+  if (s.exit_code !== null) {
+    return s.exit_code === 0 ? "done" : "errored";
+  }
+  return s.activity;
+}
+
+/** The session's activity as a word, exit code first so a finished session
+ *  reads as finished rather than as whatever it was doing when it stopped. */
+export function activityLabel(s: ActivityState, exit: number | null): string {
+  if (s === "stopped") return "stopped";
+  if (exit !== null) return exit === 0 ? "exited (0)" : `errored (${exit})`;
+  switch (s) {
+    case "waiting-for-input":
+      return "waiting for input";
+    case "awaiting-approval":
+      return "needs approval";
+    default:
+      return s;
+  }
+}
+
+/** How long a session has held its current activity, from the one timestamp
+ *  the engine actually reports. Absent on an older engine — omitted rather
+ *  than guessed. */
+export function sessionActivityAge(s: SessionSummary, now: number): string | null {
+  if (!s.activity_changed_at) return null;
+  const changed = Date.parse(s.activity_changed_at);
+  if (Number.isNaN(changed)) return null;
+  return formatAgo(now - changed);
+}
+
+/** "512 MiB", "1.2 GiB": a byte count the way a person reads memory. */
+export function formatBytes(bytes: number): string {
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value >= 10 || unit === 0 ? Math.round(value) : value.toFixed(1)} ${units[unit]}`;
+}
+
+/** "1.2 GiB · 35% CPU", with a warning mark past the deployment's
+ *  threshold; null before the engine has sampled the session. */
+export function sessionResourceWord(s: SessionSummary): string | null {
+  const r = s.resources;
+  if (!r || s.exit_code !== null || s.activity === "hibernated") return null;
+  const memory = `${r.over_threshold ? "⚠ " : ""}${formatBytes(r.rss_bytes)}`;
+  return r.cpu_pct >= 1 ? `${memory} · ${Math.round(r.cpu_pct)}% CPU` : memory;
+}
+
+/** Where a stopped pod session's uncommitted work was kept, or why it was
+ *  not (WI-4132). Null when the engine made no archive. */
+export function sessionSalvageHint(s: SessionSummary): string | null {
+  const salvage = s.salvage;
+  if (!salvage) return null;
+  if (salvage.state === "salvage_failed") {
+    return `salvage failed${salvage.reason ? `: ${salvage.reason}` : ""}`;
+  }
+  if (!salvage.path) return null;
+  const files = salvage.files === 1 ? "1 file" : `${salvage.files} files`;
+  return `salvage at ${salvage.path} (${files})`;
+}
+
+/** "template claude · codex · model gpt-5.6", from what the engine knows:
+ *  the template it was started from and the agent and model on its command
+ *  line. The model an agent actually ran is the core's to resolve from its
+ *  transcript (`session.list` → `running`, shown on the Oversight board). */
+export function sessionRuntimeHint(s: SessionSummary): string | null {
+  const words = (s.command ?? "").split(/\s+/);
+  const agent = words.map((w) => w.split("/").pop() ?? "").find((w) => ["claude", "codex", "opencode"].includes(w));
+  const flag = words.findIndex((w) => w === "--model" || w === "-m");
+  const model = flag >= 0 ? words[flag + 1] : words.find((w) => w.startsWith("--model="))?.slice(8);
+  const parts = [
+    s.template ? `template ${s.template}` : null,
+    agent ?? null,
+    model ? `model ${model}` : null,
+    s.permission_mode ? `permissions ${s.permission_mode}` : null,
+    s.stop ? `stopped${s.stop.by ? ` by ${s.stop.by}` : ""}${s.stop.reason ? `: ${s.stop.reason}` : ""}` : null,
+    sessionSalvageHint(s),
+  ].filter((part): part is string => Boolean(part));
+  return parts.length ? parts.join(" · ") : null;
+}
+
+/** A non-default permission posture, as a short visible label. The default
+ *  posture is stored as nothing and stays unmarked; bypass is the one a person
+ *  granted and a wake must not silently drop (WI-1250). */
+export function permissionPostureLabel(mode: string | null | undefined): string | null {
+  if (!mode || mode === "default") return null;
+  return mode === "bypass" ? "no permission checks" : mode;
+}
+
+/** Whether a session is waiting on a person to choose from an option list
+ *  (WI-1736): an approval-state wait whose prompt is a picker. */
+export function pickerWaiting(s: Pick<SessionSummary, "activity" | "approval" | "exit_code">): boolean {
+  return s.exit_code === null
+    && s.activity === "awaiting-approval"
+    && s.approval?.kind === "picker";
+}
+
+/** The row's state word beside the dot: "waiting for input · 40s",
+ *  "running · 6m". Colour is never the only signal, so this line exists
+ *  whether or not the age is known. */
+export function sessionStateWord(
+  s: SessionSummary,
+  now: number,
+  staleAt?: string | null,
+): string {
+  // An agent's own "blocked on you" outranks whatever its terminal is doing:
+  // it is waiting for a person, and says so.
+  const label =
+    s.blocked && s.exit_code === null
+      ? "blocked on you"
+      : pickerWaiting(s)
+        ? "waiting for a choice"
+        : activityLabel(s.activity, s.exit_code);
+  if (staleAt) {
+    const stamp = new Date(staleAt);
+    if (!Number.isNaN(stamp.getTime())) {
+      return `${label} · as of ${stamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+    }
+  }
+  const age = sessionActivityAge(s, now);
+  const resources = sessionResourceWord(s);
+  return [label, age, resources].filter(Boolean).join(" · ");
+}
+
+const ATTENTION_ORDER: Record<string, number> = {
+  // A permission dialog denies itself on a countdown: first of all.
+  "awaiting-approval": -1,
+  "waiting-for-input": 0,
+  errored: 1,
+  running: 2,
+  idle: 3,
+  // Asleep until somebody wakes it: below everything that is running.
+  hibernated: 4,
+  stopped: 4,
+  exited: 4,
+};
+
+/** Lower ranks want a reader's attention first. A non-zero exit is an error
+ *  regardless of the last live activity; a clean exit sinks to the bottom. */
+export function attentionRank(session: SessionSummary): number {
+  if (session.exit_code !== null) return session.exit_code === 0 ? 4 : 1;
+  if (session.blocked) return -1;
+  return ATTENTION_ORDER[session.activity] ?? 3;
+}
+
+/** Attention first, then most-recently-active. Pure and total — a copy, so the
+ *  caller's array is left alone — which is what lets a unit test pin it. */
+export function sortSessionsByAttention(sessions: SessionSummary[]): SessionSummary[] {
+  return [...sessions].sort((left, right) => {
+    const attentionDelta = attentionRank(left) - attentionRank(right);
+    if (attentionDelta !== 0) return attentionDelta;
+    return Date.parse(right.activity_changed_at || right.created_at)
+      - Date.parse(left.activity_changed_at || left.created_at);
+  });
+}
+
+/** Whether a session was nominated to supervise the others (WI-957). */
+export function isOversight(s: Pick<SessionSummary, "role">): boolean {
+  return s.role === "oversight";
+}
+
+/** Places-rail order (WI-1289). The engine already sorts the list: oversight
+ *  first, then `last_event_at` descending. This keeps that order and only
+ *  lifts bookmarked workers into the partition between oversight and the rest,
+ *  stable, so a bookmark does not lose its place among other bookmarks.
+ *  Attention is a badge on the row, not a reshuffle — except the phone pager,
+ *  which still calls `sortSessionsByAttention` on purpose. */
+export function sortSessionsForRail(
+  sessions: SessionSummary[],
+  bookmarked: ReadonlySet<string>,
+): SessionSummary[] {
+  const partition = (s: SessionSummary) => (isOversight(s) ? 0 : bookmarked.has(s.id) ? 1 : 2);
+  return [...sessions].sort((left, right) => partition(left) - partition(right));
+}
+
+/** The engine's order, with oversight already first (WI-957, WI-1289): the
+ *  Sessions list, which has no bookmarks partition. The phone's terminal
+ *  pager stays in plain attention order and does not use this. */
+export function sortSessionsOversightFirst(sessions: SessionSummary[]): SessionSummary[] {
+  return sortSessionsForRail(sessions, new Set());
+}
+
+/**
+ * Fields the rail partition reads: oversight role and bookmark membership.
+ * Resource samples, scrollback and activity ticks do not change this key, so
+ * a memo keyed on it does not re-sort when those tick (WI-2696).
+ */
+export function railSortKey(
+  sessions: readonly Pick<SessionSummary, "id" | "role">[],
+  bookmarked: ReadonlySet<string>,
+): string {
+  let key = "";
+  for (const session of sessions) {
+    const partition = session.role === "oversight" ? "0" : bookmarked.has(session.id) ? "1" : "2";
+    key += session.id + ":" + partition + ";";
+  }
+  return key;
+}
+
+/**
+ * Keep `previous`'s row ORDER while adopting `current`'s membership and data.
+ *
+ * The rail re-sorts by attention/recency on every activity change (see
+ * `sortSessionsForRail`). That is right when the user is only reading the list,
+ * but wrong the instant they are acting on a row: a reshuffle slides the row —
+ * and its open action menu — out from under the pointer, so the next click
+ * (e.g. Rename) lands on whatever session took its place. Holding the order
+ * steady during that interaction is what keeps the action on the session the
+ * user aimed at.
+ *
+ * Order comes from `previous`; the object for each id and the set of live ids
+ * come from `current`, so a row that vanished is dropped and one that appeared
+ * is appended (kept truthful without reshuffling what is already shown). The
+ * returned objects are `current`'s, so each row still shows fresh data even
+ * when the underlying list was rebuilt with new references.
+ */
+export function holdRailOrder(
+  previous: readonly SessionSummary[],
+  current: readonly SessionSummary[],
+): SessionSummary[] {
+  const byId = new Map(current.map((s) => [s.id, s]));
+  const held: SessionSummary[] = [];
+  const seen = new Set<string>();
+  for (const prev of previous) {
+    const fresh = byId.get(prev.id);
+    if (fresh && !seen.has(prev.id)) {
+      held.push(fresh);
+      seen.add(prev.id);
+    }
+  }
+  for (const s of current) {
+    if (!seen.has(s.id)) held.push(s);
+  }
+  return held;
+}

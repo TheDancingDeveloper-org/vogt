@@ -1,0 +1,109 @@
+# Operator ruling on these rules, 2026-10-19 (WI-1046):
+# - Answers are compared semantically: volatile values are blanked (the
+#   [volatile] keys below; ids and timestamps are fixed by the test hooks, so
+#   they are not volatile and compare verbatim), and keys are sorted
+#   (`json.dumps(..., sort_keys=True)` in the diff).
+# - Schema SQL is compared byte-exact, ignoring whitespace (the schema slice,
+#   WI-1048).
+# - Titles are not blanked, in answers or in schema objects.
+#
+# What two independent runs of the same script may differ on, and why.
+# Applied to answers, audit trails and OpenAPI. MCP tools/list is not covered
+# here: the parity script records no tools/list step, so a rule for it would
+# normalise nothing. The tool list's inputSchema comes from the registry dump,
+# which is compared against Python with no normaliser at all.
+
+[volatile]
+# A fresh instance mints nothing the hooks do not fix. Ids, timestamps and
+# digests are deterministic, so a difference between two runs is a real
+# divergence and must fail the check. What stays blanked is evidence the
+# collectors observed, which names the machine the sweep ran on.
+#
+# Compared verbatim, and why each is safe to compare:
+#   content_digest, payload_digest — pure functions of their input.
+#   last_used_at, expires_at — written by the clock, which the step clock fixes.
+#   instance_id — minted by the id factory, which sequential ids fixes.
+#   path — tokenised to <root>/<data> by the path rule below, so the remainder
+#     is comparable.
+#   observed_at, oldest_relevant_sweep, age_seconds — all read from ctx.clock,
+#     which the step clock fixes.
+#
+# Blanked: last_swept_at, the one timestamp a coverage row carries. Coverage
+# rows are compared on their verdicts (status, detail, which projects) and
+# counts. The clock reads the same on both cores, but when a sweep finished is
+# not what coverage is asked about, so it stays out of the comparison.
+#
+# The HTTP run dumps the declared store. The server is started with
+# `--no-schedule`, so the background sweep never runs: it would consume
+# AUTOINCREMENT `events.seq` values between declared writes and race
+# `auth.logout` into a 500 (WI-1152). With it off, the declared tables — audit,
+# auth_decisions, tokens, events, actors, labels — are fixed by the hooks and
+# compare verbatim. The observed store is dumped only where a script step asks
+# for it (`dump = "observed"`), after the sweeps it is meant to show: with the
+# scheduler off, its rows are the ones the steps caused.
+#
+# `token_hash` is deliberately not in this list. Python-issued tokens must
+# verify under Rust, and `core/auth.py` `hash_token` is a deterministic SHA-256,
+# so the HTTP dump checks the stored hash against the captured secret and
+# writes `<hash-of-secret>` only when it matches. A blank global key would hide
+# a scheme divergence on the CLI too.
+why = "collector evidence names the machine; everything the hooks make deterministic compares verbatim"
+# Path-scoped entries are `parent.key`: the key is blanked only inside an
+# object reached under that parent name (or inside a list of those objects).
+# A bare key is blanked wherever it appears. `suppression` and
+# `evidence_snapshot` stay bare on purpose for now: the golden at 84ec105
+# blanked the whole object, and scoping the rule to `.id` makes that
+# recording differ from itself. Narrowing them again (blank only the volatile
+# id, keep the fields the two cores must agree on) is deferred follow-up on
+# WI-2662; c104f6a0ae9f9 restored the whole-object blanking.
+keys = [
+  "last_swept_at",
+  "suppression",
+  "evidence_snapshot",
+  "evidence_observation_id",
+  "secret",
+  "data_dir",
+]
+
+[paths]
+# Absolute paths name the temporary root of that run.
+why = "each run writes under its own temporary root"
+tokens = [{ needle_kind = "root", token = "<root>" }, { needle_kind = "data", token = "<data>" }]
+
+[digests]
+# A payload digest is a hash of the payload, and a project's payload carries
+# its root path, which is the run's temporary root. Two runs never agree on
+# that digest, so it is not evidence of anything. The project is compared on
+# what the answer and the declared tables say about it, which is everything
+# the payload held.
+why = "a digest over a payload that carries the run's temporary root is not comparable across runs"
+# contract.check names the checked project's root in its audit payload too (over
+# HTTP the checked project is `second`, under the run's temporary root).
+path_bearing_operations = ["project.register", "project.create", "project.import", "contract.check"]
+# A contract.check observation's payload names the checked project's root, so
+# its content_digest moves with the temporary root too (two Python runs
+# disagree on it). Its payload is still compared verbatim.
+path_bearing_observation_kinds = ["contract.check"]
+
+[version]
+# The product version is stamped at build time, and only the answers that
+# report the build itself carry it. The rule substitutes <version> only when
+# the value is the release in pyproject.toml, which is what both sides report:
+# Python reads vogt.__version__ and the Rust core falls back to the same pinned
+# release. Anything else, including the old "local/dev" dev-build stamp, is left
+# as it is, so a build that fell back to it stays visible and fails the
+# comparison. The rule names the operations it applies to and only their
+# their top-level `version`, so a key named `version` elsewhere is untouched.
+why = "the build stamp names the build, not the behaviour, and only the version under test is substituted"
+operations = ["http.health.live", "http.version", "http.connection_info"]
+key = "version"
+
+[schema]
+# pydantic orders `anyOf` by declaration, which is a generator accident, not
+# contract; the rule applies only inside a schema object, one that carries a
+# `$schema` or `properties` key. Titles are no longer dropped anywhere, schema
+# titles included (operator ruling below), so the goldens pin real content.
+why = "anyOf order is a generator accident, not contract; titles are compared"
+drop_keys = []
+sort_any_of = true
+schema_markers = ["$schema", "properties"]

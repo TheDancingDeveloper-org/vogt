@@ -225,7 +225,7 @@ def drain_read_pool(path: Path | None = None) -> None:
 def split_statements(script: str) -> list[str]:
     """Split a migration script into individual statements.
 
-    Migrations are plain DDL: no triggers, no `BEGIN ... END` bodies, no
+    Migrations are plain DDL (a CREATE TRIGGER body is kept whole), no
     semicolons inside identifiers. `executescript` cannot be used because it
     commits any open transaction first, and each migration must apply inside
     one.
@@ -249,6 +249,11 @@ def split_statements(script: str) -> list[str]:
             continue
         elif char == ";":
             statement = "".join(buffer).strip()
+            upper = statement.upper()
+            if upper.startswith("CREATE TRIGGER") and not upper.endswith("END"):
+                buffer.append(char)
+                index += 1
+                continue
             if statement:
                 statements.append(statement)
             buffer = []

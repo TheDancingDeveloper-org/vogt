@@ -363,6 +363,25 @@ fn apply_one(
             conn.execute_batch("COMMIT")?;
             Ok(())
         }
+        Err(err) if migration.id.contains("_fts") && lacks_fts5(&err) => {
+            // A SQLite build without FTS5: record the migration without
+            // effect. Readers fall back to the LIKE-style scan when the
+            // virtual tables are absent.
+            let _ = conn.execute_batch("ROLLBACK");
+            tracing::warn!(migration = %migration.id, "FTS5 unavailable; text search falls back to a scan");
+            conn.execute_batch("BEGIN IMMEDIATE")?;
+            let recorded = conn.execute(
+                "INSERT INTO migrations (id, applied_at, checksum) VALUES (?1, ?2, ?3)",
+                (&migration.id, now, &migration.checksum),
+            );
+            match recorded {
+                Ok(_) => Ok(conn.execute_batch("COMMIT")?),
+                Err(err) => {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    Err(err.into())
+                }
+            }
+        }
         Err(err) => {
             let _ = conn.execute_batch("ROLLBACK");
             Err(MigrateError::Message(format!(
@@ -371,6 +390,11 @@ fn apply_one(
             )))
         }
     }
+}
+
+fn lacks_fts5(err: &rusqlite::Error) -> bool {
+    let text = err.to_string();
+    text.contains("no such module: fts5") || text.contains("no such tokenizer")
 }
 
 fn acquire_lock(

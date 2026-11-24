@@ -638,7 +638,7 @@ impl ReadView for SqliteReadView {
         load_work_item(&self.conn, "w.ref = ?", reference)
     }
     fn list_work_items(&self, filter: &WorkFilter) -> Result<Vec<WorkItem>, VogtError> {
-        let (where_sql, params) = work_where(filter);
+        let (where_sql, params) = work_where(&self.conn, filter);
         let mut sql_params = params;
         let (order_sql, exact) = work_order(filter);
         if let Some(exact) = exact {
@@ -656,7 +656,7 @@ impl ReadView for SqliteReadView {
         hydrate_work_items(&self.conn, bases)
     }
     fn count_work_items(&self, filter: &WorkFilter) -> Result<i64, VogtError> {
-        let (where_sql, params) = work_where(filter);
+        let (where_sql, params) = work_where(&self.conn, filter);
         let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|v| v.as_ref()).collect();
         self.conn
             .query_row(
@@ -667,7 +667,7 @@ impl ReadView for SqliteReadView {
             .map_err(sql_err)
     }
     fn board_high_water(&self, filter: &WorkFilter) -> Result<Option<(Moment, String)>, VogtError> {
-        let (where_sql, params) = work_where(filter);
+        let (where_sql, params) = work_where(&self.conn, filter);
         let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|v| v.as_ref()).collect();
         self.conn
             .query_row(
@@ -689,7 +689,8 @@ impl ReadView for SqliteReadView {
         let Some(high_water) = high_water else {
             return Ok(BTreeMap::new());
         };
-        let (where_sql, params) = with_board_high_water(filter, high_water)?.into_parts();
+        let (where_sql, params) =
+            with_board_high_water(&self.conn, filter, high_water)?.into_parts();
         let lane = board_lane(lane_mode)?;
         let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|v| v.as_ref()).collect();
         let rows = many(
@@ -729,7 +730,7 @@ impl ReadView for SqliteReadView {
         if cells.is_empty() {
             return Ok(result);
         }
-        let mut board_filter = with_board_high_water(filter, high_water)?;
+        let mut board_filter = with_board_high_water(&self.conn, filter, high_water)?;
         let lane = board_lane(lane_mode)?;
         let lane_eq = board_lane_eq(lane_mode)?;
         let mut requested: Vec<AnyGroup> = Vec::new();
@@ -3492,6 +3493,28 @@ fn exact_ref_query(text: &str) -> Option<String> {
         .then(|| format!("wi-{digits}"))
 }
 
+/// The trigram tokenizer cannot match a needle shorter than three characters.
+const FTS_MIN_NEEDLE: usize = 3;
+
+thread_local! {
+    /// Test hook: force the LIKE-style scan on this thread.
+    static FORCE_SCAN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// True when the FTS5 work-item index exists on this database (the migration
+/// was applied on a build with FTS5) and the scan is not forced.
+fn fts_usable(conn: &Connection) -> bool {
+    if FORCE_SCAN.with(|f| f.get()) {
+        return false;
+    }
+    conn.query_row(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'work_items_fts'",
+        [],
+        |_| Ok(()),
+    )
+    .is_ok()
+}
+
 /// The ordering of a work list. An exact ref leads the page, so a substring
 /// hit such as `WI-12410` or a body that cites `WI-1241` cannot push the item
 /// the number names off the first page. The filter itself is unchanged; the
@@ -3508,11 +3531,11 @@ fn work_order(filter: &WorkFilter) -> (&'static str, Option<String>) {
 
 /// The WHERE clause every work view filters through, so a count and the page
 /// beside it describe the same set.
-fn work_where(filter: &WorkFilter) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
-    work_filter(filter).into_parts()
+fn work_where(conn: &Connection, filter: &WorkFilter) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
+    work_filter(filter, fts_usable(conn)).into_parts()
 }
 
-fn work_filter(filter: &WorkFilter) -> Filter {
+fn work_filter(filter: &WorkFilter, fts: bool) -> Filter {
     let mut out = Filter::new();
     if !filter.include_superseded {
         // A native row that migrated upstream is retired. The row stays
@@ -3542,8 +3565,16 @@ fn work_filter(filter: &WorkFilter) -> Filter {
     if let Some(text) = &filter.text {
         // instr over lower rather than LIKE: the needle is caller text, and
         // LIKE would read its % and _ as wildcards.
-        if !text.is_empty() {
-            let needle = text.to_lowercase();
+        let needle = text.to_lowercase();
+        if needle.chars().count() >= FTS_MIN_NEEDLE && fts {
+            // Trigram FTS5: a quoted phrase is a case-insensitive substring
+            // match over title, body and ref, answered from the index.
+            let phrase = format!("\"{}\"", needle.replace('"', "\"\""));
+            out.and_values(
+                "w.rowid IN (SELECT rowid FROM work_items_fts WHERE work_items_fts MATCH ?)",
+                vec![Box::new(phrase)],
+            );
+        } else if !needle.is_empty() {
             out.and_values(
                 "(instr(lower(w.title), ?) > 0 OR instr(lower(w.body), ?) > 0 OR instr(lower(w.ref), ?) > 0)",
                 vec![Box::new(needle.clone()), Box::new(needle.clone()), Box::new(needle)],
@@ -3558,10 +3589,11 @@ fn work_filter(filter: &WorkFilter) -> Filter {
 }
 
 fn with_board_high_water(
+    conn: &Connection,
     filter: &WorkFilter,
     high_water: &(Moment, String),
 ) -> Result<Filter, VogtError> {
-    let mut out = work_filter(filter);
+    let mut out = work_filter(filter, fts_usable(conn));
     let moment = high_water.0;
     out.and_values(
         "(w.created_at < ? OR (w.created_at = ? AND w.ref <= ?))",
@@ -4545,6 +4577,142 @@ mod more {
         assert_eq!(txn.next_work_ref().unwrap(), "WI-1");
         txn.commit().unwrap();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn work_text_search_matches_through_fts_and_through_the_scan() {
+        let dir = tempfile_dir("vogt-fts");
+        let store = store(&dir);
+        let now = moment();
+        let mut txn = store.write().unwrap();
+        let mut make = |id: &str, title: &str, body: &str| {
+            let reference = txn.next_work_ref().unwrap();
+            txn.insert_work_item(&WorkItem {
+                id: id.into(),
+                reference,
+                kind: "bug".parse().unwrap(),
+                title: title.into(),
+                body: body.into(),
+                state: "open".into(),
+                priority: "p2".parse().unwrap(),
+                effort: None,
+                project_id: None,
+                project_slug: None,
+                initiative_id: None,
+                origin: "created".parse().unwrap(),
+                trust_state: "unverified".parse().unwrap(),
+                assignee_actor_id: None,
+                assignee_identity_ref: None,
+                labels: Vec::new(),
+                relations: Vec::new(),
+                superseded_by: None,
+                created_at: now,
+                updated_at: now,
+            })
+            .unwrap();
+        };
+        make("wrk_1", "Leaky Cache", "evicts too late");
+        make("wrk_2", "other", "100% sure the CACHE is stale");
+        make("wrk_3", "unrelated", "nothing here");
+        txn.commit().unwrap();
+
+        let ids = |text: &str| -> Vec<String> {
+            let filter = WorkFilter {
+                text: Some(text.into()),
+                ..WorkFilter::default()
+            };
+            let view = store.read().unwrap();
+            let listed = view.list_work_items(&filter).unwrap();
+            assert_eq!(view.count_work_items(&filter).unwrap(), listed.len() as i64);
+            listed.into_iter().map(|w| w.id).collect()
+        };
+        let fts_on = |text: &str| {
+            let view = store.read().unwrap();
+            assert!(fts_usable(&view.conn));
+            let _ = text;
+        };
+        fts_on("");
+        let cases: [(&str, &[&str]); 7] = [
+            ("cache", &["wrk_1", "wrk_2"]),
+            ("CACHE", &["wrk_1", "wrk_2"]),
+            ("100%", &["wrk_2"]),
+            ("wi-3", &["wrk_3"]),
+            ("ca", &["wrk_1", "wrk_2"]),
+            ("e\"x", &[]),
+            ("", &["wrk_1", "wrk_2", "wrk_3"]),
+        ];
+        for (text, want) in cases {
+            assert_eq!(ids(text), want, "fts path, {text:?}");
+        }
+        FORCE_SCAN.with(|f| f.set(true));
+        for (text, want) in cases {
+            assert_eq!(ids(text), want, "scan path, {text:?}");
+        }
+        FORCE_SCAN.with(|f| f.set(false));
+
+        // Triggers keep the index in step with updates and deletes.
+        let conn = store.open(false).unwrap();
+        conn.execute(
+            "UPDATE work_items SET body = 'zebra crossing' WHERE id = 'wrk_3'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(ids("zebra"), ["wrk_3"]);
+        assert_eq!(ids("nothing"), Vec::<String>::new());
+        conn.execute("DELETE FROM work_items WHERE id = 'wrk_3'", [])
+            .unwrap();
+        assert!(ids("zebra").is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_fts_migration_backfills_existing_rows() {
+        let dir = tempfile_dir("vogt-fts-backfill");
+        let conn = Connection::open(dir.join("b.sqlite3")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE work_items (id TEXT PRIMARY KEY, title TEXT, body TEXT, ref TEXT);
+             INSERT INTO work_items VALUES ('a', 'Alpha beta', 'gamma', 'WI-1');
+             CREATE TABLE comments (id TEXT PRIMARY KEY, body TEXT);
+             INSERT INTO comments VALUES ('c', 'delta epsilon');",
+        )
+        .unwrap();
+        for statement in crate::storage::sqlite::connection::split_statements(include_str!(
+            "../../../migrations/declared/0033_text_search_fts.sql"
+        )) {
+            conn.execute_batch(&statement).unwrap();
+        }
+        let hits: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM work_items_fts WHERE work_items_fts MATCH '\"pha be\"'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(hits, 1);
+        let hits: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM comments_fts WHERE comments_fts MATCH '\"elta eps\"'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(hits, 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn tempfile_dir(prefix: &str) -> PathBuf {
+        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "{prefix}-{}-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
     }
 
     #[test]
