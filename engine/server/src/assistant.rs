@@ -510,7 +510,7 @@ struct Watch {
 pub struct Profile {
     pub name: String,
     base_url: String,
-    api_key: String,
+    api_key: crate::secret::Secret<String>,
     pub model: String,
     reasoning_effort: Option<String>,
     /// Why this profile cannot serve its own model, if it cannot.
@@ -524,7 +524,7 @@ impl Profile {
         Self {
             name: profile.name.trim().to_string(),
             base_url: profile.base_url.clone(),
-            api_key: profile.api_key.expose().clone(),
+            api_key: profile.api_key.clone(),
             model: profile.model.clone(),
             reasoning_effort: profile.reasoning_effort.clone(),
             refusal: openai_route_refusal(&profile.model, profile.allow_claude_proxy),
@@ -560,7 +560,7 @@ impl ChatBackend {
     async fn complete(&self, profile: &Profile, body: Value) -> Result<Value> {
         match self {
             ChatBackend::Http { client } => {
-                let (base_url, api_key) = (&profile.base_url, &profile.api_key);
+                let (base_url, api_key) = (&profile.base_url, profile.api_key.expose());
                 let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
                 let resp = client
                     .post(&url)
@@ -617,7 +617,7 @@ impl ChatBackend {
                 streamed_body["stream"] = json!(true);
                 let send = client
                     .post(&url)
-                    .bearer_auth(&profile.api_key)
+                    .bearer_auth(profile.api_key.expose())
                     .json(&streamed_body)
                     .send();
                 let resp = tokio::select! {
@@ -909,8 +909,7 @@ impl AssistantRuntime {
     /// the behaviour it had, and now also a name a request can say.
     fn profiles_from_config(cfg: &Config) -> Vec<Profile> {
         let mut profiles = Vec::new();
-        if let Some(api_key) = crate::secret::expose_opt(&cfg.assistant_api_key).map(str::to_string)
-        {
+        if let Some(api_key) = cfg.assistant_api_key.clone() {
             profiles.push(Profile {
                 name: crate::config::IMPLICIT_PROFILE_NAME.to_string(),
                 base_url: cfg.assistant_base_url.clone(),

@@ -183,7 +183,7 @@ pub struct Caller {
     /// The credential this caller's Vogt calls are made with: their own
     /// bearer, which the core resolved to them, or the stack secret for the
     /// break-glass token.
-    pub core_token: Option<String>,
+    pub core_token: Option<crate::secret::Secret<String>>,
     /// Whether this caller answers as a person (`person_gate::is_person`).
     /// An approved `session.input` is typed as this caller, so it may land
     /// on a permission prompt only when this is true (WI-983).
@@ -215,7 +215,7 @@ impl Caller {
     pub fn test(token_name: &str, core_token: Option<&str>) -> Self {
         Self {
             token_name: token_name.to_string(),
-            core_token: core_token.map(str::to_owned),
+            core_token: core_token.map(crate::secret::Secret::from),
             person: false,
         }
     }
@@ -285,7 +285,7 @@ impl VogtTools {
 
     /// The credential a *read* acts with: the caller's own, or nothing.
     pub fn read_token(&self, caller: &Caller) -> Option<String> {
-        caller.core_token.clone()
+        crate::secret::expose_opt(&caller.core_token).map(str::to_string)
     }
 
     /// The credential a *write* acts with, or the reason there isn't one.
@@ -295,14 +295,16 @@ impl VogtTools {
     /// agent who approved it. The only caller with none is the break-glass
     /// token on a door with no stack secret, and the refusal says so.
     pub fn write_token(&self, caller: &Caller) -> Result<String, String> {
-        caller.core_token.clone().ok_or_else(|| {
-            format!(
-                "\"{}\" carries no vogt-core credential, so this write has no actor to be \
+        crate::secret::expose_opt(&caller.core_token)
+            .map(str::to_string)
+            .ok_or_else(|| {
+                format!(
+                    "\"{}\" carries no vogt-core credential, so this write has no actor to be \
                  audited to. Sign in with a Vogt login or an API token; the assistant will \
                  not write under a shared identity.",
-                caller.token_name
-            )
-        })
+                    caller.token_name
+                )
+            })
     }
 
     /// The curated Vogt tools this caller may be offered, fetched from the

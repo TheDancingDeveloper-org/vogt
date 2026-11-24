@@ -62,7 +62,7 @@ struct AudioBackend {
     base_urls: Vec<String>,
     /// Reused for whichever entry needs one (the cloud endpoint); `None` when
     /// only local, keyless entries are configured.
-    api_key: Option<String>,
+    api_key: Option<crate::secret::Secret<String>>,
     model: String,
     /// ISO language sent with `/audio/transcriptions` (`en`, …). Empty leaves
     /// detection to the backend. Meaningful for STT; unused for TTS.
@@ -91,7 +91,7 @@ impl AudioBackend {
         }
         Some(Self {
             base_urls: base_urls.to_vec(),
-            api_key: api_key.map(str::to_string),
+            api_key: api_key.map(crate::secret::Secret::from),
             model: model.to_string(),
             language: language.to_string(),
             voice: voice.to_string(),
@@ -215,7 +215,7 @@ impl AssistantSpeech {
                 .post(&url)
                 .timeout(self.attempt_timeout)
                 .multipart(form);
-            if let Some(key) = backend.api_key.as_deref() {
+            if let Some(key) = crate::secret::expose_opt(&backend.api_key) {
                 request = request.bearer_auth(key);
             }
             match request.send().await {
@@ -269,7 +269,7 @@ impl AssistantSpeech {
                 .post(&url)
                 .timeout(self.attempt_timeout)
                 .json(&body);
-            if let Some(key) = backend.api_key.as_deref() {
+            if let Some(key) = crate::secret::expose_opt(&backend.api_key) {
                 request = request.bearer_auth(key);
             }
             match request.send().await {

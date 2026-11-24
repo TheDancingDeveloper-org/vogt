@@ -4904,6 +4904,7 @@ dependencies = [
  "voicepipe",
  "vt100",
  "web-push",
+ "zeroize",
 ]
 
 [[package]]

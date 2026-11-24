@@ -196,7 +196,7 @@ pub struct VogtCore {
     /// The stack secret. Not injected for anybody: `/api/vogt` presents each
     /// caller's own credential. It is what this engine's own reads use — the
     /// event feed it follows — and what the break-glass token is lent.
-    fallback_token: Option<String>,
+    fallback_token: Option<crate::secret::Secret<String>>,
     /// The address this door is published at, stated to the core on every
     /// forwarded request. `None` when nobody has configured one, in
     /// which case nothing is stated and the core answers for itself — an
@@ -234,7 +234,7 @@ impl VogtCore {
         Some(Arc::new(Self {
             client,
             base,
-            fallback_token: crate::secret::expose_opt(&cfg.vogt_core_token).map(str::to_string),
+            fallback_token: cfg.vogt_core_token.clone(),
             public_url: cfg.public_url.clone(),
             heavy_in_flight: Arc::new(tokio::sync::Semaphore::new(HEAVY_READS_IN_FLIGHT)),
             light_in_flight: Arc::new(tokio::sync::Semaphore::new(LIGHT_READS_IN_FLIGHT)),
@@ -331,7 +331,8 @@ impl VogtCore {
     ) -> std::result::Result<(Vec<serde_json::Value>, u64), String> {
         let token = self
             .fallback_token
-            .as_deref()
+            .as_ref()
+            .map(|t| t.expose().as_str())
             .ok_or("no vogt_core_token is configured for this front door")?;
         let url = format!(
             "{}{CORE_API_PREFIX}/events?after={cursor}&limit={limit}",
@@ -387,7 +388,8 @@ impl VogtCore {
     ) -> std::result::Result<serde_json::Value, String> {
         let token = self
             .fallback_token
-            .as_deref()
+            .as_ref()
+            .map(|t| t.expose().as_str())
             .ok_or("no vogt_core_token is configured for this front door")?;
         let url = format!("{}{CORE_API_PREFIX}{path}", self.base);
         let response = self
@@ -556,6 +558,7 @@ pub async fn api(State(state): State<Arc<AppState>>, request: Request) -> Respon
     let injected = identity
         .as_ref()
         .and_then(|caller| caller.core_bearer.clone());
+    let injected = injected.as_ref().map(|t| t.expose().as_str());
 
     let Some(injected) = injected else {
         // Nothing to present. Forwarding anyway would send an unauthenticated
@@ -589,12 +592,12 @@ pub async fn api(State(state): State<Arc<AppState>>, request: Request) -> Respon
         return busy(pool);
     };
     let is_logout = path == CORE_LOGOUT_PATH;
-    let response = core.forward(&path, Some(&injected), request).await;
+    let response = core.forward(&path, Some(injected), request).await;
     if is_logout && response.status().is_success() {
         // The core has revoked the credential; forget what it resolved to,
         // so the next request with it is refused here rather than served
         // from the cache until the TTL.
-        state.core_identities.evict(&injected);
+        state.core_identities.evict(injected);
     }
     response
 }
