@@ -1475,7 +1475,7 @@ if command -v codex >/dev/null 2>&1; then
         || printf 'mcp-bootstrap: could not write the Codex driven-session bundle\n' >&2
 fi
 install_readonly_servers
-install_crw_server
+optional_step "crw registration" install_crw_server
 
 # stderr, like every other message in this script, because of who calls it.
 #

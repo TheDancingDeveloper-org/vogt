@@ -44,6 +44,7 @@ def _run(
     env = {
         "PATH": os.pathsep.join([str(tmp_path / "bin"), "/usr/bin", "/bin"]),
         "HOME": str(home),
+        "VOGT_CRW_MCP_URL": "",
         "VOGT_SRC": str(tmp_path / "absent"),
         "CALLS": str(tmp_path / "calls"),
         **(extra_env or {}),

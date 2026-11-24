@@ -119,10 +119,10 @@ JSON.
 
 - **As a session preset.** The engine's *test* config registers it as a
   session template (in
-  [`../engine/server/tests/integration.rs`](../engine/server/tests/integration.rs)),
+  [`../engine/server/tests/integration/agent_tasks.rs`](../engine/server/tests/integration/agent_tasks.rs)),
   the same way a deployment registers a real agent CLI. It is deliberately kept
   out of the production `SessionTemplate::default_templates()`.
-- **Through the engine.** `integration.rs` creates agent tasks whose `command`
+- **Through the engine.** `integration/agent_tasks.rs` creates agent tasks whose `command`
   is the fake-agent and asserts, end to end: an `edit+commit` run leaves a
   commit whose `Vogt-Run` trailer equals the run the engine started; a
   `findings` run has its `VOGT_NOTIFY:` line recorded as a finding on the run;

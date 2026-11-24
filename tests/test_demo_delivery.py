@@ -84,7 +84,9 @@ def test_demo_image_branches_from_the_normal_web_build() -> None:
         "the demo runtime must not reuse the builder base; that is what put "
         "compilers and -dev headers in a static file server"
     )
-    assert re.search(r"^ARG DEMO_RUNTIME_IMAGE=\S+-slim$", text, re.MULTILINE), (
+    assert re.search(
+        r"^ARG DEMO_RUNTIME_IMAGE=\S+-slim(@sha256:[0-9a-f]{64})?$", text, re.MULTILINE
+    ), (
         "the demo runtime base must be a slim variant: the property is a small "
         "surface, not merely a separate build arg pointing at the same image"
     )
