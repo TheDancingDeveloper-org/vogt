@@ -3,6 +3,12 @@
 //! The agent owns the PTY and makes the connection to the engine; a session pod
 //! never listens for an engine connection. See the crate README for the wire
 //! protocol.
+//!
+// The lint fires only on the lib's test build, where the crate is a binary, but
+// two pub items are used across crates: `ship_opencode_replies` (server
+// integration tests) and `CODEX_APPROVAL_POLICIES` (re-exported by server's
+// agent_cli). Allowed for the test build only.
+#![cfg_attr(test, allow(dead_code_pub_in_binary))]
 
 pub mod codex_guidance;
 pub mod codex_policy;
@@ -523,7 +529,7 @@ impl CodexLaunch {
     /// and the entrypoint's full bootstrap fragment from
     /// `VOGT_CODEX_CONFIG_FILE`. A missing or malformed value is no extra
     /// data, not a launch failure: the pod still starts on its config file.
-    pub fn from_env() -> Self {
+    pub(crate) fn from_env() -> Self {
         use base64::Engine as _;
         let mut launch = std::env::var("VOGT_CODEX_LAUNCH_B64")
             .ok()
