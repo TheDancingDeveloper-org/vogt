@@ -330,7 +330,7 @@ jobs:
       - run: uv sync --locked
 
       - name: canonical product version is aligned
-        run: cargo run --quiet --manifest-path engine/core/Cargo.toml --bin vogt-core -- check-product-version 0.7.22
+        run: cargo run --quiet --manifest-path engine/core/Cargo.toml --bin vogt-core -- check-product-version "$(python3 -c 'import tomllib;print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])')"
 
       - name: ruff (lint)
         run: uv run --no-sync ruff check .
@@ -439,8 +439,11 @@ jobs:
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       # First: it needs nothing built, so it is the cheapest failure to reach.
+      # Pull requests into rust-core, rust-2 and wi-1443-main-sync get fmt and
+      # the audit from rust-core.yml (its required `fmt, clippy, test` and
+      # `cargo deny and cargo audit` jobs), so they run once there (WI-4658).
       - name: cargo fmt
-        if: needs.changes.outputs.rust == 'true'
+        if: needs.changes.outputs.rust == 'true' && !(github.event_name == 'pull_request' && contains(fromJSON('["rust-core","rust-2","wi-1443-main-sync"]'), github.base_ref))
         working-directory: engine
         run: cargo fmt --all -- --check
 
@@ -483,7 +486,7 @@ jobs:
       - name: restore the cargo-audit binary
         id: cargo-audit
         # Runs after a failed step too, so one round reports every failure.
-        if: always() && !cancelled() && needs.changes.outputs.rust == 'true'
+        if: always() && !cancelled() && needs.changes.outputs.rust == 'true' && !(github.event_name == 'pull_request' && contains(fromJSON('["rust-core","rust-2","wi-1443-main-sync"]'), github.base_ref))
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: /root/.cargo/bin/cargo-audit
@@ -491,12 +494,12 @@ jobs:
 
       - name: install cargo-audit
         # Runs after a failed step too, so one round reports every failure.
-        if: always() && !cancelled() && steps.cargo-audit.outputs.cache-hit != 'true' && needs.changes.outputs.rust == 'true'
+        if: always() && !cancelled() && steps.cargo-audit.outputs.cache-hit != 'true' && needs.changes.outputs.rust == 'true' && !(github.event_name == 'pull_request' && contains(fromJSON('["rust-core","rust-2","wi-1443-main-sync"]'), github.base_ref))
         run: cargo install --locked cargo-audit --version 0.22.2 --force
 
       - name: audit Rust dependencies
         # Runs after a failed step too, so one round reports every failure.
-        if: always() && !cancelled() && needs.changes.outputs.rust == 'true'
+        if: always() && !cancelled() && needs.changes.outputs.rust == 'true' && !(github.event_name == 'pull_request' && contains(fromJSON('["rust-core","rust-2","wi-1443-main-sync"]'), github.base_ref))
         working-directory: engine
         run: |
           set -euo pipefail
@@ -561,14 +564,9 @@ jobs:
           # WI-4338 tracks moving the direct uses off chrono.
           # These ignores stay explicit while the audit denies future
           # vulnerabilities, unsound advisories, and yanks.
-          cargo audit --no-fetch --db "$advisory_db" \
-            --deny warnings \
-            --ignore RUSTSEC-2023-0071 \
-            --ignore RUSTSEC-2024-0449 \
-            --ignore RUSTSEC-2025-0134 \
-            --ignore RUSTSEC-2026-0387 \
-            --ignore RUSTSEC-2026-0459 \
-            --ignore RUSTSEC-2026-0543
+          # The ignore list is engine/.cargo/audit.toml, read from this
+          # working directory; rust-core.yml reads the same file (WI-4658).
+          cargo audit --no-fetch --db "$advisory_db" --deny warnings
 
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
         # Runs after a failed step too, so one round reports every failure.
