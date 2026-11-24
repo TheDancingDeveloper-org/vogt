@@ -114,8 +114,11 @@ jobs:
           copy engine/server/build.rs server/build.rs
           copy engine/server/src server/src
           copy engine/session-agent/Cargo.toml session-agent/Cargo.toml
+          copy engine/session-agent/build.rs session-agent/build.rs
           copy engine/session-agent/src session-agent/src
           copy engine/core/Cargo.toml core/Cargo.toml
+          copy engine/core/build.rs core/build.rs
+          copy engine/core/migrations core/migrations
           copy engine/core/src core/src
           mkdir -p "$stage/src/vogt/storage/sqlite" "$stage/web/dist"
           cp -a src/vogt/storage/sqlite/migrations "$stage/src/vogt/storage/sqlite/migrations"
