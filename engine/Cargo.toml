@@ -15,3 +15,6 @@ strip = "symbols"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
+
+[workspace.lints.cargo]
+unused_dependencies = "warn"
