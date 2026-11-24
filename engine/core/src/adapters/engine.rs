@@ -10,6 +10,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use serde::Deserialize;
 use serde_json::{Map, Value};
 
 use crate::core::py_repr;
@@ -320,7 +321,7 @@ impl EngineClient {
         )?;
         Ok(payload
             .as_object()
-            .map(|_| EngineArchivedSession::from_payload(&payload)))
+            .map(|_| decode::<EngineArchivedSession>(&payload)))
     }
 
     pub fn list_agent_tasks(&self) -> Result<Vec<EngineAgentTask>, VogtError> {
@@ -340,9 +341,7 @@ impl EngineClient {
             false,
             None,
         )?;
-        Ok(rows(&payload)
-            .map(EngineHistorySession::from_payload)
-            .collect())
+        Ok(rows(&payload).map(decode::<EngineHistorySession>).collect())
     }
 
     pub fn search_history(
@@ -362,9 +361,7 @@ impl EngineClient {
             false,
             None,
         )?;
-        Ok(rows(&payload)
-            .map(EngineHistoryMatch::from_payload)
-            .collect())
+        Ok(rows(&payload).map(decode::<EngineHistoryMatch>).collect())
     }
 
     pub fn history_log(
@@ -386,7 +383,7 @@ impl EngineClient {
         )?;
         Ok(payload
             .as_object()
-            .map(|_| EngineSessionLog::from_payload(&payload)))
+            .map(|_| decode::<EngineSessionLog>(&payload)))
     }
 
     /// Write `text` to a session's PTY. `submit` appends a carriage return.
@@ -1690,119 +1687,86 @@ impl EngineSweepEntry {
 }
 
 /// One terminal that has ended, as the engine's history records it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(default)]
 pub struct EngineArchivedSession {
+    #[serde(deserialize_with = "lenient::string")]
     pub id: String,
+    #[serde(deserialize_with = "lenient::string")]
     pub created_at: String,
+    #[serde(deserialize_with = "lenient::opt_str")]
     pub ended_at: Option<String>,
+    #[serde(deserialize_with = "lenient::opt_int")]
     pub exit_code: Option<i64>,
-}
-
-impl EngineArchivedSession {
-    fn from_payload(payload: &Value) -> Self {
-        Self {
-            id: payload.get("id").map(value_string).unwrap_or_default(),
-            created_at: payload
-                .get("created_at")
-                .map(value_string)
-                .unwrap_or_default(),
-            ended_at: optional_str(payload.get("ended_at")),
-            exit_code: optional_int(payload.get("exit_code")),
-        }
-    }
 }
 
 /// One row of the engine's session-history listing.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
+#[serde(default)]
 pub struct EngineHistorySession {
+    #[serde(deserialize_with = "lenient::string")]
     pub id: String,
+    #[serde(deserialize_with = "lenient::string")]
     pub name: String,
+    #[serde(deserialize_with = "lenient::string")]
     pub created_at: String,
+    #[serde(deserialize_with = "lenient::opt_str")]
     pub ended_at: Option<String>,
+    #[serde(deserialize_with = "lenient::opt_int")]
     pub exit_code: Option<i64>,
+    #[serde(deserialize_with = "lenient::opt_str")]
     pub cwd: Option<String>,
+    #[serde(deserialize_with = "lenient::opt_str")]
     pub command: Option<String>,
+    #[serde(deserialize_with = "lenient::int")]
     pub scrollback_bytes: i64,
+    #[serde(deserialize_with = "lenient::opt_str")]
     pub template: Option<String>,
+    #[serde(deserialize_with = "lenient::opt_str")]
     pub role: Option<String>,
+    #[serde(deserialize_with = "lenient::opt_str")]
     pub conversation_agent: Option<String>,
+    #[serde(deserialize_with = "lenient::opt_str")]
     pub conversation_id: Option<String>,
+    #[serde(deserialize_with = "lenient::opt_str")]
     pub resume_template: Option<String>,
+    #[serde(deserialize_with = "lenient::opt_str")]
     pub work_item: Option<String>,
-}
-
-impl EngineHistorySession {
-    fn from_payload(payload: &Value) -> Self {
-        Self {
-            id: field_string(payload, "id"),
-            name: field_string(payload, "name"),
-            created_at: field_string(payload, "created_at"),
-            ended_at: optional_str(payload.get("ended_at")),
-            exit_code: optional_int(payload.get("exit_code")),
-            cwd: optional_str(payload.get("cwd")),
-            command: optional_str(payload.get("command")),
-            scrollback_bytes: optional_int(payload.get("scrollback_bytes")).unwrap_or(0),
-            template: optional_str(payload.get("template")),
-            role: optional_str(payload.get("role")),
-            conversation_agent: optional_str(payload.get("conversation_agent")),
-            conversation_id: optional_str(payload.get("conversation_id")),
-            resume_template: optional_str(payload.get("resume_template")),
-            work_item: optional_str(payload.get("work_item")),
-        }
-    }
 }
 
 /// One hit from a session-output search. `live` marks a running session's
 /// scrollback rather than the archived index.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
+#[serde(default)]
 pub struct EngineHistoryMatch {
+    #[serde(deserialize_with = "lenient::string")]
     pub session_id: String,
+    #[serde(deserialize_with = "lenient::string")]
     pub session_name: String,
+    #[serde(deserialize_with = "lenient::string")]
     pub created_at: String,
+    #[serde(deserialize_with = "lenient::string")]
     pub match_snippet: String,
+    #[serde(deserialize_with = "lenient::float")]
     pub rank: f64,
+    #[serde(deserialize_with = "lenient::boolean")]
     pub live: bool,
 }
 
-impl EngineHistoryMatch {
-    fn from_payload(payload: &Value) -> Self {
-        Self {
-            session_id: field_string(payload, "session_id"),
-            session_name: field_string(payload, "session_name"),
-            created_at: field_string(payload, "created_at"),
-            match_snippet: field_string(payload, "match_snippet"),
-            rank: payload.get("rank").and_then(Value::as_f64).unwrap_or(0.0),
-            live: payload
-                .get("live")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-        }
-    }
-}
-
 /// The tail of a session's raw output log.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(default)]
 pub struct EngineSessionLog {
+    #[serde(deserialize_with = "lenient::string")]
     pub session_id: String,
+    #[serde(deserialize_with = "lenient::string")]
     pub text: String,
+    #[serde(deserialize_with = "lenient::int")]
     pub bytes: i64,
+    #[serde(deserialize_with = "lenient::int")]
     pub total_bytes: i64,
+    #[serde(deserialize_with = "lenient::boolean")]
     pub truncated: bool,
-}
-
-impl EngineSessionLog {
-    fn from_payload(payload: &Value) -> Self {
-        Self {
-            session_id: field_string(payload, "session_id"),
-            text: field_string(payload, "text"),
-            bytes: optional_int(payload.get("bytes")).unwrap_or(0),
-            total_bytes: optional_int(payload.get("total_bytes")).unwrap_or(0),
-            truncated: payload
-                .get("truncated")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-        }
-    }
 }
 
 /// A session's current visible screen. Fields the engine leaves out stay
@@ -2195,6 +2159,39 @@ fn non_empty(value: &Value) -> bool {
 
 fn string_list(values: &[Value]) -> Vec<String> {
     values.iter().map(value_string).collect()
+}
+
+/// Decode an engine payload into a type whose fields all tolerate a missing or
+/// oddly typed value (the `lenient` helpers), so this never fails: a payload
+/// that is not an object decodes to the defaults, as the hand parsers did.
+fn decode<T: serde::de::DeserializeOwned + Default>(payload: &Value) -> T {
+    T::deserialize(payload).unwrap_or_default()
+}
+
+/// serde field helpers that keep the tolerant semantics of the old parsers.
+mod lenient {
+    use super::{optional_str, value_string};
+    use serde::{Deserialize, Deserializer};
+    use serde_json::Value;
+
+    pub fn string<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+        Ok(value_string(&Value::deserialize(d)?))
+    }
+    pub fn opt_str<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+        Ok(optional_str(Some(&Value::deserialize(d)?)))
+    }
+    pub fn opt_int<'de, D: Deserializer<'de>>(d: D) -> Result<Option<i64>, D::Error> {
+        Ok(Value::deserialize(d)?.as_i64())
+    }
+    pub fn int<'de, D: Deserializer<'de>>(d: D) -> Result<i64, D::Error> {
+        Ok(opt_int(d)?.unwrap_or(0))
+    }
+    pub fn float<'de, D: Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
+        Ok(Value::deserialize(d)?.as_f64().unwrap_or(0.0))
+    }
+    pub fn boolean<'de, D: Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+        Ok(Value::deserialize(d)?.as_bool().unwrap_or(false))
+    }
 }
 
 fn value_string(value: &Value) -> String {
@@ -2731,6 +2728,52 @@ fn urllib_form(error: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn serde_decoded_history_and_log_payloads_match_engine_fixtures() {
+        let archived = decode::<EngineArchivedSession>(&serde_json::json!({
+            "id": "a1", "created_at": "2026-11-01T00:00:00Z", "ended_at": null, "exit_code": 3
+        }));
+        assert_eq!(archived.id, "a1");
+        assert_eq!(archived.ended_at, None);
+        assert_eq!(archived.exit_code, Some(3));
+        assert_eq!(
+            decode::<EngineArchivedSession>(&serde_json::json!("junk")),
+            EngineArchivedSession::default()
+        );
+
+        let h = decode::<EngineHistorySession>(&serde_json::json!({
+            "id": "h1", "name": "n", "created_at": "t", "cwd": " /w ", "command": "",
+            "scrollback_bytes": 42, "role": "worker", "work_item": "WI-1"
+        }));
+        assert_eq!(h.cwd.as_deref(), Some("/w"));
+        assert_eq!(h.command, None);
+        assert_eq!(h.scrollback_bytes, 42);
+        assert_eq!(h.work_item.as_deref(), Some("WI-1"));
+        assert_eq!(
+            decode::<EngineHistorySession>(&serde_json::json!({})).scrollback_bytes,
+            0
+        );
+
+        let m = decode::<EngineHistoryMatch>(&serde_json::json!({
+            "session_id": "s", "session_name": "n", "created_at": "t",
+            "match_snippet": "x", "rank": 1.5, "live": true
+        }));
+        assert_eq!((m.rank, m.live), (1.5, true));
+        assert_eq!(
+            decode::<EngineHistoryMatch>(&serde_json::json!({"rank": "bad"})).rank,
+            0.0
+        );
+
+        let l = decode::<EngineSessionLog>(&serde_json::json!({
+            "session_id": "s", "text": "hi", "bytes": 2, "total_bytes": 9, "truncated": true
+        }));
+        assert_eq!((l.bytes, l.total_bytes, l.truncated), (2, 9, true));
+        assert_eq!(
+            decode::<EngineSessionLog>(&serde_json::json!({"session_id": 7})).session_id,
+            "7"
+        );
+    }
+
     use super::*;
     use std::sync::{Arc, Mutex};
 
