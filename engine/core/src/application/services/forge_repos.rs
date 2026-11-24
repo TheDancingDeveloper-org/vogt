@@ -133,7 +133,7 @@ fn registered_keys(
     // the ssh and scp spellings of one repository collapse to the same key
     // as its https URL.
     Ok(view
-        .list_projects(100_000, 0)?
+        .all_projects()?
         .into_iter()
         .filter_map(|project| project.repo_url)
         .filter_map(|url| {

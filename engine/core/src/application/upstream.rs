@@ -253,11 +253,7 @@ pub fn linked_projects(
             Vec::new()
         });
     }
-    Ok(view
-        .list_projects(10_000, 0)?
-        .into_iter()
-        .filter(is_linked)
-        .collect())
+    Ok(view.all_projects()?.into_iter().filter(is_linked).collect())
 }
 
 /// The item a ref names: a declared `WI-n` first, otherwise the upstream item a

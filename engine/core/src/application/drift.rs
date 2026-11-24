@@ -529,7 +529,7 @@ fn version_findings(
     observed: &impl ObservedStore,
 ) -> Result<Vec<DriftFinding>, VogtError> {
     let mut out = Vec::new();
-    for project in declared.list_projects(1000, 0)? {
+    for project in declared.all_projects()? {
         let observations = observed.latest(
             &[KIND_TAG.to_string(), KIND_RELEASE.to_string()],
             Some(&project.id),
@@ -581,7 +581,7 @@ fn dependency_findings(
 ) -> Result<Vec<DriftFinding>, VogtError> {
     let mut out = Vec::new();
     let slugs: BTreeMap<String, String> = declared
-        .list_projects(1000, 0)?
+        .all_projects()?
         .into_iter()
         .map(|project| (project.id, project.slug))
         .collect();
@@ -737,7 +737,7 @@ fn ci_findings(
     observed: &impl ObservedStore,
 ) -> Result<Vec<DriftFinding>, VogtError> {
     let mut out = Vec::new();
-    for project in declared.list_projects(1000, 0)? {
+    for project in declared.all_projects()? {
         let checks = observed.latest(
             &[KIND_CI_CHECK.to_string()],
             Some(&project.id),
@@ -785,7 +785,7 @@ fn posture_findings(
     observed: &impl ObservedStore,
 ) -> Result<Vec<DriftFinding>, VogtError> {
     let mut out = Vec::new();
-    for project in declared.list_projects(1000, 0)? {
+    for project in declared.all_projects()? {
         let observations = observed.latest(
             &[KIND_POSTURE.to_string()],
             Some(&project.id),
@@ -825,11 +825,11 @@ fn initiative_findings(
     declared: &impl ReadView,
     observed: &impl ObservedStore,
 ) -> Result<Vec<DriftFinding>, VogtError> {
-    let initiatives = declared.list_initiatives(1000, 0)?;
+    let initiatives = declared.all_initiatives()?;
     if initiatives.is_empty() {
         return Ok(Vec::new());
     }
-    let projects = declared.list_projects(1000, 0)?;
+    let projects = declared.all_projects()?;
     let mut expected: BTreeMap<(String, String), BTreeMap<i64, bool>> = BTreeMap::new();
     let mut member_refs: BTreeMap<(String, String, i64), String> = BTreeMap::new();
     for project in projects
@@ -946,7 +946,7 @@ fn not_collected_of(
         seen.extend(projects.keys().cloned());
     }
     let mut slugs = Vec::new();
-    for project in declared.list_projects(1000, 0)? {
+    for project in declared.all_projects()? {
         if !seen.contains(&project.id) {
             slugs.push(project.slug);
         }

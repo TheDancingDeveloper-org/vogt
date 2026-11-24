@@ -77,7 +77,7 @@ fn coverage<C: Clock, I: IdFactory>(ctx: &AppContext<C, I>) -> Result<Value, Vog
     let registered: BTreeSet<String> = ctx
         .declared
         .read()?
-        .list_projects(10_000, 0)?
+        .all_projects()?
         .into_iter()
         .map(|project| project.id)
         .collect();
