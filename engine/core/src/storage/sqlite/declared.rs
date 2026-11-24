@@ -24,7 +24,7 @@ use crate::storage::interface::{
 };
 use crate::storage::sqlite::connection::Lease;
 use crate::storage::sqlite::migrator::{self, migrations_root};
-use crate::storage::sqlite::query::{select_many, select_one, FromRow};
+use crate::storage::sqlite::query::{select_filtered, select_many, select_one, Filter, FromRow};
 
 const META_INSTANCE_ID: &str = "instance_id";
 const META_REVISION: &str = "revision";
@@ -1332,30 +1332,18 @@ impl ReadView for SqliteReadView {
         kind: Option<&str>,
         limit: i64,
     ) -> Result<Vec<SessionReport>, VogtError> {
-        let mut clauses: Vec<String> = Vec::new();
-        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-        for (column, value) in [
-            ("engine_session_id", engine_session_id),
-            ("work_item_id", work_item_id),
-            ("kind", kind),
-        ] {
-            if let Some(value) = value {
-                clauses.push(format!("{column} = ?"));
-                params.push(Box::new(value.to_string()));
-            }
-        }
-        let where_sql = if clauses.is_empty() {
-            String::new()
-        } else {
-            format!("WHERE {} ", clauses.join(" AND "))
-        };
-        params.push(Box::new(limit));
-        let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|v| v.as_ref()).collect();
-        many(
+        let mut filter = Filter::new();
+        filter.and_some(
+            "engine_session_id = ?",
+            engine_session_id.map(str::to_string),
+        );
+        filter.and_some("work_item_id = ?", work_item_id.map(str::to_string));
+        filter.and_some("kind = ?", kind.map(str::to_string));
+        select_filtered::<SessionReport>(
             &self.conn,
-            &format!("SELECT * FROM session_reports {where_sql}ORDER BY created_at DESC, id DESC LIMIT ?"),
-            refs.as_slice(),
-            row_session_report,
+            filter,
+            "ORDER BY created_at DESC, id DESC LIMIT ?",
+            vec![Box::new(limit)],
         )
     }
     fn list_session_grants(
@@ -1364,28 +1352,17 @@ impl ReadView for SqliteReadView {
         target_engine_session_id: Option<&str>,
         limit: i64,
     ) -> Result<Vec<SessionGrant>, VogtError> {
-        let mut clauses: Vec<String> = Vec::new();
-        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-        if let Some(state) = state {
-            clauses.push("state = ?".into());
-            params.push(Box::new(state.to_string()));
-        }
-        if let Some(target) = target_engine_session_id {
-            clauses.push("target_engine_session_id = ?".into());
-            params.push(Box::new(target.to_string()));
-        }
-        let where_sql = if clauses.is_empty() {
-            String::new()
-        } else {
-            format!("WHERE {} ", clauses.join(" AND "))
-        };
-        params.push(Box::new(limit));
-        let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|v| v.as_ref()).collect();
-        many(
+        let mut filter = Filter::new();
+        filter.and_some("state = ?", state.map(str::to_string));
+        filter.and_some(
+            "target_engine_session_id = ?",
+            target_engine_session_id.map(str::to_string),
+        );
+        select_filtered::<SessionGrant>(
             &self.conn,
-            &format!("SELECT * FROM session_grants {where_sql}ORDER BY requested_at DESC, id DESC LIMIT ?"),
-            refs.as_slice(),
-            row_session_grant,
+            filter,
+            "ORDER BY requested_at DESC, id DESC LIMIT ?",
+            vec![Box::new(limit)],
         )
     }
     fn charter(&self, scope_kind: &str, scope_id: &str) -> Result<Option<Charter>, VogtError> {
@@ -1417,30 +1394,15 @@ impl ReadView for SqliteReadView {
         owner_actor_id: Option<&str>,
         limit: i64,
     ) -> Result<Vec<Watch>, VogtError> {
-        let mut clauses: Vec<String> = Vec::new();
-        let mut bound: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-        for (column, value) in [
-            ("state", state),
-            ("target_session", target_session),
-            ("owner_actor_id", owner_actor_id),
-        ] {
-            if let Some(value) = value {
-                clauses.push(format!("{column} = ?"));
-                bound.push(Box::new(value.to_string()));
-            }
-        }
-        let where_sql = if clauses.is_empty() {
-            String::new()
-        } else {
-            format!("WHERE {} ", clauses.join(" AND "))
-        };
-        bound.push(Box::new(limit));
-        let refs: Vec<&dyn rusqlite::ToSql> = bound.iter().map(|v| v.as_ref()).collect();
-        many(
+        let mut filter = Filter::new();
+        filter.and_some("state = ?", state.map(str::to_string));
+        filter.and_some("target_session = ?", target_session.map(str::to_string));
+        filter.and_some("owner_actor_id = ?", owner_actor_id.map(str::to_string));
+        select_filtered::<Watch>(
             &self.conn,
-            &format!("SELECT * FROM watches {where_sql}ORDER BY created_at DESC, id DESC LIMIT ?"),
-            refs.as_slice(),
-            row_watch,
+            filter,
+            "ORDER BY created_at DESC, id DESC LIMIT ?",
+            vec![Box::new(limit)],
         )
     }
     fn decision(&self, decision_id: &str) -> Result<Option<Decision>, VogtError> {
@@ -1453,32 +1415,15 @@ impl ReadView for SqliteReadView {
         asker_actor_id: Option<&str>,
         limit: i64,
     ) -> Result<Vec<Decision>, VogtError> {
-        let mut clauses: Vec<String> = Vec::new();
-        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-        for (column, value) in [
-            ("state", state),
-            ("work_item_id", work_item_id),
-            ("asker_actor_id", asker_actor_id),
-        ] {
-            if let Some(value) = value {
-                clauses.push(format!("{column} = ?"));
-                params.push(Box::new(value.to_string()));
-            }
-        }
-        let where_sql = if clauses.is_empty() {
-            String::new()
-        } else {
-            format!("WHERE {} ", clauses.join(" AND "))
-        };
-        params.push(Box::new(limit));
-        let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|v| v.as_ref()).collect();
-        many(
+        let mut filter = Filter::new();
+        filter.and_some("state = ?", state.map(str::to_string));
+        filter.and_some("work_item_id = ?", work_item_id.map(str::to_string));
+        filter.and_some("asker_actor_id = ?", asker_actor_id.map(str::to_string));
+        select_filtered::<Decision>(
             &self.conn,
-            &format!(
-                "SELECT * FROM decisions {where_sql}ORDER BY created_at DESC, id DESC LIMIT ?"
-            ),
-            refs.as_slice(),
-            row_decision,
+            filter,
+            "ORDER BY created_at DESC, id DESC LIMIT ?",
+            vec![Box::new(limit)],
         )
     }
     fn list_sessions(
@@ -1489,30 +1434,17 @@ impl ReadView for SqliteReadView {
         limit: i64,
         offset: i64,
     ) -> Result<Vec<CodingSession>, VogtError> {
-        let mut clauses: Vec<String> = Vec::new();
-        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-        for (column, value) in [("project_id", project_id), ("work_item_id", work_item_id)] {
-            if let Some(value) = value {
-                clauses.push(format!("{column} = ?"));
-                params.push(Box::new(value.to_string()));
-            }
-        }
+        let mut filter = Filter::new();
+        filter.and_some("project_id = ?", project_id.map(str::to_string));
+        filter.and_some("work_item_id = ?", work_item_id.map(str::to_string));
         if !include_stopped {
-            clauses.push("stopped_at IS NULL".into());
+            filter.and_fixed("stopped_at IS NULL");
         }
-        let where_sql = if clauses.is_empty() {
-            String::new()
-        } else {
-            format!("WHERE {}", clauses.join(" AND "))
-        };
-        params.push(Box::new(limit));
-        params.push(Box::new(offset));
-        let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|v| v.as_ref()).collect();
-        many(
+        select_filtered::<CodingSession>(
             &self.conn,
-            &format!("SELECT * FROM coding_sessions {where_sql} ORDER BY started_at DESC, id DESC LIMIT ? OFFSET ?"),
-            refs.as_slice(),
-            row_session,
+            filter,
+            "ORDER BY started_at DESC, id DESC LIMIT ? OFFSET ?",
+            vec![Box::new(limit), Box::new(offset)],
         )
     }
     fn list_live_sessions_started_by(
@@ -2841,6 +2773,14 @@ fn count(conn: &Connection, table: &str) -> Result<i64, VogtError> {
     .map_err(sql_err)
 }
 
+impl FromRow for SessionReport {
+    const TABLE: &'static str = "session_reports";
+    const COLUMNS: &'static str =
+        "data, id, actor_id, engine_session_id, work_item_id, kind, summary, created_at";
+    fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
+        row_session_report(row)
+    }
+}
 impl FromRow for Actor {
     const TABLE: &'static str = "actors";
     const COLUMNS: &'static str = "id, kind, display_name, identity_ref, disabled, created_at";
