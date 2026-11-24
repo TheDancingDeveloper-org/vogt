@@ -568,12 +568,12 @@ impl ChatBackend {
                     .json(&body)
                     .send()
                     .await
-                    .map_err(|e| ApiError::Internal(format!("assistant backend: {e}")))?;
+                    .map_err(|e| ApiError::internal_src("assistant backend", e))?;
                 let status = resp.status();
                 let payload: Value = resp
                     .json()
                     .await
-                    .map_err(|e| ApiError::Internal(format!("assistant backend body: {e}")))?;
+                    .map_err(|e| ApiError::internal_src("assistant backend body", e))?;
                 if !status.is_success() {
                     return Err(ApiError::Internal(format!(
                         "assistant backend HTTP {status}: {}",
@@ -625,7 +625,7 @@ impl ChatBackend {
                         return Ok(Streamed::Cancelled { partial: String::new() });
                     }
                     resp = send => resp
-                        .map_err(|e| ApiError::Internal(format!("assistant backend: {e}")))?,
+                        .map_err(|e| ApiError::internal_src("assistant backend", e))?,
                 };
                 if !resp.status().is_success() {
                     tracing::debug!(
@@ -648,7 +648,7 @@ impl ChatBackend {
                     let payload: Value = resp
                         .json()
                         .await
-                        .map_err(|e| ApiError::Internal(format!("assistant backend body: {e}")))?;
+                        .map_err(|e| ApiError::internal_src("assistant backend body", e))?;
                     if let Some(text) = payload
                         .pointer("/choices/0/message/content")
                         .and_then(Value::as_str)
@@ -671,9 +671,7 @@ impl ChatBackend {
                     let (payloads, closed) = match chunk {
                         Some(Ok(chunk)) => (decoder.feed(&chunk), false),
                         Some(Err(e)) => {
-                            return Err(ApiError::Internal(format!(
-                                "assistant backend stream: {e}"
-                            )))
+                            return Err(ApiError::internal_src("assistant backend stream", e))
                         }
                         None => (decoder.finish().into_iter().collect(), true),
                     };
