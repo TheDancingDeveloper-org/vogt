@@ -136,67 +136,8 @@ pub fn pending(data_dir: &Path) -> Result<(usize, usize), migrator::MigrateError
     ))
 }
 
-const WORKFLOW_DEFINITION: &str = concat!(
-    r#"{"initial_state": "open", "transitions": {"blocked": ["open", "in_progress", "wont_do"], "#,
-    r#""done": ["open"], "in_progress": ["review", "blocked", "open", "wont_do"], "#,
-    r#""open": ["in_progress", "blocked", "wont_do"], "#,
-    r#""review": ["done", "in_progress", "blocked", "wont_do"], "wont_do": ["open"]}}"#,
-);
-const WORK_KINDS: [&str; 4] = ["feature", "bug", "chore", "question"];
-
-/// Whether a query finds a row. Only a confirmed "no rows" is `false`; any
-/// other failure propagates so a caller never treats a broken lookup as absent.
-fn row_exists(
-    conn: &rusqlite::Connection,
-    sql: &str,
-    params: impl rusqlite::Params,
-) -> rusqlite::Result<bool> {
-    use rusqlite::OptionalExtension;
-
-    conn.query_row(sql, params, |_| Ok(()))
-        .optional()
-        .map(|row| row.is_some())
-}
-
-/// Insert the machine for each kind the lookup confirms absent. A failed lookup
-/// is an error and inserts nothing further.
-fn seed_kinds(
-    conn: &rusqlite::Connection,
-    at: &str,
-    exists: impl Fn(&rusqlite::Connection, &str) -> rusqlite::Result<bool>,
-) -> rusqlite::Result<()> {
-    for kind in WORK_KINDS {
-        if exists(conn, kind)? {
-            continue;
-        }
-        conn.execute(
-            "INSERT INTO workflow_defs (kind, definition, updated_at) VALUES (?1, ?2, ?3)",
-            rusqlite::params![kind, WORKFLOW_DEFINITION, at],
-        )?;
-    }
-    Ok(())
-}
-
-/// The machine every kind starts with. Python seeds it after every migrate, so
-/// a fresh instance and an upgraded one both carry the rows. An existing kind
-/// is left untouched.
 fn seed_workflows(data_dir: &Path, at: &str) -> Result<(), migrator::MigrateError> {
-    let conn = crate::storage::sqlite::connection::connect(&declared_path(data_dir))?;
-    conn.execute("BEGIN IMMEDIATE", [])?;
-    let written = seed_kinds(&conn, at, |conn, kind| {
-        row_exists(
-            conn,
-            "SELECT 1 FROM workflow_defs WHERE kind = ?1",
-            rusqlite::params![kind],
-        )
-    });
-    match written {
-        Ok(()) => conn.execute("COMMIT", []).map(|_| ()).map_err(Into::into),
-        Err(err) => {
-            let _ = conn.execute("ROLLBACK", []);
-            Err(err.into())
-        }
-    }
+    crate::storage::sqlite::instance_store::seed_workflows(&declared_path(data_dir), at)
 }
 
 fn pending_in(
@@ -212,22 +153,10 @@ fn pending_in(
 
 const INIT_OPERATION: &str = "instance.init";
 const INIT_REASON: &str = "instance bootstrap";
-const EMPTY_DIGEST: &str =
-    "sha256:0000000000000000000000000000000000000000000000000000000000000000";
 
 /// The instance id a previous init wrote. Empty when the database carries none.
 fn instance_id_of(data_dir: &Path) -> Result<String, migrator::MigrateError> {
-    let conn = crate::storage::sqlite::connection::connect(&declared_path(data_dir))?;
-    use rusqlite::OptionalExtension;
-
-    Ok(conn
-        .query_row(
-            "SELECT value FROM meta WHERE key = 'instance_id'",
-            [],
-            |row| row.get(0),
-        )
-        .optional()?
-        .unwrap_or_default())
+    crate::storage::sqlite::instance_store::instance_id_of(&declared_path(data_dir))
 }
 
 /// The instance id, the initiating actor and one audit row. A database that
@@ -237,76 +166,30 @@ fn bootstrap(
     clock: &mut Option<crate::core::StepClock>,
     ids: &mut Option<SequentialIds>,
 ) -> Result<String, migrator::MigrateError> {
-    use rusqlite::params;
+    use crate::storage::sqlite::instance_store as store;
 
-    let conn = crate::storage::sqlite::connection::connect(&declared_path(data_dir))?;
-    use rusqlite::OptionalExtension;
-
-    let existing: Option<String> = conn
-        .query_row(
-            "SELECT value FROM meta WHERE key = 'instance_id'",
-            [],
-            |row| row.get(0),
-        )
-        .optional()?;
-    if let Some(instance_id) = existing {
+    let path = declared_path(data_dir);
+    if let Some(instance_id) = store::instance_id_opt(&path)? {
         return Ok(instance_id);
     }
-    let user = crate::core::os_user();
     let next = |ids: &mut Option<SequentialIds>, prefix: &str| -> String {
         match ids {
             Some(factory) => factory.next(prefix),
             None => crate::core::fresh_id(prefix),
         }
     };
-    let instance_id = next(ids, "ins");
-    let actor_id = next(ids, "act");
-    let audit_id = next(ids, "aud");
-    let txn_id = next(ids, "txn");
-    let at = stamp(clock);
-    conn.execute("BEGIN IMMEDIATE", [])?;
-    let written = (|| -> rusqlite::Result<()> {
-        for (key, value) in [
-            ("instance_id", instance_id.as_str()),
-            ("revision", "0"),
-            ("work_ref_seq", "0"),
-            ("created_at", at.as_str()),
-        ] {
-            conn.execute(
-                "INSERT INTO meta (key, value) VALUES (?1, ?2)",
-                params![key, value],
-            )?;
-        }
-        conn.execute(
-            "INSERT INTO actors (id, kind, display_name, identity_ref, disabled, created_at)
-             VALUES (?1, 'human', ?2, ?3, 0, ?4)",
-            params![actor_id, &user, format!("local:{user}"), &at],
-        )?;
-        conn.execute(
-            "INSERT INTO audit (id, txn_id, revision, actor_id, operation, entity_kind,
-                                entity_id, reason, payload_digest, at)
-             VALUES (?1, ?2, 0, ?3, ?4, 'instance', ?5, ?6, ?7, ?8)",
-            params![
-                audit_id,
-                txn_id,
-                actor_id,
-                INIT_OPERATION,
-                instance_id,
-                INIT_REASON,
-                EMPTY_DIGEST,
-                at
-            ],
-        )?;
-        Ok(())
-    })();
-    match written {
-        Ok(()) => conn.execute("COMMIT", []).map(|_| ())?,
-        Err(err) => {
-            let _ = conn.execute("ROLLBACK", []);
-            return Err(err.into());
-        }
-    }
-    Ok(instance_id)
+    let ids = store::NewInstance {
+        user: crate::core::os_user(),
+        instance_id: next(ids, "ins"),
+        actor_id: next(ids, "act"),
+        audit_id: next(ids, "aud"),
+        txn_id: next(ids, "txn"),
+        at: stamp(clock),
+        operation: INIT_OPERATION,
+        reason: INIT_REASON,
+    };
+    store::write_instance(&path, &ids)?;
+    Ok(ids.instance_id)
 }
 
 /// Stamp the observed store with the instance it belongs to. The two stores are
@@ -319,33 +202,11 @@ fn bind_instance(
     instance_id: &str,
     clock: &mut Option<crate::core::StepClock>,
 ) -> Result<(), migrator::MigrateError> {
-    use rusqlite::params;
-
-    let conn = crate::storage::sqlite::connection::connect(&observed_path(data_dir))?;
-    let exists = row_exists(&conn, "SELECT 1 FROM meta WHERE key = 'instance_id'", [])?;
-    if exists {
-        return Ok(());
-    }
-    let at = stamp(clock);
-    conn.execute("BEGIN IMMEDIATE", [])?;
-    let written = (|| -> rusqlite::Result<()> {
-        conn.execute(
-            "INSERT INTO meta (key, value) VALUES ('instance_id', ?1)",
-            params![instance_id],
-        )?;
-        conn.execute(
-            "INSERT INTO meta (key, value) VALUES ('created_at', ?1)",
-            params![at],
-        )?;
-        Ok(())
-    })();
-    match written {
-        Ok(()) => conn.execute("COMMIT", []).map(|_| ()).map_err(Into::into),
-        Err(err) => {
-            let _ = conn.execute("ROLLBACK", []);
-            Err(err.into())
-        }
-    }
+    crate::storage::sqlite::instance_store::bind_instance(
+        &observed_path(data_dir),
+        instance_id,
+        || stamp(clock),
+    )
 }
 
 /// `mcp.stdio`, as the registry calls it. Ports `serve_mcp_stdio`.
@@ -1038,60 +899,5 @@ mod diagnostics_tests {
             message.contains("no instance in this data directory"),
             "{message}"
         );
-    }
-}
-
-#[cfg(test)]
-mod seed_tests {
-    use super::{row_exists, seed_kinds, WORK_KINDS};
-
-    fn store() -> rusqlite::Connection {
-        let conn = rusqlite::Connection::open_in_memory().expect("open");
-        conn.execute(
-            "CREATE TABLE workflow_defs (kind TEXT PRIMARY KEY, definition TEXT, updated_at TEXT)",
-            [],
-        )
-        .expect("create");
-        conn
-    }
-
-    fn count(conn: &rusqlite::Connection) -> i64 {
-        conn.query_row("SELECT COUNT(*) FROM workflow_defs", [], |r| r.get(0))
-            .expect("count")
-    }
-
-    #[test]
-    fn failed_lookup_is_an_error_and_inserts_nothing() {
-        let conn = store();
-        let result = seed_kinds(&conn, "t", |_, _| {
-            Err(rusqlite::Error::SqliteFailure(
-                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
-                None,
-            ))
-        });
-        assert!(result.is_err());
-        assert_eq!(count(&conn), 0);
-    }
-
-    #[test]
-    fn confirmed_absent_inserts_and_present_is_kept() {
-        let conn = store();
-        let lookup = |c: &rusqlite::Connection, k: &str| {
-            row_exists(
-                c,
-                "SELECT 1 FROM workflow_defs WHERE kind = ?1",
-                rusqlite::params![k],
-            )
-        };
-        seed_kinds(&conn, "t", lookup).expect("seed");
-        assert_eq!(count(&conn), WORK_KINDS.len() as i64);
-        seed_kinds(&conn, "t", lookup).expect("reseed");
-        assert_eq!(count(&conn), WORK_KINDS.len() as i64);
-    }
-
-    #[test]
-    fn row_exists_propagates_a_broken_query() {
-        let conn = store();
-        assert!(row_exists(&conn, "SELECT 1 FROM missing_table", []).is_err());
     }
 }
