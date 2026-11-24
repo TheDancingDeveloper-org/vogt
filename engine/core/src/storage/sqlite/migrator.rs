@@ -446,10 +446,43 @@ mod tests {
     use super::*;
     use crate::storage::sqlite::connection::connect_with;
 
+    /// While the Python tree still carries a copy, it must be byte-identical
+    /// so checksums (and existing databases) stay valid.
+    #[test]
+    fn the_python_copy_is_byte_identical_when_present() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("migrations");
+        let py = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../src/vogt/storage/sqlite/migrations");
+        if !py.exists() {
+            return;
+        }
+        for store in ["declared", "observed"] {
+            let mut names: Vec<_> = std::fs::read_dir(root.join(store))
+                .unwrap()
+                .map(|e| e.unwrap().file_name())
+                .collect();
+            names.sort();
+            let mut other: Vec<_> = std::fs::read_dir(py.join(store))
+                .unwrap()
+                .map(|e| e.unwrap().file_name())
+                .filter(|n| n.to_string_lossy().ends_with(".sql"))
+                .collect();
+            other.sort();
+            names.retain(|n| n.to_string_lossy().ends_with(".sql"));
+            assert_eq!(names, other, "{store} file lists differ");
+            for n in names {
+                assert_eq!(
+                    std::fs::read(root.join(store).join(&n)).unwrap(),
+                    std::fs::read(py.join(store).join(&n)).unwrap(),
+                    "{store}/{n:?} differs"
+                );
+            }
+        }
+    }
+
     #[test]
     fn the_embedded_sql_matches_the_checkout() {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../src/vogt/storage/sqlite/migrations");
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("migrations");
         for (store, pairs) in [
             ("declared", embedded::DECLARED),
             ("observed", embedded::OBSERVED),
@@ -789,8 +822,7 @@ mod tests {
     fn a_main_schema_30_database_opens_without_reapplying_migrations() {
         let dir = scratch("main-schema-30");
         let path = dir.join("declared.sqlite3");
-        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../src/vogt/storage/sqlite/migrations/declared");
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("migrations/declared");
         // The fixture is the whole tree; the version is read from it, not pinned.
         let mut conn = connect(&path).unwrap();
         migrate(&mut conn, "declared", Some(&source), "main/1", NOW).unwrap();
@@ -836,8 +868,7 @@ mod tests {
         // backfills, rather than as a branch named "".
         let dir = scratch("default-branch-upgrade");
         let path = dir.join("declared.sqlite3");
-        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../src/vogt/storage/sqlite/migrations/declared");
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("migrations/declared");
         let mut conn = connect(&path).unwrap();
         migrate(&mut conn, "declared", Some(&source), "main/1", NOW).unwrap();
         // Put the database back at schema 30: no 0031 column and no 0031 record.

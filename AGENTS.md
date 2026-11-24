@@ -156,7 +156,10 @@ becomes a typed, useful domain error rather than a foreign-key failure.
 - Change the storage protocol first, then the SQLite implementation. Do not
   reach around `DeclaredStore`, `ObservedStore`, or `WriteTxn` from a service.
 - Migrations are forward-only SQL under
-  `src/vogt/storage/sqlite/migrations/{declared,observed}/`. Never edit,
+  `engine/core/migrations/{declared,observed}/` (canonical, embedded by
+  `engine/core/src/storage/sqlite/embedded.rs`; the Python tree keeps a
+  byte-identical copy in `src/vogt/storage/sqlite/migrations/` until WI-2505,
+  enforced by `tests/test_migration_parity.py` and a Rust test). Never edit,
   rename, reorder, or delete a migration that may have shipped; append the next
   numbered migration.
 - Cover both a fresh database and an upgrade carrying old data. Add the
