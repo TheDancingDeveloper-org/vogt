@@ -231,7 +231,7 @@ generated; the **REST** routes under `/api` are generated with their schemas
 in the OpenAPI document at `/openapi.json`; and the **MCP** tool list is
 generated, one tool per operation, named for it (`work.get` is `work_get`).
 The **PWA** is a client: `web/src/vogtApi.ts` names each path it uses after
-the operation that serves it, and `tests/test_pwa.py` resolves every entry
+the operation that serves it, and `web/scripts/check-route-map.mjs` resolves every entry
 against the registry, so a view cannot grow an endpoint of its own.
 
 There are no path parameters: `HttpRoute` is a method and a literal path, and

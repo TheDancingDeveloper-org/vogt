@@ -132,7 +132,7 @@ References to `client/` or `docs/engine/` are stale.
    must be explicit and justified there.
 6. Add service/domain tests and registry/schema/auth tests appropriate to the
    change. If the PWA consumes it, update `web/src/vogtApi.ts` and the contract
-   assertions in `tests/test_pwa.py` as well as the relevant UI test.
+   assertions in `web/scripts/check-route-map.mjs` as well as the relevant UI test.
 
 Callers use human identifiers — `WI-7`, project slugs, actor `identity_ref`s.
 Resolve them through `application/services/_resolve.py` so invalid input
@@ -204,8 +204,8 @@ a finding is not evidence that a collector ran and found nothing.
   together.
 - Core-backed PWA routes are named by operation in `web/src/vogtApi.ts` and
   traverse the engine's `/api/vogt` front door. Do not create a browser-only
-  product operation or let the GUI bypass the registry. `tests/test_pwa.py`
-  checks the route map against the Python registry and engine router.
+  product operation or let the GUI bypass the registry. `web/scripts/check-route-map.mjs`
+  checks the route map against the registry manifest and engine router.
 - Preserve honest unavailable states. A missing core, engine, provider, token,
   or collector is rendered as unavailable/not configured/not collected, not
   as an empty successful result.
