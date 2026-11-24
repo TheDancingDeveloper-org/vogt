@@ -132,6 +132,10 @@ pub const DECLARED: &[(&str, &str)] = &[
         "0031_project_default_branch",
         include_str!("../../../migrations/declared/0031_project_default_branch.sql"),
     ),
+    (
+        "0032_work_created_index",
+        include_str!("../../../migrations/declared/0032_work_created_index.sql"),
+    ),
 ];
 
 pub const OBSERVED: &[(&str, &str)] = &[
