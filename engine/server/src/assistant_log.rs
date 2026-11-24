@@ -188,7 +188,7 @@ impl AssistantLog {
     /// Open (creating if absent) the log database under `state_dir`.
     pub async fn new(state_dir: &Path) -> Result<Self> {
         std::fs::create_dir_all(state_dir)
-            .map_err(|e| ApiError::Internal(format!("failed to create assistant log dir: {e}")))?;
+            .map_err(|e| ApiError::internal_src("failed to create assistant log dir", e))?;
         let db_path = state_dir.join("assistant-log.db");
         let options = SqliteConnectOptions::new()
             .filename(&db_path)
@@ -197,9 +197,7 @@ impl AssistantLog {
             .max_connections(5)
             .connect_with(options)
             .await
-            .map_err(|e| {
-                ApiError::Internal(format!("failed to connect to assistant log db: {e}"))
-            })?;
+            .map_err(|e| ApiError::internal_src("failed to connect to assistant log db", e))?;
         let log = Self { pool, db_path };
         log.init_schema().await?;
         Ok(log)
@@ -224,16 +222,16 @@ impl AssistantLog {
         )
         .execute(&self.pool)
         .await
-        .map_err(|e| ApiError::Internal(format!("failed to create entries table: {e}")))?;
+        .map_err(|e| ApiError::internal_src("failed to create entries table", e))?;
 
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_entries_at ON entries(at)")
             .execute(&self.pool)
             .await
-            .map_err(|e| ApiError::Internal(format!("failed to create at index: {e}")))?;
+            .map_err(|e| ApiError::internal_src("failed to create at index", e))?;
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_entries_actor ON entries(actor)")
             .execute(&self.pool)
             .await
-            .map_err(|e| ApiError::Internal(format!("failed to create actor index: {e}")))?;
+            .map_err(|e| ApiError::internal_src("failed to create actor index", e))?;
 
         Ok(())
     }
@@ -242,9 +240,9 @@ impl AssistantLog {
     pub async fn record(&self, actor: &str, event: LogEvent) -> Result<()> {
         let at = OffsetDateTime::now_utc()
             .format(&time::format_description::well_known::Rfc3339)
-            .map_err(|e| ApiError::Internal(format!("time format error: {e}")))?;
+            .map_err(|e| ApiError::internal_src("time format error", e))?;
         let payload = serde_json::to_string(&event.payload())
-            .map_err(|e| ApiError::Internal(format!("failed to encode log payload: {e}")))?;
+            .map_err(|e| ApiError::internal_src("failed to encode log payload", e))?;
         sqlx::query(
             r#"
             INSERT INTO entries (at, actor, kind, direction, payload)
@@ -258,7 +256,7 @@ impl AssistantLog {
         .bind(payload)
         .execute(&self.pool)
         .await
-        .map_err(|e| ApiError::Internal(format!("failed to record log entry: {e}")))?;
+        .map_err(|e| ApiError::internal_src("failed to record log entry", e))?;
         Ok(())
     }
 
@@ -298,7 +296,7 @@ impl AssistantLog {
                 .await
             }
         }
-        .map_err(|e| ApiError::Internal(format!("failed to read assistant log: {e}")))?;
+        .map_err(|e| ApiError::internal_src("failed to read assistant log", e))?;
 
         let mut entries = Vec::with_capacity(rows.len());
         for row in rows {
@@ -320,7 +318,7 @@ impl AssistantLog {
         let row = sqlx::query("SELECT COUNT(*) AS count FROM entries")
             .fetch_one(&self.pool)
             .await
-            .map_err(|e| ApiError::Internal(format!("failed to count log entries: {e}")))?;
+            .map_err(|e| ApiError::internal_src("failed to count log entries", e))?;
         Ok(row.get::<i64, _>("count") as u64)
     }
 
@@ -331,12 +329,12 @@ impl AssistantLog {
         let cutoff = OffsetDateTime::now_utc() - time::Duration::days(retention_days as i64);
         let cutoff_str = cutoff
             .format(&time::format_description::well_known::Rfc3339)
-            .map_err(|e| ApiError::Internal(format!("time format error: {e}")))?;
+            .map_err(|e| ApiError::internal_src("time format error", e))?;
         let result = sqlx::query("DELETE FROM entries WHERE at < ?")
             .bind(cutoff_str)
             .execute(&self.pool)
             .await
-            .map_err(|e| ApiError::Internal(format!("assistant log cleanup failed: {e}")))?;
+            .map_err(|e| ApiError::internal_src("assistant log cleanup failed", e))?;
         Ok(result.rows_affected() as usize)
     }
 }
