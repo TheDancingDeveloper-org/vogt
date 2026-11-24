@@ -234,7 +234,7 @@ impl VogtCore {
         Some(Arc::new(Self {
             client,
             base,
-            fallback_token: cfg.vogt_core_token.clone(),
+            fallback_token: crate::secret::expose_opt(&cfg.vogt_core_token).map(str::to_string),
             public_url: cfg.public_url.clone(),
             heavy_in_flight: Arc::new(tokio::sync::Semaphore::new(HEAVY_READS_IN_FLIGHT)),
             light_in_flight: Arc::new(tokio::sync::Semaphore::new(LIGHT_READS_IN_FLIGHT)),

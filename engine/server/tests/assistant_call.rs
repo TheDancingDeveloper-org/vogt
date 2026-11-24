@@ -199,7 +199,7 @@ fn test_config(stub: &str) -> Config {
         host_placement: Default::default(),
         session_default_backend: "local".into(),
         bind: "127.0.0.1:0".parse().unwrap(),
-        token: Some(TEST_TOKEN.to_string()),
+        token: Some(TEST_TOKEN.into()),
         token_mutating_request_limit_per_minute: 600,
         scrollback_bytes: 64 * 1024,
         default_shell: "/bin/bash".to_string(),
@@ -432,7 +432,7 @@ async fn setup_with_core(stubs: Stubs) -> (String, Shared) {
     let stub = stub_server(Arc::clone(&stubs)).await;
     let mut cfg = test_config(&stub);
     cfg.vogt_core_url = Some(stub.trim_end_matches("/v1").to_string());
-    cfg.vogt_core_token = Some("stack-secret-for-the-stub-core".to_string());
+    cfg.vogt_core_token = Some("stack-secret-for-the-stub-core".into());
     let addr = boot(cfg).await;
     (addr, stubs)
 }

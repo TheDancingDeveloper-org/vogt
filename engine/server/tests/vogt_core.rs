@@ -178,7 +178,7 @@ fn base_config() -> Config {
         host_placement: Default::default(),
         session_default_backend: "local".into(),
         bind: "127.0.0.1:0".parse().unwrap(),
-        token: Some(TEST_TOKEN.to_string()),
+        token: Some(TEST_TOKEN.into()),
         token_mutating_request_limit_per_minute: 600,
         scrollback_bytes: 64 * 1024,
         default_shell: "/bin/bash".to_string(),
@@ -285,7 +285,7 @@ async fn front_door() -> (String, Log) {
     let (core_url, log) = stand_in_core().await;
     let mut cfg = base_config();
     cfg.vogt_core_url = Some(core_url);
-    cfg.vogt_core_token = Some(CORE_TOKEN.to_string());
+    cfg.vogt_core_token = Some(CORE_TOKEN.into());
     (boot(cfg).await, log)
 }
 
@@ -646,7 +646,7 @@ async fn a_logout_forgets_the_caller_at_once() {
 async fn a_core_outage_is_503_not_401() {
     let mut cfg = base_config();
     cfg.vogt_core_url = Some("http://127.0.0.1:1".to_string());
-    cfg.vogt_core_token = Some(CORE_TOKEN.to_string());
+    cfg.vogt_core_token = Some(CORE_TOKEN.into());
     let base = boot(cfg).await;
     let res = client()
         .get(format!("{base}/api/sessions"))
@@ -883,7 +883,7 @@ async fn an_unreachable_core_is_reported_without_declaring_this_pod_unready() {
     // A port nothing is listening on. Reserved-for-testing address space, so
     // this cannot accidentally reach a real service.
     cfg.vogt_core_url = Some("http://127.0.0.1:1".to_string());
-    cfg.vogt_core_token = Some(CORE_TOKEN.to_string());
+    cfg.vogt_core_token = Some(CORE_TOKEN.into());
     let base = boot(cfg).await;
 
     let res = client().get(format!("{base}/readyz")).send().await.unwrap();
@@ -915,7 +915,7 @@ async fn an_unreachable_core_answers_502_and_says_so() {
     cfg.vogt_core_url = Some("http://127.0.0.1:1".to_string());
     // A credential to inject, so this test is about the hop failing and not
     // about the front door having nothing to present.
-    cfg.vogt_core_token = Some(CORE_TOKEN.to_string());
+    cfg.vogt_core_token = Some(CORE_TOKEN.into());
     let base = boot(cfg).await;
 
     let res = client()
@@ -1061,7 +1061,7 @@ async fn the_core_s_changes_are_republished_on_this_server_s_stream() {
 
     let mut cfg = base_config();
     cfg.vogt_core_url = Some(core_url);
-    cfg.vogt_core_token = Some(CORE_TOKEN.to_string());
+    cfg.vogt_core_token = Some(CORE_TOKEN.into());
     let (router, state) = vogt_engine_server::app::router(cfg).await;
     drop(router);
 
@@ -1110,7 +1110,7 @@ async fn the_follower_does_not_replay_history_at_boot() {
 
     let mut cfg = base_config();
     cfg.vogt_core_url = Some(core_url);
-    cfg.vogt_core_token = Some(CORE_TOKEN.to_string());
+    cfg.vogt_core_token = Some(CORE_TOKEN.into());
     let (router, state) = vogt_engine_server::app::router(cfg).await;
     drop(router);
 
@@ -1389,7 +1389,7 @@ async fn front_door_with_a_public_url() -> (String, Log) {
     let (core_url, log) = stand_in_core().await;
     let mut cfg = base_config();
     cfg.vogt_core_url = Some(core_url);
-    cfg.vogt_core_token = Some(CORE_TOKEN.to_string());
+    cfg.vogt_core_token = Some(CORE_TOKEN.into());
     cfg.public_url = Some(DOOR_URL.to_string());
     (boot(cfg).await, log)
 }

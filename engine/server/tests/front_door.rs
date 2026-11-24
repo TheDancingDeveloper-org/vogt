@@ -316,7 +316,7 @@ async fn door() -> Door {
 async fn serve_engine(core_url: &str) -> String {
     let mut cfg = base_config();
     cfg.vogt_core_url = Some(core_url.to_string());
-    cfg.vogt_core_token = Some(STACK_SECRET.to_string());
+    cfg.vogt_core_token = Some(STACK_SECRET.into());
     let (router, _state) = router(cfg).await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -550,7 +550,7 @@ fn base_config() -> Config {
         host_placement: Default::default(),
         session_default_backend: "local".into(),
         bind: "127.0.0.1:0".parse().unwrap(),
-        token: Some(BREAK_GLASS.to_string()),
+        token: Some(BREAK_GLASS.into()),
         token_mutating_request_limit_per_minute: 600,
         scrollback_bytes: 64 * 1024,
         default_shell: "/bin/bash".to_string(),
