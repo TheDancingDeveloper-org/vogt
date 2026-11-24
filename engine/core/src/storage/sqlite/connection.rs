@@ -106,3 +106,62 @@ pub fn split_statements(script: &str) -> Vec<String> {
     }
     statements
 }
+
+/// A read-only connection that never takes the write lock or creates the file.
+/// Any failure (missing file, locked database) is an `Err` the caller may treat
+/// as "no data".
+pub fn open_read_only(path: &Path) -> rusqlite::Result<Connection> {
+    Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+}
+
+/// Open a backup file by `file:` URI, read-only. The caller builds the URI
+/// (`mode=ro&immutable=1`) so that checking a backup never writes -wal/-shm.
+pub fn open_read_only_uri(uri: &str) -> rusqlite::Result<Connection> {
+    Connection::open_with_flags(
+        uri,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+    )
+}
+
+/// Newest session report per engine session: `(kind, summary, data,
+/// engine_session_id)`. A missing table or a locked database is no rows.
+pub fn latest_report_rows(
+    path: &Path,
+    wanted: &[&str],
+) -> Vec<(String, String, String, Option<String>)> {
+    let Ok(conn) = open_read_only(path) else {
+        return Vec::new();
+    };
+    let placeholders = std::iter::repeat_n("?", wanted.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT kind, summary, data, engine_session_id FROM (
+            SELECT r.kind, r.summary, r.data, r.engine_session_id,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY engine_session_id
+                       ORDER BY created_at DESC, id DESC
+                   ) AS rn
+            FROM session_reports r
+            WHERE engine_session_id IN ({placeholders})
+        ) WHERE rn = 1"
+    );
+    let Ok(mut stmt) = conn.prepare(&sql) else {
+        return Vec::new();
+    };
+    let rows = stmt.query_map(rusqlite::params_from_iter(wanted.iter()), |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, Option<String>>(3)?,
+        ))
+    });
+    let Ok(rows) = rows else {
+        return Vec::new();
+    };
+    rows.flatten().collect()
+}
