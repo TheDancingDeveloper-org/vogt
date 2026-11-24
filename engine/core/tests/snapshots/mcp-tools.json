@@ -4054,6 +4054,12 @@
             "title": "Fields",
             "type": "array"
           },
+          "starters_only": {
+            "default": false,
+            "description": "Answer from the declared table only: each session's `id` plus the starter columns named in `fields` (`engine_session_id`, `started_by_session`), with no engine call. Needs `mode=full`; sessions with no starter are not listed.",
+            "title": "Starters Only",
+            "type": "boolean"
+          },
           "started_by_session": {
             "anyOf": [
               {

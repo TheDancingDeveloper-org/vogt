@@ -2,10 +2,26 @@
 // nesting must work past the first page, not only for the first 50 sessions.
 
 import { describe, expect, it, vi } from "vitest";
-import { readAllStarters, STARTERS_MAX_PAGES, STARTERS_PAGE_SIZE } from "../railStarters";
+import * as vogtApi from "../vogtApi";
+import { fetchStartersPage, readAllStarters, STARTERS_MAX_PAGES, STARTERS_PAGE_SIZE } from "../railStarters";
 
 const link = (child: string, starter: string | null) =>
   ({ id: `ses_${child}`, engine_session_id: child, started_by_session: starter }) as never;
+
+describe("fetchStartersPage", () => {
+  it("asks for the starters path explicitly, not by the shape of `fields` (WI-4543)", async () => {
+    const list = vi
+      .spyOn(vogtApi, "listSessions")
+      .mockResolvedValue({ sessions: [], truncated: false } as never);
+    await fetchStartersPage(0, 500);
+    expect(list.mock.calls[0]![0]).toMatchObject({
+      mode: "full",
+      starters_only: true,
+      fields: ["engine_session_id", "started_by_session"],
+    });
+    list.mockRestore();
+  });
+});
 
 describe("readAllStarters", () => {
   it("reads every page the engine says is truncated", async () => {
