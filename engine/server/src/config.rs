@@ -54,7 +54,8 @@ pub struct AssistantProfile {
     pub base_url: String,
     /// Server-side only. Never advertised — `/api/config` carries names and
     /// models so a client can offer a choice, and nothing that could spend it.
-    pub api_key: String,
+    #[serde(serialize_with = "crate::secret::serialize_exposed")]
+    pub api_key: crate::secret::Secret<String>,
     pub model: String,
     #[serde(default)]
     pub reasoning_effort: Option<String>,
@@ -386,7 +387,7 @@ pub struct Config {
     /// capability, no actor of its own: its Vogt calls are attributed to the
     /// stack secret's actor. A deployment whose people all have a password
     /// login leaves it unset, and then every credential is a core token.
-    pub token: Option<String>,
+    pub token: Option<crate::secret::Secret<String>>,
     pub token_mutating_request_limit_per_minute: u32,
     pub scrollback_bytes: usize,
     pub default_shell: String,
@@ -523,7 +524,7 @@ pub struct Config {
     /// Bearer key for the assistant's LLM backend. Sourced from
     /// `ENGINE_ASSISTANT_API_KEY` env or config file. Empty disables the
     /// assistant surface entirely (routes 404, PWA hides the tab).
-    pub assistant_api_key: Option<String>,
+    pub assistant_api_key: Option<crate::secret::Secret<String>>,
     /// OpenAI-compatible base URL for the assistant backend.
     pub assistant_base_url: String,
     /// Model id sent to the assistant backend.
@@ -589,7 +590,7 @@ pub struct Config {
     /// `whisper-1`; TTS `http://127.0.0.1:8880/v1,https://api.openai.com/v1`
     /// with model `tts-1-hd` and voice `nova`.
     pub assistant_stt_base_urls: Vec<String>,
-    pub assistant_stt_api_key: Option<String>,
+    pub assistant_stt_api_key: Option<crate::secret::Secret<String>>,
     /// Transcription model sent to `/audio/transcriptions`. Defaults to
     /// `whisper-1` (voicemode's OpenAI transcription model; a local Whisper.cpp
     /// server serving `large-v2` answers the same OpenAI-compatible route).
@@ -601,7 +602,7 @@ pub struct Config {
     /// may override it per upload.
     pub assistant_stt_language: String,
     pub assistant_tts_base_urls: Vec<String>,
-    pub assistant_tts_api_key: Option<String>,
+    pub assistant_tts_api_key: Option<crate::secret::Secret<String>>,
     /// Speech model sent to `/audio/speech`. Defaults to `tts-1-hd` (voicemode).
     pub assistant_tts_model: String,
     /// Voice name sent to `/audio/speech`; `/audio/speech` requires one.
@@ -691,7 +692,7 @@ pub struct Config {
     /// session, presents it on the event feed it follows, and lends it to
     /// the break-glass `token` for `/api/vogt`. Server-side only: a browser
     /// holds a session minted by a password login, never this.
-    pub vogt_core_token: Option<String>,
+    pub vogt_core_token: Option<crate::secret::Secret<String>>,
     /// Where the runtime-pinned agent CLIs live and how they are moved:
     /// the root, the installer, the image's tool table and resolved pins. Read
     /// from the same `VOGT_AGENT_CLI_*` variables the shell half honours, so
@@ -1299,7 +1300,7 @@ pub fn load(
     )?;
     let mut config = Config {
         bind,
-        token,
+        token: token.map(Into::into),
         token_mutating_request_limit_per_minute,
         scrollback_bytes: parse_usize_env("ENGINE_SCROLLBACK_BYTES")?
             .or(from_file.scrollback_bytes)
@@ -1373,7 +1374,7 @@ pub fn load(
         session_default_backend,
         pod_backends_enabled,
         host_placement,
-        assistant_api_key,
+        assistant_api_key: assistant_api_key.map(Into::into),
         assistant_base_url: resolve_assistant_base_url(
             from_file.assistant_base_url,
             assistant_key_present,
@@ -1413,7 +1414,7 @@ pub fn load(
             .or(from_file.history_live_scan_bytes)
             .unwrap_or(256 * 1024),
         assistant_stt_base_urls,
-        assistant_stt_api_key,
+        assistant_stt_api_key: assistant_stt_api_key.map(Into::into),
         assistant_stt_model: file_or_env_nonblank(
             from_file.assistant_stt_model,
             "ENGINE_ASSISTANT_STT_MODEL",
@@ -1426,7 +1427,7 @@ pub fn load(
             .trim()
             .to_string(),
         assistant_tts_base_urls,
-        assistant_tts_api_key,
+        assistant_tts_api_key: assistant_tts_api_key.map(Into::into),
         assistant_tts_model: file_or_env_nonblank(
             from_file.assistant_tts_model,
             "ENGINE_ASSISTANT_TTS_MODEL",
@@ -1508,7 +1509,9 @@ pub fn load(
             .vogt_core_url
             .or_else(|| std::env::var("VOGT_CORE_URL").ok())
             .filter(|s| !s.trim().is_empty()),
-        vogt_core_token: vogt_core_token.filter(|s| !s.trim().is_empty()),
+        vogt_core_token: vogt_core_token
+            .filter(|s| !s.trim().is_empty())
+            .map(Into::into),
         agent_clis: crate::agent_clis::AgentCliPaths::from_env(),
         hibernation: hibernation_policy_from_env()?,
         session_list_retain_after: session_list_retain_from_env()?,
@@ -2432,7 +2435,7 @@ fn validate_assistant_profiles(
                 "assistant profile {name:?} has no base_url"
             )));
         }
-        if profile.api_key.trim().is_empty() {
+        if profile.api_key.expose().trim().is_empty() {
             return Err(ApiError::Config(format!(
                 "assistant profile {name:?} has no api_key"
             )));
@@ -2838,7 +2841,7 @@ mod tests {
         type Break = fn(&mut AssistantProfile);
         let cases: [(&str, Break); 3] = [
             ("base_url", |p| p.base_url = "  ".into()),
-            ("api_key", |p| p.api_key = String::new()),
+            ("api_key", |p| p.api_key = String::new().into()),
             ("model", |p| p.model = String::new()),
         ];
         for (field, mutate) in cases {
@@ -3062,7 +3065,7 @@ mod prefix_tests {
         }
         let cfg = load(Some(&cfg_path), None, None).unwrap();
         assert_eq!(
-            cfg.token.as_deref(),
+            crate::secret::expose_opt(&cfg.token),
             Some("engine-primary-token-0123456789")
         );
         assert_eq!(cfg.bind.port(), 9001);
@@ -3074,7 +3077,10 @@ mod prefix_tests {
             Some("cli-flag-token-0123456789".to_string()),
         )
         .unwrap();
-        assert_eq!(cfg.token.as_deref(), Some("cli-flag-token-0123456789"));
+        assert_eq!(
+            crate::secret::expose_opt(&cfg.token),
+            Some("cli-flag-token-0123456789")
+        );
 
         // WI-1354: the image bakes the fork, so a fresh Codex launch is pinned
         // unless the deployment opts out. The old default (false) left a fresh

@@ -26,7 +26,7 @@ fn test_config() -> Config {
         host_placement: Default::default(),
         session_default_backend: "local".into(),
         bind: "127.0.0.1:0".parse().unwrap(),
-        token: Some(TEST_TOKEN.to_string()),
+        token: Some(TEST_TOKEN.into()),
         token_mutating_request_limit_per_minute: 600,
         scrollback_bytes: 64 * 1024,
         default_shell: "/bin/bash".to_string(),
@@ -20181,7 +20181,7 @@ async fn llm_provider_handlers_refuse_a_non_admin_identity() {
     cfg.vogt_core_url = Some(
         stand_in_core_knowing(vec![(TEST_TOKEN, "agent:provider-test", vec!["sessions"])]).await,
     );
-    cfg.vogt_core_token = Some("stack-secret-provider-test".to_string());
+    cfg.vogt_core_token = Some("stack-secret-provider-test".into());
     cfg.llm_providers_file = Some(tmp.path().join("llm-providers.toml"));
     let (base, _state, _guard) = boot_with_state(cfg).await;
     let response = reqwest::Client::new()

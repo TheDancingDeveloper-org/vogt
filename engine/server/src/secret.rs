@@ -28,6 +28,18 @@ impl<T> From<T> for Secret<T> {
     }
 }
 
+impl From<&str> for Secret<String> {
+    fn from(value: &str) -> Self {
+        Self(value.to_string())
+    }
+}
+
+/// The text of an optional secret string, for the few places that compare or
+/// send it.
+pub fn expose_opt(secret: &Option<Secret<String>>) -> Option<&str> {
+    secret.as_ref().map(|s| s.expose().as_str())
+}
+
 impl<T> std::fmt::Debug for Secret<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("[redacted]")

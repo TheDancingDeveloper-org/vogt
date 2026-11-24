@@ -179,7 +179,7 @@ fn base_config() -> Config {
         host_placement: Default::default(),
         session_default_backend: "local".into(),
         bind: "127.0.0.1:0".parse().unwrap(),
-        token: Some(SECRET.to_string()),
+        token: Some(SECRET.into()),
         token_mutating_request_limit_per_minute: 600,
         scrollback_bytes: 64 * 1024,
         default_shell: "/bin/bash".to_string(),
@@ -276,7 +276,7 @@ fn config_against(core_url: &str) -> Config {
     // core adopted at init, so resolution has to go through whoami.
     cfg.token = None;
     cfg.vogt_core_url = Some(core_url.to_string());
-    cfg.vogt_core_token = Some(SECRET.to_string());
+    cfg.vogt_core_token = Some(SECRET.into());
     cfg
 }
 
@@ -735,7 +735,7 @@ async fn an_assistant_turn_reads_the_real_rust_core() {
     // identity alone does not hold. The break-glass token has full capability
     // and lends the stack secret to the core, which is how the engine runs
     // its own assistant turns.
-    cfg.token = Some(SECRET.to_string());
+    cfg.token = Some(SECRET.into());
     cfg.assistant_api_key = Some("sk-test".into());
     cfg.assistant_base_url = base;
     cfg.assistant_model = "test-model".into();
