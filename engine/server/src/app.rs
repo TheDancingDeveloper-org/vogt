@@ -107,7 +107,7 @@ pub struct AppState {
     pub workspace_sizes: Arc<crate::workspaces::WorkspaceSizes>,
 }
 
-pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
+async fn build_state(cfg: Config) -> Arc<AppState> {
     let cfg = Arc::new(cfg);
     let bus = EventBus::default();
 
@@ -251,7 +251,7 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         cfg.hibernation.clone(),
         Some(cfg.state_dir.join("hibernation-policy.json")),
     ));
-    let state = Arc::new(AppState {
+    Arc::new(AppState {
         agent_auth: agent_stream::global(),
         config: cfg,
         auth: Arc::new(auth::AuthRuntime::default()),
@@ -271,29 +271,31 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         hibernation,
         chats,
         workspace_sizes: Arc::new(crate::workspaces::WorkspaceSizes::from_env()),
-    });
+    })
+}
 
+fn spawn_background_tasks(state: &Arc<AppState>) {
     // Background task: fan out a push notification whenever a session enters
     // `waiting-for-input` or `errored`. Subscribes to the events bus.
-    push_api::spawn_activity_watcher(Arc::clone(&state));
+    push_api::spawn_activity_watcher(Arc::clone(state));
     // Background task: notify once when a session has sat `Idle` for a long
     // time without a recognizable prompt (the waiting-for-input heuristic
     // never fired).
-    push_api::spawn_idle_stall_watcher(Arc::clone(&state));
-    push_api::spawn_digest_flusher(Arc::clone(&state));
+    push_api::spawn_idle_stall_watcher(Arc::clone(state));
+    push_api::spawn_digest_flusher(Arc::clone(state));
     // Background task: the human fallback ladder for open escalations
     // (WI-996 E3): promote, page the webhook, remind, resolve.
-    crate::escalation_ladder::spawn_escalation_ladder(Arc::clone(&state));
+    crate::escalation_ladder::spawn_escalation_ladder(Arc::clone(state));
     // One background reader of vogt-core's event cursor, and everything that
     // cares about a core-side change hangs off it. The follower republishes
     // each change onto this server's bus as `VogtChanged`; the
     // browser gets it over SSE, and the drift watcher below gets it the same
     // way a session watcher gets an activity change. No-ops when no core or
     // no core token is configured.
-    vogt_core::spawn_event_follower(Arc::clone(&state));
+    vogt_core::spawn_event_follower(Arc::clone(state));
     // gh#1460: report stale GitHub-bound brokered tokens to the Inbox and
     // re-check them in the background.
-    crate::github_token_check::spawn(Arc::clone(&state));
+    crate::github_token_check::spawn(Arc::clone(state));
     // GH #1466: a wake that lost its conversation raises an Inbox item.
     if let Some(core) = state.vogt_core.clone() {
         state
@@ -330,7 +332,7 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
     // push. Reads the bus, never the core — see the watcher's own
     // comment for what that costs across a restart, which is a decision
     // rather than an oversight.
-    push_api::spawn_vogt_drift_watcher(Arc::clone(&state));
+    push_api::spawn_vogt_drift_watcher(Arc::clone(state));
     state.agent_tasks.spawn_scheduler();
     state.agent_tasks.spawn_run_watcher(state.bus.clone());
     // Background task: subscribe to the same bus and start runs from matching
@@ -341,18 +343,18 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
     // Background task: enforce the assistant log's retention horizon on a
     // schedule, so the horizon is a configured maximum rather than
     // whatever the last caller passed.
-    spawn_assistant_log_retention_sweeper(Arc::clone(&state));
+    spawn_assistant_log_retention_sweeper(Arc::clone(state));
     // Background task: enforce the session-history retention horizon on the same
     // daily schedule, so `history.db` and the raw `session-logs/` cannot
     // grow without bound. A no-op when history is disabled or the horizon is 0.
-    spawn_history_retention_sweeper(Arc::clone(&state));
+    spawn_history_retention_sweeper(Arc::clone(state));
     // Background task: bound what stopped sessions keep in memory (WI-4290).
-    spawn_stopped_session_reaper(Arc::clone(&state));
-    crate::hibernate_policy::spawn_watcher(Arc::clone(&state));
-    crate::autopilot::spawn_watcher(Arc::clone(&state));
-    crate::oversight_wake::spawn_watcher(Arc::clone(&state));
-    crate::budget::spawn_watcher(Arc::clone(&state));
-    crate::resources::spawn_sampler(Arc::clone(&state));
+    spawn_stopped_session_reaper(Arc::clone(state));
+    crate::hibernate_policy::spawn_watcher(Arc::clone(state));
+    crate::autopilot::spawn_watcher(Arc::clone(state));
+    crate::oversight_wake::spawn_watcher(Arc::clone(state));
+    crate::budget::spawn_watcher(Arc::clone(state));
+    crate::resources::spawn_sampler(Arc::clone(state));
     if !state.config.economics_tick.is_zero() {
         let home = state.config.economics_home.clone().unwrap_or_else(|| {
             std::env::var_os("HOME")
@@ -360,21 +362,25 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
                 .unwrap_or_default()
         });
         crate::economics::spawn_economics_tailer(
-            Arc::clone(&state),
+            Arc::clone(state),
             home,
             state.config.economics_tick,
         );
     }
-    crate::hibernate_policy::spawn_boot_wake(Arc::clone(&state));
+    crate::hibernate_policy::spawn_boot_wake(Arc::clone(state));
+}
 
+fn public_routes() -> Router<Arc<AppState>> {
     // Public: /healthz, /api/config, /api/push/public-key. None reveal secrets.
-    let public = Router::new()
+    Router::new()
         .route("/healthz", get(api::healthz))
         .route("/readyz", get(api::readyz))
         .route("/api/config", get(gui_handlers::public_config))
-        .route("/api/push/public-key", get(push_api::public_key));
+        .route("/api/push/public-key", get(push_api::public_key))
+}
 
-    let api_routes = Router::new()
+fn api_routes(state: &Arc<AppState>) -> Router<Arc<AppState>> {
+    Router::new()
         .route(
             "/api/sessions",
             get(api::list_sessions).post(api::create_session),
@@ -562,10 +568,12 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         .route("/api/vogt/", any(vogt_core::api))
         .route("/api/vogt/{*path}", any(vogt_core::api))
         .layer(middleware::from_fn_with_state(
-            Arc::clone(&state),
+            Arc::clone(state),
             auth::require_bearer,
-        ));
+        ))
+}
 
+fn vogt_open_routes() -> Router<Arc<AppState>> {
     // MCP and the probes are deliberately outside that gate.
     //
     // `/mcp` carries a *core* token minted by `vogt token issue` and bound to
@@ -589,14 +597,16 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
     // The password login is open for the same reason: a browser that holds
     // no session yet is exactly its caller. The core checks the password,
     // throttles and audits; the door only carries the request.
-    let vogt_open_routes = vogt_open_routes
+    vogt_open_routes
         .route("/api/install/status", get(vogt_core::install))
         .route("/api/install/bootstrap", post(vogt_core::install))
         .route("/api/auth/login", post(vogt_core::login))
         .route("/mcp", any(vogt_core::mcp))
         .route("/mcp/", any(vogt_core::mcp))
-        .route("/mcp/{*path}", any(vogt_core::mcp));
+        .route("/mcp/{*path}", any(vogt_core::mcp))
+}
 
+fn agent_routes(state: &Arc<AppState>) -> Router<Arc<AppState>> {
     // The on-demand secret broker is outside the gate for the
     // same structural reason `/mcp` is: the caller is a *session*, which holds
     // no engine bearer (it is withheld on purpose) and presents its own
@@ -604,7 +614,7 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
     // rate-limits, checks the manifest and audits — the read side in
     // `secret_broker::fetch`, the write side (manifest-`writable` only) in
     // `secret_broker::store`. The engine bearer does not open either.
-    let agent_routes = Router::new()
+    Router::new()
         .route("/api/agent-auth/bootstrap", post(agent_stream::bootstrap))
         .route(
             "/api/agent-auth/sessions/{id}/agent",
@@ -633,9 +643,11 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
             crate::opencode::REPLIES_ROUTE,
             post(crate::opencode::upload_pod_replies),
         )
-        .with_state(Arc::clone(&state));
+        .with_state(Arc::clone(state))
+}
 
-    let broker_routes = Router::new()
+fn broker_routes() -> Router<Arc<AppState>> {
+    Router::new()
         .route(secret_broker::FETCH_ROUTE, post(secret_broker::fetch))
         .route(
             secret_broker::GITHUB_CHECK_ROUTE,
@@ -660,16 +672,20 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         .route(api::POLICY_CHECK_ROUTE, post(api::policy_check))
         // A session's own approved grants (WI-973): the same caller and the
         // same per-session token.
-        .route(secret_broker::GRANTS_ROUTE, get(secret_broker::own_grants));
+        .route(secret_broker::GRANTS_ROUTE, get(secret_broker::own_grants))
+}
 
+fn ws_routes() -> Router<Arc<AppState>> {
     // WS handles its own auth so query-param tokens work (browsers can't set
     // Authorization on a WebSocket handshake).
-    let ws_routes = Router::new()
+    Router::new()
         .route("/api/sessions/{id}/attach", get(ws::attach))
         // The live call authenticates on its first frame like attach, and
         // additionally requires the `assistant` capability (`call.rs`).
-        .route("/api/assistant/call", get(crate::call::call));
+        .route("/api/assistant/call", get(crate::call::call))
+}
 
+fn api_fallback_routes() -> Router<Arc<AppState>> {
     // The `/api` namespace, owned to its leaves. `/mcp` already is, by
     // the proxy routes above; `/api` was not, because it is a
     // list of individual routes rather than a subtree, and every path that was
@@ -682,30 +698,37 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
     // the caller go looking for a token to reach nothing. Static routes and
     // the `/api/vogt` subtree still win — this only catches what nothing else
     // claimed. `any` so a POST to a typo'd route is a 404 too, not a 405.
-    let api_fallback = Router::new()
+    Router::new()
         .route("/api", any(api_namespace_not_found))
         .route("/api/", any(api_namespace_not_found))
-        .route("/api/{*path}", any(api_namespace_not_found));
+        .route("/api/{*path}", any(api_namespace_not_found))
+}
 
+fn asset_routes() -> Router<Arc<AppState>> {
     // Embedded PWA. The catch-all comes last so /healthz keeps priority, and
     // every machine namespace in `MACHINE_NAMESPACES` is owned above so this
     // can never claim a path under one. SPA-style fallback to index.html for
     // unknown paths is in `assets::not_found`.
-    let asset_routes = Router::new()
+    Router::new()
         .route("/", get(assets::root))
-        .route("/{*path}", get(assets::asset_wild));
+        .route("/{*path}", get(assets::asset_wild))
+}
+
+pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
+    let state = build_state(cfg).await;
+    spawn_background_tasks(&state);
 
     let cors = build_cors(&state.config.allowed_origins);
 
     let router = Router::new()
-        .merge(public)
-        .merge(api_routes)
-        .merge(vogt_open_routes)
-        .merge(agent_routes)
-        .merge(broker_routes)
-        .merge(ws_routes)
-        .merge(api_fallback)
-        .merge(asset_routes)
+        .merge(public_routes())
+        .merge(api_routes(&state))
+        .merge(vogt_open_routes())
+        .merge(agent_routes(&state))
+        .merge(broker_routes())
+        .merge(ws_routes())
+        .merge(api_fallback_routes())
+        .merge(asset_routes())
         // Every route above, timed by its template (WI-2697). A route layer
         // because only a routed request knows its `MatchedPath`.
         .route_layer(middleware::from_fn(crate::metrics::record_request))
