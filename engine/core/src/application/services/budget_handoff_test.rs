@@ -11,7 +11,7 @@ use super::budget_handoff::{read_git_state, settle_budget_stops, RESTART_NOTE};
 use super::preferences::preference_set_op;
 use super::sessions::{start_session, StartSessionParams};
 use super::sessions_test::{insert_project, opened, script_with, start_params};
-use super::work::{comment_work, get_op};
+use super::work::{comment_json, get_op};
 use crate::application::context::Built;
 use crate::application::dispatch::BUDGET_RESTARTS_KEY;
 use crate::core::{ActorKind, Moment, Origin, Principal, Priority, TrustState, WorkItem, WorkKind};
@@ -311,7 +311,7 @@ fn the_agents_own_handoff_is_kept_and_the_item_restarts_once() {
     let Built::StepSequential(ctx) = &built else {
         unreachable!();
     };
-    comment_work(
+    comment_json(
         ctx,
         json!({
             "ref": reference,

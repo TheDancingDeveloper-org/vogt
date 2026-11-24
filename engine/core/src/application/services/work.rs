@@ -18,7 +18,7 @@ use serde_json::{json, Value};
 
 use crate::adapters::forge::registry::ForgeClient;
 use crate::adapters::forge::{ForgeProvider, RepoRef, WriteBackOutcome, WriteBackResult};
-use crate::application::context::{AppContext, Built};
+use crate::application::context::AppContext;
 use crate::application::delivery_state;
 use crate::application::models::views::{
     VerdictFields, VerdictFieldsReviewerStartedBy, VerificationFields,
@@ -44,64 +44,687 @@ const WORK_UPDATED_EVENT: &str = "work.updated";
 const UNLINKED_STILL_WORKS: &str = "Native items (WI-n) on this project still take comments, \
      transitions (including to done) and field edits by ref";
 
-pub fn create_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
-    crate::with_ctx!(ctx, |ctx| create_work(ctx, params))
+crate::typed_op!(create_op, CreateParams, create_work);
+crate::typed_op!(update_op, UpdateParams, update_work);
+crate::typed_op!(list_op, ListParams, list_work);
+crate::typed_op!(get_op, GetParams, get_work);
+crate::typed_op!(get_many_op, GetManyParams, get_many_work);
+crate::typed_op!(comment_op, CommentParams, comment_work);
+crate::typed_op!(transition_op, TransitionParams, transition_work);
+crate::typed_op!(relate_op, RelateParams, relate_work);
+crate::typed_op!(unrelate_op, RelateParams, unrelate_work);
+crate::typed_op!(bind_branch_op, BindBranchParams, bind_branch);
+crate::typed_op!(adopt_op, AdoptParams, adopt_work);
+crate::typed_op!(board_list_op, BoardParams, list_board);
+
+/// Every wire field of the work operations. Each is held as the JSON the
+/// caller sent so the typed parameter types below coerce it with the same
+/// leniency, and the same messages, the hand-rolled readers had. `Some(Null)`
+/// is a field sent as `null`, which the alias check tells from an absent one.
+/// A body that is not an object reads as no fields at all.
+#[derive(serde::Deserialize, Default)]
+struct Raw {
+    #[serde(default, rename = "ref", deserialize_with = "keep")]
+    reference: Option<Value>,
+    #[serde(default, deserialize_with = "keep")]
+    id: Option<Value>,
+    #[serde(default, deserialize_with = "keep")]
+    kind: Option<Value>,
+    #[serde(default, deserialize_with = "keep")]
+    title: Option<Value>,
+    #[serde(default, deserialize_with = "keep")]
+    body: Option<Value>,
+    #[serde(default, deserialize_with = "keep")]
+    priority: Option<Value>,
+    #[serde(default, deserialize_with = "keep")]
+    effort: Option<Value>,
+    #[serde(default, deserialize_with = "keep")]
+    project: Option<Value>,
+    #[serde(default, deserialize_with = "keep")]
+    initiative: Option<Value>,
+    #[serde(default, deserialize_with = "keep")]
+    assignee: Option<Value>,
+    #[serde(default, deserialize_with = "keep")]
+    labels: Option<Value>,
+    #[serde(default, deserialize_with = "keep")]
+    upstream: Option<Value>,
+    #[serde(default, deserialize_with = "keep")]
+    local_only: Option<Value>,
+    #[serde(default, deserialize_with = "keep")]
+    reason: Option<Value>,
+    #[serde(default, deserialize_with = "keep")]
+    clear_effort: Option<Value>,
+    #[serde(default, deserialize_with = "keep")]
+    clear_assignee: Option<Value>,
+    #[serde(default, deserialize_with = "keep")]
+    clear_initiative: Option<Value>,
+    #[serde(default, deserialize_with = "keep")]
+    add_labels: Option<Value>,
+    #[serde(default, deserialize_with = "keep")]
+    remove_labels: Option<Value>,
+    #[serde(default, deserialize_with = "keep")]
+    kinds: Option<Value>,
+    #[serde(default, deserialize_with = "keep")]
+    states: Option<Value>,
+    #[serde(default, deserialize_with = "keep")]
+    priorities: Option<Value>,
+    #[serde(default, deserialize_with = "keep")]
+    label: Option<Value>,
+    #[serde(default, deserialize_with = "keep")]
+    query: Option<Value>,
+    #[serde(default, deserialize_with = "keep")]
+    include_finished: Option<Value>,
+    #[serde(default, deserialize_with = "keep")]
+    mode: Option<Value>,
+    #[serde(default, deserialize_with = "keep")]
+    limit: Option<Value>,
+    #[serde(default, deserialize_with = "keep")]
+    offset: Option<Value>,
+    #[serde(default, deserialize_with = "keep")]
+    refs: Option<Value>,
+    #[serde(default, deserialize_with = "keep")]
+    comment_limit: Option<Value>,
+    #[serde(default, deserialize_with = "keep")]
+    comment_order: Option<Value>,
+    #[serde(default, deserialize_with = "keep")]
+    handoff: Option<Value>,
+    #[serde(default, deserialize_with = "keep")]
+    verdict: Option<Value>,
+    #[serde(default, deserialize_with = "keep")]
+    verification: Option<Value>,
+    #[serde(default, deserialize_with = "keep")]
+    to_state: Option<Value>,
+    #[serde(default, deserialize_with = "keep")]
+    walk: Option<Value>,
+    #[serde(default, deserialize_with = "keep")]
+    target: Option<Value>,
+    #[serde(default, deserialize_with = "keep")]
+    related: Option<Value>,
+    #[serde(default, deserialize_with = "keep")]
+    branch: Option<Value>,
+    #[serde(default, deserialize_with = "keep")]
+    subject: Option<Value>,
+    #[serde(default, deserialize_with = "keep")]
+    cells: Option<Value>,
+    #[serde(default, deserialize_with = "keep")]
+    lane_mode: Option<Value>,
+    #[serde(default, deserialize_with = "keep")]
+    page_size: Option<Value>,
+    #[serde(default, deserialize_with = "keep")]
+    snapshot: Option<Value>,
+    #[serde(default, deserialize_with = "keep")]
+    status: Option<Value>,
+    #[serde(default, deserialize_with = "keep")]
+    state: Option<Value>,
+    #[serde(default, deserialize_with = "keep")]
+    text: Option<Value>,
+    #[serde(default, deserialize_with = "keep")]
+    search: Option<Value>,
+    #[serde(default, deserialize_with = "keep")]
+    q: Option<Value>,
 }
 
-pub fn update_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
-    crate::with_ctx!(ctx, |ctx| update_work(ctx, params))
+fn keep<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<Value>, D::Error> {
+    <Value as serde::Deserialize>::deserialize(deserializer).map(Some)
 }
 
-pub fn list_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
-    crate::with_ctx!(ctx, |ctx| list_work(ctx, params))
+/// The fields of an object body; anything else is no fields at all.
+fn raw_of<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Raw, D::Error> {
+    use serde::de::Error;
+    match <Value as serde::Deserialize>::deserialize(deserializer)? {
+        Value::Object(map) => serde_json::from_value(Value::Object(map)).map_err(D::Error::custom),
+        _ => Ok(Raw::default()),
+    }
 }
 
-pub fn get_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
-    crate::with_ctx!(ctx, |ctx| get_work(ctx, params))
+/// As `raw_of`, but a body that is not an object is refused with `message`.
+fn raw_object<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+    message: &str,
+) -> Result<Raw, D::Error> {
+    use serde::de::Error;
+    match <Value as serde::Deserialize>::deserialize(deserializer)? {
+        Value::Object(map) => serde_json::from_value(Value::Object(map)).map_err(D::Error::custom),
+        _ => Err(D::Error::custom(message)),
+    }
 }
 
-pub fn get_many_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
-    crate::with_ctx!(ctx, |ctx| get_many_work(ctx, params))
+fn custom<E: serde::de::Error>(err: VogtError) -> E {
+    match err {
+        VogtError::InvalidRequest(message) => E::custom(message),
+        other => E::custom(other),
+    }
 }
 
-pub fn comment_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
-    crate::with_ctx!(ctx, |ctx| comment_work(ctx, params))
+fn str_of(value: &Option<Value>) -> Option<&str> {
+    value.as_ref().and_then(Value::as_str)
 }
 
-pub fn transition_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
-    crate::with_ctx!(ctx, |ctx| transition_work(ctx, params))
+/// A string field; a missing field or `null` is `None` and any other
+/// non-string is the empty string (`work.create` and `work.update`).
+fn text_lossy(value: &Option<Value>) -> Option<String> {
+    match value {
+        None | Some(Value::Null) => None,
+        Some(Value::String(text)) => Some(text.clone()),
+        Some(_) => Some(String::new()),
+    }
 }
 
-pub fn relate_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
-    crate::with_ctx!(ctx, |ctx| relate_work(ctx, params))
+/// A string field; anything that is not a string reads as absent.
+fn text_strict(value: &Option<Value>) -> Option<String> {
+    str_of(value).map(str::to_string)
 }
 
-pub fn unrelate_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
-    crate::with_ctx!(ctx, |ctx| unrelate_work(ctx, params))
+fn flag(value: &Option<Value>) -> bool {
+    value.as_ref().and_then(Value::as_bool).unwrap_or(false)
 }
 
-pub fn bind_branch_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
-    crate::with_ctx!(ctx, |ctx| bind_branch(ctx, params))
+fn names(value: &Option<Value>) -> Vec<String> {
+    strings(value.as_ref())
 }
 
-pub fn adopt_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
-    crate::with_ctx!(ctx, |ctx| adopt_work(ctx, params))
+fn required_ref(value: Option<String>) -> Result<String, VogtError> {
+    value.ok_or_else(|| VogtError::InvalidRequest("ref is required".into()))
 }
 
-pub fn board_list_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
-    crate::with_ctx!(ctx, |ctx| list_board(ctx, params))
+/// `work.create` parameters.
+struct CreateParams {
+    kind: String,
+    title: String,
+    body: String,
+    priority: String,
+    effort: Option<String>,
+    project: Option<String>,
+    initiative: Option<String>,
+    assignee: Option<String>,
+    labels: Vec<String>,
+    upstream: bool,
+    local_only: bool,
+    reason: String,
+}
+
+impl<'de> serde::Deserialize<'de> for CreateParams {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = raw_object(deserializer, "work.create takes an object")?;
+        let read = || -> Result<Self, VogtError> {
+            let kind = text_lossy(&raw.kind)
+                .ok_or_else(|| VogtError::InvalidRequest("kind is required".into()))?;
+            let title = text_lossy(&raw.title)
+                .ok_or_else(|| VogtError::InvalidRequest("title is required".into()))?;
+            let priority = text_lossy(&raw.priority).unwrap_or_else(|| "p2".to_string());
+            // A string such as "true" is not the boolean the schema declares. The
+            // old as_bool().unwrap_or(false) turned it into a native create, which
+            // silently drops the upstream half (WI-4061 review).
+            let upstream = match &raw.upstream {
+                None | Some(Value::Null) => false,
+                Some(Value::Bool(value)) => *value,
+                Some(_) => {
+                    return Err(VogtError::InvalidRequest(
+                        "upstream must be a boolean".to_string(),
+                    ))
+                }
+            };
+            Ok(Self {
+                kind,
+                title,
+                body: text_lossy(&raw.body).unwrap_or_default(),
+                priority,
+                effort: text_lossy(&raw.effort),
+                project: text_lossy(&raw.project),
+                initiative: text_lossy(&raw.initiative),
+                assignee: text_lossy(&raw.assignee),
+                labels: names(&raw.labels),
+                upstream,
+                local_only: flag(&raw.local_only),
+                reason: text_lossy(&raw.reason).unwrap_or_default(),
+            })
+        };
+        read().map_err(custom)
+    }
+}
+
+/// `work.update` parameters.
+struct UpdateParams {
+    reference: String,
+    title: Option<String>,
+    body: Option<String>,
+    priority: Option<String>,
+    effort: Option<String>,
+    project: Option<String>,
+    initiative: Option<String>,
+    assignee: Option<String>,
+    clear_effort: bool,
+    clear_assignee: bool,
+    clear_initiative: bool,
+    add_labels: Vec<String>,
+    remove_labels: Vec<String>,
+    reason: String,
+}
+
+impl UpdateParams {
+    fn touches_labels(&self) -> bool {
+        !self.add_labels.is_empty() || !self.remove_labels.is_empty()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for UpdateParams {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = raw_object(deserializer, "work.update takes an object")?;
+        let reference = text_lossy(&raw.reference)
+            .or_else(|| text_lossy(&raw.id))
+            .ok_or_else(|| VogtError::InvalidRequest("ref is required".into()))
+            .map_err(custom)?;
+        Ok(Self {
+            reference,
+            title: text_lossy(&raw.title),
+            body: text_lossy(&raw.body),
+            priority: text_lossy(&raw.priority),
+            effort: text_lossy(&raw.effort),
+            project: text_lossy(&raw.project),
+            initiative: text_lossy(&raw.initiative),
+            assignee: text_lossy(&raw.assignee),
+            clear_effort: flag(&raw.clear_effort),
+            clear_assignee: flag(&raw.clear_assignee),
+            clear_initiative: flag(&raw.clear_initiative),
+            add_labels: names(&raw.add_labels),
+            remove_labels: names(&raw.remove_labels),
+            reason: text_lossy(&raw.reason).unwrap_or_default(),
+        })
+    }
+}
+
+/// `work.list` parameters, with the aliases applied and a string `states`
+/// split on commas.
+struct ListParams {
+    project: Option<String>,
+    kinds: Vec<String>,
+    states: Vec<String>,
+    priorities: Vec<String>,
+    assignee: Option<String>,
+    initiative: Option<String>,
+    label: Option<String>,
+    query: Option<String>,
+    include_finished: bool,
+    mode: String,
+    limit: i64,
+    offset: i64,
+}
+
+impl Default for ListParams {
+    fn default() -> Self {
+        Self {
+            project: None,
+            kinds: Vec::new(),
+            states: Vec::new(),
+            priorities: Vec::new(),
+            assignee: None,
+            initiative: None,
+            label: None,
+            query: None,
+            include_finished: false,
+            mode: "summary".to_string(),
+            limit: 50,
+            offset: 0,
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ListParams {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let mut raw = raw_of(deserializer)?;
+        // `apply_aliases`: an alias is accepted only when the canonical field
+        // is absent; naming both is refused. An alias sent as `null` still
+        // counts as named.
+        let mut states = raw.states.take();
+        let mut query = raw.query.take();
+        let aliased = [
+            ("status", raw.status.take(), true),
+            ("state", raw.state.take(), true),
+            ("text", raw.text.take(), false),
+            ("search", raw.search.take(), false),
+            ("q", raw.q.take(), false),
+        ];
+        for (alias, value, is_states) in aliased {
+            let Some(value) = value else {
+                continue;
+            };
+            let (slot, field) = if is_states {
+                (&mut states, "states")
+            } else {
+                (&mut query, "query")
+            };
+            if slot.is_some() {
+                return Err(custom(VogtError::InvalidRequest(format!(
+                    "work.list: {} is an alias of {field:?}; pass one of them, not both",
+                    crate::core::py_repr(alias)
+                ))));
+            }
+            *slot = Some(value);
+        }
+        let states = match &states {
+            Some(Value::String(text)) => text
+                .split(',')
+                .map(str::trim)
+                .filter(|part| !part.is_empty())
+                .map(str::to_string)
+                .collect(),
+            other => strings(other.as_ref()),
+        };
+        Ok(Self {
+            project: text_strict(&raw.project),
+            kinds: names(&raw.kinds),
+            states,
+            priorities: names(&raw.priorities),
+            assignee: text_strict(&raw.assignee),
+            initiative: text_strict(&raw.initiative),
+            label: text_strict(&raw.label),
+            query: str_of(&query).map(str::to_string),
+            include_finished: flag(&raw.include_finished),
+            mode: str_of(&raw.mode).unwrap_or("summary").to_string(),
+            limit: raw.limit.as_ref().and_then(Value::as_i64).unwrap_or(50),
+            offset: raw.offset.as_ref().and_then(Value::as_i64).unwrap_or(0),
+        })
+    }
+}
+
+/// `work.get` parameters.
+struct GetParams {
+    reference: String,
+    comment_limit: i64,
+    newest: bool,
+    summary: bool,
+}
+
+impl<'de> serde::Deserialize<'de> for GetParams {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = raw_of(deserializer)?;
+        // `ref` wins over `id` even when `ref` is present and not a string.
+        let reference = raw
+            .reference
+            .as_ref()
+            .or(raw.id.as_ref())
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        Ok(Self {
+            reference: required_ref(reference).map_err(custom)?,
+            comment_limit: raw
+                .comment_limit
+                .as_ref()
+                .and_then(Value::as_i64)
+                .unwrap_or(200),
+            newest: str_of(&raw.comment_order) == Some("newest"),
+            summary: str_of(&raw.mode) == Some("summary"),
+        })
+    }
+}
+
+/// `work.get_many` parameters.
+struct GetManyParams {
+    refs: Vec<String>,
+}
+
+impl<'de> serde::Deserialize<'de> for GetManyParams {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = raw_of(deserializer)?;
+        Ok(Self {
+            refs: names(&raw.refs),
+        })
+    }
+}
+
+/// `work.comment` parameters. The structured field sets stay raw JSON: the
+/// handler checks them against `kind` first and only then reads them, and that
+/// order decides which message a caller sees.
+struct CommentParams {
+    reference: String,
+    body: String,
+    reason: String,
+    kind: String,
+    handoff: Option<Value>,
+    verdict: Option<Value>,
+    verification: Option<Value>,
+}
+
+impl<'de> serde::Deserialize<'de> for CommentParams {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = raw_of(deserializer)?;
+        let read = || -> Result<Self, VogtError> {
+            let reference = required_ref(text_strict(&raw.reference))?;
+            let body = text_strict(&raw.body)
+                .ok_or_else(|| VogtError::InvalidRequest("body is required".into()))?;
+            Ok(Self {
+                reference,
+                body,
+                reason: text_strict(&raw.reason).unwrap_or_default(),
+                kind: text_strict(&raw.kind).unwrap_or_else(|| "note".to_string()),
+                handoff: raw.handoff.filter(|value| !value.is_null()),
+                verdict: raw.verdict.filter(|value| !value.is_null()),
+                verification: raw.verification.filter(|value| !value.is_null()),
+            })
+        };
+        read().map_err(custom)
+    }
+}
+
+/// `work.transition` parameters.
+struct TransitionParams {
+    reference: String,
+    to_state: String,
+    walk: bool,
+    reason: String,
+}
+
+impl<'de> serde::Deserialize<'de> for TransitionParams {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = raw_of(deserializer)?;
+        let read = || -> Result<Self, VogtError> {
+            let reference = required_ref(text_strict(&raw.reference))?;
+            let to_state = text_strict(&raw.to_state)
+                .ok_or_else(|| VogtError::InvalidRequest("to_state is required".into()))?;
+            Ok(Self {
+                reference,
+                to_state,
+                walk: flag(&raw.walk),
+                reason: text_strict(&raw.reason).unwrap_or_default(),
+            })
+        };
+        read().map_err(custom)
+    }
+}
+
+/// `work.relate` and `work.unrelate` parameters.
+struct RelateParams {
+    reference: String,
+    related: String,
+    kind_text: String,
+    reason: String,
+}
+
+impl<'de> serde::Deserialize<'de> for RelateParams {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = raw_of(deserializer)?;
+        let read = || -> Result<Self, VogtError> {
+            let reference = required_ref(text_strict(&raw.reference))?;
+            let related = text_strict(&raw.target)
+                .or_else(|| text_strict(&raw.related))
+                .ok_or_else(|| VogtError::InvalidRequest("target is required".into()))?;
+            Ok(Self {
+                reference,
+                related,
+                kind_text: text_strict(&raw.kind).unwrap_or_else(|| "relates_to".to_string()),
+                reason: text_strict(&raw.reason).unwrap_or_default(),
+            })
+        };
+        read().map_err(custom)
+    }
+}
+
+/// `work.bind_branch` parameters.
+struct BindBranchParams {
+    reference: String,
+    given: Option<String>,
+    reason: String,
+}
+
+impl<'de> serde::Deserialize<'de> for BindBranchParams {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = raw_of(deserializer)?;
+        Ok(Self {
+            reference: required_ref(text_strict(&raw.reference)).map_err(custom)?,
+            given: text_strict(&raw.branch),
+            reason: text_strict(&raw.reason).unwrap_or_default(),
+        })
+    }
+}
+
+/// `work.adopt` parameters.
+struct AdoptParams {
+    subject: String,
+    reason: String,
+}
+
+impl<'de> serde::Deserialize<'de> for AdoptParams {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = raw_of(deserializer)?;
+        let subject = text_strict(&raw.subject)
+            .ok_or_else(|| VogtError::InvalidRequest("subject is required".into()))
+            .map_err(custom)?;
+        Ok(Self {
+            subject,
+            reason: text_strict(&raw.reason).unwrap_or_default(),
+        })
+    }
+}
+
+/// One `board.list` cell. A cell that is not an object, or a field that is
+/// not a string, reads as blank.
+struct Cell {
+    lane_key: String,
+    state: String,
+    /// A cursor was sent (not `null`), whatever its type.
+    has_cursor: bool,
+    cursor: Option<String>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct RawCell {
+    #[serde(default)]
+    lane_key: Option<Value>,
+    #[serde(default)]
+    state: Option<Value>,
+    #[serde(default)]
+    cursor: Option<Value>,
+}
+
+impl Cell {
+    fn of(value: Value) -> Self {
+        let raw: RawCell = serde_json::from_value(value).unwrap_or_default();
+        Self {
+            lane_key: str_of(&raw.lane_key).unwrap_or("").to_string(),
+            state: str_of(&raw.state).unwrap_or("").to_string(),
+            has_cursor: raw.cursor.as_ref().is_some_and(|cursor| !cursor.is_null()),
+            cursor: text_strict(&raw.cursor),
+        }
+    }
+}
+
+/// `board.list` parameters.
+struct BoardParams {
+    cells: Vec<Cell>,
+    lane_mode: String,
+    page_size: i64,
+    project: Option<String>,
+    kinds: Vec<String>,
+    states: Vec<String>,
+    priorities: Vec<String>,
+    assignee: Option<String>,
+    initiative: Option<String>,
+    label: Option<String>,
+    /// A snapshot was sent (not `null`), whatever its type.
+    has_snapshot: bool,
+    snapshot: Option<String>,
+    /// The digest of the filter, taken from the fields as sent so a token
+    /// minted for one filter is refused for another.
+    fingerprint: String,
+}
+
+impl<'de> serde::Deserialize<'de> for BoardParams {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = raw_of(deserializer)?;
+        let cells = match raw.cells {
+            Some(Value::Array(values)) => values.into_iter().map(Cell::of).collect(),
+            _ => Vec::new(),
+        };
+        let lane_mode = str_of(&raw.lane_mode).unwrap_or("none").to_string();
+        let mut body = serde_json::Map::new();
+        for (key, value) in [
+            ("project", &raw.project),
+            ("assignee", &raw.assignee),
+            ("initiative", &raw.initiative),
+            ("label", &raw.label),
+        ] {
+            body.insert(key.into(), value.clone().unwrap_or(Value::Null));
+        }
+        for (key, value) in [
+            ("kinds", &raw.kinds),
+            ("states", &raw.states),
+            ("priorities", &raw.priorities),
+        ] {
+            let mut values = names(value);
+            values.sort();
+            body.insert(key.into(), json!(values));
+        }
+        body.insert("lane_mode".into(), json!(lane_mode));
+        Ok(Self {
+            cells,
+            lane_mode,
+            page_size: raw.page_size.as_ref().and_then(Value::as_i64).unwrap_or(25),
+            project: text_strict(&raw.project),
+            kinds: names(&raw.kinds),
+            states: names(&raw.states),
+            priorities: names(&raw.priorities),
+            assignee: text_strict(&raw.assignee),
+            initiative: text_strict(&raw.initiative),
+            label: text_strict(&raw.label),
+            has_snapshot: raw.snapshot.as_ref().is_some_and(|value| !value.is_null()),
+            snapshot: text_strict(&raw.snapshot),
+            fingerprint: crate::decisions::digest_of(&Value::Object(body)),
+        })
+    }
+}
+
+/// The fields of a board token. A token that is not an object is malformed.
+#[derive(serde::Deserialize, Default)]
+struct Token {
+    #[serde(default)]
+    kind: Option<Value>,
+    #[serde(default)]
+    fingerprint: Option<Value>,
+    #[serde(default)]
+    revision: Option<Value>,
+    #[serde(default)]
+    high_water: Option<Value>,
+    #[serde(default)]
+    snapshot_at: Option<Value>,
+    #[serde(default)]
+    lane_key: Option<Value>,
+    #[serde(default)]
+    state: Option<Value>,
+    #[serde(default)]
+    after_created_at: Option<Value>,
+    #[serde(default)]
+    after_ref: Option<Value>,
 }
 
 /// Create a work item. The default, and `local_only`, writes a native declared
 /// item, with or without a project. `upstream` on a linked project is the forge
 /// write-through (`_create_upstream`). `upstream` on an unlinked project is the
 /// decision-10 refusal.
-pub(crate) fn create_work<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
+fn create_work<C, I>(ctx: &AppContext<C, I>, params: CreateParams) -> Result<Value, VogtError>
 where
     C: Clock + 'static,
     I: IdFactory + 'static,
 {
-    let params = parse_create(params)?;
     if params.upstream && params.local_only {
         return Err(VogtError::InvalidRequest(
             "give at most one of upstream or local_only: a create is either published on the forge or kept native".to_string(),
@@ -285,78 +908,6 @@ where
         "walked": [],
         "live_sessions": [],
     }))
-}
-
-struct CreateParams {
-    kind: String,
-    title: String,
-    body: String,
-    priority: String,
-    effort: Option<String>,
-    project: Option<String>,
-    initiative: Option<String>,
-    assignee: Option<String>,
-    labels: Vec<String>,
-    upstream: bool,
-    local_only: bool,
-    reason: String,
-}
-
-fn parse_create(params: Value) -> Result<CreateParams, VogtError> {
-    let Value::Object(map) = params else {
-        return Err(VogtError::InvalidRequest(
-            "work.create takes an object".to_string(),
-        ));
-    };
-    let text = |key: &str| match map.get(key) {
-        None | Some(Value::Null) => None,
-        Some(Value::String(value)) => Some(value.clone()),
-        Some(_) => Some(String::new()),
-    };
-    let kind = text("kind").ok_or_else(|| VogtError::InvalidRequest("kind is required".into()))?;
-    let title =
-        text("title").ok_or_else(|| VogtError::InvalidRequest("title is required".into()))?;
-    let priority = text("priority").unwrap_or_else(|| "p2".to_string());
-    let labels = map
-        .get("labels")
-        .and_then(Value::as_array)
-        .map(|values| {
-            values
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default();
-    // A string such as "true" is not the boolean the schema declares. The
-    // old as_bool().unwrap_or(false) turned it into a native create, which
-    // silently drops the upstream half (WI-4061 review).
-    let upstream = match map.get("upstream") {
-        None | Some(Value::Null) => false,
-        Some(Value::Bool(value)) => *value,
-        Some(_) => {
-            return Err(VogtError::InvalidRequest(
-                "upstream must be a boolean".to_string(),
-            ))
-        }
-    };
-    Ok(CreateParams {
-        kind,
-        title,
-        body: text("body").unwrap_or_default(),
-        priority,
-        effort: text("effort"),
-        project: text("project"),
-        initiative: text("initiative"),
-        assignee: text("assignee"),
-        labels,
-        upstream,
-        local_only: map
-            .get("local_only")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        reason: text("reason").unwrap_or_default(),
-    })
 }
 
 fn refuse_unlinked(project: &Project, operation: &str) -> VogtError {
@@ -759,12 +1310,11 @@ where
 /// forge mirror, not a declared row — goes through `update_upstream`. The
 /// initiative re-projection that follows a committed update is
 /// a forge write and is not done here.
-fn update_work<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
+fn update_work<C, I>(ctx: &AppContext<C, I>, params: UpdateParams) -> Result<Value, VogtError>
 where
     C: Clock + 'static,
     I: IdFactory + 'static,
 {
-    let params = parse_update(params)?;
     let view = ctx.declared.read()?;
     // Declared ref first, then an upstream subject key, then not_found. A
     // typo'd `WI-n` never reaches the write-through: only a ref that resolves
@@ -827,74 +1377,6 @@ where
         )?;
     }
     Ok(())
-}
-
-struct UpdateParams {
-    reference: String,
-    title: Option<String>,
-    body: Option<String>,
-    priority: Option<String>,
-    effort: Option<String>,
-    project: Option<String>,
-    initiative: Option<String>,
-    assignee: Option<String>,
-    clear_effort: bool,
-    clear_assignee: bool,
-    clear_initiative: bool,
-    add_labels: Vec<String>,
-    remove_labels: Vec<String>,
-    reason: String,
-}
-
-impl UpdateParams {
-    fn touches_labels(&self) -> bool {
-        !self.add_labels.is_empty() || !self.remove_labels.is_empty()
-    }
-}
-
-fn parse_update(params: Value) -> Result<UpdateParams, VogtError> {
-    let Value::Object(map) = params else {
-        return Err(VogtError::InvalidRequest(
-            "work.update takes an object".to_string(),
-        ));
-    };
-    let text = |key: &str| match map.get(key) {
-        None | Some(Value::Null) => None,
-        Some(Value::String(value)) => Some(value.clone()),
-        Some(_) => Some(String::new()),
-    };
-    let reference = text("ref")
-        .or_else(|| text("id"))
-        .ok_or_else(|| VogtError::InvalidRequest("ref is required".into()))?;
-    let names = |key: &str| {
-        map.get(key)
-            .and_then(Value::as_array)
-            .map(|values| {
-                values
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_string)
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
-    let flag = |key: &str| map.get(key).and_then(Value::as_bool).unwrap_or(false);
-    Ok(UpdateParams {
-        reference,
-        title: text("title"),
-        body: text("body"),
-        priority: text("priority"),
-        effort: text("effort"),
-        project: text("project"),
-        initiative: text("initiative"),
-        assignee: text("assignee"),
-        clear_effort: flag("clear_effort"),
-        clear_assignee: flag("clear_assignee"),
-        clear_initiative: flag("clear_initiative"),
-        add_labels: names("add_labels"),
-        remove_labels: names("remove_labels"),
-        reason: text("reason").unwrap_or_default(),
-    })
 }
 
 /// Split an upstream item's update along the boundary decision 2 draws. Ports
@@ -1190,37 +1672,45 @@ struct Drawn {
 pub(crate) fn list_work_total<C: Clock + 'static, I: IdFactory + 'static>(
     ctx: &AppContext<C, I>,
 ) -> Result<i64, VogtError> {
-    Ok(list_work(ctx, serde_json::json!({"limit": 1}))?["total"]
+    Ok(list_work(
+        ctx,
+        ListParams {
+            limit: 1,
+            ..ListParams::default()
+        },
+    )?["total"]
         .as_i64()
         .unwrap_or(0))
 }
 
 fn list_work<C: Clock, I: IdFactory>(
     ctx: &AppContext<C, I>,
-    params: Value,
+    params: ListParams,
 ) -> Result<Value, VogtError> {
-    let params = aliases(params)?;
-    let project = params.get("project").and_then(Value::as_str);
-    let kinds = strings(params.get("kinds"));
-    let states = strings(params.get("states"));
-    let priorities = strings(params.get("priorities"));
-    let assignee = params.get("assignee").and_then(Value::as_str);
-    let initiative = params.get("initiative").and_then(Value::as_str);
-    let label = params.get("label").and_then(Value::as_str);
-    let query = params.get("query").and_then(Value::as_str);
-    let include_finished = params
-        .get("include_finished")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
+    let ListParams {
+        project,
+        kinds,
+        states,
+        priorities,
+        assignee,
+        initiative,
+        label,
+        query,
+        include_finished,
+        mode,
+        limit,
+        offset,
+    } = params;
+    let project = project.as_deref();
+    let assignee = assignee.as_deref();
+    let initiative = initiative.as_deref();
+    let label = label.as_deref();
+    let query = query.as_deref();
+    let include_finished = include_finished
         || states
             .iter()
             .any(|state| TERMINAL_STATES.contains(&state.as_str()));
-    let mode = params
-        .get("mode")
-        .and_then(Value::as_str)
-        .unwrap_or("summary");
-    let limit = params.get("limit").and_then(Value::as_i64).unwrap_or(50);
-    let offset = params.get("offset").and_then(Value::as_i64).unwrap_or(0);
+    let mode = mode.as_str();
 
     let view = ctx.declared.read()?;
     let project_row = project
@@ -1356,9 +1846,9 @@ fn summary_row(item: &WorkItem) -> Value {
 /// still come back. Python's `get_many_work`.
 fn get_many_work<C: Clock, I: IdFactory>(
     ctx: &AppContext<C, I>,
-    params: Value,
+    params: GetManyParams,
 ) -> Result<Value, VogtError> {
-    let refs = strings(params.get("refs"));
+    let refs = params.refs;
     if refs.is_empty() || refs.len() > WORK_GET_MANY_LIMIT {
         return Err(VogtError::InvalidRequest(format!(
             "work.get_many takes 1 to {WORK_GET_MANY_LIMIT} refs"
@@ -1418,42 +1908,6 @@ fn unlinked_detail(view: &impl ReadView, project: &Project) -> Result<Option<Str
     )))
 }
 
-/// `apply_aliases` plus the comma-split of a string `states`. An alias is
-/// accepted only when the canonical field is absent; naming both is refused.
-fn aliases(params: Value) -> Result<Value, VogtError> {
-    let Value::Object(mut map) = params else {
-        return Ok(params);
-    };
-    for (alias, field) in [
-        ("status", "states"),
-        ("state", "states"),
-        ("text", "query"),
-        ("search", "query"),
-        ("q", "query"),
-    ] {
-        let Some(value) = map.remove(alias) else {
-            continue;
-        };
-        if map.contains_key(field) {
-            return Err(VogtError::InvalidRequest(format!(
-                "work.list: {} is an alias of {field:?}; pass one of them, not both",
-                crate::core::py_repr(alias)
-            )));
-        }
-        map.insert(field.to_string(), value);
-    }
-    if let Some(Value::String(states)) = map.get("states") {
-        let split: Vec<Value> = states
-            .split(',')
-            .map(str::trim)
-            .filter(|part| !part.is_empty())
-            .map(|part| Value::String(part.to_string()))
-            .collect();
-        map.insert("states".to_string(), Value::Array(split));
-    }
-    Ok(Value::Object(map))
-}
-
 fn strings(value: Option<&Value>) -> Vec<String> {
     value
         .and_then(Value::as_array)
@@ -1475,19 +1929,15 @@ fn strings(value: Option<&Value>) -> Vec<String> {
 /// back for either.
 fn get_work<C: Clock, I: IdFactory>(
     ctx: &AppContext<C, I>,
-    params: Value,
+    params: GetParams,
 ) -> Result<Value, VogtError> {
-    let reference = params
-        .get("ref")
-        .or_else(|| params.get("id"))
-        .and_then(Value::as_str)
-        .ok_or_else(|| VogtError::InvalidRequest("ref is required".into()))?;
-    let limit = params
-        .get("comment_limit")
-        .and_then(Value::as_i64)
-        .unwrap_or(200);
-    let newest = params.get("comment_order").and_then(Value::as_str) == Some("newest");
-    let summary = params.get("mode").and_then(Value::as_str) == Some("summary");
+    let GetParams {
+        reference,
+        comment_limit: limit,
+        newest,
+        summary,
+    } = params;
+    let reference = reference.as_str();
     let view = ctx.declared.read()?;
     let mut item = upstream::resolve_work_ref(ctx, &view, reference)?;
     let native = view.work_item_by_ref(reference)?.is_some();
@@ -1765,36 +2215,40 @@ const WORK_ADOPTED: &str = "work.adopted";
 /// in the same transaction (`writeback.attempt`), outcome `skipped` while no
 /// forge provider is wired. An upstream item is the write-through and stores
 /// nothing.
-pub(crate) fn comment_work<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
+fn comment_work<C, I>(ctx: &AppContext<C, I>, params: CommentParams) -> Result<Value, VogtError>
 where
     C: Clock + 'static,
     I: IdFactory + 'static,
 {
-    let reference = text_of(&params, "ref")
-        .ok_or_else(|| VogtError::InvalidRequest("ref is required".into()))?;
-    let body = text_of(&params, "body")
-        .ok_or_else(|| VogtError::InvalidRequest("body is required".into()))?;
-    let reason = text_of(&params, "reason").unwrap_or_default();
-    let kind = text_of(&params, "kind").unwrap_or_else(|| "note".to_string());
+    let CommentParams {
+        reference,
+        body,
+        reason,
+        kind,
+        handoff,
+        verdict,
+        verification,
+    } = params;
     if !COMMENT_KINDS.contains(&kind.as_str()) {
         return Err(VogtError::InvalidRequest(format!(
             "unknown comment kind {}",
             crate::core::py_repr(&kind)
         )));
     }
-    for field in &COMMENT_KINDS[1..] {
-        if kind != *field && params.get(*field).is_some_and(|value| !value.is_null()) {
+    let sent = [
+        ("handoff", handoff.is_some()),
+        ("verdict", verdict.is_some()),
+        ("verification", verification.is_some()),
+    ];
+    for (field, present) in sent {
+        if kind != field && present {
             return Err(VogtError::InvalidRequest(format!(
                 "{field} fields belong on a comment of kind {field}"
             )));
         }
     }
-    let handoff = params
-        .get("handoff")
-        .filter(|value| !value.is_null())
-        .cloned();
-    let verdict = structured::<VerdictFields>(&params, "verdict")?;
-    let verification = structured::<VerificationFields>(&params, "verification")?;
+    let verdict = structured::<VerdictFields>(verdict, "verdict")?;
+    let verification = structured::<VerificationFields>(verification, "verification")?;
     let view = ctx.declared.read()?;
     let resolved = upstream::resolve_work_ref(ctx, &view, &reference)?;
     if view.work_item_by_ref(&reference)?.is_none() {
@@ -1906,6 +2360,16 @@ where
     }))
 }
 
+/// `comment_work` for in-process callers that build the wire JSON themselves
+/// (the budget hand-off notes).
+pub(crate) fn comment_json<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    comment_work(ctx, crate::application::typed::decode(params)?)
+}
+
 const COMMENT_KINDS: [&str; 4] = ["note", "handoff", "verdict", "verification"];
 
 const VERDICT_RULE: &str = "a verdict is posted by a person, or by a review session started by a person or oversight, on the item it reviews";
@@ -1920,14 +2384,12 @@ struct Caller {
 
 /// A structured field set off the (already validated) parameters.
 fn structured<T: serde::de::DeserializeOwned>(
-    params: &Value,
+    value: Option<Value>,
     field: &str,
 ) -> Result<Option<T>, VogtError> {
-    params
-        .get(field)
-        .filter(|value| !value.is_null())
+    value
         .map(|value| {
-            serde_json::from_value(value.clone())
+            serde_json::from_value(value)
                 .map_err(|_| VogtError::InvalidRequest(format!("{field} fields are malformed")))
         })
         .transpose()
@@ -1938,9 +2400,8 @@ fn is_worker(view: &impl ReadView, item: &WorkItem, ids: &[&str]) -> Result<bool
     for prior in view.comments_for(&item.id, 500, true)? {
         if prior.kind == "handoff" {
             if let Some(handoff) = &prior.handoff {
-                return Ok(handoff
-                    .get("session")
-                    .and_then(Value::as_str)
+                return Ok(handoff["session"]
+                    .as_str()
                     .is_some_and(|session| ids.contains(&session)));
             }
         }
@@ -2200,17 +2661,20 @@ where
 /// one audited hop at a time. Completion is refused while a `depends_on`
 /// target is unfinished. An upstream item is the write-through and stores
 /// nothing.
-fn transition_work<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
+fn transition_work<C, I>(
+    ctx: &AppContext<C, I>,
+    params: TransitionParams,
+) -> Result<Value, VogtError>
 where
     C: Clock + 'static,
     I: IdFactory + 'static,
 {
-    let reference = text_of(&params, "ref")
-        .ok_or_else(|| VogtError::InvalidRequest("ref is required".into()))?;
-    let to_state = text_of(&params, "to_state")
-        .ok_or_else(|| VogtError::InvalidRequest("to_state is required".into()))?;
-    let walk = params.get("walk").and_then(Value::as_bool).unwrap_or(false);
-    let reason = text_of(&params, "reason").unwrap_or_default();
+    let TransitionParams {
+        reference,
+        to_state,
+        walk,
+        reason,
+    } = params;
     let view = ctx.declared.read()?;
     let resolved = upstream::resolve_work_ref(ctx, &view, &reference)?;
     if view.work_item_by_ref(&reference)?.is_none() {
@@ -2444,18 +2908,17 @@ where
 /// Record a relation between two declared items. `implemented_by` is observed
 /// only and refused. A duplicate edge is a conflict. An upstream ref is
 /// refused as an invalid request, not a not-found.
-fn relate_work<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
+fn relate_work<C, I>(ctx: &AppContext<C, I>, params: RelateParams) -> Result<Value, VogtError>
 where
     C: Clock + 'static,
     I: IdFactory + 'static,
 {
-    let reference = text_of(&params, "ref")
-        .ok_or_else(|| VogtError::InvalidRequest("ref is required".into()))?;
-    let related = text_of(&params, "target")
-        .or_else(|| text_of(&params, "related"))
-        .ok_or_else(|| VogtError::InvalidRequest("target is required".into()))?;
-    let kind_text = text_of(&params, "kind").unwrap_or_else(|| "relates_to".to_string());
-    let reason = text_of(&params, "reason").unwrap_or_default();
+    let RelateParams {
+        reference,
+        related,
+        kind_text,
+        reason,
+    } = params;
     if !matches!(
         kind_text.as_str(),
         "depends_on" | "relates_to" | "duplicate_of" | "parent_of"
@@ -2522,18 +2985,17 @@ where
 
 /// Drop one declared relation. An edge that is not there is an invalid
 /// request, and an upstream ref is refused rather than reported missing.
-fn unrelate_work<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
+fn unrelate_work<C, I>(ctx: &AppContext<C, I>, params: RelateParams) -> Result<Value, VogtError>
 where
     C: Clock + 'static,
     I: IdFactory + 'static,
 {
-    let reference = text_of(&params, "ref")
-        .ok_or_else(|| VogtError::InvalidRequest("ref is required".into()))?;
-    let related = text_of(&params, "target")
-        .or_else(|| text_of(&params, "related"))
-        .ok_or_else(|| VogtError::InvalidRequest("target is required".into()))?;
-    let kind_text = text_of(&params, "kind").unwrap_or_else(|| "relates_to".to_string());
-    let reason = text_of(&params, "reason").unwrap_or_default();
+    let RelateParams {
+        reference,
+        related,
+        kind_text,
+        reason,
+    } = params;
     let kind: crate::core::RelationKind = kind_text.parse().map_err(|_| {
         VogtError::InvalidRequest(format!(
             "unknown relation kind {}",
@@ -2599,15 +3061,16 @@ fn would_cycle(
 /// Declare the branch a native item is worked on. An omitted name comes from
 /// `branch_binding_template`. Declaring the name already recorded is a no-op.
 /// An upstream item's overlay write is the write-through and stores nothing.
-fn bind_branch<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
+fn bind_branch<C, I>(ctx: &AppContext<C, I>, params: BindBranchParams) -> Result<Value, VogtError>
 where
     C: Clock + 'static,
     I: IdFactory + 'static,
 {
-    let reference = text_of(&params, "ref")
-        .ok_or_else(|| VogtError::InvalidRequest("ref is required".into()))?;
-    let given = text_of(&params, "branch");
-    let reason = text_of(&params, "reason").unwrap_or_default();
+    let BindBranchParams {
+        reference,
+        given,
+        reason,
+    } = params;
     // Python resolves the ref inside the write body, so a refused bind opens
     // a transaction and burns its id; the same order keeps the audit ids equal.
     let mut writing = crate::application::context::write_of(ctx);
@@ -2672,14 +3135,12 @@ where
 /// The observation must still be the latest for its subject, belong to a
 /// project, and not already be linked. The created item takes the observation's
 /// kind, title and priority; the link is the audit of the promotion.
-fn adopt_work<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
+fn adopt_work<C, I>(ctx: &AppContext<C, I>, params: AdoptParams) -> Result<Value, VogtError>
 where
     C: Clock + 'static,
     I: IdFactory + 'static,
 {
-    let subject = text_of(&params, "subject")
-        .ok_or_else(|| VogtError::InvalidRequest("subject is required".into()))?;
-    let reason = text_of(&params, "reason").unwrap_or_default();
+    let AdoptParams { subject, reason } = params;
     // Python's `_subject`: nothing swept is an invalid request, and an unknown
     // subject is a not_found that names it.
     if !ctx.observed.has_evidence_tables()? {
@@ -2962,36 +3423,12 @@ fn declared_only<C: Clock, I: IdFactory>(
     }
 }
 
-fn board_fingerprint(params: &Value) -> String {
-    let mut body = serde_json::Map::new();
-    for key in ["project", "assignee", "initiative", "label"] {
-        body.insert(key.into(), params.get(key).cloned().unwrap_or(Value::Null));
-    }
-    for key in ["kinds", "states", "priorities"] {
-        let mut values = strings(params.get(key));
-        values.sort();
-        body.insert(key.into(), json!(values));
-    }
-    body.insert(
-        "lane_mode".into(),
-        json!(params
-            .get("lane_mode")
-            .and_then(Value::as_str)
-            .unwrap_or("none")),
-    );
-    crate::decisions::digest_of(&Value::Object(body))
-}
-
 fn board_token(value: &Value) -> String {
     use base64::Engine;
     // `json.dumps(..., sort_keys=True, separators=(",", ":"))`, then urlsafe
     // base64 with the padding stripped. Not the spaced form the stores use.
     let raw = crate::decisions::render_python_json_compact(value);
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw.as_bytes())
-}
-
-fn text_of(params: &Value, key: &str) -> Option<String> {
-    params.get(key).and_then(Value::as_str).map(str::to_string)
 }
 
 /// The lane an upstream item lands in, mirroring the SQL lane expression.
@@ -3009,23 +3446,23 @@ fn board_dump_high_water(high_water: Option<&(Moment, String)>) -> Value {
     })
 }
 
-fn board_decode(token: &str, kind: &str) -> Result<Value, VogtError> {
+fn board_decode(token: &str, kind: &str) -> Result<Token, VogtError> {
     use base64::Engine;
     let malformed = || VogtError::InvalidCursor(format!("Board {kind} token is malformed"));
     let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(token.trim_end_matches('='))
         .map_err(|_| malformed())?;
-    let decoded: Value = serde_json::from_slice(&raw).map_err(|_| malformed())?;
-    if decoded.get("kind").and_then(Value::as_str) != Some(kind) {
+    let decoded: Token = serde_json::from_slice(&raw).map_err(|_| malformed())?;
+    if str_of(&decoded.kind) != Some(kind) {
         return Err(malformed());
     }
     Ok(decoded)
 }
 
-fn board_decode_high_water(token: &Value) -> Result<Option<(Moment, String)>, VogtError> {
+fn board_decode_high_water(token: &Token) -> Result<Option<(Moment, String)>, VogtError> {
     let invalid =
         || VogtError::InvalidCursor("Board snapshot has an invalid high-water mark".to_string());
-    match token.get("high_water") {
+    match &token.high_water {
         None | Some(Value::Null) => Ok(None),
         Some(Value::Array(pair)) if pair.len() == 2 => {
             let reference = pair[1].as_str().ok_or_else(invalid)?;
@@ -3040,29 +3477,28 @@ fn board_decode_high_water(token: &Value) -> Result<Option<(Moment, String)>, Vo
 }
 
 fn board_cell_query(
-    cell: &Value,
+    cell: &Cell,
     fingerprint: &str,
     revision: i64,
     high_water: Option<&(Moment, String)>,
 ) -> Result<crate::storage::interface::BoardCellQuery, VogtError> {
-    let lane_key = cell.get("lane_key").and_then(Value::as_str).unwrap_or("");
-    let state = cell.get("state").and_then(Value::as_str).unwrap_or("");
+    let lane_key = cell.lane_key.as_str();
+    let state = cell.state.as_str();
     let mut query = crate::storage::interface::BoardCellQuery {
         lane_key: lane_key.to_string(),
         state: state.to_string(),
         after_created_at: None,
         after_ref: None,
     };
-    let Some(cursor) = cell.get("cursor").and_then(Value::as_str) else {
+    let Some(cursor) = cell.cursor.as_deref() else {
         return Ok(query);
     };
     let token = board_decode(cursor, "cell")?;
-    if token.get("fingerprint").and_then(Value::as_str) != Some(fingerprint)
-        || token.get("revision").and_then(Value::as_i64) != Some(revision)
-        || token.get("lane_key").and_then(Value::as_str) != Some(lane_key)
-        || token.get("state").and_then(Value::as_str) != Some(state)
-        || token.get("high_water").cloned().unwrap_or(Value::Null)
-            != board_dump_high_water(high_water)
+    if str_of(&token.fingerprint) != Some(fingerprint)
+        || token.revision.as_ref().and_then(Value::as_i64) != Some(revision)
+        || str_of(&token.lane_key) != Some(lane_key)
+        || str_of(&token.state) != Some(state)
+        || token.high_water.clone().unwrap_or(Value::Null) != board_dump_high_water(high_water)
     {
         return Err(VogtError::InvalidCursor(
             "Board cell cursor belongs to another cell or snapshot".to_string(),
@@ -3070,19 +3506,11 @@ fn board_cell_query(
     }
     let malformed = || VogtError::InvalidCursor("Board cell cursor is malformed".to_string());
     query.after_created_at = Some(
-        token
-            .get("after_created_at")
-            .and_then(Value::as_str)
+        str_of(&token.after_created_at)
             .and_then(|text| crate::core::from_iso(text).ok())
             .ok_or_else(malformed)?,
     );
-    query.after_ref = Some(
-        token
-            .get("after_ref")
-            .and_then(Value::as_str)
-            .ok_or_else(malformed)?
-            .to_string(),
-    );
+    query.after_ref = Some(str_of(&token.after_ref).ok_or_else(malformed)?.to_string());
     Ok(query)
 }
 
@@ -3123,30 +3551,33 @@ fn board_merge_cell(
 /// declared revision so a continuation after a write is refused.
 fn list_board<C: Clock, I: IdFactory>(
     ctx: &AppContext<C, I>,
-    params: Value,
+    params: BoardParams,
 ) -> Result<Value, VogtError> {
-    let cells = params
-        .get("cells")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
+    let BoardParams {
+        cells,
+        lane_mode,
+        page_size,
+        project,
+        kinds,
+        states,
+        priorities,
+        assignee,
+        initiative,
+        label,
+        has_snapshot,
+        snapshot: snapshot_token,
+        fingerprint,
+    } = params;
     if cells.is_empty() {
         return Err(VogtError::InvalidRequest(
             "board.list needs at least one cell".to_string(),
         ));
     }
-    let lane_mode = params
-        .get("lane_mode")
-        .and_then(Value::as_str)
-        .unwrap_or("none");
-    let page_size = params
-        .get("page_size")
-        .and_then(Value::as_i64)
-        .unwrap_or(25);
+    let lane_mode = lane_mode.as_str();
     let mut seen = std::collections::BTreeSet::new();
     for cell in &cells {
-        let lane_key = cell.get("lane_key").and_then(Value::as_str).unwrap_or("");
-        let state = cell.get("state").and_then(Value::as_str).unwrap_or("");
+        let lane_key = cell.lane_key.as_str();
+        let state = cell.state.as_str();
         if !seen.insert((lane_key, state)) {
             return Err(VogtError::InvalidRequest(format!(
                 "board.list cell {}/{} is duplicated",
@@ -3159,18 +3590,16 @@ fn list_board<C: Clock, I: IdFactory>(
                 "board.list lane_key must be blank in `none` mode".to_string(),
             ));
         }
-        if cell.get("cursor").is_some_and(|cursor| !cursor.is_null())
-            && params.get("snapshot").is_none_or(Value::is_null)
-        {
+        if cell.has_cursor && !has_snapshot {
             return Err(VogtError::InvalidCursor(
                 "a Board cell cursor requires its snapshot token".to_string(),
             ));
         }
     }
     let view = ctx.declared.read()?;
-    let project = params
-        .get("project")
-        .and_then(Value::as_str)
+    let project_slug = project.clone();
+    let project = project
+        .as_deref()
         .map(|slug| resolve::project(&view, slug))
         .transpose()?;
     if let Some(project) = project.as_ref() {
@@ -3184,8 +3613,8 @@ fn list_board<C: Clock, I: IdFactory>(
                 .iter()
                 .map(|cell| {
                     json!({
-                        "lane_key": cell.get("lane_key").and_then(Value::as_str).unwrap_or(""),
-                        "state": cell.get("state").and_then(Value::as_str).unwrap_or(""),
+                        "lane_key": cell.lane_key,
+                        "state": cell.state,
                         "items": [],
                         "total": 0,
                         "next_cursor": null,
@@ -3196,7 +3625,7 @@ fn list_board<C: Clock, I: IdFactory>(
             let revision = view.current_revision()?;
             let snapshot = board_token(&json!({
                 "kind": "snapshot",
-                "fingerprint": board_fingerprint(&params),
+                "fingerprint": fingerprint,
                 "revision": revision,
                 "snapshot_at": snapshot_at.to_iso(),
                 "high_water": Value::Null,
@@ -3218,20 +3647,18 @@ fn list_board<C: Clock, I: IdFactory>(
     }
     let filter = WorkFilter {
         project_id: project.as_ref().map(|project| project.id.clone()),
-        kinds: strings(params.get("kinds")),
-        states: strings(params.get("states")),
-        priorities: strings(params.get("priorities")),
-        assignee_actor_id: params
-            .get("assignee")
-            .and_then(Value::as_str)
+        kinds: kinds.clone(),
+        states,
+        priorities: priorities.clone(),
+        assignee_actor_id: assignee
+            .as_deref()
             .map(|identity| resolve::actor(&view, identity).map(|actor| actor.id))
             .transpose()?,
-        initiative_id: params
-            .get("initiative")
-            .and_then(Value::as_str)
+        initiative_id: initiative
+            .as_deref()
             .map(|slug| resolve::initiative(&view, slug).map(|initiative| initiative.id))
             .transpose()?,
-        label: text_of(&params, "label"),
+        label: label.clone(),
         // The Board draws terminal columns when asked; the forge-less
         // withdrawal keeps unlinked projects' native rows off the global Board.
         exclude_terminal: false,
@@ -3242,7 +3669,6 @@ fn list_board<C: Clock, I: IdFactory>(
         exclude_unlinked_native: false,
         ..filter.clone()
     })? - view.count_work_items(&filter)?;
-    let fingerprint = board_fingerprint(&params);
     let revision = view.current_revision()?;
 
     // The upstream-truth half: linked projects' items live in the observed
@@ -3259,24 +3685,22 @@ fn list_board<C: Clock, I: IdFactory>(
     upstream_entries
         .sort_by(|a, b| (a.1.created_at, &a.1.reference).cmp(&(b.1.created_at, &b.1.reference)));
 
-    let (high_water, snapshot_at, snapshot) = match params.get("snapshot").and_then(Value::as_str) {
+    let (high_water, snapshot_at, snapshot) = match snapshot_token.as_deref() {
         Some(token) => {
             let decoded = board_decode(token, "snapshot")?;
-            if decoded.get("fingerprint").and_then(Value::as_str) != Some(fingerprint.as_str()) {
+            if str_of(&decoded.fingerprint) != Some(fingerprint.as_str()) {
                 return Err(VogtError::InvalidCursor(
                     "Board snapshot belongs to another filter or lane mode".to_string(),
                 ));
             }
-            if decoded.get("revision").and_then(Value::as_i64) != Some(revision) {
+            if decoded.revision.as_ref().and_then(Value::as_i64) != Some(revision) {
                 return Err(VogtError::InvalidCursor(
                     "Board snapshot is stale because declared work changed; refresh the Board"
                         .to_string(),
                 ));
             }
             let high_water = board_decode_high_water(&decoded)?;
-            let snapshot_at = decoded
-                .get("snapshot_at")
-                .and_then(Value::as_str)
+            let snapshot_at = str_of(&decoded.snapshot_at)
                 .and_then(|text| crate::core::from_iso(text).ok())
                 .ok_or_else(|| {
                     VogtError::InvalidCursor("Board snapshot has an invalid timestamp".to_string())
@@ -3377,12 +3801,12 @@ fn list_board<C: Clock, I: IdFactory>(
     // the clock: the observed-inclusive count and the declared-only count.
     let (backlog_candidates, declared_total) = crate::application::views::candidate_population(
         ctx,
-        params.get("project").and_then(Value::as_str),
-        strings(params.get("kinds")),
-        strings(params.get("priorities")),
-        params.get("assignee").and_then(Value::as_str),
-        params.get("initiative").and_then(Value::as_str),
-        params.get("label").and_then(Value::as_str),
+        project_slug.as_deref(),
+        kinds,
+        priorities,
+        assignee.as_deref(),
+        initiative.as_deref(),
+        label.as_deref(),
     )?;
     Ok(json!({
         "cells": rendered,
@@ -3401,11 +3825,7 @@ fn list_board<C: Clock, I: IdFactory>(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        bind_branch, comment_work, create_work, gaps_for, get_many_work, get_work, list_board,
-        list_work, list_work_total, policy_gap, relate_work, transition_work, unrelate_work,
-        update_work, work_page,
-    };
+    use super::{gaps_for, list_work_total, policy_gap, work_page};
     use crate::application::context::{build_context, Built};
     use crate::core::{
         ActorKind, LinkState, Moment, Principal, Project, SequentialIds, StepClock, WriteBack,
@@ -3413,6 +3833,189 @@ mod tests {
     use crate::errors::VogtError;
     use crate::storage::interface::{DeclaredStore, ObservedStore, ReadView, WriteTxn};
     use serde_json::{json, Value};
+
+    // The tests drive the handlers with the wire JSON, decoded the way the
+    // registry decodes it.
+    fn decoded<P: serde::de::DeserializeOwned>(params: Value) -> Result<P, VogtError> {
+        crate::application::typed::decode(params)
+    }
+    fn create_work<C, I>(
+        ctx: &crate::application::context::AppContext<C, I>,
+        params: Value,
+    ) -> Result<Value, VogtError>
+    where
+        C: crate::core::Clock + 'static,
+        I: crate::core::IdFactory + 'static,
+    {
+        super::create_work(ctx, decoded(params)?)
+    }
+    fn update_work<C, I>(
+        ctx: &crate::application::context::AppContext<C, I>,
+        params: Value,
+    ) -> Result<Value, VogtError>
+    where
+        C: crate::core::Clock + 'static,
+        I: crate::core::IdFactory + 'static,
+    {
+        super::update_work(ctx, decoded(params)?)
+    }
+    fn list_work<C, I>(
+        ctx: &crate::application::context::AppContext<C, I>,
+        params: Value,
+    ) -> Result<Value, VogtError>
+    where
+        C: crate::core::Clock + 'static,
+        I: crate::core::IdFactory + 'static,
+    {
+        super::list_work(ctx, decoded(params)?)
+    }
+    fn get_work<C, I>(
+        ctx: &crate::application::context::AppContext<C, I>,
+        params: Value,
+    ) -> Result<Value, VogtError>
+    where
+        C: crate::core::Clock + 'static,
+        I: crate::core::IdFactory + 'static,
+    {
+        super::get_work(ctx, decoded(params)?)
+    }
+    fn get_many_work<C, I>(
+        ctx: &crate::application::context::AppContext<C, I>,
+        params: Value,
+    ) -> Result<Value, VogtError>
+    where
+        C: crate::core::Clock + 'static,
+        I: crate::core::IdFactory + 'static,
+    {
+        super::get_many_work(ctx, decoded(params)?)
+    }
+    fn comment_work<C, I>(
+        ctx: &crate::application::context::AppContext<C, I>,
+        params: Value,
+    ) -> Result<Value, VogtError>
+    where
+        C: crate::core::Clock + 'static,
+        I: crate::core::IdFactory + 'static,
+    {
+        super::comment_work(ctx, decoded(params)?)
+    }
+    fn transition_work<C, I>(
+        ctx: &crate::application::context::AppContext<C, I>,
+        params: Value,
+    ) -> Result<Value, VogtError>
+    where
+        C: crate::core::Clock + 'static,
+        I: crate::core::IdFactory + 'static,
+    {
+        super::transition_work(ctx, decoded(params)?)
+    }
+    fn relate_work<C, I>(
+        ctx: &crate::application::context::AppContext<C, I>,
+        params: Value,
+    ) -> Result<Value, VogtError>
+    where
+        C: crate::core::Clock + 'static,
+        I: crate::core::IdFactory + 'static,
+    {
+        super::relate_work(ctx, decoded(params)?)
+    }
+    fn unrelate_work<C, I>(
+        ctx: &crate::application::context::AppContext<C, I>,
+        params: Value,
+    ) -> Result<Value, VogtError>
+    where
+        C: crate::core::Clock + 'static,
+        I: crate::core::IdFactory + 'static,
+    {
+        super::unrelate_work(ctx, decoded(params)?)
+    }
+    fn bind_branch<C, I>(
+        ctx: &crate::application::context::AppContext<C, I>,
+        params: Value,
+    ) -> Result<Value, VogtError>
+    where
+        C: crate::core::Clock + 'static,
+        I: crate::core::IdFactory + 'static,
+    {
+        super::bind_branch(ctx, decoded(params)?)
+    }
+    fn list_board<C, I>(
+        ctx: &crate::application::context::AppContext<C, I>,
+        params: Value,
+    ) -> Result<Value, VogtError>
+    where
+        C: crate::core::Clock + 'static,
+        I: crate::core::IdFactory + 'static,
+    {
+        super::list_board(ctx, decoded(params)?)
+    }
+
+    /// The decode errors are the messages the hand-rolled readers gave. Each
+    /// is pinned here so a serde-style rewrite cannot change the wire text.
+    #[test]
+    fn decode_messages_are_unchanged() {
+        fn message<P: serde::de::DeserializeOwned>(params: Value) -> String {
+            match decoded::<P>(params) {
+                Err(error) => error.message().to_string(),
+                Ok(_) => "accepted".to_string(),
+            }
+        }
+        use super::*;
+        assert_eq!(
+            message::<CreateParams>(json!(null)),
+            "work.create takes an object"
+        );
+        assert_eq!(
+            message::<UpdateParams>(json!([1])),
+            "work.update takes an object"
+        );
+        assert_eq!(
+            message::<CreateParams>(json!({"title": "t"})),
+            "kind is required"
+        );
+        assert_eq!(
+            message::<CreateParams>(json!({"kind": "bug"})),
+            "title is required"
+        );
+        assert_eq!(
+            message::<CreateParams>(json!({"kind": "bug", "title": "t", "upstream": "true"})),
+            "upstream must be a boolean"
+        );
+        assert_eq!(message::<UpdateParams>(json!({})), "ref is required");
+        assert_eq!(
+            message::<GetParams>(json!({"ref": null, "id": "WI-1"})),
+            "ref is required"
+        );
+        assert_eq!(message::<GetParams>(json!({"id": "WI-1"})), "accepted");
+        assert_eq!(
+            message::<CommentParams>(json!({"body": "b"})),
+            "ref is required"
+        );
+        assert_eq!(
+            message::<CommentParams>(json!({"ref": "WI-1"})),
+            "body is required"
+        );
+        assert_eq!(
+            message::<TransitionParams>(json!({"ref": "WI-1"})),
+            "to_state is required"
+        );
+        assert_eq!(
+            message::<RelateParams>(json!({"ref": "WI-1"})),
+            "target is required"
+        );
+        assert_eq!(message::<AdoptParams>(json!({})), "subject is required");
+        assert_eq!(
+            message::<ListParams>(json!({"status": "open", "states": ["done"]})),
+            "work.list: 'status' is an alias of \"states\"; pass one of them, not both"
+        );
+        assert_eq!(
+            message::<ListParams>(json!({"q": "x", "text": "y"})),
+            "work.list: 'q' is an alias of \"query\"; pass one of them, not both"
+        );
+        assert_eq!(message::<ListParams>(json!(null)), "accepted");
+        let split: ListParams = decoded(json!({"state": "open, done,,"})).unwrap();
+        assert_eq!(split.states, ["open", "done"]);
+    }
 
     fn moment() -> Moment {
         Moment::from_unix(1_700_000_000, 0)

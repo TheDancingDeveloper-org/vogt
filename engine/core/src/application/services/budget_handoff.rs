@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Map, Value};
 
 use super::sessions::{dispatch_preferences, start_session, SessionBudget, StartSessionParams};
-use super::work::comment_work;
+use super::work::comment_json;
 use crate::adapters::engine::EngineSession;
 use crate::application::context::AppContext;
 use crate::application::dispatch as dispatch_profiles;
@@ -333,7 +333,7 @@ where
             };
             let state = read_git_state(cwd);
             let (body, fields) = git_state_handoff(&row.id, reason, state.as_ref());
-            let written = comment_work(
+            let written = comment_json(
                 ctx,
                 json!({
                     "ref": item.reference,
@@ -382,7 +382,7 @@ where
                 continue;
             }
         };
-        comment_work(
+        comment_json(
             ctx,
             json!({
                 "ref": item.reference,
