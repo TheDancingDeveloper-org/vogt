@@ -2001,12 +2001,9 @@ impl SessionRegistry {
         self.cfg.default_cwd.clone()
     }
 
-    fn create_inner(
-        &self,
-        mut spec: SessionSpec,
-        creating: Creating,
-        preassigned: Option<Uuid>,
-    ) -> Result<Arc<Session>> {
+    /// Validate the request and expand its template into a command, account
+    /// and environment, before anything downstream reads them.
+    fn validate_and_expand_spec(&self, spec: &mut SessionSpec, creating: &Creating) -> Result<()> {
         spec.name = normalize_session_name(&spec.name)?;
         spec.work_item = vogt_engine_contract::normalize_work_item(spec.work_item.as_deref())
             .map_err(ApiError::BadRequest)?;
@@ -2016,8 +2013,8 @@ impl SessionRegistry {
             spec.placement.as_deref(),
             spec.template.as_deref(),
         )?;
-        validate_host_placement_role(&spec, &creating, self.cfg.host_placement.allow_workers)?;
-        self.default_start_pod_template(&mut spec, &creating)?;
+        validate_host_placement_role(spec, creating, self.cfg.host_placement.allow_workers)?;
+        self.default_start_pod_template(spec, creating)?;
         // A named template must resolve. An unknown name is refused here and
         // never read as "no template", which would quietly start on the host
         // (WI-4428).
@@ -2085,33 +2082,30 @@ impl SessionRegistry {
                 }
             }
         }
-        // What a hibernation record keeps: the command and environment as
-        // the template and caller gave them, before the engine adds its own
-        // launch arguments and variables (a wake adds those again).
-        let base_command = spec.command.clone();
-        let mut base_env = spec.env.clone().unwrap_or_default();
-        let id = match &creating {
-            Creating::Wake(record) => record.id,
-            Creating::Fresh(_) => preassigned.unwrap_or_else(Uuid::new_v4),
-        };
-        // An engine restart adopting a running pod: the process is the same
-        // one, so its last OSC 7501 report still holds (WI-4499). Read before
-        // the spawn takes the adoption entry.
-        let adopting = self.adopting.lock().contains_key(&id);
+        Ok(())
+    }
 
-        // A named Claude Code account becomes that account's config directory,
-        // which the engine looked up itself: the caller never supplies a path.
-        // It goes into the recorded environment (a directory, not a secret),
-        // so a wake runs on the same login, and it comes after the caller's
-        // own pairs so it has the last word. A woken session replays the
-        // directory already in its record.
+    /// Resolve the account a session runs under and take its pool slot. The
+    /// account's config directory joins the recorded environment of a fresh
+    /// start.
+    fn resolve_account_lease(
+        &self,
+        spec: &mut SessionSpec,
+        creating: &Creating,
+        id: Uuid,
+        base_command: Option<&[String]>,
+        base_env: &mut Vec<(String, String)>,
+    ) -> Result<(
+        Option<String>,
+        Option<Arc<crate::account_pool::AccountLease>>,
+    )> {
         let account = spec
             .account
             .as_deref()
             .map(str::trim)
             .filter(|a| !a.is_empty())
             .map(str::to_string);
-        let agent = base_command.as_deref().and_then(agent_cli::agent_name);
+        let agent = base_command.and_then(agent_cli::agent_name);
         let is_claude = agent.as_deref() == Some("claude");
         // A shell pod runs no agent, but whoever types `claude` in it expects
         // to be signed in (WI-4522). Only a pod is seeded (a host shell keeps
@@ -2131,7 +2125,7 @@ impl SessionRegistry {
         }
         // A fresh session that names no account takes the deployment's
         // default, when it resolves (WI-4522). An explicit account wins.
-        let account = match (account, &creating) {
+        let account = match (account, creating) {
             (None, Creating::Fresh(_)) if is_claude || shell_template => {
                 default_account(&self.cfg.agent_onboarding)
             }
@@ -2140,7 +2134,7 @@ impl SessionRegistry {
         let holds_account = is_claude || (shell_pod && account.is_some());
         // Validate a named account before taking its slot: an unknown name is
         // the caller's mistake (400), not a full pool (429).
-        if let (Some(name), Creating::Fresh(_)) = (account.as_deref(), &creating) {
+        if let (Some(name), Creating::Fresh(_)) = (account.as_deref(), creating) {
             self.cfg
                 .agent_onboarding
                 .account_dir(name)
@@ -2151,8 +2145,8 @@ impl SessionRegistry {
         }
         let account_lease = if holds_account {
             let should_reserve =
-                matches!(creating, Creating::Fresh(_)) || matches!(creating, Creating::Wake(_));
-            if matches!(creating, Creating::Wake(_)) {
+                matches!(*creating, Creating::Fresh(_)) || matches!(*creating, Creating::Wake(_));
+            if matches!(*creating, Creating::Wake(_)) {
                 // After an engine restart the pool knows only the configured
                 // accounts: a discovered one that still resolves is registered
                 // again before its slot is taken.
@@ -2190,7 +2184,7 @@ impl SessionRegistry {
             .or(account);
         // The pod is labelled with the account it was seeded with.
         spec.account = account.clone();
-        if let (Some(name), Creating::Fresh(_)) = (account.as_deref(), &creating) {
+        if let (Some(name), Creating::Fresh(_)) = (account.as_deref(), creating) {
             let dir = self
                 .cfg
                 .agent_onboarding
@@ -2203,7 +2197,116 @@ impl SessionRegistry {
             ));
             spec.env = Some(base_env.clone());
         }
+        Ok((account, account_lease))
+    }
 
+    /// A host short of disk takes on no new session (WI-1810). A wake is let
+    /// through.
+    fn refuse_if_short_of_storage(&self, creating: &Creating, pod_backed: bool) -> Result<()> {
+        if let Creating::Fresh(_) = creating {
+            let watched = [self.cfg.workspace_root.clone(), std::env::temp_dir()];
+            if let Some((path, free)) =
+                crate::session_scratch::short_of_space(&watched, self.cfg.min_free_percent)
+            {
+                return Err(ApiError::InsufficientStorage(format!(
+                    "{} has {free}% free, under the {}% a new session needs \
+                     (ENGINE_MIN_FREE_PERCENT); free space or stop finished sessions",
+                    path.display(),
+                    self.cfg.min_free_percent
+                )));
+            }
+            // A host session writes into the engine container's own
+            // ephemeral quota, which the node's free space does not show
+            // (WI-4439). Past 75% of it, no new host session starts.
+            if !pod_backed {
+                if let Some(used) =
+                    crate::session_scratch::short_of_ephemeral(self.ephemeral_limit, || {
+                        self.ephemeral_usage.used()
+                    })
+                {
+                    tracing::warn!(
+                        used_percent = used,
+                        "the engine container's ephemeral storage is past its refusal line; refusing a host session"
+                    );
+                    return Err(ApiError::InsufficientStorage(format!(
+                        "the engine container's ephemeral storage is at {used}% of \
+                         ENGINE_EPHEMERAL_LIMIT; a host session needs it under 75%; \
+                         stop finished host sessions or run the work in a pod"
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Cut the session's own worktree, when it asked for one. From here on the
+    /// returned guard removes the worktree and its branch again unless the
+    /// child is spawned.
+    fn cut_requested_worktree(
+        &self,
+        cwd: &mut Option<String>,
+        worktree: Option<vogt_engine_contract::WorktreeSpec>,
+    ) -> Result<(CutWorktree, Option<String>)> {
+        let mut cut = CutWorktree::default();
+        let worktree_base = worktree.as_ref().map(|w| w.base_ref.trim().to_string());
+        if let Some(worktree) = worktree {
+            let checkout = cwd.clone().ok_or_else(|| {
+                ApiError::BadRequest("a worktree needs the checkout it is cut from as cwd".into())
+            })?;
+            let checkout = std::path::PathBuf::from(checkout);
+            let destination = git::worktree_destination(&checkout, &worktree.branch)?;
+            let parent = destination.parent().unwrap_or(&destination);
+            workspace_path::resolve_existing_allow_absolute(
+                &self.cfg.workspace_root,
+                &parent.to_string_lossy(),
+            )
+            .map_err(|_| {
+                ApiError::BadRequest(format!(
+                    "worktree {} would be outside the workspace",
+                    destination.display()
+                ))
+            })?;
+            let created = git::create_worktree(&checkout, &worktree.branch, &worktree.base_ref)?;
+            *cwd = Some(created.to_string_lossy().into_owned());
+            cut.0 = Some((checkout, created, worktree.branch.trim().to_string()));
+        }
+        Ok((cut, worktree_base))
+    }
+
+    fn create_inner(
+        &self,
+        mut spec: SessionSpec,
+        creating: Creating,
+        preassigned: Option<Uuid>,
+    ) -> Result<Arc<Session>> {
+        self.validate_and_expand_spec(&mut spec, &creating)?;
+        // What a hibernation record keeps: the command and environment as
+        // the template and caller gave them, before the engine adds its own
+        // launch arguments and variables (a wake adds those again).
+        let base_command = spec.command.clone();
+        let mut base_env = spec.env.clone().unwrap_or_default();
+        let id = match &creating {
+            Creating::Wake(record) => record.id,
+            Creating::Fresh(_) => preassigned.unwrap_or_else(Uuid::new_v4),
+        };
+        // An engine restart adopting a running pod: the process is the same
+        // one, so its last OSC 7501 report still holds (WI-4499). Read before
+        // the spawn takes the adoption entry.
+        let adopting = self.adopting.lock().contains_key(&id);
+
+        // A named Claude Code account becomes that account's config directory,
+        // which the engine looked up itself: the caller never supplies a path.
+        // It goes into the recorded environment (a directory, not a secret),
+        // so a wake runs on the same login, and it comes after the caller's
+        // own pairs so it has the last word. A woken session replays the
+        // directory already in its record.
+        let (account, account_lease) = self.resolve_account_lease(
+            &mut spec,
+            &creating,
+            id,
+            base_command.as_deref(),
+            &mut base_env,
+        )?;
         // A resumed conversation starts where it ran, not where the caller
         // would have opened a fresh session: `claude --resume <id>` only finds
         // a conversation from the directory its transcript is keyed under,
@@ -2547,67 +2650,13 @@ impl SessionRegistry {
         // A host short of disk takes on no new session (WI-1810): a full
         // root took Infisical down with it. A wake is let through; it brings
         // back work already under way.
-        if let Creating::Fresh(_) = &creating {
-            let watched = [self.cfg.workspace_root.clone(), std::env::temp_dir()];
-            if let Some((path, free)) =
-                crate::session_scratch::short_of_space(&watched, self.cfg.min_free_percent)
-            {
-                return Err(ApiError::InsufficientStorage(format!(
-                    "{} has {free}% free, under the {}% a new session needs \
-                     (ENGINE_MIN_FREE_PERCENT); free space or stop finished sessions",
-                    path.display(),
-                    self.cfg.min_free_percent
-                )));
-            }
-            // A host session writes into the engine container's own
-            // ephemeral quota, which the node's free space does not show
-            // (WI-4439). Past 75% of it, no new host session starts.
-            if !pod_backed {
-                if let Some(used) =
-                    crate::session_scratch::short_of_ephemeral(self.ephemeral_limit, || {
-                        self.ephemeral_usage.used()
-                    })
-                {
-                    tracing::warn!(
-                        used_percent = used,
-                        "the engine container's ephemeral storage is past its refusal line; refusing a host session"
-                    );
-                    return Err(ApiError::InsufficientStorage(format!(
-                        "the engine container's ephemeral storage is at {used}% of \
-                         ENGINE_EPHEMERAL_LIMIT; a host session needs it under 75%; \
-                         stop finished host sessions or run the work in a pod"
-                    )));
-                }
-            }
-        }
+        self.refuse_if_short_of_storage(&creating, pod_backed)?;
 
         // Every refusal has passed: cut the worktree now. Its destination is
         // checked against the workspace root first — a checkout at the root
         // has its sibling outside it. From here on the guard removes the
         // worktree and its branch again unless the child is spawned.
-        let mut cut = CutWorktree::default();
-        let worktree_base = worktree.as_ref().map(|w| w.base_ref.trim().to_string());
-        if let Some(worktree) = worktree {
-            let checkout = spec.cwd.clone().ok_or_else(|| {
-                ApiError::BadRequest("a worktree needs the checkout it is cut from as cwd".into())
-            })?;
-            let checkout = std::path::PathBuf::from(checkout);
-            let destination = git::worktree_destination(&checkout, &worktree.branch)?;
-            let parent = destination.parent().unwrap_or(&destination);
-            workspace_path::resolve_existing_allow_absolute(
-                &self.cfg.workspace_root,
-                &parent.to_string_lossy(),
-            )
-            .map_err(|_| {
-                ApiError::BadRequest(format!(
-                    "worktree {} would be outside the workspace",
-                    destination.display()
-                ))
-            })?;
-            let created = git::create_worktree(&checkout, &worktree.branch, &worktree.base_ref)?;
-            spec.cwd = Some(created.to_string_lossy().into_owned());
-            cut.0 = Some((checkout, created, worktree.branch.trim().to_string()));
-        }
+        let (mut cut, worktree_base) = self.cut_requested_worktree(&mut spec.cwd, worktree)?;
         // Codex's cwd-dependent overrides are built here, where the session
         // actually runs (WI-3882). The first launch above validated the model
         // and conversation before any worktree was cut; this one adds the
