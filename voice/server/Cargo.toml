@@ -31,3 +31,6 @@ vogt-voice-tts = { path = "../tts" }
 
 [dev-dependencies]
 tower = "0.5"
+
+[lints]
+workspace = true

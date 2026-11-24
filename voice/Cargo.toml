@@ -6,9 +6,16 @@ members = ["server", "stt", "tts", "models"]
 edition = "2021"
 license = "AGPL-3.0-only"
 repository = "https://github.com/TheDancingDeveloper-org/vogt"
-rust-version = "1.88"
+rust-version = "1.100"
 
 [profile.release]
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
+
+[workspace.lints.rust]
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
